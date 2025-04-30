@@ -357,21 +357,33 @@ mod tests {
         );
         assert_eq!(index.len(), 1);
 
-        // Try inserting into an iterator while iterating.
+        // Try inserting into an iterator during iteration.
         let mut iter = index.update_iter(b"key");
-        iter.insert(42);
-        iter.insert(43);
-        assert_eq!(*iter.next().unwrap(), 43);
-        assert_eq!(*iter.next().unwrap(), 42);
-        assert!(context.encode().contains("collisions_total 4"));
-
-        // since we've advanced beyond the head, newly inserted elements won't be returned by next()
-        iter.insert(100);
         assert_eq!(*iter.next().unwrap(), 3);
-        assert_eq!(*iter.next().unwrap(), 2);
-        assert_eq!(*iter.next().unwrap(), 1);
+        iter.insert(42);
+        // Iteration should be terminated by the above insert.
         assert!(iter.next().is_none());
-        assert!(context.encode().contains("collisions_total 5"));
+        // Should be able to insert more than once.
+        iter.insert(43);
+        assert!(iter.next().is_none());
+
+        // Try inserting into an iterator before iteration.
+        let mut iter = index.update_iter(b"key");
+        iter.insert(100);
+        assert!(iter.next().is_none());
+
+        // Try inserting into an iterator after iteration.
+        let mut iter = index.update_iter(b"key");
+        while iter.next().is_some() {}
+        iter.insert(101);
+        assert!(iter.next().is_none());
+
+        assert_eq!(
+            index.get_iter(b"key").copied().collect::<Vec<_>>(),
+            vec![101, 100, 43, 42, 3, 2, 1]
+        );
+
+        assert!(context.encode().contains("collisions_total 6"));
     }
 
     #[test_traced]

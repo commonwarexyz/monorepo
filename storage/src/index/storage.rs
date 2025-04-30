@@ -57,13 +57,11 @@ impl<'a, V> Iterator for ValueIterator<'a, V> {
 /// An iterator over all values associated with a translated key, allowing for mutation of the
 /// current element and insertion of new elements at the front of the list.
 pub struct UpdateValueIterator<'a, K, V> {
-    /// If set, this is the record holding the next value to return. Otherwise, we are either at the
-    /// head of the list (and o_entry should be used to get the first element) or we have finished
-    /// iterating over all elements.
+    /// The record holding the next value to return if set, otherwise there are no (more) elements
+    /// to return.
     next: Option<*mut Record<V>>,
 
-    /// The occupied entry from the hashmap whose records we're iterating over, or None if there are
-    /// no (more) elements to return.
+    /// The occupied entry from the hashmap whose records we're iterating over.
     o_entry: Option<OccupiedEntry<'a, K, Record<V>>>,
 
     /// The vacant entry from the hashmap whose records we're iterating over if the hashmap had no
@@ -81,29 +79,16 @@ impl<'a, K, V> Iterator for UpdateValueIterator<'a, K, V> {
     type Item = &'a mut V;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let entry = self.o_entry.as_mut()?;
         match self.next {
             Some(next) => {
                 // Return the value of the record pointed at by self.next, and update self.next to
                 // point at the record after it.
                 let current = unsafe { &mut (*next) };
                 self.next = current.next.as_mut().map(|next| next.as_mut() as *mut _);
-                if self.next.is_none() {
-                    self.o_entry.take();
-                }
 
                 Some(&mut current.value)
             }
-            None => {
-                // This is the first call to next(), so return the value pointed at by the head of
-                // the list (o_entry) and update self.next to point at the record after it.
-                let current = entry.get_mut() as *mut Record<V>;
-                unsafe {
-                    self.next = (*current).next.as_mut().map(|next| next.as_mut() as *mut _);
-                }
-
-                Some(unsafe { &mut (*current).value })
-            }
+            None => None,
         }
     }
 }
@@ -111,11 +96,15 @@ impl<'a, K, V> Iterator for UpdateValueIterator<'a, K, V> {
 impl<K, V> UpdateValueIterator<'_, K, V> {
     /// Insert a new value at the front of the list. We always add to the front so behavior is
     /// consistently last in, first out. This means most recently added values will be returned
-    /// first by the iterators, providing an LRU like behavior.
+    /// first by the iterators, providing an LRU like behavior. Calls to next() after insert() will
+    /// always return None.
     pub fn insert(&mut self, mut value: V) {
+        self.next = None; // self.next could end up invalidated by the insert, so we reset it.
         if let Some(ref mut o_entry) = self.o_entry {
+            // Mutate the existing head of the list to have the new value, and create a new
+            // record that will contain the previous first value.
             let record = o_entry.get_mut();
-            swap(&mut record.value, &mut value); // puts the new value at the front
+            swap(&mut record.value, &mut value);
             record.next = Some(Box::new(Record {
                 value,
                 next: record.next.take(),
@@ -317,12 +306,17 @@ impl<T: Translator, V> Index<T, V> {
         let translated_key = self.translator.transform(key);
         let entry = self.map.entry(translated_key);
         match entry {
-            Entry::Occupied(occupied_entry) => UpdateValueIterator {
-                next: None,
-                o_entry: Some(occupied_entry),
-                v_entry: None,
-                collisions_counter: &self.collisions,
-            },
+            Entry::Occupied(occupied_entry) => {
+                let mut r = UpdateValueIterator {
+                    next: None,
+                    o_entry: Some(occupied_entry),
+                    v_entry: None,
+                    collisions_counter: &self.collisions,
+                };
+                r.next = r.o_entry.as_mut().map(|entry| entry.get_mut() as *mut _);
+
+                r
+            }
             Entry::Vacant(vacant_entry) => UpdateValueIterator {
                 next: None,
                 o_entry: None,
