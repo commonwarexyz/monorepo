@@ -1,4 +1,4 @@
-use crate::{deterministic::Auditor, mocks, Error, Metrics};
+use crate::{deterministic::Auditor, mocks, Error};
 use futures::{channel::mpsc, SinkExt as _, StreamExt as _};
 use std::{
     collections::HashMap,
@@ -58,14 +58,14 @@ type Dialable = mpsc::UnboundedSender<(
 /// bind to an ephemeral port. Likewise, if ports are not reused and when exhausted,
 /// the runtime will panic.
 #[derive(Clone)]
-struct Network {
+pub struct Network {
     auditor: Arc<Auditor>,
     ephemeral: Arc<Mutex<u16>>,
     listeners: Arc<Mutex<HashMap<SocketAddr, Dialable>>>,
 }
 
 impl Network {
-    fn new(auditor: Arc<Auditor>) -> Self {
+    pub fn new(auditor: Arc<Auditor>) -> Self {
         Self {
             auditor,
             ephemeral: Arc::new(Mutex::new(EPHEMERAL_PORT_RANGE.start)),
