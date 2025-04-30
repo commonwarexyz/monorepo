@@ -10,6 +10,39 @@ use tokio::{
 };
 use tracing::warn;
 
+/// Implementation of [crate::Sink] for the [tokio] runtime.
+pub struct Sink {
+    write_timeout: Duration,
+    sink: OwnedWriteHalf,
+}
+
+impl crate::Sink for Sink {
+    async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
+        timeout(self.write_timeout, self.sink.write_all(msg))
+            .await
+            .map_err(|_| Error::Timeout)?
+            .map_err(|_| Error::SendFailed)?;
+        Ok(())
+    }
+}
+
+/// Implementation of [crate::Stream] for the [tokio] runtime.
+pub struct Stream {
+    read_timeout: Duration,
+    stream: OwnedReadHalf,
+}
+
+impl crate::Stream for Stream {
+    async fn recv(&mut self, buf: &mut [u8]) -> Result<(), Error> {
+        // Wait for the stream to be readable
+        timeout(self.read_timeout, self.stream.read_exact(buf))
+            .await
+            .map_err(|_| Error::Timeout)?
+            .map_err(|_| Error::RecvFailed)?;
+        Ok(())
+    }
+}
+
 /// Implementation of [crate::Listener] using the [tokio] runtime.
 pub struct Listener {
     cfg: Config,
@@ -58,39 +91,6 @@ impl axum::serve::Listener for Listener {
 
     fn local_addr(&self) -> std::io::Result<Self::Addr> {
         self.listener.local_addr()
-    }
-}
-
-/// Implementation of [crate::Sink] for the [tokio] runtime.
-pub struct Sink {
-    write_timeout: Duration,
-    sink: OwnedWriteHalf,
-}
-
-impl crate::Sink for Sink {
-    async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
-        timeout(self.write_timeout, self.sink.write_all(msg))
-            .await
-            .map_err(|_| Error::Timeout)?
-            .map_err(|_| Error::SendFailed)?;
-        Ok(())
-    }
-}
-
-/// Implementation of [crate::Stream] for the [tokio] runtime.
-pub struct Stream {
-    read_timeout: Duration,
-    stream: OwnedReadHalf,
-}
-
-impl crate::Stream for Stream {
-    async fn recv(&mut self, buf: &mut [u8]) -> Result<(), Error> {
-        // Wait for the stream to be readable
-        timeout(self.read_timeout, self.stream.read_exact(buf))
-            .await
-            .map_err(|_| Error::Timeout)?
-            .map_err(|_| Error::RecvFailed)?;
-        Ok(())
     }
 }
 

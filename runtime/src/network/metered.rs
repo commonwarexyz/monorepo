@@ -47,6 +47,58 @@ impl Metrics {
     }
 }
 
+pub struct Sink<S: crate::Sink> {
+    inner: S,
+    metrics: Arc<Metrics>,
+}
+
+impl<S: crate::Sink> crate::Sink for Sink<S> {
+    async fn send(&mut self, data: &[u8]) -> Result<(), crate::Error> {
+        self.inner.send(data).await?;
+        self.metrics.outbound_bandwidth.inc_by(data.len() as u64);
+        Ok(())
+    }
+}
+
+pub struct Stream<S: crate::Stream> {
+    inner: S,
+    metrics: Arc<Metrics>,
+}
+
+impl<S: crate::Stream> crate::Stream for Stream<S> {
+    async fn recv(&mut self, buf: &mut [u8]) -> Result<(), crate::Error> {
+        self.inner.recv(buf).await?;
+        self.metrics.inbound_bandwidth.inc_by(buf.len() as u64);
+        Ok(())
+    }
+}
+
+pub struct Listener<L: crate::Listener> {
+    inner: L,
+    metrics: Arc<Metrics>,
+}
+
+impl<L: crate::Listener> crate::Listener for Listener<L> {
+    type Sink = Sink<L::Sink>;
+    type Stream = Stream<L::Stream>;
+
+    async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), crate::Error> {
+        let (addr, sink, stream) = self.inner.accept().await?;
+        self.metrics.inbound_connections.inc();
+        Ok((
+            addr,
+            Sink {
+                inner: sink,
+                metrics: self.metrics.clone(),
+            },
+            Stream {
+                inner: stream,
+                metrics: self.metrics.clone(),
+            },
+        ))
+    }
+}
+
 /// A metered network implementation which wraps another
 /// [crate::Network] and tracks metrics for it.
 #[derive(Debug, Clone)]
@@ -98,57 +150,5 @@ impl<N: crate::Network> crate::Network for Network<N> {
                 metrics: self.metrics.clone(),
             },
         ))
-    }
-}
-
-pub struct Listener<L: crate::Listener> {
-    inner: L,
-    metrics: Arc<Metrics>,
-}
-
-impl<L: crate::Listener> crate::Listener for Listener<L> {
-    type Sink = Sink<L::Sink>;
-    type Stream = Stream<L::Stream>;
-
-    async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), crate::Error> {
-        let (addr, sink, stream) = self.inner.accept().await?;
-        self.metrics.inbound_connections.inc();
-        Ok((
-            addr,
-            Sink {
-                inner: sink,
-                metrics: self.metrics.clone(),
-            },
-            Stream {
-                inner: stream,
-                metrics: self.metrics.clone(),
-            },
-        ))
-    }
-}
-
-pub struct Sink<S: crate::Sink> {
-    inner: S,
-    metrics: Arc<Metrics>,
-}
-
-impl<S: crate::Sink> crate::Sink for Sink<S> {
-    async fn send(&mut self, data: &[u8]) -> Result<(), crate::Error> {
-        self.inner.send(data).await?;
-        self.metrics.outbound_bandwidth.inc_by(data.len() as u64);
-        Ok(())
-    }
-}
-
-pub struct Stream<S: crate::Stream> {
-    inner: S,
-    metrics: Arc<Metrics>,
-}
-
-impl<S: crate::Stream> crate::Stream for Stream<S> {
-    async fn recv(&mut self, buf: &mut [u8]) -> Result<(), crate::Error> {
-        self.inner.recv(buf).await?;
-        self.metrics.inbound_bandwidth.inc_by(buf.len() as u64);
-        Ok(())
     }
 }
