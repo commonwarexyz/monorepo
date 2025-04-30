@@ -18,52 +18,6 @@ pub struct Record<V> {
     next: Option<Box<Record<V>>>,
 }
 
-impl<V> Record<V> {
-    pub fn get(&self) -> &V {
-        &self.value
-    }
-
-    pub fn peek(&self) -> Option<&V> {
-        self.next.as_deref().map(|r| r.get())
-    }
-
-    pub fn update(&mut self, v: V) {
-        self.value = v;
-    }
-
-    pub fn next(&self) -> Option<&Record<V>> {
-        self.next.as_deref()
-    }
-
-    pub fn next_mut(&mut self) -> Option<&mut Record<V>> {
-        self.next.as_deref_mut()
-    }
-
-    pub fn delete(&mut self) -> bool {
-        let Some(next) = self.next.take() else {
-            return false;
-        };
-        self.value = next.value;
-        self.next = next.next;
-        true
-    }
-
-    pub fn delete_next(&mut self) {
-        let Some(next) = self.next.take() else {
-            return;
-        };
-        self.next = next.next;
-    }
-
-    pub fn add(&mut self, v: V) {
-        let next = Box::new(Record {
-            value: v,
-            next: self.next.take(),
-        });
-        self.next = Some(next);
-    }
-}
-
 #[derive(PartialEq, Eq)]
 enum Phase {
     Initial,
@@ -107,10 +61,10 @@ impl<'a, V> Cursor<'a, V> {
                 unreachable!("must call Cursor::next() before interacting")
             }
             Phase::Current => {
-                self.current.as_mut().unwrap().update(v);
+                self.current.as_mut().unwrap().value = v;
             }
             Phase::Next => {
-                self.next.as_mut().unwrap().update(v);
+                self.next.as_mut().unwrap().value = v;
             }
             Phase::Done => {
                 unreachable!("Cursor::next() returned false")
@@ -124,12 +78,12 @@ impl<'a, V> Cursor<'a, V> {
         match self.phase {
             Phase::Initial => {
                 self.phase = Phase::Current;
-                return self.current.as_deref().map(|r| r.get());
+                return self.current.as_deref().map(|r| &r.value);
             }
             Phase::Current => {
                 if self.next.is_some() {
                     self.phase = Phase::Next;
-                    return self.next.as_deref().map(|r| r.get());
+                    return self.next.as_deref().map(|r| &r.value);
                 }
                 self.phase = Phase::Done;
                 return None;
@@ -138,7 +92,7 @@ impl<'a, V> Cursor<'a, V> {
                 // If was deleted, do nothing.
                 if was_deleted {
                     if self.next.is_some() {
-                        return self.next.as_deref().map(|r| r.get());
+                        return self.next.as_deref().map(|r| &r.value);
                     }
                     self.phase = Phase::Done;
                     return None;
@@ -153,14 +107,14 @@ impl<'a, V> Cursor<'a, V> {
                 current.next = Some(next);
 
                 // Set current to be next (via a mutable reference to current).
-                self.current = current.next_mut();
+                self.current = current.next.as_deref_mut();
 
                 // Set next to be next's next.
                 self.next = next_next;
 
                 // If we have a next record, return it.
                 if self.next.is_some() {
-                    return self.next.as_deref().map(|r| r.get());
+                    return self.next.as_deref().map(|r| &r.value);
                 }
                 self.phase = Phase::Done;
             }
@@ -192,7 +146,7 @@ impl<'a, V> Cursor<'a, V> {
                 current.next = Some(new);
 
                 // Set current to be the new record (via a mutable reference to current).
-                self.current = current.next_mut();
+                self.current = current.next.as_deref_mut();
 
                 // If there is a next record, it is still next.
             }
@@ -206,7 +160,7 @@ impl<'a, V> Cursor<'a, V> {
                 current.next = Some(next);
 
                 // Set current to be next (via a mutable reference to current).
-                self.current = current.next_mut();
+                self.current = current.next.as_deref_mut();
 
                 // Create a new record that points to next's next.
                 let new = Box::new(Record {
@@ -218,7 +172,7 @@ impl<'a, V> Cursor<'a, V> {
             Phase::Done => {
                 if self.current_deleted {
                     self.current_deleted = false;
-                    self.current.as_mut().unwrap().update(v);
+                    self.current.as_mut().unwrap().value = v;
                 } else {
                     // Take ownership of the current record.
                     let current = self.current.take().unwrap();
@@ -233,7 +187,7 @@ impl<'a, V> Cursor<'a, V> {
                     current.next = Some(new);
 
                     // Set current to be the new record (via a mutable reference to current).
-                    self.current = current.next_mut();
+                    self.current = current.next.as_deref_mut();
                 }
             }
         }
@@ -278,7 +232,7 @@ impl<'a, V> Cursor<'a, V> {
         }
     }
 
-    pub fn finish(self) -> bool {
+    pub fn empty(self) -> bool {
         self.current_deleted
     }
 }
@@ -406,7 +360,7 @@ impl<T: Translator, V> Index<T, V> {
         match self.map.entry(k) {
             Entry::Occupied(mut entry) => {
                 // Get entry
-                let mut entry = entry.get_mut();
+                let entry = entry.get_mut();
                 let mut cursor = Cursor::new(entry, &self.collisions, &self.pruned);
 
                 // Remove anything that is prunable.
@@ -421,33 +375,6 @@ impl<T: Translator, V> Index<T, V> {
 
                 // Add our new value.
                 cursor.insert(v);
-
-                // Check if first value should be changed
-                let old = entry.get();
-                if prune(old) {
-                    entry.update(v);
-                    self.pruned.inc();
-                } else {
-                    // If the first value is not pruned, we add the new value next.
-                    entry.add(v);
-                    entry = entry.next_mut().unwrap();
-                }
-
-                // Delete any prunable values.
-                loop {
-                    let Some(peek) = entry.peek() else {
-                        break;
-                    };
-                    if prune(peek) {
-                        entry.delete_next();
-                        self.pruned.inc();
-                    } else {
-                        let Some(next) = entry.next_mut() else {
-                            break;
-                        };
-                        entry = next;
-                    }
-                }
             }
             Entry::Vacant(entry) => {
                 // No collision, so we can just insert the value.
@@ -467,41 +394,22 @@ impl<T: Translator, V> Index<T, V> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
             Entry::Occupied(mut entry) => {
-                let mut record = entry.get_mut();
+                let record = entry.get_mut();
+                let mut cursor = Cursor::new(record, &self.collisions, &self.pruned);
 
-                // Loop until we find a value that is not pruned.
-                let remove = loop {
-                    let old = record.get();
-                    if prune(old) {
-                        self.pruned.inc();
-                        if !record.delete() {
-                            // If there are no more values, remove the entry.
-                            break true;
-                        }
-                        continue;
-                    }
-                    break false;
-                };
-                if remove {
-                    entry.remove();
-                    return;
-                }
-
-                // Now that we have some value that won't be pruned, we need to see if
-                // we should prune any of the next values.
+                // Remove anything that is prunable.
                 loop {
-                    let Some(peek) = record.peek() else {
+                    let Some(old) = cursor.next() else {
                         break;
                     };
-                    if prune(peek) {
-                        record.delete_next();
-                        self.pruned.inc();
-                    } else {
-                        let Some(next) = record.next_mut() else {
-                            break;
-                        };
-                        record = next;
+                    if prune(old) {
+                        cursor.delete();
                     }
+                }
+
+                // If there is nothing left, remove the entry.
+                if cursor.empty() {
+                    entry.remove();
                 }
             }
             Entry::Vacant(_) => {}
