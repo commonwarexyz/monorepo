@@ -179,7 +179,7 @@ pub struct Index<T: Translator, V> {
     translator: T,
     map: HashMap<T::Key, Record<V>, T>,
     collisions: Counter,
-    keys_pruned: Counter,
+    pruned: Counter,
 }
 
 impl<T: Translator, V> Index<T, V> {
@@ -189,12 +189,12 @@ impl<T: Translator, V> Index<T, V> {
             translator: tr.clone(),
             map: HashMap::with_capacity_and_hasher(INITIAL_CAPACITY, tr),
             collisions: Counter::default(),
-            keys_pruned: Counter::default(),
+            pruned: Counter::default(),
         };
-        ctx.register("pruned", "Number of keys pruned", s.keys_pruned.clone());
+        ctx.register("pruned", "Number of items pruned", s.pruned.clone());
         ctx.register(
             "collisions",
-            "Number of translated key collisions",
+            "Number of item collisions",
             s.collisions.clone(),
         );
         s
@@ -242,7 +242,7 @@ impl<T: Translator, V> Index<T, V> {
             last_idx: None,
 
             collisions: &self.collisions,
-            pruned: &self.keys_pruned,
+            pruned: &self.pruned,
         }
     }
 
@@ -279,7 +279,7 @@ impl<T: Translator, V> Index<T, V> {
                 if let Record::One(ref mut v1) = entry {
                     if prune(v1) {
                         *v1 = v;
-                        self.keys_pruned.inc();
+                        self.pruned.inc();
                         return;
                     }
                 }
@@ -292,7 +292,7 @@ impl<T: Translator, V> Index<T, V> {
                 vec.retain(|v| !prune(v));
                 let pruned = previous - vec.len();
                 if pruned > 0 {
-                    self.keys_pruned.inc_by(pruned as u64);
+                    self.pruned.inc_by(pruned as u64);
                 }
 
                 // Add the new value to the end of the vector.
@@ -323,7 +323,7 @@ impl<T: Translator, V> Index<T, V> {
                 if let Record::One(ref mut v1) = entry {
                     if prune(v1) {
                         occ.remove_entry();
-                        self.keys_pruned.inc();
+                        self.pruned.inc();
                         return;
                     }
                 }
@@ -334,7 +334,7 @@ impl<T: Translator, V> Index<T, V> {
                 vec.retain(|v| !prune(v));
                 let pruned = previous - vec.len();
                 if pruned > 0 {
-                    self.keys_pruned.inc_by(pruned as u64);
+                    self.pruned.inc_by(pruned as u64);
                 }
 
                 // If there are no values left, we can remove the entry.
@@ -342,7 +342,6 @@ impl<T: Translator, V> Index<T, V> {
                 match vec.len() {
                     0 => {
                         occ.remove_entry();
-                        self.keys_pruned.inc();
                     }
                     1 => {
                         let v = vec.pop().unwrap();
