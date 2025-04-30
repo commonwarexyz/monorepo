@@ -192,7 +192,7 @@ impl<'a, V> Cursor<'a, V> {
     }
 }
 
-impl<'a, V> Drop for Cursor<'_, V> {
+impl<V> Drop for Cursor<'_, V> {
     fn drop(&mut self) {
         // Re-inject the next record into the current record (if it exists).
         if let Some(next) = self.next.take() {
