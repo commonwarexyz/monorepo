@@ -75,15 +75,21 @@ pub struct Cursor<'a, V> {
     phase: Phase,
     current: Option<&'a mut Record<V>>,
     next: Option<Box<Record<V>>>,
+
+    collisions: &'a Counter,
+    pruned: &'a Counter,
 }
 
 impl<'a, V> Cursor<'a, V> {
-    pub fn new(record: &'a mut Record<V>) -> Self {
+    pub fn new(record: &'a mut Record<V>, collisions: &'a Counter, pruned: &'a Counter) -> Self {
         let next = record.next.take();
         Self {
             phase: Phase::Initial,
             current: Some(record),
             next,
+
+            collisions,
+            pruned,
         }
     }
 
@@ -136,6 +142,7 @@ impl<'a, V> Cursor<'a, V> {
     }
 
     pub fn insert(mut self, v: V) {
+        self.collisions.inc();
         match self.phase {
             Phase::Initial => {
                 unreachable!("must call Cursor::next() before interacting")
@@ -167,6 +174,7 @@ impl<'a, V> Cursor<'a, V> {
     }
 
     pub fn delete(mut self) -> bool {
+        self.pruned.inc();
         match self.phase {
             Phase::Initial => {
                 unreachable!("must call Cursor::next() before interacting")
@@ -273,7 +281,9 @@ impl<T: Translator, V> Index<T, V> {
 
     pub fn get_mut(&mut self, key: &[u8]) -> Option<Cursor<V>> {
         let k = self.translator.transform(key);
-        self.map.get_mut(&k).map(|record| Cursor::new(record))
+        self.map
+            .get_mut(&k)
+            .map(|record| Cursor::new(record, &self.collisions, &self.pruned))
     }
 
     /// Remove all values at the given translated key.

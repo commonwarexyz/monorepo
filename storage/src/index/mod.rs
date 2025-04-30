@@ -223,6 +223,7 @@ mod tests {
                 // Mutate the value
                 let new = *old + 10;
                 cursor.update(new);
+                println!("Updated value: {}", new);
             }
         }
 
