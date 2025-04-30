@@ -90,24 +90,6 @@ pub struct Config {
     /// Whether or not to catch panics.
     catch_panics: bool,
 
-    /// Duration after which to close the connection if no message is read.
-    read_timeout: Duration,
-
-    /// Duration after which to close the connection if a message cannot be written.
-    write_timeout: Duration,
-
-    /// Whether or not to disable Nagle's algorithm.
-    ///
-    /// The algorithm combines a series of small network packets into a single packet
-    /// before sending to reduce overhead of sending multiple small packets which might not
-    /// be efficient on slow, congested networks. However, to do so the algorithm introduces
-    /// a slight delay as it waits to accumulate more data. Latency-sensitive networks should
-    /// consider disabling it to send the packets as soon as possible to reduce latency.
-    ///
-    /// Note: Make sure that your compile target has and allows this configuration otherwise
-    /// panics or unexpected behaviours are possible.
-    tcp_nodelay: Option<bool>,
-
     /// Base directory for all storage operations.
     storage_directory: PathBuf,
 
@@ -115,6 +97,8 @@ pub struct Config {
     ///
     /// Tokio sets the default value to 2MB.
     maximum_buffer_size: usize,
+
+    network_cfg: TokioNetworkConfig,
 }
 
 impl Config {
@@ -126,11 +110,9 @@ impl Config {
             worker_threads: 2,
             max_blocking_threads: 512,
             catch_panics: true,
-            read_timeout: Duration::from_secs(60),
-            write_timeout: Duration::from_secs(30),
-            tcp_nodelay: None,
             storage_directory,
             maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
+            network_cfg: TokioNetworkConfig::default(),
         }
     }
 
@@ -152,17 +134,17 @@ impl Config {
     }
     /// See [Config]
     pub fn with_read_timeout(mut self, d: Duration) -> Self {
-        self.read_timeout = d;
+        self.network_cfg.read_timeout = d;
         self
     }
     /// See [Config]
     pub fn with_write_timeout(mut self, d: Duration) -> Self {
-        self.write_timeout = d;
+        self.network_cfg.write_timeout = d;
         self
     }
     /// See [Config]
     pub fn with_tcp_nodelay(mut self, n: Option<bool>) -> Self {
-        self.tcp_nodelay = n;
+        self.network_cfg.tcp_nodelay = n;
         self
     }
     /// See [Config]
@@ -191,15 +173,15 @@ impl Config {
     }
     /// See [Config]
     pub fn read_timeout(&self) -> Duration {
-        self.read_timeout
+        self.network_cfg.read_timeout
     }
     /// See [Config]
     pub fn write_timeout(&self) -> Duration {
-        self.write_timeout
+        self.network_cfg.write_timeout
     }
     /// See [Config]
     pub fn tcp_nodelay(&self) -> Option<bool> {
-        self.tcp_nodelay
+        self.network_cfg.tcp_nodelay
     }
     /// See [Config]
     pub fn storage_directory(&self) -> &PathBuf {
@@ -275,11 +257,7 @@ impl crate::Runner for Runner {
             runtime_registry,
         );
 
-        let network = TokioNetwork::from(TokioNetworkConfig {
-            read_timeout: self.cfg.read_timeout,
-            write_timeout: self.cfg.write_timeout,
-            tcp_nodelay: self.cfg.tcp_nodelay,
-        });
+        let network = TokioNetwork::from(self.cfg.network_cfg.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
 
         let executor = Arc::new(Executor {

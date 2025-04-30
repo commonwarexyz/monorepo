@@ -96,11 +96,20 @@ impl axum::serve::Listener for Listener {
 
 #[derive(Clone, Debug)]
 pub(crate) struct Config {
-    /// If given, enables/disables TCP_NODELAY on connections
+    /// Whether or not to disable Nagle's algorithm.
+    ///
+    /// The algorithm combines a series of small network packets into a single packet
+    /// before sending to reduce overhead of sending multiple small packets which might not
+    /// be efficient on slow, congested networks. However, to do so the algorithm introduces
+    /// a slight delay as it waits to accumulate more data. Latency-sensitive networks should
+    /// consider disabling it to send the packets as soon as possible to reduce latency.
+    ///
+    /// Note: Make sure that your compile target has and allows this configuration otherwise
+    /// panics or unexpected behaviours are possible.
     pub(crate) tcp_nodelay: Option<bool>,
-    /// Read timeout for connections
+    /// Read timeout for connections, after which the connection will be closed
     pub(crate) read_timeout: Duration,
-    /// Write timeout for connections
+    /// Write timeout for connections, after which the connection will be closed
     pub(crate) write_timeout: Duration,
 }
 
