@@ -523,11 +523,9 @@ mod tests {
     fn slow_and_lossy_links(seed: u64) -> String {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
-        let cfg = deterministic::Config {
-            seed,
-            timeout: Some(Duration::from_secs(40)),
-            ..deterministic::Config::default()
-        };
+        let cfg = deterministic::Config::new()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(40)));
         let runner = deterministic::Runner::new(cfg);
 
         runner.start(|mut context| async move {
