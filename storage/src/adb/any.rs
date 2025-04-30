@@ -384,6 +384,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// The operation is reflected in the snapshot, but will be subject to rollback until the next
     /// successful `commit`. Returns the location of the deleted value for the key (if any).
     pub async fn delete(&mut self, hasher: &mut H, key: K) -> Result<Option<u64>, Error> {
+        // Check if the key is in the snapshot.
         let mut loc_iter = self.snapshot.mut_iter(&key);
         for loc in &mut loc_iter {
             let op = self.log.read(*loc).await?;
@@ -392,6 +393,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                     if k == key {
                         let old_loc = *loc;
                         loc_iter.remove();
+                        drop(loc_iter);
                         self.apply_op(hasher, Operation::delete(key)).await?;
                         return Ok(Some(old_loc));
                     }
@@ -537,19 +539,20 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         op: Operation<K, V>,
         old_loc: u64,
     ) -> Result<Option<u64>, Error> {
+        // Check if the operation is active.
         let key = op.to_key();
         let new_loc = self.op_count();
-        let loc_iter = self.snapshot.mut_iter(&key);
-
-        for loc in loc_iter {
+        let mut loc_iter = self.snapshot.mut_iter(&key);
+        for loc in &mut loc_iter {
             if *loc == old_loc {
-                let old_loc = *loc;
                 *loc = new_loc;
+                drop(loc_iter);
                 self.apply_op(hasher, op).await?;
                 return Ok(Some(old_loc));
             }
         }
 
+        // The operation was not active, so this is a no-op.
         Ok(None)
     }
 
