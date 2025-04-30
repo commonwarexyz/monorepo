@@ -113,6 +113,34 @@ impl<'a, V> Cursor<'a, V> {
         }
     }
 
+    pub fn next(&mut self) -> bool {
+        match self.phase {
+            Phase::Initial => {
+                self.phase = Phase::Current;
+                return self.current.is_some();
+            }
+            Phase::Current => {
+                if self.next.is_some() {
+                    self.phase = Phase::Next;
+                    return true;
+                }
+                self.phase = Phase::Done;
+                return false;
+            }
+            Phase::Next => {
+                let current = self.current.take().unwrap();
+                let mut next = self.next.take().unwrap();
+                let next_next = next.next.take();
+                current.next = Some(next);
+                self.current = Some(current);
+                self.next = next_next;
+                return self.next.is_some();
+            }
+            Phase::Done => {}
+        }
+        false
+    }
+
     pub fn add(mut self, v: V) {
         match self.phase {
             Phase::Initial => {
@@ -140,28 +168,23 @@ impl<'a, V> Cursor<'a, V> {
         }
     }
 
-    pub fn next(&mut self) -> bool {
+    pub fn delete(mut self) -> bool {
         match self.phase {
             Phase::Initial => {
-                self.phase = Phase::Current;
-                return self.current.is_some();
+                unreachable!("must call Cursor::next() before interacting")
             }
             Phase::Current => {
-                if self.next.is_some() {
-                    self.phase = Phase::Next;
-                    return true;
-                }
-                self.phase = Phase::Done;
-                return false;
+                let Some(next) = self.next.take() else {
+                    return false;
+                };
+                let current = self.current.as_mut().unwrap();
+                current.value = next.value;
+                current.next = next.next;
+                return true;
             }
             Phase::Next => {
-                let current = self.current.take().unwrap();
-                let mut next = self.next.take().unwrap();
-                let next_next = next.next.take();
-                current.next = Some(next);
-                self.current = Some(current);
-                self.next = next_next;
-                return self.next.is_some();
+                let next = self.next.take().unwrap();
+                self.next = next.next;
             }
             Phase::Done => {}
         }
