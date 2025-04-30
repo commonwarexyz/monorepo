@@ -419,7 +419,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 Type::Update(k, _) => {
                     if k == key {
                         let old_loc = *loc;
-                        cursor.delete();
+                        if !cursor.delete() {
+                            // If we can't delete from the cursor, then we need to remove the key from
+                            // the snapshot (its the last one).
+                            self.snapshot.remove(&key);
+                        }
                         self.apply_op(hasher, Operation::delete(key)).await?;
                         return Ok(Some(old_loc));
                     }
