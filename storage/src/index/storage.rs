@@ -195,7 +195,6 @@ impl<'a, V> Cursor<'a, V> {
                 let current = self.current.as_mut().unwrap();
                 current.value = next.value;
                 current.next = next.next;
-                return true;
             }
             Phase::Next => {
                 let next = self.next.take().unwrap();
@@ -205,7 +204,9 @@ impl<'a, V> Cursor<'a, V> {
                 unreachable!("Cursor::next() returned false")
             }
         }
-        false
+
+        // If we make it here, there is at least one record left.
+        true
     }
 }
 
@@ -298,6 +299,7 @@ impl<T: Translator, V> Index<T, V> {
     /// Remove all values at the given translated key.
     pub fn remove(&mut self, key: &[u8]) {
         let k = self.translator.transform(key);
+        // TODO: count records dropped?
         self.map.remove(&k);
     }
 

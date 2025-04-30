@@ -260,9 +260,10 @@ mod tests {
 
         // Test removing first value from the list.
         {
-            let cursor = index.get_mut(b"key").unwrap();
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 1);
             assert!(cursor.delete());
-            // assert!(context.encode().contains("pruned_total 1"));
+            assert!(context.encode().contains("pruned_total 1"));
         }
 
         assert_eq!(
