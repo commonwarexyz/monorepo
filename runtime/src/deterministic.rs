@@ -362,18 +362,17 @@ impl Config {
         }
     }
 
-    /// Set the seed for the random number generator.
+    // Setters
+    /// See [Config]
     pub fn with_seed(mut self, seed: u64) -> Self {
         self.seed = seed;
         self
     }
-
-    /// Set the cycle duration.
+    /// See [Config]
     pub fn with_cycle(mut self, cycle: Duration) -> Self {
         self.cycle = cycle;
         self
     }
-
     /// Set the timeout.
     pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.timeout = timeout;
@@ -381,16 +380,20 @@ impl Config {
     }
 
     // Getters
+    /// See [Config]
     pub fn seed(&self) -> u64 {
         self.seed
     }
+    /// See [Config]
     pub fn cycle(&self) -> Duration {
         self.cycle
     }
+    /// See [Config]
     pub fn timeout(&self) -> Option<Duration> {
         self.timeout
     }
 
+    /// Assert that the configuration is valid.
     pub fn assert(&self) {
         assert!(
             self.cycle != Duration::default() || self.timeout.is_none(),
