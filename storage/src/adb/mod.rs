@@ -1,4 +1,14 @@
 //! A collection of authenticated databases (ADB).
+//!
+//! # Terminology
+//!
+//! A _key_ in an authenticated database either has a _value_ or it doesn't. Two types of
+//! _operations_ can be applied to the db to modify the state of a specific key. A key that has a
+//! value can change to one without a value through the _delete_ operation. The _update_ operation
+//! gives a key a specific value whether it previously had no value or had a different value.
+//!
+//! Keys with values are called _active_. An operation is called _active_ if (1) its key is active,
+//! (2) it is an update operation, and (3) it is the most recent operation for that key.
 
 use commonware_utils::array::prefixed_u64::U64;
 use thiserror::Error;
