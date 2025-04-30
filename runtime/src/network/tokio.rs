@@ -102,11 +102,11 @@ impl crate::Stream for Stream {
 #[derive(Clone, Debug)]
 pub(crate) struct Config {
     /// If given, enables/disables TCP_NODELAY on the socket
-    tcp_nodelay: Option<bool>,
+    pub(crate) tcp_nodelay: Option<bool>,
     /// Read timeout for sockets created by this listener
-    read_timeout: Duration,
+    pub(crate) read_timeout: Duration,
     /// Write timeout for sockets created by this listener
-    write_timeout: Duration,
+    pub(crate) write_timeout: Duration,
 }
 
 impl Default for Config {

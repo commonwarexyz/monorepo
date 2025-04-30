@@ -1,3 +1,7 @@
+use crate::network::metered::{Listener as MeteredListener, Network as MeteredNetwork};
+use crate::network::tokio::{
+    Config as TokioNetworkConfig, Listener as TokioListener, Network as TokioNetwork,
+};
 use crate::storage::metered::Storage;
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 use crate::{utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
@@ -12,19 +16,12 @@ use rand::{rngs::OsRng, CryptoRng, RngCore};
 use std::{
     env,
     future::Future,
-    io,
     net::SocketAddr,
     path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{tcp::OwnedReadHalf, tcp::OwnedWriteHalf, TcpListener, TcpStream},
-    runtime::{Builder, Runtime},
-    time::timeout,
-};
-use tracing::warn;
+use tokio::runtime::{Builder, Runtime};
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct Work {
@@ -309,6 +306,13 @@ impl crate::Runner for Runner {
             runtime_registry,
         );
 
+        let network = TokioNetwork::new(TokioNetworkConfig {
+            read_timeout: self.cfg.read_timeout,
+            write_timeout: self.cfg.write_timeout,
+            tcp_nodelay: self.cfg.tcp_nodelay.clone(),
+        });
+        let network = MeteredNetwork::new(network, runtime_registry);
+
         let executor = Arc::new(Executor {
             cfg: self.cfg,
             registry: Mutex::new(registry),
@@ -323,6 +327,7 @@ impl crate::Runner for Runner {
             label: String::new(),
             spawned: false,
             executor: executor.clone(),
+            network,
         };
 
         executor.runtime.block_on(f(context))
@@ -337,6 +342,7 @@ pub struct Context {
     spawned: bool,
     executor: Arc<Executor>,
     storage: Storage<TokioStorage>,
+    network: MeteredNetwork<TokioNetwork>,
 }
 
 impl Clone for Context {
@@ -346,6 +352,7 @@ impl Clone for Context {
             spawned: false,
             executor: self.executor.clone(),
             storage: self.storage.clone(),
+            network: self.network.clone(),
         }
     }
 }
@@ -483,6 +490,7 @@ impl crate::Metrics for Context {
             spawned: false,
             executor: self.executor.clone(),
             storage: self.storage.clone(),
+            network: self.network.clone(),
         }
     }
 
@@ -545,145 +553,14 @@ impl GClock for Context {
 impl ReasonablyRealtime for Context {}
 
 impl crate::Network for Context {
-    type Listener = Listener;
+    type Listener = MeteredListener<TokioListener>;
 
-    async fn bind(&self, socket: SocketAddr) -> Result<Listener, Error> {
-        TcpListener::bind(socket)
-            .await
-            .map_err(|_| Error::BindFailed)
-            .map(|listener| Listener {
-                context: self.clone(),
-                listener,
-            })
+    async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, Error> {
+        self.network.bind(socket).await
     }
 
     async fn dial(&self, socket: SocketAddr) -> Result<(SinkOf<Self>, StreamOf<Self>), Error> {
-        // Create a new TCP stream
-        let stream = TcpStream::connect(socket)
-            .await
-            .map_err(|_| Error::ConnectionFailed)?;
-        self.executor.metrics.outbound_connections.inc();
-
-        // Set TCP_NODELAY if configured
-        if let Some(tcp_nodelay) = self.executor.cfg.tcp_nodelay {
-            if let Err(err) = stream.set_nodelay(tcp_nodelay) {
-                warn!(?err, "failed to set TCP_NODELAY");
-            }
-        }
-
-        // Return the sink and stream
-        let context = self.clone();
-        let (stream, sink) = stream.into_split();
-        Ok((
-            Sink {
-                context: context.clone(),
-                sink,
-            },
-            Stream { context, stream },
-        ))
-    }
-}
-
-/// Implementation of [crate::Listener] for the `tokio` runtime.
-pub struct Listener {
-    context: Context,
-    listener: TcpListener,
-}
-
-impl crate::Listener for Listener {
-    type Sink = Sink;
-    type Stream = Stream;
-
-    async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
-        // Accept a new TCP stream
-        let (stream, addr) = self.listener.accept().await.map_err(|_| Error::Closed)?;
-        self.context.executor.metrics.inbound_connections.inc();
-
-        // Set TCP_NODELAY if configured
-        if let Some(tcp_nodelay) = self.context.executor.cfg.tcp_nodelay {
-            if let Err(err) = stream.set_nodelay(tcp_nodelay) {
-                warn!(?err, "failed to set TCP_NODELAY");
-            }
-        }
-
-        // Return the sink and stream
-        let context = self.context.clone();
-        let (stream, sink) = stream.into_split();
-        Ok((
-            addr,
-            Sink {
-                context: context.clone(),
-                sink,
-            },
-            Stream { context, stream },
-        ))
-    }
-}
-
-impl axum::serve::Listener for Listener {
-    type Io = TcpStream;
-    type Addr = SocketAddr;
-
-    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
-        let (stream, addr) = self.listener.accept().await.unwrap();
-        (stream, addr)
-    }
-
-    fn local_addr(&self) -> io::Result<Self::Addr> {
-        self.listener.local_addr()
-    }
-}
-
-/// Implementation of [crate::Sink] for the `tokio` runtime.
-pub struct Sink {
-    context: Context,
-    sink: OwnedWriteHalf,
-}
-
-impl crate::Sink for Sink {
-    async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
-        let len = msg.len();
-        timeout(
-            self.context.executor.cfg.write_timeout,
-            self.sink.write_all(msg),
-        )
-        .await
-        .map_err(|_| Error::Timeout)?
-        .map_err(|_| Error::SendFailed)?;
-        self.context
-            .executor
-            .metrics
-            .outbound_bandwidth
-            .inc_by(len as u64);
-        Ok(())
-    }
-}
-
-/// Implementation of [crate::Stream] for the `tokio` runtime.
-pub struct Stream {
-    context: Context,
-    stream: OwnedReadHalf,
-}
-
-impl crate::Stream for Stream {
-    async fn recv(&mut self, buf: &mut [u8]) -> Result<(), Error> {
-        // Wait for the stream to be readable
-        timeout(
-            self.context.executor.cfg.read_timeout,
-            self.stream.read_exact(buf),
-        )
-        .await
-        .map_err(|_| Error::Timeout)?
-        .map_err(|_| Error::RecvFailed)?;
-
-        // Record metrics
-        self.context
-            .executor
-            .metrics
-            .inbound_bandwidth
-            .inc_by(buf.len() as u64);
-
-        Ok(())
+        self.network.dial(socket).await
     }
 }
 

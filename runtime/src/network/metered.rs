@@ -43,13 +43,13 @@ impl Metrics {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct Network<N: crate::Network> {
+pub struct Network<N: crate::Network> {
     inner: N,
     metrics: Arc<Metrics>,
 }
 
 impl<N: crate::Network> Network<N> {
-    pub(crate) fn new(inner: N, registry: &mut Registry) -> Self {
+    pub fn new(inner: N, registry: &mut Registry) -> Self {
         let metrics = Metrics::new(registry);
         Self {
             inner,
@@ -92,7 +92,7 @@ impl<N: crate::Network> crate::Network for Network<N> {
     }
 }
 
-pub(crate) struct Listener<L: crate::Listener> {
+pub struct Listener<L: crate::Listener> {
     inner: L,
     metrics: Arc<Metrics>,
 }
@@ -119,7 +119,7 @@ impl<L: crate::Listener> crate::Listener for Listener<L> {
     }
 }
 
-pub(crate) struct Sink<S: crate::Sink> {
+pub struct Sink<S: crate::Sink> {
     inner: S,
     metrics: Arc<Metrics>,
 }
@@ -132,7 +132,7 @@ impl<S: crate::Sink> crate::Sink for Sink<S> {
     }
 }
 
-pub(crate) struct Stream<S: crate::Stream> {
+pub struct Stream<S: crate::Stream> {
     inner: S,
     metrics: Arc<Metrics>,
 }
