@@ -5,7 +5,7 @@ use commonware_runtime::{
     Runner as _,
 };
 use commonware_storage::journal::fixed::Journal;
-use commonware_utils::array::FixedBytes;
+use commonware_utils::{array::FixedBytes, default_seed};
 use criterion::{black_box, criterion_group, Criterion};
 use futures::future::try_join_all;
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -26,7 +26,7 @@ const ITEM_SIZE: usize = 32;
 /// Read `items_to_read` random items from the given `journal`, awaiting each
 /// result before continuing.
 async fn bench_run_serial(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, items_to_read: usize) {
-    let mut rng = StdRng::seed_from_u64(0);
+    let mut rng = StdRng::seed_from_u64(default_seed());
     for _ in 0..items_to_read {
         let pos = rng.gen_range(0..ITEMS_TO_WRITE);
         black_box(journal.read(pos).await.expect("failed to read data"));
@@ -38,7 +38,7 @@ async fn bench_run_concurrent(
     journal: &Journal<Context, FixedBytes<ITEM_SIZE>>,
     items_to_read: usize,
 ) {
-    let mut rng = StdRng::seed_from_u64(0);
+    let mut rng = StdRng::seed_from_u64(default_seed());
     let mut futures = Vec::with_capacity(items_to_read);
     for _ in 0..items_to_read {
         let pos = rng.gen_range(0..ITEMS_TO_WRITE);

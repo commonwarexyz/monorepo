@@ -71,7 +71,7 @@ mod tests {
         Metrics,
     };
     use commonware_runtime::{Clock, Runner, Spawner};
-    use commonware_utils::quorum;
+    use commonware_utils::{default_seed, quorum};
     use futures::channel::oneshot;
     use futures::future::join_all;
     use rand::{rngs::StdRng, SeedableRng as _};
@@ -356,7 +356,7 @@ mod tests {
     fn test_unclean_shutdown() {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
         let (identity, mut shares_vec) =
             ops::generate_shares(&mut rng, None, num_validators, quorum);
         shares_vec.sort_by(|a, b| a.index.cmp(&b.index));

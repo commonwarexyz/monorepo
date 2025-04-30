@@ -161,13 +161,14 @@ mod tests {
         use crate::ordered_broadcast::types::Chunk;
         use commonware_codec::{DecodeExt, FixedSize};
         use commonware_cryptography::bls12381::primitives::group::Share;
+        use commonware_utils::default_seed;
         use rand::{rngs::StdRng, SeedableRng as _};
 
         const NAMESPACE: &[u8] = b"1234";
 
         /// Generate shares using a seeded RNG.
         pub fn setup_shares(num_validators: u32, quorum: u32) -> Vec<Share> {
-            let mut rng = StdRng::seed_from_u64(0);
+            let mut rng = StdRng::seed_from_u64(default_seed());
             let (_identity, shares) = generate_shares(&mut rng, None, num_validators, quorum);
             shares
         }

@@ -5,7 +5,7 @@ use commonware_storage::{
     archive::{Archive, Config},
     index::translator::TwoCap,
 };
-use commonware_utils::array::FixedBytes;
+use commonware_utils::{array::FixedBytes, default_seed};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 
 /// Partition used across all archive benchmarks.
@@ -42,7 +42,7 @@ pub async fn get_archive(ctx: Context, compression: Option<u8>) -> ArchiveType {
 
 /// Append `count` random (index,key,value) triples and sync once.
 pub async fn append_random(archive: &mut ArchiveType, count: u64) -> Vec<Key> {
-    let mut rng = StdRng::seed_from_u64(0);
+    let mut rng = StdRng::seed_from_u64(default_seed());
     let mut key_buf = [0u8; 64];
     let mut val_buf = [0u8; 32];
 

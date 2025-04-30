@@ -164,13 +164,14 @@ pub mod mocks;
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::Monitor;
     use commonware_cryptography::{bls12381::dkg::ops, Ed25519, Sha256, Signer};
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
-    use commonware_utils::{quorum, Array};
+    use commonware_utils::{default_seed, quorum, Array};
     use engine::Engine;
     use futures::{future::join_all, StreamExt};
     use governor::Quota;
@@ -518,7 +519,7 @@ mod tests {
         let namespace = b"consensus".to_vec();
 
         // Derive threshold
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
         let (public, shares) = ops::generate_shares(&mut rng, None, n, threshold);
 
         // Random restarts every x seconds

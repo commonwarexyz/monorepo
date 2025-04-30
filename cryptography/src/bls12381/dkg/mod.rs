@@ -192,14 +192,14 @@ mod tests {
     };
     use crate::bls12381::primitives::poly::public;
     use crate::{Ed25519, Signer};
-    use commonware_utils::quorum;
+    use commonware_utils::{default_seed, quorum};
     use rand::rngs::StdRng;
     use rand::SeedableRng;
     use std::collections::HashMap;
 
     fn run_dkg_and_reshare(n_0: u32, dealers_0: u32, n_1: u32, dealers_1: u32, concurrency: usize) {
         // Create shared RNG (for reproducibility)
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
@@ -462,7 +462,7 @@ mod tests {
     fn test_invalid_commitment() {
         // Initialize test
         let n = 5;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
@@ -497,7 +497,7 @@ mod tests {
     fn test_mismatched_commitment() {
         // Initialize test
         let n = 5;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
@@ -537,7 +537,7 @@ mod tests {
     fn test_mismatched_share() {
         // Initialize test
         let n = 5;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
@@ -581,7 +581,7 @@ mod tests {
     fn test_duplicate_share() {
         // Initialize test
         let n = 5;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
@@ -621,7 +621,7 @@ mod tests {
     fn test_misdirected_share() {
         // Initialize test
         let n = 5;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
@@ -656,7 +656,7 @@ mod tests {
     fn test_invalid_dealer() {
         // Initialize test
         let n = 5;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
@@ -695,7 +695,7 @@ mod tests {
     fn test_invalid_commitment_degree() {
         // Initialize test
         let n = 5;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
@@ -741,7 +741,7 @@ mod tests {
     fn test_reveal() {
         // Initialize test
         let n = 5;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
@@ -772,7 +772,7 @@ mod tests {
         // Initialize test
         let n = 11;
         let q = quorum(n as u32) as usize;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
@@ -824,7 +824,7 @@ mod tests {
     fn test_duplicate_commitment() {
         // Initialize test
         let n = 5;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
@@ -863,7 +863,7 @@ mod tests {
     fn test_reveal_duplicate_player() {
         // Initialize test
         let n = 5;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
@@ -893,7 +893,7 @@ mod tests {
     fn test_insufficient_active() {
         // Initialize test
         let n = 5;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
@@ -932,7 +932,7 @@ mod tests {
     fn test_manual_disqualify() {
         // Initialize test
         let n = 5;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
@@ -965,7 +965,7 @@ mod tests {
     fn test_too_many_reveals() {
         // Initialize test
         let n = 5;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
@@ -995,7 +995,7 @@ mod tests {
     fn test_incorrect_reveal() {
         // Initialize test
         let n = 5;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
@@ -1029,7 +1029,7 @@ mod tests {
     fn test_reveal_corrupt_share() {
         // Initialize test
         let n = 5;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
@@ -1063,7 +1063,7 @@ mod tests {
     fn test_reveal_duplicate_ack() {
         // Initialize test
         let n = 5;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
@@ -1093,7 +1093,7 @@ mod tests {
     fn test_reveal_invalid_ack() {
         // Initialize test
         let n = 5;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
@@ -1123,7 +1123,7 @@ mod tests {
     fn test_reveal_invalid_share() {
         // Initialize test
         let n = 5;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
@@ -1157,7 +1157,7 @@ mod tests {
     fn test_dealer_acks() {
         // Initialize test
         let n = 5;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
@@ -1185,7 +1185,7 @@ mod tests {
     fn test_dealer_inactive() {
         // Initialize test
         let n = 5;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
@@ -1213,7 +1213,7 @@ mod tests {
     fn test_dealer_insufficient() {
         // Initialize test
         let n = 5;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
@@ -1239,7 +1239,7 @@ mod tests {
     fn test_dealer_duplicate_ack() {
         // Initialize test
         let n = 5;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
@@ -1265,7 +1265,7 @@ mod tests {
     fn test_dealer_invalid_player() {
         // Initialize test
         let n = 5;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
@@ -1289,7 +1289,7 @@ mod tests {
         // Initialize test
         let n = 11;
         let q = quorum(n as u32) as usize;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
@@ -1332,7 +1332,7 @@ mod tests {
         // Initialize test
         let n = 11;
         let q = quorum(n as u32) as usize;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
@@ -1373,7 +1373,7 @@ mod tests {
     fn test_player_insufficient_commitments() {
         // Initialize test
         let n = 5;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
@@ -1412,7 +1412,7 @@ mod tests {
         // Initialize test
         let n = 11;
         let q = quorum(n as u32) as usize;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
@@ -1456,7 +1456,7 @@ mod tests {
         // Initialize test
         let n = 11;
         let q = quorum(n as u32) as usize;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
@@ -1500,7 +1500,7 @@ mod tests {
         // Initialize test
         let n = 11;
         let q = quorum(n as u32) as usize;
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();

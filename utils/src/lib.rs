@@ -93,6 +93,13 @@ pub fn modulo(bytes: &[u8], n: u64) -> u64 {
     result
 }
 
+/// Gets the seed from the `COMMONWARE_DEFAULT_SEED` or 0 if not set or parsing as a `u64` fails
+pub fn default_seed() -> u64 {
+    option_env!("COMMONWARE_DEFAULT_SEED")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

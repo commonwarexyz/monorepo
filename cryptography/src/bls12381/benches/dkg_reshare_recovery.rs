@@ -2,14 +2,14 @@ use commonware_cryptography::{
     bls12381::dkg::{Dealer, Player},
     Ed25519, Signer,
 };
-use commonware_utils::quorum;
+use commonware_utils::{default_seed, quorum};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
 use std::collections::HashMap;
 use std::hint::black_box;
 
 fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
-    let mut rng = StdRng::seed_from_u64(0);
+    let mut rng = StdRng::seed_from_u64(default_seed());
     for &n in &[5, 10, 20, 50, 100, 250, 500] {
         // Perform DKG
         //
