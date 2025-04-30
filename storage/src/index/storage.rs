@@ -118,25 +118,19 @@ impl<'a, T: Translator, V> std::iter::Iterator for MutableIterator<'a, T, V> {
 }
 
 impl<T: Translator, V> MutableIterator<'_, T, V> {
-    /// Insert a new value at the start of the iterator.
-    ///
-    /// This operation will prevent the iterator from being used again (although
-    /// it is possible to call `insert()` multiple times).
+    /// Insert a new value at the translated key.
     ///
     /// If you want to instead update some existing value, use `next()` to get a mutable reference
     /// and then update it directly.
     ///
-    /// This is more efficient than calling `index::insert()` after iteration.
-    pub fn insert(&mut self, v: V) {
+    /// This is more efficient than calling `index::insert()` after dropping
+    /// `MutableIterator`.
+    pub fn insert(self, v: V) {
         self.values.push(v);
         let values_len = self.values.len();
         if values_len > 1 {
             self.collisions.inc();
         }
-
-        // Stop the iterator.
-        self.idx = 0;
-        self.last_idx = None;
     }
 
     /// Remove the last value returned by `next()` (swapping it with the most recently added value for the

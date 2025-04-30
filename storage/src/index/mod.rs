@@ -344,50 +344,41 @@ mod tests {
         let context = deterministic::Context::default();
         let mut index = Index::init(context.clone(), TwoCap);
 
+        // Add values to the index
         {
             {
-                let mut iter = index.mut_iter(b"key");
+                let iter = index.mut_iter(b"key");
                 iter.insert(1);
-                iter.insert(2);
             }
             index.insert(b"key", 3);
-            assert!(context.encode().contains("collisions_total 2"));
+            assert!(context.encode().contains("collisions_total 1"));
         }
-
-        assert_eq!(
-            index.iter(b"key").copied().collect::<Vec<_>>(),
-            vec![3, 2, 1]
-        );
+        assert_eq!(index.iter(b"key").copied().collect::<Vec<_>>(), vec![3, 1]);
         assert_eq!(index.len(), 1);
 
         // Try inserting into an iterator while iterating.
         {
             let mut iter = index.mut_iter(b"key");
+            assert_eq!(*iter.next().unwrap(), 3);
             iter.insert(42);
-            assert_eq!(iter.next(), None);
-            iter.insert(43);
-            assert_eq!(iter.next(), None);
-            assert!(context.encode().contains("collisions_total 4"));
+            assert!(context.encode().contains("collisions_total 2"));
         }
 
-        // Verify first two values are new ones
+        // Verify first value is new one
         {
             let mut iter = index.iter(b"key");
-            assert_eq!(*iter.next().unwrap(), 43);
             assert_eq!(*iter.next().unwrap(), 42);
         }
 
         // Insert a new value
         index.insert(b"key", 100);
-        assert!(context.encode().contains("collisions_total 5"));
+        assert!(context.encode().contains("collisions_total 3"));
 
         // Iterate to end
         let mut iter = index.iter(b"key");
         assert_eq!(*iter.next().unwrap(), 100);
-        assert_eq!(*iter.next().unwrap(), 43);
         assert_eq!(*iter.next().unwrap(), 42);
         assert_eq!(*iter.next().unwrap(), 3);
-        assert_eq!(*iter.next().unwrap(), 2);
         assert_eq!(*iter.next().unwrap(), 1);
         assert!(iter.next().is_none());
     }
