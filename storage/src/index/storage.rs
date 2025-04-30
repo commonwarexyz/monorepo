@@ -125,7 +125,10 @@ impl<'a, V> Cursor<'a, V> {
                 current.next = Some(next);
                 self.current = Some(current);
                 self.next = next_next;
-                return self.next.as_deref().map(|r| r.get());
+                if self.next.is_some() {
+                    return self.next.as_deref().map(|r| r.get());
+                }
+                self.phase = Phase::Done;
             }
             Phase::Done => {}
         }
@@ -154,7 +157,11 @@ impl<'a, V> Cursor<'a, V> {
                 next.next = Some(new);
             }
             Phase::Done => {
-                unreachable!("Cursor::next() returned false")
+                let new = Box::new(Record {
+                    value: v,
+                    next: None,
+                });
+                self.next = Some(new);
             }
         }
     }
@@ -177,7 +184,9 @@ impl<'a, V> Cursor<'a, V> {
                 let next = self.next.take().unwrap();
                 self.next = next.next;
             }
-            Phase::Done => {}
+            Phase::Done => {
+                unreachable!("Cursor::next() returned false")
+            }
         }
         false
     }
