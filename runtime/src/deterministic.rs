@@ -164,7 +164,7 @@ impl Auditor {
         *hash = hasher.finalize().to_vec();
     }
 
-    fn bind(&self, address: SocketAddr) {
+    pub(crate) fn bind(&self, address: SocketAddr) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(&*hash);
@@ -173,7 +173,7 @@ impl Auditor {
         *hash = hasher.finalize().to_vec();
     }
 
-    fn dial(&self, dialer: SocketAddr, listener: SocketAddr) {
+    pub(crate) fn dial(&self, dialer: SocketAddr, listener: SocketAddr) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(&*hash);
@@ -183,7 +183,7 @@ impl Auditor {
         *hash = hasher.finalize().to_vec();
     }
 
-    fn accept(&self, listener: SocketAddr, dialer: SocketAddr) {
+    pub(crate) fn accept(&self, listener: SocketAddr, dialer: SocketAddr) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(&*hash);
@@ -193,7 +193,7 @@ impl Auditor {
         *hash = hasher.finalize().to_vec();
     }
 
-    fn send(&self, sender: SocketAddr, receiver: SocketAddr, message: &[u8]) {
+    pub(crate) fn send(&self, sender: SocketAddr, receiver: SocketAddr, message: &[u8]) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(&*hash);
@@ -204,7 +204,7 @@ impl Auditor {
         *hash = hasher.finalize().to_vec();
     }
 
-    fn recv(&self, receiver: SocketAddr, sender: SocketAddr, message: &[u8]) {
+    pub(crate) fn recv(&self, receiver: SocketAddr, sender: SocketAddr, message: &[u8]) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(&*hash);
