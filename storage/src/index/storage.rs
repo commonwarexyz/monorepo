@@ -64,6 +64,7 @@ impl<V> Record<V> {
     }
 }
 
+#[derive(PartialEq, Eq)]
 enum Phase {
     Initial,
     Current,
@@ -73,6 +74,9 @@ enum Phase {
 
 pub struct Cursor<'a, V> {
     phase: Phase,
+    last_deleted: bool,
+    current_deleted: bool,
+
     current: Option<&'a mut Record<V>>,
     next: Option<Box<Record<V>>>,
 
@@ -85,6 +89,9 @@ impl<'a, V> Cursor<'a, V> {
         let next = record.next.take();
         Self {
             phase: Phase::Initial,
+            last_deleted: false,
+            current_deleted: false,
+
             current: Some(record),
             next,
 
@@ -94,6 +101,7 @@ impl<'a, V> Cursor<'a, V> {
     }
 
     pub fn update(&mut self, v: V) {
+        assert!(!self.last_deleted);
         match self.phase {
             Phase::Initial => {
                 unreachable!("must call Cursor::next() before interacting")
@@ -111,6 +119,8 @@ impl<'a, V> Cursor<'a, V> {
     }
 
     pub fn next(&mut self) -> Option<&V> {
+        let was_deleted = self.last_deleted;
+        self.last_deleted = false;
         match self.phase {
             Phase::Initial => {
                 self.phase = Phase::Current;
@@ -125,6 +135,15 @@ impl<'a, V> Cursor<'a, V> {
                 return None;
             }
             Phase::Next => {
+                // If was deleted, do nothing.
+                if was_deleted {
+                    if self.next.is_some() {
+                        return self.next.as_deref().map(|r| r.get());
+                    }
+                    self.phase = Phase::Done;
+                    return None;
+                }
+
                 // Take ownership of all records.
                 let current = self.current.take().unwrap();
                 let mut next = self.next.take().unwrap();
@@ -153,10 +172,11 @@ impl<'a, V> Cursor<'a, V> {
     }
 
     pub fn insert(&mut self, v: V) {
+        assert!(!self.last_deleted);
         self.collisions.inc();
         match self.phase {
             Phase::Initial => {
-                unreachable!("must call Cursor::next() before interacting")
+                unimplemented!("must call Cursor::next() before interacting")
             }
             Phase::Current => {
                 // Take ownership of the current record.
@@ -196,31 +216,47 @@ impl<'a, V> Cursor<'a, V> {
                 self.next = Some(new);
             }
             Phase::Done => {
-                // If we are done, next must be empty.
-                let new = Box::new(Record {
-                    value: v,
-                    next: None,
-                });
-                self.next = Some(new);
+                if self.current_deleted {
+                    self.current_deleted = false;
+                    self.current.as_mut().unwrap().update(v);
+                } else {
+                    // Take ownership of the current record.
+                    let current = self.current.take().unwrap();
+
+                    // Create a new record that points to next.
+                    let new = Box::new(Record {
+                        value: v,
+                        next: None,
+                    });
+
+                    // Set current next to be the new record.
+                    current.next = Some(new);
+
+                    // Set current to be the new record (via a mutable reference to current).
+                    self.current = current.next_mut();
+                }
             }
         }
     }
 
     pub fn delete(&mut self) {
+        assert!(!self.last_deleted);
+        self.last_deleted = true;
         self.pruned.inc();
         match self.phase {
             Phase::Initial => {
                 unreachable!("must call Cursor::next() before interacting")
             }
             Phase::Current => {
-                // Take ownership of the current record.
-                let current = self.current.take().unwrap();
-
                 // If there is nothing next, we are done.
                 let Some(mut next) = self.next.take() else {
+                    self.current_deleted = true;
                     self.phase = Phase::Done;
                     return;
                 };
+
+                // Take ownership of the current record.
+                let current = self.current.take().unwrap();
 
                 // If there is a next record, we update current to be it.
                 current.value = next.value;
@@ -240,6 +276,10 @@ impl<'a, V> Cursor<'a, V> {
                 unreachable!("Cursor::next() returned false")
             }
         }
+    }
+
+    pub fn finish(self) -> bool {
+        self.current_deleted
     }
 }
 
@@ -343,9 +383,10 @@ impl<T: Translator, V> Index<T, V> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
             Entry::Occupied(mut entry) => {
-                self.collisions.inc();
-                let entry = entry.get_mut();
-                entry.add(v);
+                let record = entry.get_mut();
+                let mut cursor = Cursor::new(record, &self.collisions, &self.pruned);
+                cursor.next();
+                cursor.insert(v);
             }
             Entry::Vacant(entry) => {
                 entry.insert(Record {
@@ -365,8 +406,21 @@ impl<T: Translator, V> Index<T, V> {
         match self.map.entry(k) {
             Entry::Occupied(mut entry) => {
                 // Get entry
-                self.collisions.inc();
                 let mut entry = entry.get_mut();
+                let mut cursor = Cursor::new(entry, &self.collisions, &self.pruned);
+
+                // Remove anything that is prunable.
+                loop {
+                    let Some(old) = cursor.next() else {
+                        break;
+                    };
+                    if prune(old) {
+                        cursor.delete();
+                    }
+                }
+
+                // Add our new value.
+                cursor.insert(v);
 
                 // Check if first value should be changed
                 let old = entry.get();
