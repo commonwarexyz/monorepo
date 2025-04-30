@@ -275,7 +275,7 @@ impl crate::Runner for Runner {
             runtime_registry,
         );
 
-        let network = TokioNetwork::new(TokioNetworkConfig {
+        let network = TokioNetwork::from(TokioNetworkConfig {
             read_timeout: self.cfg.read_timeout,
             write_timeout: self.cfg.write_timeout,
             tcp_nodelay: self.cfg.tcp_nodelay.clone(),

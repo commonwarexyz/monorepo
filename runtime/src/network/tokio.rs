@@ -12,12 +12,7 @@ use tracing::warn;
 
 /// Implementation of [crate::Listener] using the [tokio] runtime.
 pub struct Listener {
-    /// If given, enables/disables TCP_NODELAY on the socket
-    tcp_nodelay: Option<bool>,
-    /// Write timeout for sockets created by this listener
-    write_timeout: Duration,
-    /// Read timeout for sockets created by this listener
-    read_timeout: Duration,
+    cfg: Config,
     listener: TcpListener,
 }
 
@@ -30,7 +25,7 @@ impl crate::Listener for Listener {
         let (stream, addr) = self.listener.accept().await.map_err(|_| Error::Closed)?;
 
         // Set TCP_NODELAY if configured
-        if let Some(tcp_nodelay) = self.tcp_nodelay {
+        if let Some(tcp_nodelay) = self.cfg.tcp_nodelay {
             if let Err(err) = stream.set_nodelay(tcp_nodelay) {
                 warn!(?err, "failed to set TCP_NODELAY");
             }
@@ -41,11 +36,11 @@ impl crate::Listener for Listener {
         Ok((
             addr,
             Sink {
-                write_timeout: self.write_timeout,
+                write_timeout: self.cfg.write_timeout,
                 sink,
             },
             Stream {
-                read_timeout: self.read_timeout,
+                read_timeout: self.cfg.read_timeout,
                 stream,
             },
         ))
@@ -66,7 +61,7 @@ impl axum::serve::Listener for Listener {
     }
 }
 
-/// Implementation of [crate::Sink] for the `tokio` runtime.
+/// Implementation of [crate::Sink] for the [tokio] runtime.
 pub struct Sink {
     write_timeout: Duration,
     sink: OwnedWriteHalf,
@@ -82,7 +77,7 @@ impl crate::Sink for Sink {
     }
 }
 
-/// Implementation of [crate::Stream] for the `tokio` runtime.
+/// Implementation of [crate::Stream] for the [tokio] runtime.
 pub struct Stream {
     read_timeout: Duration,
     stream: OwnedReadHalf,
@@ -101,11 +96,11 @@ impl crate::Stream for Stream {
 
 #[derive(Clone, Debug)]
 pub(crate) struct Config {
-    /// If given, enables/disables TCP_NODELAY on the socket
+    /// If given, enables/disables TCP_NODELAY on connections
     pub(crate) tcp_nodelay: Option<bool>,
-    /// Read timeout for sockets created by this listener
+    /// Read timeout for connections
     pub(crate) read_timeout: Duration,
-    /// Write timeout for sockets created by this listener
+    /// Write timeout for connections
     pub(crate) write_timeout: Duration,
 }
 
@@ -124,9 +119,15 @@ pub(crate) struct Network {
     cfg: Config,
 }
 
-impl Network {
-    pub(crate) fn new(cfg: Config) -> Self {
+impl From<Config> for Network {
+    fn from(cfg: Config) -> Self {
         Self { cfg }
+    }
+}
+
+impl Default for Network {
+    fn default() -> Self {
+        Self::from(Config::default())
     }
 }
 
@@ -138,9 +139,7 @@ impl crate::Network for Network {
             .await
             .map_err(|_| Error::BindFailed)
             .map(|listener| Listener {
-                tcp_nodelay: self.cfg.tcp_nodelay,
-                write_timeout: self.cfg.write_timeout,
-                read_timeout: self.cfg.read_timeout,
+                cfg: self.cfg.clone(),
                 listener,
             })
     }

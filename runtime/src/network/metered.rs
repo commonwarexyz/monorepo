@@ -5,9 +5,13 @@ use std::{net::SocketAddr, sync::Arc};
 #[derive(Debug)]
 /// Tracks network metrics.
 struct Metrics {
+    /// Number of connections created by dialing us.
     inbound_connections: Counter,
+    /// Number of connections created by dialing others.
     outbound_connections: Counter,
+    /// Bandwidth used by receiving data from others.
     inbound_bandwidth: Counter,
+    /// Bandwidth used by sending data to others.
     outbound_bandwidth: Counter,
 }
 
@@ -43,6 +47,8 @@ impl Metrics {
     }
 }
 
+/// A metered network implementation which wraps another
+/// [crate::Network] and tracks metrics for it.
 #[derive(Debug, Clone)]
 pub struct Network<N: crate::Network> {
     inner: N,
@@ -104,9 +110,7 @@ impl<L: crate::Listener> crate::Listener for Listener<L> {
     type Sink = Sink<L::Sink>;
     type Stream = Stream<L::Stream>;
 
-    async fn accept(
-        &mut self,
-    ) -> Result<(std::net::SocketAddr, Self::Sink, Self::Stream), crate::Error> {
+    async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), crate::Error> {
         let (addr, sink, stream) = self.inner.accept().await?;
         self.metrics.inbound_connections.inc();
         Ok((
