@@ -168,69 +168,78 @@ impl Config {
         }
     }
 
-    /// Number of threads to use for handling async tasks.
+    // Setters
+    /// See [Config]
     pub fn with_worker_threads(mut self, n: usize) -> Self {
         self.worker_threads = n;
         self
     }
-    /// Maximum number of threads to use for blocking tasks.
+    /// See [Config]
     pub fn with_max_blocking_threads(mut self, n: usize) -> Self {
         self.max_blocking_threads = n;
         self
     }
-    /// Whether or not to catch panics.
+    /// See [Config]
     pub fn with_catch_panics(mut self, b: bool) -> Self {
         self.catch_panics = b;
         self
     }
-    /// Duration after which to close the connection if no message is read.
+    /// See [Config]
     pub fn with_read_timeout(mut self, d: Duration) -> Self {
         self.read_timeout = d;
         self
     }
-    /// Duration after which to close the connection if a message cannot be written.
+    /// See [Config]
     pub fn with_write_timeout(mut self, d: Duration) -> Self {
         self.write_timeout = d;
         self
     }
-    /// Whether or not to disable Nagle's algorithm.
+    /// See [Config]
     pub fn with_tcp_nodelay(mut self, n: Option<bool>) -> Self {
         self.tcp_nodelay = n;
         self
     }
-    /// Base directory for all storage operations.
+    /// See [Config]
     pub fn with_storage_directory(mut self, p: impl Into<PathBuf>) -> Self {
         self.storage_directory = p.into();
         self
     }
-    /// Maximum buffer size for operations on blobs.
+    /// See [Config]
     pub fn with_maximum_buffer_size(mut self, n: usize) -> Self {
         self.maximum_buffer_size = n;
         self
     }
 
     // Getters
+    /// See [Config]
     pub fn worker_threads(&self) -> usize {
         self.worker_threads
     }
+    /// See [Config]
     pub fn max_blocking_threads(&self) -> usize {
         self.max_blocking_threads
     }
+    /// See [Config]
     pub fn catch_panics(&self) -> bool {
         self.catch_panics
     }
+    /// See [Config]
     pub fn read_timeout(&self) -> Duration {
         self.read_timeout
     }
+    /// See [Config]
     pub fn write_timeout(&self) -> Duration {
         self.write_timeout
     }
+    /// See [Config]
     pub fn tcp_nodelay(&self) -> Option<bool> {
         self.tcp_nodelay
     }
+    /// See [Config]
     pub fn storage_directory(&self) -> &PathBuf {
         &self.storage_directory
     }
+    /// See [Config]
     pub fn maximum_buffer_size(&self) -> usize {
         self.maximum_buffer_size
     }
