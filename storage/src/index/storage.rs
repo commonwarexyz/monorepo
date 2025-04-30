@@ -143,10 +143,8 @@ pub struct RemoveValueIterator<'a, K, V> {
 /// async boundary.
 unsafe impl<K, V> Send for RemoveValueIterator<'_, K, V> {}
 
-impl<'a, K, V> Iterator for RemoveValueIterator<'a, K, V> {
-    type Item = &'a mut V;
-
-    fn next(&mut self) -> Option<Self::Item> {
+impl<K, V> RemoveValueIterator<'_, K, V> {
+    pub fn next(&mut self) -> Option<&mut V> {
         let entry = self.entry.as_mut()?;
 
         if let Some(last_returned) = self.last_returned {
@@ -188,9 +186,19 @@ impl<'a, K, V> Iterator for RemoveValueIterator<'a, K, V> {
 }
 
 impl<K, V> RemoveValueIterator<'_, K, V> {
+    /// Consume the iterator and remove the last returned value, if any.
+    pub fn remove(mut self) {
+        self.unsafe_remove();
+    }
+
     /// Remove the value last returned from this iterator from the map. If no value has been
     /// returned yet, or if the last returned value was removed already, then this is a no-op.
-    pub fn remove(&mut self) {
+    ///
+    /// ## Warning
+    ///
+    /// This operation invalidates the reference last returned by the iterator, and any accesses to
+    /// it after this call may result in a crash.
+    pub(crate) fn unsafe_remove(&mut self) {
         let Some(last_returned) = self.last_returned else {
             return;
         };
@@ -351,7 +359,7 @@ impl<T: Translator, V> Index<T, V> {
         let mut iter = self.remove_iter(key);
         while let Some(value) = iter.next() {
             if prune(value) {
-                iter.remove();
+                iter.unsafe_remove();
             }
         }
     }

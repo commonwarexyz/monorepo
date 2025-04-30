@@ -296,7 +296,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher> Any<E, K, V,
     /// successful `commit`.
     pub async fn delete(&mut self, hasher: &mut H, key: K) -> Result<(), Error> {
         let mut loc_iter = self.snapshot.remove_iter(&key);
-        for loc in &mut loc_iter {
+        while let Some(loc) = loc_iter.next() {
             let op = self.log.read(*loc).await?;
             match op.to_type() {
                 Type::Update(k, _) => {

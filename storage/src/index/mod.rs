@@ -239,7 +239,8 @@ mod tests {
         );
 
         // Mutations should work with a remove iterator too
-        for value in index.remove_iter(b"key") {
+        let mut iter = index.remove_iter(b"key");
+        while let Some(value) = iter.next() {
             // Mutate the value
             *value *= 10;
         }
@@ -267,10 +268,10 @@ mod tests {
 
         // Test removing first value from the list.
         let mut iter = index.remove_iter(b"key");
-        iter.remove(); // should be a no-op
+        iter.unsafe_remove(); // should be a no-op
         assert_eq!(*iter.next().unwrap(), 4);
-        iter.remove();
-        iter.remove(); // should be a no-op
+        iter.unsafe_remove();
+        iter.unsafe_remove(); // should be a no-op
         assert!(context.encode().contains("pruned_total 1"));
 
         assert_eq!(
@@ -289,8 +290,8 @@ mod tests {
         assert_eq!(*iter.next().unwrap(), 4);
         assert_eq!(*iter.next().unwrap(), 3);
         assert_eq!(*iter.next().unwrap(), 2);
-        iter.remove();
-        iter.remove(); // should be a no-op
+        iter.unsafe_remove();
+        iter.unsafe_remove(); // should be a no-op
         assert!(context.encode().contains("pruned_total 2"));
 
         assert_eq!(
@@ -303,14 +304,14 @@ mod tests {
             vec![2, 4, 3, 1]
         );
 
-        // Test removing last value.
+        // Test removing last value with a safe remove().
         let mut iter = index.remove_iter(b"key");
         assert_eq!(*iter.next().unwrap(), 2);
         assert_eq!(*iter.next().unwrap(), 4);
         assert_eq!(*iter.next().unwrap(), 3);
         assert_eq!(*iter.next().unwrap(), 1);
         iter.remove();
-        iter.remove(); // should be a no-op
+
         assert!(context.encode().contains("pruned_total 3"));
 
         assert_eq!(
@@ -320,16 +321,16 @@ mod tests {
 
         // Test removing all values.
         let mut iter = index.remove_iter(b"key");
-        while let Some(_) = iter.next() {
-            iter.remove();
+        while iter.next().is_some() {
+            iter.unsafe_remove();
         }
-        iter.remove(); // should be a no-op
+        iter.unsafe_remove(); // should be a no-op
         assert_eq!(index.len(), 0);
         assert!(context.encode().contains("pruned_total 6"));
 
         // Removing from an empty iterator should be a no-op and shouldn't panic
         let mut iter = index.remove_iter(b"key");
-        iter.remove();
+        iter.unsafe_remove();
 
         assert_eq!(
             index.get_iter(b"key").copied().collect::<Vec<_>>(),
@@ -400,9 +401,9 @@ mod tests {
         let mut iter = index.remove_iter(b"key");
         assert_eq!(*iter.next().unwrap(), 3); // head (kept)
         assert_eq!(*iter.next().unwrap(), 2); // middle (removed)
-        iter.remove();
+        iter.unsafe_remove();
         assert_eq!(*iter.next().unwrap(), 1); // middle (removed)
-        iter.remove();
+        iter.unsafe_remove();
         assert_eq!(*iter.next().unwrap(), 0); // middle (removed)
         assert_eq!(
             index.get_iter(b"key").copied().collect::<Vec<_>>(),
