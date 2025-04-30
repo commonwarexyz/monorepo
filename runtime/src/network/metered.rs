@@ -47,6 +47,7 @@ impl Metrics {
     }
 }
 
+/// Sends using the `inner` sink and tracks metrics for it.
 pub struct Sink<S: crate::Sink> {
     inner: S,
     metrics: Arc<Metrics>,
@@ -60,6 +61,7 @@ impl<S: crate::Sink> crate::Sink for Sink<S> {
     }
 }
 
+/// Receives from the `inner` stream and tracks metrics for it.
 pub struct Stream<S: crate::Stream> {
     inner: S,
     metrics: Arc<Metrics>,
@@ -73,6 +75,8 @@ impl<S: crate::Stream> crate::Stream for Stream<S> {
     }
 }
 
+/// Listens for incoming connections using the `inner` listener
+/// and tracks metrics for it.
 pub struct Listener<L: crate::Listener> {
     inner: L,
     metrics: Arc<Metrics>,
