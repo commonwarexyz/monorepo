@@ -278,7 +278,7 @@ impl crate::Runner for Runner {
         let network = TokioNetwork::from(TokioNetworkConfig {
             read_timeout: self.cfg.read_timeout,
             write_timeout: self.cfg.write_timeout,
-            tcp_nodelay: self.cfg.tcp_nodelay.clone(),
+            tcp_nodelay: self.cfg.tcp_nodelay,
         });
         let network = MeteredNetwork::new(network, runtime_registry);
 
