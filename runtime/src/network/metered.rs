@@ -104,18 +104,19 @@ impl<L: crate::Listener> crate::Listener for Listener<L> {
     async fn accept(
         &mut self,
     ) -> Result<(std::net::SocketAddr, Self::Sink, Self::Stream), crate::Error> {
-        self.inner.accept().await.map(|(addr, sink, stream)| {
-            self.metrics.inbound_connections.inc();
-            let sink = Sink {
+        let (addr, sink, stream) = self.inner.accept().await?;
+        self.metrics.inbound_connections.inc();
+        Ok((
+            addr,
+            Sink {
                 inner: sink,
                 metrics: self.metrics.clone(),
-            };
-            let stream = Stream {
+            },
+            Stream {
                 inner: stream,
                 metrics: self.metrics.clone(),
-            };
-            (addr, sink, stream)
-        })
+            },
+        ))
     }
 }
 
