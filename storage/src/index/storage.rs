@@ -206,19 +206,31 @@ impl<'a, V> Cursor<'a, V> {
         }
     }
 
-    pub fn delete(&mut self) -> bool {
+    pub fn delete(&mut self) {
         self.pruned.inc();
         match self.phase {
             Phase::Initial => {
                 unreachable!("must call Cursor::next() before interacting")
             }
             Phase::Current => {
-                let Some(next) = self.next.take() else {
-                    return false;
+                // Take ownership of the current record.
+                let current = self.current.take().unwrap();
+
+                // If there is nothing next, we are done.
+                let Some(mut next) = self.next.take() else {
+                    self.phase = Phase::Done;
+                    return;
                 };
-                let current = self.current.as_mut().unwrap();
+
+                // If there is a next record, we update current to be it.
                 current.value = next.value;
-                current.next = next.next;
+
+                // Take next's next and set it to be current's next.
+                let next_next = next.next.take();
+
+                // Restore the current record (whatever is next will still be there).
+                self.current = Some(current);
+                self.next = next_next;
             }
             Phase::Next => {
                 let next = self.next.take().unwrap();
@@ -228,9 +240,6 @@ impl<'a, V> Cursor<'a, V> {
                 unreachable!("Cursor::next() returned false")
             }
         }
-
-        // If we make it here, there is at least one record left.
-        true
     }
 }
 
