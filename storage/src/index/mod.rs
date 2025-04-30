@@ -316,7 +316,7 @@ mod tests {
         {
             index.insert(b"key", 1);
             let record = index.get_mut(b"key").unwrap();
-            record.add(3);
+            record.insert(3);
             // assert!(context.encode().contains("collisions_total 1"));
         }
         assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![1, 3]);
@@ -326,7 +326,7 @@ mod tests {
         {
             let mut cursor = index.get_mut(b"key").unwrap();
             assert_eq!(*cursor.next().unwrap(), 1);
-            cursor.add(42);
+            cursor.insert(42);
             // assert!(context.encode().contains("collisions_total 2"));
         }
 

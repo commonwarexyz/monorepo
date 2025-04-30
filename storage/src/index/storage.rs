@@ -135,7 +135,7 @@ impl<'a, V> Cursor<'a, V> {
         None
     }
 
-    pub fn add(mut self, v: V) {
+    pub fn insert(mut self, v: V) {
         match self.phase {
             Phase::Initial => {
                 unreachable!("must call Cursor::next() before interacting")

@@ -321,7 +321,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         }
 
         // The key wasn't in the snapshot, so add it.
-        cursor.add(new_loc);
+        cursor.insert(new_loc);
 
         Ok(UpdateResult::Inserted(new_loc))
     }
