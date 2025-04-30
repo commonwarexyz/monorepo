@@ -493,4 +493,25 @@ mod tests {
         assert!(ctx.encode().contains("collisions_total 2"));
         assert!(ctx.encode().contains("pruned_total 2"));
     }
+
+    #[test_traced]
+    fn dangling_vec_pointer() {
+        let ctx = deterministic::Context::default();
+        let mut ix = Index::<TwoCap, i32>::init(ctx, TwoCap);
+        let kb = b"k";
+
+        // Create a Vec with two elements
+        ix.insert(kb, 1);
+        ix.insert(kb, 2);
+
+        // Create a dangling pointer to the second element
+        let mut it = ix.mut_iter(kb);
+        let dangling = it.next().unwrap(); // &mut 2
+
+        // Remove the item we have a reference to
+        it.remove();
+
+        // Attempt to mutate the reference
+        *dangling = 99;
+    }
 }
