@@ -214,19 +214,7 @@ impl<T: Translator, V> Index<T, V> {
         self.map.is_empty()
     }
 
-    /// Get a reference to the value at the given translated key.
-    pub fn get(&self, key: &[u8]) -> Option<&Record<V>> {
-        let k = self.translator.transform(key);
-        self.map.get(&k)
-    }
-
-    /// Get a mutable reference to the value at the given translated key.
-    pub fn get_mut(&mut self, key: &[u8]) -> Option<&mut Record<V>> {
-        let k = self.translator.transform(key);
-        self.map.get_mut(&k)
-    }
-
-    pub fn iter(&self, key: &[u8]) -> impl Iterator<Item = &V> {
+    pub fn get(&self, key: &[u8]) -> impl Iterator<Item = &V> {
         let k = self.translator.transform(key);
         self.map
             .get(&k)
@@ -235,6 +223,11 @@ impl<T: Translator, V> Index<T, V> {
             })
             .into_iter()
             .flatten()
+    }
+
+    pub fn get_mut(&mut self, key: &[u8]) -> Option<Cursor<V>> {
+        let k = self.translator.transform(key);
+        self.map.get_mut(&k).map(|record| Cursor::new(record))
     }
 
     /// Remove all values at the given translated key.
