@@ -444,4 +444,53 @@ mod tests {
             );
         }
     }
+
+    #[test_traced]
+    fn test_insert_and_prune_vacant() {
+        let ctx = deterministic::Context::default();
+        let mut index = Index::init(ctx.clone(), TwoCap);
+
+        // Inserting into a *vacant* key behaves just like `insert`
+        // (no collisions and nothing to prune).
+        index.insert_and_prune(b"key", 1u64, |_| false);
+
+        assert_eq!(index.iter(b"key").copied().collect::<Vec<_>>(), vec![1]);
+        assert!(ctx.encode().contains("collisions_total 0"));
+        assert!(ctx.encode().contains("pruned_total 0"));
+    }
+
+    #[test_traced]
+    fn test_insert_and_prune_replace_one() {
+        let ctx = deterministic::Context::default();
+        let mut index = Index::init(ctx.clone(), TwoCap);
+
+        // If a key currently has *one* value and the predicate matches,
+        // the value is *replaced* in-place (1 prune, 1 collision).
+        index.insert(b"key", 1u64); // 0 → collisions
+        index.insert_and_prune(b"key", 2u64, |_| true); // +1 collision, +1 prune
+
+        assert_eq!(index.iter(b"key").copied().collect::<Vec<_>>(), vec![2]);
+        assert!(ctx.encode().contains("collisions_total 1"));
+        assert!(ctx.encode().contains("pruned_total 1"));
+    }
+
+    #[test_traced]
+    fn test_insert_and_prune_prune_many_and_demote() {
+        let ctx = deterministic::Context::default();
+        let mut index = Index::init(ctx.clone(), TwoCap);
+
+        // Add multiple values to the same key
+        index.insert(b"key", 10u64); // 0 → collisions
+        index.insert(b"key", 20u64); // +1 collision
+
+        // When multiple values exist, `insert_and_prune` should:
+        // 1. remove all matching values,
+        // 2. push the new one,
+        // 3. *demote* back to `One` when only a single value remains.
+        index.insert_and_prune(b"key", 30u64, |_| true); // +1 collision, +2 pruned
+
+        assert_eq!(index.iter(b"key").copied().collect::<Vec<_>>(), vec![30]);
+        assert!(ctx.encode().contains("collisions_total 2"));
+        assert!(ctx.encode().contains("pruned_total 2"));
+    }
 }
