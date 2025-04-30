@@ -1,6 +1,5 @@
-use sha2::digest::Update;
-
 use crate::{deterministic::Auditor, Error};
+use sha2::digest::Update;
 use std::sync::Arc;
 
 #[derive(Clone)]
