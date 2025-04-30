@@ -18,6 +18,52 @@ pub struct Record<V> {
     next: Option<Box<Record<V>>>,
 }
 
+impl<V> Record<V> {
+    pub fn get(&self) -> &V {
+        &self.value
+    }
+
+    pub fn peek(&self) -> Option<&V> {
+        self.next.as_deref().map(|r| r.get())
+    }
+
+    pub fn update(&mut self, v: V) {
+        self.value = v;
+    }
+
+    pub fn next(&self) -> Option<&Record<V>> {
+        self.next.as_deref()
+    }
+
+    pub fn next_mut(&mut self) -> Option<&mut Record<V>> {
+        self.next.as_deref_mut()
+    }
+
+    pub fn delete(&mut self) -> bool {
+        let Some(next) = self.next.take() else {
+            return false;
+        };
+        self.value = next.value;
+        self.next = next.next;
+        true
+    }
+
+    pub fn delete_next(&mut self) {
+        let Some(next) = self.next.take() else {
+            return;
+        };
+        self.next = next.next;
+    }
+
+    pub fn add(&mut self, v: V) {
+        let next = Box::new(Record {
+            value: v,
+            next: self.next.take(),
+        });
+        self.next = Some(next);
+    }
+}
+
 enum Phase {
     Initial,
     Current,
@@ -44,8 +90,8 @@ impl<'a, V> Cursor<'a, V> {
     pub fn get(&self) -> &V {
         match self.phase {
             Phase::Initial => unreachable!("must call Cursor::next() before interacting"),
-            Phase::Current => self.current.as_deref().map(|r| &r.value).unwrap(),
-            Phase::Next => self.next.as_deref().map(|r| &r.value).unwrap(),
+            Phase::Current => self.current.as_deref().map(|r| r.get()).unwrap(),
+            Phase::Next => self.next.as_deref().map(|r| r.get()).unwrap(),
             Phase::Done => unreachable!("Cursor::next() returned false"),
         }
     }
@@ -56,10 +102,10 @@ impl<'a, V> Cursor<'a, V> {
                 unreachable!("must call Cursor::next() before interacting")
             }
             Phase::Current => {
-                self.current.as_mut().unwrap().value = v;
+                self.current.as_mut().unwrap().update(v);
             }
             Phase::Next => {
-                self.next.as_mut().unwrap().value = v;
+                self.next.as_mut().unwrap().update(v);
             }
             Phase::Done => {
                 unreachable!("Cursor::next() returned false")
