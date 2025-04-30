@@ -152,19 +152,29 @@ impl<'a, V> Cursor<'a, V> {
         None
     }
 
-    pub fn insert(mut self, v: V) {
+    pub fn insert(&mut self, v: V) {
         self.collisions.inc();
         match self.phase {
             Phase::Initial => {
                 unreachable!("must call Cursor::next() before interacting")
             }
             Phase::Current => {
+                // Take ownership of the current record.
+                let current = self.current.take().unwrap();
+
                 // Create a new record that points to next.
                 let new = Box::new(Record {
                     value: v,
-                    next: self.next.take(),
+                    next: None,
                 });
-                self.next = Some(new);
+
+                // Set current next to be the new record.
+                current.next = Some(new);
+
+                // Set current to be the new record (via a mutable reference to current).
+                self.current = current.next_mut();
+
+                // If there is a next record, it is still next.
             }
             Phase::Next => {
                 // Take ownership of all records.
@@ -196,7 +206,7 @@ impl<'a, V> Cursor<'a, V> {
         }
     }
 
-    pub fn delete(mut self) -> bool {
+    pub fn delete(&mut self) -> bool {
         self.pruned.inc();
         match self.phase {
             Phase::Initial => {
