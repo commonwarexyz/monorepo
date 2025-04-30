@@ -141,7 +141,7 @@ impl<T: Translator, V> Index<T, V> {
                 current: Some(record),
             })
             .into_iter()
-            .flat_map(|iter| iter)
+            .flatten()
     }
 
     /// Remove all values at the given translated key.
@@ -227,7 +227,7 @@ impl<T: Translator, V> Index<T, V> {
     pub fn prune(&mut self, key: &[u8], prune: impl Fn(&V) -> bool) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
-            Entry::Occupied(mut entry) => loop {
+            Entry::Occupied(mut entry) => {
                 let mut record = entry.get_mut();
 
                 // Loop until we find a value that is not pruned.
@@ -245,7 +245,7 @@ impl<T: Translator, V> Index<T, V> {
                 };
                 if remove {
                     entry.remove();
-                    break;
+                    return;
                 }
 
                 // Now that we have some value that won't be pruned, we need to see if
@@ -264,7 +264,7 @@ impl<T: Translator, V> Index<T, V> {
                         record = next;
                     }
                 }
-            },
+            }
             Entry::Vacant(_) => {}
         }
     }

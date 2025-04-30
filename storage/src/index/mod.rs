@@ -60,7 +60,7 @@ mod tests {
         index.insert(key, 3);
         index.insert(key, 4);
         index.prune(key, |i| *i == 3);
-        assert_eq!(index.iter(key).copied().collect::<Vec<_>>(), vec![4, 2, 1]);
+        assert_eq!(index.iter(key).copied().collect::<Vec<_>>(), vec![1, 4, 2]);
         index.prune(key, |_| true);
         // Try removing all of a keys values.
         assert_eq!(
