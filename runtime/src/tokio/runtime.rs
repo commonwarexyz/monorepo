@@ -34,13 +34,6 @@ struct Metrics {
     tasks_running: Family<Work, Gauge>,
     blocking_tasks_spawned: Family<Work, Counter>,
     blocking_tasks_running: Family<Work, Gauge>,
-
-    // As nice as it would be to track each of these by socket address,
-    // it quickly becomes an OOM attack vector.
-    inbound_connections: Counter,
-    outbound_connections: Counter,
-    inbound_bandwidth: Counter,
-    outbound_bandwidth: Counter,
 }
 
 impl Metrics {
@@ -50,10 +43,6 @@ impl Metrics {
             tasks_running: Family::default(),
             blocking_tasks_spawned: Family::default(),
             blocking_tasks_running: Family::default(),
-            inbound_connections: Counter::default(),
-            outbound_connections: Counter::default(),
-            inbound_bandwidth: Counter::default(),
-            outbound_bandwidth: Counter::default(),
         };
         registry.register(
             "tasks_spawned",
@@ -74,26 +63,6 @@ impl Metrics {
             "blocking_tasks_running",
             "Number of blocking tasks currently running",
             metrics.blocking_tasks_running.clone(),
-        );
-        registry.register(
-            "inbound_connections",
-            "Number of connections created by dialing us",
-            metrics.inbound_connections.clone(),
-        );
-        registry.register(
-            "outbound_connections",
-            "Number of connections created by dialing others",
-            metrics.outbound_connections.clone(),
-        );
-        registry.register(
-            "inbound_bandwidth",
-            "Bandwidth used by receiving data from others",
-            metrics.inbound_bandwidth.clone(),
-        );
-        registry.register(
-            "outbound_bandwidth",
-            "Bandwidth used by sending data to others",
-            metrics.outbound_bandwidth.clone(),
         );
         metrics
     }
