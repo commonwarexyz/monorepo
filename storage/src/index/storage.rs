@@ -68,6 +68,7 @@ enum Phase {
     Initial,
     Current,
     Next,
+    Done,
 }
 
 pub struct Cursor<'a, V> {
@@ -91,6 +92,46 @@ impl<'a, V> Cursor<'a, V> {
             Phase::Initial => None,
             Phase::Current => self.current.as_deref().map(|r| r.get()),
             Phase::Next => self.next.as_deref().map(|r| r.get()),
+            Phase::Done => unreachable!("Cursor::next() returned false"),
+        }
+    }
+
+    pub fn update(&mut self, v: V) {
+        match self.phase {
+            Phase::Initial => {
+                unreachable!("must call Cursor::next() before interacting")
+            }
+            Phase::Current => {
+                self.current.as_mut().unwrap().update(v);
+            }
+            Phase::Next => {
+                self.next.as_mut().unwrap().update(v);
+            }
+            Phase::Done => {
+                unreachable!("Cursor::next() returned false")
+            }
+        }
+    }
+
+    pub fn insert(&mut self, v: V) {
+        match self.phase {
+            Phase::Initial => {
+                unreachable!("must call Cursor::next() before interacting")
+            }
+            Phase::Current => {
+                let new = Box::new(Record {
+                    value: v,
+                    next: self.next.take(),
+                });
+                self.next = Some(new);
+            }
+            Phase::Next => {
+                let current = self.current.take().unwrap();
+                current.next = self.next.take();
+            }
+            Phase::Done => {
+                unreachable!("Cursor::next() returned false")
+            }
         }
     }
 
@@ -98,23 +139,28 @@ impl<'a, V> Cursor<'a, V> {
         match self.phase {
             Phase::Initial => {
                 self.phase = Phase::Current;
-                return true;
+                return self.current.is_some();
             }
             Phase::Current => {
-                self.phase = Phase::Next;
-                return true;
+                if self.next.is_some() {
+                    self.phase = Phase::Next;
+                    return true;
+                }
+                self.phase = Phase::Done;
+                return false;
             }
-            Phase::Next => {}
+            Phase::Next => {
+                let current = self.current.take().unwrap();
+                let mut next = self.next.take().unwrap();
+                let next_next = next.next.take();
+                current.next = Some(next);
+                self.current = Some(current);
+                self.next = next_next;
+                return self.next.is_some();
+            }
+            Phase::Done => {}
         }
-        let Some(mut next) = self.next.take() else {
-            return false;
-        };
-        let current = self.current.take().unwrap();
-        let next_next = next.next.take();
-        current.next = Some(next);
-        self.current = Some(current);
-        self.next = next_next;
-        true
+        false
     }
 }
 
