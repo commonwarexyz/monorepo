@@ -153,13 +153,28 @@ impl crate::Stream for Stream {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct Network {
+pub(crate) struct Config {
     /// If given, enables/disables TCP_NODELAY on the socket
     tcp_nodelay: Option<bool>,
-    /// Write timeout for sockets created by this listener
-    write_timeout: Duration,
     /// Read timeout for sockets created by this listener
     read_timeout: Duration,
+    /// Write timeout for sockets created by this listener
+    write_timeout: Duration,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            tcp_nodelay: None,
+            read_timeout: Duration::from_secs(60),
+            write_timeout: Duration::from_secs(30),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Network {
+    cfg: Config,
     metrics: Arc<Metrics>,
 }
 
@@ -171,9 +186,9 @@ impl crate::Network for Network {
             .await
             .map_err(|_| Error::BindFailed)
             .map(|listener| Listener {
-                tcp_nodelay: self.tcp_nodelay,
-                write_timeout: self.write_timeout,
-                read_timeout: self.read_timeout,
+                tcp_nodelay: self.cfg.tcp_nodelay,
+                write_timeout: self.cfg.write_timeout,
+                read_timeout: self.cfg.read_timeout,
                 metrics: Arc::new(Metrics::new(&mut Registry::default())), // TODO danlaine: pass registry
                 listener,
             })
@@ -190,7 +205,7 @@ impl crate::Network for Network {
         self.metrics.outbound_connections.inc();
 
         // Set TCP_NODELAY if configured
-        if let Some(tcp_nodelay) = self.tcp_nodelay {
+        if let Some(tcp_nodelay) = self.cfg.tcp_nodelay {
             if let Err(err) = stream.set_nodelay(tcp_nodelay) {
                 warn!(?err, "failed to set TCP_NODELAY");
             }
@@ -200,12 +215,12 @@ impl crate::Network for Network {
         let (stream, sink) = stream.into_split();
         Ok((
             Sink {
-                write_timeout: self.write_timeout,
+                write_timeout: self.cfg.write_timeout,
                 metrics: self.metrics.clone(),
                 sink,
             },
             Stream {
-                read_timeout: self.read_timeout,
+                read_timeout: self.cfg.read_timeout,
                 metrics: self.metrics.clone(),
                 stream,
             },
