@@ -178,6 +178,15 @@ pub(crate) struct Network {
     metrics: Arc<Metrics>,
 }
 
+impl Network {
+    pub(crate) fn new(cfg: Config, reg: &mut Registry) -> Self {
+        Self {
+            cfg,
+            metrics: Arc::new(Metrics::new(reg)),
+        }
+    }
+}
+
 impl crate::Network for Network {
     type Listener = Listener;
 
