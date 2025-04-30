@@ -64,8 +64,14 @@ impl<V> Record<V> {
     }
 }
 
+enum Phase {
+    Initial,
+    Current,
+    Next,
+}
+
 pub struct Cursor<'a, V> {
-    on_next: bool,
+    phase: Phase,
     current: Option<&'a mut Record<V>>,
     next: Option<Box<Record<V>>>,
 }
@@ -74,24 +80,31 @@ impl<'a, V> Cursor<'a, V> {
     pub fn new(record: &'a mut Record<V>) -> Self {
         let next = record.next.take();
         Self {
-            on_next: false,
+            phase: Phase::Initial,
             current: Some(record),
             next,
         }
     }
 
     pub fn get(&self) -> Option<&V> {
-        if self.on_next {
-            self.next.as_deref().map(|r| r.get())
-        } else {
-            self.current.as_deref().map(|r| r.get())
+        match self.phase {
+            Phase::Initial => None,
+            Phase::Current => self.current.as_deref().map(|r| r.get()),
+            Phase::Next => self.next.as_deref().map(|r| r.get()),
         }
     }
 
     pub fn next(&mut self) -> bool {
-        if !self.on_next {
-            self.on_next = true;
-            return self.next.is_some();
+        match self.phase {
+            Phase::Initial => {
+                self.phase = Phase::Current;
+                return true;
+            }
+            Phase::Current => {
+                self.phase = Phase::Next;
+                return true;
+            }
+            Phase::Next => {}
         }
         let Some(mut next) = self.next.take() else {
             return false;
