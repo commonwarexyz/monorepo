@@ -64,6 +64,48 @@ impl<V> Record<V> {
     }
 }
 
+pub struct Cursor<'a, V> {
+    current: Option<&'a mut Record<V>>,
+    next: Option<Box<Record<V>>>,
+}
+
+impl<'a, V> Cursor<'a, V> {
+    pub fn new(record: &'a mut Record<V>) -> Self {
+        let next = record.next.take();
+        Self {
+            current: Some(record),
+            next,
+        }
+    }
+
+    pub fn get(&self) -> Option<&V> {
+        self.current.as_ref().map(|r| r.get())
+    }
+
+    pub fn next(&mut self) -> bool {
+        let Some(mut next) = self.next.take() else {
+            return false;
+        };
+        let current = self.current.take().unwrap();
+        let next_next = next.next.take();
+        current.next = Some(next);
+        self.current = Some(current);
+        self.next = next_next;
+        true
+    }
+}
+
+impl<'a, V> Drop for Cursor<'_, V> {
+    fn drop(&mut self) {
+        // Re-inject the next record into the current record (if it exists).
+        if let Some(next) = self.next.take() {
+            if let Some(current) = self.current.take() {
+                current.next = Some(next);
+            }
+        }
+    }
+}
+
 /// An iterator over the values in a `Record` chain.
 pub struct RecordIter<'a, V> {
     current: Option<&'a Record<V>>,

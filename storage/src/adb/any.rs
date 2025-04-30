@@ -229,16 +229,25 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             let op: Operation<K, V> = log.read(i).await?;
             match op.to_type() {
                 Type::Deleted(key) => {
-                    let mut loc_iter = snapshot.mut_iter(&key);
-                    while let Some(loc) = loc_iter.next() {
-                        let op = log.read(*loc).await?;
+                    let mut record = snapshot.get_mut(&key);
+                    loop {
+                        let Some(loc) = record else {
+                            // Nothing to delete
+                            break;
+                        };
+                        let value = *loc.get();
+                        let op = log.read(value).await?;
                         if op.to_key() != key {
+                            record = loc.next_mut();
                             continue;
                         }
                         if let Some(ref mut bitmap_ref) = bitmap {
-                            bitmap_ref.set_bit(hasher, *loc, false);
+                            bitmap_ref.set_bit(hasher, value, false);
                         }
-                        loc_iter.remove();
+                        if !loc.delete() {
+                            // TODO: use peak here
+                            snapshot.remove(&key);
+                        }
                         break;
                     }
                 }
@@ -283,10 +292,16 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         value: Option<&V>,
         new_loc: u64,
     ) -> Result<UpdateResult, Error> {
-        let mut loc_iter = snapshot.mut_iter(&key);
-        for loc in &mut loc_iter {
-            let op = log.read(*loc).await?;
+        let mut record = snapshot.get_mut(&key);
+        loop {
+            let Some(loc) = record else {
+                // The key isn't in the snapshot, so add it.
+                break;
+            };
+            let value = *loc.get();
+            let op = log.read(value).await?;
             if op.to_key() != key {
+                record = loc.next_mut();
                 continue;
             }
             if let Some(v) = value {
