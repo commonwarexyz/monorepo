@@ -65,6 +65,7 @@ impl<V> Record<V> {
 }
 
 pub struct Cursor<'a, V> {
+    on_next: bool,
     current: Option<&'a mut Record<V>>,
     next: Option<Box<Record<V>>>,
 }
@@ -73,16 +74,25 @@ impl<'a, V> Cursor<'a, V> {
     pub fn new(record: &'a mut Record<V>) -> Self {
         let next = record.next.take();
         Self {
+            on_next: false,
             current: Some(record),
             next,
         }
     }
 
     pub fn get(&self) -> Option<&V> {
-        self.current.as_ref().map(|r| r.get())
+        if self.on_next {
+            self.next.as_deref().map(|r| r.get())
+        } else {
+            self.current.as_deref().map(|r| r.get())
+        }
     }
 
     pub fn next(&mut self) -> bool {
+        if !self.on_next {
+            self.on_next = true;
+            return self.next.is_some();
+        }
         let Some(mut next) = self.next.take() else {
             return false;
         };
