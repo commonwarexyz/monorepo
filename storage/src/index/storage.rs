@@ -166,15 +166,26 @@ impl<'a, V> Cursor<'a, V> {
                 self.next = Some(new);
             }
             Phase::Next => {
+                // Take ownership of all records.
+                let current = self.current.take().unwrap();
                 let mut next = self.next.take().unwrap();
                 let next_next = next.next.take();
+
+                // Repair current.
+                current.next = Some(next);
+
+                // Set current to be next (via a mutable reference to current).
+                self.current = current.next_mut();
+
+                // Create a new record.
                 let new = Box::new(Record {
                     value: v,
                     next: next_next,
                 });
-                next.next = Some(new);
+                self.next = Some(new);
             }
             Phase::Done => {
+                // If we are done, next must be empty.
                 let new = Box::new(Record {
                     value: v,
                     next: None,
