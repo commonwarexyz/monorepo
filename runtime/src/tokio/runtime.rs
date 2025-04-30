@@ -110,7 +110,7 @@ pub struct Config {
     /// Worker threads are always active (waiting for work).
     ///
     /// Tokio sets the default value to the number of logical CPUs.
-    pub worker_threads: usize,
+    worker_threads: usize,
 
     /// Maximum number of threads to use for blocking tasks.
     ///
@@ -119,16 +119,16 @@ pub struct Config {
     ///
     /// Tokio sets the default value to 512 to avoid hanging on lower-level
     /// operations that require blocking (like `fs` and writing to `Stdout`).
-    pub max_blocking_threads: usize,
+    max_blocking_threads: usize,
 
     /// Whether or not to catch panics.
-    pub catch_panics: bool,
+    catch_panics: bool,
 
     /// Duration after which to close the connection if no message is read.
-    pub read_timeout: Duration,
+    read_timeout: Duration,
 
     /// Duration after which to close the connection if a message cannot be written.
-    pub write_timeout: Duration,
+    write_timeout: Duration,
 
     /// Whether or not to disable Nagle's algorithm.
     ///
@@ -140,24 +140,22 @@ pub struct Config {
     ///
     /// Note: Make sure that your compile target has and allows this configuration otherwise
     /// panics or unexpected behaviours are possible.
-    pub tcp_nodelay: Option<bool>,
+    tcp_nodelay: Option<bool>,
 
     /// Base directory for all storage operations.
-    pub storage_directory: PathBuf,
+    storage_directory: PathBuf,
 
     /// Maximum buffer size for operations on blobs.
     ///
     /// Tokio sets the default value to 2MB.
-    pub maximum_buffer_size: usize,
+    maximum_buffer_size: usize,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        // Generate a random directory name to avoid conflicts (used in tests, so we shouldn't need to reload)
+impl Config {
+    /// Returns a new [Config] with default values.
+    pub fn new() -> Self {
         let rng = OsRng.next_u64();
         let storage_directory = env::temp_dir().join(format!("commonware_tokio_runtime_{}", rng));
-
-        // Return the configuration
         Self {
             worker_threads: 2,
             max_blocking_threads: 512,
@@ -168,6 +166,88 @@ impl Default for Config {
             storage_directory,
             maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
         }
+    }
+
+    // Setters
+    /// See [Config]
+    pub fn with_worker_threads(mut self, n: usize) -> Self {
+        self.worker_threads = n;
+        self
+    }
+    /// See [Config]
+    pub fn with_max_blocking_threads(mut self, n: usize) -> Self {
+        self.max_blocking_threads = n;
+        self
+    }
+    /// See [Config]
+    pub fn with_catch_panics(mut self, b: bool) -> Self {
+        self.catch_panics = b;
+        self
+    }
+    /// See [Config]
+    pub fn with_read_timeout(mut self, d: Duration) -> Self {
+        self.read_timeout = d;
+        self
+    }
+    /// See [Config]
+    pub fn with_write_timeout(mut self, d: Duration) -> Self {
+        self.write_timeout = d;
+        self
+    }
+    /// See [Config]
+    pub fn with_tcp_nodelay(mut self, n: Option<bool>) -> Self {
+        self.tcp_nodelay = n;
+        self
+    }
+    /// See [Config]
+    pub fn with_storage_directory(mut self, p: impl Into<PathBuf>) -> Self {
+        self.storage_directory = p.into();
+        self
+    }
+    /// See [Config]
+    pub fn with_maximum_buffer_size(mut self, n: usize) -> Self {
+        self.maximum_buffer_size = n;
+        self
+    }
+
+    // Getters
+    /// See [Config]
+    pub fn worker_threads(&self) -> usize {
+        self.worker_threads
+    }
+    /// See [Config]
+    pub fn max_blocking_threads(&self) -> usize {
+        self.max_blocking_threads
+    }
+    /// See [Config]
+    pub fn catch_panics(&self) -> bool {
+        self.catch_panics
+    }
+    /// See [Config]
+    pub fn read_timeout(&self) -> Duration {
+        self.read_timeout
+    }
+    /// See [Config]
+    pub fn write_timeout(&self) -> Duration {
+        self.write_timeout
+    }
+    /// See [Config]
+    pub fn tcp_nodelay(&self) -> Option<bool> {
+        self.tcp_nodelay
+    }
+    /// See [Config]
+    pub fn storage_directory(&self) -> &PathBuf {
+        &self.storage_directory
+    }
+    /// See [Config]
+    pub fn maximum_buffer_size(&self) -> usize {
+        self.maximum_buffer_size
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

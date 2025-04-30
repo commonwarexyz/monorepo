@@ -137,10 +137,7 @@ fn main() {
         group::Public::decode(other_public.as_ref()).expect("Other identity not well-formed");
 
     // Initialize context
-    let runtime_cfg = tokio::Config {
-        storage_directory: storage_directory.into(),
-        ..Default::default()
-    };
+    let runtime_cfg = tokio::Config::new().with_storage_directory(storage_directory);
     let executor = tokio::Runner::new(runtime_cfg.clone());
 
     // Configure indexer

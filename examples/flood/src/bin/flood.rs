@@ -59,10 +59,7 @@ fn main() {
     let public_key = signer.public_key();
 
     // Initialize runtime
-    let cfg = tokio::Config {
-        worker_threads: config.worker_threads,
-        ..Default::default()
-    };
+    let cfg = tokio::Config::new().with_worker_threads(config.worker_threads);
     let executor = tokio::Runner::new(cfg);
 
     // Start runtime

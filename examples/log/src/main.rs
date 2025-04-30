@@ -140,10 +140,7 @@ fn main() {
         .expect("Please provide storage directory");
 
     // Initialize context
-    let runtime_cfg = tokio::Config {
-        storage_directory: storage_directory.into(),
-        ..Default::default()
-    };
+    let runtime_cfg = tokio::Config::new().with_storage_directory(storage_directory);
     let executor = tokio::Runner::new(runtime_cfg.clone());
 
     // Configure network
