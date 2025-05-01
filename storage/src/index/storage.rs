@@ -301,12 +301,21 @@ impl<T: Translator, V> Drop for Cursor<'_, T, V> {
     }
 }
 
-/// An iterator over the values in a `Record` list.
-pub struct RecordIter<'a, V> {
+/// An immutable iterator over the values associated with a translated key.
+pub struct ImmutableCursor<'a, V> {
     current: Option<&'a Record<V>>,
 }
 
-impl<'a, V> Iterator for RecordIter<'a, V> {
+impl<'a, V> ImmutableCursor<'a, V> {
+    /// Creates a new `ImmutableCursor` from a `Record`.
+    fn new(record: &'a Record<V>) -> Self {
+        Self {
+            current: Some(record),
+        }
+    }
+}
+
+impl<'a, V> Iterator for ImmutableCursor<'a, V> {
     type Item = &'a V;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -358,19 +367,17 @@ impl<T: Translator, V> Index<T, V> {
         self.map.is_empty()
     }
 
-    /// Retrieves an iterator over all values associated with a given key.
+    /// Returns an iterator over all values associated with a translated key.
     pub fn get(&self, key: &[u8]) -> impl Iterator<Item = &V> {
         let k = self.translator.transform(key);
         self.map
             .get(&k)
-            .map(|record| RecordIter {
-                current: Some(record),
-            })
+            .map(|record| ImmutableCursor::new(record))
             .into_iter()
             .flatten()
     }
 
-    /// Provides mutable access to the values associated with a key via a `Cursor`.
+    /// Provides mutable access to the values associated with a translated key, if the key exists.
     pub fn get_mut(&mut self, key: &[u8]) -> Option<Cursor<T, V>> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
@@ -379,7 +386,7 @@ impl<T: Translator, V> Index<T, V> {
         }
     }
 
-    /// Provides mutable access to the values associated with a key via a `Cursor` (if the key exists), otherwise
+    /// Provides mutable access to the values associated with a translated key (if the key exists), otherwise
     /// inserts a new value and returns `None`.
     pub fn get_mut_or_insert(&mut self, key: &[u8], v: V) -> Option<Cursor<T, V>> {
         let k = self.translator.transform(key);
@@ -398,7 +405,9 @@ impl<T: Translator, V> Index<T, V> {
 
     /// Remove all values at the given translated key.
     pub fn remove(&mut self, key: &[u8]) {
-        // We use `prune()` to ensure we count all dropped values.
+        // To ensure metrics are accurate, we iterate over all
+        // conflicting values and remove them one-by-one (rather
+        // than just removing the entire entry).
         self.prune(key, |_| true);
     }
 
@@ -421,6 +430,8 @@ impl<T: Translator, V> Index<T, V> {
     }
 
     /// Insert a value at the given translated key, and prune any values that are no longer valid.
+    ///
+    /// If the value is prunable, it will not be inserted.
     pub fn insert_and_prune(&mut self, key: &[u8], v: V, prune: impl Fn(&V) -> bool) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
@@ -438,11 +449,10 @@ impl<T: Translator, V> Index<T, V> {
                     }
                 }
 
-                // Add our new value.
-                cursor.insert(v);
-
-                // There must be something left, so we don't need to worry about checking
-                // for emptiness.
+                // Add our new value (if not prunable).
+                if !prune(&v) {
+                    cursor.insert(v);
+                }
             }
             Entry::Vacant(entry) => {
                 // No collision, so we can just insert the value.
@@ -454,7 +464,7 @@ impl<T: Translator, V> Index<T, V> {
         }
     }
 
-    /// Remove a value at the given translated key, and prune any values that are no longer valid.
+    /// Remove all values associated with a translated key that match the `prune` predicate.
     pub fn prune(&mut self, key: &[u8], prune: impl Fn(&V) -> bool) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {

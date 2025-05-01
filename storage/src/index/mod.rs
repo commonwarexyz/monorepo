@@ -484,7 +484,7 @@ mod tests {
 
         // Add a value to the index
         index.insert(b"key", 1u64); // 0 → collisions
-        index.insert_and_prune(b"key", 2u64, |_| true); // +1 collision, +1 prune
+        index.insert_and_prune(b"key", 2u64, |v| *v == 1); // +1 collision, +1 prune
 
         assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![2]);
         assert!(ctx.encode().contains("collisions_total 1"));
@@ -492,7 +492,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_insert_and_prune_prune_many_and_demote() {
+    fn test_insert_and_prune_dead_insert() {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx.clone(), TwoCap);
 
@@ -501,10 +501,13 @@ mod tests {
         index.insert(b"key", 20u64); // +1 collision
 
         // Update an item if it matches the predicate
-        index.insert_and_prune(b"key", 30u64, |_| true); // +1 collision, +2 pruned
+        index.insert_and_prune(b"key", 30u64, |_| true); // +2 pruned (and last value not added)
 
-        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![30]);
-        assert!(ctx.encode().contains("collisions_total 2"));
+        assert_eq!(
+            index.get(b"key").copied().collect::<Vec<u64>>(),
+            Vec::<u64>::new()
+        );
+        assert!(ctx.encode().contains("collisions_total 1"));
         assert!(ctx.encode().contains("pruned_total 2"));
     }
 
@@ -642,5 +645,21 @@ mod tests {
         let mut values = index.get(b"key").copied().collect::<Vec<_>>();
         values.sort();
         assert_eq!(values, vec![123, 456, 789, 999]);
+    }
+
+    #[test_traced]
+    #[should_panic]
+    fn test_cursor_double_delete() {
+        let ctx = deterministic::Context::default();
+        let mut index = Index::init(ctx, TwoCap);
+        index.insert(b"key", 123);
+        index.insert(b"key", 456);
+
+        let mut cursor = index.get_mut(b"key").unwrap();
+        assert_eq!(*cursor.next().unwrap(), 123);
+        cursor.delete();
+
+        // Attempt to delete again (will panic)
+        cursor.delete();
     }
 }
