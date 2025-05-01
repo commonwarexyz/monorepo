@@ -267,15 +267,13 @@ impl<T: Translator, V> Drop for Cursor<'_, T, V> {
         }
 
         // Attach last record to the entry.
-        let last = self.past.pop().unwrap();
-        entry.get_mut().next = Some(last);
+        let mut iter = self.past.drain(..);
+        let first = iter.next().unwrap();
+        entry.get_mut().next = Some(first);
 
         // Reattach all records.
         let mut tip = entry.get_mut().next.as_mut().unwrap();
-        loop {
-            let Some(record) = self.past.pop() else {
-                break;
-            };
+        for record in iter {
             tip.next = Some(record);
             tip = tip.next.as_mut().unwrap();
         }
