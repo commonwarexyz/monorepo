@@ -600,4 +600,114 @@ mod tests {
             assert!(got.is_empty());
         });
     }
+
+    #[test_traced]
+    fn test_ref_count_across_peers() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|context| async move {
+            // three peers so we can observe from a third
+            let (peers, mut registrations, _oracle) =
+                initialize_simulation(context.clone(), 3, 1.0).await;
+            let mailboxes = spawn_peer_engines(context.clone(), &mut registrations);
+
+            let p0 = peers[0].clone();
+            let p1 = peers[1].clone();
+            let observer = peers[2].clone();
+
+            let mut mb0 = mailboxes.get(&p0).unwrap().clone();
+            let mut mb1 = mailboxes.get(&p1).unwrap().clone();
+            let mut obs = mailboxes.get(&observer).unwrap().clone();
+
+            // the message duplicated by p0 and p1
+            let dup = TestMessage::shared(b"dup");
+            let id = dup.identity();
+
+            // broadcast from both senders
+            mb0.broadcast(Recipients::All, dup.clone())
+                .await
+                .await
+                .unwrap();
+            mb1.broadcast(Recipients::All, dup.clone())
+                .await
+                .await
+                .unwrap();
+            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
+
+            // observer must get it now
+            assert_eq!(obs.get(None, id, None).await, vec![dup.clone()]);
+
+            // Evict from p0’s deque only → still retrievable
+            for i in 0..CACHE_SIZE {
+                let spam = TestMessage::shared(format!("p0-{i}").into_bytes());
+                mb0.broadcast(Recipients::All, spam).await.await.unwrap();
+            }
+            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
+            assert_eq!(obs.get(None, id, None).await, vec![dup.clone()]);
+
+            // Evict from p1’s deque as well → gone
+            for i in 0..CACHE_SIZE {
+                let spam = TestMessage::shared(format!("p1-{i}").into_bytes());
+                mb1.broadcast(Recipients::All, spam).await.await.unwrap();
+            }
+            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
+            assert!(obs.get(None, id, None).await.is_empty());
+        });
+    }
+
+    #[test_traced]
+    fn test_digest_filtered_waiter() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|context| async move {
+            let (peers, mut registrations, _oracle) =
+                initialize_simulation(context.clone(), 3, 1.0).await;
+            let mailboxes = spawn_peer_engines(context.clone(), &mut registrations);
+
+            let owner = peers[0].clone();
+            let spoiler = peers[1].clone();
+            let waiter = peers[2].clone();
+
+            let mut mb_owner = mailboxes.get(&owner).unwrap().clone();
+            let mut mb_spoiler = mailboxes.get(&spoiler).unwrap().clone();
+            let mut mb_waiter = mailboxes.get(&waiter).unwrap().clone();
+
+            // two messages share identity but differ in digest
+            let wanted = TestMessage::new(b"same-id", b"wanted");
+            let not_want = TestMessage::new(b"same-id", b"noise");
+
+            // waiter only wants the *wanted* digest and only from `owner`
+            let mut recv = mb_waiter
+                .subscribe(
+                    Some(owner.clone()),
+                    wanted.identity(),
+                    Some(wanted.digest()),
+                )
+                .await;
+
+            // spoiler broadcasts the *wanted* digest → should be ignored
+            mb_spoiler
+                .broadcast(Recipients::All, wanted.clone())
+                .await
+                .await
+                .unwrap();
+            context.sleep(A_JIFFY).await;
+            assert!(recv.try_recv().unwrap().is_none());
+
+            // owner broadcasts a *different* digest with same identity → ignored
+            mb_owner
+                .broadcast(Recipients::All, not_want.clone())
+                .await
+                .await
+                .unwrap();
+            context.sleep(A_JIFFY).await;
+            assert!(recv.try_recv().unwrap().is_none());
+
+            // owner finally broadcasts the exact match → waiter resolves
+            mb_owner
+                .broadcast(Recipients::All, wanted.clone())
+                .await
+                .await
+                .unwrap();
+            assert_eq!(recv.await.unwrap(), wanted);
+        });
+    }
 }
