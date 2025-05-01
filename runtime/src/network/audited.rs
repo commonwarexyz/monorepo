@@ -16,12 +16,11 @@ impl<S: crate::Sink> crate::Sink for Sink<S> {
             hasher.update(data);
         });
 
-        self.inner.send(data).await.map_err(|e| {
+        self.inner.send(data).await.inspect_err(|e| {
             self.auditor.event(b"send_failure", |hasher| {
                 hasher.update(self.remote_addr.to_string().as_bytes());
                 hasher.update(e.to_string().as_bytes());
             });
-            e
         })?;
 
         self.auditor.event(b"send_success", |hasher| {
@@ -45,12 +44,11 @@ impl<S: crate::Stream> crate::Stream for Stream<S> {
             hasher.update(self.remote_addr.to_string().as_bytes());
         });
 
-        self.inner.recv(buf).await.map_err(|e| {
+        self.inner.recv(buf).await.inspect_err(|e| {
             self.auditor.event(b"recv_failure", |hasher| {
                 hasher.update(self.remote_addr.to_string().as_bytes());
                 hasher.update(e.to_string().as_bytes());
             });
-            e
         })?;
 
         self.auditor.event(b"recv_success", |hasher| {
@@ -77,12 +75,11 @@ impl<L: crate::Listener> crate::Listener for Listener<L> {
             hasher.update(self.local_addr.to_string().as_bytes());
         });
 
-        let (addr, sink, stream) = self.inner.accept().await.map_err(|e| {
+        let (addr, sink, stream) = self.inner.accept().await.inspect_err(|e| {
             self.auditor.event(b"accept_failure", |hasher| {
                 hasher.update(self.local_addr.to_string().as_bytes());
                 hasher.update(e.to_string().as_bytes());
             });
-            e
         })?;
 
         self.auditor.event(b"accept_success", |hasher| {
@@ -129,12 +126,11 @@ impl<N: crate::Network> crate::Network for Network<N> {
             hasher.update(local_addr.to_string().as_bytes());
         });
 
-        let inner = self.inner.bind(local_addr).await.map_err(|e| {
+        let inner = self.inner.bind(local_addr).await.inspect_err(|e| {
             self.auditor.event(b"bind_failure", |hasher| {
                 hasher.update(local_addr.to_string().as_bytes());
                 hasher.update(e.to_string().as_bytes());
             });
-            e
         })?;
 
         self.auditor.event(b"bind_success", |hasher| {
@@ -153,12 +149,11 @@ impl<N: crate::Network> crate::Network for Network<N> {
             hasher.update(remote_addr.to_string().as_bytes());
         });
 
-        let (sink, stream) = self.inner.dial(remote_addr).await.map_err(|e| {
+        let (sink, stream) = self.inner.dial(remote_addr).await.inspect_err(|e| {
             self.auditor.event(b"dial_failure", |hasher| {
                 hasher.update(remote_addr.to_string().as_bytes());
                 hasher.update(e.to_string().as_bytes());
             });
-            e
         })?;
 
         self.auditor.event(b"dial_success", |hasher| {
