@@ -223,6 +223,8 @@ impl<P: Array, D: Digest> Write for Chunk<P, D> {
 }
 
 impl<P: Array, D: Digest> Read for Chunk<P, D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let sequencer = P::read(reader)?;
         let height = UInt::read(reader)?.into();
@@ -282,6 +284,8 @@ impl<D: Digest> Write for Parent<D> {
 }
 
 impl<D: Digest> Read for Parent<D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let digest = D::read(reader)?;
         let epoch = UInt::read(reader)?.into();
@@ -434,6 +438,8 @@ impl<C: Verifier, D: Digest> Write for Node<C, D> {
 }
 
 impl<C: Verifier, D: Digest> Read for Node<C, D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let chunk = Chunk::read(reader)?;
         let signature = C::Signature::read(reader)?;
@@ -573,6 +579,8 @@ impl<P: Array, D: Digest> Write for Ack<P, D> {
 }
 
 impl<P: Array, D: Digest> Read for Ack<P, D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let chunk = Chunk::read(reader)?;
         let epoch = UInt::read(reader)?.into();
@@ -626,6 +634,8 @@ impl<C: Verifier, D: Digest> Write for Activity<C, D> {
 }
 
 impl<C: Verifier, D: Digest> Read for Activity<C, D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         match u8::read(reader)? {
             0 => Ok(Activity::Tip(Proposal::read(reader)?)),
@@ -693,6 +703,8 @@ impl<C: Verifier, D: Digest> Write for Proposal<C, D> {
 }
 
 impl<C: Verifier, D: Digest> Read for Proposal<C, D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let chunk = Chunk::read(reader)?;
         let signature = C::Signature::read(reader)?;
@@ -785,6 +797,8 @@ impl<P: Array, D: Digest> Write for Lock<P, D> {
 }
 
 impl<P: Array, D: Digest> Read for Lock<P, D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let chunk = Chunk::read(reader)?;
         let epoch = UInt::read(reader)?.into();

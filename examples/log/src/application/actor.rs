@@ -1,5 +1,3 @@
-use std::marker::PhantomData;
-
 use super::{
     ingress::{Mailbox, Message},
     supervisor::Supervisor,
@@ -10,6 +8,7 @@ use commonware_runtime::{Handle, Spawner};
 use commonware_utils::{hex, Array};
 use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
+use std::marker::PhantomData;
 use tracing::info;
 
 /// Genesis message to use during initialization.

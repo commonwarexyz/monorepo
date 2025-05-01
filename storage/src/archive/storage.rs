@@ -4,15 +4,13 @@ use crate::{
     journal::variable::{Config as JConfig, Journal},
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{
-    varint::UInt, Codec, Config as CodecConfig, EncodeSize, Read, ReadExt, Write,
-};
+use commonware_codec::{varint::UInt, Codec, EncodeSize, Read, ReadExt, Write};
 use commonware_runtime::{Metrics, Storage};
 use commonware_utils::Array;
 use futures::{pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use rangemap::RangeInclusiveSet;
-use std::{collections::BTreeMap, marker::PhantomData};
+use std::collections::BTreeMap;
 use tracing::{debug, trace};
 
 /// Subject of a `get` or `has` operation.
@@ -28,27 +26,20 @@ struct Location {
 }
 
 /// Record stored in the `Archive`.
-struct Record<K: Array, VC: CodecConfig, V: Codec<VC>> {
+struct Record<K: Array, V: Codec> {
     index: u64,
     key: K,
     value: V,
-
-    _phantom: PhantomData<VC>,
 }
 
-impl<K: Array, VC: CodecConfig, V: Codec<VC>> Record<K, VC, V> {
+impl<K: Array, V: Codec> Record<K, V> {
     /// Create a new `Record`.
     fn new(index: u64, key: K, value: V) -> Self {
-        Self {
-            index,
-            key,
-            value,
-            _phantom: PhantomData,
-        }
+        Self { index, key, value }
     }
 }
 
-impl<K: Array, VC: CodecConfig, V: Codec<VC>> Write for Record<K, VC, V> {
+impl<K: Array, V: Codec> Write for Record<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
         UInt(self.index).write(buf);
         self.key.write(buf);
@@ -56,37 +47,28 @@ impl<K: Array, VC: CodecConfig, V: Codec<VC>> Write for Record<K, VC, V> {
     }
 }
 
-impl<K: Array, VC: CodecConfig, V: Codec<VC>> Read<VC> for Record<K, VC, V> {
-    fn read_cfg(buf: &mut impl Buf, cfg: &VC) -> Result<Self, commonware_codec::Error> {
+impl<K: Array, V: Codec> Read for Record<K, V> {
+    type Cfg = V::Cfg;
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let index = UInt::read(buf)?.into();
         let key = K::read(buf)?;
         let value = V::read_cfg(buf, cfg)?;
-        Ok(Self {
-            index,
-            key,
-            value,
-            _phantom: PhantomData,
-        })
+        Ok(Self { index, key, value })
     }
 }
 
-impl<K: Array, VC: CodecConfig, V: Codec<VC>> EncodeSize for Record<K, VC, V> {
+impl<K: Array, V: Codec> EncodeSize for Record<K, V> {
     fn encode_size(&self) -> usize {
         UInt(self.index).encode_size() + K::SIZE + self.value.encode_size()
     }
 }
 
 /// Implementation of `Archive` storage.
-pub struct Archive<
-    T: Translator,
-    E: Storage + Metrics,
-    K: Array,
-    VC: CodecConfig + Copy,
-    V: Codec<VC>,
-> {
+pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
     // The section mask is used to determine which section of the journal to write to.
     section_mask: u64,
-    journal: Journal<E, VC, Record<K, VC, V>>,
+    journal: Journal<E, Record<K, V>>,
 
     // Oldest allowed section to read from. This is updated when `prune` is called.
     oldest_allowed: Option<u64>,
@@ -110,16 +92,14 @@ pub struct Archive<
     syncs: Counter,
 }
 
-impl<T: Translator, E: Storage + Metrics, K: Array, VC: CodecConfig + Copy, V: Codec<VC>>
-    Archive<T, E, K, VC, V>
-{
+impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V> {
     /// Initialize a new `Archive` instance.
     ///
     /// The in-memory index for `Archive` is populated during this call
     /// by replaying the journal.
-    pub async fn init(context: E, cfg: Config<T, VC>) -> Result<Self, Error> {
+    pub async fn init(context: E, cfg: Config<T, V::Cfg>) -> Result<Self, Error> {
         // Initialize journal
-        let mut journal = Journal::<E, VC, Record<K, VC, V>>::init(
+        let mut journal = Journal::<E, Record<K, V>>::init(
             context.with_label("journal"),
             JConfig {
                 partition: cfg.partition,

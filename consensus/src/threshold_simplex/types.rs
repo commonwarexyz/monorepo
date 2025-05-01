@@ -162,6 +162,8 @@ impl<D: Digest> EncodeSize for Voter<D> {
 }
 
 impl<D: Digest> Read for Voter<D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let tag = <u8>::read(reader)?;
         match tag {
@@ -242,6 +244,8 @@ impl<D: Digest> Write for Proposal<D> {
 }
 
 impl<D: Digest> Read for Proposal<D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let view = UInt::read(reader)?.into();
         let parent = UInt::read(reader)?.into();
@@ -350,6 +354,8 @@ impl<D: Digest> Write for Notarize<D> {
 }
 
 impl<D: Digest> Read for Notarize<D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
         let proposal_signature = PartialSignature::read(reader)?;
@@ -441,6 +447,8 @@ impl<D: Digest> Write for Notarization<D> {
 }
 
 impl<D: Digest> Read for Notarization<D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
         let proposal_signature = Signature::read(reader)?;
@@ -549,6 +557,8 @@ impl Write for Nullify {
 }
 
 impl Read for Nullify {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let view = UInt::read(reader)?.into();
         let view_signature = PartialSignature::read(reader)?;
@@ -635,6 +645,8 @@ impl Write for Nullification {
 }
 
 impl Read for Nullification {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let view = UInt::read(reader)?.into();
         let view_signature = Signature::read(reader)?;
@@ -726,6 +738,8 @@ impl<D: Digest> Write for Finalize<D> {
 }
 
 impl<D: Digest> Read for Finalize<D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
         let proposal_signature = PartialSignature::read(reader)?;
@@ -807,6 +821,8 @@ impl<D: Digest> Write for Finalization<D> {
 }
 
 impl<D: Digest> Read for Finalization<D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
         let proposal_signature = Signature::read(reader)?;
@@ -867,7 +883,9 @@ impl<D: Digest> EncodeSize for Backfiller<D> {
     }
 }
 
-impl<D: Digest> Read<usize> for Backfiller<D> {
+impl<D: Digest> Read for Backfiller<D> {
+    type Cfg = usize;
+
     fn read_cfg(reader: &mut impl Buf, cfg: &usize) -> Result<Self, Error> {
         let tag = <u8>::read(reader)?;
         match tag {
@@ -926,7 +944,9 @@ impl EncodeSize for Request {
     }
 }
 
-impl Read<usize> for Request {
+impl Read for Request {
+    type Cfg = usize;
+
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let id = UInt::read(reader)?.into();
         let notarizations = Vec::<View>::read_range(reader, ..=*max_len)?;
@@ -983,7 +1003,9 @@ impl<D: Digest> EncodeSize for Response<D> {
     }
 }
 
-impl<D: Digest> Read<usize> for Response<D> {
+impl<D: Digest> Read for Response<D> {
+    type Cfg = usize;
+
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let id = UInt::read(reader)?.into();
         let notarizations = Vec::<Notarization<D>>::read_range(reader, ..=*max_len)?;
@@ -1081,6 +1103,8 @@ impl<D: Digest> EncodeSize for Activity<D> {
 }
 
 impl<D: Digest> Read for Activity<D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let tag = <u8>::read(reader)?;
         match tag {
@@ -1181,6 +1205,8 @@ impl Write for Seed {
 }
 
 impl Read for Seed {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let view = UInt::read(reader)?.into();
         let signature = Signature::read(reader)?;
@@ -1287,6 +1313,8 @@ impl<D: Digest> Write for ConflictingNotarize<D> {
 }
 
 impl<D: Digest> Read for ConflictingNotarize<D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let view = UInt::read(reader)?.into();
         let parent_1 = UInt::read(reader)?.into();
@@ -1418,6 +1446,8 @@ impl<D: Digest> Write for ConflictingFinalize<D> {
 }
 
 impl<D: Digest> Read for ConflictingFinalize<D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let view = UInt::read(reader)?.into();
         let parent_1 = UInt::read(reader)?.into();
@@ -1520,6 +1550,8 @@ impl<D: Digest> Write for NullifyFinalize<D> {
 }
 
 impl<D: Digest> Read for NullifyFinalize<D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
         let view_signature = PartialSignature::read(reader)?;
