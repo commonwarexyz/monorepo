@@ -326,9 +326,9 @@ impl<
     /// Returns `true` if the message was inserted, `false` if it was already present.
     /// Updates the deque, item count, and message cache, potentially evicting an old message.
     fn insert_message(&mut self, peer: P, msg: M) -> bool {
-        // Get the digest and identity of the message
-        let digest = msg.digest();
+        // Get the identity and digest of the message
         let identity = msg.identity();
+        let digest = msg.digest();
 
         // Send the message to the waiters, if any, ignoring errors (as the receiver may have dropped)
         if let Some(mut waiters) = self.waiters.remove(&identity) {
@@ -350,7 +350,7 @@ impl<
                 self.respond_subscribe(responder, msg.clone());
             }
 
-            // Re-insert if any waiters remain.
+            // Re-insert if any waiters remain for this identity.
             if !waiters.is_empty() {
                 self.waiters.insert(identity, waiters);
             }
@@ -387,7 +387,7 @@ impl<
 
         // If the cache is full...
         if deque.len() > self.deque_size {
-            // Remove the oldest digest from the peer cache
+            // Remove the oldest item from the peer cache
             // Decrement the item count
             // Remove the message if-and-only-if the new item count is 0
             let stale = deque.pop_back().unwrap();
