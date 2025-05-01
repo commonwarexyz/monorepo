@@ -58,7 +58,7 @@ pub struct Cursor<'a, T: Translator, V> {
 
     entry: Option<OccupiedEntry<'a, T::Key, Record<V>>>,
     next: Option<Box<Record<V>>>,
-    past: Vec<Box<Record<V>>>,
+    past: Option<Box<Record<V>>>,
 
     last_deleted: bool,
     entry_deleted: bool,
@@ -80,13 +80,24 @@ impl<'a, T: Translator, V> Cursor<'a, T, V> {
 
             entry: Some(entry),
             next,
-            past: Vec::new(),
+            past: None,
 
             last_deleted: false,
             entry_deleted: false,
 
             collisions,
             pruned,
+        }
+    }
+
+    /// Pushes a `Record` to the past list, maintaining the linked list structure.
+    fn past_push(&mut self, mut new: Box<Record<V>>) {
+        if self.past.is_none() {
+            self.past = Some(new);
+        } else {
+            let past = self.past.take().unwrap();
+            new.next = Some(past);
+            self.past = Some(new);
         }
     }
 
@@ -152,7 +163,7 @@ impl<'a, T: Translator, V> Cursor<'a, T, V> {
                 let next_next = next.next.take();
 
                 // Add next to the past list.
-                self.past.push(next);
+                self.past_push(next);
 
                 // Set next to be next's next.
                 self.next = next_next;
@@ -197,7 +208,7 @@ impl<'a, T: Translator, V> Cursor<'a, T, V> {
                 let next_next = next.next.take();
 
                 // Add next to the past list.
-                self.past.push(next);
+                self.past_push(next);
 
                 // Create a new record that points to next's next.
                 let new = Box::new(Record {
@@ -215,10 +226,11 @@ impl<'a, T: Translator, V> Cursor<'a, T, V> {
                 }
 
                 // If not, we should add to past.
-                self.past.push(Box::new(Record {
+                let new = Box::new(Record {
                     value: v,
                     next: None,
-                }));
+                });
+                self.past_push(new);
             }
         }
     }
@@ -274,25 +286,18 @@ impl<T: Translator, V> Drop for Cursor<'_, T, V> {
 
         // If there is a next, we should add it to past.
         if let Some(next) = self.next.take() {
-            self.past.push(next);
+            if self.past.is_none() {
+                self.past = Some(next);
+            } else {
+                let mut past = self.past.take().unwrap();
+                past.next = Some(next);
+                self.past = Some(past);
+            }
         }
 
-        // If there are old records, we need to reattach them.
-        if self.past.is_empty() {
-            return;
-        }
-
-        // Attach last record to the entry.
-        let mut iter = self.past.drain(..);
-        let first = iter.next().unwrap();
-        entry.get_mut().next = Some(first);
-
-        // Reattach all records.
-        let mut tip = entry.get_mut().next.as_mut().unwrap();
-        for record in iter {
-            tip.next = Some(record);
-            tip = tip.next.as_mut().unwrap();
-        }
+        // Take past and attach it to the entry.
+        let past = self.past.take();
+        entry.get_mut().next = past;
     }
 }
 
