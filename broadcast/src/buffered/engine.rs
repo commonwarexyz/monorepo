@@ -224,7 +224,13 @@ impl<
     }
 
     /// Searches through all maintained messages for a match.
-    fn find_message(&mut self, sender: &Option<P>, identity: Di, digest: Option<Dd>) -> Vec<&M> {
+    fn find_messages(
+        &mut self,
+        sender: &Option<P>,
+        identity: Di,
+        digest: Option<Dd>,
+        all: bool,
+    ) -> Vec<M> {
         if let Some(ref sender) = sender {
             if let Some(deque) = self.deques.get(sender) {
                 for item in deque {
@@ -238,17 +244,22 @@ impl<
 
                     // If the message is already in the cache, send it to the responder
                     if let Some(msg) = self.items.get(&item.0).and_then(|m| m.get(&item.1)) {
-                        return vec![msg];
+                        return vec![msg.clone()];
                     }
                 }
             }
         } else if let Some(msg) = self.items.get(&identity) {
             if let Some(digest) = digest {
                 if let Some(msg) = msg.get(&digest) {
-                    return vec![msg];
+                    return vec![msg.clone()];
                 }
             }
-            return msg.values().collect();
+            if all {
+                return msg.values().cloned().collect();
+            } else {
+                // There should always be at least one message if the identity exists.
+                return vec![msg.values().next().unwrap().clone()];
+            }
         }
         Vec::new()
     }
@@ -265,10 +276,9 @@ impl<
         responder: oneshot::Sender<M>,
     ) {
         // Check if the message is already in the cache
-        let items = self.find_message(&sender, identity, digest);
-        if !items.is_empty() {
-            let msg = items[0].clone();
-            self.respond_subscribe(responder, msg);
+        let mut items = self.find_messages(&sender, identity, digest, false);
+        if let Some(item) = items.pop() {
+            self.respond_subscribe(responder, item);
             return;
         }
 
@@ -287,8 +297,7 @@ impl<
         digest: Option<Dd>,
         responder: oneshot::Sender<Vec<M>>,
     ) {
-        let items = self.find_message(&sender, identity, digest);
-        let items = items.into_iter().cloned().collect::<Vec<_>>();
+        let items = self.find_messages(&sender, identity, digest, true);
         self.respond_get(responder, items);
     }
 
