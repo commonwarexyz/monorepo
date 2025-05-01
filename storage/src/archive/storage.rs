@@ -279,7 +279,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, VC: CodecConfig + Copy, V: C
         self.gets.inc();
 
         // Fetch index
-        let iter = self.keys.iter(key);
+        let iter = self.keys.get(key);
         let min_allowed = self.oldest_allowed.unwrap_or(0);
         for index in iter {
             // Continue if index is no longer allowed due to pruning.

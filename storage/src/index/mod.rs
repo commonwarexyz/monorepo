@@ -1,4 +1,6 @@
-//! A memory-efficient index for mapping keys to values.
+//! A memory-efficient index for mapping translated keys to values.
+//!
+//! # Multiple Values for a Key
 //!
 //! Keys are translated into a compressed, fixed-size representation using a `Translator`. Depending
 //! on the size of the representation, this can lead to a non-negligible number of collisions (even
@@ -12,7 +14,7 @@
 //! degrade substantially (each conflicting key may contain the desired value).
 
 mod storage;
-pub use storage::{Index, Iterator, MutableIterator};
+pub use storage::{Cursor, Index};
 pub mod translator;
 
 use std::hash::{BuildHasher, Hash};
@@ -37,7 +39,7 @@ pub trait Translator: Clone + BuildHasher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::translator::{OneCap, TwoCap};
+    use crate::index::translator::TwoCap;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Metrics};
     use rand::Rng;
@@ -53,24 +55,34 @@ mod tests {
         let key = b"duplicate".as_slice();
         index.insert(key, 1);
         index.insert(key, 2);
+        index.insert(key, 3);
         assert_eq!(index.len(), 1);
-        assert!(context.encode().contains("collisions_total 1"));
+        assert!(context.encode().contains("collisions_total 2"));
+
+        // Ensure cursor terminates
+        {
+            let mut cursor = index.get_mut(key).unwrap();
+            assert_eq!(*cursor.next().unwrap(), 1);
+            assert_eq!(*cursor.next().unwrap(), 3);
+            assert_eq!(*cursor.next().unwrap(), 2);
+            assert!(cursor.next().is_none());
+        }
 
         // Make sure we can remove keys with a predicate
         index.insert(key, 3);
         index.insert(key, 4);
-        index.remove(key, |i| *i == 3);
-        assert_eq!(index.iter(key).copied().collect::<Vec<_>>(), vec![4, 2, 1]);
-        index.remove(key, |_| true);
+        index.prune(key, |i| *i == 3);
+        assert_eq!(index.get(key).copied().collect::<Vec<_>>(), vec![1, 4, 2]);
+        index.prune(key, |_| true);
         // Try removing all of a keys values.
         assert_eq!(
-            index.iter(key).copied().collect::<Vec<_>>(),
+            index.get(key).copied().collect::<Vec<_>>(),
             Vec::<u64>::new()
         );
         assert!(index.is_empty());
 
         // Removing a key that doesn't exist should be a no-op.
-        index.remove(key, |_| true);
+        index.prune(key, |_| true);
         assert!(index.is_empty());
     }
 
@@ -94,7 +106,7 @@ mod tests {
         }
 
         for (key, loc) in expected.iter() {
-            let mut values = index.iter(key);
+            let mut values = index.get(key);
             let res = values.find(|i| *i == loc);
             assert!(res.is_some());
         }
@@ -111,40 +123,35 @@ mod tests {
         index.insert(b"abc", 3); // Longer than cap (3 bytes -> "ab")
 
         // Check that "a" maps to "a\0"
-        assert_eq!(index.iter(b"a").copied().collect::<Vec<_>>(), vec![1]);
+        assert_eq!(index.get(b"a").copied().collect::<Vec<_>>(), vec![1]);
 
         // Check that "ab" and "abc" map to "ab" due to TwoCap truncation
-        let mut values = index.iter(b"ab").copied().collect::<Vec<_>>();
-        values.sort();
+        let values = index.get(b"ab").copied().collect::<Vec<_>>();
         assert_eq!(values, vec![2, 3]);
 
-        let mut values = index.iter(b"abc").copied().collect::<Vec<_>>();
-        values.sort();
+        let values = index.get(b"abc").copied().collect::<Vec<_>>();
         assert_eq!(values, vec![2, 3]);
 
         // Insert another value for "ab"
         index.insert(b"ab", 4);
         // Expected order: head=2 (first "ab"), then 4 (new "ab"), then 3 (from "abc")
 
-        assert_eq!(
-            index.iter(b"ab").copied().collect::<Vec<_>>(),
-            vec![4, 3, 2]
-        );
+        assert_eq!(index.get(b"ab").copied().collect::<Vec<_>>(), vec![2, 4, 3]);
 
         // Remove a specific value
-        index.remove(b"ab", |v| *v == 4);
-        assert_eq!(index.iter(b"ab").copied().collect::<Vec<_>>(), vec![3, 2]);
+        index.prune(b"ab", |v| *v == 4);
+        assert_eq!(index.get(b"ab").copied().collect::<Vec<_>>(), vec![2, 3]);
 
         // Remove all values for "ab"
-        index.remove(b"ab", |_| true);
+        index.prune(b"ab", |_| true);
         assert_eq!(
-            index.iter(b"ab").copied().collect::<Vec<_>>(),
+            index.get(b"ab").copied().collect::<Vec<_>>(),
             Vec::<u64>::new()
         );
         assert_eq!(index.len(), 1); // Only "a" remains
 
         // Check that "a" is still present
-        assert_eq!(index.iter(b"a").copied().collect::<Vec<_>>(), vec![1]);
+        assert_eq!(index.get(b"a").copied().collect::<Vec<_>>(), vec![1]);
     }
 
     #[test_traced]
@@ -158,8 +165,8 @@ mod tests {
 
         // Values should be in stack order (last in first).
         assert_eq!(
-            index.iter(b"key").copied().collect::<Vec<_>>(),
-            vec![3, 2, 1]
+            index.get(b"key").copied().collect::<Vec<_>>(),
+            vec![1, 3, 2]
         );
     }
 
@@ -173,12 +180,12 @@ mod tests {
         index.insert(b"key", 3);
 
         // Remove value 2
-        index.remove(b"key", |v| *v == 2);
-        assert_eq!(index.iter(b"key").copied().collect::<Vec<_>>(), vec![3, 1]);
+        index.prune(b"key", |v| *v == 2);
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![1, 3]);
 
         // Remove head value 1
-        index.remove(b"key", |v| *v == 1);
-        assert_eq!(index.iter(b"key").copied().collect::<Vec<_>>(), vec![3]);
+        index.prune(b"key", |v| *v == 1);
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![3]);
     }
 
     #[test_traced]
@@ -191,21 +198,21 @@ mod tests {
         index.insert(b"\0\0", 2); // Maps to [0, 0]
 
         // All keys map to [0, 0], so all values should be returned
-        let mut values = index.iter(b"").copied().collect::<Vec<_>>();
+        let mut values = index.get(b"").copied().collect::<Vec<_>>();
         values.sort();
         assert_eq!(values, vec![0, 1, 2]);
 
-        let mut values = index.iter(b"\0").copied().collect::<Vec<_>>();
+        let mut values = index.get(b"\0").copied().collect::<Vec<_>>();
         values.sort();
         assert_eq!(values, vec![0, 1, 2]);
 
-        let mut values = index.iter(b"\0\0").copied().collect::<Vec<_>>();
+        let mut values = index.get(b"\0\0").copied().collect::<Vec<_>>();
         values.sort();
         assert_eq!(values, vec![0, 1, 2]);
 
         // Remove a specific value
-        index.remove(b"", |v| *v == 1);
-        let mut values = index.iter(b"").copied().collect::<Vec<_>>();
+        index.prune(b"", |v| *v == 1);
+        let mut values = index.get(b"").copied().collect::<Vec<_>>();
         values.sort();
         assert_eq!(values, vec![0, 2]);
     }
@@ -219,24 +226,21 @@ mod tests {
         index.insert(b"key", 2);
         index.insert(b"key", 3);
 
-        for value in index.mut_iter(b"key") {
-            // Mutate the value
-            *value += 10;
+        {
+            let mut cursor = index.get_mut(b"key").unwrap();
+            loop {
+                let Some(old) = cursor.next() else {
+                    break;
+                };
+                // Mutate the value
+                let new = *old + 10;
+                cursor.update(new);
+            }
         }
 
         assert_eq!(
-            index.iter(b"key").copied().collect::<Vec<_>>(),
-            vec![13, 12, 11]
-        );
-
-        // Mutations should work with a remove iterator too
-        for value in index.mut_iter(b"key") {
-            // Mutate the value
-            *value *= 10;
-        }
-        assert_eq!(
-            index.iter(b"key").copied().collect::<Vec<_>>(),
-            vec![130, 120, 110]
+            index.get(b"key").copied().collect::<Vec<_>>(),
+            vec![11, 13, 12]
         );
     }
 
@@ -251,91 +255,72 @@ mod tests {
         index.insert(b"key", 4);
 
         assert_eq!(
-            index.iter(b"key").copied().collect::<Vec<_>>(),
-            vec![4, 3, 2, 1]
+            index.get(b"key").copied().collect::<Vec<_>>(),
+            vec![1, 4, 3, 2]
         );
         assert!(context.encode().contains("pruned_total 0"));
 
         // Test removing first value from the list.
         {
-            let mut iter = index.mut_iter(b"key");
-            iter.remove(); // should be a no-op
-            assert_eq!(*iter.next().unwrap(), 4);
-            iter.remove();
-            iter.remove(); // should be a no-op
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 1);
+            cursor.delete();
+            assert!(!cursor.empty());
             assert!(context.encode().contains("pruned_total 1"));
         }
 
         assert_eq!(
-            index.iter(b"key").copied().collect::<Vec<_>>(),
-            vec![3, 2, 1]
+            index.get(b"key").copied().collect::<Vec<_>>(),
+            vec![4, 3, 2]
         );
 
-        index.insert(b"key", 4);
+        index.insert(b"key", 1);
         assert_eq!(
-            index.iter(b"key").copied().collect::<Vec<_>>(),
-            vec![4, 3, 2, 1]
+            index.get(b"key").copied().collect::<Vec<_>>(),
+            vec![4, 1, 3, 2]
         );
 
         // Test removing from the middle.
         {
-            let mut iter = index.mut_iter(b"key");
-            assert_eq!(*iter.next().unwrap(), 4);
-            assert_eq!(*iter.next().unwrap(), 3);
-            assert_eq!(*iter.next().unwrap(), 2);
-            iter.remove();
-            iter.remove(); // should be a no-op
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 4);
+            assert_eq!(*cursor.next().unwrap(), 1);
+            assert_eq!(*cursor.next().unwrap(), 3);
+            cursor.delete();
+            assert!(!cursor.empty());
             assert!(context.encode().contains("pruned_total 2"));
         }
 
         assert_eq!(
-            index.iter(b"key").copied().collect::<Vec<_>>(),
-            vec![3, 4, 1]
+            index.get(b"key").copied().collect::<Vec<_>>(),
+            vec![4, 1, 2]
         );
-        index.insert(b"key", 2);
+        index.insert(b"key", 3);
         assert_eq!(
-            index.iter(b"key").copied().collect::<Vec<_>>(),
-            vec![2, 3, 4, 1]
+            index.get(b"key").copied().collect::<Vec<_>>(),
+            vec![4, 3, 1, 2]
         );
 
         // Test removing last value.
         {
-            let mut iter = index.mut_iter(b"key");
-            assert_eq!(*iter.next().unwrap(), 2);
-            assert_eq!(*iter.next().unwrap(), 3);
-            assert_eq!(*iter.next().unwrap(), 4);
-            assert_eq!(*iter.next().unwrap(), 1);
-            iter.remove();
-            iter.remove(); // should be a no-op
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 4);
+            assert_eq!(*cursor.next().unwrap(), 3);
+            assert_eq!(*cursor.next().unwrap(), 1);
+            assert_eq!(*cursor.next().unwrap(), 2);
+            cursor.delete();
+            assert!(!cursor.empty());
             assert!(context.encode().contains("pruned_total 3"));
         }
 
         assert_eq!(
-            index.iter(b"key").copied().collect::<Vec<_>>(),
-            vec![3, 4, 2]
+            index.get(b"key").copied().collect::<Vec<_>>(),
+            vec![4, 3, 1]
         );
 
         // Test removing all values.
-        {
-            let mut iter = index.mut_iter(b"key");
-            while let Some(_) = iter.next() {
-                iter.remove();
-            }
-            iter.remove(); // should be a no-op
-        }
+        index.remove(b"key");
         assert_eq!(index.len(), 0);
-        assert!(context.encode().contains("pruned_total 6"));
-
-        // Removing from an empty iterator should be a no-op and shouldn't panic
-        {
-            let mut iter = index.mut_iter(b"key");
-            iter.remove();
-        }
-
-        assert_eq!(
-            index.iter(b"key").copied().collect::<Vec<_>>(),
-            Vec::<u64>::new()
-        );
         assert!(context.encode().contains("pruned_total 6"));
     }
 
@@ -345,28 +330,28 @@ mod tests {
         let mut index = Index::init(context.clone(), TwoCap);
 
         // Add values to the index
+        index.insert(b"key", 1);
         {
-            {
-                let iter = index.mut_iter(b"key");
-                iter.insert(1);
-            }
-            index.insert(b"key", 3);
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 1);
+            cursor.insert(3);
             assert!(context.encode().contains("collisions_total 1"));
         }
-        assert_eq!(index.iter(b"key").copied().collect::<Vec<_>>(), vec![3, 1]);
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![1, 3]);
         assert_eq!(index.len(), 1);
 
         // Try inserting into an iterator while iterating.
         {
-            let mut iter = index.mut_iter(b"key");
-            assert_eq!(*iter.next().unwrap(), 3);
-            iter.insert(42);
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 1);
+            cursor.insert(42);
             assert!(context.encode().contains("collisions_total 2"));
         }
 
-        // Verify first value is new one
+        // Verify second value is new one
         {
-            let mut iter = index.iter(b"key");
+            let mut iter = index.get(b"key");
+            assert_eq!(*iter.next().unwrap(), 1);
             assert_eq!(*iter.next().unwrap(), 42);
         }
 
@@ -375,11 +360,11 @@ mod tests {
         assert!(context.encode().contains("collisions_total 3"));
 
         // Iterate to end
-        let mut iter = index.iter(b"key");
+        let mut iter = index.get(b"key");
+        assert_eq!(*iter.next().unwrap(), 1);
         assert_eq!(*iter.next().unwrap(), 100);
         assert_eq!(*iter.next().unwrap(), 42);
         assert_eq!(*iter.next().unwrap(), 3);
-        assert_eq!(*iter.next().unwrap(), 1);
         assert!(iter.next().is_none());
     }
 
@@ -388,61 +373,96 @@ mod tests {
         let context = deterministic::Context::default();
         let mut index = Index::init(context.clone(), TwoCap);
 
-        // Build list: [3, 2, 1, 0]
+        // Build list: [0, 3, 2, 1]
         for i in 0..4 {
             index.insert(b"key", i);
         }
 
         // Remove middle: [3, 0]
         {
-            let mut iter = index.mut_iter(b"key");
-            assert_eq!(*iter.next().unwrap(), 3); // head (kept)
-            assert_eq!(*iter.next().unwrap(), 2); // middle (removed)
-            iter.remove();
-            assert_eq!(*iter.next().unwrap(), 1); // middle (removed)
-            iter.remove();
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 0); // head
+            assert_eq!(*cursor.next().unwrap(), 3); // middle
+            cursor.delete();
         }
-        assert_eq!(index.iter(b"key").copied().collect::<Vec<_>>(), vec![3, 0]);
+        assert_eq!(
+            index.get(b"key").copied().collect::<Vec<_>>(),
+            vec![0, 2, 1]
+        );
     }
 
     #[test_traced]
-    fn test_index_many_conflicts() {
+    fn test_index_remove_to_nothing() {
         let context = deterministic::Context::default();
-        let mut index = Index::init(context.clone(), OneCap);
+        let mut index = Index::init(context.clone(), TwoCap);
 
-        // Add 1000 entries to the same key (pruning 100 behind)
-        let key = b"key";
-        for i in 0..1000 {
-            index.insert(key, i);
-
-            if i < 100 {
-                continue;
-            }
-            let lower_bound = i - 100;
-            index.remove(key, |v| *v < lower_bound);
-            assert_eq!(
-                (lower_bound..=i).rev().collect::<Vec<_>>(),
-                index.iter(key).copied().collect::<Vec<_>>()
-            );
+        // Build list: [0, 3, 2, 1]
+        for i in 0..4 {
+            index.insert(b"key", i);
         }
 
-        // Remove everything
-        index.remove(key, |v| *v < 1000);
-        assert!(index.iter(key).collect::<Vec<_>>().is_empty());
-
-        // Add again
-        for i in 1000..2000 {
-            index.insert(key, i);
-            if i < 1100 {
-                continue;
-            }
-            let lower_bound = i - 100;
-            index.remove(key, |v| *v < lower_bound);
-            assert_eq!(
-                (lower_bound..=i).rev().collect::<Vec<_>>(),
-                index.iter(key).copied().collect::<Vec<_>>()
-            );
+        // Remove middle: []
+        {
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 0); // head
+            cursor.delete();
+            assert_eq!(*cursor.next().unwrap(), 3); // middle
+            cursor.delete();
+            assert_eq!(*cursor.next().unwrap(), 2); // tail
+            cursor.delete();
+            assert_eq!(*cursor.next().unwrap(), 1); // tail
+            cursor.delete();
+            assert_eq!(cursor.next(), None);
+            assert!(cursor.empty());
         }
+    }
+
+    #[test_traced]
+    fn test_index_remove_to_nothing_then_add() {
+        let context = deterministic::Context::default();
+        let mut index = Index::init(context.clone(), TwoCap);
+
+        // Build list: [0, 3, 2, 1]
+        for i in 0..4 {
+            index.insert(b"key", i);
+        }
+
+        // Remove middle: [4, 5]
+        {
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 0); // head
+            cursor.delete();
+            assert_eq!(*cursor.next().unwrap(), 3); // middle
+            cursor.delete();
+            assert_eq!(*cursor.next().unwrap(), 2); // tail
+            cursor.delete();
+            assert_eq!(*cursor.next().unwrap(), 1); // tail
+            cursor.delete();
+            assert_eq!(cursor.next(), None);
+            cursor.insert(4);
+            cursor.insert(5);
+            assert!(!cursor.empty());
+        }
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![4, 5]);
+    }
+
+    #[test_traced]
+    fn test_index_insert_and_remove_cursor() {
+        let context = deterministic::Context::default();
+        let mut index = Index::init(context.clone(), TwoCap);
+
+        // Build list: [0]
+        index.insert(b"key", 0);
+
+        // Remove item: []
+        {
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 0); // head
+            cursor.delete();
+            assert!(cursor.empty());
+        }
+        index.remove(b"key");
+        assert!(index.get(b"key").copied().collect::<Vec<i32>>().is_empty());
     }
 
     #[test_traced]
@@ -454,7 +474,7 @@ mod tests {
         // (no collisions and nothing to prune).
         index.insert_and_prune(b"key", 1u64, |_| false);
 
-        assert_eq!(index.iter(b"key").copied().collect::<Vec<_>>(), vec![1]);
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![1]);
         assert!(ctx.encode().contains("collisions_total 0"));
         assert!(ctx.encode().contains("pruned_total 0"));
     }
@@ -464,12 +484,11 @@ mod tests {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx.clone(), TwoCap);
 
-        // If a key currently has *one* value and the predicate matches,
-        // the value is *replaced* in-place (1 prune, 1 collision).
+        // Add a value to the index
         index.insert(b"key", 1u64); // 0 → collisions
         index.insert_and_prune(b"key", 2u64, |_| true); // +1 collision, +1 prune
 
-        assert_eq!(index.iter(b"key").copied().collect::<Vec<_>>(), vec![2]);
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![2]);
         assert!(ctx.encode().contains("collisions_total 1"));
         assert!(ctx.encode().contains("pruned_total 1"));
     }
@@ -483,35 +502,73 @@ mod tests {
         index.insert(b"key", 10u64); // 0 → collisions
         index.insert(b"key", 20u64); // +1 collision
 
-        // When multiple values exist, `insert_and_prune` should:
-        // 1. remove all matching values,
-        // 2. push the new one,
-        // 3. *demote* back to `One` when only a single value remains.
+        // Update an item if it matches the predicate
         index.insert_and_prune(b"key", 30u64, |_| true); // +1 collision, +2 pruned
 
-        assert_eq!(index.iter(b"key").copied().collect::<Vec<_>>(), vec![30]);
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![30]);
         assert!(ctx.encode().contains("collisions_total 2"));
         assert!(ctx.encode().contains("pruned_total 2"));
     }
 
     #[test_traced]
-    fn test_dangling_item() {
+    fn test_cursor_delete_then_next_returns_next() {
         let ctx = deterministic::Context::default();
-        let mut ix = Index::<TwoCap, i32>::init(ctx, TwoCap);
-        let kb = b"k";
+        let mut index = Index::init(ctx, TwoCap);
 
-        // Create a Vec with two elements
-        ix.insert(kb, 1);
-        ix.insert(kb, 2);
+        // Build list: [1 → 2]
+        index.insert(b"key", 1);
+        index.insert(b"key", 2);
 
-        // Create a dangling pointer to the second element
-        let mut it = ix.mut_iter(kb);
-        let dangling = it.next().unwrap(); // &mut 2
+        let mut cursor = index.get_mut(b"key").unwrap();
+        assert_eq!(*cursor.next().unwrap(), 1); // Phase::Current
 
-        // Remove the item we have a reference to
-        it.remove();
+        // After deleting the current element, `next` should yield the element that was
+        // copied in from the old `next` node (the iterator does not advance).
+        cursor.delete(); // remove 1, copy 2 into place
+        assert_eq!(*cursor.next().unwrap(), 2); // should yield 2
+        assert!(cursor.next().is_none()); // now exhausted
+    }
 
-        // Attempt to mutate the reference
-        *dangling = 99;
+    #[test_traced]
+    fn test_cursor_insert_after_done_appends() {
+        let ctx = deterministic::Context::default();
+        let mut index = Index::init(ctx, TwoCap);
+
+        index.insert(b"key", 10);
+
+        {
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 10);
+            assert!(cursor.next().is_none()); // Phase::Done
+
+            // Inserting after we've already iterated to the end should append a new node.
+            cursor.insert(20); // append while Done
+        }
+
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![10, 20]);
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next() before interacting")]
+    fn test_cursor_update_before_next_panics() {
+        let ctx = deterministic::Context::default();
+        let mut index = Index::init(ctx, TwoCap);
+        index.insert(b"key", 123);
+
+        let mut cursor = index.get_mut(b"key").unwrap();
+        // Calling `update` before `next` is a logic error and should panic.
+        cursor.update(321); // triggers unreachable! branch
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next() before interacting")]
+    fn test_cursor_delete_before_next_panics() {
+        let ctx = deterministic::Context::default();
+        let mut index = Index::init(ctx, TwoCap);
+        index.insert(b"key", 123);
+
+        let mut cursor = index.get_mut(b"key").unwrap();
+        // Calling `delete` before `next` is a logic error and should panic.
+        cursor.delete(); // triggers unreachable! branch
     }
 }
