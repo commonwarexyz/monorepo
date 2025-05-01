@@ -41,7 +41,7 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
-    use std::{collections::BTreeMap, ops::RangeToInclusive, time::Duration};
+    use std::{collections::BTreeMap, ops::RangeFull, time::Duration};
 
     // Number of messages to cache per sender
     const CACHE_SIZE: usize = 10;
@@ -107,8 +107,7 @@ mod tests {
     fn spawn_peer_engines(
         context: deterministic::Context,
         registrations: &mut Registrations,
-    ) -> BTreeMap<PublicKey, Mailbox<RangeToInclusive<usize>, PublicKey, Sha256Digest, TestMessage>>
-    {
+    ) -> BTreeMap<PublicKey, Mailbox<RangeFull, PublicKey, Sha256Digest, TestMessage>> {
         let mut mailboxes = BTreeMap::new();
         while let Some((peer, network)) = registrations.pop_first() {
             let context = context.with_label(&peer.to_string());
@@ -117,7 +116,7 @@ mod tests {
                 mailbox_size: 1024,
                 deque_size: CACHE_SIZE,
                 priority: false,
-                codec_config: ..=1024usize,
+                codec_config: ..,
             };
             let (engine, engine_mailbox) = Engine::new(context.clone(), config);
             mailboxes.insert(peer.clone(), engine_mailbox);

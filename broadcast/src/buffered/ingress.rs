@@ -93,9 +93,10 @@ impl<Cfg: Config, P: Array, D: Digest, M: Digestible<D>> Mailbox<Cfg, P, D, M> {
     }
 }
 
-impl<Cfg: Config, P: Array, D: Digest, M: Codec<Cfg> + Digestible<D>> Broadcaster<Cfg>
+impl<Cfg: Config, P: Array, D: Digest, M: Digestible<D> + Codec<Cfg>> Broadcaster
     for Mailbox<Cfg, P, D, M>
 {
+    type CodecConfig = Cfg;
     type Message = M;
     type Response = Vec<P>;
 
