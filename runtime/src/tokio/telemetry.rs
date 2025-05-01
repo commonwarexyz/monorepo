@@ -20,6 +20,7 @@ use tracing_subscriber::{layer::SubscriberExt, Layer, Registry};
 pub struct Logging {
     /// The level of logging to use.
     pub level: Level,
+
     /// Whether to log in JSON format.
     ///
     /// This is useful for structured logging in server-based environments.
