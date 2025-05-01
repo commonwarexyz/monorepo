@@ -42,13 +42,14 @@ impl Identifiable<Digest> for TestMessage {
 
 impl Write for TestMessage {
     fn write(&self, buf: &mut impl BufMut) {
+        self.identity.write(buf);
         self.content.write(buf);
     }
 }
 
 impl EncodeSize for TestMessage {
     fn encode_size(&self) -> usize {
-        self.content.encode_size()
+        self.identity.encode_size() + self.content.encode_size()
     }
 }
 
