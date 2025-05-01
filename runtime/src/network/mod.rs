@@ -2,28 +2,21 @@ pub(crate) mod metered;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod tokio;
 
-// TODO danlaine: remove
-const PORT_NUMBER: u16 = 5000;
-
 // Add this to the tests module
 #[cfg(test)]
 mod network_tests {
-    use futures::join;
-
-    use crate::{
-        deterministic, tokio::Runner as TokioRunner, Clock, Network as _, Runner, Spawner,
-    };
+    use crate::{deterministic, tokio::Runner as TokioRunner, Network as _, Runner, Spawner};
     use crate::{Listener, Metrics, Sink, Stream};
-
-    use super::*;
+    use futures::join;
     use std::net::SocketAddr;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+
+    // TODO danlaine: remove
+    const PORT_NUMBER: u16 = 5000;
 
     // Basic network connectivity test
     fn test_network_bind_and_dial<R: Runner>(runner: R)
     where
-        R::Context: crate::Network + Spawner + Clock,
+        R::Context: crate::Network + Spawner,
     {
         runner.start(|context| async move {
             let listener_addr = SocketAddr::from(([127, 0, 0, 1], PORT_NUMBER));
@@ -74,52 +67,54 @@ mod network_tests {
     where
         R::Context: crate::Network + Spawner + Metrics,
     {
+        const CLIENT_SEND_DATA: &'static str = "client_send_data";
+        const SERVER_SEND_DATA: &'static str = "server_send_data";
+
         runner.start(|context| async move {
             let listener_addr = SocketAddr::from(([127, 0, 0, 1], PORT_NUMBER));
 
             // Start a server
             let mut listener = context.bind(listener_addr).await.expect("Failed to bind");
 
-            // Connection counter
-            let connection_count = Arc::new(AtomicUsize::new(0));
-
             // Server task
-            let server_conn_count = connection_count.clone();
             let server = context.clone().spawn(|context| async move {
                 // Handle multiple clients
                 for _ in 0..3 {
                     let (_, mut sink, mut stream) =
                         listener.accept().await.expect("Failed to accept");
-                    let count = server_conn_count.clone();
 
                     context.clone().spawn(|_| async move {
-                        let mut buf = [0u8; 10];
+                        let mut buf = [0u8; CLIENT_SEND_DATA.len()];
                         stream.recv(&mut buf).await.expect("Failed to receive");
-                        sink.send(&buf).await.expect("Failed to send");
-                        count.fetch_add(1, Ordering::SeqCst);
+                        assert_eq!(&buf, CLIENT_SEND_DATA.as_bytes());
+
+                        sink.send(SERVER_SEND_DATA.as_bytes())
+                            .await
+                            .expect("Failed to send");
                     });
                 }
             });
 
             // Create multiple clients
             let mut client_handles = Vec::new();
-            for i in 0..3 {
-                let client_ctx = context.clone().with_label(&format!("client_{}", i));
-                let client = client_ctx.spawn(move |context| async move {
+            for _ in 0..3 {
+                let client = context.clone().spawn(move |context| async move {
                     // Connect to the server
                     let (mut sink, mut stream) = context
                         .dial(listener_addr)
                         .await
                         .expect("Failed to dial server");
 
-                    // Send unique data for each client
-                    let data = [i as u8; 10];
-                    sink.send(&data).await.expect("Failed to send data");
+                    // Send a message to the server
+                    sink.send(CLIENT_SEND_DATA.as_bytes())
+                        .await
+                        .expect("Failed to send data");
 
-                    let mut buf = [0u8; 10];
+                    // Receive a message from the server
+                    let mut buf = [0u8; SERVER_SEND_DATA.len()];
                     stream.recv(&mut buf).await.expect("Failed to receive data");
-
-                    assert_eq!(&buf, &data);
+                    // Verify the received data
+                    assert_eq!(&buf, SERVER_SEND_DATA.as_bytes());
                 });
                 client_handles.push(client);
             }
@@ -129,9 +124,6 @@ mod network_tests {
             for (i, handle) in client_handles.into_iter().enumerate() {
                 handle.await.expect(&format!("Client {} failed", i));
             }
-
-            // Verify all connections were processed
-            assert_eq!(connection_count.load(Ordering::SeqCst), 3);
         });
     }
 
