@@ -431,7 +431,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                         cursor.delete();
 
                         // If the cursor is empty, then we need to remove the key from the snapshot.
-                        if cursor.empty() {
+                        let empty = cursor.empty();
+                        drop(cursor);
+                        if empty {
                             self.snapshot.remove(&key);
                         }
                         self.apply_op(hasher, Operation::delete(key)).await?;

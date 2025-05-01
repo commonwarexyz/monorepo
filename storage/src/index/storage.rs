@@ -283,7 +283,7 @@ impl<'a, V> Cursor<'a, V> {
     /// Returns whether the list is empty after iteration and modifications.
     ///
     /// If this returns true, the key should be removed from `Index`.
-    pub fn empty(self) -> bool {
+    pub fn empty(&self) -> bool {
         self.current_deleted
     }
 }
@@ -455,7 +455,9 @@ impl<T: Translator, V> Index<T, V> {
                 }
 
                 // If there is nothing left, remove the entry.
-                if cursor.empty() {
+                let empty = cursor.empty();
+                drop(cursor);
+                if empty {
                     entry.remove();
                 }
             }
