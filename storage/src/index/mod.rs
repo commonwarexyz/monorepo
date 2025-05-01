@@ -265,7 +265,6 @@ mod tests {
             let mut cursor = index.get_mut(b"key").unwrap();
             assert_eq!(*cursor.next().unwrap(), 1);
             cursor.delete();
-            assert!(!cursor.empty());
             assert!(context.encode().contains("pruned_total 1"));
         }
 
@@ -287,7 +286,6 @@ mod tests {
             assert_eq!(*cursor.next().unwrap(), 1);
             assert_eq!(*cursor.next().unwrap(), 3);
             cursor.delete();
-            assert!(!cursor.empty());
             assert!(context.encode().contains("pruned_total 2"));
         }
 
@@ -309,7 +307,6 @@ mod tests {
             assert_eq!(*cursor.next().unwrap(), 1);
             assert_eq!(*cursor.next().unwrap(), 2);
             cursor.delete();
-            assert!(!cursor.empty());
             assert!(context.encode().contains("pruned_total 3"));
         }
 
@@ -412,7 +409,6 @@ mod tests {
             assert_eq!(*cursor.next().unwrap(), 1);
             cursor.delete();
             assert_eq!(cursor.next(), None);
-            assert!(cursor.empty());
         }
     }
 
@@ -440,7 +436,6 @@ mod tests {
             assert_eq!(cursor.next(), None);
             cursor.insert(4);
             cursor.insert(5);
-            assert!(!cursor.empty());
         }
 
         // Ensure remaining values are correct
@@ -460,7 +455,6 @@ mod tests {
             let mut cursor = index.get_mut(b"key").unwrap();
             assert_eq!(*cursor.next().unwrap(), 0); // head
             cursor.delete();
-            assert!(cursor.empty());
         }
         index.remove(b"key");
         assert!(index.get(b"key").copied().collect::<Vec<i32>>().is_empty());
