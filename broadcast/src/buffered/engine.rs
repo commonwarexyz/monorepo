@@ -61,25 +61,25 @@ pub struct Engine<
     mailbox_receiver: mpsc::Receiver<Message<P, Di, Dd, M>>,
 
     /// Pending requests from the application.
-    waiters: HashMap<D, Vec<oneshot::Sender<M>>>,
+    waiters: HashMap<Di, Vec<(Option<Dd>, oneshot::Sender<M>)>>,
 
     ////////////////////////////////////////
     // Cache
     ////////////////////////////////////////
     /// All cached messages by digest.
-    items: HashMap<D, M>,
+    items: HashMap<Dd, HashMap<Di, M>>,
 
     /// A LRU cache of the latest received digests from each peer.
     ///
     /// This is used to limit the number of digests stored per peer.
     /// At most `deque_size` digests are stored per peer. This value is expected to be small, so
     /// membership checks are done in linear time.
-    deques: HashMap<P, VecDeque<D>>,
+    deques: HashMap<P, VecDeque<(Dd, Di)>>,
 
     /// The number of times each digest exists in one of the deques.
     ///
     /// This is because multiple peers can send the same message.
-    counts: HashMap<D, usize>,
+    counts: HashMap<Di, usize>,
 
     ////////////////////////////////////////
     // Metrics
@@ -91,16 +91,17 @@ pub struct Engine<
 impl<
         E: Clock + Spawner + Metrics,
         P: Array,
-        D: Digest,
+        Di: Digest,
+        Dd: Digest,
         Cfg: CodecCfg,
-        M: Identifiable<D> + Digestible<D> + Codec<Cfg>,
-    > Engine<E, P, D, Cfg, M>
+        M: Identifiable<Di> + Digestible<Dd> + Codec<Cfg>,
+    > Engine<E, P, Di, Dd, Cfg, M>
 {
     /// Creates a new engine with the given context and configuration.
     /// Returns the engine and a mailbox for sending messages to the engine.
-    pub fn new(context: E, cfg: Config<Cfg, P>) -> (Self, Mailbox<P, D, M>) {
+    pub fn new(context: E, cfg: Config<Cfg, P>) -> (Self, Mailbox<P, Di, Dd, M>) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
-        let mailbox = Mailbox::<P, D, M>::new(mailbox_sender);
+        let mailbox = Mailbox::<P, Di, Dd, M>::new(mailbox_sender);
         let metrics = metrics::Metrics::init(context.clone());
 
         let result = Self {
@@ -155,13 +156,13 @@ impl<
                             trace!("mailbox: broadcast");
                             self.handle_broadcast(&mut sender, recipients, message, responder).await;
                         }
-                        Message::Subscribe{ sender, digest, responder } => {
+                        Message::Subscribe{ sender, identity, digest, responder } => {
                             trace!("mailbox: subscribe");
-                            self.handle_subscribe(sender, digest, responder).await;
+                            self.handle_subscribe(sender, identity, digest, responder).await;
                         }
-                        Message::Get{ sender, digest, responder } => {
+                        Message::Get{ sender, identity, digest, responder } => {
                             trace!("mailbox: get");
-                            self.handle_get(sender, digest, responder).await;
+                            self.handle_get(sender, identity, digest, responder).await;
                         }
                     }
                 },
@@ -225,7 +226,13 @@ impl<
     ///
     /// If the message is already in the cache, the responder is immediately sent the message.
     /// Otherwise, the responder is stored in the waiters list.
-    async fn handle_subscribe(&mut self, digest: D, responder: oneshot::Sender<M>) {
+    async fn handle_subscribe(
+        &mut self,
+        sender: Option<P>,
+        identity: Di,
+        digest: Option<Dd>,
+        responder: oneshot::Sender<M>,
+    ) {
         // Check if the message is already in the cache
         if let Some(msg) = self.items.get(&digest) {
             self.respond_subscribe(responder, msg.clone());
@@ -237,7 +244,13 @@ impl<
     }
 
     /// Handles a `get` request from the application.
-    async fn handle_get(&mut self, digest: D, responder: oneshot::Sender<Option<M>>) {
+    async fn handle_get(
+        &mut self,
+        sender: Option<P>,
+        identity: Di,
+        digest: Option<Dd>,
+        responder: oneshot::Sender<Option<M>>,
+    ) {
         let item = self.items.get(&digest).cloned();
         self.respond_get(responder, item);
     }
