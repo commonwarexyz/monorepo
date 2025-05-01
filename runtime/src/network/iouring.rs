@@ -4,7 +4,7 @@ use futures::{
 };
 use io_uring::{squeue::Entry as SqueueEntry, types::Fd, IoUring};
 use std::{
-    net::{SocketAddr, TcpListener},
+    net::{SocketAddr, TcpListener, TcpStream},
     os::fd::{AsFd, AsRawFd, OwnedFd},
     sync::Arc,
 };
@@ -49,14 +49,30 @@ impl crate::Network for Network {
     type Listener = Listener;
 
     async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, crate::Error> {
-        todo!()
+        let listener = TcpListener::bind(socket).map_err(|_| crate::Error::BindFailed)?;
+        Ok(Listener {
+            inner: listener,
+            submitter: self.submitter.clone(),
+        })
     }
 
     async fn dial(
         &self,
         socket: SocketAddr,
     ) -> Result<(crate::SinkOf<Self>, crate::StreamOf<Self>), crate::Error> {
-        todo!()
+        let stream = TcpStream::connect(socket).map_err(|_| crate::Error::ConnectionFailed)?;
+        let fd = Arc::new(OwnedFd::from(stream));
+
+        Ok((
+            Sink {
+                fd: fd.clone(),
+                submitter: self.submitter.clone(),
+            },
+            Stream {
+                fd,
+                submitter: self.submitter.clone(),
+            },
+        ))
     }
 }
 
