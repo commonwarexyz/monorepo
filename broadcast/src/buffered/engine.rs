@@ -319,16 +319,16 @@ impl<
         // Send the message to the waiters, if any, ignoring errors (as the receiver may have dropped)
         if let Some(responders) = self.waiters.remove(&identity) {
             let mut remaining = Vec::new();
-            for item in responders {
-                if item.0.is_some() && item.0.unwrap() != peer {
-                    remaining.push(item);
+            for (sender_filter, digest_filter, responder) in responders {
+                if sender_filter.as_ref().is_some_and(|s| s != &peer) {
+                    remaining.push((sender_filter, digest_filter, responder));
                     continue;
                 }
-                if item.1.is_some() && item.1.unwrap() != digest {
-                    remaining.push(item);
+                if digest_filter.is_some_and(|d| d != digest) {
+                    remaining.push((sender_filter, digest_filter, responder));
                     continue;
                 }
-                self.respond_subscribe(item.2, msg.clone());
+                self.respond_subscribe(responder, msg.clone());
             }
             if !remaining.is_empty() {
                 self.waiters.insert(identity, remaining);
