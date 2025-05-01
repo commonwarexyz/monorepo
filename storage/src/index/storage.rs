@@ -367,7 +367,7 @@ impl<T: Translator, V> Index<T, V> {
         self.map.is_empty()
     }
 
-    /// Retrieves an iterator over all values associated with a given key.
+    /// Returns an iterator over all values associated with a translated key.
     pub fn get(&self, key: &[u8]) -> impl Iterator<Item = &V> {
         let k = self.translator.transform(key);
         self.map
@@ -377,7 +377,7 @@ impl<T: Translator, V> Index<T, V> {
             .flatten()
     }
 
-    /// Provides mutable access to the values associated with a key via a `Cursor`.
+    /// Provides mutable access to the values associated with a translated key, if the key exists.
     pub fn get_mut(&mut self, key: &[u8]) -> Option<Cursor<T, V>> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
@@ -386,7 +386,7 @@ impl<T: Translator, V> Index<T, V> {
         }
     }
 
-    /// Provides mutable access to the values associated with a key via a `Cursor` (if the key exists), otherwise
+    /// Provides mutable access to the values associated with a translated key (if the key exists), otherwise
     /// inserts a new value and returns `None`.
     pub fn get_mut_or_insert(&mut self, key: &[u8], v: V) -> Option<Cursor<T, V>> {
         let k = self.translator.transform(key);
