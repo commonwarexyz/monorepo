@@ -374,6 +374,8 @@ impl<T: Translator, V> Index<T, V> {
         }
     }
 
+    /// Provides mutable access to the values associated with a key via a `Cursor` (if the key exists), otherwise
+    /// inserts a new value and returns `None`.
     pub fn get_mut_or_insert(&mut self, key: &[u8], v: V) -> Option<Cursor<T, V>> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
