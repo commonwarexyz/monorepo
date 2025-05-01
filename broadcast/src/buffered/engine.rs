@@ -62,7 +62,7 @@ pub struct Engine<
 
     /// Pending requests from the application.
     #[allow(clippy::type_complexity)]
-    waiters: HashMap<Di, Vec<(Option<P>, Option<Dd>, oneshot::Sender<M>)>>,
+    waiters: HashMap<Di, Vec<(Option<P>, Option<Dd>, oneshot::Sender<Vec<M>>)>>,
 
     ////////////////////////////////////////
     // Cache
@@ -224,7 +224,7 @@ impl<
     }
 
     /// Searches through all maintained messages for a match.
-    fn find_message(&mut self, sender: &Option<P>, identity: Di, digest: Option<Dd>) -> Option<M> {
+    fn find_message(&mut self, sender: &Option<P>, identity: Di, digest: Option<Dd>) -> Vec<M> {
         if let Some(ref sender) = sender {
             if let Some(deque) = self.deques.get(sender) {
                 for item in deque {
@@ -232,29 +232,28 @@ impl<
                     if item.0 != identity {
                         continue;
                     }
-                    if digest.is_some() && item.1 != digest.unwrap() {
+                    if digest.as_ref().is_some_and(|d| d != &item.1) {
                         continue;
                     }
 
                     // If the message is already in the cache, send it to the responder
                     if let Some(msg) = self.items.get(&item.0).and_then(|m| m.get(&item.1)) {
-                        return Some(msg.clone());
+                        return vec![msg.clone()];
                     }
                 }
             }
         } else if let Some(msg) = self.items.get(&identity) {
             if let Some(digest) = digest {
                 if let Some(msg) = msg.get(&digest) {
-                    return Some(msg.clone());
+                    return vec![msg.clone()];
                 }
             } else {
-                // If no digest is provided, send the first we have
+                // If no digest is provided, send all items we have
                 // for an identity.
-                return msg.values().next().cloned();
+                return msg.values().cloned().collect();
             }
         }
-
-        None
+        Vec::new()
     }
 
     /// Handles a `subscribe` request from the application.
@@ -266,11 +265,12 @@ impl<
         sender: Option<P>,
         identity: Di,
         digest: Option<Dd>,
-        responder: oneshot::Sender<M>,
+        responder: oneshot::Sender<Vec<M>>,
     ) {
         // Check if the message is already in the cache
-        if let Some(msg) = self.find_message(&sender, identity, digest) {
-            self.respond_subscribe(responder, msg);
+        let items = self.find_message(&sender, identity, digest);
+        if !items.is_empty() {
+            self.respond_subscribe(responder, items);
             return;
         }
 
@@ -287,7 +287,7 @@ impl<
         sender: Option<P>,
         identity: Di,
         digest: Option<Dd>,
-        responder: oneshot::Sender<Option<M>>,
+        responder: oneshot::Sender<Vec<M>>,
     ) {
         let item = self.find_message(&sender, identity, digest);
         self.respond_get(responder, item);
@@ -334,7 +334,7 @@ impl<
 
                 // Filters match → fulfil the subscription and drop the entry.
                 let (_, _, responder) = waiters.swap_remove(i);
-                self.respond_subscribe(responder, msg.clone());
+                self.respond_subscribe(responder, vec![msg.clone()]);
             }
 
             // Re-insert if any waiters remain.
@@ -419,7 +419,7 @@ impl<
 
     /// Respond to a waiter with a message.
     /// Increments the appropriate metric based on the result.
-    fn respond_subscribe(&mut self, responder: oneshot::Sender<M>, msg: M) {
+    fn respond_subscribe(&mut self, responder: oneshot::Sender<Vec<M>>, msg: Vec<M>) {
         let result = responder.send(msg);
         self.metrics.subscribe.inc(match result {
             Ok(_) => Status::Success,
@@ -429,8 +429,8 @@ impl<
 
     /// Respond to a waiter with an optional message.
     /// Increments the appropriate metric based on the result.
-    fn respond_get(&mut self, responder: oneshot::Sender<Option<M>>, msg: Option<M>) {
-        let found = msg.is_some();
+    fn respond_get(&mut self, responder: oneshot::Sender<Vec<M>>, msg: Vec<M>) {
+        let found = !msg.is_empty();
         let result = responder.send(msg);
         self.metrics.get.inc(match result {
             Ok(_) if found => Status::Success,

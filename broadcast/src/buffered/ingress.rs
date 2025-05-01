@@ -27,7 +27,7 @@ pub enum Message<P: Array, Di: Digest, Dd: Digest, M: Identifiable<Di> + Digesti
         sender: Option<P>,
         identity: Di,
         digest: Option<Dd>,
-        responder: oneshot::Sender<M>,
+        responder: oneshot::Sender<Vec<M>>,
     },
 
     /// Get a message by digest.
@@ -35,7 +35,7 @@ pub enum Message<P: Array, Di: Digest, Dd: Digest, M: Identifiable<Di> + Digesti
         sender: Option<P>,
         identity: Di,
         digest: Option<Dd>,
-        responder: oneshot::Sender<Option<M>>,
+        responder: oneshot::Sender<Vec<M>>,
     },
 }
 
@@ -61,7 +61,7 @@ impl<P: Array, Di: Digest, Dd: Digest, M: Identifiable<Di> + Digestible<Dd>> Mai
         sender: Option<P>,
         identity: Di,
         digest: Option<Dd>,
-    ) -> oneshot::Receiver<M> {
+    ) -> oneshot::Receiver<Vec<M>> {
         let (responder, receiver) = oneshot::channel();
         self.sender
             .send(Message::Subscribe {
@@ -84,7 +84,7 @@ impl<P: Array, Di: Digest, Dd: Digest, M: Identifiable<Di> + Digestible<Dd>> Mai
         sender: Option<P>,
         identity: Di,
         digest: Option<Dd>,
-        responder: oneshot::Sender<M>,
+        responder: oneshot::Sender<Vec<M>>,
     ) {
         self.sender
             .send(Message::Subscribe {
@@ -98,7 +98,7 @@ impl<P: Array, Di: Digest, Dd: Digest, M: Identifiable<Di> + Digestible<Dd>> Mai
     }
 
     /// Get a message by digest.
-    pub async fn get(&mut self, sender: Option<P>, identity: Di, digest: Option<Dd>) -> Option<M> {
+    pub async fn get(&mut self, sender: Option<P>, identity: Di, digest: Option<Dd>) -> Vec<M> {
         let (responder, receiver) = oneshot::channel();
         self.sender
             .send(Message::Get {
@@ -109,7 +109,7 @@ impl<P: Array, Di: Digest, Dd: Digest, M: Identifiable<Di> + Digestible<Dd>> Mai
             })
             .await
             .expect("mailbox closed");
-        receiver.await.unwrap_or(None)
+        receiver.await.unwrap_or(Vec::new())
     }
 }
 
