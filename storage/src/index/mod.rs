@@ -378,17 +378,16 @@ mod tests {
             index.insert(b"key", i);
         }
 
-        // Remove middle: [3, 0]
+        // Remove middle: [0, 1]
         {
             let mut cursor = index.get_mut(b"key").unwrap();
             assert_eq!(*cursor.next().unwrap(), 0); // head
             assert_eq!(*cursor.next().unwrap(), 3); // middle
             cursor.delete();
+            assert_eq!(*cursor.next().unwrap(), 2); // middle
+            cursor.delete();
         }
-        assert_eq!(
-            index.get(b"key").copied().collect::<Vec<_>>(),
-            vec![0, 2, 1]
-        );
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![0, 1]);
     }
 
     #[test_traced]
