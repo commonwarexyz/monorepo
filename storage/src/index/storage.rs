@@ -1,337 +1,488 @@
 use crate::index::Translator;
 use commonware_runtime::Metrics;
 use prometheus_client::metrics::counter::Counter;
-use std::{
-    collections::{
-        hash_map::{Entry, OccupiedEntry, VacantEntry},
-        HashMap,
-    },
-    mem::swap,
+use std::collections::{
+    hash_map::{Entry, OccupiedEntry},
+    HashMap,
 };
 
-/// The initial capacity of the hashmap. This is a guess at the number of unique keys we will
+/// The initial capacity of the internal hashmap. This is a guess at the number of unique keys we will
 /// encounter. The hashmap will grow as needed, but this is a good starting point (covering
 /// the entire [super::translator::OneCap] range).
 const INITIAL_CAPACITY: usize = 256;
 
-/// Each key is mapped to a `Record` that contains a linked list of potential values for the key.
+/// Each key is mapped to a `Record` that contains a linked list of potential values for that key.
 ///
-/// In the common case of a single value associated with a key, the value is stored within the
-/// HashMap entry and can be read without additional indirection (heap jumping).
+/// We avoid using a `Vec` to store values because the common case (where there are no collisions) would
+/// require an additional 24 bytes of memory for each value (the `len`, `capacity`, and `ptr` fields).
+///
+/// Again optimizing for the common case, we store the first value directly in the `Record` to avoid
+/// indirection (heap jumping).
 struct Record<V> {
     value: V,
-
     next: Option<Box<Record<V>>>,
 }
 
-/// An iterator over all values associated with a translated key.
-pub struct ValueIterator<'a, V> {
-    next: Option<&'a Record<V>>,
+/// Phases of the `Cursor` during iteration.
+#[derive(PartialEq, Eq)]
+enum Phase {
+    /// Before iteration starts.
+    Initial,
+    /// Pointing to the entry.
+    Entry,
+    /// Pointing to the next record in the list.
+    Next,
+    /// Iteration is done (only insertions can occur).
+    Done,
 }
 
-impl<V> ValueIterator<'_, V> {
-    /// Create a `ValueIterator` that returns no items.
-    fn empty() -> Self {
-        ValueIterator { next: None }
+/// A mutable iterator over the values associated with a translated key, allowing in-place modifications.
+///
+/// The `Cursor` provides a way to traverse and modify the linked list of `Record`s while maintaining its
+/// structure. It supports:
+///
+/// - Iteration via `next()` to access values.
+/// - Modification via `update()` to change the current value.
+/// - Insertion via `insert()` to add new values.
+/// - Deletion via `delete()` to remove values.
+///
+/// # Safety
+///
+/// - Must call `next()` before `update()`, `insert()`, or `delete()` to establish a valid position.
+/// - Once `next()` returns `None`, only `insert()` can be called.
+/// - Dropping the `Cursor` automatically restores the list structure by reattaching any detached `next` nodes.
+///
+/// _If you don't need advanced functionality, just use `insert()`, `insert_and_prune()`, or `remove()` instead._
+pub struct Cursor<'a, T: Translator, V> {
+    phase: Phase,
+
+    entry: Option<OccupiedEntry<'a, T::Key, Record<V>>>,
+    next: Option<Box<Record<V>>>,
+    past: Option<Box<Record<V>>>,
+
+    last_deleted: bool,
+    entry_deleted: bool,
+
+    collisions: &'a Counter,
+    pruned: &'a Counter,
+}
+
+impl<'a, T: Translator, V> Cursor<'a, T, V> {
+    /// Creates a new `Cursor` from a mutable record reference, detaching its `next` chain for iteration.
+    fn new(
+        mut entry: OccupiedEntry<'a, T::Key, Record<V>>,
+        collisions: &'a Counter,
+        pruned: &'a Counter,
+    ) -> Self {
+        let next = entry.get_mut().next.take();
+        Self {
+            phase: Phase::Initial,
+
+            entry: Some(entry),
+            next,
+            past: None,
+
+            last_deleted: false,
+            entry_deleted: false,
+
+            collisions,
+            pruned,
+        }
+    }
+
+    /// Pushes a `Record` to the past list, maintaining the linked list structure.
+    fn past_push(&mut self, mut new: Box<Record<V>>) {
+        if self.past.is_none() {
+            self.past = Some(new);
+        } else {
+            let past = self.past.take().unwrap();
+            new.next = Some(past);
+            self.past = Some(new);
+        }
+    }
+
+    /// Updates the value at the current position in the iteration.
+    ///
+    /// Panics if called before `next()` or after iteration is complete (`Status::Done` phase).
+    pub fn update(&mut self, v: V) {
+        assert!(!self.last_deleted);
+        match self.phase {
+            Phase::Initial => {
+                unreachable!("must call Cursor::next() before interacting")
+            }
+            Phase::Entry => {
+                self.entry.as_mut().unwrap().get_mut().value = v;
+            }
+            Phase::Next => {
+                self.next.as_mut().unwrap().value = v;
+            }
+            Phase::Done => {
+                unreachable!(
+                    "only Cursor::insert() can be called after Cursor::next() returns None"
+                )
+            }
+        }
+    }
+
+    /// Advances the cursor to the next value in the chain, returning a reference to it.
+    ///
+    /// Handles transitions between phases and adjusts for deletions. Returns `None` when the list is exhausted.
+    /// It is safe to call `next()` even after it returns `None`.
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> Option<&V> {
+        let last_deleted = self.last_deleted;
+        self.last_deleted = false;
+        match self.phase {
+            Phase::Initial => {
+                self.phase = Phase::Entry;
+                return self.entry.as_ref().map(|r| &r.get().value);
+            }
+            Phase::Entry => {
+                // If the last operation was a delete, do nothing.
+                if last_deleted {
+                    return self.entry.as_ref().map(|r| &r.get().value);
+                }
+
+                // If there is an entry after, we set it to be the current record.
+                if self.next.is_none() {
+                    // If there is no next, we are done.
+                    self.phase = Phase::Done;
+                    return None;
+                }
+                self.phase = Phase::Next;
+                return self.next.as_deref().map(|r| &r.value);
+            }
+            Phase::Next => {
+                // If last deleted, do noting.
+                if last_deleted {
+                    return self.next.as_deref().map(|r| &r.value);
+                }
+
+                // Take ownership of all records.
+                let mut next = self.next.take().unwrap();
+                let next_next = next.next.take();
+
+                // Add next to the past list.
+                self.past_push(next);
+
+                // Set next to be next's next.
+                self.next = next_next;
+
+                // If we have a next record, return it.
+                if self.next.is_some() {
+                    return self.next.as_deref().map(|r| &r.value);
+                }
+                self.phase = Phase::Done;
+            }
+            Phase::Done => {
+                // We allow calling next() unnecessarily as inner ops may move us to `Phase::Done` (unbenownst to
+                // the caller).
+            }
+        }
+        None
+    }
+
+    /// Inserts a new value at the current position.
+    ///
+    /// Increments the `collisions` counter as this adds to an existing key's chain.
+    pub fn insert(&mut self, v: V) {
+        assert!(!self.last_deleted);
+        self.collisions.inc();
+        match self.phase {
+            Phase::Initial => {
+                unimplemented!("must call Cursor::next() before interacting")
+            }
+            Phase::Entry => {
+                // Create a new record that points to next.
+                let new = Box::new(Record {
+                    value: v,
+                    next: self.next.take(),
+                });
+
+                // Set current next to be the new record.
+                self.next = Some(new);
+            }
+            Phase::Next => {
+                // Take next
+                let mut next = self.next.take().unwrap();
+                let next_next = next.next.take();
+
+                // Add next to the past list.
+                self.past_push(next);
+
+                // Create a new record that points to next's next.
+                let new = Box::new(Record {
+                    value: v,
+                    next: next_next,
+                });
+                self.next = Some(new);
+            }
+            Phase::Done => {
+                // If entry is deleted, we need to update it.
+                if self.entry_deleted {
+                    self.entry_deleted = false;
+                    self.entry.as_mut().unwrap().get_mut().value = v;
+                    return;
+                }
+
+                // If not, we should add to past.
+                let new = Box::new(Record {
+                    value: v,
+                    next: None,
+                });
+                self.past_push(new);
+            }
+        }
+    }
+
+    /// Deletes the current value, adjusting the list structure.
+    ///
+    /// Increments the `pruned` counter to track removals.
+    pub fn delete(&mut self) {
+        assert!(!self.last_deleted);
+        self.last_deleted = true;
+        self.pruned.inc();
+        match self.phase {
+            Phase::Initial => {
+                unreachable!("must call Cursor::next() before interacting")
+            }
+            Phase::Entry => {
+                // Attempt to overwrite the entry with the next value.
+                let Some(mut next) = self.next.take() else {
+                    // If there is no next, we are done.
+                    self.phase = Phase::Done;
+                    self.entry_deleted = true;
+                    return;
+                };
+
+                // Update in-place.
+                let next_next = next.next.take();
+                self.entry.as_mut().unwrap().get_mut().value = next.value;
+                self.next = next_next;
+            }
+            Phase::Next => {
+                let next = self.next.take().unwrap();
+                self.next = next.next;
+            }
+            Phase::Done => {
+                unreachable!(
+                    "only Cursor::insert() can be called after Cursor::next() returns None"
+                )
+            }
+        }
     }
 }
 
-impl<'a, V> Iterator for ValueIterator<'a, V> {
+impl<T: Translator, V> Drop for Cursor<'_, T, V> {
+    fn drop(&mut self) {
+        // Take entry
+        let mut entry = self.entry.take().unwrap();
+
+        // If there is nothing left, delete the entry.
+        if self.entry_deleted {
+            entry.remove();
+            return;
+        }
+
+        // If there is a next, we should add it to past.
+        if let Some(next) = self.next.take() {
+            if self.past.is_none() {
+                self.past = Some(next);
+            } else {
+                let mut past = self.past.take().unwrap();
+                past.next = Some(next);
+                self.past = Some(past);
+            }
+        }
+
+        // Take past and attach it to the entry.
+        let past = self.past.take();
+        entry.get_mut().next = past;
+    }
+}
+
+/// An immutable iterator over the values associated with a translated key.
+pub struct ImmutableCursor<'a, V> {
+    current: Option<&'a Record<V>>,
+}
+
+impl<'a, V> ImmutableCursor<'a, V> {
+    /// Creates a new `ImmutableCursor` from a `Record`.
+    fn new(record: &'a Record<V>) -> Self {
+        Self {
+            current: Some(record),
+        }
+    }
+}
+
+impl<'a, V> Iterator for ImmutableCursor<'a, V> {
     type Item = &'a V;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.next {
-            Some(next) => {
-                let value = &next.value;
-                match next.next {
-                    Some(ref next_next) => self.next = Some(next_next),
-                    None => self.next = None,
-                }
-                Some(value)
-            }
-            None => None,
-        }
+        self.current.map(|record| {
+            let value = &record.value;
+            self.current = record.next.as_deref();
+            value
+        })
     }
 }
 
-/// A wrapper for the hashmap entry when it can be either occupied or vacant.
-enum MapEntry<'a, K, V> {
-    Occupied(OccupiedEntry<'a, K, Record<V>>),
-    Vacant(VacantEntry<'a, K, Record<V>>),
-}
-
-/// An iterator over all values associated with a translated key, allowing for mutation of the
-/// current element and insertion of new elements at the front of the list.
-pub struct UpdateValueIterator<'a, K, V> {
-    next: Option<*mut Record<V>>,
-    entry: Option<MapEntry<'a, K, V>>,
-    collisions_counter: &'a Counter,
-}
-
-/// UpdateValueIterator must be sendable across threads so it can be held across a journal's read
-/// async boundary.
-unsafe impl<K, V> Send for UpdateValueIterator<'_, K, V> {}
-
-impl<'a, K, V> Iterator for UpdateValueIterator<'a, K, V> {
-    type Item = &'a mut V;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.next {
-            Some(next) => {
-                let current = unsafe { &mut (*next) };
-                let value = &mut current.value;
-                self.next = current
-                    .next
-                    .as_mut()
-                    .map(|next_next| next_next.as_mut() as *mut _);
-                Some(value)
-            }
-            None => None,
-        }
-    }
-}
-
-impl<K, V> UpdateValueIterator<'_, K, V> {
-    /// Insert a new value at the front of the list. We always add to the front so behavior is
-    /// consistently last in, first out. This means most recently added values will be returned
-    /// first by the iterators, providing an LRU like behavior.
-    pub fn insert(&mut self, mut value: V) {
-        let entry = self.entry.take().unwrap();
-
-        let mut occupied_entry = match entry {
-            MapEntry::Occupied(occupied_entry) => occupied_entry,
-            MapEntry::Vacant(vacant_entry) => {
-                // Key had no associated values, so just turn the vacant entry into an occupied one.
-                let record = Record { value, next: None };
-                let occupied_entry = vacant_entry.insert_entry(record);
-                self.entry = Some(MapEntry::Occupied(occupied_entry));
-                return;
-            }
-        };
-
-        // This key already has a value, so add the new value to the front of the list.
-        let record = occupied_entry.get_mut();
-        swap(&mut record.value, &mut value); // puts the new value at the front
-        record.next = Some(Box::new(Record {
-            value,
-            next: record.next.take(),
-        }));
-        self.entry = Some(MapEntry::Occupied(occupied_entry));
-
-        self.collisions_counter.inc();
-    }
-}
-
-/// An iterator over all values associated with a translated key, allowing for mutation and removal
-/// of the current element.
-pub struct RemoveValueIterator<'a, K, V> {
-    can_remove: bool, //  false means remove should be a no-op
-    prev_prev: Option<*mut Record<V>>,
-    prev: Option<*mut Record<V>>,
-    next: Option<*mut Record<V>>,
-    entry: Option<OccupiedEntry<'a, K, Record<V>>>,
-    pruned_counter: &'a Counter,
-}
-
-/// RemoveValueIterator must be sendable across threads so it can be held across a journal's read
-/// async boundary.
-unsafe impl<K, V> Send for RemoveValueIterator<'_, K, V> {}
-
-impl<'a, K, V> Iterator for RemoveValueIterator<'a, K, V> {
-    type Item = &'a mut V;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.next {
-            Some(next) => {
-                let current = unsafe { &mut (*next) };
-                let value = &mut current.value;
-                self.prev_prev = self.prev;
-                self.prev = self.next;
-                self.next = current
-                    .next
-                    .as_mut()
-                    .map(|next_next| next_next.as_mut() as *mut _);
-                self.can_remove = true;
-                Some(value)
-            }
-            None => None,
-        }
-    }
-}
-
-impl<K, V> RemoveValueIterator<'_, K, V> {
-    /// Remove the value last returned from this iterator from the map. If no value has been
-    /// returned yet, or if the last returned value was removed already, then this is a no-op.
-    pub fn remove(&mut self) {
-        if !self.can_remove {
-            return;
-        }
-        self.can_remove = false;
-        self.pruned_counter.inc();
-
-        if let Some(prev_prev) = self.prev_prev {
-            unsafe {
-                (*prev_prev).next = (*self.prev.unwrap()).next.take();
-            }
-            return;
-        }
-
-        let Some(occupied_entry) = self.entry.as_mut() else {
-            unreachable!("can_remove should prevent this");
-        };
-
-        // The element we are removing is at the front.
-        let head = occupied_entry.get_mut();
-
-        match head.next.take() {
-            Some(next) => {
-                // There is a linked element, so just make it the new head.
-                *head = *next;
-                self.prev = None;
-                self.next = Some(head as *mut Record<V>);
-            }
-            None => {
-                // This is the only element, so removing it requires we remove the map entry
-                // entirely.
-                self.entry.take().unwrap().remove();
-                self.prev = None;
-                self.next = None;
-            }
-        }
-    }
-}
-
-impl<V> Record<V> {
-    fn iter(&self) -> ValueIterator<V> {
-        ValueIterator { next: Some(self) }
-    }
-}
-
-/// An index that maps translated keys to values.
+/// A memory-efficient index that maps translated keys to arbitrary values.
 pub struct Index<T: Translator, V> {
     translator: T,
     map: HashMap<T::Key, Record<V>, T>,
-
     collisions: Counter,
-    keys_pruned: Counter,
+    pruned: Counter,
 }
 
 impl<T: Translator, V> Index<T, V> {
-    /// Create a new index.
-    pub fn init(context: impl Metrics, translator: T) -> Self {
+    /// Create a new index with the given translator.
+    pub fn init(ctx: impl Metrics, tr: T) -> Self {
         let s = Self {
-            translator: translator.clone(),
-            map: HashMap::with_capacity_and_hasher(INITIAL_CAPACITY, translator),
+            translator: tr.clone(),
+            map: HashMap::with_capacity_and_hasher(INITIAL_CAPACITY, tr),
             collisions: Counter::default(),
-            keys_pruned: Counter::default(),
+            pruned: Counter::default(),
         };
-        context.register("pruned", "Number of keys pruned", s.keys_pruned.clone());
-        context.register(
+        ctx.register("pruned", "Number of items pruned", s.pruned.clone());
+        ctx.register(
             "collisions",
-            "Number of translated key collisions",
+            "Number of item collisions",
             s.collisions.clone(),
         );
-
         s
     }
 
-    /// The number of unique keys in the index after translation (so two keys that collide after
-    /// translation will only be counted as one).
+    /// Return the number of translated keys in the index (there may
+    /// be many more total entries, with multiple keys per translated
+    /// key).
+    #[inline]
     pub fn len(&self) -> usize {
         self.map.len()
     }
 
-    /// Returns if the index currently holds no values.
+    /// Return whether the index is empty.
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
 
-    /// Insert a new record into the index. If there is a collision, then the new value will be
-    /// added in front of the rest of values for this translated key.
-    pub fn insert(&mut self, key: &[u8], mut value: V) {
-        let translated_key = self.translator.transform(key);
+    /// Returns an iterator over all values associated with a translated key.
+    pub fn get(&self, key: &[u8]) -> impl Iterator<Item = &V> {
+        let k = self.translator.transform(key);
+        self.map
+            .get(&k)
+            .map(|record| ImmutableCursor::new(record))
+            .into_iter()
+            .flatten()
+    }
 
-        match self.map.entry(translated_key) {
-            Entry::Occupied(mut occupied_entry) => {
-                let record = occupied_entry.get_mut();
-                swap(&mut record.value, &mut value); // puts the new value at the front
-                record.next = Some(Box::new(Record {
-                    value,
-                    next: record.next.take(),
-                }));
-                self.collisions.inc();
+    /// Provides mutable access to the values associated with a translated key, if the key exists.
+    pub fn get_mut(&mut self, key: &[u8]) -> Option<Cursor<T, V>> {
+        let k = self.translator.transform(key);
+        match self.map.entry(k) {
+            Entry::Occupied(entry) => Some(Cursor::new(entry, &self.collisions, &self.pruned)),
+            Entry::Vacant(_) => None,
+        }
+    }
+
+    /// Provides mutable access to the values associated with a translated key (if the key exists), otherwise
+    /// inserts a new value and returns `None`.
+    pub fn get_mut_or_insert(&mut self, key: &[u8], v: V) -> Option<Cursor<T, V>> {
+        let k = self.translator.transform(key);
+        match self.map.entry(k) {
+            Entry::Occupied(entry) => Some(Cursor::new(entry, &self.collisions, &self.pruned)),
+            Entry::Vacant(entry) => {
+                let record = Record {
+                    value: v,
+                    next: None,
+                };
+                entry.insert(record);
+                None
+            }
+        }
+    }
+
+    /// Remove all values at the given translated key.
+    pub fn remove(&mut self, key: &[u8]) {
+        // To ensure metrics are accurate, we iterate over all
+        // conflicting values and remove them one-by-one (rather
+        // than just removing the entire entry).
+        self.prune(key, |_| true);
+    }
+
+    /// Insert a value at the given translated key.
+    pub fn insert(&mut self, key: &[u8], v: V) {
+        let k = self.translator.transform(key);
+        match self.map.entry(k) {
+            Entry::Occupied(entry) => {
+                let mut cursor = Cursor::<'_, T, V>::new(entry, &self.collisions, &self.pruned);
+                cursor.next();
+                cursor.insert(v);
             }
             Entry::Vacant(entry) => {
-                entry.insert(Record { value, next: None });
+                entry.insert(Record {
+                    value: v,
+                    next: None,
+                });
             }
-        };
-    }
-
-    /// Retrieve all values associated with a translated key.
-    pub fn get_iter(&self, key: &[u8]) -> ValueIterator<V> {
-        let translated_key = self.translator.transform(key);
-        match self.map.get(&translated_key) {
-            Some(head) => head.iter(),
-            None => ValueIterator::empty(),
         }
     }
 
-    /// Retrieve all values associated with a translated key, allowing for mutation & insertion if
-    /// the key you are trying to update isn't currently active.
-    pub fn update_iter(&mut self, key: &[u8]) -> UpdateValueIterator<T::Key, V> {
-        let translated_key = self.translator.transform(key);
-        let entry = self.map.entry(translated_key);
-        match entry {
-            Entry::Occupied(mut occupied_entry) => {
-                let record_ptr = occupied_entry.get_mut();
-                UpdateValueIterator {
-                    next: Some(record_ptr),
-                    entry: Some(MapEntry::Occupied(occupied_entry)),
-                    collisions_counter: &self.collisions,
-                }
-            }
-            Entry::Vacant(vacant_entry) => UpdateValueIterator {
-                next: None,
-                entry: Some(MapEntry::Vacant(vacant_entry)),
-                collisions_counter: &self.collisions,
-            },
-        }
-    }
+    /// Insert a value at the given translated key, and prune any values that are no longer valid.
+    ///
+    /// If the value is prunable, it will not be inserted.
+    pub fn insert_and_prune(&mut self, key: &[u8], v: V, prune: impl Fn(&V) -> bool) {
+        let k = self.translator.transform(key);
+        match self.map.entry(k) {
+            Entry::Occupied(entry) => {
+                // Get entry
+                let mut cursor = Cursor::<'_, T, V>::new(entry, &self.collisions, &self.pruned);
 
-    /// Retrieve all values associated with a translated key, allowing for mutation and removal.
-    pub fn remove_iter(&mut self, key: &[u8]) -> RemoveValueIterator<T::Key, V> {
-        let translated_key = self.translator.transform(key);
-        let entry = self.map.entry(translated_key);
-        match entry {
-            Entry::Occupied(mut occupied_entry) => {
-                let record_ptr = occupied_entry.get_mut();
-                RemoveValueIterator {
-                    can_remove: false,
-                    prev_prev: None,
-                    prev: None,
-                    next: Some(record_ptr),
-                    entry: Some(occupied_entry),
-                    pruned_counter: &self.keys_pruned,
+                // Remove anything that is prunable.
+                loop {
+                    let Some(old) = cursor.next() else {
+                        break;
+                    };
+                    if prune(old) {
+                        cursor.delete();
+                    }
+                }
+
+                // Add our new value (if not prunable).
+                if !prune(&v) {
+                    cursor.insert(v);
                 }
             }
-            Entry::Vacant(_) => RemoveValueIterator {
-                can_remove: false,
-                prev_prev: None,
-                prev: None,
-                next: None,
-                entry: None,
-                pruned_counter: &self.keys_pruned,
-            },
+            Entry::Vacant(entry) => {
+                // No collision, so we can just insert the value.
+                entry.insert(Record {
+                    value: v,
+                    next: None,
+                });
+            }
         }
     }
 
     /// Remove all values associated with a translated key that match the `prune` predicate.
-    pub fn remove(&mut self, key: &[u8], prune: impl Fn(&V) -> bool) {
-        let mut iter = self.remove_iter(key);
-        while let Some(value) = iter.next() {
-            if prune(value) {
-                iter.remove();
+    pub fn prune(&mut self, key: &[u8], prune: impl Fn(&V) -> bool) {
+        let k = self.translator.transform(key);
+        match self.map.entry(k) {
+            Entry::Occupied(entry) => {
+                // Get cursor
+                let mut cursor = Cursor::<'_, T, V>::new(entry, &self.collisions, &self.pruned);
+
+                // Remove anything that is prunable.
+                loop {
+                    let Some(old) = cursor.next() else {
+                        break;
+                    };
+                    if prune(old) {
+                        cursor.delete();
+                    }
+                }
             }
+            Entry::Vacant(_) => {}
         }
     }
 }
