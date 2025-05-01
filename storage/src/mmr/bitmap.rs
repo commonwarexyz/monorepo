@@ -1,6 +1,6 @@
 //! An authenticated bitmap.
 //!
-//! The authenticated bitmap is is an in-memory data structure that does not persist its contents
+//! The authenticated bitmap is an in-memory data structure that does not persist its contents
 //! other than the data corresponding to its "pruned" section, allowing full restoration by
 //! "replaying" any unpruned elements.
 //!
