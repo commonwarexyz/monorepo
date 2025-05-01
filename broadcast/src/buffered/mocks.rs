@@ -22,7 +22,7 @@ impl TestMessage {
         }
     }
 
-    pub fn simple(msg: impl Into<Vec<u8>>) -> Self {
+    pub fn shared(msg: impl Into<Vec<u8>>) -> Self {
         let msg = msg.into();
         Self::new(msg.clone(), msg)
     }

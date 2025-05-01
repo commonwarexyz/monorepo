@@ -145,7 +145,7 @@ mod tests {
             let mailboxes = spawn_peer_engines(context.clone(), &mut registrations);
 
             // Send a single broadcast message from the first peer
-            let message = TestMessage::simple(b"hello world test message");
+            let message = TestMessage::shared(b"hello world test message");
             let mut first_mailbox = mailboxes.get(peers.first().unwrap()).unwrap().clone();
             let result = first_mailbox
                 .broadcast(Recipients::All, message.clone())
@@ -165,7 +165,7 @@ mod tests {
             assert_eq!(result.await.unwrap().len(), peers.len() - 1);
 
             // Drop broadcast result
-            let message = TestMessage::simple(b"hello world again");
+            let message = TestMessage::shared(b"hello world again");
             let result = first_mailbox
                 .broadcast(Recipients::All, message.clone())
                 .await;
@@ -202,7 +202,7 @@ mod tests {
             let mut mailbox_a = mailboxes.get(&peers[0]).unwrap().clone();
 
             // Create a test message
-            let m1 = TestMessage::simple(b"hello world");
+            let m1 = TestMessage::shared(b"hello world");
             let identity_m1 = m1.identity();
 
             // Attempt immediate retrieval before broadcasting
@@ -253,7 +253,7 @@ mod tests {
             let mailboxes = spawn_peer_engines(context.clone(), &mut registrations);
 
             // Create a message and grab an arbitrary mailbox
-            let message = TestMessage::simple(b"hello world test message");
+            let message = TestMessage::shared(b"hello world test message");
             let mut first_mailbox = mailboxes.get(peers.first().unwrap()).unwrap().clone();
 
             // Retry until all peers receive the message (or timeout)
@@ -297,7 +297,7 @@ mod tests {
             let mailboxes = spawn_peer_engines(context.clone(), &mut registrations);
 
             // Broadcast a message
-            let message = TestMessage::simple(b"cached message");
+            let message = TestMessage::shared(b"cached message");
             let mut first_mailbox = mailboxes.get(peers.first().unwrap()).unwrap().clone();
             let result = first_mailbox
                 .broadcast(Recipients::All, message.clone())
@@ -328,7 +328,7 @@ mod tests {
             let mailboxes = spawn_peer_engines(context.clone(), &mut registrations);
 
             // Request nonexistent message from two nodes
-            let message = TestMessage::simple(b"future message");
+            let message = TestMessage::shared(b"future message");
             let identity = message.identity();
             let mut mailbox1 = mailboxes.get(&peers[0]).unwrap().clone();
             let mut mailbox2 = mailboxes.get(&peers[1]).unwrap().clone();
@@ -365,7 +365,7 @@ mod tests {
             let mut mailbox = mailboxes.get(&peers[0]).unwrap().clone();
             let mut messages = vec![];
             for i in 0..CACHE_SIZE + 1 {
-                messages.push(TestMessage::simple(format!("message {}", i).as_bytes()));
+                messages.push(TestMessage::shared(format!("message {}", i).as_bytes()));
             }
             for message in messages.iter() {
                 let result = mailbox.broadcast(Recipients::All, message.clone()).await;
@@ -412,7 +412,7 @@ mod tests {
             let mut mailbox_c = mailboxes.get(&peers[2]).unwrap().clone();
 
             // Create and broadcast message M1 from A
-            let m1 = TestMessage::simple(b"message M1");
+            let m1 = TestMessage::shared(b"message M1");
             let identity_m1 = m1.identity();
             let result = mailbox_a.broadcast(Recipients::All, m1.clone()).await;
             assert_eq!(result.await.unwrap().len(), peers.len() - 1);
@@ -428,7 +428,7 @@ mod tests {
             // Peer A broadcasts 10 new messages to evict M1 from A's deque
             let mut new_messages_a = Vec::with_capacity(CACHE_SIZE);
             for i in 0..CACHE_SIZE {
-                new_messages_a.push(TestMessage::simple(format!("A{}", i).as_bytes()));
+                new_messages_a.push(TestMessage::shared(format!("A{}", i).as_bytes()));
             }
             for msg in &new_messages_a {
                 let result = mailbox_a.broadcast(Recipients::All, msg.clone()).await;
@@ -444,7 +444,7 @@ mod tests {
             // Peer C broadcasts 10 new messages to evict M1 from C's deque
             let mut new_messages_c = Vec::with_capacity(CACHE_SIZE);
             for i in 0..CACHE_SIZE {
-                new_messages_c.push(TestMessage::simple(format!("C{}", i).as_bytes()));
+                new_messages_c.push(TestMessage::shared(format!("C{}", i).as_bytes()));
             }
             for msg in &new_messages_c {
                 let result = mailbox_c.broadcast(Recipients::All, msg.clone()).await;
