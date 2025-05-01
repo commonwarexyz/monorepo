@@ -5,8 +5,7 @@
 //! In the [Any] db, it is not possible to prove whether the value of a key is the currently active
 //! one, only that it was associated with the key at some point in the past. This type of
 //! authenticated database is most useful for applications involving keys that are given values once
-//! and cannot be updated after. If authenticating the current value is required, see
-//! [Current](crate::adb::Current).
+//! and cannot be updated after.
 
 use crate::{
     adb::{operation::Operation, Error},
@@ -28,6 +27,8 @@ use futures::{
     try_join,
 };
 use tracing::{debug, warn};
+
+const UNUSED_N: usize = 0; // Indicator that the generic parameter N is unused by the call.
 
 /// Configuration for an `Any` authenticated db.
 #[derive(Clone)]
@@ -108,7 +109,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         let (mmr, log) = Self::init_mmr_and_log(context, hasher, cfg).await?;
 
         let start_leaf_num = leaf_pos_to_num(mmr.pruned_to_pos()).unwrap();
-        let inactivity_floor_loc = Self::build_snapshot_from_log::<0 /* value is unused*/>(
+        let inactivity_floor_loc = Self::build_snapshot_from_log::<UNUSED_N>(
             hasher,
             start_leaf_num,
             &log,
@@ -522,23 +523,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     pub async fn commit(&mut self, hasher: &mut H) -> Result<(), Error> {
         // Raise the inactivity floor by the # of uncommitted operations, plus 1 to account for the
         // commit op that will be appended.
-        self.raise_inactivity_floor::<0 /*unused*/>(hasher, self.uncommitted_ops + 1, None)
+        self.raise_inactivity_floor::<UNUSED_N>(hasher, self.uncommitted_ops + 1, None)
             .await?;
         self.uncommitted_ops = 0;
         self.sync().await?;
-
-        Ok(())
-    }
-
-    /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
-    /// upon return from this function. Also raises the inactivity floor according to the schedule,
-    /// and prunes those operations below it.
-    pub async fn commit(
-        &mut self,
-        hasher: &mut H,
-        old_locs: Option<&mut Vec<u64>>,
-    ) -> Result<(), Error> {
-        self.commit_only(hasher, old_locs).await?;
 
         // TODO: Make the frequency with which we prune known inactive items configurable in case
         // this turns out to be a significant part of commit overhead, or the user wants to ensure
@@ -885,7 +873,7 @@ mod test {
 
             // Since this db no longer has any active keys, we should be able to raise the
             // inactivity floor to the tip (only the inactive commit op remains).
-            db.raise_inactivity_floor::<0>(&mut hasher, 100, None)
+            db.raise_inactivity_floor::<UNUSED_N>(&mut hasher, 100, None)
                 .await
                 .unwrap();
             assert_eq!(db.inactivity_floor_loc, db.op_count() - 1);
@@ -982,7 +970,7 @@ mod test {
             assert_eq!(db.snapshot.keys(), 857);
 
             // Raise the inactivity floor to the point where all inactive operations can be pruned.
-            db.raise_inactivity_floor::<0>(&mut hasher, 3000, None)
+            db.raise_inactivity_floor::<UNUSED_N>(&mut hasher, 3000, None)
                 .await
                 .unwrap();
             db.prune_inactive().await.unwrap();
@@ -1012,7 +1000,7 @@ mod test {
             let start_pos = db.ops.pruned_to_pos();
             let start_loc = leaf_pos_to_num(start_pos).unwrap();
             // Raise the inactivity floor and make sure historical inactive operations are still provable.
-            db.raise_inactivity_floor::<0>(&mut hasher, 100, None)
+            db.raise_inactivity_floor::<UNUSED_N>(&mut hasher, 100, None)
                 .await
                 .unwrap();
             let root = db.root(&mut hasher);

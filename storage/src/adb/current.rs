@@ -9,7 +9,10 @@ use crate::{
         Error,
     },
     index::{Index, Translator},
-    mmr::{bitmap::Bitmap, iterator::leaf_num_to_pos, iterator::leaf_pos_to_num},
+    mmr::{
+        bitmap::Bitmap,
+        iterator::{leaf_num_to_pos, leaf_pos_to_num},
+    },
 };
 use commonware_codec::FixedSize;
 use commonware_cryptography::Hasher as CHasher;
@@ -189,10 +192,15 @@ impl<
     /// Updates `key` to have value `value`. If the key already has this same value, then this is a
     /// no-op. The operation is reflected in the snapshot, but will be subject to rollback until the
     /// next successful `commit`.
-    pub async fn update(&mut self, hasher: &mut H, key: K, value: V) -> Result<(), Error> {
+    pub async fn update(
+        &mut self,
+        hasher: &mut H,
+        key: K,
+        value: V,
+    ) -> Result<UpdateResult, Error> {
         let update_result = self.any.update(hasher, key.clone(), value.clone()).await?;
         match update_result {
-            UpdateResult::NoOp => return Ok(()),
+            UpdateResult::NoOp => return Ok(update_result),
             UpdateResult::Inserted(_) => (),
             UpdateResult::Updated(old_loc, _) => {
                 self.is_active.set_bit(hasher, old_loc, false);
@@ -200,7 +208,7 @@ impl<
         }
         self.is_active.append(hasher, true);
 
-        Ok(())
+        Ok(update_result)
     }
 
     /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
@@ -217,9 +225,8 @@ impl<
         Ok(())
     }
 
-    /// Commit any pending operations to the db, ensuring they are persisted to disk &
-    /// recoverable upon return from this function.
-    pub async fn commit(&mut self, hasher: &mut H) -> Result<(), Error> {
+    /// Commit pending operations to the adb::any and sync it to disk.
+    async fn commit_ops(&mut self, hasher: &mut H) -> Result<(), Error> {
         // Raise the inactivity floor by the # of uncommitted operations, plus 1 to account for the
         // commit op that will be appended.
         self.any
@@ -232,10 +239,19 @@ impl<
         self.any.uncommitted_ops = 0;
         self.any.sync().await?;
 
-        // Prune inactive bits & elements.
+        Ok(())
+    }
+
+    /// Commit any pending operations to the db, ensuring they are persisted to disk &
+    /// recoverable upon return from this function.
+    pub async fn commit(&mut self, hasher: &mut H) -> Result<(), Error> {
+        self.commit_ops(hasher).await?;
+
+        // Prune inactive elements from the any db.
         self.any.prune_inactive().await?;
 
-        // To ensure recovery from failures, the bitmap should be pruned & written *last*.
+        // Failure recovery code relies on the bitmap getting written & pruned *after* ops have been
+        // committed & the adb::any pruned.
         self.is_active.prune_to_bit(self.any.inactivity_floor_loc);
         self.is_active
             .write_pruned(
@@ -247,30 +263,48 @@ impl<
         Ok(())
     }
 
+    /// Return the root hash of the db.
+    ///
+    /// Current implementation just hashes the roots of the `Any` and `Bitmap` databases together.
+    pub fn root(&self, hasher: &mut H) -> H::Digest {
+        let any_root = self.any.root(hasher);
+        let bitmap_root = self.is_active.root(hasher);
+        hasher.update(any_root.as_ref());
+        hasher.update(bitmap_root.as_ref());
+
+        hasher.finalize()
+    }
+
     /// Close the db. Operations that have not been committed will be lost.
     pub async fn close(self) -> Result<(), Error> {
         self.any.close().await
     }
 
     #[cfg(test)]
-    /// Simulate a crash that happens during commit and prevents the bitmap state from being
-    /// written.
-    pub async fn commit_fail(mut self, hasher: &mut H) -> Result<(), Error> {
-        // Run the first few steps of the commit process, but do not write the bitmap.
-        self.any
-            .raise_inactivity_floor(
-                hasher,
-                self.any.uncommitted_ops + 1,
-                Some(&mut self.is_active),
-            )
-            .await?;
-        self.any.sync().await?;
+    /// Simulate a crash that happens during commit and prevents the any db from being pruned of
+    /// inactive operations, and bitmap state from being written/pruned.
+    async fn simulate_failure_after_any_db_commit(mut self, hasher: &mut H) -> Result<(), Error> {
+        self.commit_ops(hasher).await?;
 
-        // Prune inactive bits & elements.
+        Ok(())
+    }
+
+    #[cfg(test)]
+    /// Simulate a crash that happens during commit and prevents the bitmap state from being
+    /// written, but the any db is fully committed and pruned.
+    async fn simulate_failure_after_any_db_pruned(mut self, hasher: &mut H) -> Result<(), Error> {
+        self.commit_ops(hasher).await?;
+
+        // Prune inactive elements from the any db.
         self.any.prune_inactive().await?;
 
         Ok(())
     }
+
+    #[cfg(test)]
+    /// Simulate a crash that prevents any data from being written to disk, which involves simply
+    /// consuming the db before it can be cleanly closed.
+    fn simulate_failure_before_any_writes(self) {}
 }
 
 #[cfg(test)]
@@ -285,14 +319,14 @@ pub mod test {
         RngCore, SeedableRng,
     };
 
-    fn current_db_config() -> Config {
+    fn current_db_config(partition_prefix: &str) -> Config {
         Config {
-            mmr_journal_partition: "journal_partition".into(),
-            mmr_metadata_partition: "metadata_partition".into(),
+            mmr_journal_partition: format!("{}_journal_partition", partition_prefix),
+            mmr_metadata_partition: format!("{}_metadata_partition", partition_prefix),
             mmr_items_per_blob: 11,
-            log_journal_partition: "log_journal_partition".into(),
+            log_journal_partition: format!("{}_partition_prefix", partition_prefix),
             log_items_per_blob: 7,
-            bitmap_metadata_partition: "bitmap_metadata_partition".into(),
+            bitmap_metadata_partition: format!("{}_bitmap_metadata_partition", partition_prefix),
         }
     }
 
@@ -300,11 +334,12 @@ pub mod test {
     async fn open_db<E: RStorage + Clock + Metrics>(
         context: E,
         hasher: &mut Sha256,
+        partition_prefix: &str,
     ) -> Current<E, Digest, Digest, Sha256, TwoCap, 64> {
         Current::<E, Digest, Digest, Sha256, TwoCap, 64>::init(
             context,
             hasher,
-            current_db_config(),
+            current_db_config(partition_prefix),
             TwoCap,
         )
         .await
@@ -316,13 +351,14 @@ pub mod test {
     pub fn test_current_db_build_small_close_reopen() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            let partition = "build_small";
             let mut hasher = Sha256::new();
-            let mut db = open_db(context.clone(), &mut hasher).await;
+            let mut db = open_db(context.clone(), &mut hasher, partition).await;
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.oldest_retained_loc(), None);
             let root0 = db.root(&mut hasher);
             db.close().await.unwrap();
-            db = open_db(context.clone(), &mut hasher).await;
+            db = open_db(context.clone(), &mut hasher, partition).await;
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.root(&mut hasher), root0);
 
@@ -330,12 +366,18 @@ pub mod test {
             let k1 = hash(&0u64.to_be_bytes());
             let v1 = hash(&10u64.to_be_bytes());
             db.update(&mut hasher, k1, v1).await.unwrap();
+            assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             db.commit(&mut hasher).await.unwrap();
             assert_eq!(db.op_count(), 4); // 1 update, 1 commit, 2 moves.
             let root1 = db.root(&mut hasher);
             assert!(root1 != root0);
             db.close().await.unwrap();
-            db = open_db(context.clone(), &mut hasher).await;
+            db = open_db(context.clone(), &mut hasher, partition).await;
+            // repeated update should be no-op
+            assert!(matches!(
+                db.update(&mut hasher, k1, v1).await.unwrap(),
+                UpdateResult::NoOp
+            ));
             assert_eq!(db.op_count(), 4); // 1 update, 1 commit, 2 moves.
             assert_eq!(db.root(&mut hasher), root1);
 
@@ -345,7 +387,7 @@ pub mod test {
             assert_eq!(db.op_count(), 6); // 1 update, 2 commits, 2 moves, 1 delete.
             let root2 = db.root(&mut hasher);
             db.close().await.unwrap();
-            db = open_db(context.clone(), &mut hasher).await;
+            db = open_db(context.clone(), &mut hasher, partition).await;
             assert_eq!(db.op_count(), 6); // 1 update, 2 commits, 2 moves, 1 delete.
             assert_eq!(db.root(&mut hasher), root2);
 
@@ -356,18 +398,18 @@ pub mod test {
         });
     }
 
-    async fn build_random_db<E: RStorage + Clock + Metrics>(
-        context: E,
+    /// Apply random operations to the given db, committing them (randomly & at the end) only if
+    /// `commit_changes` is true.
+    async fn apply_random_ops<E: RStorage + Clock + Metrics>(
         hasher: &mut Sha256,
         num_elements: u64,
-    ) -> Result<Current<E, Digest, Digest, Sha256, TwoCap, 64>, Error> {
-        // Use a non-deterministic rng seed to ensure each run is different.
-        let rng_seed = OsRng.next_u64();
+        commit_changes: bool,
+        rng_seed: u64,
+        db: &mut Current<E, Digest, Digest, Sha256, TwoCap, 64>,
+    ) -> Result<(), Error> {
         // Log the seed with high visibility to make failures reproducible.
         warn!("rng_seed={}", rng_seed);
         let mut rng = StdRng::seed_from_u64(rng_seed);
-
-        let mut db = open_db(context.clone(), hasher).await;
 
         for i in 0u64..num_elements {
             let k = hash(&i.to_be_bytes());
@@ -385,14 +427,16 @@ pub mod test {
             }
             let v = hash(&rng.next_u32().to_be_bytes());
             db.update(hasher, rand_key, v).await.unwrap();
-            if rng.next_u32() % 20 == 0 {
+            if commit_changes && rng.next_u32() % 20 == 0 {
                 // Commit every ~20 updates.
                 db.commit(hasher).await.unwrap();
             }
         }
-        db.commit(hasher).await.unwrap();
+        if commit_changes {
+            db.commit(hasher).await.unwrap();
+        }
 
-        Ok(db)
+        Ok(())
     }
 
     /// This test builds a random database, and makes sure that its state is correctly restored
@@ -405,7 +449,11 @@ pub mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = Sha256::new();
-            let db = build_random_db(context.clone(), &mut hasher, ELEMENTS)
+            let partition = "build_random";
+            // Use a non-deterministic rng seed to ensure each run is different.
+            let rng_seed = OsRng.next_u64();
+            let mut db = open_db(context.clone(), &mut hasher, partition).await;
+            apply_random_ops(&mut hasher, ELEMENTS, true, rng_seed, &mut db)
                 .await
                 .unwrap();
 
@@ -414,8 +462,102 @@ pub mod test {
             // Create a bitmap based on the current db's pruned/inactive state.
             db.close().await.unwrap();
 
-            let db = open_db(context, &mut hasher).await;
+            let db = open_db(context, &mut hasher, partition).await;
             assert_eq!(db.root(&mut hasher), root);
+        });
+    }
+
+    /// This test builds a random database and simulates we can recover from 3 different types of
+    /// failure scenarios.
+    #[test_traced("WARN")]
+    pub fn test_current_db_simulate_write_failures() {
+        // Number of elements to initially insert into the db.
+        const ELEMENTS: u64 = 1000;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Sha256::new();
+            let partition = "build_random_fail_commit";
+            // Use a non-deterministic rng seed to ensure each run is different.
+            let rng_seed = OsRng.next_u64();
+            let mut db = open_db(context.clone(), &mut hasher, partition).await;
+            apply_random_ops(&mut hasher, ELEMENTS, true, rng_seed, &mut db)
+                .await
+                .unwrap();
+            let committed_root = db.root(&mut hasher);
+            let committed_op_count = db.op_count();
+
+            // Perform more random operations without committing any of them.
+            apply_random_ops(&mut hasher, ELEMENTS, false, rng_seed + 1, &mut db)
+                .await
+                .unwrap();
+            let uncommitted_root = db.root(&mut hasher);
+            assert!(uncommitted_root != committed_root);
+
+            // SCENARIO #1: Simulate a crash that happens before any writes. Upon reopening, the
+            // state of the DB should be as of the last commit.
+            db.simulate_failure_before_any_writes();
+            let mut db = open_db(context.clone(), &mut hasher, partition).await;
+            assert_eq!(db.root(&mut hasher), committed_root);
+            assert_eq!(db.op_count(), committed_op_count);
+
+            // Re-apply the exact same uncommitted operations.
+            apply_random_ops(&mut hasher, ELEMENTS, false, rng_seed + 1, &mut db)
+                .await
+                .unwrap();
+            assert_eq!(db.root(&mut hasher), uncommitted_root);
+
+            // SCENARIO #2: Simulate a crash that happens after the any db has been committed, but
+            // before any pruning or bitmap writing.
+            db.simulate_failure_after_any_db_commit(&mut hasher)
+                .await
+                .unwrap();
+
+            // We should be able to recover, so the root hash should differ from the previous
+            // commit, and the op count should be greater than before.
+            let db = open_db(context.clone(), &mut hasher, partition).await;
+            let second_committed_root = db.root(&mut hasher);
+            assert!(second_committed_root != uncommitted_root);
+            let failed_pruning_loc = db.any.oldest_retained_loc().unwrap();
+
+            // To confirm the second committed hash is correct we'll re-build the DB in a new
+            // partition, but without any failures. They should have the exact same state.
+            let fresh_partition = "build_random_fail_commit_fresh";
+            let mut db = open_db(context.clone(), &mut hasher, fresh_partition).await;
+            apply_random_ops(&mut hasher, ELEMENTS, true, rng_seed, &mut db)
+                .await
+                .unwrap();
+            apply_random_ops(&mut hasher, ELEMENTS, false, rng_seed + 1, &mut db)
+                .await
+                .unwrap();
+            db.commit(&mut hasher).await.unwrap();
+            assert_eq!(db.root(&mut hasher), second_committed_root);
+            let successful_pruning_loc = db.any.oldest_retained_loc().unwrap();
+            // pruning points will differ, but this is OK since it doesn't affect state.
+            assert!(successful_pruning_loc > failed_pruning_loc);
+            db.close().await.unwrap();
+
+            // SCENARIO #3: Simulate a crash that happens after the any db has been committed and
+            // pruned but before the bitmap is written. Full state restoration should remain
+            // possible, and pruning point should match a successful commit.
+            let fresh_partition = "build_random_fail_commit_fresh_2";
+            let mut db = open_db(context.clone(), &mut hasher, fresh_partition).await;
+            apply_random_ops(&mut hasher, ELEMENTS, true, rng_seed, &mut db)
+                .await
+                .unwrap();
+            apply_random_ops(&mut hasher, ELEMENTS, false, rng_seed + 1, &mut db)
+                .await
+                .unwrap();
+            db.simulate_failure_after_any_db_pruned(&mut hasher)
+                .await
+                .unwrap();
+            let db = open_db(context.clone(), &mut hasher, fresh_partition).await;
+            assert_eq!(db.root(&mut hasher), second_committed_root);
+            // State & pruning boundary should match that of the successful commit.
+            assert_eq!(
+                db.any.oldest_retained_loc().unwrap(),
+                successful_pruning_loc
+            );
         });
     }
 }
