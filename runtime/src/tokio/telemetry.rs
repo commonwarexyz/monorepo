@@ -55,20 +55,19 @@ pub fn init(
 
     // Register the layers with the global subscriber
     let registry = Registry::default().with(filter).with(log_layer);
-    if let Some(cfg) = traces {
+    let registry: Box<dyn tracing::Subscriber + Send + Sync> = if let Some(cfg) = traces {
         // Initialize tracing
         let tracer = export(cfg).expect("Failed to initialize tracer");
 
         // Create OpenTelemetry layer for tracing
         let trace_layer = tracing_opentelemetry::layer().with_tracer(tracer);
-
-        // Set the global subscriber
-        let registry = registry.with(trace_layer);
-        tracing::subscriber::set_global_default(registry).expect("Failed to set subscriber");
+        Box::new(registry.with(trace_layer))
     } else {
-        // Set the global subscriber
-        tracing::subscriber::set_global_default(registry).expect("Failed to set subscriber");
+        Box::new(registry)
     };
+
+    // Set the global subscriber
+    tracing::subscriber::set_global_default(registry).expect("Failed to set subscriber");
 
     // Expose metrics over HTTP
     if let Some(cfg) = metrics {
