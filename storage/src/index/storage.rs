@@ -301,12 +301,21 @@ impl<T: Translator, V> Drop for Cursor<'_, T, V> {
     }
 }
 
-/// An iterator over the values in a `Record` list.
-pub struct RecordIter<'a, V> {
+/// An immutable iterator over the values associated with a translated key.
+pub struct ImmutableCursor<'a, V> {
     current: Option<&'a Record<V>>,
 }
 
-impl<'a, V> Iterator for RecordIter<'a, V> {
+impl<'a, V> ImmutableCursor<'a, V> {
+    /// Creates a new `ImmutableCursor` from a `Record`.
+    fn new(record: &'a Record<V>) -> Self {
+        Self {
+            current: Some(record),
+        }
+    }
+}
+
+impl<'a, V> Iterator for ImmutableCursor<'a, V> {
     type Item = &'a V;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -363,9 +372,7 @@ impl<T: Translator, V> Index<T, V> {
         let k = self.translator.transform(key);
         self.map
             .get(&k)
-            .map(|record| RecordIter {
-                current: Some(record),
-            })
+            .map(|record| ImmutableCursor::new(record))
             .into_iter()
             .flatten()
     }
