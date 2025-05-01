@@ -141,6 +141,9 @@ pub trait Digestible<D: Digest>: Clone + Sized + Send + Sync + 'static {
 }
 
 /// An object that can be identified by a [Digest].
+///
+/// When possible, crates should prefer supporting [Identifiable] over [Digestible] (
+/// returning all [Digestible] objects for a given `identity()`).
 pub trait Identifiable<D: Digest>: Clone + Sized + Send + Sync + 'static {
     /// Returns the identity of the object.
     ///
