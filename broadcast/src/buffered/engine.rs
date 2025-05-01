@@ -79,7 +79,7 @@ pub struct Engine<
     /// The number of times each digest exists in one of the deques.
     ///
     /// This is because multiple peers can send the same message.
-    counts: HashMap<Dd, usize>,
+    counts: HashMap<(Di, Dd), usize>,
 
     ////////////////////////////////////////
     // Metrics
@@ -317,15 +317,21 @@ impl<
         let identity = msg.identity();
 
         // Send the message to the waiters, if any, ignoring errors (as the receiver may have dropped)
-        if let Some(responders) = self.waiters.get_mut(&identity) {
-            for (req_sender, req_digest, responder) in responders {
-                if req_sender.is_some() && req_sender.unwrap() != peer {
+        if let Some(responders) = self.waiters.remove(&identity) {
+            let mut remaining = Vec::new();
+            for item in responders {
+                if item.0.is_some() && item.0.unwrap() != peer {
+                    remaining.push(item);
                     continue;
                 }
-                if req_digest.is_some() && req_digest.unwrap() != digest {
+                if item.1.is_some() && item.1.unwrap() != digest {
+                    remaining.push(item);
                     continue;
                 }
-                self.respond_subscribe(responder, msg.clone());
+                self.respond_subscribe(item.2, msg.clone());
+            }
+            if !remaining.is_empty() {
+                self.waiters.insert(identity, remaining);
             }
         }
 
@@ -350,11 +356,11 @@ impl<
         deque.push_front((identity, digest));
         let count = self
             .counts
-            .entry(digest)
+            .entry((identity, digest))
             .and_modify(|c| *c = c.checked_add(1).unwrap())
             .or_insert(1);
         if *count == 1 {
-            let existing = self.items.insert(digest, msg);
+            let existing = self.items.entry(identity).or_default().insert(digest, msg);
             assert!(existing.is_none());
         }
 
@@ -372,7 +378,11 @@ impl<
             if *count == 0 {
                 let existing = self.counts.remove(&stale);
                 assert!(existing == Some(0));
-                self.items.remove(&stale).unwrap(); // Must have existed
+                let identities = self.items.get_mut(&stale.0).unwrap();
+                identities.remove(&stale.1); // Must have existed
+                if identities.is_empty() {
+                    self.items.remove(&stale.0);
+                }
             }
         }
 
