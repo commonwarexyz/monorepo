@@ -413,6 +413,9 @@ mod tests {
             cursor.delete();
             assert_eq!(cursor.next(), None);
         }
+
+        // Ensure item is deleted from index
+        assert_eq!(index.len(), 0);
     }
 
     #[test_traced]
