@@ -196,7 +196,18 @@ impl<'a, T: Translator, V> Cursor<'a, T, V> {
                 self.next = Some(new);
             }
             Phase::Done => {
-                unimplemented!("done");
+                // If entry is deleted, we need to update it.
+                if self.entry_deleted {
+                    self.entry_deleted = false;
+                    self.entry.as_mut().unwrap().get_mut().value = v;
+                    return;
+                }
+
+                // If not, we should add to past.
+                self.past.push(Box::new(Record {
+                    value: v,
+                    next: None,
+                }));
             }
         }
     }
@@ -231,7 +242,7 @@ impl<'a, T: Translator, V> Cursor<'a, T, V> {
 impl<T: Translator, V> Drop for Cursor<'_, T, V> {
     fn drop(&mut self) {
         // Take entry
-        let entry = self.entry.take().unwrap();
+        let mut entry = self.entry.take().unwrap();
 
         // If there is nothing left, delete the entry.
         if self.entry_deleted {
@@ -239,7 +250,24 @@ impl<T: Translator, V> Drop for Cursor<'_, T, V> {
             return;
         }
 
-        // TODO: add past back to list.
+        // If there are old records, we need to reattach them.
+        if self.past.is_empty() {
+            return;
+        }
+
+        // Attach last record to the entry.
+        let last = self.past.pop().unwrap();
+        entry.get_mut().next = Some(last);
+
+        // Reattach all records.
+        let mut tip = entry.get_mut().next.as_mut().unwrap();
+        loop {
+            let Some(record) = self.past.pop() else {
+                break;
+            };
+            tip.next = Some(record);
+            tip = tip.next.as_mut().unwrap();
+        }
     }
 }
 
