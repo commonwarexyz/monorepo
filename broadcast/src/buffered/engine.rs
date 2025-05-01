@@ -1,7 +1,7 @@
 use super::{metrics, Config, Mailbox, Message};
 use crate::buffered::metrics::SequencerLabel;
 use commonware_codec::{Codec, Config as CodecCfg};
-use commonware_cryptography::{Digest, Identifiable};
+use commonware_cryptography::{Digest, Digestible, Identifiable};
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
@@ -29,9 +29,10 @@ use tracing::{debug, error, trace, warn};
 pub struct Engine<
     E: Clock + Spawner + Metrics,
     P: Array,
-    D: Digest,
+    Di: Digest,
+    Dd: Digest,
     Cfg: CodecCfg,
-    M: Identifiable<D> + Codec<Cfg>,
+    M: Identifiable<Di> + Digestible<Dd> + Codec<Cfg>,
 > {
     ////////////////////////////////////////
     // Interfaces
@@ -57,7 +58,7 @@ pub struct Engine<
     // Messaging
     ////////////////////////////////////////
     /// The mailbox for receiving messages.
-    mailbox_receiver: mpsc::Receiver<Message<P, D, M>>,
+    mailbox_receiver: mpsc::Receiver<Message<P, Di, Dd, M>>,
 
     /// Pending requests from the application.
     waiters: HashMap<D, Vec<oneshot::Sender<M>>>,
@@ -92,7 +93,7 @@ impl<
         P: Array,
         D: Digest,
         Cfg: CodecCfg,
-        M: Identifiable<D> + Codec<Cfg>,
+        M: Identifiable<D> + Digestible<D> + Codec<Cfg>,
     > Engine<E, P, D, Cfg, M>
 {
     /// Creates a new engine with the given context and configuration.
@@ -156,11 +157,11 @@ impl<
                         }
                         Message::Subscribe{ sender, digest, responder } => {
                             trace!("mailbox: subscribe");
-                            self.handle_subscribe(digest, responder).await;
+                            self.handle_subscribe(sender, digest, responder).await;
                         }
                         Message::Get{ sender, digest, responder } => {
                             trace!("mailbox: get");
-                            self.handle_get(digest, responder).await;
+                            self.handle_get(sender, digest, responder).await;
                         }
                     }
                 },
@@ -261,10 +262,12 @@ impl<
     /// Returns `true` if the message was inserted, `false` if it was already present.
     /// Updates the deque, item count, and message cache, potentially evicting an old message.
     fn insert_message(&mut self, peer: P, msg: M) -> bool {
-        let digest = msg.identity();
+        // Get the digest and identity of the message
+        let digest = msg.digest();
+        let identity = msg.identity();
 
         // Send the message to the waiters, if any, ignoring errors (as the receiver may have dropped)
-        if let Some(responders) = self.waiters.remove(&digest) {
+        if let Some(responders) = self.waiters.remove(&identity) {
             for responder in responders {
                 self.respond_subscribe(responder, msg.clone());
             }

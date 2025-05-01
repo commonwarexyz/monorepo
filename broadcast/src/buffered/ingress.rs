@@ -1,6 +1,6 @@
 use crate::Broadcaster;
 use commonware_codec::{Codec, Config};
-use commonware_cryptography::{Digest, Identifiable};
+use commonware_cryptography::{Digest, Digestible, Identifiable};
 use commonware_p2p::Recipients;
 use commonware_utils::Array;
 use futures::{
@@ -9,7 +9,7 @@ use futures::{
 };
 
 /// Message types that can be sent to the `Mailbox`
-pub enum Message<P: Array, D: Digest, M: Identifiable<D>> {
+pub enum Message<P: Array, Di: Digest, Dd: Digest, M: Identifiable<Di> + Digestible<Dd>> {
     /// Broadcast a [`Message`](crate::Broadcaster::Message) to the network.
     ///
     /// The responder will be sent a list of peers that received the message.
@@ -25,40 +25,48 @@ pub enum Message<P: Array, D: Digest, M: Identifiable<D>> {
     /// when it is received from the network. The request can be canceled by dropping the responder.
     Subscribe {
         sender: Option<P>,
-        digest: D,
+        identity: Di,
+        digest: Option<Dd>,
         responder: oneshot::Sender<M>,
     },
 
     /// Get a message by digest.
     Get {
         sender: Option<P>,
-        digest: D,
+        identity: Di,
+        digest: Option<Dd>,
         responder: oneshot::Sender<Option<M>>,
     },
 }
 
 /// Ingress mailbox for [`Engine`](super::Engine).
 #[derive(Clone)]
-pub struct Mailbox<P: Array, D: Digest, M: Identifiable<D>> {
-    sender: mpsc::Sender<Message<P, D, M>>,
+pub struct Mailbox<P: Array, Di: Digest, Dd: Digest, M: Identifiable<Di> + Digestible<Dd>> {
+    sender: mpsc::Sender<Message<P, Di, Dd, M>>,
 }
 
-impl<P: Array, D: Digest, M: Identifiable<D>> Mailbox<P, D, M> {
-    pub(super) fn new(sender: mpsc::Sender<Message<P, D, M>>) -> Self {
+impl<P: Array, Di: Digest, Dd: Digest, M: Identifiable<Di> + Digestible<Dd>> Mailbox<P, Di, Dd, M> {
+    pub(super) fn new(sender: mpsc::Sender<Message<P, Di, Dd, M>>) -> Self {
         Self { sender }
     }
 }
 
-impl<P: Array, D: Digest, M: Identifiable<D>> Mailbox<P, D, M> {
+impl<P: Array, Di: Digest, Dd: Digest, M: Identifiable<Di> + Digestible<Dd>> Mailbox<P, Di, Dd, M> {
     /// Subscribe to a message by digest.
     ///
     /// The responder will be sent the message when it is available; either instantly (if cached) or
     /// when it is received from the network. The request can be canceled by dropping the responder.
-    pub async fn subscribe(&mut self, sender: Option<P>, digest: D) -> oneshot::Receiver<M> {
+    pub async fn subscribe(
+        &mut self,
+        sender: Option<P>,
+        identity: Di,
+        digest: Option<Dd>,
+    ) -> oneshot::Receiver<M> {
         let (responder, receiver) = oneshot::channel();
         self.sender
             .send(Message::Subscribe {
                 sender,
+                identity,
                 digest,
                 responder,
             })
@@ -74,12 +82,14 @@ impl<P: Array, D: Digest, M: Identifiable<D>> Mailbox<P, D, M> {
     pub async fn subscribe_prepared(
         &mut self,
         sender: Option<P>,
-        digest: D,
+        identity: Di,
+        digest: Option<Dd>,
         responder: oneshot::Sender<M>,
     ) {
         self.sender
             .send(Message::Subscribe {
                 sender,
+                identity,
                 digest,
                 responder,
             })
@@ -88,11 +98,12 @@ impl<P: Array, D: Digest, M: Identifiable<D>> Mailbox<P, D, M> {
     }
 
     /// Get a message by digest.
-    pub async fn get(&mut self, sender: Option<P>, digest: D) -> Option<M> {
+    pub async fn get(&mut self, sender: Option<P>, identity: Di, digest: Option<Dd>) -> Option<M> {
         let (responder, receiver) = oneshot::channel();
         self.sender
             .send(Message::Get {
                 sender,
+                identity,
                 digest,
                 responder,
             })
@@ -102,8 +113,13 @@ impl<P: Array, D: Digest, M: Identifiable<D>> Mailbox<P, D, M> {
     }
 }
 
-impl<Cfg: Config, P: Array, D: Digest, M: Codec<Cfg> + Identifiable<D>> Broadcaster<P, Cfg>
-    for Mailbox<P, D, M>
+impl<
+        Cfg: Config,
+        P: Array,
+        Di: Digest,
+        Dd: Digest,
+        M: Codec<Cfg> + Identifiable<Di> + Digestible<Dd>,
+    > Broadcaster<P, Cfg> for Mailbox<P, Di, Dd, M>
 {
     type Message = M;
     type Response = Vec<P>;
