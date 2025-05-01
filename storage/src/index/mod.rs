@@ -643,4 +643,20 @@ mod tests {
         values.sort();
         assert_eq!(values, vec![123, 456, 789, 999]);
     }
+
+    #[test_traced]
+    #[should_panic]
+    fn test_cursor_double_delete() {
+        let ctx = deterministic::Context::default();
+        let mut index = Index::init(ctx, TwoCap);
+        index.insert(b"key", 123);
+        index.insert(b"key", 456);
+
+        let mut cursor = index.get_mut(b"key").unwrap();
+        assert_eq!(*cursor.next().unwrap(), 123);
+        cursor.delete();
+
+        // Attempt to delete again (will panic)
+        cursor.delete();
+    }
 }
