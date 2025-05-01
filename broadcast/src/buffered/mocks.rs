@@ -4,7 +4,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadRangeExt, Write};
 use commonware_cryptography::{
     sha256::{Digest as Sha256Digest, Sha256},
-    Digestible, Hasher,
+    Hasher, Identifiable,
 };
 
 /// A simple test message.
@@ -23,8 +23,8 @@ impl TestMessage {
     }
 }
 
-impl Digestible<Sha256Digest> for TestMessage {
-    fn digest(&self) -> Sha256Digest {
+impl Identifiable<Sha256Digest> for TestMessage {
+    fn identity(&self) -> Sha256Digest {
         let mut hasher = Sha256::default();
         hasher.update(&self.content);
         hasher.finalize()

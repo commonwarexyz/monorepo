@@ -1,6 +1,6 @@
 use crate::Broadcaster;
 use commonware_codec::{Codec, Config};
-use commonware_cryptography::{Digest, Digestible};
+use commonware_cryptography::{Digest, Identifiable};
 use commonware_utils::Array;
 use futures::{
     channel::{mpsc, oneshot},
@@ -8,7 +8,7 @@ use futures::{
 };
 
 /// Message types that can be sent to the `Mailbox`
-pub enum Message<P: Array, D: Digest, M: Digestible<D>> {
+pub enum Message<P: Array, D: Digest, M: Identifiable<D>> {
     /// Broadcast a [`Message`](crate::Broadcaster::Message) to the network.
     ///
     /// The responder will be sent a list of peers that received the message.
@@ -35,17 +35,17 @@ pub enum Message<P: Array, D: Digest, M: Digestible<D>> {
 
 /// Ingress mailbox for [`Engine`](super::Engine).
 #[derive(Clone)]
-pub struct Mailbox<P: Array, D: Digest, M: Digestible<D>> {
+pub struct Mailbox<P: Array, D: Digest, M: Identifiable<D>> {
     sender: mpsc::Sender<Message<P, D, M>>,
 }
 
-impl<P: Array, D: Digest, M: Digestible<D>> Mailbox<P, D, M> {
+impl<P: Array, D: Digest, M: Identifiable<D>> Mailbox<P, D, M> {
     pub(super) fn new(sender: mpsc::Sender<Message<P, D, M>>) -> Self {
         Self { sender }
     }
 }
 
-impl<P: Array, D: Digest, M: Digestible<D>> Mailbox<P, D, M> {
+impl<P: Array, D: Digest, M: Identifiable<D>> Mailbox<P, D, M> {
     /// Subscribe to a message by digest.
     ///
     /// The responder will be sent the message when it is available; either instantly (if cached) or
@@ -90,7 +90,7 @@ impl<P: Array, D: Digest, M: Digestible<D>> Mailbox<P, D, M> {
     }
 }
 
-impl<Cfg: Config, P: Array, D: Digest, M: Codec<Cfg> + Digestible<D>> Broadcaster<Cfg>
+impl<Cfg: Config, P: Array, D: Digest, M: Codec<Cfg> + Identifiable<D>> Broadcaster<Cfg>
     for Mailbox<P, D, M>
 {
     type Message = M;

@@ -1,7 +1,7 @@
 use super::{metrics, Config, Mailbox, Message};
 use crate::buffered::metrics::SequencerLabel;
 use commonware_codec::{Codec, Config as CodecCfg};
-use commonware_cryptography::{Digest, Digestible};
+use commonware_cryptography::{Digest, Identifiable};
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
@@ -31,7 +31,7 @@ pub struct Engine<
     P: Array,
     D: Digest,
     Cfg: CodecCfg,
-    M: Digestible<D> + Codec<Cfg>,
+    M: Identifiable<D> + Codec<Cfg>,
 > {
     ////////////////////////////////////////
     // Interfaces
@@ -92,7 +92,7 @@ impl<
         P: Array,
         D: Digest,
         Cfg: CodecCfg,
-        M: Digestible<D> + Codec<Cfg>,
+        M: Identifiable<D> + Codec<Cfg>,
     > Engine<E, P, D, Cfg, M>
 {
     /// Creates a new engine with the given context and configuration.
@@ -261,7 +261,7 @@ impl<
     /// Returns `true` if the message was inserted, `false` if it was already present.
     /// Updates the deque, item count, and message cache, potentially evicting an old message.
     fn insert_message(&mut self, peer: P, msg: M) -> bool {
-        let digest = msg.digest();
+        let digest = msg.identity();
 
         // Send the message to the waiters, if any, ignoring errors (as the receiver may have dropped)
         if let Some(responders) = self.waiters.remove(&digest) {

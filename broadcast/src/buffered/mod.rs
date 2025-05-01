@@ -37,7 +37,7 @@ mod tests {
 
     use super::{mocks::TestMessage, *};
     use commonware_cryptography::{
-        ed25519::PublicKey, sha256::Digest as Sha256Digest, Digestible, Ed25519, Signer,
+        ed25519::PublicKey, sha256::Digest as Sha256Digest, Ed25519, Identifiable, Signer,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
@@ -147,7 +147,7 @@ mod tests {
             // Check that all peers received the message
             for peer in peers.iter() {
                 let mut mailbox = mailboxes.get(peer).unwrap().clone();
-                let digest = message.digest();
+                let digest = message.identity();
                 let receiver = mailbox.subscribe(digest).await;
                 let received_message = receiver.await.ok();
                 assert_eq!(received_message.unwrap(), message);
@@ -166,7 +166,7 @@ mod tests {
             let mut found = 0;
             for peer in peers.iter() {
                 let mut mailbox = mailboxes.get(peer).unwrap().clone();
-                let digest = message.digest();
+                let digest = message.identity();
                 let receiver = mailbox.get(digest).await;
                 if let Some(msg) = receiver {
                     assert_eq!(msg, message);
@@ -191,7 +191,7 @@ mod tests {
 
             // Create a test message
             let m1 = TestMessage::new(b"hello world");
-            let digest_m1 = m1.digest();
+            let digest_m1 = m1.identity();
 
             // Attempt immediate retrieval before broadcasting
             let receiver_before = mailbox_a.get(digest_m1).await;
@@ -245,7 +245,7 @@ mod tests {
             let mut first_mailbox = mailboxes.get(peers.first().unwrap()).unwrap().clone();
 
             // Retry until all peers receive the message (or timeout)
-            let digest = message.digest();
+            let digest = message.identity();
             for i in 0..100 {
                 // Broadcast the message
                 let result = first_mailbox.broadcast(message.clone()).await;
@@ -292,7 +292,7 @@ mod tests {
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             // Get from cache (should be instant)
-            let digest = message.digest();
+            let digest = message.identity();
             let mut mailbox = mailboxes.get(peers.last().unwrap()).unwrap().clone();
             let receiver = mailbox.subscribe(digest).await;
             let start = context.current();
@@ -313,7 +313,7 @@ mod tests {
 
             // Request nonexistent message from two nodes
             let message = TestMessage::new(b"future message");
-            let digest = message.digest();
+            let digest = message.identity();
             let mut mailbox1 = mailboxes.get(&peers[0]).unwrap().clone();
             let mut mailbox2 = mailboxes.get(&peers[1]).unwrap().clone();
             let receiver = mailbox1.subscribe(digest).await;
@@ -362,12 +362,12 @@ mod tests {
             // Check all other messages exist
             let mut peer_mailbox = mailboxes.get(&peers[1]).unwrap().clone();
             for msg in messages.iter().skip(1) {
-                let result = peer_mailbox.subscribe(msg.digest()).await.await.unwrap();
+                let result = peer_mailbox.subscribe(msg.identity()).await.await.unwrap();
                 assert_eq!(result, msg.clone());
             }
 
             // Check first message times out
-            let receiver = peer_mailbox.subscribe(messages[0].digest()).await;
+            let receiver = peer_mailbox.subscribe(messages[0].identity()).await;
             select! {
                 _ = context.sleep(A_JIFFY) => {},
                 _ = receiver => { panic!("receiver should have failed")},
@@ -391,7 +391,7 @@ mod tests {
 
             // Create and broadcast message M1 from A
             let m1 = TestMessage::new(b"message M1");
-            let digest_m1 = m1.digest();
+            let digest_m1 = m1.identity();
             let result = mailbox_a.broadcast(m1.clone()).await;
             assert_eq!(result.await.unwrap().len(), peers.len() - 1);
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
