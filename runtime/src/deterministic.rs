@@ -132,194 +132,20 @@ impl Default for Auditor {
 }
 
 impl Auditor {
-    fn process_task(&self, task: u128, label: &str) {
+    /// Record that an event happened.
+    /// This auditor's hash will be updated with the event's `label` and
+    /// whatever other data is passed in the `payload` closure.
+    pub(crate) fn event<F>(&self, label: &'static [u8], payload: F)
+    where
+        F: FnOnce(&mut Sha256),
+    {
         let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"process_task");
-        hasher.update(task.to_be_bytes());
-        hasher.update(label.as_bytes());
-        *hash = hasher.finalize().to_vec();
-    }
 
-    fn stop(&self, value: i32) {
-        let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(&*hash);
-        hasher.update(b"stop");
-        hasher.update(value.to_be_bytes());
-        *hash = hasher.finalize().to_vec();
-    }
+        hasher.update(label);
+        payload(&mut hasher);
 
-    fn stopped(&self) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"stopped");
-        *hash = hasher.finalize().to_vec();
-    }
-
-    pub(crate) fn bind(&self, address: SocketAddr) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"bind");
-        hasher.update(address.to_string().as_bytes());
-        *hash = hasher.finalize().to_vec();
-    }
-
-    pub(crate) fn dial(&self, dialer: SocketAddr, listener: SocketAddr) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"dial");
-        hasher.update(dialer.to_string().as_bytes());
-        hasher.update(listener.to_string().as_bytes());
-        *hash = hasher.finalize().to_vec();
-    }
-
-    pub(crate) fn accept(&self, listener: SocketAddr, dialer: SocketAddr) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"accept");
-        hasher.update(listener.to_string().as_bytes());
-        hasher.update(dialer.to_string().as_bytes());
-        *hash = hasher.finalize().to_vec();
-    }
-
-    pub(crate) fn send(&self, sender: SocketAddr, receiver: SocketAddr, message: &[u8]) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"send");
-        hasher.update(sender.to_string().as_bytes());
-        hasher.update(receiver.to_string().as_bytes());
-        hasher.update(message);
-        *hash = hasher.finalize().to_vec();
-    }
-
-    pub(crate) fn recv(&self, receiver: SocketAddr, sender: SocketAddr, message: &[u8]) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"recv");
-        hasher.update(receiver.to_string().as_bytes());
-        hasher.update(sender.to_string().as_bytes());
-        hasher.update(message);
-        *hash = hasher.finalize().to_vec();
-    }
-
-    fn rand(&self, method: String) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"rand");
-        hasher.update(method.as_bytes());
-        *hash = hasher.finalize().to_vec();
-    }
-
-    pub(crate) fn open(&self, partition: &str, name: &[u8]) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"open");
-        hasher.update(partition.as_bytes());
-        hasher.update(name);
-        *hash = hasher.finalize().to_vec();
-    }
-
-    pub(crate) fn remove(&self, partition: &str, name: Option<&[u8]>) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"remove");
-        hasher.update(partition.as_bytes());
-        if let Some(name) = name {
-            hasher.update(name);
-        }
-        *hash = hasher.finalize().to_vec();
-    }
-
-    pub(crate) fn scan(&self, partition: &str) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"scan");
-        hasher.update(partition.as_bytes());
-        *hash = hasher.finalize().to_vec();
-    }
-
-    pub(crate) fn read_at(&self, partition: &str, name: &[u8], buf: usize, offset: u64) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"read_at");
-        hasher.update(partition.as_bytes());
-        hasher.update(name);
-        hasher.update(buf.to_be_bytes());
-        hasher.update(offset.to_be_bytes());
-        *hash = hasher.finalize().to_vec();
-    }
-
-    pub(crate) fn write_at(&self, partition: &str, name: &[u8], buf: &[u8], offset: u64) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"write_at");
-        hasher.update(partition.as_bytes());
-        hasher.update(name);
-        hasher.update(buf);
-        hasher.update(offset.to_be_bytes());
-        *hash = hasher.finalize().to_vec();
-    }
-
-    pub(crate) fn truncate(&self, partition: &str, name: &[u8], size: u64) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"truncate");
-        hasher.update(partition.as_bytes());
-        hasher.update(name);
-        hasher.update(size.to_be_bytes());
-        *hash = hasher.finalize().to_vec();
-    }
-
-    pub(crate) fn sync(&self, partition: &str, name: &[u8]) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"sync");
-        hasher.update(partition.as_bytes());
-        hasher.update(name);
-        *hash = hasher.finalize().to_vec();
-    }
-
-    pub(crate) fn close(&self, partition: &str, name: &[u8]) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"close");
-        hasher.update(partition.as_bytes());
-        hasher.update(name);
-        *hash = hasher.finalize().to_vec();
-    }
-
-    fn register(&self, name: &str, help: &str) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"register");
-        hasher.update(name.as_bytes());
-        hasher.update(help.as_bytes());
-        *hash = hasher.finalize().to_vec();
-    }
-
-    fn encode(&self) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"encode");
         *hash = hasher.finalize().to_vec();
     }
 
@@ -533,7 +359,10 @@ impl crate::Runner for Runner {
             trace!(iter, tasks = tasks.len(), "starting loop");
             for task in tasks {
                 // Record task for auditing
-                executor.auditor.process_task(task.id, &task.label);
+                executor.auditor.event(b"process_task", |hasher| {
+                    hasher.update(task.id.to_be_bytes());
+                    hasher.update(task.label.as_bytes());
+                });
                 trace!(id = task.id, "processing task");
 
                 // Record task poll
@@ -1008,12 +837,14 @@ impl crate::Spawner for Context {
     }
 
     fn stop(&self, value: i32) {
-        self.executor.auditor.stop(value);
+        self.executor.auditor.event(b"stop", |hasher| {
+            hasher.update(value.to_be_bytes());
+        });
         self.executor.signaler.lock().unwrap().signal(value);
     }
 
     fn stopped(&self) -> Signal {
-        self.executor.auditor.stopped();
+        self.executor.auditor.event(b"stopped", |_| {});
         self.executor.signal.clone()
     }
 }
@@ -1051,7 +882,10 @@ impl crate::Metrics for Context {
         let help = help.into();
 
         // Register metric
-        self.executor.auditor.register(&name, &help);
+        self.executor.auditor.event(b"register", |hasher| {
+            hasher.update(name.as_bytes());
+            hasher.update(help.as_bytes());
+        });
         let prefixed_name = {
             let prefix = &self.label;
             if prefix.is_empty() {
@@ -1068,7 +902,7 @@ impl crate::Metrics for Context {
     }
 
     fn encode(&self) -> String {
-        self.executor.auditor.encode();
+        self.executor.auditor.event(b"encode", |_| {});
         let mut buffer = String::new();
         encode(&mut buffer, &self.executor.registry.lock().unwrap()).expect("encoding failed");
         buffer
@@ -1177,22 +1011,30 @@ impl crate::Network for Context {
 }
 impl RngCore for Context {
     fn next_u32(&mut self) -> u32 {
-        self.executor.auditor.rand("next_u32".to_string());
+        self.executor.auditor.event(b"rand", |hasher| {
+            hasher.update(b"next_u32");
+        });
         self.executor.rng.lock().unwrap().next_u32()
     }
 
     fn next_u64(&mut self) -> u64 {
-        self.executor.auditor.rand("next_u64".to_string());
+        self.executor.auditor.event(b"rand", |hasher| {
+            hasher.update(b"next_u64");
+        });
         self.executor.rng.lock().unwrap().next_u64()
     }
 
     fn fill_bytes(&mut self, dest: &mut [u8]) {
-        self.executor.auditor.rand("fill_bytes".to_string());
+        self.executor.auditor.event(b"rand", |hasher| {
+            hasher.update(b"fill_bytes");
+        });
         self.executor.rng.lock().unwrap().fill_bytes(dest)
     }
 
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        self.executor.auditor.rand("try_fill_bytes".to_string());
+        self.executor.auditor.event(b"rand", |hasher| {
+            hasher.update(b"try_fill_bytes");
+        });
         self.executor.rng.lock().unwrap().try_fill_bytes(dest)
     }
 }

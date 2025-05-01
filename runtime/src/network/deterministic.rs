@@ -1,5 +1,6 @@
 use crate::{deterministic::Auditor, mocks, Error};
 use futures::{channel::mpsc, SinkExt as _, StreamExt as _};
+use sha2::Digest;
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -20,9 +21,12 @@ pub struct Sink {
 
 impl crate::Sink for Sink {
     async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
-        self.auditor.send(self.me, self.peer, msg);
-        self.sender.send(msg).await.map_err(|_| Error::SendFailed)?;
-        Ok(())
+        self.auditor.event(b"send", |hasher| {
+            hasher.update(self.me.to_string().as_bytes());
+            hasher.update(self.peer.to_string().as_bytes());
+            hasher.update(msg);
+        });
+        self.sender.send(msg).await.map_err(|_| Error::SendFailed)
     }
 }
 
@@ -36,11 +40,15 @@ pub struct Stream {
 
 impl crate::Stream for Stream {
     async fn recv(&mut self, buf: &mut [u8]) -> Result<(), Error> {
+        self.auditor.event(b"recv", |hasher| {
+            hasher.update(self.me.to_string().as_bytes());
+            hasher.update(self.peer.to_string().as_bytes());
+            hasher.update(&buf);
+        });
         self.receiver
             .recv(buf)
             .await
             .map_err(|_| Error::RecvFailed)?;
-        self.auditor.recv(self.me, self.peer, buf);
         Ok(())
     }
 }
@@ -58,7 +66,12 @@ impl crate::Listener for Listener {
 
     async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
         let (socket, sender, receiver) = self.listener.next().await.ok_or(Error::ReadFailed)?;
-        self.auditor.accept(self.address, socket);
+
+        self.auditor.event(b"accept", |hasher| {
+            hasher.update(self.address.to_string().as_bytes());
+            hasher.update(socket.to_string().as_bytes());
+        });
+
         Ok((
             socket,
             Sink {
@@ -110,7 +123,9 @@ impl crate::Network for Network {
     type Listener = Listener;
 
     async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, Error> {
-        self.auditor.bind(socket);
+        self.auditor.event(b"bind", |hasher| {
+            hasher.update(socket.to_string().as_bytes());
+        });
 
         // If the IP is localhost, ensure the port is not in the ephemeral range
         // so that it can be used for binding in the dial method
@@ -146,7 +161,11 @@ impl crate::Network for Network {
                 .expect("ephemeral port range exhausted");
             dialer
         };
-        self.auditor.dial(dialer, socket);
+
+        self.auditor.event(b"dial", |hasher| {
+            hasher.update(dialer.to_string().as_bytes());
+            hasher.update(socket.to_string().as_bytes());
+        });
 
         // Get listener
         let mut sender = {
