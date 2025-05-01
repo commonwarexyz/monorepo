@@ -405,7 +405,9 @@ impl<T: Translator, V> Index<T, V> {
 
     /// Remove all values at the given translated key.
     pub fn remove(&mut self, key: &[u8]) {
-        // We use `prune()` to ensure we count all dropped values.
+        // To ensure metrics are accurate, we iterate over all
+        // conflicting values and remove them one-by-one (rather
+        // than just removing the entire entry).
         self.prune(key, |_| true);
     }
 
