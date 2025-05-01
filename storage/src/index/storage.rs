@@ -430,6 +430,8 @@ impl<T: Translator, V> Index<T, V> {
     }
 
     /// Insert a value at the given translated key, and prune any values that are no longer valid.
+    ///
+    /// If the value is prunable, it will not be inserted.
     pub fn insert_and_prune(&mut self, key: &[u8], v: V, prune: impl Fn(&V) -> bool) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
@@ -447,11 +449,10 @@ impl<T: Translator, V> Index<T, V> {
                     }
                 }
 
-                // Add our new value.
-                cursor.insert(v);
-
-                // There must be something left, so we don't need to worry about checking
-                // for emptiness.
+                // Add our new value (if not prunable).
+                if !prune(&v) {
+                    cursor.insert(v);
+                }
             }
             Entry::Vacant(entry) => {
                 // No collision, so we can just insert the value.
