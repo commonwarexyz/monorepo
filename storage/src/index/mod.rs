@@ -1,4 +1,6 @@
-//! A memory-efficient index for mapping keys to values.
+//! A memory-efficient index for mapping translated keys to values.
+//!
+//! # Multiple Values for a Key
 //!
 //! Keys are translated into a compressed, fixed-size representation using a `Translator`. Depending
 //! on the size of the representation, this can lead to a non-negligible number of collisions (even
@@ -12,7 +14,7 @@
 //! degrade substantially (each conflicting key may contain the desired value).
 
 mod storage;
-pub use storage::Index;
+pub use storage::{Cursor, Index};
 pub mod translator;
 
 use std::hash::{BuildHasher, Hash};
@@ -262,7 +264,8 @@ mod tests {
         {
             let mut cursor = index.get_mut(b"key").unwrap();
             assert_eq!(*cursor.next().unwrap(), 1);
-            assert!(cursor.delete());
+            cursor.delete();
+            assert!(!cursor.empty());
             assert!(context.encode().contains("pruned_total 1"));
         }
 
@@ -283,7 +286,9 @@ mod tests {
             assert_eq!(*cursor.next().unwrap(), 4);
             assert_eq!(*cursor.next().unwrap(), 1);
             assert_eq!(*cursor.next().unwrap(), 3);
-            assert!(cursor.delete());
+            cursor.delete();
+            assert!(!cursor.empty());
+            assert!(context.encode().contains("pruned_total 2"));
         }
 
         assert_eq!(
@@ -303,7 +308,8 @@ mod tests {
             assert_eq!(*cursor.next().unwrap(), 3);
             assert_eq!(*cursor.next().unwrap(), 1);
             assert_eq!(*cursor.next().unwrap(), 2);
-            assert!(cursor.delete());
+            cursor.delete();
+            assert!(!cursor.empty());
             assert!(context.encode().contains("pruned_total 3"));
         }
 
@@ -386,6 +392,61 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_index_remove_to_nothing() {
+        let context = deterministic::Context::default();
+        let mut index = Index::init(context.clone(), TwoCap);
+
+        // Build list: [0, 3, 2, 1]
+        for i in 0..4 {
+            index.insert(b"key", i);
+        }
+
+        // Remove middle: []
+        {
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 0); // head
+            cursor.delete();
+            assert_eq!(*cursor.next().unwrap(), 3); // middle
+            cursor.delete();
+            assert_eq!(*cursor.next().unwrap(), 2); // tail
+            cursor.delete();
+            assert_eq!(*cursor.next().unwrap(), 1); // tail
+            cursor.delete();
+            assert_eq!(cursor.next(), None);
+            assert!(cursor.empty());
+        }
+    }
+
+    #[test_traced]
+    fn test_index_remove_to_nothing_then_add() {
+        let context = deterministic::Context::default();
+        let mut index = Index::init(context.clone(), TwoCap);
+
+        // Build list: [0, 3, 2, 1]
+        for i in 0..4 {
+            index.insert(b"key", i);
+        }
+
+        // Remove middle: [4, 5]
+        {
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 0); // head
+            cursor.delete();
+            assert_eq!(*cursor.next().unwrap(), 3); // middle
+            cursor.delete();
+            assert_eq!(*cursor.next().unwrap(), 2); // tail
+            cursor.delete();
+            assert_eq!(*cursor.next().unwrap(), 1); // tail
+            cursor.delete();
+            assert_eq!(cursor.next(), None);
+            cursor.insert(4);
+            cursor.insert(5);
+            assert!(!cursor.empty());
+        }
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![4, 5]);
+    }
+
+    #[test_traced]
     fn test_index_insert_and_remove_cursor() {
         let context = deterministic::Context::default();
         let mut index = Index::init(context.clone(), TwoCap);
@@ -397,7 +458,8 @@ mod tests {
         {
             let mut cursor = index.get_mut(b"key").unwrap();
             assert_eq!(*cursor.next().unwrap(), 0); // head
-            assert!(!cursor.delete());
+            cursor.delete();
+            assert!(cursor.empty());
         }
         index.remove(b"key");
         assert!(index.get(b"key").copied().collect::<Vec<i32>>().is_empty());
@@ -446,5 +508,67 @@ mod tests {
         assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![30]);
         assert!(ctx.encode().contains("collisions_total 2"));
         assert!(ctx.encode().contains("pruned_total 2"));
+    }
+
+    #[test_traced]
+    fn test_cursor_delete_then_next_returns_next() {
+        let ctx = deterministic::Context::default();
+        let mut index = Index::init(ctx, TwoCap);
+
+        // Build list: [1 → 2]
+        index.insert(b"key", 1);
+        index.insert(b"key", 2);
+
+        let mut cursor = index.get_mut(b"key").unwrap();
+        assert_eq!(*cursor.next().unwrap(), 1); // Phase::Current
+
+        // After deleting the current element, `next` should yield the element that was
+        // copied in from the old `next` node (the iterator does not advance).
+        cursor.delete(); // remove 1, copy 2 into place
+        assert_eq!(*cursor.next().unwrap(), 2); // should yield 2
+        assert!(cursor.next().is_none()); // now exhausted
+    }
+
+    #[test_traced]
+    fn test_cursor_insert_after_done_appends() {
+        let ctx = deterministic::Context::default();
+        let mut index = Index::init(ctx, TwoCap);
+
+        index.insert(b"key", 10);
+
+        {
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 10);
+            assert!(cursor.next().is_none()); // Phase::Done
+
+            // Inserting after we've already iterated to the end should append a new node.
+            cursor.insert(20); // append while Done
+        }
+
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![10, 20]);
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next() before interacting")]
+    fn test_cursor_update_before_next_panics() {
+        let ctx = deterministic::Context::default();
+        let mut index = Index::init(ctx, TwoCap);
+        index.insert(b"key", 123);
+
+        let mut cursor = index.get_mut(b"key").unwrap();
+        // Calling `update` before `next` is a logic error and should panic.
+        cursor.update(321); // triggers unreachable! branch
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next() before interacting")]
+    fn test_cursor_delete_before_next_panics() {
+        let ctx = deterministic::Context::default();
+        let mut index = Index::init(ctx, TwoCap);
+        index.insert(b"key", 123);
+
+        let mut cursor = index.get_mut(b"key").unwrap();
+        // Calling `delete` before `next` is a logic error and should panic.
+        cursor.delete(); // triggers unreachable! branch
     }
 }

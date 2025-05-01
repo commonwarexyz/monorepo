@@ -3,76 +3,58 @@ use commonware_runtime::Metrics;
 use prometheus_client::metrics::counter::Counter;
 use std::collections::{hash_map::Entry, HashMap};
 
-/// The initial capacity of the hashmap. This is a guess at the number of unique keys we will
+/// The initial capacity of the internal hashmap. This is a guess at the number of unique keys we will
 /// encounter. The hashmap will grow as needed, but this is a good starting point (covering
 /// the entire [super::translator::OneCap] range).
 const INITIAL_CAPACITY: usize = 256;
 
-/// Each key is mapped to a `Record` that contains a value and optionally a `Vec` of values.
+/// Each key is mapped to a `Record` that contains a linked list of potential values for that key.
 ///
-/// In the common case (where a single value is associated with a key), we store the value directly in the `Record`
-/// to avoid both indirection (heap jumping) and unnecessary allocations (storing `Vec` directly would make all
-/// `Record`s larger).
-pub struct Record<V> {
+/// We avoid using a `Vec` to store values because the common case (where there are no collisions) would
+/// require an additional 24 bytes of memory for each value (the `len`, `capacity`, and `ptr` fields).
+///
+/// Again optimizing for the common case, we store the first value directly in the `Record` to avoid
+/// indirection (heap jumping).
+struct Record<V> {
     value: V,
     next: Option<Box<Record<V>>>,
 }
 
-impl<V> Record<V> {
-    pub fn get(&self) -> &V {
-        &self.value
-    }
-
-    pub fn peek(&self) -> Option<&V> {
-        self.next.as_deref().map(|r| r.get())
-    }
-
-    pub fn update(&mut self, v: V) {
-        self.value = v;
-    }
-
-    pub fn next(&self) -> Option<&Record<V>> {
-        self.next.as_deref()
-    }
-
-    pub fn next_mut(&mut self) -> Option<&mut Record<V>> {
-        self.next.as_deref_mut()
-    }
-
-    pub fn delete(&mut self) -> bool {
-        let Some(next) = self.next.take() else {
-            return false;
-        };
-        self.value = next.value;
-        self.next = next.next;
-        true
-    }
-
-    pub fn delete_next(&mut self) {
-        let Some(next) = self.next.take() else {
-            return;
-        };
-        self.next = next.next;
-    }
-
-    pub fn add(&mut self, v: V) {
-        let next = Box::new(Record {
-            value: v,
-            next: self.next.take(),
-        });
-        self.next = Some(next);
-    }
-}
-
+/// Phases of the `Cursor` during iteration.
+#[derive(PartialEq, Eq)]
 enum Phase {
+    /// Before iteration starts.
     Initial,
+    /// Pointing to the head of the list.
     Current,
+    /// Pointing to the next record in the list.
     Next,
+    /// Iteration is done (only insertions can occur).
     Done,
 }
 
+/// A mutable iterator over the values associated with a translated key, allowing in-place modifications.
+///
+/// The `Cursor` provides a way to traverse and modify the linked list of `Record`s while maintaining its
+/// structure. It supports:
+///
+/// - Iteration via `next()` to access values.
+/// - Modification via `update()` to change the current value.
+/// - Insertion via `insert()` to add new values.
+/// - Deletion via `delete()` to remove values.
+///
+/// # Safety
+///
+/// - Must call `next()` before `update()`, `insert()`, or `delete()` to establish a valid position.
+/// - Once `next()` returns `None`, only `insert()` can be called.
+/// - Dropping the `Cursor` automatically restores the list structure by reattaching any detached `next` nodes.
+///
+/// _If you don't need advanced functionality, just use `insert()`, `insert_and_prune()`, or `remove()` instead._
 pub struct Cursor<'a, V> {
     phase: Phase,
+    last_deleted: bool,
+    current_deleted: bool,
+
     current: Option<&'a mut Record<V>>,
     next: Option<Box<Record<V>>>,
 
@@ -81,10 +63,14 @@ pub struct Cursor<'a, V> {
 }
 
 impl<'a, V> Cursor<'a, V> {
-    pub fn new(record: &'a mut Record<V>, collisions: &'a Counter, pruned: &'a Counter) -> Self {
+    /// Creates a new `Cursor` from a mutable record reference, detaching its `next` chain for iteration.
+    fn new(record: &'a mut Record<V>, collisions: &'a Counter, pruned: &'a Counter) -> Self {
         let next = record.next.take();
         Self {
             phase: Phase::Initial,
+            last_deleted: false,
+            current_deleted: false,
+
             current: Some(record),
             next,
 
@@ -93,38 +79,68 @@ impl<'a, V> Cursor<'a, V> {
         }
     }
 
+    /// Updates the value at the current position in the iteration.
+    ///
+    /// Panics if called before `next()` or after iteration is complete (`Status::Done` phase).
     pub fn update(&mut self, v: V) {
+        assert!(!self.last_deleted);
         match self.phase {
             Phase::Initial => {
                 unreachable!("must call Cursor::next() before interacting")
             }
             Phase::Current => {
-                self.current.as_mut().unwrap().update(v);
+                self.current.as_mut().unwrap().value = v;
             }
             Phase::Next => {
-                self.next.as_mut().unwrap().update(v);
+                self.next.as_mut().unwrap().value = v;
             }
             Phase::Done => {
-                unreachable!("Cursor::next() returned false")
+                unreachable!(
+                    "only Cursor::insert() can be called after Cursor::next() returns None"
+                )
             }
         }
     }
 
+    /// Advances the cursor to the next value in the chain, returning a reference to it.
+    ///
+    /// Handles transitions between phases and adjusts for deletions. Returns `None` when the list is exhausted.
+    /// It is safe to call `next()` even after it returns `None`.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<&V> {
+        let was_deleted = self.last_deleted;
+        self.last_deleted = false;
         match self.phase {
             Phase::Initial => {
                 self.phase = Phase::Current;
-                return self.current.as_deref().map(|r| r.get());
+                return self.current.as_deref().map(|r| &r.value);
             }
             Phase::Current => {
+                // If was deleted, do nothing.
+                if was_deleted {
+                    return self.current.as_deref().map(|r| &r.value);
+                }
+
+                // If there is a next, switch to next phase.
                 if self.next.is_some() {
                     self.phase = Phase::Next;
-                    return self.next.as_deref().map(|r| r.get());
+                    return self.next.as_deref().map(|r| &r.value);
                 }
+
+                // If there is no next, we are done.
                 self.phase = Phase::Done;
                 return None;
             }
             Phase::Next => {
+                // If was deleted, do nothing.
+                if was_deleted {
+                    if self.next.is_some() {
+                        return self.next.as_deref().map(|r| &r.value);
+                    }
+                    self.phase = Phase::Done;
+                    return None;
+                }
+
                 // Take ownership of all records.
                 let current = self.current.take().unwrap();
                 let mut next = self.next.take().unwrap();
@@ -134,37 +150,52 @@ impl<'a, V> Cursor<'a, V> {
                 current.next = Some(next);
 
                 // Set current to be next (via a mutable reference to current).
-                self.current = current.next_mut();
+                self.current = current.next.as_deref_mut();
 
                 // Set next to be next's next.
                 self.next = next_next;
 
                 // If we have a next record, return it.
                 if self.next.is_some() {
-                    return self.next.as_deref().map(|r| r.get());
+                    return self.next.as_deref().map(|r| &r.value);
                 }
                 self.phase = Phase::Done;
             }
             Phase::Done => {
-                unreachable!("Cursor::next() returned false")
+                // We allow calling next() unnecessarily as inner ops may move us to `Phase::Done` (unbenownst to
+                // the caller).
             }
         }
         None
     }
 
-    pub fn insert(mut self, v: V) {
+    /// Inserts a new value at the current position.
+    ///
+    /// Increments the `collisions` counter as this adds to an existing key's chain.
+    pub fn insert(&mut self, v: V) {
+        assert!(!self.last_deleted);
         self.collisions.inc();
         match self.phase {
             Phase::Initial => {
-                unreachable!("must call Cursor::next() before interacting")
+                unimplemented!("must call Cursor::next() before interacting")
             }
             Phase::Current => {
+                // Take ownership of the current record.
+                let current = self.current.take().unwrap();
+
                 // Create a new record that points to next.
                 let new = Box::new(Record {
                     value: v,
-                    next: self.next.take(),
+                    next: None,
                 });
-                self.next = Some(new);
+
+                // Set current next to be the new record.
+                current.next = Some(new);
+
+                // Set current to be the new record (via a mutable reference to current).
+                self.current = current.next.as_deref_mut();
+
+                // If there is a next record, it is still next.
             }
             Phase::Next => {
                 // Take ownership of all records.
@@ -176,7 +207,7 @@ impl<'a, V> Cursor<'a, V> {
                 current.next = Some(next);
 
                 // Set current to be next (via a mutable reference to current).
-                self.current = current.next_mut();
+                self.current = current.next.as_deref_mut();
 
                 // Create a new record that points to next's next.
                 let new = Box::new(Record {
@@ -186,41 +217,74 @@ impl<'a, V> Cursor<'a, V> {
                 self.next = Some(new);
             }
             Phase::Done => {
-                // If we are done, next must be empty.
-                let new = Box::new(Record {
-                    value: v,
-                    next: None,
-                });
-                self.next = Some(new);
+                if self.current_deleted {
+                    self.current_deleted = false;
+                    self.current.as_mut().unwrap().value = v;
+                } else {
+                    // Take ownership of the current record.
+                    let current = self.current.take().unwrap();
+
+                    // Create a new record that points to next.
+                    let new = Box::new(Record {
+                        value: v,
+                        next: None,
+                    });
+
+                    // Set current next to be the new record.
+                    current.next = Some(new);
+
+                    // Set current to be the new record (via a mutable reference to current).
+                    self.current = current.next.as_deref_mut();
+                }
             }
         }
     }
 
-    pub fn delete(mut self) -> bool {
+    /// Deletes the current value, adjusting the list structure.
+    ///
+    /// Increments the `pruned` counter to track removals.
+    pub fn delete(&mut self) {
+        assert!(!self.last_deleted);
+        self.last_deleted = true;
         self.pruned.inc();
         match self.phase {
             Phase::Initial => {
                 unreachable!("must call Cursor::next() before interacting")
             }
             Phase::Current => {
-                let Some(next) = self.next.take() else {
-                    return false;
+                // If there is nothing next, we are done.
+                let Some(mut next) = self.next.take() else {
+                    self.current_deleted = true;
+                    self.phase = Phase::Done;
+                    return;
                 };
-                let current = self.current.as_mut().unwrap();
-                current.value = next.value;
-                current.next = next.next;
+
+                // If there is a next record, we update current to be it.
+                self.current.as_mut().unwrap().value = next.value;
+
+                // Take next's next and set it to be current's next.
+                let next_next = next.next.take();
+
+                // Restore the current record (whatever is next will still be there).
+                self.next = next_next;
             }
             Phase::Next => {
                 let next = self.next.take().unwrap();
                 self.next = next.next;
             }
             Phase::Done => {
-                unreachable!("Cursor::next() returned false")
+                unreachable!(
+                    "only Cursor::insert() can be called after Cursor::next() returns None"
+                )
             }
         }
+    }
 
-        // If we make it here, there is at least one record left.
-        true
+    /// Returns whether the list is empty after iteration and modifications.
+    ///
+    /// If this returns true, the key should be removed from `Index`.
+    pub fn empty(self) -> bool {
+        self.current_deleted
     }
 }
 
@@ -235,7 +299,7 @@ impl<V> Drop for Cursor<'_, V> {
     }
 }
 
-/// An iterator over the values in a `Record` chain.
+/// An iterator over the values in a `Record` list.
 pub struct RecordIter<'a, V> {
     current: Option<&'a Record<V>>,
 }
@@ -292,6 +356,7 @@ impl<T: Translator, V> Index<T, V> {
         self.map.is_empty()
     }
 
+    /// Retrieves an iterator over all values associated with a given key.
     pub fn get(&self, key: &[u8]) -> impl Iterator<Item = &V> {
         let k = self.translator.transform(key);
         self.map
@@ -303,6 +368,7 @@ impl<T: Translator, V> Index<T, V> {
             .flatten()
     }
 
+    /// Provides mutable access to the values associated with a key via a `Cursor`.
     pub fn get_mut(&mut self, key: &[u8]) -> Option<Cursor<V>> {
         let k = self.translator.transform(key);
         self.map
@@ -317,16 +383,14 @@ impl<T: Translator, V> Index<T, V> {
     }
 
     /// Insert a value at the given translated key.
-    ///
-    /// If no value exists at the key, inserting via `insert()` will be more efficient than
-    /// `mut_iter()` + `insert()`.
     pub fn insert(&mut self, key: &[u8], v: V) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
             Entry::Occupied(mut entry) => {
-                self.collisions.inc();
-                let entry = entry.get_mut();
-                entry.add(v);
+                let record = entry.get_mut();
+                let mut cursor = Cursor::new(record, &self.collisions, &self.pruned);
+                cursor.next();
+                cursor.insert(v);
             }
             Entry::Vacant(entry) => {
                 entry.insert(Record {
@@ -338,43 +402,29 @@ impl<T: Translator, V> Index<T, V> {
     }
 
     /// Insert a value at the given translated key, and prune any values that are no longer valid.
-    ///
-    /// If no value exists at the key or only 1 value exists at a key, inserting via `insert_and_prune()`
-    /// will be more efficient than `mut_iter()` + `remove()` + `insert()`.
     pub fn insert_and_prune(&mut self, key: &[u8], v: V, prune: impl Fn(&V) -> bool) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
             Entry::Occupied(mut entry) => {
                 // Get entry
-                self.collisions.inc();
-                let mut entry = entry.get_mut();
+                let entry = entry.get_mut();
+                let mut cursor = Cursor::new(entry, &self.collisions, &self.pruned);
 
-                // Check if first value should be changed
-                let old = entry.get();
-                if prune(old) {
-                    entry.update(v);
-                    self.pruned.inc();
-                } else {
-                    // If the first value is not pruned, we add the new value next.
-                    entry.add(v);
-                    entry = entry.next_mut().unwrap();
-                }
-
-                // Delete any prunable values.
+                // Remove anything that is prunable.
                 loop {
-                    let Some(peek) = entry.peek() else {
+                    let Some(old) = cursor.next() else {
                         break;
                     };
-                    if prune(peek) {
-                        entry.delete_next();
-                        self.pruned.inc();
-                    } else {
-                        let Some(next) = entry.next_mut() else {
-                            break;
-                        };
-                        entry = next;
+                    if prune(old) {
+                        cursor.delete();
                     }
                 }
+
+                // Add our new value.
+                cursor.insert(v);
+
+                // There must be something left, so we don't need to worry about checking
+                // for emptiness.
             }
             Entry::Vacant(entry) => {
                 // No collision, so we can just insert the value.
@@ -387,48 +437,26 @@ impl<T: Translator, V> Index<T, V> {
     }
 
     /// Remove a value at the given translated key, and prune any values that are no longer valid.
-    ///
-    /// If no value exists at the key or only 1 value exists at a key, this is more efficient than
-    /// `mut_iter()` + `remove()`.
     pub fn prune(&mut self, key: &[u8], prune: impl Fn(&V) -> bool) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
             Entry::Occupied(mut entry) => {
-                let mut record = entry.get_mut();
+                let record = entry.get_mut();
+                let mut cursor = Cursor::new(record, &self.collisions, &self.pruned);
 
-                // Loop until we find a value that is not pruned.
-                let remove = loop {
-                    let old = record.get();
-                    if prune(old) {
-                        self.pruned.inc();
-                        if !record.delete() {
-                            // If there are no more values, remove the entry.
-                            break true;
-                        }
-                        continue;
-                    }
-                    break false;
-                };
-                if remove {
-                    entry.remove();
-                    return;
-                }
-
-                // Now that we have some value that won't be pruned, we need to see if
-                // we should prune any of the next values.
+                // Remove anything that is prunable.
                 loop {
-                    let Some(peek) = record.peek() else {
+                    let Some(old) = cursor.next() else {
                         break;
                     };
-                    if prune(peek) {
-                        record.delete_next();
-                        self.pruned.inc();
-                    } else {
-                        let Some(next) = record.next_mut() else {
-                            break;
-                        };
-                        record = next;
+                    if prune(old) {
+                        cursor.delete();
                     }
+                }
+
+                // If there is nothing left, remove the entry.
+                if cursor.empty() {
+                    entry.remove();
                 }
             }
             Entry::Vacant(_) => {}
