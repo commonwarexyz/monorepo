@@ -97,9 +97,9 @@ impl<
 {
     /// Creates a new engine with the given context and configuration.
     /// Returns the engine and a mailbox for sending messages to the engine.
-    pub fn new(context: E, cfg: Config<Cfg, P>) -> (Self, Mailbox<P, D, M>) {
+    pub fn new(context: E, cfg: Config<Cfg, P>) -> (Self, Mailbox<Cfg, P, D, M>) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
-        let mailbox = Mailbox::<P, D, M>::new(mailbox_sender);
+        let mailbox = Mailbox::<Cfg, P, D, M>::new(mailbox_sender);
         let metrics = metrics::Metrics::init(context.clone());
 
         let result = Self {
