@@ -63,6 +63,7 @@ pub struct Cursor<'a, V> {
 }
 
 impl<'a, V> Cursor<'a, V> {
+    /// Creates a new `Cursor` from a mutable record reference, detaching its `next` chain for iteration.
     fn new(record: &'a mut Record<V>, collisions: &'a Counter, pruned: &'a Counter) -> Self {
         let next = record.next.take();
         Self {
@@ -78,6 +79,9 @@ impl<'a, V> Cursor<'a, V> {
         }
     }
 
+    /// Updates the value at the current position in the iteration.
+    ///
+    /// Panics if called before `next()` or after iteration is complete (`Status::Done` phase).
     pub fn update(&mut self, v: V) {
         assert!(!self.last_deleted);
         match self.phase {
@@ -98,6 +102,10 @@ impl<'a, V> Cursor<'a, V> {
         }
     }
 
+    /// Advances the cursor to the next value in the chain, returning a reference to it.
+    ///
+    /// Handles transitions between phases and adjusts for deletions. Returns `None` when the list is exhausted.
+    /// It is safe to call `next()` even after it returns `None`.
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<&V> {
         let was_deleted = self.last_deleted;
@@ -161,6 +169,9 @@ impl<'a, V> Cursor<'a, V> {
         None
     }
 
+    /// Inserts a new value at the current position.
+    ///
+    /// Increments the `collisions` counter as this adds to an existing key's chain.
     pub fn insert(&mut self, v: V) {
         assert!(!self.last_deleted);
         self.collisions.inc();
@@ -229,6 +240,9 @@ impl<'a, V> Cursor<'a, V> {
         }
     }
 
+    /// Deletes the current value, adjusting the list structure.
+    ///
+    /// Increments the `pruned` counter to track removals.
     pub fn delete(&mut self) {
         assert!(!self.last_deleted);
         self.last_deleted = true;
@@ -266,6 +280,9 @@ impl<'a, V> Cursor<'a, V> {
         }
     }
 
+    /// Returns whether the list is empty after iteration and modifications.
+    ///
+    /// If this returns true, the key should be removed from `Index`.
     pub fn empty(self) -> bool {
         self.current_deleted
     }
@@ -282,7 +299,7 @@ impl<V> Drop for Cursor<'_, V> {
     }
 }
 
-/// An iterator over the values in a `Record` chain.
+/// An iterator over the values in a `Record` list.
 pub struct RecordIter<'a, V> {
     current: Option<&'a Record<V>>,
 }
@@ -339,6 +356,7 @@ impl<T: Translator, V> Index<T, V> {
         self.map.is_empty()
     }
 
+    /// Retrieves an iterator over all values associated with a given key.
     pub fn get(&self, key: &[u8]) -> impl Iterator<Item = &V> {
         let k = self.translator.transform(key);
         self.map
@@ -350,6 +368,7 @@ impl<T: Translator, V> Index<T, V> {
             .flatten()
     }
 
+    /// Provides mutable access to the values associated with a key via a `Cursor`.
     pub fn get_mut(&mut self, key: &[u8]) -> Option<Cursor<V>> {
         let k = self.translator.transform(key);
         self.map
@@ -364,9 +383,6 @@ impl<T: Translator, V> Index<T, V> {
     }
 
     /// Insert a value at the given translated key.
-    ///
-    /// If no value exists at the key, inserting via `insert()` will be more efficient than
-    /// `mut_iter()` + `insert()`.
     pub fn insert(&mut self, key: &[u8], v: V) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
@@ -386,9 +402,6 @@ impl<T: Translator, V> Index<T, V> {
     }
 
     /// Insert a value at the given translated key, and prune any values that are no longer valid.
-    ///
-    /// If no value exists at the key or only 1 value exists at a key, inserting via `insert_and_prune()`
-    /// will be more efficient than `mut_iter()` + `remove()` + `insert()`.
     pub fn insert_and_prune(&mut self, key: &[u8], v: V, prune: impl Fn(&V) -> bool) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
@@ -424,9 +437,6 @@ impl<T: Translator, V> Index<T, V> {
     }
 
     /// Remove a value at the given translated key, and prune any values that are no longer valid.
-    ///
-    /// If no value exists at the key or only 1 value exists at a key, this is more efficient than
-    /// `mut_iter()` + `remove()`.
     pub fn prune(&mut self, key: &[u8], prune: impl Fn(&V) -> bool) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
