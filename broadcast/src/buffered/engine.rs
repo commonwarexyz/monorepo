@@ -336,10 +336,10 @@ impl<
             .or_insert_with(|| VecDeque::with_capacity(self.deque_size + 1));
 
         // If the message is already in the deque, move it to the front and return early
-        if let Some(i) = deque.iter().position(|d| *d == digest) {
+        if let Some(i) = deque.iter().position(|d| d.0 == identity && d.1 == digest) {
             if i != 0 {
                 deque.remove(i).unwrap(); // Must exist
-                deque.push_front(digest);
+                deque.push_front((identity, digest));
             }
             return false;
         };
@@ -347,7 +347,7 @@ impl<
         // - Insert the message into the peer cache
         // - Increment the item count
         // - Insert the message if-and-only-if the new item count is 1
-        deque.push_front(digest);
+        deque.push_front((identity, digest));
         let count = self
             .counts
             .entry(digest)
