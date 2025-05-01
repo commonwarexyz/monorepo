@@ -13,7 +13,7 @@ const INITIAL_CAPACITY: usize = 256;
 /// In the common case (where a single value is associated with a key), we store the value directly in the `Record`
 /// to avoid both indirection (heap jumping) and unnecessary allocations (storing `Vec` directly would make all
 /// `Record`s larger).
-pub struct Record<V> {
+struct Record<V> {
     value: V,
     next: Option<Box<Record<V>>>,
 }
@@ -39,7 +39,7 @@ pub struct Cursor<'a, V> {
 }
 
 impl<'a, V> Cursor<'a, V> {
-    pub fn new(record: &'a mut Record<V>, collisions: &'a Counter, pruned: &'a Counter) -> Self {
+    fn new(record: &'a mut Record<V>, collisions: &'a Counter, pruned: &'a Counter) -> Self {
         let next = record.next.take();
         Self {
             phase: Phase::Initial,
@@ -72,6 +72,7 @@ impl<'a, V> Cursor<'a, V> {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<&V> {
         let was_deleted = self.last_deleted;
         self.last_deleted = false;

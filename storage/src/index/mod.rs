@@ -12,7 +12,7 @@
 //! degrade substantially (each conflicting key may contain the desired value).
 
 mod storage;
-pub use storage::Index;
+pub use storage::{Cursor, Index};
 pub mod translator;
 
 use std::hash::{BuildHasher, Hash};
