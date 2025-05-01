@@ -3,29 +3,53 @@ use commonware_runtime::Metrics;
 use prometheus_client::metrics::counter::Counter;
 use std::collections::{hash_map::Entry, HashMap};
 
-/// The initial capacity of the hashmap. This is a guess at the number of unique keys we will
+/// The initial capacity of the internal hashmap. This is a guess at the number of unique keys we will
 /// encounter. The hashmap will grow as needed, but this is a good starting point (covering
 /// the entire [super::translator::OneCap] range).
 const INITIAL_CAPACITY: usize = 256;
 
-/// Each key is mapped to a `Record` that contains a value and optionally a `Vec` of values.
+/// Each key is mapped to a `Record` that contains a linked list of potential values for that key.
 ///
-/// In the common case (where a single value is associated with a key), we store the value directly in the `Record`
-/// to avoid both indirection (heap jumping) and unnecessary allocations (storing `Vec` directly would make all
-/// `Record`s larger).
+/// We avoid using a `Vec` to store values because the common case (where there are no collisions) would
+/// require an additional 24 bytes of memory for each value (the `len`, `capacity`, and `ptr` fields).
+///
+/// Again optimizing for the common case, we store the first value directly in the `Record` to avoid
+/// indirection (heap jumping).
 struct Record<V> {
     value: V,
     next: Option<Box<Record<V>>>,
 }
 
+/// Phases of the `Cursor` during iteration.
 #[derive(PartialEq, Eq)]
 enum Phase {
+    /// Before iteration starts.
     Initial,
+    /// Pointing to the head of the list.
     Current,
+    /// Pointing to the next record in the list.
     Next,
+    /// Iteration is done (only insertions can occur).
     Done,
 }
 
+/// A mutable iterator over the values associated with a translated key, allowing in-place modifications.
+///
+/// The `Cursor` provides a way to traverse and modify the linked list of `Record`s while maintaining its
+/// structure. It supports:
+///
+/// - Iteration via `next()` to access values.
+/// - Modification via `update()` to change the current value.
+/// - Insertion via `insert()` to add new values.
+/// - Deletion via `delete()` to remove values.
+///
+/// # Safety
+///
+/// - Must call `next()` before `update()`, `insert()`, or `delete()` to establish a valid position.
+/// - Once `next()` returns `None`, only `insert()` can be called.
+/// - Dropping the `Cursor` automatically restores the list structure by reattaching any detached `next` nodes.
+///
+/// _If you don't need advanced functionality, just use `insert()`, `insert_and_prune()`, or `remove()` instead._
 pub struct Cursor<'a, V> {
     phase: Phase,
     last_deleted: bool,
@@ -67,7 +91,9 @@ impl<'a, V> Cursor<'a, V> {
                 self.next.as_mut().unwrap().value = v;
             }
             Phase::Done => {
-                unreachable!("Cursor::next() returned false")
+                unreachable!(
+                    "only Cursor::insert() can be called after Cursor::next() returns None"
+                )
             }
         }
     }
@@ -127,7 +153,10 @@ impl<'a, V> Cursor<'a, V> {
                 }
                 self.phase = Phase::Done;
             }
-            Phase::Done => {}
+            Phase::Done => {
+                // We allow calling next() unnecessarily as inner ops may move us to `Phase::Done` (unbenownst to
+                // the caller).
+            }
         }
         None
     }
@@ -230,7 +259,9 @@ impl<'a, V> Cursor<'a, V> {
                 self.next = next.next;
             }
             Phase::Done => {
-                unreachable!("Cursor::next() returned false")
+                unreachable!(
+                    "only Cursor::insert() can be called after Cursor::next() returns None"
+                )
             }
         }
     }

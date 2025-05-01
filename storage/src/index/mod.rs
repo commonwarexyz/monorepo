@@ -1,4 +1,6 @@
-//! A memory-efficient index for mapping keys to values.
+//! A memory-efficient index for mapping translated keys to values.
+//!
+//! # Multiple Values for a Key
 //!
 //! Keys are translated into a compressed, fixed-size representation using a `Translator`. Depending
 //! on the size of the representation, this can lead to a non-negligible number of collisions (even
