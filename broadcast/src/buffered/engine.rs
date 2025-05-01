@@ -150,15 +150,15 @@ impl<
                         break;
                     };
                     match msg {
-                        Message::Broadcast{ message, responder } => {
+                        Message::Broadcast{ recipients, message, responder } => {
                             trace!("mailbox: broadcast");
-                            self.handle_broadcast(&mut sender, message, responder).await;
+                            self.handle_broadcast(&mut sender, recipients, message, responder).await;
                         }
-                        Message::Subscribe{ digest, responder } => {
+                        Message::Subscribe{ sender, digest, responder } => {
                             trace!("mailbox: subscribe");
                             self.handle_subscribe(digest, responder).await;
                         }
-                        Message::Get{ digest, responder } => {
+                        Message::Get{ sender, digest, responder } => {
                             trace!("mailbox: get");
                             self.handle_get(digest, responder).await;
                         }
@@ -202,6 +202,7 @@ impl<
     async fn handle_broadcast<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Cfg, M>,
+        recipients: Recipients<P>,
         msg: M,
         responder: oneshot::Sender<Vec<P>>,
     ) {
@@ -209,7 +210,6 @@ impl<
         let _ = self.insert_message(self.public_key.clone(), msg.clone());
 
         // Broadcast the message to the network
-        let recipients = Recipients::All;
         let sent_to = sender
             .send(recipients, msg, self.priority)
             .await
