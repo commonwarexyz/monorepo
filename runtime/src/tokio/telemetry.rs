@@ -40,30 +40,30 @@ pub fn init(
     let filter = tracing_subscriber::EnvFilter::new(logging.level.to_string());
 
     // Create fmt layer for logging
-    let fmt_layer = tracing_subscriber::fmt::layer()
+    let log_layer = tracing_subscriber::fmt::layer()
         .with_line_number(true)
         .with_thread_ids(true)
         .with_file(true)
         .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE);
 
     // Set the format to JSON (if specified)
-    let fmt_layer = if logging.json {
-        fmt_layer.json().boxed()
+    let log_layer = if logging.json {
+        log_layer.json().boxed()
     } else {
-        fmt_layer.pretty().boxed()
+        log_layer.pretty().boxed()
     };
 
     // Register the layers with the global subscriber
-    let registry = Registry::default().with(filter).with(fmt_layer);
+    let registry = Registry::default().with(filter).with(log_layer);
     if let Some(cfg) = traces {
         // Initialize tracing
         let tracer = export(cfg).expect("Failed to initialize tracer");
 
         // Create OpenTelemetry layer for tracing
-        let telemetry_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+        let trace_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
         // Set the global subscriber
-        let registry = registry.with(telemetry_layer);
+        let registry = registry.with(trace_layer);
         tracing::subscriber::set_global_default(registry).expect("Failed to set subscriber");
     } else {
         // Set the global subscriber
