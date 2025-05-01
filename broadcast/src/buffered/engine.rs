@@ -346,6 +346,9 @@ impl<
                 }
 
                 // Filters match → fulfil the subscription and drop the entry.
+                //
+                // The index `i` is intentionally not incremented here to check
+                // the element that was swapped into position `i`.
                 let (_, _, responder) = waiters.swap_remove(i);
                 self.respond_subscribe(responder, msg.clone());
             }
