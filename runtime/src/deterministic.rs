@@ -23,7 +23,10 @@
 //! ```
 
 use crate::{
-    network::{deterministic::Network as DeterministicNetwork, metered::Network as MeteredNetwork},
+    network::{
+        audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
+        metered::Network as MeteredNetwork,
+    },
     storage::{
         audited::Storage as AuditedStorage, memory::Storage as MemStorage,
         metered::Storage as MeteredStorage,
@@ -583,6 +586,8 @@ impl Tasks {
     }
 }
 
+type Network = MeteredNetwork<AuditedNetwork<DeterministicNetwork>>;
+
 /// Implementation of [crate::Spawner], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `deterministic`
 /// runtime.
@@ -590,7 +595,7 @@ pub struct Context {
     label: String,
     spawned: bool,
     executor: Arc<Executor>,
-    network: Arc<MeteredNetwork<DeterministicNetwork>>,
+    network: Arc<Network>,
     storage: MeteredStorage<AuditedStorage<MemStorage>>,
 }
 
@@ -618,7 +623,7 @@ impl Context {
             AuditedStorage::new(MemStorage::default(), auditor.clone()),
             runtime_registry,
         );
-        let network = DeterministicNetwork::new(auditor.clone());
+        let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
 
         let executor = Arc::new(Executor {
@@ -681,7 +686,7 @@ impl Context {
         // Copy state
         let auditor = self.executor.auditor.clone();
         let (signaler, signal) = Signaler::new();
-        let network = DeterministicNetwork::new(auditor.clone());
+        let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
 
         let executor = Arc::new(Executor {
@@ -996,7 +1001,7 @@ impl GClock for Context {
 impl ReasonablyRealtime for Context {}
 
 impl crate::Network for Context {
-    type Listener = crate::ListenerOf<MeteredNetwork<DeterministicNetwork>>;
+    type Listener = crate::ListenerOf<Network>;
 
     async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, Error> {
         self.network.bind(socket).await
