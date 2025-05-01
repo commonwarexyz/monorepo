@@ -144,7 +144,7 @@ impl<
             }
         }
 
-        // Replay log to populate the bitmap.
+        // Replay the log to generate the snapshot & populate the retained portion of the bitmap.
         let mut snapshot = Index::init(context.with_label("snapshot"), translator);
         let inactivity_floor_loc = Any::build_snapshot_from_log(
             hasher,
@@ -156,7 +156,6 @@ impl<
         .await
         .unwrap();
 
-        // Check the recovered state is correct.
         let any = Any {
             ops: mmr,
             log,
