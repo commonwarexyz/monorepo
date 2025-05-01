@@ -464,7 +464,7 @@ impl<T: Translator, V> Index<T, V> {
         }
     }
 
-    /// Remove a value at the given translated key, and prune any values that are no longer valid.
+    /// Remove all values associated with a translated key that match the `prune` predicate.
     pub fn prune(&mut self, key: &[u8], prune: impl Fn(&V) -> bool) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
