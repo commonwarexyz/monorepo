@@ -572,4 +572,78 @@ mod tests {
         // Calling `delete` before `next` is a logic error and should panic.
         cursor.delete(); // triggers unreachable! branch
     }
+
+    #[test_traced]
+    #[should_panic(
+        expected = "only Cursor::insert() can be called after Cursor::next() returns None"
+    )]
+    fn test_cursor_update_after_done() {
+        let ctx = deterministic::Context::default();
+        let mut index = Index::init(ctx, TwoCap);
+        index.insert(b"key", 123);
+
+        let mut cursor = index.get_mut(b"key").unwrap();
+        assert_eq!(*cursor.next().unwrap(), 123);
+        assert!(cursor.next().is_none()); // Phase::Done
+
+        // Calling `update` after `next` is a logic error and should panic.
+        cursor.update(321); // triggers unreachable! branch
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next() before interacting")]
+    fn test_cursor_insert_before_next() {
+        let ctx = deterministic::Context::default();
+        let mut index = Index::init(ctx, TwoCap);
+        index.insert(b"key", 123);
+
+        let mut cursor = index.get_mut(b"key").unwrap();
+
+        // Calling `insert` after `next` is a logic error and should panic.
+        cursor.insert(321); // triggers unreachable! branch
+    }
+
+    #[test_traced]
+    #[should_panic(
+        expected = "only Cursor::insert() can be called after Cursor::next() returns None"
+    )]
+    fn test_cursor_delete_after_done() {
+        let ctx = deterministic::Context::default();
+        let mut index = Index::init(ctx, TwoCap);
+        index.insert(b"key", 123);
+
+        let mut cursor = index.get_mut(b"key").unwrap();
+        assert_eq!(*cursor.next().unwrap(), 123);
+        assert!(cursor.next().is_none()); // Phase::Done
+
+        // Calling `delete` after `next` is a logic error and should panic.
+        cursor.delete(); // triggers unreachable! branch
+    }
+
+    #[test_traced]
+    fn test_cursor_insert_with_next() {
+        let ctx = deterministic::Context::default();
+        let mut index = Index::init(ctx, TwoCap);
+        index.insert(b"key", 123);
+        index.insert(b"key", 456);
+
+        let mut cursor = index.get_mut(b"key").unwrap();
+        assert_eq!(*cursor.next().unwrap(), 123);
+        assert_eq!(*cursor.next().unwrap(), 456);
+
+        // Insert while in Phase::Next
+        cursor.insert(789);
+
+        // Call next to advance to Phase::Done
+        assert_eq!(cursor.next(), None);
+
+        // Add another value while in Phase::Done
+        cursor.insert(999);
+
+        // Check that everything worked
+        drop(cursor);
+        let mut values = index.get(b"key").copied().collect::<Vec<_>>();
+        values.sort();
+        assert_eq!(values, vec![123, 456, 789, 999]);
+    }
 }
