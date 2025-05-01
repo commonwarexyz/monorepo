@@ -262,6 +262,9 @@ pub trait Listener: Sync + Send + 'static {
     fn accept(
         &mut self,
     ) -> impl Future<Output = Result<(SocketAddr, Self::Sink, Self::Stream), Error>> + Send;
+
+    /// Returns the local address of the listener.
+    fn local_addr(&self) -> Result<SocketAddr, std::io::Error>;
 }
 
 /// Interface that any runtime must implement to send

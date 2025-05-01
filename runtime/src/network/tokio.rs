@@ -78,6 +78,10 @@ impl crate::Listener for Listener {
             },
         ))
     }
+
+    fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {
+        self.listener.local_addr()
+    }
 }
 
 impl axum::serve::Listener for Listener {

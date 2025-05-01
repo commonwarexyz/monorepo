@@ -1146,6 +1146,10 @@ impl crate::Listener for Listener {
             },
         ))
     }
+
+    fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {
+        Ok(self.address)
+    }
 }
 
 /// Implementation of [crate::Sink] for the `deterministic` runtime.
