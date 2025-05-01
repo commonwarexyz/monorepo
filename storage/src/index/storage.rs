@@ -127,6 +127,11 @@ impl<'a, T: Translator, V> Cursor<'a, T, V> {
                 return self.entry.as_ref().map(|r| &r.get().value);
             }
             Phase::Entry => {
+                // If the last operation was a delete, do nothing.
+                if last_deleted {
+                    return self.entry.as_ref().map(|r| &r.get().value);
+                }
+
                 // If there is an entry after, we set it to be the current record.
                 if self.next.is_none() {
                     // If there is no next, we are done.
@@ -230,7 +235,18 @@ impl<'a, T: Translator, V> Cursor<'a, T, V> {
                 unreachable!("must call Cursor::next() before interacting")
             }
             Phase::Entry => {
-                self.entry_deleted = true;
+                // Attempt to overwrite the entry with the next value.
+                let Some(mut next) = self.next.take() else {
+                    // If there is no next, we are done.
+                    self.phase = Phase::Done;
+                    self.entry_deleted = true;
+                    return;
+                };
+
+                // Update in-place.
+                let next_next = next.next.take();
+                self.entry.as_mut().unwrap().get_mut().value = next.value;
+                self.next = next_next;
             }
             Phase::Next => {
                 let next = self.next.take().unwrap();
