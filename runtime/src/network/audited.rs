@@ -6,18 +6,29 @@ use std::{net::SocketAddr, sync::Arc};
 pub struct Sink<S: crate::Sink> {
     auditor: Arc<Auditor>,
     inner: S,
-    local_addr: SocketAddr,
     remote_addr: SocketAddr,
 }
 
 impl<S: crate::Sink> crate::Sink for Sink<S> {
     async fn send(&mut self, data: &[u8]) -> Result<(), Error> {
-        self.auditor.event(b"send", |hasher| {
-            hasher.update(self.local_addr.to_string().as_bytes());
+        self.auditor.event(b"send_attempt", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
             hasher.update(data);
         });
-        self.inner.send(data).await
+
+        self.inner.send(data).await.map_err(|e| {
+            self.auditor.event(b"send_failure", |hasher| {
+                hasher.update(self.remote_addr.to_string().as_bytes());
+                hasher.update(e.to_string().as_bytes());
+            });
+            e
+        })?;
+
+        self.auditor.event(b"send_success", |hasher| {
+            hasher.update(self.remote_addr.to_string().as_bytes());
+            hasher.update(data);
+        });
+        Ok(())
     }
 }
 
@@ -25,21 +36,28 @@ impl<S: crate::Sink> crate::Sink for Sink<S> {
 pub struct Stream<S: crate::Stream> {
     auditor: Arc<Auditor>,
     inner: S,
-    local_addr: SocketAddr,
     remote_addr: SocketAddr,
 }
 
 impl<S: crate::Stream> crate::Stream for Stream<S> {
     async fn recv(&mut self, buf: &mut [u8]) -> Result<(), Error> {
-        let result = self.inner.recv(buf).await;
-        if result.is_ok() {
-            self.auditor.event(b"recv", |hasher| {
-                hasher.update(self.local_addr.to_string().as_bytes());
+        self.auditor.event(b"recv_attempt", |hasher| {
+            hasher.update(self.remote_addr.to_string().as_bytes());
+        });
+
+        self.inner.recv(buf).await.map_err(|e| {
+            self.auditor.event(b"recv_failure", |hasher| {
                 hasher.update(self.remote_addr.to_string().as_bytes());
-                hasher.update(buf);
+                hasher.update(e.to_string().as_bytes());
             });
-        }
-        result
+            e
+        })?;
+
+        self.auditor.event(b"recv_success", |hasher| {
+            hasher.update(self.remote_addr.to_string().as_bytes());
+            hasher.update(buf);
+        });
+        Ok(())
     }
 }
 
@@ -55,9 +73,19 @@ impl<L: crate::Listener> crate::Listener for Listener<L> {
     type Stream = Stream<L::Stream>;
 
     async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
-        let (addr, sink, stream) = self.inner.accept().await?;
+        self.auditor.event(b"accept_attempt", |hasher| {
+            hasher.update(self.local_addr.to_string().as_bytes());
+        });
 
-        self.auditor.event(b"accept", |hasher| {
+        let (addr, sink, stream) = self.inner.accept().await.map_err(|e| {
+            self.auditor.event(b"accept_failure", |hasher| {
+                hasher.update(self.local_addr.to_string().as_bytes());
+                hasher.update(e.to_string().as_bytes());
+            });
+            e
+        })?;
+
+        self.auditor.event(b"accept_success", |hasher| {
             hasher.update(self.local_addr.to_string().as_bytes());
             hasher.update(addr.to_string().as_bytes());
         });
@@ -67,13 +95,11 @@ impl<L: crate::Listener> crate::Listener for Listener<L> {
             Sink {
                 auditor: self.auditor.clone(),
                 inner: sink,
-                local_addr: self.local_addr,
                 remote_addr: addr,
             },
             Stream {
                 auditor: self.auditor.clone(),
                 inner: stream,
-                local_addr: self.local_addr,
                 remote_addr: addr,
             },
         ))
@@ -98,44 +124,57 @@ impl<N: crate::Network> Network<N> {
 impl<N: crate::Network> crate::Network for Network<N> {
     type Listener = Listener<N::Listener>;
 
-    async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, Error> {
-        self.auditor.event(b"bind", |hasher| {
-            hasher.update(socket.to_string().as_bytes());
+    async fn bind(&self, local_addr: SocketAddr) -> Result<Self::Listener, Error> {
+        self.auditor.event(b"bind_attempt", |hasher| {
+            hasher.update(local_addr.to_string().as_bytes());
         });
 
-        let inner = self.inner.bind(socket).await?;
+        let inner = self.inner.bind(local_addr).await.map_err(|e| {
+            self.auditor.event(b"bind_failure", |hasher| {
+                hasher.update(local_addr.to_string().as_bytes());
+                hasher.update(e.to_string().as_bytes());
+            });
+            e
+        })?;
+
+        self.auditor.event(b"bind_success", |hasher| {
+            hasher.update(local_addr.to_string().as_bytes());
+        });
 
         Ok(Listener {
             auditor: self.auditor.clone(),
             inner,
-            local_addr: socket,
+            local_addr,
         })
     }
 
-    async fn dial(&self, socket: SocketAddr) -> Result<(SinkOf<Self>, StreamOf<Self>), Error> {
-        // Assume we get local address from the connection itself
-        // In a real implementation, we'd get this from the socket
-        let local_addr = SocketAddr::from(([127, 0, 0, 1], 0));
-
-        self.auditor.event(b"dial", |hasher| {
-            hasher.update(local_addr.to_string().as_bytes());
-            hasher.update(socket.to_string().as_bytes());
+    async fn dial(&self, remote_addr: SocketAddr) -> Result<(SinkOf<Self>, StreamOf<Self>), Error> {
+        self.auditor.event(b"dial_attempt", |hasher| {
+            hasher.update(remote_addr.to_string().as_bytes());
         });
 
-        let (sink, stream) = self.inner.dial(socket).await?;
+        let (sink, stream) = self.inner.dial(remote_addr).await.map_err(|e| {
+            self.auditor.event(b"dial_failure", |hasher| {
+                hasher.update(remote_addr.to_string().as_bytes());
+                hasher.update(e.to_string().as_bytes());
+            });
+            e
+        })?;
+
+        self.auditor.event(b"dial_success", |hasher| {
+            hasher.update(remote_addr.to_string().as_bytes());
+        });
 
         Ok((
             Sink {
                 auditor: self.auditor.clone(),
                 inner: sink,
-                local_addr,
-                remote_addr: socket,
+                remote_addr,
             },
             Stream {
                 auditor: self.auditor.clone(),
                 inner: stream,
-                local_addr,
-                remote_addr: socket,
+                remote_addr,
             },
         ))
     }
