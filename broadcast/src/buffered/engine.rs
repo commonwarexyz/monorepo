@@ -67,19 +67,19 @@ pub struct Engine<
     // Cache
     ////////////////////////////////////////
     /// All cached messages by digest.
-    items: HashMap<Dd, HashMap<Di, M>>,
+    items: HashMap<Di, HashMap<Dd, M>>,
 
     /// A LRU cache of the latest received digests from each peer.
     ///
     /// This is used to limit the number of digests stored per peer.
     /// At most `deque_size` digests are stored per peer. This value is expected to be small, so
     /// membership checks are done in linear time.
-    deques: HashMap<P, VecDeque<(Dd, Di)>>,
+    deques: HashMap<P, VecDeque<(Di, Dd)>>,
 
     /// The number of times each digest exists in one of the deques.
     ///
     /// This is because multiple peers can send the same message.
-    counts: HashMap<Di, usize>,
+    counts: HashMap<Dd, usize>,
 
     ////////////////////////////////////////
     // Metrics
@@ -234,7 +234,7 @@ impl<
         responder: oneshot::Sender<M>,
     ) {
         // Check if the message is already in the cache
-        if let Some(msg) = self.items.get(&digest) {
+        if let Some(msg) = self.items.get(&identity) {
             self.respond_subscribe(responder, msg.clone());
             return;
         }
