@@ -2,38 +2,42 @@
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, RangeConfig, Read, ReadRangeExt, Write};
-use commonware_cryptography::{
-    sha256::{Digest as Sha256Digest, Sha256},
-    Digestible, Hasher, Identifiable,
-};
+use commonware_cryptography::{hash, sha256::Digest, Digestible, Identifiable};
 
 /// A simple test message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TestMessage {
+    // The identity of the message.
+    pub identity: Vec<u8>,
+
     /// The content of the message.
     pub content: Vec<u8>,
 }
 
 impl TestMessage {
     /// Create a new test message with the given content.
-    pub fn new(content: impl Into<Vec<u8>>) -> Self {
+    pub fn new(identity: impl Into<Vec<u8>>, content: impl Into<Vec<u8>>) -> Self {
         Self {
+            identity: identity.into(),
             content: content.into(),
         }
     }
-}
 
-impl Digestible<Sha256Digest> for TestMessage {
-    fn digest(&self) -> Sha256Digest {
-        let mut hasher = Sha256::default();
-        hasher.update(&self.content);
-        hasher.finalize()
+    pub fn simple(msg: impl Into<Vec<u8>>) -> Self {
+        let msg = msg.into();
+        Self::new(msg.clone(), msg)
     }
 }
 
-impl Identifiable<Sha256Digest> for TestMessage {
-    fn identity(&self) -> Sha256Digest {
-        self.digest()
+impl Digestible<Digest> for TestMessage {
+    fn digest(&self) -> Digest {
+        hash(&self.content)
+    }
+}
+
+impl Identifiable<Digest> for TestMessage {
+    fn identity(&self) -> Digest {
+        hash(&self.identity)
     }
 }
 
@@ -51,7 +55,8 @@ impl EncodeSize for TestMessage {
 
 impl<R: RangeConfig> Read<R> for TestMessage {
     fn read_cfg(buf: &mut impl Buf, range: &R) -> Result<Self, CodecError> {
+        let identity = Vec::<u8>::read_range(buf, range.clone())?;
         let content = Vec::<u8>::read_range(buf, range.clone())?;
-        Ok(Self { content })
+        Ok(Self { identity, content })
     }
 }
