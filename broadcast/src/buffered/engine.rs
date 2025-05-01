@@ -351,8 +351,8 @@ impl<
         // If the message is already in the deque, move it to the front and return early
         if let Some(i) = deque.iter().position(|d| d.0 == identity && d.1 == digest) {
             if i != 0 {
-                deque.remove(i).unwrap(); // Must exist
-                deque.push_front((identity, digest));
+                let v = deque.remove(i).unwrap(); // Must exist
+                deque.push_front(v);
             }
             return false;
         };
