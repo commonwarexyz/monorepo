@@ -387,7 +387,7 @@ impl<
     fn cleanup_waiters(&mut self) {
         self.waiters.retain(|_, waiters| {
             let initial_len = waiters.len();
-            waiters.retain(|waiter| !waiter.is_canceled());
+            waiters.retain(|waiter| !waiter.2.is_canceled());
             let dropped_count = initial_len - waiters.len();
 
             // Increment metrics for each dropped waiter
