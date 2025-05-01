@@ -1,6 +1,7 @@
 use crate::Broadcaster;
 use commonware_codec::{Codec, Config};
 use commonware_cryptography::{Digest, Identifiable};
+use commonware_p2p::Recipients;
 use commonware_utils::Array;
 use futures::{
     channel::{mpsc, oneshot},
@@ -13,6 +14,7 @@ pub enum Message<P: Array, D: Digest, M: Identifiable<D>> {
     ///
     /// The responder will be sent a list of peers that received the message.
     Broadcast {
+        recipients: Recipients<P>,
         message: M,
         responder: oneshot::Sender<Vec<P>>,
     },
@@ -22,12 +24,14 @@ pub enum Message<P: Array, D: Digest, M: Identifiable<D>> {
     /// The responder will be sent the message when it is available; either instantly (if cached) or
     /// when it is received from the network. The request can be canceled by dropping the responder.
     Subscribe {
+        sender: Option<P>,
         digest: D,
         responder: oneshot::Sender<M>,
     },
 
     /// Get a message by digest.
     Get {
+        sender: Option<P>,
         digest: D,
         responder: oneshot::Sender<Option<M>>,
     },
@@ -50,12 +54,13 @@ impl<P: Array, D: Digest, M: Identifiable<D>> Mailbox<P, D, M> {
     ///
     /// The responder will be sent the message when it is available; either instantly (if cached) or
     /// when it is received from the network. The request can be canceled by dropping the responder.
-    pub async fn subscribe(&mut self, digest: D) -> oneshot::Receiver<M> {
-        let (sender, receiver) = oneshot::channel();
+    pub async fn subscribe(&mut self, sender: Option<P>, digest: D) -> oneshot::Receiver<M> {
+        let (responder, receiver) = oneshot::channel();
         self.sender
             .send(Message::Subscribe {
+                sender,
                 digest,
-                responder: sender,
+                responder,
             })
             .await
             .expect("mailbox closed");
@@ -66,23 +71,30 @@ impl<P: Array, D: Digest, M: Identifiable<D>> Mailbox<P, D, M> {
     ///
     /// The responder will be sent the message when it is available; either instantly (if cached) or
     /// when it is received from the network. The request can be canceled by dropping the responder.
-    pub async fn subscribe_prepared(&mut self, digest: D, sender: oneshot::Sender<M>) {
+    pub async fn subscribe_prepared(
+        &mut self,
+        sender: Option<P>,
+        digest: D,
+        responder: oneshot::Sender<M>,
+    ) {
         self.sender
             .send(Message::Subscribe {
+                sender,
                 digest,
-                responder: sender,
+                responder,
             })
             .await
             .expect("mailbox closed");
     }
 
     /// Get a message by digest.
-    pub async fn get(&mut self, digest: D) -> Option<M> {
-        let (sender, receiver) = oneshot::channel();
+    pub async fn get(&mut self, sender: Option<P>, digest: D) -> Option<M> {
+        let (responder, receiver) = oneshot::channel();
         self.sender
             .send(Message::Get {
+                sender,
                 digest,
-                responder: sender,
+                responder,
             })
             .await
             .expect("mailbox closed");
@@ -90,16 +102,21 @@ impl<P: Array, D: Digest, M: Identifiable<D>> Mailbox<P, D, M> {
     }
 }
 
-impl<Cfg: Config, P: Array, D: Digest, M: Codec<Cfg> + Identifiable<D>> Broadcaster<Cfg>
+impl<Cfg: Config, P: Array, D: Digest, M: Codec<Cfg> + Identifiable<D>> Broadcaster<P, Cfg>
     for Mailbox<P, D, M>
 {
     type Message = M;
     type Response = Vec<P>;
 
-    async fn broadcast(&mut self, message: Self::Message) -> oneshot::Receiver<Vec<P>> {
+    async fn broadcast(
+        &mut self,
+        recipients: Recipients<P>,
+        message: Self::Message,
+    ) -> oneshot::Receiver<Vec<P>> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::Broadcast {
+                recipients,
                 message,
                 responder: sender,
             })
