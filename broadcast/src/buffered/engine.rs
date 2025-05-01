@@ -62,7 +62,7 @@ pub struct Engine<
 
     /// Pending requests from the application.
     #[allow(clippy::type_complexity)]
-    waiters: HashMap<Di, Vec<(Option<P>, Option<Dd>, oneshot::Sender<Vec<M>>)>>,
+    waiters: HashMap<Di, Vec<(Option<P>, Option<Dd>, oneshot::Sender<M>)>>,
 
     ////////////////////////////////////////
     // Cache
@@ -224,7 +224,7 @@ impl<
     }
 
     /// Searches through all maintained messages for a match.
-    fn find_message(&mut self, sender: &Option<P>, identity: Di, digest: Option<Dd>) -> Vec<M> {
+    fn find_message(&mut self, sender: &Option<P>, identity: Di, digest: Option<Dd>) -> Vec<&M> {
         if let Some(ref sender) = sender {
             if let Some(deque) = self.deques.get(sender) {
                 for item in deque {
@@ -238,20 +238,17 @@ impl<
 
                     // If the message is already in the cache, send it to the responder
                     if let Some(msg) = self.items.get(&item.0).and_then(|m| m.get(&item.1)) {
-                        return vec![msg.clone()];
+                        return vec![msg];
                     }
                 }
             }
         } else if let Some(msg) = self.items.get(&identity) {
             if let Some(digest) = digest {
                 if let Some(msg) = msg.get(&digest) {
-                    return vec![msg.clone()];
+                    return vec![msg];
                 }
-            } else {
-                // If no digest is provided, send all items we have
-                // for an identity.
-                return msg.values().cloned().collect();
             }
+            return msg.values().collect();
         }
         Vec::new()
     }
@@ -265,12 +262,13 @@ impl<
         sender: Option<P>,
         identity: Di,
         digest: Option<Dd>,
-        responder: oneshot::Sender<Vec<M>>,
+        responder: oneshot::Sender<M>,
     ) {
         // Check if the message is already in the cache
         let items = self.find_message(&sender, identity, digest);
         if !items.is_empty() {
-            self.respond_subscribe(responder, items);
+            let msg = items[0].clone();
+            self.respond_subscribe(responder, msg);
             return;
         }
 
@@ -289,8 +287,9 @@ impl<
         digest: Option<Dd>,
         responder: oneshot::Sender<Vec<M>>,
     ) {
-        let item = self.find_message(&sender, identity, digest);
-        self.respond_get(responder, item);
+        let items = self.find_message(&sender, identity, digest);
+        let items = items.into_iter().cloned().collect::<Vec<_>>();
+        self.respond_get(responder, items);
     }
 
     /// Handles a message that was received from a peer.
@@ -334,7 +333,7 @@ impl<
 
                 // Filters match → fulfil the subscription and drop the entry.
                 let (_, _, responder) = waiters.swap_remove(i);
-                self.respond_subscribe(responder, vec![msg.clone()]);
+                self.respond_subscribe(responder, msg.clone());
             }
 
             // Re-insert if any waiters remain.
@@ -419,7 +418,7 @@ impl<
 
     /// Respond to a waiter with a message.
     /// Increments the appropriate metric based on the result.
-    fn respond_subscribe(&mut self, responder: oneshot::Sender<Vec<M>>, msg: Vec<M>) {
+    fn respond_subscribe(&mut self, responder: oneshot::Sender<M>, msg: M) {
         let result = responder.send(msg);
         self.metrics.subscribe.inc(match result {
             Ok(_) => Status::Success,
