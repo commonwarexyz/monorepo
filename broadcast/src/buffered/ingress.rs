@@ -22,8 +22,9 @@ pub enum Message<P: Array, Di: Digest, Dd: Digest, M: Identifiable<Di> + Digesti
 
     /// Subscribe to receive a message by digest.
     ///
-    /// The responder will be sent the message when it is available; either instantly (if cached) or
-    /// when it is received from the network. The request can be canceled by dropping the responder.
+    /// The responder will be sent the first message for an identity when it is available; either
+    /// instantly (if cached) or when it is received from the network. The request can be canceled
+    /// by dropping the responder.
     Subscribe {
         sender: Option<P>,
         identity: Di,
@@ -31,7 +32,7 @@ pub enum Message<P: Array, Di: Digest, Dd: Digest, M: Identifiable<Di> + Digesti
         responder: oneshot::Sender<M>,
     },
 
-    /// Get a message by digest.
+    /// Get all messages for an identity.
     Get {
         sender: Option<P>,
         identity: Di,
@@ -77,10 +78,11 @@ impl<
         M: Identifiable<Di> + Digestible<Dd> + Codec<MCfg>,
     > Mailbox<P, Di, Dd, MCfg, M>
 {
-    /// Subscribe to a message by digest.
+    /// Subscribe to a message by sender (optionally), identity, and digest (optionally).
     ///
-    /// The responder will be sent the message when it is available; either instantly (if cached) or
-    /// when it is received from the network. The request can be canceled by dropping the responder.
+    /// The responder will be sent the first message for an identity when it is available; either
+    /// instantly (if cached) or when it is received from the network. The request can be canceled
+    /// by dropping the responder.
     pub async fn subscribe(
         &mut self,
         sender: Option<P>,
@@ -100,10 +102,12 @@ impl<
         receiver
     }
 
-    /// Subscribe to a message by digest with an externally prepared sender.
+    /// Subscribe to a message by sender (optionally), identity, and digest (optionally) with an
+    /// externally prepared responder.
     ///
-    /// The responder will be sent the message when it is available; either instantly (if cached) or
-    /// when it is received from the network. The request can be canceled by dropping the responder.
+    /// The responder will be sent the first message for an identity when it is available; either
+    /// instantly (if cached) or when it is received from the network. The request can be canceled
+    /// by dropping the responder.
     pub async fn subscribe_prepared(
         &mut self,
         sender: Option<P>,
@@ -122,7 +126,7 @@ impl<
             .expect("mailbox closed");
     }
 
-    /// Get a message by digest.
+    /// Get all messages for an identity.
     pub async fn get(&mut self, sender: Option<P>, identity: Di, digest: Option<Dd>) -> Vec<M> {
         let (responder, receiver) = oneshot::channel();
         self.sender
