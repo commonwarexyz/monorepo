@@ -15,7 +15,6 @@ pub struct TestMessage {
 }
 
 impl TestMessage {
-    /// Create a new test message with the given content.
     pub fn new(identity: impl Into<Vec<u8>>, content: impl Into<Vec<u8>>) -> Self {
         Self {
             identity: identity.into(),
