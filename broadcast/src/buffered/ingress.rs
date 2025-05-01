@@ -1,5 +1,5 @@
 use crate::Broadcaster;
-use commonware_codec::{Codec, Config};
+use commonware_codec::{Codec, Config as CodecConfig};
 use commonware_cryptography::{Digest, Digestible, Identifiable};
 use commonware_p2p::Recipients;
 use commonware_utils::Array;
@@ -7,6 +7,7 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
+use std::marker::PhantomData;
 
 /// Message types that can be sent to the `Mailbox`
 pub enum Message<P: Array, Di: Digest, Dd: Digest, M: Identifiable<Di> + Digestible<Dd>> {
@@ -41,17 +42,41 @@ pub enum Message<P: Array, Di: Digest, Dd: Digest, M: Identifiable<Di> + Digesti
 
 /// Ingress mailbox for [`Engine`](super::Engine).
 #[derive(Clone)]
-pub struct Mailbox<P: Array, Di: Digest, Dd: Digest, M: Identifiable<Di> + Digestible<Dd>> {
+pub struct Mailbox<
+    P: Array,
+    Di: Digest,
+    Dd: Digest,
+    MCfg: CodecConfig,
+    M: Identifiable<Di> + Digestible<Dd> + Codec<MCfg>,
+> {
     sender: mpsc::Sender<Message<P, Di, Dd, M>>,
+    _phantom: PhantomData<MCfg>,
 }
 
-impl<P: Array, Di: Digest, Dd: Digest, M: Identifiable<Di> + Digestible<Dd>> Mailbox<P, Di, Dd, M> {
+impl<
+        P: Array,
+        Di: Digest,
+        Dd: Digest,
+        MCfg: CodecConfig,
+        M: Identifiable<Di> + Digestible<Dd> + Codec<MCfg>,
+    > Mailbox<P, Di, Dd, MCfg, M>
+{
     pub(super) fn new(sender: mpsc::Sender<Message<P, Di, Dd, M>>) -> Self {
-        Self { sender }
+        Self {
+            sender,
+            _phantom: PhantomData,
+        }
     }
 }
 
-impl<P: Array, Di: Digest, Dd: Digest, M: Identifiable<Di> + Digestible<Dd>> Mailbox<P, Di, Dd, M> {
+impl<
+        P: Array,
+        Di: Digest,
+        Dd: Digest,
+        MCfg: CodecConfig,
+        M: Identifiable<Di> + Digestible<Dd> + Codec<MCfg>,
+    > Mailbox<P, Di, Dd, MCfg, M>
+{
     /// Subscribe to a message by digest.
     ///
     /// The responder will be sent the message when it is available; either instantly (if cached) or
@@ -114,13 +139,15 @@ impl<P: Array, Di: Digest, Dd: Digest, M: Identifiable<Di> + Digestible<Dd>> Mai
 }
 
 impl<
-        Cfg: Config,
         P: Array,
         Di: Digest,
         Dd: Digest,
-        M: Codec<Cfg> + Identifiable<Di> + Digestible<Dd>,
-    > Broadcaster<P, Cfg> for Mailbox<P, Di, Dd, M>
+        MCfg: CodecConfig,
+        M: Identifiable<Di> + Digestible<Dd> + Codec<MCfg>,
+    > Broadcaster for Mailbox<P, Di, Dd, MCfg, M>
 {
+    type PublicKey = P;
+    type MessageDecoder = MCfg;
     type Message = M;
     type Response = Vec<P>;
 

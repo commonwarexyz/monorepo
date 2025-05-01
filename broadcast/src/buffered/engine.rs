@@ -1,6 +1,6 @@
 use super::{metrics, Config, Mailbox, Message};
 use crate::buffered::metrics::SequencerLabel;
-use commonware_codec::{Codec, Config as CodecCfg};
+use commonware_codec::{Codec, Config as CodecConfig};
 use commonware_cryptography::{Digest, Digestible, Identifiable};
 use commonware_macros::select;
 use commonware_p2p::{
@@ -31,8 +31,8 @@ pub struct Engine<
     P: Array,
     Di: Digest,
     Dd: Digest,
-    Cfg: CodecCfg,
-    M: Identifiable<Di> + Digestible<Dd> + Codec<Cfg>,
+    MCfg: CodecConfig,
+    M: Identifiable<Di> + Digestible<Dd> + Codec<MCfg>,
 > {
     ////////////////////////////////////////
     // Interfaces
@@ -52,7 +52,7 @@ pub struct Engine<
     deque_size: usize,
 
     /// Configuration for decoding messages
-    codec_config: Cfg,
+    codec_config: MCfg,
 
     ////////////////////////////////////////
     // Messaging
@@ -94,15 +94,15 @@ impl<
         P: Array,
         Di: Digest,
         Dd: Digest,
-        Cfg: CodecCfg,
-        M: Identifiable<Di> + Digestible<Dd> + Codec<Cfg>,
-    > Engine<E, P, Di, Dd, Cfg, M>
+        MCfg: CodecConfig,
+        M: Identifiable<Di> + Digestible<Dd> + Codec<MCfg>,
+    > Engine<E, P, Di, Dd, MCfg, M>
 {
     /// Creates a new engine with the given context and configuration.
     /// Returns the engine and a mailbox for sending messages to the engine.
-    pub fn new(context: E, cfg: Config<Cfg, P>) -> (Self, Mailbox<P, Di, Dd, M>) {
+    pub fn new(context: E, cfg: Config<P, MCfg>) -> (Self, Mailbox<P, Di, Dd, MCfg, M>) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
-        let mailbox = Mailbox::<P, Di, Dd, M>::new(mailbox_sender);
+        let mailbox = Mailbox::<P, Di, Dd, MCfg, M>::new(mailbox_sender);
         let metrics = metrics::Metrics::init(context.clone());
 
         let result = Self {
@@ -204,7 +204,7 @@ impl<
     /// Handles a `broadcast` request from the application.
     async fn handle_broadcast<Sr: Sender<PublicKey = P>>(
         &mut self,
-        sender: &mut WrappedSender<Sr, Cfg, M>,
+        sender: &mut WrappedSender<Sr, MCfg, M>,
         recipients: Recipients<P>,
         msg: M,
         responder: oneshot::Sender<Vec<P>>,

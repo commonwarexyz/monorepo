@@ -9,13 +9,20 @@ use std::future::Future;
 pub mod buffered;
 
 /// Broadcaster is the interface responsible for attempting replication of messages across a network.
-pub trait Broadcaster<P: Array, Cfg: Config>: Clone + Send + 'static {
+pub trait Broadcaster: Clone + Send + 'static {
+    /// PublicKey is the type of public key used to identify the sender and recipients.
+    type PublicKey: Array;
+
+    /// MessageDecoder is the type of configuration used as the configuration for decoding the
+    /// Message type.
+    type MessageDecoder: Config;
+
     /// Message is the type of data that can be broadcasted.
     ///
     /// It must implement the Codec trait so that it can be:
     /// - serialized upon broadcast
     /// - deserialized upon reception
-    type Message: Codec<Cfg> + Clone + Send + 'static;
+    type Message: Codec<Self::MessageDecoder> + Clone + Send + 'static;
 
     /// Response is the type of data that is returned once the message is broadcasted.
     ///
@@ -25,7 +32,7 @@ pub trait Broadcaster<P: Array, Cfg: Config>: Clone + Send + 'static {
     /// Attempt to broadcast a message to the network.
     fn broadcast(
         &mut self,
-        recipients: Recipients<P>,
+        recipients: Recipients<Self::PublicKey>,
         message: Self::Message,
     ) -> impl Future<Output = oneshot::Receiver<Self::Response>> + Send;
 }
