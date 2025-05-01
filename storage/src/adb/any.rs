@@ -230,13 +230,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             match op.to_type() {
                 Type::Deleted(key) => {
                     // Remove the key if it exists in the snapshot.
-                    let empty = if let Some(mut cursor) = snapshot.get_mut(&key) {
+                    if let Some(mut cursor) = snapshot.get_mut(&key) {
                         // Iterate over all conflicting keys in the snapshot.
-                        loop {
-                            let Some(loc) = cursor.next() else {
-                                // Nothing to delete
-                                break false;
-                            };
+                        while let Some(loc) = cursor.next() {
                             let op = log.read(*loc).await?;
                             if op.to_key() != key {
                                 continue;
@@ -245,17 +241,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                                 bitmap_ref.set_bit(hasher, *loc, false);
                             }
                             cursor.delete();
-                            break cursor.empty();
+                            break;
                         }
-                    } else {
-                        // The key isn't in the snapshot, so this is a no-op.
-                        false
-                    };
-
-                    // If the key is the last one in the cursor, then we need to remove it from
-                    // the snapshot.
-                    if empty {
-                        snapshot.remove(&key);
                     }
                 }
                 Type::Update(key, _) => {
@@ -300,18 +287,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         new_loc: u64,
     ) -> Result<UpdateResult, Error> {
         // Determine if there are any conflicting operations for the key in the snapshot.
-        let Some(mut cursor) = snapshot.get_mut(&key) else {
-            // The key isn't in the snapshot, so add it.
-            snapshot.insert(&key, new_loc);
+        let Some(mut cursor) = snapshot.get_mut_or_insert(&key, new_loc) else {
             return Ok(UpdateResult::Inserted(new_loc));
         };
 
         // Iterate over conflicts in the snapshot.
-        loop {
-            let Some(loc) = cursor.next() else {
-                // The key isn't in the snapshot, so add it.
-                break;
-            };
+        while let Some(loc) = cursor.next() {
             let op = log.read(*loc).await?;
             if op.to_key() != key {
                 continue;
@@ -417,11 +398,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         };
 
         // Iterate over all conflicting keys in the snapshot.
-        loop {
-            let Some(loc) = cursor.next() else {
-                // The key isn't in the snapshot, so this is a no-op.
-                return Ok(None);
-            };
+        while let Some(loc) = cursor.next() {
             let op = self.log.read(*loc).await?;
             match op.to_type() {
                 Type::Update(k, _) => {
@@ -429,11 +406,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                         // The key is in the snapshot, so delete it.
                         let old_loc = *loc;
                         cursor.delete();
-
-                        // If the cursor is empty, then we need to remove the key from the snapshot.
-                        if cursor.empty() {
-                            self.snapshot.remove(&key);
-                        }
+                        drop(cursor);
                         self.apply_op(hasher, Operation::delete(key)).await?;
                         return Ok(Some(old_loc));
                     }
@@ -446,6 +419,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 }
             }
         }
+
+        // The key isn't in the snapshot, so this is a no-op.
+        Ok(None)
     }
 
     /// Return the root hash of the db.
@@ -585,11 +561,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         };
 
         // Iterate over all conflicting keys in the snapshot.
-        loop {
-            let Some(loc) = cursor.next() else {
-                // The operation is not active, so this is a no-op.
-                return Ok(None);
-            };
+        while let Some(loc) = cursor.next() {
             if *loc == old_loc {
                 // Update the location of the operation in the snapshot.
                 cursor.update(new_loc);
@@ -600,6 +572,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 return Ok(Some(old_loc));
             }
         }
+
+        // The operation is not active, so this is a no-op.
+        Ok(None)
     }
 
     /// Raise the inactivity floor by exactly `max_steps` steps, followed by applying a commit

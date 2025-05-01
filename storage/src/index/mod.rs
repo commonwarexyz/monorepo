@@ -59,6 +59,9 @@ mod tests {
         assert_eq!(index.len(), 1);
         assert!(context.encode().contains("collisions_total 2"));
 
+        // Check that the values are in the correct order
+        assert_eq!(index.get(key).copied().collect::<Vec<_>>(), vec![1, 3, 2]);
+
         // Ensure cursor terminates
         {
             let mut cursor = index.get_mut(key).unwrap();
@@ -72,7 +75,7 @@ mod tests {
         index.insert(key, 3);
         index.insert(key, 4);
         index.prune(key, |i| *i == 3);
-        assert_eq!(index.get(key).copied().collect::<Vec<_>>(), vec![1, 4, 2]);
+        assert_eq!(index.get(key).copied().collect::<Vec<_>>(), vec![1, 2, 4]);
         index.prune(key, |_| true);
         // Try removing all of a keys values.
         assert_eq!(
@@ -240,7 +243,7 @@ mod tests {
 
         assert_eq!(
             index.get(b"key").copied().collect::<Vec<_>>(),
-            vec![11, 13, 12]
+            vec![11, 12, 13]
         );
     }
 
@@ -265,7 +268,6 @@ mod tests {
             let mut cursor = index.get_mut(b"key").unwrap();
             assert_eq!(*cursor.next().unwrap(), 1);
             cursor.delete();
-            assert!(!cursor.empty());
             assert!(context.encode().contains("pruned_total 1"));
         }
 
@@ -287,7 +289,6 @@ mod tests {
             assert_eq!(*cursor.next().unwrap(), 1);
             assert_eq!(*cursor.next().unwrap(), 3);
             cursor.delete();
-            assert!(!cursor.empty());
             assert!(context.encode().contains("pruned_total 2"));
         }
 
@@ -309,13 +310,12 @@ mod tests {
             assert_eq!(*cursor.next().unwrap(), 1);
             assert_eq!(*cursor.next().unwrap(), 2);
             cursor.delete();
-            assert!(!cursor.empty());
             assert!(context.encode().contains("pruned_total 3"));
         }
 
         assert_eq!(
             index.get(b"key").copied().collect::<Vec<_>>(),
-            vec![4, 3, 1]
+            vec![4, 1, 3]
         );
 
         // Test removing all values.
@@ -412,7 +412,6 @@ mod tests {
             assert_eq!(*cursor.next().unwrap(), 1);
             cursor.delete();
             assert_eq!(cursor.next(), None);
-            assert!(cursor.empty());
         }
     }
 
@@ -440,7 +439,6 @@ mod tests {
             assert_eq!(cursor.next(), None);
             cursor.insert(4);
             cursor.insert(5);
-            assert!(!cursor.empty());
         }
 
         // Ensure remaining values are correct
@@ -460,7 +458,6 @@ mod tests {
             let mut cursor = index.get_mut(b"key").unwrap();
             assert_eq!(*cursor.next().unwrap(), 0); // head
             cursor.delete();
-            assert!(cursor.empty());
         }
         index.remove(b"key");
         assert!(index.get(b"key").copied().collect::<Vec<i32>>().is_empty());
