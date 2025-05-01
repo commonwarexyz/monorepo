@@ -119,6 +119,7 @@ impl<'a, T: Translator, V> Cursor<'a, T, V> {
     /// It is safe to call `next()` even after it returns `None`.
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<&V> {
+        let last_deleted = self.last_deleted;
         self.last_deleted = false;
         match self.phase {
             Phase::Initial => {
@@ -136,6 +137,11 @@ impl<'a, T: Translator, V> Cursor<'a, T, V> {
                 return self.next.as_deref().map(|r| &r.value);
             }
             Phase::Next => {
+                // If last deleted, do noting.
+                if last_deleted {
+                    return self.next.as_deref().map(|r| &r.value);
+                }
+
                 // Take ownership of all records.
                 let mut next = self.next.take().unwrap();
                 let next_next = next.next.take();
@@ -248,6 +254,11 @@ impl<T: Translator, V> Drop for Cursor<'_, T, V> {
         if self.entry_deleted {
             entry.remove();
             return;
+        }
+
+        // If there is a next, we should add it to past.
+        if let Some(next) = self.next.take() {
+            self.past.push(next);
         }
 
         // If there are old records, we need to reattach them.

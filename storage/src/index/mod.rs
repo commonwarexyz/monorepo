@@ -59,6 +59,9 @@ mod tests {
         assert_eq!(index.len(), 1);
         assert!(context.encode().contains("collisions_total 2"));
 
+        // Check that the values are in the correct order
+        assert_eq!(index.get(key).copied().collect::<Vec<_>>(), vec![1, 3, 2]);
+
         // Ensure cursor terminates
         {
             let mut cursor = index.get_mut(key).unwrap();
