@@ -61,6 +61,7 @@ pub struct Engine<
     mailbox_receiver: mpsc::Receiver<Message<P, Di, Dd, M>>,
 
     /// Pending requests from the application.
+    #[allow(clippy::type_complexity)]
     waiters: HashMap<Di, Vec<(Option<P>, Option<Dd>, oneshot::Sender<M>)>>,
 
     ////////////////////////////////////////
@@ -317,21 +318,28 @@ impl<
         let identity = msg.identity();
 
         // Send the message to the waiters, if any, ignoring errors (as the receiver may have dropped)
-        if let Some(responders) = self.waiters.remove(&identity) {
-            let mut remaining = Vec::new();
-            for (sender_filter, digest_filter, responder) in responders {
-                if sender_filter.as_ref().is_some_and(|s| s != &peer) {
-                    remaining.push((sender_filter, digest_filter, responder));
+        if let Some(mut waiters) = self.waiters.remove(&identity) {
+            let mut i = 0;
+            while i < waiters.len() {
+                // Get the sender and digest filters
+                let (sender_filter, digest_filter, _) = &waiters[i];
+
+                // Keep the waiter if either filter does not match.
+                if sender_filter.as_ref().is_some_and(|s| s != &peer)
+                    || digest_filter.is_some_and(|d| d != digest)
+                {
+                    i += 1;
                     continue;
                 }
-                if digest_filter.is_some_and(|d| d != digest) {
-                    remaining.push((sender_filter, digest_filter, responder));
-                    continue;
-                }
+
+                // Filters match → fulfil the subscription and drop the entry.
+                let (_, _, responder) = waiters.swap_remove(i);
                 self.respond_subscribe(responder, msg.clone());
             }
-            if !remaining.is_empty() {
-                self.waiters.insert(identity, remaining);
+
+            // Re-insert if any waiters remain.
+            if !waiters.is_empty() {
+                self.waiters.insert(identity, waiters);
             }
         }
 
