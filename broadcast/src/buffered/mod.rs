@@ -33,16 +33,15 @@ pub mod mocks;
 
 #[cfg(test)]
 mod tests {
-    use crate::Broadcaster;
-
     use super::{mocks::TestMessage, *};
+    use crate::Broadcaster;
     use commonware_cryptography::{
         ed25519::PublicKey, sha256::Digest as Sha256Digest, Digestible, Ed25519, Signer,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
-    use std::{collections::BTreeMap, time::Duration};
+    use std::{collections::BTreeMap, ops::RangeFull, time::Duration};
 
     // Number of messages to cache per sender
     const CACHE_SIZE: usize = 10;
@@ -108,9 +107,8 @@ mod tests {
     fn spawn_peer_engines(
         context: deterministic::Context,
         registrations: &mut Registrations,
-    ) -> BTreeMap<PublicKey, Mailbox<PublicKey, Sha256Digest, TestMessage>> {
-        let mut mailboxes =
-            BTreeMap::<PublicKey, Mailbox<PublicKey, Sha256Digest, TestMessage>>::new();
+    ) -> BTreeMap<PublicKey, Mailbox<PublicKey, Sha256Digest, RangeFull, TestMessage>> {
+        let mut mailboxes = BTreeMap::new();
         while let Some((peer, network)) = registrations.pop_first() {
             let context = context.with_label(&peer.to_string());
             let config = Config {
@@ -118,10 +116,9 @@ mod tests {
                 mailbox_size: 1024,
                 deque_size: CACHE_SIZE,
                 priority: false,
-                codec_config: (),
+                codec_config: ..,
             };
-            let (engine, engine_mailbox) =
-                Engine::<_, PublicKey, Sha256Digest, _, TestMessage>::new(context.clone(), config);
+            let (engine, engine_mailbox) = Engine::new(context.clone(), config);
             mailboxes.insert(peer.clone(), engine_mailbox);
             engine.start(network);
         }
