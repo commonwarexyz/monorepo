@@ -507,4 +507,66 @@ mod tests {
         assert!(ctx.encode().contains("collisions_total 2"));
         assert!(ctx.encode().contains("pruned_total 2"));
     }
+
+    #[test_traced]
+    fn test_cursor_delete_then_next_returns_next() {
+        let ctx = deterministic::Context::default();
+        let mut index = Index::init(ctx, TwoCap);
+
+        // Build list: [1 → 2]
+        index.insert(b"key", 1);
+        index.insert(b"key", 2);
+
+        let mut cursor = index.get_mut(b"key").unwrap();
+        assert_eq!(*cursor.next().unwrap(), 1); // Phase::Current
+
+        // After deleting the current element, `next` should yield the element that was
+        // copied in from the old `next` node (the iterator does not advance).
+        cursor.delete(); // remove 1, copy 2 into place
+        assert_eq!(*cursor.next().unwrap(), 2); // should yield 2
+        assert!(cursor.next().is_none()); // now exhausted
+    }
+
+    #[test_traced]
+    fn test_cursor_insert_after_done_appends() {
+        let ctx = deterministic::Context::default();
+        let mut index = Index::init(ctx, TwoCap);
+
+        index.insert(b"key", 10);
+
+        {
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 10);
+            assert!(cursor.next().is_none()); // Phase::Done
+
+            // Inserting after we've already iterated to the end should append a new node.
+            cursor.insert(20); // append while Done
+        }
+
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![10, 20]);
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next() before interacting")]
+    fn test_cursor_update_before_next_panics() {
+        let ctx = deterministic::Context::default();
+        let mut index = Index::init(ctx, TwoCap);
+        index.insert(b"key", 123);
+
+        let mut cursor = index.get_mut(b"key").unwrap();
+        // Calling `update` before `next` is a logic error and should panic.
+        cursor.update(321); // triggers unreachable! branch
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next() before interacting")]
+    fn test_cursor_delete_before_next_panics() {
+        let ctx = deterministic::Context::default();
+        let mut index = Index::init(ctx, TwoCap);
+        index.insert(b"key", 123);
+
+        let mut cursor = index.get_mut(b"key").unwrap();
+        // Calling `delete` before `next` is a logic error and should panic.
+        cursor.delete(); // triggers unreachable! branch
+    }
 }
