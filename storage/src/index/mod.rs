@@ -403,13 +403,13 @@ mod tests {
         // Remove middle: []
         {
             let mut cursor = index.get_mut(b"key").unwrap();
-            assert_eq!(*cursor.next().unwrap(), 0); // head
+            assert_eq!(*cursor.next().unwrap(), 0);
             cursor.delete();
-            assert_eq!(*cursor.next().unwrap(), 3); // middle
+            assert_eq!(*cursor.next().unwrap(), 3);
             cursor.delete();
-            assert_eq!(*cursor.next().unwrap(), 2); // tail
+            assert_eq!(*cursor.next().unwrap(), 2);
             cursor.delete();
-            assert_eq!(*cursor.next().unwrap(), 1); // tail
+            assert_eq!(*cursor.next().unwrap(), 1);
             cursor.delete();
             assert_eq!(cursor.next(), None);
             assert!(cursor.empty());
@@ -429,19 +429,21 @@ mod tests {
         // Remove middle: [4, 5]
         {
             let mut cursor = index.get_mut(b"key").unwrap();
-            assert_eq!(*cursor.next().unwrap(), 0); // head
+            assert_eq!(*cursor.next().unwrap(), 0);
             cursor.delete();
-            assert_eq!(*cursor.next().unwrap(), 3); // middle
+            assert_eq!(*cursor.next().unwrap(), 3);
             cursor.delete();
-            assert_eq!(*cursor.next().unwrap(), 2); // tail
+            assert_eq!(*cursor.next().unwrap(), 2);
             cursor.delete();
-            assert_eq!(*cursor.next().unwrap(), 1); // tail
+            assert_eq!(*cursor.next().unwrap(), 1);
             cursor.delete();
             assert_eq!(cursor.next(), None);
             cursor.insert(4);
             cursor.insert(5);
             assert!(!cursor.empty());
         }
+
+        // Ensure remaining values are correct
         assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![4, 5]);
     }
 
