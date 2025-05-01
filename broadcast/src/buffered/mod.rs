@@ -107,7 +107,7 @@ mod tests {
     fn spawn_peer_engines(
         context: deterministic::Context,
         registrations: &mut Registrations,
-    ) -> BTreeMap<PublicKey, Mailbox<RangeFull, PublicKey, Sha256Digest, TestMessage>> {
+    ) -> BTreeMap<PublicKey, Mailbox<PublicKey, Sha256Digest, RangeFull, TestMessage>> {
         let mut mailboxes = BTreeMap::new();
         while let Some((peer, network)) = registrations.pop_first() {
             let context = context.with_label(&peer.to_string());

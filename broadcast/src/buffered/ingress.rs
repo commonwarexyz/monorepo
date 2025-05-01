@@ -1,5 +1,5 @@
 use crate::Broadcaster;
-use commonware_codec::{Codec, Config};
+use commonware_codec::{Codec, Config as CodecConfig};
 use commonware_cryptography::{Digest, Digestible};
 use commonware_utils::Array;
 use futures::{
@@ -36,12 +36,14 @@ pub enum Message<P: Array, D: Digest, M: Digestible<D>> {
 
 /// Ingress mailbox for [`Engine`](super::Engine).
 #[derive(Clone)]
-pub struct Mailbox<Cfg: Config, P: Array, D: Digest, M: Digestible<D>> {
+pub struct Mailbox<P: Array, D: Digest, CodecCfg: CodecConfig, M: Digestible<D> + Codec<CodecCfg>> {
     sender: mpsc::Sender<Message<P, D, M>>,
-    _phantom: PhantomData<Cfg>,
+    _phantom: PhantomData<CodecCfg>,
 }
 
-impl<Cfg: Config, P: Array, D: Digest, M: Digestible<D>> Mailbox<Cfg, P, D, M> {
+impl<P: Array, D: Digest, CodecCfg: CodecConfig, M: Digestible<D> + Codec<CodecCfg>>
+    Mailbox<P, D, CodecCfg, M>
+{
     pub(super) fn new(sender: mpsc::Sender<Message<P, D, M>>) -> Self {
         Self {
             sender,
@@ -93,10 +95,10 @@ impl<Cfg: Config, P: Array, D: Digest, M: Digestible<D>> Mailbox<Cfg, P, D, M> {
     }
 }
 
-impl<Cfg: Config, P: Array, D: Digest, M: Digestible<D> + Codec<Cfg>> Broadcaster
-    for Mailbox<Cfg, P, D, M>
+impl<P: Array, D: Digest, CodecCfg: CodecConfig, M: Digestible<D> + Codec<CodecCfg>> Broadcaster
+    for Mailbox<P, D, CodecCfg, M>
 {
-    type CodecConfig = Cfg;
+    type MessageDecoder = CodecCfg;
     type Message = M;
     type Response = Vec<P>;
 

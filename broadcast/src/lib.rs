@@ -8,15 +8,16 @@ pub mod buffered;
 
 /// Broadcaster is the interface responsible for attempting replication of messages across a network.
 pub trait Broadcaster: Clone + Send + 'static {
-    /// CodecConfig is the type of configuration used by the [`Codec`] trait for the Message type.
-    type CodecConfig: Config;
+    /// MessageDecoder is the type of configuration used as the configuration for decoding the
+    /// Message type.
+    type MessageDecoder: Config;
 
     /// Message is the type of data that can be broadcasted.
     ///
     /// It must implement the Codec trait so that it can be:
     /// - serialized upon broadcast
     /// - deserialized upon reception
-    type Message: Codec<Self::CodecConfig> + Clone + Send + 'static;
+    type Message: Codec<Self::MessageDecoder> + Clone + Send + 'static;
 
     /// Response is the type of data that is returned once the message is broadcasted.
     ///
