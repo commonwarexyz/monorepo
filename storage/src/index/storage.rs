@@ -341,7 +341,7 @@ impl<T: Translator, V> Index<T, V> {
     }
 
     /// Provides mutable access to the values associated with a key via a `Cursor`.
-    pub fn get_mut(&mut self, key: &[u8]) -> Option<Cursor<V>> {
+    pub fn get_mut(&mut self, key: &[u8]) -> Option<Cursor<T, V>> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
             Entry::Occupied(entry) => Some(Cursor::new(entry, &self.collisions, &self.pruned)),
@@ -349,20 +349,17 @@ impl<T: Translator, V> Index<T, V> {
         }
     }
 
-    pub fn get_mut_or_insert(&mut self, key: &[u8], v: V) -> (bool, Cursor<V>) {
+    pub fn get_mut_or_insert(&mut self, key: &[u8], v: V) -> Option<Cursor<T, V>> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
-            Entry::Occupied(entry) => {
-                let record = entry.into_mut();
-                (false, Cursor::new(record, &self.collisions, &self.pruned))
-            }
+            Entry::Occupied(entry) => Some(Cursor::new(entry, &self.collisions, &self.pruned)),
             Entry::Vacant(entry) => {
                 let record = Record {
                     value: v,
                     next: None,
                 };
-                let record = entry.insert(record);
-                (true, Cursor::new(record, &self.collisions, &self.pruned))
+                entry.insert(record);
+                None
             }
         }
     }
@@ -377,9 +374,8 @@ impl<T: Translator, V> Index<T, V> {
     pub fn insert(&mut self, key: &[u8], v: V) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
-            Entry::Occupied(mut entry) => {
-                let mut cursor =
-                    Cursor::<'_, T, V>::new(&mut entry, &self.collisions, &self.pruned);
+            Entry::Occupied(entry) => {
+                let mut cursor = Cursor::<'_, T, V>::new(entry, &self.collisions, &self.pruned);
                 cursor.next();
                 cursor.insert(v);
             }
@@ -396,10 +392,9 @@ impl<T: Translator, V> Index<T, V> {
     pub fn insert_and_prune(&mut self, key: &[u8], v: V, prune: impl Fn(&V) -> bool) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
-            Entry::Occupied(mut entry) => {
+            Entry::Occupied(entry) => {
                 // Get entry
-                let mut cursor =
-                    Cursor::<'_, T, V>::new(&mut entry, &self.collisions, &self.pruned);
+                let mut cursor = Cursor::<'_, T, V>::new(entry, &self.collisions, &self.pruned);
 
                 // Remove anything that is prunable.
                 loop {
@@ -431,9 +426,9 @@ impl<T: Translator, V> Index<T, V> {
     pub fn prune(&mut self, key: &[u8], prune: impl Fn(&V) -> bool) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
-            Entry::Occupied(mut entry) => {
-                let mut cursor =
-                    Cursor::<'_, T, V>::new(&mut entry, &self.collisions, &self.pruned);
+            Entry::Occupied(entry) => {
+                // Get cursor
+                let mut cursor = Cursor::<'_, T, V>::new(entry, &self.collisions, &self.pruned);
 
                 // Remove anything that is prunable.
                 loop {
@@ -443,11 +438,6 @@ impl<T: Translator, V> Index<T, V> {
                     if prune(old) {
                         cursor.delete();
                     }
-                }
-
-                // If there is nothing left, remove the entry.
-                if cursor.empty() {
-                    entry.remove();
                 }
             }
             Entry::Vacant(_) => {}

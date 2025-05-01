@@ -230,12 +230,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             match op.to_type() {
                 Type::Deleted(key) => {
                     // Remove the key if it exists in the snapshot.
-                    let should_remove = if let Some(mut cursor) = snapshot.get_mut(&key) {
+                    if let Some(mut cursor) = snapshot.get_mut(&key) {
                         // Iterate over all conflicting keys in the snapshot.
                         loop {
                             let Some(loc) = cursor.next() else {
                                 // Nothing to delete
-                                break false;
+                                break;
                             };
                             let op = log.read(*loc).await?;
                             if op.to_key() != key {
@@ -245,17 +245,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                                 bitmap_ref.set_bit(hasher, *loc, false);
                             }
                             cursor.delete();
-                            break cursor.empty();
+                            break;
                         }
-                    } else {
-                        // The key isn't in the snapshot, so this is a no-op.
-                        false
-                    };
-
-                    // If the key is the last one in the cursor, then we need to remove it from
-                    // the snapshot.
-                    if should_remove {
-                        snapshot.remove(&key);
                     }
                 }
                 Type::Update(key, _) => {
@@ -300,8 +291,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         new_loc: u64,
     ) -> Result<UpdateResult, Error> {
         // Determine if there are any conflicting operations for the key in the snapshot.
-        let (new, mut cursor) = snapshot.get_mut_or_insert(&key, new_loc);
-        if new {
+        let Some(mut cursor) = snapshot.get_mut_or_insert(&key, new_loc) else {
             return Ok(UpdateResult::Inserted(new_loc));
         };
 
@@ -428,11 +418,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                         // The key is in the snapshot, so delete it.
                         let old_loc = *loc;
                         cursor.delete();
-
-                        // If the cursor is empty, then we need to remove the key from the snapshot.
-                        if cursor.empty() {
-                            self.snapshot.remove(&key);
-                        }
+                        drop(cursor);
                         self.apply_op(hasher, Operation::delete(key)).await?;
                         return Ok(Some(old_loc));
                     }
