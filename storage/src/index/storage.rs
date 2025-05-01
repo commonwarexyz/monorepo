@@ -376,6 +376,24 @@ impl<T: Translator, V> Index<T, V> {
             .map(|record| Cursor::new(record, &self.collisions, &self.pruned))
     }
 
+    pub fn get_mut_or_insert(&mut self, key: &[u8], v: V) -> (bool, Cursor<V>) {
+        let k = self.translator.transform(key);
+        match self.map.entry(k) {
+            Entry::Occupied(entry) => {
+                let record = entry.into_mut();
+                (false, Cursor::new(record, &self.collisions, &self.pruned))
+            }
+            Entry::Vacant(entry) => {
+                let record = Record {
+                    value: v,
+                    next: None,
+                };
+                let record = entry.insert(record);
+                (true, Cursor::new(record, &self.collisions, &self.pruned))
+            }
+        }
+    }
+
     /// Remove all values at the given translated key.
     pub fn remove(&mut self, key: &[u8]) {
         // We use `prune()` to ensure we count all dropped values.
