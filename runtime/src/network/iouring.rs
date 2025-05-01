@@ -1,11 +1,12 @@
 use futures::{
     channel::{mpsc, oneshot},
-    SinkExt as _,
+    executor::block_on,
+    SinkExt as _, StreamExt as _,
 };
 use io_uring::{squeue::Entry as SqueueEntry, types::Fd, IoUring};
 use std::{
     net::{SocketAddr, TcpListener, TcpStream},
-    os::fd::{AsFd, AsRawFd, OwnedFd},
+    os::fd::{AsRawFd, OwnedFd},
     sync::Arc,
 };
 
@@ -43,6 +44,89 @@ fn new_ring(cfg: &IoUringConfig) -> Result<IoUring, std::io::Error> {
 #[derive(Clone, Debug)]
 pub(crate) struct Network {
     submitter: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
+}
+
+impl Network {
+    pub(crate) fn start(cfg: IoUringConfig) -> Result<Self, crate::Error> {
+        let (tx, rx) = mpsc::channel(128);
+
+        std::thread::spawn(|| block_on(run_network(cfg, rx)));
+
+        Ok(Self {
+            submitter: tx.clone(),
+        })
+    }
+}
+
+/// Background task that polls for completed work and notifies waiters on completion.
+/// The user data field of all operations received on `receiver` will be ignored.
+async fn run_network(
+    cfg: IoUringConfig,
+    mut receiver: mpsc::Receiver<(SqueueEntry, oneshot::Sender<i32>)>,
+) {
+    let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
+    let mut next_work_id: u64 = 0;
+    // Maps a work ID to the sender that we will send the result to.
+    let mut waiters: std::collections::HashMap<_, oneshot::Sender<i32>> =
+        std::collections::HashMap::with_capacity(cfg.size as usize);
+
+    loop {
+        // Try to get a completion
+        if let Some(cqe) = ring.completion().next() {
+            let work_id = cqe.user_data();
+            let result = cqe.result();
+            let sender = waiters.remove(&work_id).expect("work is missing");
+            // Notify with the result of this operation
+            let _ = sender.send(result);
+            continue;
+        }
+
+        // Try to fill the submission queue with incoming work.
+        // Stop if we are at the max number of processing work.
+        while waiters.len() < cfg.size as usize {
+            // Wait for more work
+            let (mut work, sender) = if waiters.is_empty() {
+                // Block until there is something to do
+                match receiver.next().await {
+                    Some(work) => work,
+                    None => return,
+                }
+            } else {
+                // Handle incoming work
+                match receiver.try_next() {
+                    // Got work without blocking
+                    Ok(Some(work_item)) => work_item,
+                    // Channel closed, shut down
+                    Ok(None) => return,
+                    // No new work available, wait for a completion
+                    Err(_) => break,
+                }
+            };
+
+            // Assign a unique id
+            let work_id = next_work_id;
+            work = work.user_data(work_id);
+            // Use wrapping add in case we overflow
+            next_work_id = next_work_id.wrapping_add(1);
+
+            // We'll send the result of this operation to `sender`.
+            waiters.insert(work_id, sender);
+
+            // Submit the operation to the ring
+            unsafe {
+                ring.submission()
+                    .push(&work)
+                    .expect("unable to push to queue");
+            }
+        }
+
+        // Wait for at least 1 item to be in the completion queue.
+        // Note that we block until anything is in the completion queue,
+        // even if it's there before this call. That is, a completion
+        // that arrived before this call will be counted and cause this
+        // call to return. Note that waiters.len() > 0 here.
+        ring.submit_and_wait(1).expect("unable to submit to ring");
+    }
 }
 
 impl crate::Network for Network {
