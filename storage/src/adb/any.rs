@@ -5,8 +5,7 @@
 //! In the [Any] db, it is not possible to prove whether the value of a key is the currently active
 //! one, only that it was associated with the key at some point in the past. This type of
 //! authenticated database is most useful for applications involving keys that are given values once
-//! and cannot be updated after. If authenticating the current value is required, see
-//! [Current](crate::adb::Current).
+//! and cannot be updated after.
 
 use crate::{
     adb::{operation::Operation, Error},
