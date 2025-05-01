@@ -222,6 +222,40 @@ impl<
         let _ = responder.send(sent_to);
     }
 
+    /// Searches through all maintained messages for a match.
+    fn find_message(&mut self, sender: &Option<P>, identity: Di, digest: Option<Dd>) -> Option<M> {
+        if let Some(ref sender) = sender {
+            if let Some(deque) = self.deques.get(sender) {
+                for item in deque {
+                    // Try to find a match from the sender
+                    if item.0 != identity {
+                        continue;
+                    }
+                    if digest.is_some() && item.1 != digest.unwrap() {
+                        continue;
+                    }
+
+                    // If the message is already in the cache, send it to the responder
+                    if let Some(msg) = self.items.get(&item.0).and_then(|m| m.get(&item.1)) {
+                        return Some(msg.clone());
+                    }
+                }
+            }
+        } else if let Some(msg) = self.items.get(&identity) {
+            if let Some(digest) = digest {
+                if let Some(msg) = msg.get(&digest) {
+                    return Some(msg.clone());
+                }
+            } else {
+                // If no digest is provided, send the first we have
+                // for an identity.
+                return msg.values().next().cloned();
+            }
+        }
+
+        None
+    }
+
     /// Handles a `subscribe` request from the application.
     ///
     /// If the message is already in the cache, the responder is immediately sent the message.
@@ -234,38 +268,9 @@ impl<
         responder: oneshot::Sender<M>,
     ) {
         // Check if the message is already in the cache
-        if let Some(ref sender) = sender {
-            if let Some(deque) = self.deques.get(&sender) {
-                for item in deque {
-                    // Try to find a match from the sender
-                    if item.0 != identity {
-                        continue;
-                    }
-                    if digest.is_some() && item.1 != digest.unwrap() {
-                        continue;
-                    }
-
-                    // If the message is already in the cache, send it to the responder
-                    if let Some(msg) = self.items.get(&item.0).and_then(|m| m.get(&item.1)) {
-                        self.respond_subscribe(responder, msg.clone());
-                        return;
-                    }
-                }
-            }
-        } else if let Some(msg) = self.items.get(&identity) {
-            if let Some(digest) = digest {
-                if let Some(msg) = msg.get(&digest) {
-                    self.respond_subscribe(responder, msg.clone());
-                    return;
-                }
-            } else {
-                // If no digest is provided, send the first we have
-                // for an identity.
-                if let Some(msg) = msg.values().next() {
-                    self.respond_subscribe(responder, msg.clone());
-                    return;
-                }
-            }
+        if let Some(msg) = self.find_message(&sender, identity, digest) {
+            self.respond_subscribe(responder, msg);
+            return;
         }
 
         // Store the responder
@@ -283,7 +288,7 @@ impl<
         digest: Option<Dd>,
         responder: oneshot::Sender<Option<M>>,
     ) {
-        let item = self.items.get(&digest).cloned();
+        let item = self.find_message(&sender, identity, digest);
         self.respond_get(responder, item);
     }
 
@@ -312,8 +317,14 @@ impl<
         let identity = msg.identity();
 
         // Send the message to the waiters, if any, ignoring errors (as the receiver may have dropped)
-        if let Some(responders) = self.waiters.remove(&identity) {
-            for responder in responders {
+        if let Some(responders) = self.waiters.get_mut(&identity) {
+            for (req_sender, req_digest, responder) in responders {
+                if req_sender.is_some() && req_sender.unwrap() != peer {
+                    continue;
+                }
+                if req_digest.is_some() && req_digest.unwrap() != digest {
+                    continue;
+                }
                 self.respond_subscribe(responder, msg.clone());
             }
         }
