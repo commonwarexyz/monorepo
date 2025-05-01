@@ -61,7 +61,7 @@ pub struct Engine<
     mailbox_receiver: mpsc::Receiver<Message<P, Di, Dd, M>>,
 
     /// Pending requests from the application.
-    waiters: HashMap<Di, Vec<(Option<Dd>, oneshot::Sender<M>)>>,
+    waiters: HashMap<Di, Vec<(Option<P>, Option<Dd>, oneshot::Sender<M>)>>,
 
     ////////////////////////////////////////
     // Cache
@@ -234,13 +234,45 @@ impl<
         responder: oneshot::Sender<M>,
     ) {
         // Check if the message is already in the cache
-        if let Some(msg) = self.items.get(&identity) {
-            self.respond_subscribe(responder, msg.clone());
-            return;
+        if let Some(ref sender) = sender {
+            if let Some(deque) = self.deques.get(&sender) {
+                for item in deque {
+                    // Try to find a match from the sender
+                    if item.0 != identity {
+                        continue;
+                    }
+                    if digest.is_some() && item.1 != digest.unwrap() {
+                        continue;
+                    }
+
+                    // If the message is already in the cache, send it to the responder
+                    if let Some(msg) = self.items.get(&item.0).and_then(|m| m.get(&item.1)) {
+                        self.respond_subscribe(responder, msg.clone());
+                        return;
+                    }
+                }
+            }
+        } else if let Some(msg) = self.items.get(&identity) {
+            if let Some(digest) = digest {
+                if let Some(msg) = msg.get(&digest) {
+                    self.respond_subscribe(responder, msg.clone());
+                    return;
+                }
+            } else {
+                // If no digest is provided, send the first we have
+                // for an identity.
+                if let Some(msg) = msg.values().next() {
+                    self.respond_subscribe(responder, msg.clone());
+                    return;
+                }
+            }
         }
 
         // Store the responder
-        self.waiters.entry(digest).or_default().push(responder);
+        self.waiters
+            .entry(identity)
+            .or_default()
+            .push((sender, digest, responder));
     }
 
     /// Handles a `get` request from the application.
