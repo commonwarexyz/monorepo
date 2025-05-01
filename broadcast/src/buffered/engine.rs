@@ -67,19 +67,23 @@ pub struct Engine<
     ////////////////////////////////////////
     // Cache
     ////////////////////////////////////////
-    /// All cached messages by digest.
+    /// All cached messages by identity and digest.
+    ///
+    /// We store messages outside of the deques to minimize memory usage
+    /// when receiving duplicate messages.
     items: HashMap<Di, HashMap<Dd, M>>,
 
-    /// A LRU cache of the latest received digests from each peer.
+    /// A LRU cache of the latest received identities and digests from each peer.
     ///
     /// This is used to limit the number of digests stored per peer.
     /// At most `deque_size` digests are stored per peer. This value is expected to be small, so
     /// membership checks are done in linear time.
     deques: HashMap<P, VecDeque<(Di, Dd)>>,
 
-    /// The number of times each digest exists in one of the deques.
+    /// The number of times each identity and digest exists in one of the deques.
     ///
-    /// This is because multiple peers can send the same message.
+    /// Multiple peers can send the same message and we only want to store
+    /// the message once.
     counts: HashMap<(Di, Dd), usize>,
 
     ////////////////////////////////////////
