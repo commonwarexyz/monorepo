@@ -253,6 +253,7 @@ impl<
                 if let Some(msg) = msg.get(&digest) {
                     return vec![msg.clone()];
                 }
+                return Vec::new();
             }
             if all {
                 return msg.values().cloned().collect();

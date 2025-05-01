@@ -36,7 +36,8 @@ mod tests {
     use super::{mocks::TestMessage, *};
     use crate::Broadcaster;
     use commonware_cryptography::{
-        ed25519::PublicKey, sha256::Digest as Sha256Digest, Ed25519, Identifiable, Signer,
+        ed25519::PublicKey, sha256::Digest as Sha256Digest, Digestible, Ed25519, Identifiable,
+        Signer,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
@@ -458,6 +459,145 @@ mod tests {
                 _ = context.sleep(A_JIFFY) => {},
                 _ = receiver => { panic!("M1 should not be retrievable"); },
             }
+        });
+    }
+
+    #[test_traced]
+    fn test_selective_recipients() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|context| async move {
+            let (peers, mut registrations, _oracle) =
+                initialize_simulation(context.clone(), 4, 1.0).await;
+
+            let sender_pk = peers[0].clone();
+            let target_peer = peers[1].clone();
+            let non_target_peer = peers[2].clone();
+
+            let mailboxes = spawn_peer_engines(context.clone(), &mut registrations);
+            let mut sender_mb = mailboxes.get(&sender_pk).unwrap().clone();
+
+            let msg = TestMessage::shared(b"selective-broadcast");
+            let result = sender_mb
+                .broadcast(Recipients::One(target_peer.clone()), msg.clone())
+                .await;
+            assert_eq!(result.await.unwrap(), vec![target_peer.clone()]);
+
+            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
+
+            // Only target peer should retrieve the message.
+            let got_target = mailboxes
+                .get(&target_peer)
+                .unwrap()
+                .clone()
+                .get(None, msg.identity(), None)
+                .await;
+            assert_eq!(got_target, vec![msg.clone()]);
+
+            // Non-target peer should not retrieve the message.
+            let got_other = mailboxes
+                .get(&non_target_peer)
+                .unwrap()
+                .clone()
+                .get(None, msg.identity(), None)
+                .await;
+            assert!(got_other.is_empty());
+        });
+    }
+
+    #[test_traced]
+    fn test_sender_filter_subscribe() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|context| async move {
+            let (peers, mut registrations, _oracle) =
+                initialize_simulation(context.clone(), 4, 1.0).await;
+            let mailboxes = spawn_peer_engines(context.clone(), &mut registrations);
+
+            let sender1 = peers[0].clone();
+            let sender2 = peers[1].clone();
+            let sender3 = peers[2].clone();
+
+            let mut mb1 = mailboxes.get(&sender1).unwrap().clone();
+            let mut mb2 = mailboxes.get(&sender2).unwrap().clone();
+            let mut mb3 = mailboxes.get(&sender3).unwrap().clone();
+
+            let msg = TestMessage::shared(b"from-one");
+            let id = msg.identity();
+
+            // mb2 waits for `id` but only if it originates from `sender1`.
+            let mut recv = mb2.subscribe(Some(sender1.clone()), id, None).await;
+
+            // Broadcast from the wrong sender (should *not* satisfy).
+            mb3.broadcast(Recipients::All, msg.clone())
+                .await
+                .await
+                .unwrap();
+
+            // Wait for the broadcast to propagate
+            context.sleep(A_JIFFY).await;
+
+            // Check that the receiver is still waiting
+            assert!(recv.try_recv().unwrap().is_none());
+
+            // Correct sender broadcasts → subscription fulfils.
+            mb1.broadcast(Recipients::All, msg.clone())
+                .await
+                .await
+                .unwrap();
+            assert_eq!(recv.await.unwrap(), msg);
+        });
+    }
+
+    #[test_traced]
+    fn test_get_all_for_identity() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|context| async move {
+            let (peers, mut registrations, _oracle) =
+                initialize_simulation(context.clone(), 4, 1.0).await;
+            let mailboxes = spawn_peer_engines(context.clone(), &mut registrations);
+
+            let sender1 = peers[0].clone();
+            let sender2 = peers[1].clone();
+
+            let mut mb1 = mailboxes.get(&sender1).unwrap().clone();
+            let mut mb2 = mailboxes.get(&sender2).unwrap().clone();
+
+            // Two messages share identity but have distinct digests.
+            let m1 = TestMessage::new(b"id", b"content-1");
+            let m2 = TestMessage::new(b"id", b"content-2");
+            let m3 = TestMessage::new(b"other-id", b"content-1");
+            mb1.broadcast(Recipients::All, m1.clone())
+                .await
+                .await
+                .unwrap();
+            mb1.broadcast(Recipients::All, m2.clone())
+                .await
+                .await
+                .unwrap();
+            mb1.broadcast(Recipients::All, m3.clone())
+                .await
+                .await
+                .unwrap();
+
+            // Wait for propagation
+            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
+
+            // `get` with digest=None returns both.
+            let mut got = mb2.get(None, m1.identity(), None).await;
+            got.sort_by_key(|m| m.content.clone());
+            assert_eq!(got, vec![m1.clone(), m2.clone()]);
+
+            // `get` with digest=Some returns only the first.
+            let got = mb2.get(None, m1.identity(), Some(m1.digest())).await;
+            assert_eq!(got, vec![m1.clone()]);
+
+            // `get` with digest=None returns only one with a duplicate digest.
+            let got = mb2.get(None, m3.identity(), None).await;
+            assert_eq!(got, vec![m3.clone()]);
+
+            // `get` with digest=Some that does not exist returns empty.
+            let got = mb2.get(None, m3.identity(), Some(m2.digest())).await;
+            println!("got: {:?}", got);
+            assert!(got.is_empty());
         });
     }
 }
