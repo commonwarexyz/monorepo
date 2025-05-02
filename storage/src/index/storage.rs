@@ -319,8 +319,8 @@ where
         }
 
         // Attach the tip of past to the entry.
-        if self.past.is_some() {
-            entry.get_mut().next = self.past.take();
+        if let Some(past) = self.past.take() {
+            entry.get_mut().next = Some(past);
         }
     }
 }
