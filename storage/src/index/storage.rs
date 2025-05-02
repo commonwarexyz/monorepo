@@ -222,11 +222,29 @@ where
     V: PartialEq + Eq,
 {
     fn drop(&mut self) {
+        // Take the entry.
         let mut entry = self.entry.take().unwrap();
+
+        // If there is nothing left, delete the entry.
         if self.phase == Phase::EntryDeleted {
             entry.remove();
             return;
         }
+
+        // If there is a dangling next, we should add it to past.
+        match std::mem::replace(&mut self.phase, Phase::Done) {
+            Phase::Next(current) => {
+                // Take the next record and push the current one to the past list.
+                self.past_push(current);
+            }
+            Phase::Stale(Some(stale)) => {
+                // If the stale value is some, we set it to be the current record.
+                self.past_push(stale);
+            }
+            _ => {}
+        }
+
+        // Attach the tip of past to the entry.
         entry.get_mut().next = self.past.take();
     }
 }
