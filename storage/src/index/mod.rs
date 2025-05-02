@@ -486,7 +486,7 @@ mod tests {
         let mut index = Index::init(ctx.clone(), TwoCap);
 
         // Add a value to the index
-        index.insert(b"key", 1u64); // 0 → collisions
+        index.insert(b"key", 1u64); // 0 collisions
         index.insert_and_prune(b"key", 2u64, |v| *v == 1); // +1 collision, +1 prune
 
         assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![2]);
@@ -500,7 +500,7 @@ mod tests {
         let mut index = Index::init(ctx.clone(), TwoCap);
 
         // Add multiple values to the same key
-        index.insert(b"key", 10u64); // 0 → collisions
+        index.insert(b"key", 10u64); // 0 collisions
         index.insert(b"key", 20u64); // +1 collision
 
         // Update an item if it matches the predicate
@@ -519,7 +519,7 @@ mod tests {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx, TwoCap);
 
-        // Build list: [1 → 2]
+        // Build list: [1, 2]
         index.insert(b"key", 1);
         index.insert(b"key", 2);
 

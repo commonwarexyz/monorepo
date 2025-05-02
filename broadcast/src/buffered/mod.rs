@@ -538,7 +538,7 @@ mod tests {
             // Check that the receiver is still waiting
             assert!(recv.try_recv().unwrap().is_none());
 
-            // Correct sender broadcasts → subscription fulfils.
+            // Correct sender broadcasts and subscription fulfills.
             mb1.broadcast(Recipients::All, msg.clone())
                 .await
                 .await
@@ -642,7 +642,7 @@ mod tests {
             // observer must get it now
             assert_eq!(obs.get(None, id, None).await, vec![dup.clone()]);
 
-            // Evict from p0’s deque only → still retrievable
+            // Evict from p0’s deque only
             for i in 0..CACHE_SIZE {
                 let spam = TestMessage::shared(format!("p0-{i}").into_bytes());
                 mb0.broadcast(Recipients::All, spam).await.await.unwrap();
@@ -650,7 +650,7 @@ mod tests {
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
             assert_eq!(obs.get(None, id, None).await, vec![dup.clone()]);
 
-            // Evict from p1’s deque as well → gone
+            // Evict from p1’s deque as well
             for i in 0..CACHE_SIZE {
                 let spam = TestMessage::shared(format!("p1-{i}").into_bytes());
                 mb1.broadcast(Recipients::All, spam).await.await.unwrap();
@@ -689,7 +689,7 @@ mod tests {
                 )
                 .await;
 
-            // spoiler broadcasts the *wanted* digest → should be ignored
+            // spoiler broadcasts the *wanted* digest
             mb_spoiler
                 .broadcast(Recipients::All, wanted.clone())
                 .await
@@ -698,7 +698,7 @@ mod tests {
             context.sleep(A_JIFFY).await;
             assert!(recv.try_recv().unwrap().is_none());
 
-            // owner broadcasts a *different* digest with same identity → ignored
+            // owner broadcasts a *different* digest with same identity
             mb_owner
                 .broadcast(Recipients::All, not_want.clone())
                 .await
@@ -707,7 +707,7 @@ mod tests {
             context.sleep(A_JIFFY).await;
             assert!(recv.try_recv().unwrap().is_none());
 
-            // owner finally broadcasts the exact match → waiter resolves
+            // owner finally broadcasts the exact match
             mb_owner
                 .broadcast(Recipients::All, wanted.clone())
                 .await

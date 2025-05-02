@@ -363,7 +363,7 @@ impl<
                     continue;
                 }
 
-                // Filters match → fulfil the subscription and drop the entry.
+                // Filters match, so fulfill the subscription and drop the entry.
                 //
                 // The index `i` is intentionally not incremented here to check
                 // the element that was swapped into position `i`.
