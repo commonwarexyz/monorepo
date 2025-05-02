@@ -36,14 +36,17 @@ struct Record<V: PartialEq + Eq> {
 enum Phase<V: PartialEq + Eq> {
     /// Before iteration starts.
     Initial,
+
     /// The current entry.
     Entry,
     /// Some item after the current entry.
     Next(Box<Record<V>>),
+
     /// Iteration is done.
     Done,
     /// The current entry has no valid item.
     EntryDeleted,
+
     /// The current entry has been deleted and we've updated its value in-place
     /// to be the value of the next record.
     PostDeleteEntry,
@@ -118,13 +121,13 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
             Phase::Entry => {
                 self.entry.as_mut().unwrap().get_mut().value = v;
             }
-            Phase::PostDeleteNext(_) => unreachable!("{NO_ACTIVE_ITEM}"),
             Phase::Next(next) => {
                 next.value = v;
             }
             Phase::Done => unreachable!("{NO_ACTIVE_ITEM}"),
             Phase::EntryDeleted => unreachable!("{NO_ACTIVE_ITEM}"),
             Phase::PostDeleteEntry => unreachable!("{NO_ACTIVE_ITEM}"),
+            Phase::PostDeleteNext(_) => unreachable!("{NO_ACTIVE_ITEM}"),
             Phase::PostInsert(_) => unreachable!("{NO_ACTIVE_ITEM}"),
         }
     }
@@ -132,14 +135,10 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
     /// If we are in a phase where we could return a value, return it.
     fn value(&self) -> Option<&V> {
         match &self.phase {
+            Phase::Initial | Phase::Entry => unreachable!(),
             Phase::Next(current) => Some(&current.value),
-            Phase::Done => None,
-            Phase::EntryDeleted => None,
-            Phase::Initial
-            | Phase::Entry
-            | Phase::PostDeleteEntry
-            | Phase::PostDeleteNext(_)
-            | Phase::PostInsert(_) => {
+            Phase::Done | Phase::EntryDeleted => None,
+            Phase::PostDeleteEntry | Phase::PostDeleteNext(_) | Phase::PostInsert(_) => {
                 unreachable!()
             }
         }
@@ -181,17 +180,17 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                 }
                 self.value()
             }
+            Phase::Done => None,
+            Phase::EntryDeleted => {
+                self.phase = Phase::EntryDeleted;
+                None
+            }
             Phase::PostDeleteNext(current) => {
                 // If the stale value is some, we set it to be the current record.
                 if current.is_some() {
                     self.phase = Phase::Next(current.unwrap());
                 }
                 self.value()
-            }
-            Phase::Done => None,
-            Phase::EntryDeleted => {
-                self.phase = Phase::EntryDeleted;
-                None
             }
         }
     }
@@ -225,10 +224,6 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                 self.phase = Phase::PostInsert(new);
                 self.collisions.inc();
             }
-            Phase::EntryDeleted => {
-                // If entry is deleted, we need to update it.
-                self.entry.as_mut().unwrap().get_mut().value = v;
-            }
             Phase::Done => {
                 // If we are done, we need to create a new record and
                 // immediately push it to the past list.
@@ -238,6 +233,10 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                 });
                 self.past_push(new);
                 self.collisions.inc();
+            }
+            Phase::EntryDeleted => {
+                // If entry is deleted, we need to update it.
+                self.entry.as_mut().unwrap().get_mut().value = v;
             }
             Phase::PostDeleteEntry | Phase::PostDeleteNext(_) | Phase::PostInsert(_) => {
                 unreachable!("{MUST_CALL_NEXT}")
@@ -269,10 +268,10 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                 let next = current.next.take();
                 self.phase = Phase::PostDeleteNext(next);
             }
+            Phase::Done | Phase::EntryDeleted => unreachable!("{NO_ACTIVE_ITEM}"),
             Phase::PostDeleteEntry | Phase::PostDeleteNext(_) | Phase::PostInsert(_) => {
                 unreachable!("{MUST_CALL_NEXT}")
             }
-            Phase::Done | Phase::EntryDeleted => unreachable!("{NO_ACTIVE_ITEM}"),
         }
     }
 }
