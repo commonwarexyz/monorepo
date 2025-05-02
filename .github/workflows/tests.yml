@@ -31,7 +31,7 @@ jobs:
       env:
         RUSTDOCFLAGS: "-D warnings"
 
-  All:
+  Fast:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
@@ -46,7 +46,7 @@ jobs:
     - name: Run tests
       run: cargo test --verbose
 
-  Ignored:
+  Slow:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
