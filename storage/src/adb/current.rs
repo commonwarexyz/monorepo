@@ -281,9 +281,7 @@ impl<
     /// Simulate a crash that happens during commit and prevents the any db from being pruned of
     /// inactive operations, and bitmap state from being written/pruned.
     async fn simulate_failure_after_any_db_commit(mut self, hasher: &mut H) -> Result<(), Error> {
-        self.commit_ops(hasher).await?;
-
-        Ok(())
+        self.commit_ops(hasher).await
     }
 
     #[cfg(test)]
@@ -293,9 +291,7 @@ impl<
         self.commit_ops(hasher).await?;
 
         // Prune inactive elements from the any db.
-        self.any.prune_inactive().await?;
-
-        Ok(())
+        self.any.prune_inactive().await
     }
 
     #[cfg(test)]
