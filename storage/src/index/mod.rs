@@ -488,10 +488,10 @@ mod tests {
 
         // Add a value to the index
         index.insert(b"key", 1u64); // 0 collisions
-        index.insert_and_prune(b"key", 2u64, |v| *v == 1); // +1 collision, +1 prune
+        index.insert_and_prune(b"key", 2u64, |v| *v == 1); // replace
 
         assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![2]);
-        assert!(ctx.encode().contains("collisions_total 1"));
+        assert!(ctx.encode().contains("collisions_total 0"));
         assert!(ctx.encode().contains("pruned_total 1"));
     }
 
@@ -843,5 +843,20 @@ mod tests {
         index.insert(b"p", 1);
         let mut cur = index.get_mut(b"p").unwrap();
         cur.update(2); // still illegal
+    }
+
+    #[test_traced]
+    fn test_entry_replacement_not_a_collision() {
+        let ctx = deterministic::Context::default();
+        let mut index = Index::init(ctx.clone(), TwoCap);
+
+        index.insert(b"a", 1); // collisions = 0
+        let mut cur = index.get_mut(b"a").unwrap();
+        cur.next(); // Entry
+        cur.delete(); // list empty, pruned = 1
+        cur.next(); // Done
+        cur.insert(2); // replacement, *not* collision
+
+        assert!(ctx.encode().contains("collisions_total 0"));
     }
 }

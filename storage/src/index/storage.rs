@@ -213,7 +213,6 @@ impl<'a, T: Translator, V> Cursor<'a, T, V> {
     pub fn insert(&mut self, v: V) {
         assert!(!self.next_required, "{MUST_CALL_NEXT}");
         self.next_required = true;
-        self.collisions.inc();
         match self.phase {
             Phase::Initial => {
                 unreachable!("{MUST_CALL_NEXT}")
@@ -231,6 +230,7 @@ impl<'a, T: Translator, V> Cursor<'a, T, V> {
                 // Now that the current item is in next, we need to update
                 // the phase.
                 self.phase = Phase::Next;
+                self.collisions.inc();
             }
             Phase::Next => {
                 // Take next
@@ -246,6 +246,7 @@ impl<'a, T: Translator, V> Cursor<'a, T, V> {
                     next: next_next,
                 });
                 self.next = Some(new);
+                self.collisions.inc();
             }
             Phase::Done => {
                 // If entry is deleted, we need to update it.
@@ -261,6 +262,7 @@ impl<'a, T: Translator, V> Cursor<'a, T, V> {
                     next: None,
                 });
                 self.past_push(new);
+                self.collisions.inc();
             }
         }
     }
