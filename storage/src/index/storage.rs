@@ -134,28 +134,39 @@ impl<'a, T: Translator, V> Cursor<'a, T, V> {
         self.last_deleted = false;
         match self.phase {
             Phase::Initial => {
+                // We must start with some entry, so this will always be some non-None value.
                 self.phase = Phase::Entry;
                 return self.entry.as_ref().map(|r| &r.get().value);
             }
             Phase::Entry => {
                 // If the last operation was a delete, do nothing.
                 if last_deleted {
-                    return self.entry.as_ref().map(|r| &r.get().value);
+                    let value = self.entry.as_ref().map(|r| &r.get().value);
+                    if value.is_none() {
+                        self.phase = Phase::Done;
+                    }
+                    return value;
                 }
 
                 // If there is an entry after, we set it to be the current record.
-                if self.next.is_none() {
+                let value = self.next.as_deref().map(|r| &r.value);
+                if value.is_none() {
                     // If there is no next, we are done.
                     self.phase = Phase::Done;
-                    return None;
+                } else {
+                    // If there is a next, we set it to be the current record.
+                    self.phase = Phase::Next;
                 }
-                self.phase = Phase::Next;
-                return self.next.as_deref().map(|r| &r.value);
+                return value;
             }
             Phase::Next => {
                 // If last deleted, do noting.
                 if last_deleted {
-                    return self.next.as_deref().map(|r| &r.value);
+                    let value = self.next.as_deref().map(|r| &r.value);
+                    if value.is_none() {
+                        self.phase = Phase::Done;
+                    }
+                    return value;
                 }
 
                 // Take ownership of all records.
@@ -169,10 +180,11 @@ impl<'a, T: Translator, V> Cursor<'a, T, V> {
                 self.next = next_next;
 
                 // If we have a next record, return it.
-                if self.next.is_some() {
-                    return self.next.as_deref().map(|r| &r.value);
+                let value = self.next.as_deref().map(|r| &r.value);
+                if value.is_none() {
+                    self.phase = Phase::Done;
                 }
-                self.phase = Phase::Done;
+                return value;
             }
             Phase::Done => {
                 // We allow calling next() unnecessarily as inner ops may move us to `Phase::Done` (unbenownst to

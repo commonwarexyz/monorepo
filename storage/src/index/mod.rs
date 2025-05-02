@@ -665,4 +665,30 @@ mod tests {
         // Attempt to delete again (will panic)
         cursor.delete();
     }
+
+    #[test_traced]
+    fn test_cursor_delete_last_then_next_panic() {
+        let context = deterministic::Context::default();
+        let mut index = Index::init(context.clone(), TwoCap);
+
+        // Insert two values
+        index.insert(b"key", 1);
+        index.insert(b"key", 2);
+
+        // Get mutable cursor
+        let mut cursor = index.get_mut(b"key").unwrap();
+
+        // Iterate to the second value
+        assert_eq!(*cursor.next().unwrap(), 1); // Phase::Entry
+        assert_eq!(*cursor.next().unwrap(), 2); // Phase::Next
+
+        // Delete the second value
+        cursor.delete();
+
+        // Call next() once, should return None
+        assert!(cursor.next().is_none());
+
+        // Call next() again, triggers panic in original code
+        assert!(cursor.next().is_none()); // Panics at unwrap() of None
+    }
 }
