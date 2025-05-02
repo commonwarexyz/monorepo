@@ -182,7 +182,8 @@ mod tests {
     fn spawn_validator_engines(
         context: Context,
         identity: poly::Public,
-        pks: &[PublicKey],
+        sequencer_pks: &[PublicKey],
+        validator_pks: &[PublicKey],
         validators: &[(PublicKey, Ed25519, Share)],
         registrations: &mut Registrations<PublicKey>,
         automatons: &mut BTreeMap<PublicKey, mocks::Automaton<PublicKey>>,
@@ -197,10 +198,10 @@ mod tests {
             let context = context.with_label(&validator.to_string());
             let monitor = mocks::Monitor::new(111);
             monitors.insert(validator.clone(), monitor.clone());
-            let sequencers = mocks::Sequencers::<PublicKey>::new(pks.to_vec());
+            let sequencers = mocks::Sequencers::<PublicKey>::new(sequencer_pks.to_vec());
             let validators = mocks::Validators::<PublicKey>::new(
                 identity.clone(),
-                pks.to_vec(),
+                validator_pks.to_vec(),
                 Some(share.clone()),
             );
 
@@ -334,6 +335,7 @@ mod tests {
                 context.with_label("validator"),
                 identity.clone(),
                 &pks,
+                &pks,
                 &validators,
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
@@ -411,6 +413,7 @@ mod tests {
                     context.with_label("validator"),
                     identity.clone(),
                     &pks,
+                    &pks,
                     &validators,
                     &mut registrations,
                     &mut automatons.lock().unwrap(),
@@ -487,6 +490,7 @@ mod tests {
                 context.with_label("validator"),
                 identity.clone(),
                 &pks,
+                &pks,
                 &validators,
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
@@ -556,6 +560,7 @@ mod tests {
                 context.with_label("validator"),
                 identity.clone(),
                 &pks,
+                &pks,
                 &validators,
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
@@ -619,6 +624,7 @@ mod tests {
                 context.with_label("validator"),
                 identity.clone(),
                 &pks,
+                &pks,
                 &validators,
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
@@ -664,6 +670,7 @@ mod tests {
             let monitors = spawn_validator_engines(
                 context.with_label("validator"),
                 identity.clone(),
+                &pks,
                 &pks,
                 &validators,
                 &mut registrations,
@@ -922,9 +929,11 @@ mod tests {
             ));
             let mut reporters =
                 BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, Sha256Digest>>::new();
+            let sequencers = &pks[0..pks.len() / 2];
             spawn_validator_engines(
                 context.with_label("validator"),
                 identity.clone(),
+                sequencers,
                 &pks,
                 &validators,
                 &mut registrations,
@@ -937,7 +946,7 @@ mod tests {
 
             await_reporters(
                 context.with_label("reporter"),
-                reporters.keys().cloned().collect::<Vec<_>>(),
+                sequencers.to_vec(),
                 &reporters,
                 (1_000, 111, false),
             )
