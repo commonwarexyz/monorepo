@@ -793,7 +793,7 @@ mod tests {
     #[should_panic(expected = "must call Cursor::next()")]
     fn test_insert_at_entry_then_delete_head() {
         let ctx = deterministic::Context::default();
-        let mut index = Index::init(ctx, TwoCap);
+        let mut index = Index::init(ctx.clone(), TwoCap);
 
         index.insert(b"key", 10);
         index.insert(b"key", 20); // [10, 20]
@@ -804,26 +804,32 @@ mod tests {
             cur.insert(15); // [10, 15, 20]
             cur.delete(); // [15, 20]
         }
+
+        assert!(ctx.encode().contains("keys 1"));
+        assert!(ctx.encode().contains("items 2"));
     }
 
     #[test_traced]
     fn test_delete_last_then_insert_while_done() {
         let ctx = deterministic::Context::default();
-        let mut index = Index::init(ctx, TwoCap);
+        let mut index = Index::init(ctx.clone(), TwoCap);
 
         index.insert(b"k", 7);
 
-        let mut cur = index.get_mut(b"k").unwrap();
-        assert_eq!(*cur.next().unwrap(), 7); // Entry
-        cur.delete(); // list emptied, Done
-        assert!(cur.next().is_none()); // Done
+        {
+            let mut cur = index.get_mut(b"k").unwrap();
+            assert_eq!(*cur.next().unwrap(), 7); // Entry
+            cur.delete(); // list emptied, Done
+            assert!(cur.next().is_none()); // Done
 
-        cur.insert(8); // append while Done
-        assert!(cur.next().is_none()); // still Done
-        cur.insert(9); // another append while Done
-        assert!(cur.next().is_none()); // still Done
+            cur.insert(8); // append while Done
+            assert!(cur.next().is_none()); // still Done
+            cur.insert(9); // another append while Done
+            assert!(cur.next().is_none()); // still Done
+        }
 
-        drop(cur);
+        assert!(ctx.encode().contains("keys 1"));
+        assert!(ctx.encode().contains("items 2"));
         assert_eq!(index.get(b"k").copied().collect::<Vec<_>>(), vec![8, 9]);
     }
 
@@ -871,6 +877,8 @@ mod tests {
         cur.next(); // Done
         cur.insert(2); // replacement, *not* collision
 
+        assert!(ctx.encode().contains("keys 1"));
+        assert!(ctx.encode().contains("items 1"));
         assert!(ctx.encode().contains("collisions_total 0"));
     }
 }
