@@ -201,6 +201,7 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
     ///
     /// Increments the `collisions` counter as this adds to an existing key's chain.
     pub fn insert(&mut self, v: V) {
+        self.items.inc();
         match std::mem::replace(&mut self.phase, Phase::Done) {
             Phase::Initial => unreachable!("{MUST_CALL_NEXT}"),
             Phase::Entry => {
@@ -212,7 +213,6 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
 
                 // Set the phase to the new record.
                 self.phase = Phase::PostInsert(new);
-                self.items.inc();
                 self.collisions.inc();
             }
             Phase::Next(mut current) => {
@@ -225,7 +225,6 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                 // Create a new record that points to the next's next.
                 let new = Box::new(Record { value: v, next });
                 self.phase = Phase::PostInsert(new);
-                self.items.inc();
                 self.collisions.inc();
             }
             Phase::Done => {
@@ -236,7 +235,6 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                     next: None,
                 });
                 self.past_push(new);
-                self.items.inc();
                 self.collisions.inc();
             }
             Phase::EntryDeleted => {
@@ -256,6 +254,7 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
     /// Increments the `pruned` counter to track removals.
     pub fn delete(&mut self) {
         self.pruned.inc();
+        self.items.dec();
         match std::mem::replace(&mut self.phase, Phase::Done) {
             Phase::Initial => unreachable!("{MUST_CALL_NEXT}"),
             Phase::Entry => {
@@ -265,7 +264,6 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                     entry.value = next.value;
                     entry.next = next.next;
                     self.phase = Phase::PostDeleteEntry;
-                    self.items.dec();
                     return;
                 }
 
@@ -277,7 +275,6 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                 // Drop current instead of pushing it to the past list.
                 let next = current.next.take();
                 self.phase = Phase::PostDeleteNext(next);
-                self.items.dec();
             }
             Phase::Done | Phase::EntryDeleted => unreachable!("{NO_ACTIVE_ITEM}"),
             Phase::PostDeleteEntry | Phase::PostDeleteNext(_) | Phase::PostInsert(_) => {
@@ -310,7 +307,6 @@ where
             Phase::EntryDeleted => {
                 // If the entry is deleted, we should remove it.
                 self.keys.dec();
-                self.items.dec();
                 entry.remove();
                 return;
             }
