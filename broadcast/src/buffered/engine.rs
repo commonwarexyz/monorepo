@@ -256,44 +256,38 @@ impl<
         digest: Option<Dd>,
         all: bool,
     ) -> Vec<M> {
-        if let Some(ref sender) = sender {
-            if let Some(deque) = self.deques.get(sender) {
-                let mut values = Vec::new();
-                for item in deque {
-                    // Try to find a match from the sender
-                    if item.identity != identity {
-                        continue;
-                    }
-                    if digest.as_ref().is_some_and(|d| d != &item.digest) {
-                        continue;
-                    }
+        match sender {
+            // Only consider messages from the sender filter
+            Some(s) => self
+                .deques
+                .get(s)
+                .into_iter()
+                .flat_map(|dq| dq.iter())
+                .filter(|pair| pair.identity == identity)
+                .filter_map(|pair| {
+                    self.items
+                        .get(&pair.identity)
+                        .and_then(|m| m.get(&pair.digest))
+                })
+                .cloned()
+                .collect(),
 
-                    // If the message is already in the cache, send it to the responder
-                    if let Some(msg) = self
-                        .items
-                        .get(&item.identity)
-                        .and_then(|m| m.get(&item.digest))
-                    {
-                        values.push(msg.clone());
-                    }
-                }
-                return values;
-            }
-        } else if let Some(msg) = self.items.get(&identity) {
-            if let Some(digest) = digest {
-                if let Some(msg) = msg.get(&digest) {
-                    return vec![msg.clone()];
-                }
-                return Vec::new();
-            }
-            if all {
-                return msg.values().cloned().collect();
-            } else {
-                // There should always be at least one message if the identity exists.
-                return vec![msg.values().next().unwrap().clone()];
-            }
+            // Search by identity
+            None => match self.items.get(&identity) {
+                // If there are no messages for the identity, return an empty vector
+                None => Vec::new(),
+
+                // If there are messages, return the ones that match the digest filter
+                Some(msgs) => match digest {
+                    // If a digest is provided, return whatever matches it.
+                    Some(dg) => msgs.get(&dg).cloned().into_iter().collect(),
+
+                    // If no digest was provided, return `all` messages for the identity.
+                    None if all => msgs.values().cloned().collect(),
+                    None => msgs.values().next().cloned().into_iter().collect(),
+                },
+            },
         }
-        Vec::new()
     }
 
     /// Handles a `subscribe` request from the application.
