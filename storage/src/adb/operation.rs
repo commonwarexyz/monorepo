@@ -177,93 +177,80 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode};
     use commonware_utils::array::U64;
 
-    // #[test]
-    // fn test_operation_array_basic() {
-    //     let key = U64::new(1234);
-    //     let value = U64::new(56789);
-    //     let update_op = Operation::Update(key, value);
+    #[test]
+    fn test_operation_array_basic() {
+        let key = U64::new(1234);
+        let value = U64::new(56789);
 
-    //     let from = Operation::decode(update_op).unwrap();
-    //     assert_eq!(key, from.to_key());
-    //     assert_eq!(value, from.to_value().unwrap());
-    //     assert_eq!(update_op, from);
+        let update_op = Operation::Update(key.clone(), value.clone());
+        let from = Operation::decode(update_op.encode()).unwrap();
+        assert_eq!(key, from.to_key());
+        assert_eq!(value, from.to_value().unwrap());
+        assert_eq!(update_op, from);
 
-    //     let vec = update_op.to_vec();
+        let key2 = U64::new(42);
+        let delete_op = Operation::<U64, U64>::Deleted(key2.clone());
+        let from = Operation::<U64, U64>::decode(delete_op.encode()).unwrap();
+        assert_eq!(key2, from.to_key());
+        assert_eq!(None, from.to_value());
+        assert_eq!(delete_op, from);
 
-    //     let from = Operation::<U64, U64>::decode(vec.as_ref()).unwrap();
-    //     assert_eq!(key, from.to_key());
-    //     assert_eq!(value, from.to_value().unwrap());
-    //     assert_eq!(update_op, from);
+        let commit_op = Operation::<U64, U64>::Commit(42);
+        let from = Operation::<U64, U64>::decode(commit_op.encode()).unwrap();
+        assert_eq!(None, from.to_value());
+        assert!(matches!(from, Operation::Commit(42)));
+        assert_eq!(commit_op, from);
 
-    //     let from = Operation::<U64, U64>::decode(vec.as_ref()).unwrap();
-    //     assert_eq!(key, from.to_key());
-    //     assert_eq!(value, from.to_value().unwrap());
-    //     assert_eq!(update_op, from);
+        // test non-zero byte detection in delete operation
+        let mut invalid = delete_op.encode();
+        invalid[U64::SIZE + 4] = 0xFF;
+        let decoded = Operation::<U64, U64>::decode(invalid.as_ref());
+        assert!(matches!(decoded.unwrap_err(), CodecError::Invalid(_, _)));
 
-    //     let key2 = U64::new(42);
-    //     let delete_op = Operation::<U64, U64>::delete(&key2);
-    //     let from = Operation::<U64, U64>::decode(delete_op.as_ref()).unwrap();
-    //     assert_eq!(key2, from.to_key());
-    //     assert_eq!(None, from.to_value());
-    //     assert_eq!(delete_op, from);
+        // test invalid context byte detection
+        let mut invalid = delete_op.encode();
+        invalid[0] = 0xFF;
+        let decoded = Operation::<U64, U64>::decode(invalid.as_ref());
+        assert!(matches!(
+            decoded.unwrap_err(),
+            CodecError::InvalidEnum(0xFF)
+        ));
 
-    //     let commit_op = Operation::<U64, U64>::new(Type::Commit(42));
-    //     let from = Operation::<U64, U64>::decode(commit_op.as_ref()).unwrap();
-    //     assert_eq!(None, from.to_value());
-    //     assert!(matches!(from.to_type(), Type::Commit(42)));
-    //     assert_eq!(commit_op, from);
+        // test invalid length detection
+        let mut invalid = delete_op.encode().to_vec();
+        invalid.pop();
+        let decoded = Operation::<U64, U64>::decode(invalid.as_ref());
+        assert!(matches!(decoded.unwrap_err(), CodecError::EndOfBuffer));
+    }
 
-    //     // test non-zero byte detection in delete operation
-    //     let mut invalid = delete_op.to_vec();
-    //     invalid[U64::SIZE + 4] = 0xFF;
-    //     let decoded = Operation::<U64, U64>::decode(invalid.as_ref());
-    //     assert!(matches!(decoded.unwrap_err(), CodecError::Invalid(_, _)));
+    #[test]
+    fn test_operation_array_display() {
+        let key = U64::new(1234);
+        let value = U64::new(56789);
+        let update_op = Operation::Update(key.clone(), value.clone());
+        assert_eq!(
+            format!("{}", update_op),
+            format!("[key:{} value:{}]", key, value)
+        );
 
-    //     // test invalid context byte detection
-    //     let mut invalid = delete_op.to_vec();
-    //     invalid[0] = 0xFF;
-    //     let decoded = Operation::<U64, U64>::decode(invalid.as_ref());
-    //     assert!(matches!(
-    //         decoded.unwrap_err(),
-    //         CodecError::InvalidEnum(0xFF)
-    //     ));
+        let key2 = U64::new(42);
+        let delete_op = Operation::<U64, U64>::Deleted(key2.clone());
+        assert_eq!(
+            format!("{}", delete_op),
+            format!("[key:{} <deleted>]", key2)
+        );
+    }
 
-    //     // test invalid length detection
-    //     let mut invalid = update_op.to_vec();
-    //     invalid.pop();
-    //     let decoded = Operation::<U64, U64>::decode(invalid.as_ref());
-    //     assert!(matches!(decoded.unwrap_err(), CodecError::EndOfBuffer));
-    // }
+    #[test]
+    fn test_operation_array_codec() {
+        let key = U64::new(1234);
+        let value = U64::new(5678);
+        let update_op = Operation::Update(key, value);
 
-    // #[test]
-    // fn test_operation_array_display() {
-    //     let key = U64::new(1234);
-    //     let value = U64::new(56789);
-    //     let update_op = Operation::Update(&key, &value);
-    //     assert_eq!(
-    //         format!("{}", update_op),
-    //         format!("[key:{} value:{}]", key, value)
-    //     );
+        let encoded = update_op.encode();
+        assert_eq!(encoded.len(), Operation::<U64, U64>::SIZE);
 
-    //     let key2 = U64::new(42);
-    //     let delete_op = Operation::<U64, U64>::delete(&key2);
-    //     assert_eq!(
-    //         format!("{}", delete_op),
-    //         format!("[key:{} <deleted>]", key2)
-    //     );
-    // }
-
-    // #[test]
-    // fn test_operation_array_codec() {
-    //     let key = U64::new(1234);
-    //     let value = U64::new(5678);
-    //     let update_op = Operation::Update(&key, &value);
-
-    //     let encoded = update_op.encode();
-    //     assert_eq!(encoded.len(), Operation::<U64, U64>::SIZE);
-    //     assert_eq!(encoded, update_op.as_ref());
-
-    //     let decoded = Operation::decode(encoded).unwrap();
-    //     assert_eq!(update_op, decoded);
-    // }
+        let decoded = Operation::decode(encoded).unwrap();
+        assert_eq!(update_op, decoded);
+    }
 }

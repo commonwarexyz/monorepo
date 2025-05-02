@@ -50,7 +50,7 @@
 
 use super::Error;
 use bytes::BufMut;
-use commonware_codec::{Codec, Decode, DecodeExt, Encode, FixedSize};
+use commonware_codec::{Decode, DecodeExt, Encode, FixedSize};
 use commonware_runtime::{Blob, Error as RError, Metrics, Storage};
 use commonware_utils::hex;
 use futures::stream::{self, Stream, StreamExt};
