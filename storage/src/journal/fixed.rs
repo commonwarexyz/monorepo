@@ -50,9 +50,9 @@
 
 use super::Error;
 use bytes::BufMut;
-use commonware_codec::{DecodeExt, FixedSize};
+use commonware_codec::{Codec, DecodeExt, FixedSize};
 use commonware_runtime::{Blob, Error as RError, Metrics, Storage};
-use commonware_utils::{hex, Array};
+use commonware_utils::hex;
 use futures::stream::{self, Stream, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::BTreeMap;
@@ -73,7 +73,7 @@ pub struct Config {
 }
 
 /// Implementation of `Journal` storage.
-pub struct Journal<E: Storage + Metrics, A: Array> {
+pub struct Journal<E: Storage + Metrics, A> {
     context: E,
     cfg: Config,
 
@@ -91,7 +91,7 @@ pub struct Journal<E: Storage + Metrics, A: Array> {
     _array: PhantomData<A>,
 }
 
-impl<E: Storage + Metrics, A: Array> Journal<E, A> {
+impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
     const CHUNK_SIZE: usize = u32::SIZE + A::SIZE;
     const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
 
@@ -215,6 +215,7 @@ impl<E: Storage + Metrics, A: Array> Journal<E, A> {
         assert!(*len < self.cfg.items_per_blob * Self::CHUNK_SIZE_U64);
         assert_eq!(*len % Self::CHUNK_SIZE_U64, 0);
         let mut buf: Vec<u8> = Vec::with_capacity(Self::CHUNK_SIZE);
+        let item = item.encode();
         let checksum = crc32fast::hash(&item);
         buf.extend_from_slice(&item);
         buf.put_u32(checksum);

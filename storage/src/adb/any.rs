@@ -8,10 +8,7 @@
 //! and cannot be updated after.
 
 use crate::{
-    adb::{
-        operation::{Operation, Type},
-        Error,
-    },
+    adb::{operation::Operation, Error},
     index::{translator::EightCap, Index, Translator},
     journal::fixed::{Config as JConfig, Journal},
     mmr::{
@@ -21,6 +18,7 @@ use crate::{
         verification::Proof,
     },
 };
+use commonware_codec::Encode as _;
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
@@ -161,11 +159,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         let mut rewind_leaf_num = log_size;
         while rewind_leaf_num > 0 {
             let op: Operation<K, V> = log.read(rewind_leaf_num - 1).await?;
-            match op.to_type() {
-                Type::Commit(_) => {
+            match op {
+                Operation::Commit(_) => {
                     break; // floor is our commit indicator
                 }
-                _other => {
+                _ => {
                     rewind_leaf_num -= 1;
                 }
             }
@@ -227,26 +225,31 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         // is more recent than the last operation for the same key.
         for i in start_leaf_num..log_size {
             let op: Operation<K, V> = log.read(i).await?;
-            match op.to_type() {
-                Type::Deleted(key) => {
+            match op {
+                Operation::Deleted(key) => {
                     // If the translated key is in the snapshot, get a cursor to look for the key.
                     if let Some(mut cursor) = snapshot.get_mut(&key) {
                         while let Some(loc) = cursor.next() {
                             let op = log.read(*loc).await?;
-                            if op.to_key() != key {
+                            let Some(op_key) = op.to_key() else {
+                                // This is a commit
+                                continue;
+                            };
+                            if *op_key != key {
+                                // This operation is not for the key we're looking for.
                                 continue;
                             }
+
+                            // The mapped key is the same; delete it from the snapshot.
                             if let Some(ref mut bitmap_ref) = bitmap {
                                 bitmap_ref.set_bit(hasher, *loc, false);
                             }
-
-                            // If the mapped key is the same, delete it from the snapshot.
                             cursor.delete();
                             break;
                         }
                     }
                 }
-                Type::Update(key, _) => {
+                Operation::Update(key, _) => {
                     let update_result =
                         Any::<E, K, V, H, T>::update_loc(snapshot, log, key, None, i).await?;
                     if let Some(ref mut bitmap_ref) = bitmap {
@@ -262,7 +265,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                         }
                     }
                 }
-                Type::Commit(loc) => inactivity_floor_loc = loc,
+                Operation::Commit(loc) => inactivity_floor_loc = loc,
             }
             if let Some(ref mut bitmap_ref) = bitmap {
                 // If we reach this point and a bit hasn't been added for the operation, then it's
@@ -296,11 +299,17 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         // Iterate over conflicts in the snapshot.
         while let Some(loc) = cursor.next() {
             let op = log.read(*loc).await?;
-            if op.to_key() != key {
+            let Some(op_key) = op.to_key() else {
+                // This is a commit
+                continue;
+            };
+            if *op_key != key {
+                // This operation is not for the key we're looking for.
                 continue;
             }
+
             if let Some(v) = value {
-                if op.to_value().unwrap() == *v {
+                if op.to_value().unwrap() == v {
                     // The key value is the same as the previous one: treat as a no-op.
                     return Ok(UpdateResult::NoOp);
                 }
@@ -319,7 +328,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
     /// Return a digest of the operation.
     pub fn op_digest(hasher: &mut H, op: &Operation<K, V>) -> H::Digest {
-        hasher.update(op);
+        hasher.update(&op.encode());
         hasher.finalize()
     }
 
@@ -327,8 +336,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         for loc in self.snapshot.get(key) {
             let op = self.log.read(*loc).await?;
-            match op.to_type() {
-                Type::Update(k, v) => {
+            match op {
+                Operation::Update(k, v) => {
                     if k == *key {
                         return Ok(Some(v));
                     }
@@ -385,7 +394,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             UpdateResult::Updated(_, _) => (),
         }
 
-        let op = Operation::update(key, value);
+        let op = Operation::Update(key, value);
         self.apply_op(hasher, op).await?;
 
         Ok(res)
@@ -403,8 +412,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         // Iterate over all conflicting keys in the snapshot.
         while let Some(loc) = cursor.next() {
             let op = self.log.read(*loc).await?;
-            match op.to_type() {
-                Type::Update(k, _) => {
+            match op {
+                Operation::Update(k, _) => {
                     if k == key {
                         // The key is in the snapshot, so delete it.
                         //
@@ -413,7 +422,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                         let old_loc = *loc;
                         cursor.delete();
                         drop(cursor);
-                        self.apply_op(hasher, Operation::delete(key)).await?;
+                        self.apply_op(hasher, Operation::Deleted(key)).await?;
                         return Ok(Some(old_loc));
                     }
                 }
@@ -559,9 +568,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         old_loc: u64,
     ) -> Result<Option<u64>, Error> {
         // If the translated key is not in the snapshot, get a cursor to look for the key.
-        let key = op.to_key();
+        let Some(key) = op.to_key() else {
+            // `op` is a commit
+            return Ok(None);
+        };
         let new_loc = self.op_count();
-        let Some(mut cursor) = self.snapshot.get_mut(&key) else {
+        let Some(mut cursor) = self.snapshot.get_mut(key) else {
             return Ok(None);
         };
 
@@ -609,7 +621,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             self.inactivity_floor_loc += 1;
         }
 
-        self.apply_op(hasher, Operation::commit(self.inactivity_floor_loc))
+        self.apply_op(hasher, Operation::Commit(self.inactivity_floor_loc))
             .await?;
 
         Ok(())
@@ -648,7 +660,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         hasher: &mut H,
         write_limit: usize,
     ) -> Result<H::Digest, Error> {
-        self.apply_op(hasher, Operation::commit(self.inactivity_floor_loc))
+        self.apply_op(hasher, Operation::Commit(self.inactivity_floor_loc))
             .await?;
         let root = self.root(hasher);
         self.log.close().await?;
@@ -661,7 +673,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// fully committing the log, requiring rollback of the MMR and log upon reopening.
     #[cfg(test)]
     pub async fn simulate_failed_commit_log(mut self, hasher: &mut H) -> Result<(), Error> {
-        self.apply_op(hasher, Operation::commit(self.inactivity_floor_loc))
+        self.apply_op(hasher, Operation::Commit(self.inactivity_floor_loc))
             .await?;
         self.ops.close().await?;
         // Rewind the operation log over the commit op to force rollback to the previous commit.
@@ -1207,7 +1219,11 @@ mod test {
             // This loop checks that the expected true bits are true in the bitmap.
             for pos in db.inactivity_floor_loc..items {
                 let item = db.log.read(pos).await.unwrap();
-                let iter = db.snapshot.get(&item.to_key());
+                let Some(item_key) = item.to_key() else {
+                    // `item` is a commit
+                    continue;
+                };
+                let iter = db.snapshot.get(item_key);
                 for loc in iter {
                     if *loc == pos {
                         // Found an active op.
