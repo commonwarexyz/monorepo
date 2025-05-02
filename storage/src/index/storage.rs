@@ -212,9 +212,8 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                 let next = current.next.take();
                 self.phase = Phase::Stale(next);
             }
-            Phase::Done | Phase::EntryDeleted | Phase::PostDeleteEntry | Phase::Stale(_) => {
-                unreachable!("{NO_ACTIVE_ITEM}")
-            }
+            Phase::PostDeleteEntry | Phase::Stale(_) => unreachable!("{MUST_CALL_NEXT}"),
+            Phase::Done | Phase::EntryDeleted => unreachable!("{NO_ACTIVE_ITEM}"),
         }
     }
 }
