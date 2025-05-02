@@ -235,7 +235,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                                 // This is a commit
                                 continue;
                             };
-                            if op_key != key {
+                            if *op_key != key {
                                 // This operation is not for the key we're looking for.
                                 continue;
                             }
@@ -303,13 +303,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 // This is a commit
                 continue;
             };
-            if op_key != key {
+            if *op_key != key {
                 // This operation is not for the key we're looking for.
                 continue;
             }
 
             if let Some(v) = value {
-                if op.to_value().unwrap() == *v {
+                if op.to_value().unwrap() == v {
                     // The key value is the same as the previous one: treat as a no-op.
                     return Ok(UpdateResult::NoOp);
                 }
@@ -573,7 +573,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             return Ok(None);
         };
         let new_loc = self.op_count();
-        let Some(mut cursor) = self.snapshot.get_mut(&key) else {
+        let Some(mut cursor) = self.snapshot.get_mut(key) else {
             return Ok(None);
         };
 
@@ -1223,7 +1223,7 @@ mod test {
                     // `item` is a commit
                     continue;
                 };
-                let iter = db.snapshot.get(&item_key);
+                let iter = db.snapshot.get(item_key);
                 for loc in iter {
                     if *loc == pos {
                         // Found an active op.

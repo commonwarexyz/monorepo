@@ -63,20 +63,20 @@ impl<K: Array, V: Array> Operation<K, V> {
 
     /// If this is a [Operation::Update] or [Operation::Deleted] operation, returns the key.
     /// Otherwise, returns None.
-    pub fn to_key(&self) -> Option<K> {
+    pub fn to_key(&self) -> Option<&K> {
         match self {
-            Operation::Deleted(key) => Some(key.clone()),
-            Operation::Update(key, _) => Some(key.clone()),
+            Operation::Deleted(key) => Some(key),
+            Operation::Update(key, _) => Some(key),
             Operation::Commit(_) => None,
         }
     }
 
     ///If this is a [Operation::Update] operation, returns the value.
     /// Otherwise, returns None.
-    pub fn to_value(&self) -> Option<V> {
+    pub fn to_value(&self) -> Option<&V> {
         match self {
             Operation::Deleted(_) => None,
-            Operation::Update(_, value) => Some(value.clone()),
+            Operation::Update(_, value) => Some(value),
             Operation::Commit(_) => None,
         }
     }
@@ -169,10 +169,10 @@ mod tests {
         let value = U64::new(56789);
 
         let update_op = Operation::Update(key.clone(), value.clone());
-        assert_eq!(key, update_op.to_key().unwrap());
+        assert_eq!(&key, update_op.to_key().unwrap());
 
         let delete_op = Operation::<U64, U64>::Deleted(key.clone());
-        assert_eq!(key, delete_op.to_key().unwrap());
+        assert_eq!(&key, delete_op.to_key().unwrap());
 
         let commit_op = Operation::<U64, U64>::Commit(42);
         assert_eq!(None, commit_op.to_key());
@@ -184,7 +184,7 @@ mod tests {
         let value = U64::new(56789);
 
         let update_op = Operation::Update(key.clone(), value.clone());
-        assert_eq!(value, update_op.to_value().unwrap());
+        assert_eq!(&value, update_op.to_value().unwrap());
 
         let delete_op = Operation::<U64, U64>::Deleted(key.clone());
         assert_eq!(None, delete_op.to_value());
@@ -199,18 +199,18 @@ mod tests {
         let value = U64::new(56789);
 
         let update_op = Operation::Update(key.clone(), value.clone());
-        assert_eq!(key, update_op.to_key().unwrap());
-        assert_eq!(value, update_op.to_value().unwrap());
+        assert_eq!(&key, update_op.to_key().unwrap());
+        assert_eq!(&value, update_op.to_value().unwrap());
 
         let from = Operation::decode(update_op.encode()).unwrap();
-        assert_eq!(key, from.to_key().unwrap());
-        assert_eq!(value, from.to_value().unwrap());
+        assert_eq!(&key, from.to_key().unwrap());
+        assert_eq!(&value, from.to_value().unwrap());
         assert_eq!(update_op, from);
 
         let key2 = U64::new(42);
         let delete_op = Operation::<U64, U64>::Deleted(key2.clone());
         let from = Operation::<U64, U64>::decode(delete_op.encode()).unwrap();
-        assert_eq!(key2, from.to_key().unwrap());
+        assert_eq!(&key2, from.to_key().unwrap());
         assert_eq!(None, from.to_value());
         assert_eq!(delete_op, from);
 
