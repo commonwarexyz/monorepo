@@ -133,25 +133,21 @@ pub trait Digest: Array + Copy {}
 
 /// An object that can be uniquely represented as a [Digest].
 pub trait Digestible<D: Digest>: Clone + Sized + Send + Sync + 'static {
-    /// Returns the unique representation of the object as a [Digest].
+    /// Returns a unique representation of the object as a [Digest].
     ///
-    /// If many objects can be represented by the same [Digest], you
-    /// should implement [Identifiable] instead.
+    /// If many objects with [Digest]s are related (map to some higher-level
+    /// group [Digest]), you should also implement [Committable].
     fn digest(&self) -> D;
 }
 
-/// An object that can be identified by a [Digest].
-///
-/// When possible, crates should prefer supporting [Identifiable] over [Digestible]
-/// (returning all [Digestible] objects for a given `identity()`).
-pub trait Identifiable<D: Digest>: Clone + Sized + Send + Sync + 'static {
-    /// Returns the identity of the object.
+/// An object that shares a (commitment) [Digest] with other, related values.
+pub trait Committable<D: Digest>: Clone + Sized + Send + Sync + 'static {
+    /// Returns the commitment of the object as a [Digest].
     ///
-    /// For simple objects, this is often just a hash of the object itself.
-    /// For more complex objects, however, this may represent some component
-    /// of a proof structure (where many unique objects map to the same
-    /// identity).
-    fn identity(&self) -> D;
+    /// For simple objects (like a block), this is often just the digest of the object
+    /// itself. For more complex objects, however, this may represent some root or base
+    /// of a proof structure (where many unique objects map to the same commitment).
+    fn commitment(&self) -> D;
 }
 
 /// Interface that commonware crates rely on for hashing.
