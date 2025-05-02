@@ -2310,6 +2310,7 @@ mod tests {
     }
 
     #[test_traced]
+    #[ignore]
     fn test_1k() {
         // Create context
         let n = 10;

@@ -899,6 +899,7 @@ mod tests {
     }
 
     #[test_traced]
+    #[ignore]
     fn test_1k() {
         let num_validators: u32 = 10;
         let quorum: u32 = 3;

@@ -33,6 +33,21 @@ jobs:
     - name: Run tests
       run: cargo test --verbose
 
+  Ignored:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Get Rust version
+      id: rust-version
+      run: echo "rust_version=$(rustc --version)" >> "$GITHUB_OUTPUT"
+    - name: Run setup
+      uses: ./.github/actions/setup
+      with:
+        rust-version: ${{ steps.rust-version.outputs.rust_version}}
+    - name: Run ignored tests
+      run: cargo test --verbose --ignored
+
   Dependencies:
     runs-on: ubuntu-latest
     steps:
