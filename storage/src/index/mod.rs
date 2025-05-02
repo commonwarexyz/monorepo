@@ -809,13 +809,28 @@ mod tests {
 
         {
             let mut cur = index.get_mut(b"key").unwrap();
-            assert_eq!(*cur.next().unwrap(), 10); // Entry
-            cur.insert(15); // [10, 15, 20]
-            cur.delete(); // [15, 20]
+            assert_eq!(*cur.next().unwrap(), 10);
+            cur.insert(15);
+            cur.delete();
         }
+    }
 
-        assert!(ctx.encode().contains("keys 1"));
-        assert!(ctx.encode().contains("items 2"));
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next()")]
+    fn test_delete_then_insert_without_next() {
+        let ctx = deterministic::Context::default();
+        let mut index = Index::init(ctx.clone(), TwoCap);
+
+        index.insert(b"key", 10);
+        index.insert(b"key", 20);
+
+        {
+            let mut cur = index.get_mut(b"key").unwrap();
+            assert_eq!(*cur.next().unwrap(), 10);
+            assert_eq!(*cur.next().unwrap(), 20);
+            cur.delete();
+            cur.insert(15);
+        }
     }
 
     #[test_traced]
