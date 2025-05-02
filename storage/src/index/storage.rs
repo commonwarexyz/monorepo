@@ -154,7 +154,7 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                 });
 
                 // Set the phase to the new record.
-                self.phase = Phase::Stale(Some(new));
+                self.phase = Phase::Next(new);
                 self.collisions.inc();
             }
             Phase::Next(mut current) => {
