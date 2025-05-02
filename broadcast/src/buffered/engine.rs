@@ -19,6 +19,18 @@ use futures::{
 use std::collections::{HashMap, VecDeque};
 use tracing::{debug, error, trace, warn};
 
+/// A responder waiting for a message.
+pub struct Waiter<P, Dd, M> {
+    /// The sender of the message.
+    pub sender: Option<P>,
+
+    /// The digest of the message.
+    pub digest: Option<Dd>,
+
+    /// The responder to send the message to.
+    pub responder: oneshot::Sender<M>,
+}
+
 /// Instance of the main engine for the module.
 ///
 /// It is responsible for:
@@ -61,8 +73,7 @@ pub struct Engine<
     mailbox_receiver: mpsc::Receiver<Message<P, Di, Dd, M>>,
 
     /// Pending requests from the application.
-    #[allow(clippy::type_complexity)]
-    waiters: HashMap<Di, Vec<(Option<P>, Option<Dd>, oneshot::Sender<M>)>>,
+    waiters: HashMap<Di, Vec<Waiter<P, Dd, M>>>,
 
     ////////////////////////////////////////
     // Cache
@@ -290,10 +301,11 @@ impl<
         }
 
         // Store the responder
-        self.waiters
-            .entry(identity)
-            .or_default()
-            .push((sender, digest, responder));
+        self.waiters.entry(identity).or_default().push(Waiter {
+            sender,
+            digest,
+            responder,
+        });
     }
 
     /// Handles a `get` request from the application.
@@ -337,7 +349,11 @@ impl<
             let mut i = 0;
             while i < waiters.len() {
                 // Get the sender and digest filters
-                let (sender_filter, digest_filter, _) = &waiters[i];
+                let Waiter {
+                    sender: sender_filter,
+                    digest: digest_filter,
+                    responder: _,
+                } = &waiters[i];
 
                 // Keep the waiter if either filter does not match.
                 if sender_filter.as_ref().is_some_and(|s| s != &peer)
@@ -351,7 +367,7 @@ impl<
                 //
                 // The index `i` is intentionally not incremented here to check
                 // the element that was swapped into position `i`.
-                let (_, _, responder) = waiters.swap_remove(i);
+                let responder = waiters.swap_remove(i).responder;
                 self.respond_subscribe(responder, msg.clone());
             }
 
@@ -423,7 +439,7 @@ impl<
     fn cleanup_waiters(&mut self) {
         self.waiters.retain(|_, waiters| {
             let initial_len = waiters.len();
-            waiters.retain(|waiter| !waiter.2.is_canceled());
+            waiters.retain(|waiter| !waiter.responder.is_canceled());
             let dropped_count = initial_len - waiters.len();
 
             // Increment metrics for each dropped waiter
