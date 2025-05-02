@@ -133,6 +133,11 @@ impl<'a, T: Translator, V> Cursor<'a, T, V> {
 
     /// Advances the cursor to the next value in the chain, returning a reference to it.
     ///
+    /// This method must be called before any other operations (`insert()`, `delete()`, etc.). If
+    /// either `insert()` or `delete()` is called, `next()` must be called to set a new active
+    /// item. If after `insert()`, the next active item is the item after the inserted item. If after
+    /// `delete()`, the next active item is the item after the deleted item.
+    ///
     /// Handles transitions between phases and adjusts for deletions. Returns `None` when the list is exhausted.
     /// It is safe to call `next()` even after it returns `None`.
     #[allow(clippy::should_implement_trait)]
