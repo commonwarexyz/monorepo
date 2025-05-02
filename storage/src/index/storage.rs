@@ -159,18 +159,14 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
             }
             Phase::Next(mut current) => {
                 // Take next.
-                let mut next = current.next.take().unwrap();
-                let next_next = next.next.take();
+                let next = current.next.take();
 
                 // Add current to the past list.
                 self.past_push(current);
 
                 // Create a new record that points to the next's next.
-                let new = Box::new(Record {
-                    value: v,
-                    next: next_next,
-                });
-                self.phase = Phase::Stale(Some(new));
+                let new = Box::new(Record { value: v, next });
+                self.phase = Phase::Next(new);
                 self.collisions.inc();
             }
             Phase::EntryDeleted => {
