@@ -49,6 +49,7 @@ pub struct Config {
 /// of the hash digest being produced by the hasher. A compile-time assertion is used to prevent any
 /// other setting.
 pub struct Current<
+    'a,
     E: RStorage + Clock + Metrics,
     K: Array,
     V: Array,
@@ -62,7 +63,7 @@ pub struct Current<
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Any] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
-    pub status: Bitmap<H, N>,
+    pub status: Bitmap<'a, H, N>,
 
     context: E,
 
@@ -76,7 +77,7 @@ impl<
         H: CHasher,
         T: Translator,
         const N: usize,
-    > Current<E, K, V, H, T, N>
+    > Current<'_, E, K, V, H, T, N>
 {
     // A compile-time assertion that the chunk size is the expected multiple of digest size.
     const _MULTIPLE: usize = 2; // 2 yields the smallest possible proof sizes
@@ -128,7 +129,7 @@ impl<
             for _ in pruned_bits..mmr_pruned_leaves {
                 status.append(hasher, false);
             }
-            if mmr_pruned_leaves > Bitmap::<H, N>::CHUNK_SIZE_BITS
+            if mmr_pruned_leaves > Bitmap::<'static, H, N>::CHUNK_SIZE_BITS
                 && pruned_bits < mmr_pruned_leaves - Bitmap::<H, N>::CHUNK_SIZE_BITS
             {
                 // This is unusual but can happen if we fail to write the bitmap after pruning
@@ -321,11 +322,11 @@ pub mod test {
     }
 
     /// Return an [Current] database initialized with a fixed config.
-    async fn open_db<E: RStorage + Clock + Metrics>(
+    async fn open_db<'a, E: RStorage + Clock + Metrics>(
         context: E,
         hasher: &mut Sha256,
         partition_prefix: &str,
-    ) -> Current<E, Digest, Digest, Sha256, TwoCap, 64> {
+    ) -> Current<'a, E, Digest, Digest, Sha256, TwoCap, 64> {
         Current::<E, Digest, Digest, Sha256, TwoCap, 64>::init(
             context,
             hasher,
@@ -395,7 +396,7 @@ pub mod test {
         num_elements: u64,
         commit_changes: bool,
         rng_seed: u64,
-        db: &mut Current<E, Digest, Digest, Sha256, TwoCap, 64>,
+        db: &mut Current<'_, E, Digest, Digest, Sha256, TwoCap, 64>,
     ) -> Result<(), Error> {
         // Log the seed with high visibility to make failures reproducible.
         warn!("rng_seed={}", rng_seed);

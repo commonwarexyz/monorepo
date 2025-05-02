@@ -62,7 +62,7 @@ pub struct Any<
 > {
     /// An MMR over digests of the operations applied to the db. The number of leaves in this MMR
     /// always equals the number of operations in the unpruned `log`.
-    pub(super) ops: Mmr<E, H>,
+    pub(super) ops: Mmr<'static, E, H>,
 
     /// A (pruned) log of all operations applied to the db in order of occurrence. The position
     /// of each operation in the log is called its _location_, which is a stable identifier. Pruning
@@ -96,7 +96,7 @@ pub enum UpdateResult {
     Updated(u64, u64),
 }
 
-impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translator>
+impl<'a, E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translator>
     Any<E, K, V, H, T>
 {
     /// Returns any `Any` adb initialized from `cfg`. Any uncommitted log operations will be
@@ -138,7 +138,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         context: E,
         hasher: &mut H,
         cfg: Config,
-    ) -> Result<(Mmr<E, H>, Journal<E, Operation<K, V>>), Error> {
+    ) -> Result<(Mmr<'static, E, H>, Journal<E, Operation<K, V>>), Error> {
         let mut mmr = Mmr::init(
             context.with_label("mmr"),
             MmrConfig {
@@ -216,7 +216,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         start_leaf_num: u64,
         log: &Journal<E, Operation<K, V>>,
         snapshot: &mut Index<T, u64>,
-        mut bitmap: Option<&mut Bitmap<H, N>>,
+        mut bitmap: Option<&mut Bitmap<'a, H, N>>,
     ) -> Result<u64, Error> {
         let mut inactivity_floor_loc = start_leaf_num;
         let log_size = log.size().await.unwrap();
@@ -608,7 +608,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         &mut self,
         hasher: &mut H,
         max_steps: u64,
-        mut bitmap: Option<&mut Bitmap<H, N>>,
+        mut bitmap: Option<&mut Bitmap<'a, H, N>>,
     ) -> Result<(), Error> {
         for _ in 0..max_steps {
             if self.inactivity_floor_loc == self.op_count() {
@@ -739,7 +739,10 @@ mod test {
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.oldest_retained_loc(), None);
             assert!(matches!(db.prune_inactive().await, Ok(())));
-            assert_eq!(db.root(&mut hasher), MemMmr::default().root(&mut hasher));
+            assert_eq!(
+                db.root(&mut hasher),
+                MemMmr::<'static, Sha256>::default().root(&mut hasher)
+            );
 
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
             let d1 = <Sha256 as CHasher>::Digest::decode(vec![1u8; 32].as_ref()).unwrap();

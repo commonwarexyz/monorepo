@@ -15,8 +15,44 @@ use crate::mmr::{
     Error,
     Error::{ElementPruned, Empty},
 };
-use commonware_cryptography::Hasher as CHasher;
+use commonware_cryptography::{Digest, Hasher as CHasher};
 use std::collections::{HashMap, VecDeque};
+use std::marker::PhantomData;
+
+/// A configuration struct indicating we wish this MMR to be "grafted" on to another tree. Grafting
+/// implies nodes in this tree with height "from_height" will effectively have a third child coming
+/// from the other tree for the purpose of computing its digest, allowing information in the other
+/// tree to flow up to the root of this tree.
+pub struct GraftingConfig<'a, D: Digest, S: Storage<D>> {
+    /// The height of the nodes from this MMR being grafted on to another tree.
+    from_height: u32,
+
+    /// The height of the nodes in the other tree serving as the graft points for this MRR's nodes.
+    /// This height must be >= `from_height`.
+    to_height: u32,
+
+    /// The other tree onto which this MMR is being grafted.
+    tree: &'a S,
+
+    // marker to keep D in scope
+    _marker: PhantomData<D>,
+}
+
+/// Dummy storage implementation for users who don't use grafting features.
+/// Placeholder storage implementation for MMRs that do not use grafting.
+pub struct DummyStorage<D: Digest> {
+    _phantom: std::marker::PhantomData<D>,
+}
+
+impl<D: Digest> Storage<D> for DummyStorage<D> {
+    fn size(&self) -> u64 {
+        0
+    }
+
+    async fn get_node(&self, _position: u64) -> Result<Option<D>, Error> {
+        Ok(None)
+    }
+}
 
 /// Implementation of `Mmr`.
 ///
@@ -24,7 +60,7 @@ use std::collections::{HashMap, VecDeque};
 ///
 /// The maximum number of elements that can be stored is usize::MAX
 /// (u32::MAX on 32-bit architectures).
-pub struct Mmr<H: CHasher> {
+pub struct Mmr<'a, H: CHasher, S: Storage<H::Digest> = DummyStorage<<H as CHasher>::Digest>> {
     // The nodes of the MMR, laid out according to a post-order traversal of the MMR trees, starting
     // from the from tallest tree to shortest.
     nodes: VecDeque<H::Digest>,
@@ -35,15 +71,22 @@ pub struct Mmr<H: CHasher> {
 
     // The auxiliary map from node position to the digest of any pinned node.
     pub(crate) pinned_nodes: HashMap<u64, H::Digest>,
+
+    /// The grafting configuration, if this MMR is being "grafted" onto another tree.
+    grafting_cfg: Option<GraftingConfig<'a, H::Digest, S>>,
 }
 
-impl<H: CHasher> Default for Mmr<H> {
+impl<H: CHasher, S: Storage<H::Digest>> Default for Mmr<'_, H, S> {
     fn default() -> Self {
-        Self::new()
+        Mmr::new()
     }
 }
 
-impl<H: CHasher> Storage<H::Digest> for Mmr<H> {
+impl<H, S> Storage<H::Digest> for Mmr<'_, H, S>
+where
+    H: CHasher,
+    S: Storage<H::Digest> + Send + Sync,
+{
     fn size(&self) -> u64 {
         self.size()
     }
@@ -53,23 +96,25 @@ impl<H: CHasher> Storage<H::Digest> for Mmr<H> {
     }
 }
 
-impl<H: CHasher> Mmr<H> {
+impl<H: CHasher, S: Storage<H::Digest>> Mmr<'_, H, S> {
     /// Return a new (empty) `Mmr`.
     pub fn new() -> Self {
         Self {
             nodes: VecDeque::new(),
             pruned_to_pos: 0,
             pinned_nodes: HashMap::new(),
+            grafting_cfg: None,
         }
     }
 
-    /// Return an `Mmr` initialized with the given nodes, oldest retained position, and hashes of
+    /// Return an [Mmr] initialized with the given nodes, oldest retained position, and hashes of
     /// pinned nodes.
     pub fn init(nodes: Vec<H::Digest>, pruned_to_pos: u64, pinned_nodes: Vec<H::Digest>) -> Self {
         let mut mmr = Self {
             nodes: VecDeque::from(nodes),
             pruned_to_pos,
             pinned_nodes: HashMap::new(),
+            grafting_cfg: None,
         };
         if mmr.size() == 0 {
             return mmr;
@@ -150,27 +195,91 @@ impl<H: CHasher> Mmr<H> {
 
     /// Add an element to the MMR and return its position in the MMR.
     pub fn add(&mut self, hasher: &mut H, element: &[u8]) -> u64 {
-        let element_pos = self.index_to_pos(self.nodes.len());
+        assert!(self.grafting_cfg.is_none(), "not supported when grafting");
+
+        let element_pos = self.size();
         let hash = Hasher::new(hasher).leaf_hash(element_pos, element);
         self.add_leaf_digest(hasher, hash);
 
         element_pos
     }
 
+    /// Add an element to the MMR and return its position in the MMR.
+    pub async fn add_with_grafting(
+        &mut self,
+        hasher: &mut H,
+        element: &[u8],
+    ) -> Result<u64, Error> {
+        let element_pos = self.size();
+        let hash = Hasher::new(hasher).leaf_hash(element_pos, element);
+        self.add_leaf_digest_with_grafting(hasher, hash).await?;
+
+        Ok(element_pos)
+    }
+
     /// Add a leaf's `digest` to the MMR, generating the necessary parent nodes to maintain the
     /// MMR's structure.
     pub(crate) fn add_leaf_digest(&mut self, hasher: &mut H, mut digest: H::Digest) {
+        assert!(self.grafting_cfg.is_none(), "not supported when grafting");
+
         let peaks = nodes_needing_parents(self.peak_iterator());
         self.nodes.push_back(digest);
 
         // Compute the new parent nodes if any, and insert them into the MMR.
         let mut h = Hasher::new(hasher);
         for sibling_pos in peaks.into_iter().rev() {
-            let parent_pos = self.index_to_pos(self.nodes.len());
+            let new_node_pos = self.size();
             let sibling_hash = self.get_node_unchecked(sibling_pos);
-            digest = h.node_hash(parent_pos, sibling_hash, &digest);
+            digest = h.node_hash(new_node_pos, sibling_hash, &digest);
             self.nodes.push_back(digest);
         }
+    }
+
+    /// Add a leaf's `digest` to the MMR, generating the necessary parent nodes to maintain the
+    /// MMR's structure.
+    pub(crate) async fn add_leaf_digest_with_grafting(
+        &mut self,
+        hasher: &mut H,
+        mut digest: H::Digest,
+    ) -> Result<(), Error> {
+        let peaks = nodes_needing_parents(self.peak_iterator());
+        self.nodes.push_back(digest);
+
+        // Compute the new parent nodes if any, and insert them into the MMR.
+        let mut h = Hasher::new(hasher);
+        for (height, sibling_pos) in peaks.into_iter().rev().enumerate() {
+            let new_node_pos = self.size();
+            let sibling_hash = self.get_node_unchecked(sibling_pos);
+            if let Some(cfg) = &self.grafting_cfg {
+                if height as u32 == cfg.from_height {
+                    digest = self
+                        .grafted_node_hash(&mut h, cfg, &digest, sibling_hash, new_node_pos)
+                        .await?;
+                    self.nodes.push_back(digest);
+                    continue;
+                }
+            }
+            digest = h.node_hash(new_node_pos, sibling_hash, &digest);
+            self.nodes.push_back(digest);
+        }
+
+        Ok(())
+    }
+
+    async fn grafted_node_hash(
+        &self,
+        hasher: &mut Hasher<'_, H>,
+        cfg: &GraftingConfig<'_, H::Digest, S>,
+        left_digest: &H::Digest,
+        right_digest: &H::Digest,
+        node_pos: u64,
+    ) -> Result<H::Digest, Error> {
+        // todo: compute proper position for the node in the destination tree based on its height.
+        if cfg.from_height != cfg.to_height {
+            // todo: compute proper position for the node in the destination tree based on its height.
+        }
+        let grafted_child_digest = cfg.tree.get_node(node_pos).await?.unwrap();
+        Ok(hasher.grafted_node_hash(node_pos, left_digest, right_digest, &grafted_child_digest))
     }
 
     /// Pop the most recent leaf element out of the MMR if it exists, returning Empty or
@@ -777,13 +886,14 @@ pub(crate) mod tests {
         }
     }
 
-    fn compute_big_mmr(hasher: &mut Sha256) -> (Mmr<Sha256>, Vec<u64>) {
+    fn compute_big_mmr() -> (Mmr<'static, Sha256>, Vec<u64>) {
+        let mut hasher = Sha256::new();
         let mut mmr = Mmr::<Sha256>::new();
         let mut leaves = Vec::new();
         for i in 0u64..199 {
             hasher.update(&i.to_be_bytes());
             let element = hasher.finalize();
-            leaves.push(mmr.add(hasher, &element));
+            leaves.push(mmr.add(&mut hasher, &element));
         }
         (mmr, leaves)
     }
@@ -791,7 +901,7 @@ pub(crate) mod tests {
     #[test]
     fn test_mem_mmr_pop() {
         let mut hasher = Sha256::new();
-        let (mut mmr, _) = compute_big_mmr(&mut hasher);
+        let (mut mmr, _) = compute_big_mmr();
         let root = mmr.root(&mut hasher);
         let expected_root = ROOTS[199];
         assert_eq!(hex(&root), expected_root);
@@ -831,7 +941,7 @@ pub(crate) mod tests {
         let mut hasher = Sha256::new();
         let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
 
-        let (mut mmr, leaves) = compute_big_mmr(&mut hasher);
+        let (mut mmr, leaves) = compute_big_mmr();
         let root = mmr.root(&mut hasher);
 
         // For a few leaves, update the leaf and ensure the root hash changes, and the root hash
@@ -871,7 +981,7 @@ pub(crate) mod tests {
         let mut hasher = Sha256::new();
         let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
 
-        let (mut mmr, _) = compute_big_mmr(&mut hasher);
+        let (mut mmr, _) = compute_big_mmr();
         let not_a_leaf_pos = 2;
 
         let _ = mmr.update_leaf(&mut hasher, not_a_leaf_pos, &element);

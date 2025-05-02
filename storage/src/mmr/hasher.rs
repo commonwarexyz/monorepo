@@ -32,6 +32,21 @@ impl<'a, H: CHasher> Hasher<'a, H> {
         self.finalize_reset()
     }
 
+    /// Computes the hash for a node that has been grafted onto another tree.
+    pub(crate) fn grafted_node_hash(
+        &mut self,
+        pos: u64,
+        left_hash: &H::Digest,
+        right_hash: &H::Digest,
+        grafted_hash: &H::Digest,
+    ) -> H::Digest {
+        self.update_with_pos(pos);
+        self.update_with_hash(left_hash);
+        self.update_with_hash(right_hash);
+        self.update_with_hash(grafted_hash);
+        self.finalize_reset()
+    }
+
     /// Computes the root hash for an MMR given its size and an iterator over the hashes of its
     /// peaks. The iterator should yield the peak hashes in decreasing order of their height.
     pub(crate) fn root_hash<'b>(

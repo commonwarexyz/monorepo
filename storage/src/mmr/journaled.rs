@@ -39,9 +39,9 @@ pub struct Config {
 }
 
 /// A MMR backed by a fixed-item-length journal.
-pub struct Mmr<E: RStorage + Clock + Metrics, H: Hasher> {
+pub struct Mmr<'a, E: RStorage + Clock + Metrics, H: Hasher> {
     /// A memory resident MMR used to build the MMR structure and cache updates.
-    mem_mmr: MemMmr<H>,
+    mem_mmr: MemMmr<'a, H>,
 
     /// Stores all unpruned MMR nodes.
     journal: Journal<E, H::Digest>,
@@ -60,7 +60,7 @@ pub struct Mmr<E: RStorage + Clock + Metrics, H: Hasher> {
     pruned_to_pos: u64,
 }
 
-impl<E: RStorage + Clock + Metrics, H: Hasher> Storage<H::Digest> for Mmr<E, H> {
+impl<E: RStorage + Clock + Metrics, H: Hasher> Storage<H::Digest> for Mmr<'_, E, H> {
     fn size(&self) -> u64 {
         self.size()
     }
@@ -84,7 +84,7 @@ const NODE_PREFIX: u8 = 0;
 /// Prefix used for the key storing the prune_to_pos position in the metadata.
 const PRUNE_TO_POS_PREFIX: u8 = 1;
 
-impl<E: RStorage + Clock + Metrics, H: Hasher> Mmr<E, H> {
+impl<E: RStorage + Clock + Metrics, H: Hasher> Mmr<'_, E, H> {
     /// Initialize a new `Mmr` instance.
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
         let journal_cfg = JConfig {

@@ -34,7 +34,7 @@ pub struct Proof<H: CHasher> {
 }
 
 /// A trait that allows generic generation of an MMR inclusion proof.
-pub trait Storage<D: Digest> {
+pub trait Storage<D: Digest>: Send + Sync {
     /// Return the number of elements in the MMR.
     fn size(&self) -> u64;
 

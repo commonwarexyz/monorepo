@@ -24,10 +24,10 @@ use tracing::{error, warn};
 /// Implements the [Storage] trait for generating inclusion proofs over the bitmap.
 struct BitmapStorage<'a, H: CHasher> {
     /// The Merkle tree over all bitmap bits other than the last chunk.
-    mmr: &'a Mmr<H>,
+    mmr: &'a Mmr<'a, H>,
 
     /// A pruned Merkle tree over all bits of the bitmap including the last chunk.
-    last_chunk_mmr: &'a Mmr<H>,
+    last_chunk_mmr: &'a Mmr<'a, H>,
 }
 
 impl<H: CHasher + Send + Sync> Storage<H::Digest> for BitmapStorage<'_, H> {
@@ -51,7 +51,7 @@ impl<H: CHasher + Send + Sync> Storage<H::Digest> for BitmapStorage<'_, H> {
 ///
 /// Warning: Even though we use u64 identifiers for bits, on 32-bit machines, the maximum
 /// addressable bit is limited to (u32::MAX * N * 8).
-pub struct Bitmap<H: CHasher, const N: usize> {
+pub struct Bitmap<'a, H: CHasher, const N: usize> {
     /// The bitmap itself, in chunks of size N bytes. The number of valid bits in the last chunk is
     /// given by `self.next_bit`. Within each byte, lowest order bits are treated as coming before
     /// higher order bits in the bit ordering.
@@ -71,13 +71,13 @@ pub struct Bitmap<H: CHasher, const N: usize> {
     /// an MMR structure, is not an MMR but a Merkle tree. The MMR structure results in reduced
     /// update overhead for elements being appended or updated near the tip compared to a more
     /// typical balanced Merkle tree.
-    mmr: Mmr<H>,
+    mmr: Mmr<'a, H>,
 
     /// The number of bitmap chunks that have been pruned.
     pruned_chunks: usize,
 }
 
-impl<H: CHasher, const N: usize> Default for Bitmap<H, N> {
+impl<H: CHasher, const N: usize> Default for Bitmap<'static, H, N> {
     fn default() -> Self {
         Self::new()
     }
@@ -89,7 +89,7 @@ const NODE_PREFIX: u8 = 0;
 /// Prefix used for the metadata key identifying the pruned_chunks value.
 const PRUNED_CHUNKS_PREFIX: u8 = 1;
 
-impl<H: CHasher, const N: usize> Bitmap<H, N> {
+impl<H: CHasher, const N: usize> Bitmap<'_, H, N> {
     /// The size of a chunk in bytes.
     pub const CHUNK_SIZE: usize = N;
 
