@@ -111,6 +111,8 @@ mod tests {
             index.insert(&key, loc);
             expected.insert(key, loc);
         }
+        assert!(context.encode().contains("keys 1975"));
+        assert!(context.encode().contains("items 2000"));
 
         for (key, loc) in expected.iter() {
             let mut values = index.get(key);
@@ -128,6 +130,8 @@ mod tests {
         index.insert(b"a", 1); // Shorter than cap (1 byte -> "a\0")
         index.insert(b"ab", 2); // Equal to cap (2 bytes -> "ab")
         index.insert(b"abc", 3); // Longer than cap (3 bytes -> "ab")
+        assert!(context.encode().contains("keys 2"));
+        assert!(context.encode().contains("items 3"));
 
         // Check that "a" maps to "a\0"
         assert_eq!(index.get(b"a").copied().collect::<Vec<_>>(), vec![1]);
@@ -141,13 +145,15 @@ mod tests {
 
         // Insert another value for "ab"
         index.insert(b"ab", 4);
-        // Expected order: head=2 (first "ab"), then 4 (new "ab"), then 3 (from "abc")
-
         assert_eq!(index.get(b"ab").copied().collect::<Vec<_>>(), vec![2, 4, 3]);
+        assert!(context.encode().contains("keys 2"));
+        assert!(context.encode().contains("items 4"));
 
         // Remove a specific value
         index.prune(b"ab", |v| *v == 4);
         assert_eq!(index.get(b"ab").copied().collect::<Vec<_>>(), vec![2, 3]);
+        assert!(context.encode().contains("keys 2"));
+        assert!(context.encode().contains("items 3"));
 
         // Remove all values for "ab"
         index.prune(b"ab", |_| true);
