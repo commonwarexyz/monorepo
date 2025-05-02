@@ -231,14 +231,19 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                     if let Some(mut cursor) = snapshot.get_mut(&key) {
                         while let Some(loc) = cursor.next() {
                             let op = log.read(*loc).await?;
-                            if op.to_key() != key {
+                            let Some(op_key) = op.to_key() else {
+                                // This is a commit
+                                continue;
+                            };
+                            if op_key != key {
+                                // This operation is not for the key we're looking for.
                                 continue;
                             }
+
+                            // The mapped key is the same; delete it from the snapshot.
                             if let Some(ref mut bitmap_ref) = bitmap {
                                 bitmap_ref.set_bit(hasher, *loc, false);
                             }
-
-                            // If the mapped key is the same, delete it from the snapshot.
                             cursor.delete();
                             break;
                         }
@@ -294,9 +299,15 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         // Iterate over conflicts in the snapshot.
         while let Some(loc) = cursor.next() {
             let op = log.read(*loc).await?;
-            if op.to_key() != key {
+            let Some(op_key) = op.to_key() else {
+                // This is a commit
+                continue;
+            };
+            if op_key != key {
+                // This operation is not for the key we're looking for.
                 continue;
             }
+
             if let Some(v) = value {
                 if op.to_value().unwrap() == *v {
                     // The key value is the same as the previous one: treat as a no-op.
@@ -557,7 +568,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         old_loc: u64,
     ) -> Result<Option<u64>, Error> {
         // If the translated key is not in the snapshot, get a cursor to look for the key.
-        let key = op.to_key();
+        let Some(key) = op.to_key() else {
+            // `op` is a commit
+            return Ok(None);
+        };
         let new_loc = self.op_count();
         let Some(mut cursor) = self.snapshot.get_mut(&key) else {
             return Ok(None);
@@ -1205,7 +1219,11 @@ mod test {
             // This loop checks that the expected true bits are true in the bitmap.
             for pos in db.inactivity_floor_loc..items {
                 let item = db.log.read(pos).await.unwrap();
-                let iter = db.snapshot.get(&item.to_key());
+                let Some(item_key) = item.to_key() else {
+                    // `item` is a commit
+                    continue;
+                };
+                let iter = db.snapshot.get(&item_key);
                 for loc in iter {
                     if *loc == pos {
                         // Found an active op.

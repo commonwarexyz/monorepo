@@ -61,18 +61,18 @@ impl<K: Array, V: Array> Operation<K, V> {
         "array size too small for commit op"
     );
 
-    /// Returns the key of this operation.
-    /// Panics if the operation is an [Operation::Commit].
-    pub fn to_key(&self) -> K {
+    /// If this is a [Operation::Update] or [Operation::Deleted] operation, returns the key.
+    /// Otherwise, returns None.
+    pub fn to_key(&self) -> Option<K> {
         match self {
-            Operation::Deleted(key) => key.clone(),
-            Operation::Update(key, _) => key.clone(),
-            Operation::Commit(_) => panic!("Cannot get key from commit operation"),
+            Operation::Deleted(key) => Some(key.clone()),
+            Operation::Update(key, _) => Some(key.clone()),
+            Operation::Commit(_) => None,
         }
     }
 
-    /// Returns the value of this operation.
-    /// Panics if the operation is not [Operation::Update].
+    ///If this is a [Operation::Update] operation, returns the value.
+    /// Otherwise, returns None.
     pub fn to_value(&self) -> Option<V> {
         match self {
             Operation::Deleted(_) => None,
@@ -164,23 +164,53 @@ mod tests {
     use commonware_utils::array::U64;
 
     #[test]
+    fn test_to_key() {
+        let key = U64::new(1234);
+        let value = U64::new(56789);
+
+        let update_op = Operation::Update(key.clone(), value.clone());
+        assert_eq!(key, update_op.to_key().unwrap());
+
+        let delete_op = Operation::<U64, U64>::Deleted(key.clone());
+        assert_eq!(key, delete_op.to_key().unwrap());
+
+        let commit_op = Operation::<U64, U64>::Commit(42);
+        assert_eq!(None, commit_op.to_key());
+    }
+
+    #[test]
+    fn test_to_value() {
+        let key = U64::new(1234);
+        let value = U64::new(56789);
+
+        let update_op = Operation::Update(key.clone(), value.clone());
+        assert_eq!(value, update_op.to_value().unwrap());
+
+        let delete_op = Operation::<U64, U64>::Deleted(key.clone());
+        assert_eq!(None, delete_op.to_value());
+
+        let commit_op = Operation::<U64, U64>::Commit(42);
+        assert_eq!(None, commit_op.to_value());
+    }
+
+    #[test]
     fn test_operation_array_basic() {
         let key = U64::new(1234);
         let value = U64::new(56789);
 
         let update_op = Operation::Update(key.clone(), value.clone());
-        assert_eq!(key, update_op.to_key());
+        assert_eq!(key, update_op.to_key().unwrap());
         assert_eq!(value, update_op.to_value().unwrap());
 
         let from = Operation::decode(update_op.encode()).unwrap();
-        assert_eq!(key, from.to_key());
+        assert_eq!(key, from.to_key().unwrap());
         assert_eq!(value, from.to_value().unwrap());
         assert_eq!(update_op, from);
 
         let key2 = U64::new(42);
         let delete_op = Operation::<U64, U64>::Deleted(key2.clone());
         let from = Operation::<U64, U64>::decode(delete_op.encode()).unwrap();
-        assert_eq!(key2, from.to_key());
+        assert_eq!(key2, from.to_key().unwrap());
         assert_eq!(None, from.to_value());
         assert_eq!(delete_op, from);
 
