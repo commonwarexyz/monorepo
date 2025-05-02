@@ -61,6 +61,8 @@ impl<K: Array, V: Array> Operation<K, V> {
         "array size too small for commit op"
     );
 
+    /// Returns the key of this operation.
+    /// Panics if the operation is an [Operation::Commit].
     pub fn to_key(&self) -> K {
         match self {
             Operation::Deleted(key) => key.clone(),
@@ -69,6 +71,8 @@ impl<K: Array, V: Array> Operation<K, V> {
         }
     }
 
+    /// Returns the value of this operation.
+    /// Panics if the operation is not [Operation::Update].
     pub fn to_value(&self) -> Option<V> {
         match self {
             Operation::Deleted(_) => None,
@@ -95,8 +99,8 @@ impl<K: Array, V: Array> Write for Operation<K, V> {
             Operation::Commit(loc) => {
                 buf.put_u8(Self::COMMIT_CONTEXT);
                 buf.put_slice(&loc.to_be_bytes());
-                // Put 0s for the rest
-                buf.put_bytes(0, Self::SIZE - 1 - u64::SIZE);
+                // Put 0s for the value
+                buf.put_bytes(0, V::SIZE);
             }
         }
     }
@@ -131,7 +135,7 @@ impl<K: Array, V: Array> Read for Operation<K, V> {
             }
             Self::COMMIT_CONTEXT => {
                 let loc = u64::read(&mut buf)?;
-                for _ in 0..(V::SIZE + K::SIZE - u64::SIZE) {
+                for _ in 0..(K::SIZE + V::SIZE) {
                     if buf.get_u8() != 0 {
                         return Err(CodecError::Invalid("Operation", "Commit value non-zero"));
                     }
