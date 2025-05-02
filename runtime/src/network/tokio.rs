@@ -79,10 +79,14 @@ impl crate::Listener for Listener {
             },
         ))
     }
+
+    fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {
+        self.listener.local_addr()
+    }
 }
 
-#[derive(Clone, Debug)]
 /// Configuration for the tokio [Network] implementation of the [crate::Network] trait.
+#[derive(Clone, Debug)]
 pub(crate) struct Config {
     /// Whether or not to disable Nagle's algorithm.
     ///

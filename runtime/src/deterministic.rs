@@ -1009,6 +1009,7 @@ impl crate::Network for Context {
         self.network.dial(socket).await
     }
 }
+
 impl RngCore for Context {
     fn next_u32(&mut self) -> u32 {
         self.executor.auditor.event(b"rand", |hasher| {
