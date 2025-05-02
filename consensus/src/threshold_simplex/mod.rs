@@ -1817,8 +1817,7 @@ mod tests {
         }
     }
 
-    #[test_traced]
-    fn test_conflicter() {
+    fn conflicter(seed: u64) {
         // Create context
         let n = 4;
         let threshold = quorum(n);
@@ -1826,7 +1825,10 @@ mod tests {
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        let cfg = deterministic::Config::new()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(30)));
+        let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1983,7 +1985,13 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_nuller() {
+    fn test_conflicter() {
+        for seed in 0..5 {
+            conflicter(seed);
+        }
+    }
+
+    fn nuller(seed: u64) {
         // Create context
         let n = 4;
         let threshold = quorum(n);
@@ -1991,7 +1999,10 @@ mod tests {
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        let cfg = deterministic::Config::new()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(30)));
+        let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -2140,7 +2151,13 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_outdated() {
+    fn test_nuller() {
+        for seed in 0..5 {
+            nuller(seed);
+        }
+    }
+
+    fn outdated(seed: u64) {
         // Create context
         let n = 4;
         let threshold = quorum(n);
@@ -2148,7 +2165,10 @@ mod tests {
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        let cfg = deterministic::Config::new()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(30)));
+        let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -2280,6 +2300,13 @@ mod tests {
                 }
             }
         });
+    }
+
+    #[test_traced]
+    fn test_outdated() {
+        for seed in 0..5 {
+            outdated(seed);
+        }
     }
 
     #[test_traced]
