@@ -29,7 +29,7 @@ use crate::{
         metered::Storage as MeteredStorage,
     },
     utils::Signaler,
-    Clock, Error, Handle, Signal, METRICS_PREFIX,
+    Clock, Error, Handle, ListenerOf, Signal, METRICS_PREFIX,
 };
 use commonware_utils::{hex, SystemTimeExt};
 use futures::{
@@ -996,7 +996,7 @@ impl GClock for Context {
 impl ReasonablyRealtime for Context {}
 
 impl crate::Network for Context {
-    type Listener = crate::ListenerOf<MeteredNetwork<DeterministicNetwork>>;
+    type Listener = ListenerOf<MeteredNetwork<DeterministicNetwork>>;
 
     async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, Error> {
         self.network.bind(socket).await
