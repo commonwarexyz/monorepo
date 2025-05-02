@@ -101,11 +101,11 @@ pub struct Engine<
     /// membership checks are done in linear time.
     deques: HashMap<P, VecDeque<Pair<Dc, Dd>>>,
 
-    /// The number of times each commitment and digest exists in one of the deques.
+    /// The number of times each digest (globally unique) exists in one of the deques.
     ///
     /// Multiple peers can send the same message and we only want to store
     /// the message once.
-    counts: HashMap<Pair<Dc, Dd>, usize>,
+    counts: HashMap<Dd, usize>,
 
     ////////////////////////////////////////
     // Metrics
@@ -408,7 +408,7 @@ impl<
         deque.push_front(pair);
         let count = self
             .counts
-            .entry(pair)
+            .entry(pair.digest)
             .and_modify(|c| *c = c.checked_add(1).unwrap())
             .or_insert(1);
         if *count == 1 {
@@ -428,11 +428,11 @@ impl<
             let stale = deque.pop_back().unwrap();
             let count = self
                 .counts
-                .entry(stale)
+                .entry(stale.digest)
                 .and_modify(|c| *c = c.checked_sub(1).unwrap())
                 .or_insert_with(|| unreachable!());
             if *count == 0 {
-                let existing = self.counts.remove(&stale);
+                let existing = self.counts.remove(&stale.digest);
                 assert!(existing == Some(0));
                 let identities = self.items.get_mut(&stale.commitment).unwrap();
                 identities.remove(&stale.digest); // Must have existed

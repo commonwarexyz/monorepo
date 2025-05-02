@@ -564,7 +564,7 @@ mod tests {
             // Two messages share commitment but have distinct digests.
             let m1 = TestMessage::new(b"id", b"content-1");
             let m2 = TestMessage::new(b"id", b"content-2");
-            let m3 = TestMessage::new(b"other-id", b"content-1");
+            let m3 = TestMessage::new(b"other-id", b"content-3");
             mb1.broadcast(Recipients::All, m1.clone())
                 .await
                 .await
