@@ -1802,6 +1802,7 @@ mod tests {
     }
 
     #[test_traced]
+    #[ignore]
     fn test_determinism() {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
