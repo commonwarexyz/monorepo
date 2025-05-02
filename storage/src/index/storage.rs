@@ -40,7 +40,7 @@ enum Phase<V: PartialEq + Eq> {
     EntryDeleted,
     PostDeleteEntry,
     PostDeleteNext(Option<Box<Record<V>>>),
-    PostInsert(Option<Box<Record<V>>>),
+    PostInsert(Box<Record<V>>),
 }
 
 fn value<V: PartialEq + Eq>(phase: &Phase<V>) -> Option<&V> {
@@ -125,7 +125,7 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                 }
                 value(&self.phase)
             }
-            Phase::Next(mut current) => {
+            Phase::Next(mut current) | Phase::PostInsert(mut current) => {
                 // Take the next record and push the current one to the past list.
                 let next = current.next.take();
                 self.past_push(current);
@@ -136,7 +136,7 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                 }
                 value(&self.phase)
             }
-            Phase::PostInsert(current) | Phase::PostDeleteNext(current) => {
+            Phase::PostDeleteNext(current) => {
                 // If the stale value is some, we set it to be the current record.
                 if current.is_some() {
                     self.phase = Phase::Next(current.unwrap());
@@ -174,7 +174,7 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
 
                 // Create a new record that points to the next's next.
                 let new = Box::new(Record { value: v, next });
-                self.phase = Phase::Next(new);
+                self.phase = Phase::PostInsert(new);
                 self.collisions.inc();
             }
             Phase::EntryDeleted => {
@@ -249,6 +249,10 @@ where
             Phase::PostDeleteNext(Some(stale)) => {
                 // If there is a stale record, we should add it to past.
                 self.past_push(stale);
+            }
+            Phase::PostInsert(current) => {
+                // If there is a current record, we should add it to past.
+                self.past_push(current);
             }
             _ => {}
         }

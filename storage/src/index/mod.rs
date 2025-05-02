@@ -740,6 +740,12 @@ mod tests {
         index.insert(b"key", 2);
         index.insert(b"key", 3);
 
+        // Ensure the values are in the index
+        assert_eq!(
+            index.get(b"key").copied().collect::<Vec<_>>(),
+            vec![1, 3, 2]
+        );
+
         {
             let mut cur = index.get_mut(b"key").unwrap();
             assert_eq!(*cur.next().unwrap(), 1); // Entry
