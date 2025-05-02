@@ -85,6 +85,7 @@ impl crate::Listener for Listener {
     }
 }
 
+/// Configuration for the tokio [Network] implementation of the [crate::Network] trait.
 #[derive(Clone, Debug)]
 pub(crate) struct Config {
     /// Whether or not to disable Nagle's algorithm.
