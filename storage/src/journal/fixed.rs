@@ -73,7 +73,7 @@ pub struct Config {
 }
 
 /// Implementation of `Journal` storage.
-pub struct Journal<E: Storage + Metrics, A: Codec + FixedSize> {
+pub struct Journal<E: Storage + Metrics, A> {
     context: E,
     cfg: Config,
 
@@ -91,7 +91,7 @@ pub struct Journal<E: Storage + Metrics, A: Codec + FixedSize> {
     _array: PhantomData<A>,
 }
 
-impl<E: Storage + Metrics, A: Codec + FixedSize> Journal<E, A> {
+impl<E: Storage + Metrics, A: Encode + Decode<Cfg = ()> + FixedSize> Journal<E, A> {
     const CHUNK_SIZE: usize = u32::SIZE + A::SIZE;
     const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
 

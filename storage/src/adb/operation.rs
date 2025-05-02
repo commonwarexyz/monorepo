@@ -4,15 +4,12 @@
 //! based on a `crate::Journal`.
 
 use bytes::{Buf, BufMut};
-use commonware_codec::{
-    util::at_least, DecodeExt, Error as CodecError, FixedSize, Read, ReadExt, Write,
-};
+use commonware_codec::{util::at_least, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_utils::Array;
 use std::{
     cmp::{Ord, PartialOrd},
     fmt::{Debug, Display},
     hash::Hash,
-    ops::Deref,
 };
 use thiserror::Error;
 
@@ -49,7 +46,7 @@ pub enum Error {
 
 /// An `Array` implementation for operations applied to an authenticated database.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub(super) enum Operation<K: Array, V: Array> {
+pub enum Operation<K: Array, V: Array> {
     /// Indicates the key no longer has a value.
     Deleted(K),
 
@@ -73,59 +70,10 @@ impl<K: Array, V: Array> Operation<K, V> {
     // A compile-time assertion that operation's array size is large enough to handle the commit
     // operation, which requires 9 bytes.
     const _MIN_OPERATION_LEN: usize = 9;
-    // const _COMMIT_OP_ASSERT: () = assert!(
-    //     Self::SIZE >= Self::_MIN_OPERATION_LEN,
-    //     "array size too small for commit op"
-    // );
-
-    // Create a new operation of the given type.
-    // pub fn new(t: Type<K, V>) -> Self {
-    //     match t {
-    //         Type::Deleted(key) => Self::delete(&key),
-    //         Type::Update(key, value) => Self::update(&key, &value),
-    //         Type::Commit(loc) => Self::commit(loc),
-    //     }
-    // }
-
-    // /// Create a new update operation that makes `key` have value `value`.
-    // pub fn update(key: &K, value: &V) -> Self {
-    //     let mut data = Vec::with_capacity(Self::SIZE);
-    //     data.push(Self::UPDATE_CONTEXT);
-    //     data.extend_from_slice(key);
-    //     data.extend_from_slice(&value);
-
-    //     Self {
-    //         data,
-    //         _phantom: std::marker::PhantomData,
-    //     }
-    // }
-
-    // /// Create a new delete operation that removes any value assigned to `key`.
-    // pub fn delete(key: &K) -> Self {
-    //     let mut data = Vec::with_capacity(Self::SIZE);
-    //     data.push(Self::DELETE_CONTEXT);
-    //     data.extend_from_slice(key);
-    //     data.resize(Self::SIZE, 0);
-
-    //     Self {
-    //         data,
-    //         _phantom: std::marker::PhantomData,
-    //     }
-    // }
-
-    // /// Create a new commit operation that indicates the current floor on inactive operations is
-    // /// `loc`.
-    // pub fn commit(loc: u64) -> Self {
-    //     let mut data = Vec::with_capacity(Self::SIZE);
-    //     data.push(Self::COMMIT_CONTEXT);
-    //     data.extend_from_slice(&loc.to_be_bytes());
-    //     data.resize(Self::SIZE, 0);
-
-    //     Self {
-    //         data,
-    //         _phantom: std::marker::PhantomData,
-    //     }
-    // }
+    const _COMMIT_OP_ASSERT: () = assert!(
+        Self::SIZE >= Self::_MIN_OPERATION_LEN,
+        "array size too small for commit op"
+    );
 
     pub fn to_key(&self) -> K {
         match self {
@@ -134,22 +82,6 @@ impl<K: Array, V: Array> Operation<K, V> {
             Operation::Commit(_) => panic!("Cannot get key from commit operation"),
         }
     }
-
-    // pub fn to_type(&self) -> Type<K, V> {
-    //     let key = K::decode(&self.data[1..K::SIZE + 1]).unwrap();
-    //     match self.data[0] {
-    //         Self::DELETE_CONTEXT => Type::Deleted(key),
-    //         Self::UPDATE_CONTEXT => {
-    //             let value = V::decode(&self.data[K::SIZE + 1..]).unwrap();
-    //             Type::Update(key, value)
-    //         }
-    //         Self::COMMIT_CONTEXT => {
-    //             let loc = u64::from_be_bytes(self.data[1..9].try_into().unwrap());
-    //             Type::Commit(loc)
-    //         }
-    //         _ => unreachable!(),
-    //     }
-    // }
 
     pub fn to_value(&self) -> Option<V> {
         match self {
@@ -177,9 +109,8 @@ impl<K: Array, V: Array> Write for Operation<K, V> {
             Operation::Commit(loc) => {
                 buf.put_u8(Self::COMMIT_CONTEXT);
                 buf.put_slice(&loc.to_be_bytes());
-                // TODO danlaine: fix this
                 // Put 0s for the rest
-                // buf.put_bytes(0, Self::SIZE -1 - u64::SIZE);
+                buf.put_bytes(0, Self::SIZE - 1 - u64::SIZE);
             }
         }
     }
@@ -229,25 +160,6 @@ impl<K: Array, V: Array> Read for Operation<K, V> {
         Ok(op)
     }
 }
-
-// impl<K: Array, V: Array> FixedSize for Operation<K, V> {
-//     const SIZE: usize = u8::SIZE + K::SIZE + V::SIZE;
-// }
-
-// impl<K: Array, V: Array> Array for Operation<K, V> {}
-
-// impl<K: Array, V: Array> AsRef<[u8]> for Operation<K, V> {
-//     fn as_ref(&self) -> &[u8] {
-//         &self.data
-//     }
-// }
-
-// impl<K: Array, V: Array> Deref for Operation<K, V> {
-//     type Target = [u8];
-//     fn deref(&self) -> &[u8] {
-//         &self.data
-//     }
-// }
 
 impl<K: Array, V: Array> Display for Operation<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
