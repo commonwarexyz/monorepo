@@ -287,29 +287,34 @@ where
 
         // If there is a dangling next, we should add it to past.
         match std::mem::replace(&mut self.phase, Phase::Done) {
-            Phase::Initial
-            | Phase::Entry
-            | Phase::Done
-            | Phase::PostDeleteEntry
-            | Phase::PostDeleteNext(None) => {
+            Phase::Initial | Phase::Entry => {
                 // No action needed.
             }
             Phase::Next(current) => {
                 // If there is a next, we should add it to past.
                 self.past_push(current);
             }
-            Phase::PostDeleteNext(Some(stale)) => {
-                // If there is a stale record, we should add it to past.
-                self.past_push(stale);
-            }
-            Phase::PostInsert(current) => {
-                // If there is a current record, we should add it to past.
-                self.past_push(current);
+            Phase::Done => {
+                // No action needed.
             }
             Phase::EntryDeleted => {
                 // If the entry is deleted, we should remove it.
                 entry.remove();
                 return;
+            }
+            Phase::PostDeleteEntry => {
+                // No action needed.
+            }
+            Phase::PostDeleteNext(Some(stale)) => {
+                // If there is a stale record, we should add it to past.
+                self.past_push(stale);
+            }
+            Phase::PostDeleteNext(None) => {
+                // No action needed.
+            }
+            Phase::PostInsert(current) => {
+                // If there is a current record, we should add it to past.
+                self.past_push(current);
             }
         }
 
