@@ -233,6 +233,8 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
             Phase::EntryDeleted => {
                 // If entry is deleted, we need to update it.
                 self.entry.as_mut().unwrap().get_mut().value = v;
+
+                // We don't consider overwriting a deleted entry a collision.
             }
             Phase::PostDeleteEntry | Phase::PostDeleteNext(_) | Phase::PostInsert(_) => {
                 unreachable!("{MUST_CALL_NEXT}")
