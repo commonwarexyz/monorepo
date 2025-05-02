@@ -124,11 +124,11 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
             Phase::Next(next) => {
                 next.value = v;
             }
-            Phase::Done => unreachable!("{NO_ACTIVE_ITEM}"),
-            Phase::EntryDeleted => unreachable!("{NO_ACTIVE_ITEM}"),
-            Phase::PostDeleteEntry => unreachable!("{NO_ACTIVE_ITEM}"),
-            Phase::PostDeleteNext(_) => unreachable!("{NO_ACTIVE_ITEM}"),
-            Phase::PostInsert(_) => unreachable!("{NO_ACTIVE_ITEM}"),
+            Phase::Done
+            | Phase::EntryDeleted
+            | Phase::PostDeleteEntry
+            | Phase::PostDeleteNext(_)
+            | Phase::PostInsert(_) => unreachable!("{NO_ACTIVE_ITEM}"),
         }
     }
 
