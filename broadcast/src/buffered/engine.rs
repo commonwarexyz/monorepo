@@ -1,7 +1,7 @@
 use super::{metrics, Config, Mailbox, Message};
 use crate::buffered::metrics::SequencerLabel;
 use commonware_codec::{Codec, Config as CodecConfig};
-use commonware_cryptography::{Digest, Digestible, Identifiable};
+use commonware_cryptography::{Committable, Digest, Digestible};
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
@@ -31,11 +31,11 @@ struct Waiter<P, Dd, M> {
     responder: oneshot::Sender<M>,
 }
 
-/// A pair of identity and digest.
+/// A pair of commitment and digest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct Pair<Di, Dd> {
-    /// The identity of the message.
-    identity: Di,
+struct Pair<Dc, Dd> {
+    /// The commitment of the message.
+    commitment: Dc,
 
     /// The digest of the message.
     digest: Dd,
@@ -51,10 +51,10 @@ struct Pair<Di, Dd> {
 pub struct Engine<
     E: Clock + Spawner + Metrics,
     P: Array,
-    Di: Digest,
+    Dc: Digest,
     Dd: Digest,
     MCfg: CodecConfig,
-    M: Identifiable<Di> + Digestible<Dd> + Codec<MCfg>,
+    M: Committable<Dc> + Digestible<Dd> + Codec<MCfg>,
 > {
     ////////////////////////////////////////
     // Interfaces
@@ -80,32 +80,32 @@ pub struct Engine<
     // Messaging
     ////////////////////////////////////////
     /// The mailbox for receiving messages.
-    mailbox_receiver: mpsc::Receiver<Message<P, Di, Dd, M>>,
+    mailbox_receiver: mpsc::Receiver<Message<P, Dc, Dd, M>>,
 
     /// Pending requests from the application.
-    waiters: HashMap<Di, Vec<Waiter<P, Dd, M>>>,
+    waiters: HashMap<Dc, Vec<Waiter<P, Dd, M>>>,
 
     ////////////////////////////////////////
     // Cache
     ////////////////////////////////////////
-    /// All cached messages by identity and digest.
+    /// All cached messages by commitment and digest.
     ///
     /// We store messages outside of the deques to minimize memory usage
     /// when receiving duplicate messages.
-    items: HashMap<Di, HashMap<Dd, M>>,
+    items: HashMap<Dc, HashMap<Dd, M>>,
 
     /// A LRU cache of the latest received identities and digests from each peer.
     ///
     /// This is used to limit the number of digests stored per peer.
     /// At most `deque_size` digests are stored per peer. This value is expected to be small, so
     /// membership checks are done in linear time.
-    deques: HashMap<P, VecDeque<Pair<Di, Dd>>>,
+    deques: HashMap<P, VecDeque<Pair<Dc, Dd>>>,
 
-    /// The number of times each identity and digest exists in one of the deques.
+    /// The number of times each commitment and digest exists in one of the deques.
     ///
     /// Multiple peers can send the same message and we only want to store
     /// the message once.
-    counts: HashMap<Pair<Di, Dd>, usize>,
+    counts: HashMap<Pair<Dc, Dd>, usize>,
 
     ////////////////////////////////////////
     // Metrics
@@ -117,17 +117,17 @@ pub struct Engine<
 impl<
         E: Clock + Spawner + Metrics,
         P: Array,
-        Di: Digest,
+        Dc: Digest,
         Dd: Digest,
         MCfg: CodecConfig,
-        M: Identifiable<Di> + Digestible<Dd> + Codec<MCfg>,
-    > Engine<E, P, Di, Dd, MCfg, M>
+        M: Committable<Dc> + Digestible<Dd> + Codec<MCfg>,
+    > Engine<E, P, Dc, Dd, MCfg, M>
 {
     /// Creates a new engine with the given context and configuration.
     /// Returns the engine and a mailbox for sending messages to the engine.
-    pub fn new(context: E, cfg: Config<P, MCfg>) -> (Self, Mailbox<P, Di, Dd, MCfg, M>) {
+    pub fn new(context: E, cfg: Config<P, MCfg>) -> (Self, Mailbox<P, Dc, Dd, MCfg, M>) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
-        let mailbox = Mailbox::<P, Di, Dd, MCfg, M>::new(mailbox_sender);
+        let mailbox = Mailbox::<P, Dc, Dd, MCfg, M>::new(mailbox_sender);
         let metrics = metrics::Metrics::init(context.clone());
 
         let result = Self {
@@ -182,13 +182,13 @@ impl<
                             trace!("mailbox: broadcast");
                             self.handle_broadcast(&mut sender, recipients, message, responder).await;
                         }
-                        Message::Subscribe{ peer, identity, digest, responder } => {
+                        Message::Subscribe{ peer, commitment, digest, responder } => {
                             trace!("mailbox: subscribe");
-                            self.handle_subscribe(peer, identity, digest, responder).await;
+                            self.handle_subscribe(peer, commitment, digest, responder).await;
                         }
-                        Message::Get{ peer, identity, digest, responder } => {
+                        Message::Get{ peer, commitment, digest, responder } => {
                             trace!("mailbox: get");
-                            self.handle_get(peer, identity, digest, responder).await;
+                            self.handle_get(peer, commitment, digest, responder).await;
                         }
                     }
                 },
@@ -252,7 +252,7 @@ impl<
     fn find_messages(
         &mut self,
         peer: &Option<P>,
-        identity: Di,
+        commitment: Dc,
         digest: Option<Dd>,
         all: bool,
     ) -> Vec<M> {
@@ -263,18 +263,18 @@ impl<
                 .get(s)
                 .into_iter()
                 .flat_map(|dq| dq.iter())
-                .filter(|pair| pair.identity == identity)
+                .filter(|pair| pair.commitment == commitment)
                 .filter_map(|pair| {
                     self.items
-                        .get(&pair.identity)
+                        .get(&pair.commitment)
                         .and_then(|m| m.get(&pair.digest))
                 })
                 .cloned()
                 .collect(),
 
-            // Search by identity
-            None => match self.items.get(&identity) {
-                // If there are no messages for the identity, return an empty vector
+            // Search by commitment
+            None => match self.items.get(&commitment) {
+                // If there are no messages for the commitment, return an empty vector
                 None => Vec::new(),
 
                 // If there are messages, return the ones that match the digest filter
@@ -282,7 +282,7 @@ impl<
                     // If a digest is provided, return whatever matches it.
                     Some(dg) => msgs.get(&dg).cloned().into_iter().collect(),
 
-                    // If no digest was provided, return `all` messages for the identity.
+                    // If no digest was provided, return `all` messages for the commitment.
                     None if all => msgs.values().cloned().collect(),
                     None => msgs.values().next().cloned().into_iter().collect(),
                 },
@@ -297,19 +297,19 @@ impl<
     async fn handle_subscribe(
         &mut self,
         peer: Option<P>,
-        identity: Di,
+        commitment: Dc,
         digest: Option<Dd>,
         responder: oneshot::Sender<M>,
     ) {
         // Check if the message is already in the cache
-        let mut items = self.find_messages(&peer, identity, digest, false);
+        let mut items = self.find_messages(&peer, commitment, digest, false);
         if let Some(item) = items.pop() {
             self.respond_subscribe(responder, item);
             return;
         }
 
         // Store the responder
-        self.waiters.entry(identity).or_default().push(Waiter {
+        self.waiters.entry(commitment).or_default().push(Waiter {
             peer,
             digest,
             responder,
@@ -320,11 +320,11 @@ impl<
     async fn handle_get(
         &mut self,
         peer: Option<P>,
-        identity: Di,
+        commitment: Dc,
         digest: Option<Dd>,
         responder: oneshot::Sender<Vec<M>>,
     ) {
-        let items = self.find_messages(&peer, identity, digest, true);
+        let items = self.find_messages(&peer, commitment, digest, true);
         self.respond_get(responder, items);
     }
 
@@ -348,14 +348,14 @@ impl<
     /// Returns `true` if the message was inserted, `false` if it was already present.
     /// Updates the deque, item count, and message cache, potentially evicting an old message.
     fn insert_message(&mut self, peer: P, msg: M) -> bool {
-        // Get the identity and digest of the message
+        // Get the commitment and digest of the message
         let pair = Pair {
-            identity: msg.identity(),
+            commitment: msg.commitment(),
             digest: msg.digest(),
         };
 
         // Send the message to the waiters, if any, ignoring errors (as the receiver may have dropped)
-        if let Some(mut waiters) = self.waiters.remove(&pair.identity) {
+        if let Some(mut waiters) = self.waiters.remove(&pair.commitment) {
             let mut i = 0;
             while i < waiters.len() {
                 // Get the peer and digest filters
@@ -381,9 +381,9 @@ impl<
                 self.respond_subscribe(responder, msg.clone());
             }
 
-            // Re-insert if any waiters remain for this identity.
+            // Re-insert if any waiters remain for this commitment.
             if !waiters.is_empty() {
-                self.waiters.insert(pair.identity, waiters);
+                self.waiters.insert(pair.commitment, waiters);
             }
         }
 
@@ -414,7 +414,7 @@ impl<
         if *count == 1 {
             let existing = self
                 .items
-                .entry(pair.identity)
+                .entry(pair.commitment)
                 .or_default()
                 .insert(pair.digest, msg);
             assert!(existing.is_none());
@@ -434,10 +434,10 @@ impl<
             if *count == 0 {
                 let existing = self.counts.remove(&stale);
                 assert!(existing == Some(0));
-                let identities = self.items.get_mut(&stale.identity).unwrap();
+                let identities = self.items.get_mut(&stale.commitment).unwrap();
                 identities.remove(&stale.digest); // Must have existed
                 if identities.is_empty() {
-                    self.items.remove(&stale.identity);
+                    self.items.remove(&stale.commitment);
                 }
             }
         }
