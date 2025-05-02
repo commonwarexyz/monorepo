@@ -34,6 +34,7 @@ cfg_if::cfg_if! {
         pub mod benchmarks;
     }
 }
+mod network;
 mod storage;
 pub mod telemetry;
 mod utils;
