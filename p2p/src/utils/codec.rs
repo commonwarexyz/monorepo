@@ -2,14 +2,14 @@
 
 use crate::{Receiver, Recipients, Sender};
 use bytes::Bytes;
-use commonware_codec::{Codec, Config, Error};
+use commonware_codec::{Codec, Error};
 
 /// Wrap a [Sender] and [Receiver] with some [Codec].
-pub fn wrap<S: Sender, R: Receiver, VC: Config, V: Codec<VC>>(
-    config: VC,
+pub fn wrap<S: Sender, R: Receiver, V: Codec>(
+    config: V::Cfg,
     sender: S,
     receiver: R,
-) -> (WrappedSender<S, VC, V>, WrappedReceiver<R, VC, V>) {
+) -> (WrappedSender<S, V>, WrappedReceiver<R, V>) {
     (
         WrappedSender::new(sender),
         WrappedReceiver::new(config, receiver),
@@ -20,19 +20,17 @@ pub fn wrap<S: Sender, R: Receiver, VC: Config, V: Codec<VC>>(
 pub type WrappedMessage<P, V> = (P, Result<V, Error>);
 
 /// Wrapper around a [Sender] that encodes messages using a [Codec].
-pub struct WrappedSender<S: Sender, VC: Config, V: Codec<VC>> {
+pub struct WrappedSender<S: Sender, V: Codec> {
     sender: S,
 
-    _phantom_vc: std::marker::PhantomData<VC>,
     _phantom_v: std::marker::PhantomData<V>,
 }
 
-impl<S: Sender, VC: Config, V: Codec<VC>> WrappedSender<S, VC, V> {
+impl<S: Sender, V: Codec> WrappedSender<S, V> {
     /// Create a new [WrappedSender] with the given [Sender].
     pub fn new(sender: S) -> Self {
         Self {
             sender,
-            _phantom_vc: std::marker::PhantomData,
             _phantom_v: std::marker::PhantomData,
         }
     }
@@ -52,16 +50,16 @@ impl<S: Sender, VC: Config, V: Codec<VC>> WrappedSender<S, VC, V> {
 }
 
 /// Wrapper around a [Receiver] that decodes messages using a [Codec].
-pub struct WrappedReceiver<R: Receiver, VC: Config, V: Codec<VC>> {
-    config: VC,
+pub struct WrappedReceiver<R: Receiver, V: Codec> {
+    config: V::Cfg,
     receiver: R,
 
     _phantom_v: std::marker::PhantomData<V>,
 }
 
-impl<R: Receiver, VC: Config, V: Codec<VC>> WrappedReceiver<R, VC, V> {
+impl<R: Receiver, V: Codec> WrappedReceiver<R, V> {
     /// Create a new [WrappedReceiver] with the given [Receiver].
-    pub fn new(config: VC, receiver: R) -> Self {
+    pub fn new(config: V::Cfg, receiver: R) -> Self {
         Self {
             config,
             receiver,

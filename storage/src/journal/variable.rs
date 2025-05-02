@@ -98,7 +98,7 @@
 
 use super::Error;
 use bytes::BufMut;
-use commonware_codec::{Codec, Config as CodecConfig};
+use commonware_codec::Codec;
 use commonware_runtime::{Blob, Error as RError, Metrics, Storage};
 use commonware_utils::hex;
 use futures::stream::{self, Stream, StreamExt};
@@ -112,7 +112,7 @@ use zstd::bulk::{compress, decompress};
 
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
-pub struct Config<C: CodecConfig> {
+pub struct Config<C> {
     /// The `commonware-runtime::Storage` partition to use
     /// for storing journal blobs.
     pub partition: String,
@@ -139,9 +139,9 @@ fn compute_next_offset(mut offset: u64) -> Result<u32, Error> {
 }
 
 /// Implementation of `Journal` storage.
-pub struct Journal<E: Storage + Metrics, C: CodecConfig, V: Codec<C>> {
+pub struct Journal<E: Storage + Metrics, V: Codec> {
     context: E,
-    cfg: Config<C>,
+    cfg: Config<V::Cfg>,
 
     oldest_allowed: Option<u64>,
 
@@ -154,13 +154,13 @@ pub struct Journal<E: Storage + Metrics, C: CodecConfig, V: Codec<C>> {
     _phantom: PhantomData<V>,
 }
 
-impl<E: Storage + Metrics, C: CodecConfig, V: Codec<C>> Journal<E, C, V> {
+impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// Initialize a new `Journal` instance.
     ///
     /// All backing blobs are opened but not read during
     /// initialization. The `replay` method can be used
     /// to iterate over all items in the `Journal`.
-    pub async fn init(context: E, cfg: Config<C>) -> Result<Self, Error> {
+    pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Iterate over blobs in partition
         let mut blobs = BTreeMap::new();
         let stored_blobs = match context.scan(&cfg.partition).await {
@@ -217,7 +217,7 @@ impl<E: Storage + Metrics, C: CodecConfig, V: Codec<C>> Journal<E, C, V> {
     /// Reads an item from the blob at the given offset.
     async fn read(
         compressed: bool,
-        cfg: &C,
+        cfg: &V::Cfg,
         blob: &E::Blob,
         offset: u32,
     ) -> Result<(u32, u32, V), Error> {
@@ -263,7 +263,7 @@ impl<E: Storage + Metrics, C: CodecConfig, V: Codec<C>> Journal<E, C, V> {
     /// Reads an item from the blob at the given offset and of a given size.
     async fn read_exact(
         compressed: bool,
-        cfg: &C,
+        cfg: &V::Cfg,
         blob: &E::Blob,
         offset: u32,
         size: u32,
@@ -623,7 +623,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
             };
-            let mut journal = Journal::<_, _, i32>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, i32>::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -835,7 +835,7 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Attempt to initialize the journal
-            let result = Journal::<_, _, u64>::init(context, cfg).await;
+            let result = Journal::<_, u64>::init(context, cfg).await;
 
             // Expect an error
             assert!(matches!(result, Err(Error::InvalidBlobName(_))));

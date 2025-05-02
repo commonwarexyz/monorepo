@@ -44,7 +44,7 @@ pub trait Array:
     + Display
     + AsRef<[u8]>
     + Deref<Target = [u8]>
-    + Decode
+    + Decode<Cfg = ()>
     + EncodeFixed
 {
 }

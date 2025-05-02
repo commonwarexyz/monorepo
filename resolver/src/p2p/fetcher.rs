@@ -93,7 +93,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: Array, Key: Array, NetS: Sender<Publi
     /// Panics if the key is already being fetched.
     pub async fn fetch(
         &mut self,
-        sender: &mut WrappedSender<NetS, (), wire::Message<Key>>,
+        sender: &mut WrappedSender<NetS, wire::Message<Key>>,
         key: Key,
         is_new: bool,
     ) {

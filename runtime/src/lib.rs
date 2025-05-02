@@ -227,6 +227,9 @@ pub type SinkOf<N> = <<N as Network>::Listener as Listener>::Sink;
 /// Syntactic sugar for the type of [Stream] used by a given [Network] N.
 pub type StreamOf<N> = <<N as Network>::Listener as Listener>::Stream;
 
+/// Syntactic sugar for the type of [Listener] used by a given [Network] N.
+pub type ListenerOf<N> = <N as crate::Network>::Listener;
+
 /// Interface that any runtime must implement to create
 /// network connections.
 pub trait Network: Clone + Send + Sync + 'static {
@@ -1307,7 +1310,10 @@ mod tests {
             // Configure telemetry
             tokio::telemetry::init(
                 context.with_label("metrics"),
-                Level::INFO,
+                tokio::telemetry::Logging {
+                    level: Level::INFO,
+                    json: false,
+                },
                 Some(address),
                 None,
             );

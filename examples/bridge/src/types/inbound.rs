@@ -1,9 +1,8 @@
+use super::block::BlockFormat;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_consensus::threshold_simplex::types::Finalization;
 use commonware_cryptography::{bls12381::primitives::group, Digest};
-
-use super::block::BlockFormat;
 
 /// Enum representing incoming messages from validators to the indexer.
 ///
@@ -45,6 +44,8 @@ impl<D: Digest> Write for Inbound<D> {
 }
 
 impl<D: Digest> Read for Inbound<D> {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let tag = u8::read(buf)?;
         match tag {
@@ -97,6 +98,8 @@ impl<D: Digest> Write for PutBlock<D> {
 }
 
 impl<D: Digest> Read for PutBlock<D> {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let network = group::Public::read(buf)?;
         let block = BlockFormat::<D>::read(buf)?;
@@ -127,6 +130,8 @@ impl<D: Digest> Write for GetBlock<D> {
 }
 
 impl<D: Digest> Read for GetBlock<D> {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let network = group::Public::read(buf)?;
         let digest = D::read(buf)?;
@@ -155,6 +160,8 @@ impl<D: Digest> Write for PutFinalization<D> {
 }
 
 impl<D: Digest> Read for PutFinalization<D> {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let network = group::Public::read(buf)?;
         let finalization = Finalization::read(buf)?;
@@ -185,6 +192,8 @@ impl Write for GetFinalization {
 }
 
 impl Read for GetFinalization {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let network = group::Public::read(buf)?;
         Ok(GetFinalization { network })

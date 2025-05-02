@@ -23,19 +23,18 @@
 //! ```
 
 use crate::{
-    mocks,
+    network::{deterministic::Network as DeterministicNetwork, metered::Network as MeteredNetwork},
     storage::{
         audited::Storage as AuditedStorage, memory::Storage as MemStorage,
         metered::Storage as MeteredStorage,
     },
     utils::Signaler,
-    Clock, Error, Handle, Signal, METRICS_PREFIX,
+    Clock, Error, Handle, ListenerOf, Signal, METRICS_PREFIX,
 };
 use commonware_utils::{hex, SystemTimeExt};
 use futures::{
-    channel::mpsc,
     task::{waker_ref, ArcWake},
-    Future, SinkExt, StreamExt,
+    Future,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
@@ -48,17 +47,13 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BinaryHeap, HashMap},
     mem::replace,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-    ops::Range,
+    net::SocketAddr,
     pin::Pin,
     sync::{Arc, Mutex},
     task::{self, Poll, Waker},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tracing::trace;
-
-/// Range of ephemeral ports assigned to dialers.
-const EPHEMERAL_PORT_RANGE: Range<u16> = 32768..61000;
 
 /// Map of names to blob contents.
 pub type Partition = HashMap<Vec<u8>, Vec<u8>>;
@@ -595,7 +590,7 @@ pub struct Context {
     label: String,
     spawned: bool,
     executor: Arc<Executor>,
-    networking: Arc<Networking>,
+    network: Arc<MeteredNetwork<DeterministicNetwork>>,
     storage: MeteredStorage<AuditedStorage<MemStorage>>,
 }
 
@@ -623,6 +618,9 @@ impl Context {
             AuditedStorage::new(MemStorage::default(), auditor.clone()),
             runtime_registry,
         );
+        let network = DeterministicNetwork::new(auditor.clone());
+        let network = MeteredNetwork::new(network, runtime_registry);
+
         let executor = Arc::new(Executor {
             registry: Mutex::new(registry),
             cycle: cfg.cycle,
@@ -639,11 +637,12 @@ impl Context {
             finished: Mutex::new(false),
             recovered: Mutex::new(false),
         });
+
         Context {
             label: String::new(),
             spawned: false,
             executor: executor.clone(),
-            networking: Arc::new(Networking::new(metrics, auditor)),
+            network: Arc::new(network),
             storage,
         }
     }
@@ -682,6 +681,9 @@ impl Context {
         // Copy state
         let auditor = self.executor.auditor.clone();
         let (signaler, signal) = Signaler::new();
+        let network = DeterministicNetwork::new(auditor.clone());
+        let network = MeteredNetwork::new(network, runtime_registry);
+
         let executor = Arc::new(Executor {
             // Copied from the current runtime
             cycle: self.executor.cycle,
@@ -705,7 +707,7 @@ impl Context {
             label: String::new(),
             spawned: false,
             executor,
-            networking: Arc::new(Networking::new(metrics, auditor.clone())),
+            network: Arc::new(network),
             storage: self.storage,
         }
     }
@@ -721,7 +723,7 @@ impl Clone for Context {
             label: self.label.clone(),
             spawned: false,
             executor: self.executor.clone(),
-            networking: self.networking.clone(),
+            network: self.network.clone(),
             storage: self.storage.clone(),
         }
     }
@@ -865,7 +867,7 @@ impl crate::Metrics for Context {
             label,
             spawned: false,
             executor: self.executor.clone(),
-            networking: self.networking.clone(),
+            network: self.network.clone(),
             storage: self.storage.clone(),
         }
     }
@@ -993,207 +995,18 @@ impl GClock for Context {
 
 impl ReasonablyRealtime for Context {}
 
-type Dialable = mpsc::UnboundedSender<(
-    SocketAddr,
-    mocks::Sink,   // Listener -> Dialer
-    mocks::Stream, // Dialer -> Listener
-)>;
-
-/// Implementation of [crate::Network] for the `deterministic` runtime.
-///
-/// When a dialer connects to a listener, the listener is given a new ephemeral port
-/// from the range `32768..61000`. To keep things simple, it is not possible to
-/// bind to an ephemeral port. Likewise, if ports are not reused and when exhausted,
-/// the runtime will panic.
-struct Networking {
-    metrics: Arc<Metrics>,
-    auditor: Arc<Auditor>,
-    ephemeral: Mutex<u16>,
-    listeners: Mutex<HashMap<SocketAddr, Dialable>>,
-}
-
-impl Networking {
-    fn new(metrics: Arc<Metrics>, auditor: Arc<Auditor>) -> Self {
-        Self {
-            metrics,
-            auditor,
-            ephemeral: Mutex::new(EPHEMERAL_PORT_RANGE.start),
-            listeners: Mutex::new(HashMap::new()),
-        }
-    }
-
-    fn bind(&self, socket: SocketAddr) -> Result<Listener, Error> {
-        self.auditor.event(b"bind", |hasher| {
-            hasher.update(socket.to_string().as_bytes());
-        });
-
-        // If the IP is localhost, ensure the port is not in the ephemeral range
-        // so that it can be used for binding in the dial method
-        if socket.ip() == IpAddr::V4(Ipv4Addr::LOCALHOST)
-            && EPHEMERAL_PORT_RANGE.contains(&socket.port())
-        {
-            return Err(Error::BindFailed);
-        }
-
-        // Ensure the port is not already bound
-        let mut listeners = self.listeners.lock().unwrap();
-        if listeners.contains_key(&socket) {
-            return Err(Error::BindFailed);
-        }
-
-        // Bind the socket
-        let (sender, receiver) = mpsc::unbounded();
-        listeners.insert(socket, sender);
-        Ok(Listener {
-            auditor: self.auditor.clone(),
-            address: socket,
-            listener: receiver,
-            metrics: self.metrics.clone(),
-        })
-    }
-
-    async fn dial(&self, socket: SocketAddr) -> Result<(Sink, Stream), Error> {
-        // Assign dialer a port from the ephemeral range
-        let dialer = {
-            let mut ephemeral = self.ephemeral.lock().unwrap();
-            let dialer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), *ephemeral);
-            *ephemeral = ephemeral
-                .checked_add(1)
-                .expect("ephemeral port range exhausted");
-            dialer
-        };
-        self.auditor.event(b"dial", |hasher| {
-            hasher.update(dialer.to_string().as_bytes());
-            hasher.update(socket.to_string().as_bytes());
-        });
-
-        // Get listener
-        let mut sender = {
-            let listeners = self.listeners.lock().unwrap();
-            let sender = listeners.get(&socket).ok_or(Error::ConnectionFailed)?;
-            sender.clone()
-        };
-
-        // Construct connection
-        let (dialer_sender, dialer_receiver) = mocks::Channel::init();
-        let (listener_sender, listener_receiver) = mocks::Channel::init();
-        sender
-            .send((dialer, dialer_sender, listener_receiver))
-            .await
-            .map_err(|_| Error::ConnectionFailed)?;
-        Ok((
-            Sink {
-                metrics: self.metrics.clone(),
-                auditor: self.auditor.clone(),
-                me: dialer,
-                peer: socket,
-                sender: listener_sender,
-            },
-            Stream {
-                auditor: self.auditor.clone(),
-                me: dialer,
-                peer: socket,
-                receiver: dialer_receiver,
-            },
-        ))
-    }
-}
-
 impl crate::Network for Context {
-    type Listener = Listener;
+    type Listener = ListenerOf<MeteredNetwork<DeterministicNetwork>>;
 
     async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, Error> {
-        self.networking.bind(socket)
+        self.network.bind(socket).await
     }
 
-    async fn dial(&self, socket: SocketAddr) -> Result<(Sink, Stream), Error> {
-        self.networking.dial(socket).await
-    }
-}
-
-/// Implementation of [crate::Listener] for the `deterministic` runtime.
-pub struct Listener {
-    metrics: Arc<Metrics>,
-    auditor: Arc<Auditor>,
-    address: SocketAddr,
-    listener: mpsc::UnboundedReceiver<(SocketAddr, mocks::Sink, mocks::Stream)>,
-}
-
-impl crate::Listener for Listener {
-    type Sink = Sink;
-    type Stream = Stream;
-
-    async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
-        let (socket, sender, receiver) = self.listener.next().await.ok_or(Error::ReadFailed)?;
-        self.auditor.event(b"accept", |hasher| {
-            hasher.update(self.address.to_string().as_bytes());
-            hasher.update(socket.to_string().as_bytes());
-        });
-        Ok((
-            socket,
-            Sink {
-                metrics: self.metrics.clone(),
-                auditor: self.auditor.clone(),
-                me: self.address,
-                peer: socket,
-                sender,
-            },
-            Stream {
-                auditor: self.auditor.clone(),
-                me: self.address,
-                peer: socket,
-                receiver,
-            },
-        ))
-    }
-
-    fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {
-        Ok(self.address)
-    }
-}
-
-/// Implementation of [crate::Sink] for the `deterministic` runtime.
-pub struct Sink {
-    metrics: Arc<Metrics>,
-    auditor: Arc<Auditor>,
-    me: SocketAddr,
-    peer: SocketAddr,
-    sender: mocks::Sink,
-}
-
-impl crate::Sink for Sink {
-    async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
-        self.auditor.event(b"send", |hasher| {
-            hasher.update(self.me.to_string().as_bytes());
-            hasher.update(self.peer.to_string().as_bytes());
-            hasher.update(msg);
-        });
-        self.sender.send(msg).await.map_err(|_| Error::SendFailed)?;
-        self.metrics.network_bandwidth.inc_by(msg.len() as u64);
-        Ok(())
-    }
-}
-
-/// Implementation of [crate::Stream] for the `deterministic` runtime.
-pub struct Stream {
-    auditor: Arc<Auditor>,
-    me: SocketAddr,
-    peer: SocketAddr,
-    receiver: mocks::Stream,
-}
-
-impl crate::Stream for Stream {
-    async fn recv(&mut self, buf: &mut [u8]) -> Result<(), Error> {
-        self.receiver
-            .recv(buf)
-            .await
-            .map_err(|_| Error::RecvFailed)?;
-        self.auditor.event(b"recv", |hasher| {
-            hasher.update(self.me.to_string().as_bytes());
-            hasher.update(self.peer.to_string().as_bytes());
-            hasher.update(buf);
-        });
-        Ok(())
+    async fn dial(
+        &self,
+        socket: SocketAddr,
+    ) -> Result<(crate::SinkOf<Self>, crate::StreamOf<Self>), Error> {
+        self.network.dial(socket).await
     }
 }
 

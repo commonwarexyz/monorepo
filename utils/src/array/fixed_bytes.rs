@@ -35,6 +35,8 @@ impl<const N: usize> Write for FixedBytes<N> {
 }
 
 impl<const N: usize> Read for FixedBytes<N> {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         Ok(Self(<[u8; N]>::read(buf)?))
     }

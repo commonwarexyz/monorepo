@@ -199,7 +199,7 @@ impl<
     async fn send<Sr: Sender<PublicKey = C::PublicKey>>(
         &mut self,
         shuffle: bool,
-        sender: &mut WrappedSender<Sr, (usize, usize), Backfiller<C::Signature, D>>,
+        sender: &mut WrappedSender<Sr, Backfiller<C::Signature, D>>,
     ) {
         // Clear retry
         self.retry = None;
