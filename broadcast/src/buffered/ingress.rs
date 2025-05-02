@@ -150,16 +150,16 @@ impl<
         M: Identifiable<Di> + Digestible<Dd> + Codec<MCfg>,
     > Broadcaster for Mailbox<P, Di, Dd, MCfg, M>
 {
-    type PublicKey = P;
+    type Recipients = Recipients<P>;
     type MessageDecoder = MCfg;
     type Message = M;
     type Response = Vec<P>;
 
     async fn broadcast(
         &mut self,
-        recipients: Recipients<P>,
+        recipients: Self::Recipients,
         message: Self::Message,
-    ) -> oneshot::Receiver<Vec<P>> {
+    ) -> oneshot::Receiver<Self::Response> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::Broadcast {
