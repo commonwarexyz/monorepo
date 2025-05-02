@@ -37,6 +37,7 @@ enum Phase<V: PartialEq + Eq> {
     Entry,
     Next(Box<Record<V>>),
     Done,
+    EntryDeleted,
     PostDeleteEntry,
     PostDeleteNext(Option<Box<Record<V>>>),
 }
@@ -44,7 +45,6 @@ enum Phase<V: PartialEq + Eq> {
 pub struct Cursor<'a, T: Translator, V: PartialEq + Eq> {
     phase: Phase<V>,
     entry: Option<OccupiedEntry<'a, T::Key, Record<V>>>,
-    entry_deleted: bool,
     past: Option<Box<Record<V>>>,
     collisions: &'a Counter,
     pruned: &'a Counter,
@@ -59,7 +59,6 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
         Self {
             phase: Phase::Initial,
             entry: Some(entry),
-            entry_deleted: false,
             past: None,
             collisions,
             pruned,
@@ -82,6 +81,7 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                 next.value = v;
             }
             Phase::Done => unreachable!("{NO_ACTIVE_ITEM}"),
+            Phase::EntryDeleted => unreachable!("{NO_ACTIVE_ITEM}"),
             Phase::PostDeleteEntry => unreachable!("{NO_ACTIVE_ITEM}"),
             Phase::PostDeleteNext(_) => unreachable!("{NO_ACTIVE_ITEM}"),
         }
@@ -142,6 +142,10 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                 }
             }
             Phase::Done => None,
+            Phase::EntryDeleted => {
+                self.phase = Phase::EntryDeleted;
+                None
+            }
         }
     }
 
@@ -166,18 +170,16 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                 self.phase = Phase::Next(new);
                 self.collisions.inc();
             }
+            Phase::EntryDeleted => {
+                self.phase = Phase::Entry;
+                self.entry.as_mut().unwrap().get_mut().value = v;
+            }
             Phase::Done => {
-                if self.entry_deleted {
-                    self.entry_deleted = false;
-                    self.entry.as_mut().unwrap().get_mut().value = v;
-                    self.phase = Phase::Entry;
-                } else {
-                    let new = Box::new(Record {
-                        value: v,
-                        next: None,
-                    });
-                    self.past_push(new);
-                }
+                let new = Box::new(Record {
+                    value: v,
+                    next: None,
+                });
+                self.past_push(new);
                 self.collisions.inc();
             }
             Phase::PostDeleteEntry | Phase::PostDeleteNext(_) => unreachable!("{MUST_CALL_NEXT}"),
@@ -195,16 +197,17 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                     self.entry.as_mut().unwrap().get_mut().next = next.next;
                     self.phase = Phase::PostDeleteEntry;
                 } else {
-                    self.phase = Phase::Done;
-                    self.entry_deleted = true;
+                    self.phase = Phase::EntryDeleted;
                 }
             }
             Phase::Next(mut current) => {
                 let next = current.next.take();
                 self.phase = Phase::PostDeleteNext(next);
             }
-            Phase::Done => unreachable!("{NO_ACTIVE_ITEM}"),
-            Phase::PostDeleteEntry | Phase::PostDeleteNext(_) => unreachable!("{NO_ACTIVE_ITEM}"),
+            Phase::Done
+            | Phase::EntryDeleted
+            | Phase::PostDeleteEntry
+            | Phase::PostDeleteNext(_) => unreachable!("{NO_ACTIVE_ITEM}"),
         }
     }
 }
@@ -215,7 +218,7 @@ where
 {
     fn drop(&mut self) {
         let mut entry = self.entry.take().unwrap();
-        if self.entry_deleted {
+        if self.phase == Phase::EntryDeleted {
             entry.remove();
             return;
         }
