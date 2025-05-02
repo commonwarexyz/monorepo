@@ -135,7 +135,8 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
     /// If we are in a phase where we could return a value, return it.
     fn value(&self) -> Option<&V> {
         match &self.phase {
-            Phase::Initial | Phase::Entry => unreachable!(),
+            Phase::Initial => unreachable!(),
+            Phase::Entry => self.entry.as_ref().map(|r| &r.get().value),
             Phase::Next(current) => Some(&current.value),
             Phase::Done | Phase::EntryDeleted => None,
             Phase::PostDeleteEntry | Phase::PostDeleteNext(_) | Phase::PostInsert(_) => {
@@ -159,15 +160,12 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
             Phase::Initial | Phase::PostDeleteEntry => {
                 // We must start with some entry, so this will always be some non-None value.
                 self.phase = Phase::Entry;
-                self.entry.as_ref().map(|r| &r.get().value)
             }
             Phase::Entry => {
                 // If there is a record after, we set it to be the current record.
-                let next = self.entry.as_mut().unwrap().get_mut().next.take();
-                if let Some(next) = next {
+                if let Some(next) = self.entry.as_mut().unwrap().get_mut().next.take() {
                     self.phase = Phase::Next(next);
                 }
-                self.value()
             }
             Phase::Next(mut current) | Phase::PostInsert(mut current) => {
                 // Take the next record and push the current one to the past list.
@@ -178,21 +176,19 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                 if let Some(next) = next {
                     self.phase = Phase::Next(next);
                 }
-                self.value()
             }
-            Phase::Done => None,
+            Phase::Done => {}
             Phase::EntryDeleted => {
                 self.phase = Phase::EntryDeleted;
-                None
             }
             Phase::PostDeleteNext(current) => {
                 // If the stale value is some, we set it to be the current record.
                 if let Some(current) = current {
                     self.phase = Phase::Next(current);
                 }
-                self.value()
             }
         }
+        self.value()
     }
 
     /// Inserts a new value at the current position.
