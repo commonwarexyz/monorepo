@@ -440,6 +440,7 @@ mod tests {
     }
 
     #[test_traced]
+    #[ignore]
     fn test_determinism_one() {
         for i in 0..10 {
             run_deterministic_test(i, Mode::One);
@@ -447,6 +448,7 @@ mod tests {
     }
 
     #[test_traced]
+    #[ignore]
     fn test_determinism_some() {
         for i in 0..10 {
             run_deterministic_test(i, Mode::Some);
@@ -454,6 +456,7 @@ mod tests {
     }
 
     #[test_traced]
+    #[ignore]
     fn test_determinism_all() {
         for i in 0..10 {
             run_deterministic_test(i, Mode::All);

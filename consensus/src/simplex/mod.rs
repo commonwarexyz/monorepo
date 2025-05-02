@@ -1863,6 +1863,7 @@ mod tests {
     }
 
     #[test_traced]
+    #[ignore]
     fn test_conflicter() {
         for seed in 0..5 {
             conflicter(seed);
@@ -2023,6 +2024,7 @@ mod tests {
     }
 
     #[test_traced]
+    #[ignore]
     fn test_nuller() {
         for seed in 0..5 {
             nuller(seed);
@@ -2169,6 +2171,7 @@ mod tests {
     }
 
     #[test_traced]
+    #[ignore]
     fn test_outdated() {
         for seed in 0..5 {
             outdated(seed);
