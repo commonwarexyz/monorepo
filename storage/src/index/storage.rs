@@ -263,7 +263,9 @@ where
         }
 
         // Attach the tip of past to the entry.
-        entry.get_mut().next = self.past.take();
+        if self.past.is_some() {
+            entry.get_mut().next = self.past.take();
+        }
     }
 }
 

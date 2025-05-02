@@ -294,12 +294,12 @@ mod tests {
 
         assert_eq!(
             index.get(b"key").copied().collect::<Vec<_>>(),
-            vec![4, 1, 2]
+            vec![4, 2, 1]
         );
         index.insert(b"key", 3);
         assert_eq!(
             index.get(b"key").copied().collect::<Vec<_>>(),
-            vec![4, 3, 1, 2]
+            vec![4, 3, 2, 1]
         );
 
         // Test removing last value.
@@ -307,15 +307,15 @@ mod tests {
             let mut cursor = index.get_mut(b"key").unwrap();
             assert_eq!(*cursor.next().unwrap(), 4);
             assert_eq!(*cursor.next().unwrap(), 3);
-            assert_eq!(*cursor.next().unwrap(), 1);
             assert_eq!(*cursor.next().unwrap(), 2);
+            assert_eq!(*cursor.next().unwrap(), 1);
             cursor.delete();
             assert!(context.encode().contains("pruned_total 3"));
         }
 
         assert_eq!(
             index.get(b"key").copied().collect::<Vec<_>>(),
-            vec![4, 1, 3]
+            vec![4, 2, 3]
         );
 
         // Test removing all values.
