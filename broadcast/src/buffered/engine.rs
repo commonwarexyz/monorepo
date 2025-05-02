@@ -20,15 +20,25 @@ use std::collections::{HashMap, VecDeque};
 use tracing::{debug, error, trace, warn};
 
 /// A responder waiting for a message.
-pub struct Waiter<P, Dd, M> {
+struct Waiter<P, Dd, M> {
     /// The sender of the message.
-    pub sender: Option<P>,
+    sender: Option<P>,
 
     /// The digest of the message.
-    pub digest: Option<Dd>,
+    digest: Option<Dd>,
 
     /// The responder to send the message to.
-    pub responder: oneshot::Sender<M>,
+    responder: oneshot::Sender<M>,
+}
+
+/// A pair of identity and digest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct Pair<Di, Dd> {
+    /// The identity of the message.
+    identity: Di,
+
+    /// The digest of the message.
+    digest: Dd,
 }
 
 /// Instance of the main engine for the module.
@@ -89,13 +99,13 @@ pub struct Engine<
     /// This is used to limit the number of digests stored per peer.
     /// At most `deque_size` digests are stored per peer. This value is expected to be small, so
     /// membership checks are done in linear time.
-    deques: HashMap<P, VecDeque<(Di, Dd)>>,
+    deques: HashMap<P, VecDeque<Pair<Di, Dd>>>,
 
     /// The number of times each identity and digest exists in one of the deques.
     ///
     /// Multiple peers can send the same message and we only want to store
     /// the message once.
-    counts: HashMap<(Di, Dd), usize>,
+    counts: HashMap<Pair<Di, Dd>, usize>,
 
     ////////////////////////////////////////
     // Metrics
@@ -251,15 +261,19 @@ impl<
                 let mut values = Vec::new();
                 for item in deque {
                     // Try to find a match from the sender
-                    if item.0 != identity {
+                    if item.identity != identity {
                         continue;
                     }
-                    if digest.as_ref().is_some_and(|d| d != &item.1) {
+                    if digest.as_ref().is_some_and(|d| d != &item.digest) {
                         continue;
                     }
 
                     // If the message is already in the cache, send it to the responder
-                    if let Some(msg) = self.items.get(&item.0).and_then(|m| m.get(&item.1)) {
+                    if let Some(msg) = self
+                        .items
+                        .get(&item.identity)
+                        .and_then(|m| m.get(&item.digest))
+                    {
                         values.push(msg.clone());
                     }
                 }
@@ -341,11 +355,13 @@ impl<
     /// Updates the deque, item count, and message cache, potentially evicting an old message.
     fn insert_message(&mut self, peer: P, msg: M) -> bool {
         // Get the identity and digest of the message
-        let identity = msg.identity();
-        let digest = msg.digest();
+        let pair = Pair {
+            identity: msg.identity(),
+            digest: msg.digest(),
+        };
 
         // Send the message to the waiters, if any, ignoring errors (as the receiver may have dropped)
-        if let Some(mut waiters) = self.waiters.remove(&identity) {
+        if let Some(mut waiters) = self.waiters.remove(&pair.identity) {
             let mut i = 0;
             while i < waiters.len() {
                 // Get the sender and digest filters
@@ -357,7 +373,7 @@ impl<
 
                 // Keep the waiter if either filter does not match.
                 if sender_filter.as_ref().is_some_and(|s| s != &peer)
-                    || digest_filter.is_some_and(|d| d != digest)
+                    || digest_filter.is_some_and(|d| d != pair.digest)
                 {
                     i += 1;
                     continue;
@@ -373,7 +389,7 @@ impl<
 
             // Re-insert if any waiters remain for this identity.
             if !waiters.is_empty() {
-                self.waiters.insert(identity, waiters);
+                self.waiters.insert(pair.identity, waiters);
             }
         }
 
@@ -384,7 +400,7 @@ impl<
             .or_insert_with(|| VecDeque::with_capacity(self.deque_size + 1));
 
         // If the message is already in the deque, move it to the front and return early
-        if let Some(i) = deque.iter().position(|d| d.0 == identity && d.1 == digest) {
+        if let Some(i) = deque.iter().position(|d| *d == pair) {
             if i != 0 {
                 let v = deque.remove(i).unwrap(); // Must exist
                 deque.push_front(v);
@@ -395,14 +411,18 @@ impl<
         // - Insert the message into the peer cache
         // - Increment the item count
         // - Insert the message if-and-only-if the new item count is 1
-        deque.push_front((identity, digest));
+        deque.push_front(pair);
         let count = self
             .counts
-            .entry((identity, digest))
+            .entry(pair)
             .and_modify(|c| *c = c.checked_add(1).unwrap())
             .or_insert(1);
         if *count == 1 {
-            let existing = self.items.entry(identity).or_default().insert(digest, msg);
+            let existing = self
+                .items
+                .entry(pair.identity)
+                .or_default()
+                .insert(pair.digest, msg);
             assert!(existing.is_none());
         }
 
@@ -420,10 +440,10 @@ impl<
             if *count == 0 {
                 let existing = self.counts.remove(&stale);
                 assert!(existing == Some(0));
-                let identities = self.items.get_mut(&stale.0).unwrap();
-                identities.remove(&stale.1); // Must have existed
+                let identities = self.items.get_mut(&stale.identity).unwrap();
+                identities.remove(&stale.digest); // Must have existed
                 if identities.is_empty() {
-                    self.items.remove(&stale.0);
+                    self.items.remove(&stale.identity);
                 }
             }
         }
