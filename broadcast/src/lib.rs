@@ -8,26 +8,26 @@ pub mod buffered;
 
 /// Broadcaster is the interface responsible for attempting replication of messages across a network.
 pub trait Broadcaster: Clone + Send + 'static {
-    /// Recipients is the type of recipients that can receive messages.
+    /// The type of recipients that can receive messages.
     type Recipients;
 
-    /// MessageDecoder is the type of configuration used as the configuration for decoding the
+    /// The type of configuration used as the configuration for decoding the
     /// Message type.
     type MessageDecoder: Config;
 
-    /// Message is the type of data that can be broadcasted.
+    /// The type of data that can be broadcasted.
     ///
     /// It must implement the Codec trait so that it can be:
     /// - serialized upon broadcast
     /// - deserialized upon reception
     type Message: Codec<Self::MessageDecoder> + Clone + Send + 'static;
 
-    /// Response is the type of data that is returned once the message is broadcasted.
+    /// The type of data that is returned once the message is broadcasted.
     ///
     /// It may also indicate the success or failure of the broadcast attempt.
     type Response: Clone + Send + 'static;
 
-    /// Attempt to broadcast a message to the network.
+    /// Attempt to broadcast a message to the associated recipients.
     fn broadcast(
         &mut self,
         recipients: Self::Recipients,
