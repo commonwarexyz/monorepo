@@ -791,4 +791,57 @@ mod tests {
             cur.delete(); // [15, 20]
         }
     }
+
+    #[test_traced]
+    fn test_delete_last_then_insert_while_done() {
+        let ctx = deterministic::Context::default();
+        let mut index = Index::init(ctx, TwoCap);
+
+        index.insert(b"k", 7);
+
+        let mut cur = index.get_mut(b"k").unwrap();
+        assert_eq!(*cur.next().unwrap(), 7); // Entry
+        cur.delete(); // list emptied, Done
+        assert!(cur.next().is_none()); // Done
+
+        cur.insert(8); // append while Done
+        assert!(cur.next().is_none()); // still Done
+        cur.insert(9); // another append while Done
+        assert!(cur.next().is_none()); // still Done
+
+        drop(cur);
+        assert_eq!(index.get(b"k").copied().collect::<Vec<_>>(), vec![8, 9]);
+    }
+
+    #[test_traced]
+    fn test_drop_mid_iteration_relinks() {
+        let ctx = deterministic::Context::default();
+        let mut index = Index::init(ctx, TwoCap);
+        for i in 0..5 {
+            index.insert(b"z", i);
+        }
+
+        {
+            let mut cur = index.get_mut(b"z").unwrap();
+            cur.next(); // Entry (0)
+            cur.next(); // Next (4)
+                        // cursor is dropped here after visiting two nodes
+        }
+
+        // All five values must still be visible and in stack order
+        assert_eq!(
+            index.get(b"z").copied().collect::<Vec<_>>(),
+            vec![0, 4, 3, 2, 1]
+        );
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next()")]
+    fn test_update_before_next_panics() {
+        let ctx = deterministic::Context::default();
+        let mut index = Index::init(ctx, TwoCap);
+        index.insert(b"p", 1);
+        let mut cur = index.get_mut(b"p").unwrap();
+        cur.update(2); // still illegal
+    }
 }
