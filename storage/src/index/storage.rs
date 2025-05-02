@@ -253,9 +253,10 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
             Phase::Initial => unreachable!("{MUST_CALL_NEXT}"),
             Phase::Entry => {
                 // Attempt to overwrite the entry with the next value.
-                if let Some(next) = self.entry.as_mut().unwrap().get_mut().next.take() {
-                    self.entry.as_mut().unwrap().get_mut().value = next.value;
-                    self.entry.as_mut().unwrap().get_mut().next = next.next;
+                let entry = self.entry.as_mut().unwrap().get_mut();
+                if let Some(next) = entry.next.take() {
+                    entry.value = next.value;
+                    entry.next = next.next;
                     self.phase = Phase::PostDeleteEntry;
                     return;
                 }
