@@ -1001,7 +1001,7 @@ impl GClock for Context {
 impl ReasonablyRealtime for Context {}
 
 impl crate::Network for Context {
-    type Listener = ListenerOf<MeteredNetwork<DeterministicNetwork>>;
+    type Listener = ListenerOf<Network>;
 
     async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, Error> {
         self.network.bind(socket).await
