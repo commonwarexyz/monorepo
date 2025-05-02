@@ -385,7 +385,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             UpdateResult::Updated(_, _) => (),
         }
 
-        let op = Operation::update(key, value);
+        let op = Operation::update(&key, value);
         self.apply_op(hasher, op).await?;
 
         Ok(res)

@@ -72,16 +72,16 @@ impl<K: Array, V: Array> Operation<K, V> {
     pub fn new(t: Type<K, V>) -> Self {
         match t {
             Type::Deleted(key) => Self::delete(&key),
-            Type::Update(key, value) => Self::update(key, value),
+            Type::Update(key, value) => Self::update(&key, value),
             Type::Commit(loc) => Self::commit(loc),
         }
     }
 
     /// Create a new update operation that makes `key` have value `value`.
-    pub fn update(key: K, value: V) -> Self {
+    pub fn update(key: &K, value: V) -> Self {
         let mut data = Vec::with_capacity(Self::SIZE);
         data.push(Self::UPDATE_CONTEXT);
-        data.extend_from_slice(&key);
+        data.extend_from_slice(key);
         data.extend_from_slice(&value);
 
         Self {
@@ -237,7 +237,7 @@ mod tests {
     fn test_operation_array_basic() {
         let key = U64::new(1234);
         let value = U64::new(56789);
-        let update_op = Operation::update(key.clone(), value.clone());
+        let update_op = Operation::update(&key, value.clone());
 
         let from = Operation::decode(update_op.as_ref()).unwrap();
         assert_eq!(key, from.to_key());
@@ -295,7 +295,7 @@ mod tests {
     fn test_operation_array_display() {
         let key = U64::new(1234);
         let value = U64::new(56789);
-        let update_op = Operation::update(key.clone(), value.clone());
+        let update_op = Operation::update(&key, value.clone());
         assert_eq!(
             format!("{}", update_op),
             format!("[key:{} value:{}]", key, value)
@@ -313,7 +313,7 @@ mod tests {
     fn test_operation_array_codec() {
         let key = U64::new(1234);
         let value = U64::new(5678);
-        let update_op = Operation::update(key, value);
+        let update_op = Operation::update(&key, value);
 
         let encoded = update_op.encode();
         assert_eq!(encoded.len(), Operation::<U64, U64>::SIZE);
