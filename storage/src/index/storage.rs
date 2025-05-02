@@ -102,11 +102,13 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<&V> {
         match std::mem::replace(&mut self.phase, Phase::Done) {
-            Phase::Initial => {
+            Phase::Initial | Phase::PostDeleteEntry => {
+                // We must start with some entry, so this will always be some non-None value.
                 self.phase = Phase::Entry;
                 self.entry.as_ref().map(|r| &r.get().value)
             }
             Phase::Entry => {
+                // If there is a record after, we set it to be the current record.
                 let next = self.entry.as_mut().unwrap().get_mut().next.take();
                 if let Some(next) = next {
                     self.phase = Phase::Next(next);
@@ -114,21 +116,18 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                 value(&self.phase)
             }
             Phase::Next(mut current) => {
+                // Take the next record and push the current one to the past list.
                 let next = current.next.take();
                 self.past_push(current);
+
+                // Set the next record to be the current record.
                 if let Some(next) = next {
                     self.phase = Phase::Next(next);
                 }
                 value(&self.phase)
             }
-            Phase::PostDeleteEntry => {
-                let value = self.entry.as_ref().map(|r| &r.get().value);
-                if value.is_some() {
-                    self.phase = Phase::Entry;
-                }
-                value
-            }
             Phase::Stale(current) => {
+                // If the stale value is some, we set it to be the current record.
                 if current.is_some() {
                     self.phase = Phase::Next(current.unwrap());
                 }
@@ -200,6 +199,7 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                     self.entry.as_mut().unwrap().get_mut().value = next.value;
                     self.entry.as_mut().unwrap().get_mut().next = next.next;
                     self.phase = Phase::PostDeleteEntry;
+                    return;
                 }
 
                 // If there is no next, we consider the entry deleted.
