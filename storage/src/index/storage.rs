@@ -234,14 +234,15 @@ where
         // Take the entry.
         let mut entry = self.entry.take().unwrap();
 
-        // If there is nothing left, delete the entry.
-        if self.phase == Phase::EntryDeleted {
-            entry.remove();
-            return;
-        }
-
         // If there is a dangling next, we should add it to past.
         match std::mem::replace(&mut self.phase, Phase::Done) {
+            Phase::Initial
+            | Phase::Entry
+            | Phase::Done
+            | Phase::PostDeleteEntry
+            | Phase::PostDeleteNext(None) => {
+                // No action needed.
+            }
             Phase::Next(current) => {
                 // If there is a next, we should add it to past.
                 self.past_push(current);
@@ -254,7 +255,11 @@ where
                 // If there is a current record, we should add it to past.
                 self.past_push(current);
             }
-            _ => {}
+            Phase::EntryDeleted => {
+                // If the entry is deleted, we should remove it.
+                entry.remove();
+                return;
+            }
         }
 
         // Attach the tip of past to the entry.
