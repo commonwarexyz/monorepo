@@ -100,7 +100,7 @@ impl<K: Array, V: Array> Write for Operation<K, V> {
                 buf.put_u8(Self::COMMIT_CONTEXT);
                 buf.put_slice(&loc.to_be_bytes());
                 // Put 0s for the value
-                buf.put_bytes(0, V::SIZE);
+                buf.put_bytes(0, Self::SIZE - 1 - u64::SIZE);
             }
         }
     }
@@ -135,7 +135,7 @@ impl<K: Array, V: Array> Read for Operation<K, V> {
             }
             Self::COMMIT_CONTEXT => {
                 let loc = u64::read(&mut buf)?;
-                for _ in 0..(K::SIZE + V::SIZE) {
+                for _ in 0..(Self::SIZE - 1 - u64::SIZE) {
                     if buf.get_u8() != 0 {
                         return Err(CodecError::Invalid("Operation", "Commit value non-zero"));
                     }
