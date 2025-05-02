@@ -237,6 +237,7 @@ impl<
     ) -> Vec<M> {
         if let Some(ref sender) = sender {
             if let Some(deque) = self.deques.get(sender) {
+                let mut values = Vec::new();
                 for item in deque {
                     // Try to find a match from the sender
                     if item.0 != identity {
@@ -248,9 +249,10 @@ impl<
 
                     // If the message is already in the cache, send it to the responder
                     if let Some(msg) = self.items.get(&item.0).and_then(|m| m.get(&item.1)) {
-                        return vec![msg.clone()];
+                        values.push(msg.clone());
                     }
                 }
+                return values;
             }
         } else if let Some(msg) = self.items.get(&identity) {
             if let Some(digest) = digest {
