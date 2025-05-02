@@ -6,13 +6,15 @@ pub(crate) mod tokio;
 #[cfg(test)]
 mod network_tests {
     use crate::{tokio::Runner as TokioRunner, Network as _, Runner, Spawner};
-    use crate::{Listener, Metrics, Sink, Stream};
+    use crate::{Listener, Sink, Stream};
     use futures::join;
     use std::net::SocketAddr;
     use std::time::Duration;
 
     // TODO danlaine: remove
     const PORT_NUMBER: u16 = 5000;
+    const CLIENT_SEND_DATA: &'static str = "client_send_data";
+    const SERVER_SEND_DATA: &'static str = "server_send_data";
 
     // Basic network connectivity test
     async fn test_network_bind_and_dial<N: crate::Network>(network: N) {
@@ -23,20 +25,17 @@ mod network_tests {
 
         let runtime = tokio::runtime::Handle::current();
 
-        // Server task
+        // Spawn server
         let server = runtime.spawn(async move {
-            let (client_addr, mut sink, mut stream) =
-                listener.accept().await.expect("Failed to accept");
+            let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
 
-            // Echo server
-            let mut buf = [0u8; 10];
+            let mut buf = [0u8; CLIENT_SEND_DATA.len()];
             stream.recv(&mut buf).await.expect("Failed to receive");
+            assert_eq!(&buf, CLIENT_SEND_DATA.as_bytes());
             sink.send(&buf).await.expect("Failed to send");
-
-            client_addr
         });
 
-        // Client task
+        // Spawn client, connect to server, send and receive data over connection
         let client = runtime.spawn(async move {
             // Connect to the server
             let (mut sink, mut stream) = network
@@ -44,14 +43,13 @@ mod network_tests {
                 .await
                 .expect("Failed to dial server");
 
-            // Send and receive data
-            let data = b"Hello Test";
-            sink.send(data).await.expect("Failed to send data");
+            sink.send(CLIENT_SEND_DATA.as_bytes())
+                .await
+                .expect("Failed to send data");
 
-            let mut buf = [0u8; 10];
+            let mut buf = [0u8; SERVER_SEND_DATA.len()];
             stream.recv(&mut buf).await.expect("Failed to receive data");
-
-            assert_eq!(&buf, data);
+            assert_eq!(&buf, CLIENT_SEND_DATA.as_bytes());
         });
 
         // Wait for both tasks to complete
@@ -62,9 +60,6 @@ mod network_tests {
 
     // Test handling multiple clients
     async fn test_network_multiple_clients<N: crate::Network>(network: N) {
-        const CLIENT_SEND_DATA: &'static str = "client_send_data";
-        const SERVER_SEND_DATA: &'static str = "server_send_data";
-
         let listener_addr = SocketAddr::from(([127, 0, 0, 1], PORT_NUMBER));
 
         let runtime = tokio::runtime::Handle::current();
@@ -123,76 +118,71 @@ mod network_tests {
         client.await.expect("Client task failed");
     }
 
-    // // Test large data transfer
-    // fn test_network_large_data<R: Runner>(runner: R)
-    // where
-    //     R::Context: crate::Network + Spawner,
-    // {
-    //     runner.start(|context| async move {
-    //         let socket = SocketAddr::from(([127, 0, 0, 1], 0));
+    // Test large data transfer
+    async fn test_network_large_data<N: crate::Network>(network: N) {
+        let listener_addr = SocketAddr::from(([127, 0, 0, 1], PORT_NUMBER));
 
-    //         // Start a server
-    //         let mut listener = context.bind(socket).await.expect("Failed to bind");
-    //         let server_addr = listener.local_addr().expect("Failed to get server address");
+        // Start a server
+        let mut listener = network.bind(listener_addr).await.expect("Failed to bind");
+        let runtime = tokio::runtime::Handle::current();
+        let server = runtime.spawn(async move {
+            let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
 
-    //         // Server task
-    //         let server = context.spawn(move |_| async move {
-    //             let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
+            // Receive and echo large data in chunks
+            let mut total_received = 0;
+            let mut buffer = vec![0u8; 8192];
 
-    //             // Receive and echo large data in chunks
-    //             let mut total_received = 0;
-    //             let mut buffer = vec![0u8; 8192];
+            while total_received < 1_000_000 {
+                stream
+                    .recv(&mut buffer)
+                    .await
+                    .expect("Failed to receive chunk");
+                sink.send(&buffer).await.expect("Failed to send chunk");
+                total_received += buffer.len();
+            }
 
-    //             while total_received < 1_000_000 {
-    //                 stream
-    //                     .recv(&mut buffer)
-    //                     .await
-    //                     .expect("Failed to receive chunk");
-    //                 sink.send(&buffer).await.expect("Failed to send chunk");
-    //                 total_received += buffer.len();
-    //             }
+            total_received
+        });
 
-    //             total_received
-    //         });
+        // Client task
+        let client = runtime.spawn(async move {
+            // Connect to the server
+            let (mut sink, mut stream) = network
+                .dial(listener_addr)
+                .await
+                .expect("Failed to dial server");
 
-    //         // Client task
-    //         let client = context.spawn(move |context| async move {
-    //             let (mut sink, mut stream) = context
-    //                 .dial(server_addr)
-    //                 .await
-    //                 .expect("Failed to dial server");
+            // Create a pattern of data
+            let pattern = (0..8192).map(|i| (i % 256) as u8).collect::<Vec<_>>();
+            let mut total_sent = 0;
+            let mut total_received = 0;
+            let mut receive_buffer = vec![0u8; 8192];
 
-    //             // Create a pattern of data
-    //             let pattern = (0..8192).map(|i| (i % 256) as u8).collect::<Vec<_>>();
-    //             let mut total_sent = 0;
-    //             let mut total_received = 0;
-    //             let mut receive_buffer = vec![0u8; 8192];
+            // Send and verify data in chunks
+            while total_sent < 1_000_000 {
+                sink.send(&pattern).await.expect("Failed to send chunk");
+                total_sent += pattern.len();
 
-    //             // Send and verify data in chunks
-    //             while total_sent < 1_000_000 {
-    //                 sink.send(&pattern).await.expect("Failed to send chunk");
-    //                 total_sent += pattern.len();
+                stream
+                    .recv(&mut receive_buffer)
+                    .await
+                    .expect("Failed to receive chunk");
+                assert_eq!(&receive_buffer, &pattern);
+                total_received += receive_buffer.len();
+            }
 
-    //                 stream
-    //                     .recv(&mut receive_buffer)
-    //                     .await
-    //                     .expect("Failed to receive chunk");
-    //                 assert_eq!(&receive_buffer, &pattern);
-    //                 total_received += receive_buffer.len();
-    //             }
+            (total_sent, total_received)
+        });
 
-    //             (total_sent, total_received)
-    //         });
+        // Wait for both tasks to complete
+        let (server_result, client_result) = join!(server, client);
+        let server_total = server_result.expect("Server task failed");
+        let (client_sent, client_received) = client_result.expect("Client task failed");
 
-    //         // Wait for tasks to complete
-    //         let (server_total, client_results) = join!(server, client);
-    //         let (client_sent, client_received) = client_results.unwrap();
-
-    //         assert!(server_total.is_ok());
-    //         assert_eq!(client_sent, 1_048_576); // 128 * 8192
-    //         assert_eq!(client_received, 1_048_576);
-    //     });
-    // }
+        assert_eq!(server_total, 123 * 8192); // Smallest multiple of 8192 greater than 1_000_000
+        assert_eq!(client_sent, 123 * 8192);
+        assert_eq!(client_received, 123 * 8192);
+    }
 
     // // Test connection errors
     // fn test_network_connection_errors<R: Runner>(runner: R)
@@ -317,11 +307,14 @@ mod network_tests {
         test_network_multiple_clients(network).await;
     }
 
-    // #[test]
-    // fn test_tokio_network_large_data() {
-    //     let executor = TokioRunner::default();
-    //     test_network_large_data(executor);
-    // }
+    #[tokio::test]
+    async fn test_tokio_network_large_data() {
+        let network: super::tokio::Network = super::tokio::Config::default()
+            .with_read_timeout(Duration::from_secs(15))
+            .with_write_timeout(Duration::from_secs(15))
+            .into();
+        test_network_large_data(network).await;
+    }
 
     // #[test]
     // fn test_tokio_network_connection_errors() {
