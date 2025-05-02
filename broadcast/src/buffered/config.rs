@@ -1,8 +1,7 @@
-use commonware_codec::Config as CodecConfig;
 use commonware_utils::Array;
 
 /// Configuration for the [`Engine`](super::Engine).
-pub struct Config<P: Array, MCfg: CodecConfig> {
+pub struct Config<P: Array, MCfg> {
     /// The public key of the participant.
     pub public_key: P,
 

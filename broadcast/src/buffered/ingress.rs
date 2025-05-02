@@ -1,5 +1,5 @@
 use crate::Broadcaster;
-use commonware_codec::{Codec, Config as CodecConfig};
+use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digest, Digestible};
 use commonware_p2p::Recipients;
 use commonware_utils::Array;
@@ -7,7 +7,6 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
-use std::marker::PhantomData;
 
 /// Message types that can be sent to the `Mailbox`
 pub enum Message<P: Array, Dc: Digest, Dd: Digest, M: Committable<Dc> + Digestible<Dd>> {
@@ -43,40 +42,20 @@ pub enum Message<P: Array, Dc: Digest, Dd: Digest, M: Committable<Dc> + Digestib
 
 /// Ingress mailbox for [`Engine`](super::Engine).
 #[derive(Clone)]
-pub struct Mailbox<
-    P: Array,
-    Dc: Digest,
-    Dd: Digest,
-    MCfg: CodecConfig,
-    M: Committable<Dc> + Digestible<Dd> + Codec<MCfg>,
-> {
+pub struct Mailbox<P: Array, Dc: Digest, Dd: Digest, M: Committable<Dc> + Digestible<Dd> + Codec> {
     sender: mpsc::Sender<Message<P, Dc, Dd, M>>,
-    _phantom: PhantomData<MCfg>,
 }
 
-impl<
-        P: Array,
-        Dc: Digest,
-        Dd: Digest,
-        MCfg: CodecConfig,
-        M: Committable<Dc> + Digestible<Dd> + Codec<MCfg>,
-    > Mailbox<P, Dc, Dd, MCfg, M>
+impl<P: Array, Dc: Digest, Dd: Digest, M: Committable<Dc> + Digestible<Dd> + Codec>
+    Mailbox<P, Dc, Dd, M>
 {
     pub(super) fn new(sender: mpsc::Sender<Message<P, Dc, Dd, M>>) -> Self {
-        Self {
-            sender,
-            _phantom: PhantomData,
-        }
+        Self { sender }
     }
 }
 
-impl<
-        P: Array,
-        Dc: Digest,
-        Dd: Digest,
-        MCfg: CodecConfig,
-        M: Committable<Dc> + Digestible<Dd> + Codec<MCfg>,
-    > Mailbox<P, Dc, Dd, MCfg, M>
+impl<P: Array, Dc: Digest, Dd: Digest, M: Committable<Dc> + Digestible<Dd> + Codec>
+    Mailbox<P, Dc, Dd, M>
 {
     /// Subscribe to a message by peer (optionally), commitment, and digest (optionally).
     ///
@@ -142,16 +121,10 @@ impl<
     }
 }
 
-impl<
-        P: Array,
-        Dc: Digest,
-        Dd: Digest,
-        MCfg: CodecConfig,
-        M: Committable<Dc> + Digestible<Dd> + Codec<MCfg>,
-    > Broadcaster for Mailbox<P, Dc, Dd, MCfg, M>
+impl<P: Array, Dc: Digest, Dd: Digest, M: Committable<Dc> + Digestible<Dd> + Codec> Broadcaster
+    for Mailbox<P, Dc, Dd, M>
 {
     type Recipients = Recipients<P>;
-    type MessageDecoder = MCfg;
     type Message = M;
     type Response = Vec<P>;
 

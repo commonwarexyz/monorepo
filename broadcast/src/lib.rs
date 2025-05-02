@@ -1,6 +1,6 @@
 //! Disseminate data over a wide-area network.
 
-use commonware_codec::{Codec, Config};
+use commonware_codec::Codec;
 use futures::channel::oneshot;
 use std::future::Future;
 
@@ -11,16 +11,12 @@ pub trait Broadcaster: Clone + Send + 'static {
     /// The type of recipients that can receive messages.
     type Recipients;
 
-    /// The type of configuration used as the configuration for decoding the
-    /// Message type.
-    type MessageDecoder: Config;
-
-    /// The type of data that can be broadcasted.
+    /// Message is the type of data that can be broadcasted.
     ///
     /// It must implement the Codec trait so that it can be:
     /// - serialized upon broadcast
     /// - deserialized upon reception
-    type Message: Codec<Self::MessageDecoder> + Clone + Send + 'static;
+    type Message: Codec + Clone + Send + 'static;
 
     /// The type of data that is returned once the message is broadcasted.
     ///
