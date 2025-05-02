@@ -598,6 +598,12 @@ mod tests {
             let got = mb2.get(None, m3.identity(), Some(m2.digest())).await;
             println!("got: {:?}", got);
             assert!(got.is_empty());
+
+            // `get` with digest=None from a single sender should return all messages.
+            let got = mb2.get(Some(sender1.clone()), m1.identity(), None).await;
+            assert_eq!(got, vec![m1.clone(), m2.clone()]);
+            let got = mb2.get(Some(sender2.clone()), m3.identity(), None).await;
+            assert_eq!(got, vec![m3.clone()]);
         });
     }
 
