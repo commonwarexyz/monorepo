@@ -39,18 +39,18 @@ enum Phase<V: PartialEq + Eq> {
     Done,
     EntryDeleted,
     PostDeleteEntry,
-    PostDeleteNext(Option<Box<Record<V>>>),
+    Stale(Option<Box<Record<V>>>),
 }
 
 fn value<V: PartialEq + Eq>(phase: &Phase<V>) -> Option<&V> {
     match phase {
-        Phase::Initial => None,
-        Phase::Entry => None,
         Phase::Next(next) => Some(&next.value),
-        Phase::Done => None,
-        Phase::EntryDeleted => None,
-        Phase::PostDeleteEntry => None,
-        Phase::PostDeleteNext(current) => current.as_deref().map(|r| &r.value),
+        Phase::Initial
+        | Phase::Entry
+        | Phase::Done
+        | Phase::EntryDeleted
+        | Phase::PostDeleteEntry
+        | Phase::Stale(_) => unreachable!(),
     }
 }
 
@@ -89,16 +89,17 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
             Phase::Entry => {
                 self.entry.as_mut().unwrap().get_mut().value = v;
             }
+            Phase::Stale(_) => unreachable!("{NO_ACTIVE_ITEM}"),
             Phase::Next(next) => {
                 next.value = v;
             }
             Phase::Done => unreachable!("{NO_ACTIVE_ITEM}"),
             Phase::EntryDeleted => unreachable!("{NO_ACTIVE_ITEM}"),
             Phase::PostDeleteEntry => unreachable!("{NO_ACTIVE_ITEM}"),
-            Phase::PostDeleteNext(_) => unreachable!("{NO_ACTIVE_ITEM}"),
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<&V> {
         match std::mem::replace(&mut self.phase, Phase::Done) {
             Phase::Initial => {
@@ -124,12 +125,10 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                 let value = self.entry.as_ref().map(|r| &r.get().value);
                 if value.is_some() {
                     self.phase = Phase::Entry;
-                } else {
-                    self.phase = Phase::Done;
                 }
                 value
             }
-            Phase::PostDeleteNext(current) => {
+            Phase::Stale(current) => {
                 if current.is_some() {
                     self.phase = Phase::Next(current.unwrap());
                 }
@@ -147,28 +146,40 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
         match std::mem::replace(&mut self.phase, Phase::Done) {
             Phase::Initial => unreachable!("{MUST_CALL_NEXT}"),
             Phase::Entry => {
+                // Create a new record that points to entry's next.
                 let new = Box::new(Record {
                     value: v,
                     next: self.entry.as_mut().unwrap().get_mut().next.take(),
                 });
-                self.phase = Phase::Next(new);
+
+                // Set the phase to the new record.
+                self.phase = Phase::Stale(Some(new));
                 self.collisions.inc();
             }
             Phase::Next(mut current) => {
+                // Take next.
                 let mut next = current.next.take().unwrap();
                 let next_next = next.next.take();
+
+                // Add current to the past list.
+                self.past_push(current);
+
+                // Create a new record that points to the next's next.
                 let new = Box::new(Record {
                     value: v,
                     next: next_next,
                 });
-                self.phase = Phase::Next(new);
+                self.phase = Phase::Stale(Some(new));
                 self.collisions.inc();
             }
             Phase::EntryDeleted => {
-                self.phase = Phase::Entry;
+                // If entry is deleted, we need to update it.
+                self.phase = Phase::Done;
                 self.entry.as_mut().unwrap().get_mut().value = v;
             }
             Phase::Done => {
+                // If we are done, we need to create a new record and
+                // immediately push it to the past list.
                 let new = Box::new(Record {
                     value: v,
                     next: None,
@@ -176,7 +187,7 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                 self.past_push(new);
                 self.collisions.inc();
             }
-            Phase::PostDeleteEntry | Phase::PostDeleteNext(_) => unreachable!("{MUST_CALL_NEXT}"),
+            Phase::PostDeleteEntry | Phase::Stale(_) => unreachable!("{MUST_CALL_NEXT}"),
         }
     }
 
@@ -196,12 +207,11 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
             }
             Phase::Next(mut current) => {
                 let next = current.next.take();
-                self.phase = Phase::PostDeleteNext(next);
+                self.phase = Phase::Stale(next);
             }
-            Phase::Done
-            | Phase::EntryDeleted
-            | Phase::PostDeleteEntry
-            | Phase::PostDeleteNext(_) => unreachable!("{NO_ACTIVE_ITEM}"),
+            Phase::Done | Phase::EntryDeleted | Phase::PostDeleteEntry | Phase::Stale(_) => {
+                unreachable!("{NO_ACTIVE_ITEM}")
+            }
         }
     }
 }
