@@ -404,13 +404,7 @@ impl<T: Translator, V: PartialEq + Eq> Index<T, V> {
     #[inline]
     /// Returns the number of translated keys in the index.
     pub fn keys(&self) -> usize {
-        self.keys.get().try_into().unwrap_or(usize::MAX)
-    }
-
-    #[inline]
-    /// Returns the number of items in the index.
-    pub fn items(&self) -> usize {
-        self.items.get().try_into().unwrap_or(usize::MAX)
+        self.map.len()
     }
 
     /// Returns an iterator over all values associated with a translated key.
