@@ -18,6 +18,7 @@ use crate::{
         verification::Proof,
     },
 };
+use commonware_codec::Encode as _;
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
@@ -224,7 +225,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         // is more recent than the last operation for the same key.
         for i in start_leaf_num..log_size {
             let op: Operation<K, V> = log.read(i).await?;
-            match &op {
+            match op {
                 Operation::Deleted(key) => {
                     // If the translated key is in the snapshot, get a cursor to look for the key.
                     if let Some(mut cursor) = snapshot.get_mut(&key) {
@@ -259,7 +260,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                         }
                     }
                 }
-                Operation::Commit(loc) => inactivity_floor_loc = *loc,
+                Operation::Commit(loc) => inactivity_floor_loc = loc,
             }
             if let Some(ref mut bitmap_ref) = bitmap {
                 // If we reach this point and a bit hasn't been added for the operation, then it's
@@ -316,7 +317,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
     /// Return a digest of the operation.
     pub fn op_digest(hasher: &mut H, op: &Operation<K, V>) -> H::Digest {
-        hasher.update(op);
+        hasher.update(&op.encode());
         hasher.finalize()
     }
 

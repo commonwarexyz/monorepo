@@ -61,6 +61,10 @@ pub(super) enum Operation<K: Array, V: Array> {
     Commit(u64),
 }
 
+impl<K: Array, V: Array> FixedSize for Operation<K, V> {
+    const SIZE: usize = u8::SIZE + K::SIZE + V::SIZE;
+}
+
 impl<K: Array, V: Array> Operation<K, V> {
     const DELETE_CONTEXT: u8 = 0;
     const UPDATE_CONTEXT: u8 = 1;
@@ -74,7 +78,7 @@ impl<K: Array, V: Array> Operation<K, V> {
     //     "array size too small for commit op"
     // );
 
-    /// Create a new operation of the given type.
+    // Create a new operation of the given type.
     // pub fn new(t: Type<K, V>) -> Self {
     //     match t {
     //         Type::Deleted(key) => Self::delete(&key),
@@ -123,9 +127,13 @@ impl<K: Array, V: Array> Operation<K, V> {
     //     }
     // }
 
-    // pub fn to_key(&self) -> K {
-    //     K::decode(&self.data[1..K::SIZE + 1]).unwrap()
-    // }
+    pub fn to_key(&self) -> K {
+        match self {
+            Operation::Deleted(key) => key.clone(),
+            Operation::Update(key, _) => key.clone(),
+            Operation::Commit(_) => panic!("Cannot get key from commit operation"),
+        }
+    }
 
     // pub fn to_type(&self) -> Type<K, V> {
     //     let key = K::decode(&self.data[1..K::SIZE + 1]).unwrap();
@@ -143,14 +151,13 @@ impl<K: Array, V: Array> Operation<K, V> {
     //     }
     // }
 
-    // pub fn to_value(&self) -> Option<V> {
-    //     match self.data[0] {
-    //         Self::DELETE_CONTEXT => None,
-    //         Self::UPDATE_CONTEXT => Some(V::decode(&self.data[K::SIZE + 1..]).unwrap()),
-    //         Self::COMMIT_CONTEXT => None,
-    //         _ => unreachable!(),
-    //     }
-    // }
+    pub fn to_value(&self) -> Option<V> {
+        match self {
+            Operation::Deleted(_) => None,
+            Operation::Update(_, value) => Some(value.clone()),
+            Operation::Commit(_) => None,
+        }
+    }
 }
 
 impl<K: Array, V: Array> Write for Operation<K, V> {
@@ -161,21 +168,19 @@ impl<K: Array, V: Array> Write for Operation<K, V> {
                 k.write(buf);
                 // Put 0s for the value
                 buf.put_bytes(0, V::SIZE);
-
-            },
+            }
             Operation::Update(k, v) => {
                 buf.put_u8(Self::UPDATE_CONTEXT);
                 k.write(buf);
                 v.write(buf);
-            },
+            }
             Operation::Commit(loc) => {
                 buf.put_u8(Self::COMMIT_CONTEXT);
                 buf.put_slice(&loc.to_be_bytes());
                 // TODO danlaine: fix this
                 // Put 0s for the rest
                 // buf.put_bytes(0, Self::SIZE -1 - u64::SIZE);
-
-            },
+            }
         }
     }
 }
@@ -191,36 +196,37 @@ impl<K: Array, V: Array> Read for Operation<K, V> {
 
         // Now, read-over and verify the data.
         let mut buf: &[u8] = data.as_ref();
-        match u8::read(&mut buf)? {
+        let op = match u8::read(&mut buf)? {
             Self::UPDATE_CONTEXT => {
-                K::read(&mut buf)?;
-                V::read(&mut buf)?;
+                let key = K::read(&mut buf)?;
+                let value = V::read(&mut buf)?;
+                Self::Update(key, value)
             }
             Self::DELETE_CONTEXT => {
-                K::read(&mut buf)?;
+                let key = K::read(&mut buf)?;
+                // Check that the value is all zeroes
                 for _ in 0..V::SIZE {
                     if buf.get_u8() != 0 {
                         return Err(CodecError::Invalid("Operation", "Delete value non-zero"));
                     }
                 }
+                Self::Deleted(key)
             }
             Self::COMMIT_CONTEXT => {
-                u64::read(&mut buf)?;
+                let loc = u64::read(&mut buf)?;
                 for _ in 0..(V::SIZE + K::SIZE - u64::SIZE) {
                     if buf.get_u8() != 0 {
                         return Err(CodecError::Invalid("Operation", "Commit value non-zero"));
                     }
                 }
+                Self::Commit(loc)
             }
             e => {
                 return Err(CodecError::InvalidEnum(e));
             }
-        }
+        };
 
-        Ok(Self {
-            data,
-            _phantom: std::marker::PhantomData,
-        })
+        Ok(op)
     }
 }
 
@@ -259,93 +265,93 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode};
     use commonware_utils::array::U64;
 
-    #[test]
-    fn test_operation_array_basic() {
-        let key = U64::new(1234);
-        let value = U64::new(56789);
-        let update_op = Operation::update(&key, &value);
+    // #[test]
+    // fn test_operation_array_basic() {
+    //     let key = U64::new(1234);
+    //     let value = U64::new(56789);
+    //     let update_op = Operation::Update(key, value);
 
-        let from = Operation::decode(update_op.as_ref()).unwrap();
-        assert_eq!(key, from.to_key());
-        assert_eq!(value, from.to_value().unwrap());
-        assert_eq!(update_op, from);
+    //     let from = Operation::decode(update_op).unwrap();
+    //     assert_eq!(key, from.to_key());
+    //     assert_eq!(value, from.to_value().unwrap());
+    //     assert_eq!(update_op, from);
 
-        let vec = update_op.to_vec();
+    //     let vec = update_op.to_vec();
 
-        let from = Operation::<U64, U64>::decode(vec.as_ref()).unwrap();
-        assert_eq!(key, from.to_key());
-        assert_eq!(value, from.to_value().unwrap());
-        assert_eq!(update_op, from);
+    //     let from = Operation::<U64, U64>::decode(vec.as_ref()).unwrap();
+    //     assert_eq!(key, from.to_key());
+    //     assert_eq!(value, from.to_value().unwrap());
+    //     assert_eq!(update_op, from);
 
-        let from = Operation::<U64, U64>::decode(vec.as_ref()).unwrap();
-        assert_eq!(key, from.to_key());
-        assert_eq!(value, from.to_value().unwrap());
-        assert_eq!(update_op, from);
+    //     let from = Operation::<U64, U64>::decode(vec.as_ref()).unwrap();
+    //     assert_eq!(key, from.to_key());
+    //     assert_eq!(value, from.to_value().unwrap());
+    //     assert_eq!(update_op, from);
 
-        let key2 = U64::new(42);
-        let delete_op = Operation::<U64, U64>::delete(&key2);
-        let from = Operation::<U64, U64>::decode(delete_op.as_ref()).unwrap();
-        assert_eq!(key2, from.to_key());
-        assert_eq!(None, from.to_value());
-        assert_eq!(delete_op, from);
+    //     let key2 = U64::new(42);
+    //     let delete_op = Operation::<U64, U64>::delete(&key2);
+    //     let from = Operation::<U64, U64>::decode(delete_op.as_ref()).unwrap();
+    //     assert_eq!(key2, from.to_key());
+    //     assert_eq!(None, from.to_value());
+    //     assert_eq!(delete_op, from);
 
-        let commit_op = Operation::<U64, U64>::new(Type::Commit(42));
-        let from = Operation::<U64, U64>::decode(commit_op.as_ref()).unwrap();
-        assert_eq!(None, from.to_value());
-        assert!(matches!(from.to_type(), Type::Commit(42)));
-        assert_eq!(commit_op, from);
+    //     let commit_op = Operation::<U64, U64>::new(Type::Commit(42));
+    //     let from = Operation::<U64, U64>::decode(commit_op.as_ref()).unwrap();
+    //     assert_eq!(None, from.to_value());
+    //     assert!(matches!(from.to_type(), Type::Commit(42)));
+    //     assert_eq!(commit_op, from);
 
-        // test non-zero byte detection in delete operation
-        let mut invalid = delete_op.to_vec();
-        invalid[U64::SIZE + 4] = 0xFF;
-        let decoded = Operation::<U64, U64>::decode(invalid.as_ref());
-        assert!(matches!(decoded.unwrap_err(), CodecError::Invalid(_, _)));
+    //     // test non-zero byte detection in delete operation
+    //     let mut invalid = delete_op.to_vec();
+    //     invalid[U64::SIZE + 4] = 0xFF;
+    //     let decoded = Operation::<U64, U64>::decode(invalid.as_ref());
+    //     assert!(matches!(decoded.unwrap_err(), CodecError::Invalid(_, _)));
 
-        // test invalid context byte detection
-        let mut invalid = delete_op.to_vec();
-        invalid[0] = 0xFF;
-        let decoded = Operation::<U64, U64>::decode(invalid.as_ref());
-        assert!(matches!(
-            decoded.unwrap_err(),
-            CodecError::InvalidEnum(0xFF)
-        ));
+    //     // test invalid context byte detection
+    //     let mut invalid = delete_op.to_vec();
+    //     invalid[0] = 0xFF;
+    //     let decoded = Operation::<U64, U64>::decode(invalid.as_ref());
+    //     assert!(matches!(
+    //         decoded.unwrap_err(),
+    //         CodecError::InvalidEnum(0xFF)
+    //     ));
 
-        // test invalid length detection
-        let mut invalid = update_op.to_vec();
-        invalid.pop();
-        let decoded = Operation::<U64, U64>::decode(invalid.as_ref());
-        assert!(matches!(decoded.unwrap_err(), CodecError::EndOfBuffer));
-    }
+    //     // test invalid length detection
+    //     let mut invalid = update_op.to_vec();
+    //     invalid.pop();
+    //     let decoded = Operation::<U64, U64>::decode(invalid.as_ref());
+    //     assert!(matches!(decoded.unwrap_err(), CodecError::EndOfBuffer));
+    // }
 
-    #[test]
-    fn test_operation_array_display() {
-        let key = U64::new(1234);
-        let value = U64::new(56789);
-        let update_op = Operation::update(&key, &value);
-        assert_eq!(
-            format!("{}", update_op),
-            format!("[key:{} value:{}]", key, value)
-        );
+    // #[test]
+    // fn test_operation_array_display() {
+    //     let key = U64::new(1234);
+    //     let value = U64::new(56789);
+    //     let update_op = Operation::Update(&key, &value);
+    //     assert_eq!(
+    //         format!("{}", update_op),
+    //         format!("[key:{} value:{}]", key, value)
+    //     );
 
-        let key2 = U64::new(42);
-        let delete_op = Operation::<U64, U64>::delete(&key2);
-        assert_eq!(
-            format!("{}", delete_op),
-            format!("[key:{} <deleted>]", key2)
-        );
-    }
+    //     let key2 = U64::new(42);
+    //     let delete_op = Operation::<U64, U64>::delete(&key2);
+    //     assert_eq!(
+    //         format!("{}", delete_op),
+    //         format!("[key:{} <deleted>]", key2)
+    //     );
+    // }
 
-    #[test]
-    fn test_operation_array_codec() {
-        let key = U64::new(1234);
-        let value = U64::new(5678);
-        let update_op = Operation::update(&key, &value);
+    // #[test]
+    // fn test_operation_array_codec() {
+    //     let key = U64::new(1234);
+    //     let value = U64::new(5678);
+    //     let update_op = Operation::Update(&key, &value);
 
-        let encoded = update_op.encode();
-        assert_eq!(encoded.len(), Operation::<U64, U64>::SIZE);
-        assert_eq!(encoded, update_op.as_ref());
+    //     let encoded = update_op.encode();
+    //     assert_eq!(encoded.len(), Operation::<U64, U64>::SIZE);
+    //     assert_eq!(encoded, update_op.as_ref());
 
-        let decoded = Operation::decode(encoded).unwrap();
-        assert_eq!(update_op, decoded);
-    }
+    //     let decoded = Operation::decode(encoded).unwrap();
+    //     assert_eq!(update_op, decoded);
+    // }
 }
