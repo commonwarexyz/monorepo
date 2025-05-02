@@ -61,8 +61,8 @@ pub struct Mmr<E: RStorage + Clock + Metrics, H: Hasher> {
 }
 
 impl<E: RStorage + Clock + Metrics, H: Hasher> Storage<H::Digest> for Mmr<E, H> {
-    async fn size(&self) -> Result<u64, Error> {
-        Ok(self.size())
+    fn size(&self) -> u64 {
+        self.size()
     }
 
     async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, Error> {

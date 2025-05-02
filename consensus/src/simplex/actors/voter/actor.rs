@@ -327,7 +327,7 @@ pub struct Actor<
     partition: String,
     compression: Option<u8>,
     replay_concurrency: usize,
-    journal: Option<Journal<E, usize, Voter<C::Signature, D>>>,
+    journal: Option<Journal<E, Voter<C::Signature, D>>>,
 
     genesis: Option<D>,
 
@@ -602,7 +602,7 @@ impl<
 
     async fn timeout<Sr: Sender>(
         &mut self,
-        sender: &mut WrappedSender<Sr, usize, Voter<C::Signature, D>>,
+        sender: &mut WrappedSender<Sr, Voter<C::Signature, D>>,
     ) {
         // Set timeout fired
         let round = self.views.get_mut(&self.view).unwrap();
@@ -1450,7 +1450,7 @@ impl<
     async fn notify<Sr: Sender>(
         &mut self,
         backfiller: &mut resolver::Mailbox<C::Signature, D>,
-        sender: &mut WrappedSender<Sr, usize, Voter<C::Signature, D>>,
+        sender: &mut WrappedSender<Sr, Voter<C::Signature, D>>,
         view: u64,
     ) {
         // Attempt to notarize
@@ -1678,7 +1678,7 @@ impl<
         self.enter_view(1);
 
         // Initialize journal
-        let mut journal = Journal::<_, _, Voter<C::Signature, D>>::init(
+        let mut journal = Journal::<_, Voter<C::Signature, D>>::init(
             self.context.with_label("journal"),
             JConfig {
                 partition: self.partition.clone(),

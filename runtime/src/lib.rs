@@ -1307,7 +1307,10 @@ mod tests {
             // Configure telemetry
             tokio::telemetry::init(
                 context.with_label("metrics"),
-                Level::INFO,
+                tokio::telemetry::Logging {
+                    level: Level::INFO,
+                    json: false,
+                },
                 Some(address),
                 None,
             );
