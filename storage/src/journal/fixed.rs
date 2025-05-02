@@ -50,7 +50,7 @@
 
 use super::Error;
 use bytes::BufMut;
-use commonware_codec::{Decode, DecodeExt, Encode, FixedSize};
+use commonware_codec::{Codec, DecodeExt, FixedSize};
 use commonware_runtime::{Blob, Error as RError, Metrics, Storage};
 use commonware_utils::hex;
 use futures::stream::{self, Stream, StreamExt};
@@ -91,7 +91,7 @@ pub struct Journal<E: Storage + Metrics, A> {
     _array: PhantomData<A>,
 }
 
-impl<E: Storage + Metrics, A: Encode + Decode<Cfg = ()> + FixedSize> Journal<E, A> {
+impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
     const CHUNK_SIZE: usize = u32::SIZE + A::SIZE;
     const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
 

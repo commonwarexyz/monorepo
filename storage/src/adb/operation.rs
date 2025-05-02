@@ -88,7 +88,7 @@ impl<K: Array, V: Array> Write for Operation<K, V> {
             Operation::Deleted(k) => {
                 buf.put_u8(Self::DELETE_CONTEXT);
                 k.write(buf);
-                // Put 0s for the value
+                // Pad with 0 up to [Self::SIZE]
                 buf.put_bytes(0, V::SIZE);
             }
             Operation::Update(k, v) => {
@@ -99,7 +99,7 @@ impl<K: Array, V: Array> Write for Operation<K, V> {
             Operation::Commit(loc) => {
                 buf.put_u8(Self::COMMIT_CONTEXT);
                 buf.put_slice(&loc.to_be_bytes());
-                // Put 0s for the value
+                // Pad with 0 up to [Self::SIZE]
                 buf.put_bytes(0, Self::SIZE - 1 - u64::SIZE);
             }
         }
