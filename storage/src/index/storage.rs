@@ -42,6 +42,18 @@ enum Phase<V: PartialEq + Eq> {
     PostDeleteNext(Option<Box<Record<V>>>),
 }
 
+fn value<V: PartialEq + Eq>(phase: &Phase<V>) -> Option<&V> {
+    match phase {
+        Phase::Initial => None,
+        Phase::Entry => None,
+        Phase::Next(next) => Some(&next.value),
+        Phase::Done => None,
+        Phase::EntryDeleted => None,
+        Phase::PostDeleteEntry => None,
+        Phase::PostDeleteNext(current) => current.as_deref().map(|r| &r.value),
+    }
+}
+
 pub struct Cursor<'a, T: Translator, V: PartialEq + Eq> {
     phase: Phase<V>,
     entry: Option<OccupiedEntry<'a, T::Key, Record<V>>>,
@@ -97,28 +109,16 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                 let next = self.entry.as_mut().unwrap().get_mut().next.take();
                 if let Some(next) = next {
                     self.phase = Phase::Next(next);
-                    if let Phase::Next(ref current) = self.phase {
-                        Some(&current.value)
-                    } else {
-                        unreachable!()
-                    }
-                } else {
-                    None
                 }
+                value(&self.phase)
             }
             Phase::Next(mut current) => {
                 let next = current.next.take();
                 self.past_push(current);
                 if let Some(next) = next {
                     self.phase = Phase::Next(next);
-                    if let Phase::Next(ref current) = self.phase {
-                        Some(&current.value)
-                    } else {
-                        unreachable!()
-                    }
-                } else {
-                    None
                 }
+                value(&self.phase)
             }
             Phase::PostDeleteEntry => {
                 let value = self.entry.as_ref().map(|r| &r.get().value);
@@ -132,14 +132,8 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
             Phase::PostDeleteNext(current) => {
                 if current.is_some() {
                     self.phase = Phase::Next(current.unwrap());
-                    if let Phase::Next(ref current) = self.phase {
-                        Some(&current.value)
-                    } else {
-                        unreachable!()
-                    }
-                } else {
-                    None
                 }
+                value(&self.phase)
             }
             Phase::Done => None,
             Phase::EntryDeleted => {
