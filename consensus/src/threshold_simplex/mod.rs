@@ -2291,7 +2291,7 @@ mod tests {
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
-        let cfg = deterministic::Config::new().with_timeout(Some(Duration::from_secs(5_000)));
+        let cfg = deterministic::Config::new();
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
             // Create simulated network

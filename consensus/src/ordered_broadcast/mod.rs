@@ -890,4 +890,58 @@ mod tests {
             .await;
         });
     }
+
+    #[test_traced]
+    fn test_1k() {
+        let num_validators: u32 = 10;
+        let quorum: u32 = 3;
+        let cfg = deterministic::Config::new();
+        let runner = deterministic::Runner::new(cfg);
+
+        runner.start(|mut context| async move {
+            let (identity, mut shares_vec) =
+                ops::generate_shares(&mut context, None, num_validators, quorum);
+            shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+
+            let (oracle, validators, pks, mut registrations) = initialize_simulation(
+                context.with_label("simulation"),
+                num_validators,
+                &mut shares_vec,
+            )
+            .await;
+            let delayed_link = Link {
+                latency: 80.0,
+                jitter: 10.0,
+                success_rate: 0.98,
+            };
+            let mut oracle_clone = oracle.clone();
+            link_participants(&mut oracle_clone, &pks, Action::Update(delayed_link), None).await;
+
+            let automatons = Arc::new(Mutex::new(
+                BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
+            ));
+            let mut reporters =
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, Sha256Digest>>::new();
+            spawn_validator_engines(
+                context.with_label("validator"),
+                identity.clone(),
+                &pks,
+                &validators,
+                &mut registrations,
+                &mut automatons.lock().unwrap(),
+                &mut reporters,
+                Duration::from_millis(150),
+                |_| false,
+                None,
+            );
+
+            await_reporters(
+                context.with_label("reporter"),
+                reporters.keys().cloned().collect::<Vec<_>>(),
+                &reporters,
+                (1_000, 111, false),
+            )
+            .await;
+        })
+    }
 }
