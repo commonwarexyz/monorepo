@@ -25,318 +25,207 @@ const NO_ACTIVE_ITEM: &str = "no active item in Cursor";
 ///
 /// Again optimizing for the common case, we store the first value directly in the `Record` to avoid
 /// indirection (heap jumping).
-struct Record<V> {
+#[derive(PartialEq, Eq)]
+struct Record<V: PartialEq + Eq> {
     value: V,
     next: Option<Box<Record<V>>>,
 }
 
-/// Phases of the `Cursor` during iteration.
 #[derive(PartialEq, Eq)]
-enum Phase {
-    /// Before iteration starts.
+enum Phase<V: PartialEq + Eq> {
     Initial,
-    /// Pointing to the entry.
     Entry,
-    /// Pointing to the next record in the list.
-    Next,
-    /// Iteration is done (only insertions can occur).
+    Next(Box<Record<V>>),
     Done,
+    PostDeleteEntry,
+    PostDeleteNext(Box<Record<V>>),
 }
 
-/// A mutable iterator over the values associated with a translated key, allowing in-place modifications.
-///
-/// The `Cursor` provides a way to traverse and modify the linked list of `Record`s while maintaining its
-/// structure. It supports:
-///
-/// - Iteration via `next()` to access values.
-/// - Modification via `update()` to change the current value.
-/// - Insertion via `insert()` to add new values.
-/// - Deletion via `delete()` to remove values.
-///
-/// # Safety
-///
-/// - Must call `next()` before `update()`, `insert()`, or `delete()` to establish a valid position.
-/// - Once `next()` returns `None`, only `insert()` can be called.
-/// - Dropping the `Cursor` automatically restores the list structure by reattaching any detached `next` nodes.
-///
-/// _If you don't need advanced functionality, just use `insert()`, `insert_and_prune()`, or `remove()` instead._
-pub struct Cursor<'a, T: Translator, V> {
-    phase: Phase,
-
+pub struct Cursor<'a, T: Translator, V: PartialEq + Eq> {
+    phase: Phase<V>,
     entry: Option<OccupiedEntry<'a, T::Key, Record<V>>>,
-    next: Option<Box<Record<V>>>,
-    past: Option<Box<Record<V>>>,
-
-    next_required: bool,
-    last_deleted: bool,
     entry_deleted: bool,
-
+    past: Option<Box<Record<V>>>,
     collisions: &'a Counter,
     pruned: &'a Counter,
 }
 
-impl<'a, T: Translator, V> Cursor<'a, T, V> {
-    /// Creates a new `Cursor` from a mutable record reference, detaching its `next` chain for iteration.
+impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
     fn new(
-        mut entry: OccupiedEntry<'a, T::Key, Record<V>>,
+        entry: OccupiedEntry<'a, T::Key, Record<V>>,
         collisions: &'a Counter,
         pruned: &'a Counter,
     ) -> Self {
-        let next = entry.get_mut().next.take();
         Self {
             phase: Phase::Initial,
-
             entry: Some(entry),
-            next,
-            past: None,
-
-            next_required: true,
-            last_deleted: false,
             entry_deleted: false,
-
+            past: None,
             collisions,
             pruned,
         }
     }
 
-    /// Pushes a `Record` to the past list, maintaining the linked list structure.
-    fn past_push(&mut self, mut new: Box<Record<V>>) {
-        if self.past.is_none() {
-            self.past = Some(new);
-        } else {
-            let past = self.past.take().unwrap();
-            new.next = Some(past);
-            self.past = Some(new);
-        }
+    fn past_push(&mut self, new: Box<Record<V>>) {
+        let mut new = new;
+        new.next = self.past.take();
+        self.past = Some(new);
     }
 
-    /// Updates the value at the current position in the iteration.
-    ///
-    /// Panics if called before `next()` or after iteration is complete (`Status::Done` phase).
     pub fn update(&mut self, v: V) {
-        assert!(!self.next_required, "{MUST_CALL_NEXT}");
-        match self.phase {
-            Phase::Initial => {
-                unreachable!("{MUST_CALL_NEXT}")
-            }
+        match &mut self.phase {
+            Phase::Initial => unreachable!("{MUST_CALL_NEXT}"),
             Phase::Entry => {
                 self.entry.as_mut().unwrap().get_mut().value = v;
             }
-            Phase::Next => {
-                self.next.as_mut().unwrap().value = v;
+            Phase::Next(next) => {
+                next.value = v;
             }
-            Phase::Done => {
-                unreachable!("{NO_ACTIVE_ITEM}")
-            }
+            Phase::Done => unreachable!("{NO_ACTIVE_ITEM}"),
+            Phase::PostDeleteEntry => unreachable!("{NO_ACTIVE_ITEM}"),
+            Phase::PostDeleteNext(_) => unreachable!("{NO_ACTIVE_ITEM}"),
         }
     }
 
-    /// Advances the cursor to the next value in the chain, returning a reference to it.
-    ///
-    /// This method must be called before any other operations (`insert()`, `delete()`, etc.). If
-    /// either `insert()` or `delete()` is called, `next()` must be called to set a new active
-    /// item. If after `insert()`, the next active item is the item after the inserted item. If after
-    /// `delete()`, the next active item is the item after the deleted item.
-    ///
-    /// Handles transitions between phases and adjusts for deletions. Returns `None` when the list is exhausted.
-    /// It is safe to call `next()` even after it returns `None`.
-    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<&V> {
-        // Mark that we have called next.
-        self.next_required = false;
-
-        // Early exit if we are done.
-        if self.phase == Phase::Done {
-            return None;
-        }
-
-        // If we just deleted the last item, we should return the current value.
-        if self.last_deleted {
-            self.last_deleted = false;
-            let value = match self.phase {
-                Phase::Entry => self.entry.as_ref().map(|r| &r.get().value),
-                Phase::Next => self.next.as_deref().map(|r| &r.value),
-                _ => None,
-            };
-
-            // If there is no value, we are done.
-            if value.is_none() {
-                self.phase = Phase::Done;
-            }
-            return value;
-        }
-
-        // If we didn't just delete, we need to move to the next item.
-        match self.phase {
+        match std::mem::replace(&mut self.phase, Phase::Done) {
             Phase::Initial => {
-                // We must start with some entry, so this will always be some non-None value.
                 self.phase = Phase::Entry;
                 self.entry.as_ref().map(|r| &r.get().value)
             }
             Phase::Entry => {
-                // If there is a record after, we set it to be the current record.
-                let value = self.next.as_deref().map(|r| &r.value);
-                self.phase = if value.is_some() {
-                    // If there is a next, we enter the next phase.
-                    Phase::Next
+                if let Some(next) = self.entry.as_mut().unwrap().get_mut().next.take() {
+                    self.phase = Phase::Next(next);
+                    if let Phase::Next(ref current) = self.phase {
+                        Some(&current.value)
+                    } else {
+                        unreachable!()
+                    }
                 } else {
-                    // If there is no next, we are done.
-                    Phase::Done
-                };
-                value
+                    self.phase = Phase::Done;
+                    None
+                }
             }
-            Phase::Next => {
-                // Remove the current record from the list and push it to past.
-                let mut next = self.next.take().unwrap();
-                let next_next = next.next.take();
-                self.past_push(next);
-
-                // Set next to be the next record of what we just took.
-                self.next = next_next;
-                self.next.as_deref().map(|r| &r.value).map_or_else(
-                    || {
-                        // If there is no next, we are done.
-                        self.phase = Phase::Done;
-                        None
-                    },
-                    Some,
-                )
+            Phase::Next(mut current) => {
+                let next = current.next.take();
+                self.past_push(current);
+                let value = &self.past.as_ref().unwrap().value;
+                if let Some(next) = next {
+                    self.phase = Phase::Next(next);
+                } else {
+                    self.phase = Phase::Done;
+                }
+                Some(value)
             }
-            Phase::Done => unreachable!(),
+            Phase::PostDeleteEntry => {
+                self.phase = Phase::Entry;
+                self.entry.as_ref().map(|r| &r.get().value)
+            }
+            Phase::PostDeleteNext(current) => {
+                self.past_push(current);
+                if let Some(next) = self.past.as_mut().unwrap().next.take() {
+                    self.phase = Phase::Next(next);
+                    if let Phase::Next(ref current) = self.phase {
+                        Some(&current.value)
+                    } else {
+                        unreachable!()
+                    }
+                } else {
+                    self.phase = Phase::Done;
+                    None
+                }
+            }
+            Phase::Done => {
+                self.phase = Phase::Done;
+                None
+            }
         }
     }
 
-    /// Inserts a new value at the current position.
-    ///
-    /// Increments the `collisions` counter as this adds to an existing key's chain.
     pub fn insert(&mut self, v: V) {
-        assert!(!self.next_required, "{MUST_CALL_NEXT}");
-        self.next_required = true;
-        match self.phase {
-            Phase::Initial => {
-                unreachable!("{MUST_CALL_NEXT}")
-            }
+        match &mut self.phase {
+            Phase::Initial => unreachable!("{MUST_CALL_NEXT}"),
             Phase::Entry => {
-                // Create a new record that points to next.
                 let new = Box::new(Record {
                     value: v,
-                    next: self.next.take(),
+                    next: self.entry.as_mut().unwrap().get_mut().next.take(),
                 });
-
-                // Set current next to be the new record.
-                self.next = Some(new);
-
-                // Now that the current item is in next, we need to update
-                // the phase.
-                self.phase = Phase::Next;
+                self.entry.as_mut().unwrap().get_mut().next = Some(new);
+                self.phase =
+                    Phase::Next(self.entry.as_mut().unwrap().get_mut().next.take().unwrap());
                 self.collisions.inc();
             }
-            Phase::Next => {
-                // Take next
-                let mut next = self.next.take().unwrap();
-                let next_next = next.next.take();
-
-                // Add next to the past list.
-                self.past_push(next);
-
-                // Create a new record that points to next's next.
+            Phase::Next(current) => {
                 let new = Box::new(Record {
                     value: v,
-                    next: next_next,
+                    next: current.next.take(),
                 });
-                self.next = Some(new);
+                current.next = Some(new);
+                self.phase = Phase::Next(current.next.take().unwrap());
                 self.collisions.inc();
             }
             Phase::Done => {
-                // If entry is deleted, we need to update it.
                 if self.entry_deleted {
                     self.entry_deleted = false;
                     self.entry.as_mut().unwrap().get_mut().value = v;
-                    return;
+                    self.phase = Phase::Entry;
+                } else {
+                    let new = Box::new(Record {
+                        value: v,
+                        next: None,
+                    });
+                    self.past_push(new);
                 }
-
-                // If not, we should add to past.
-                let new = Box::new(Record {
-                    value: v,
-                    next: None,
-                });
-                self.past_push(new);
                 self.collisions.inc();
             }
+            Phase::PostDeleteEntry | Phase::PostDeleteNext(_) => unreachable!("{MUST_CALL_NEXT}"),
         }
     }
 
-    /// Deletes the current value, adjusting the list structure.
-    ///
-    /// Increments the `pruned` counter to track removals.
     pub fn delete(&mut self) {
-        assert!(!self.next_required, "{MUST_CALL_NEXT}");
-        self.next_required = true;
-        self.last_deleted = true;
         self.pruned.inc();
-        match self.phase {
-            Phase::Initial => {
-                unreachable!("{MUST_CALL_NEXT}")
-            }
+        match std::mem::replace(&mut self.phase, Phase::Done) {
+            Phase::Initial => unreachable!("{MUST_CALL_NEXT}"),
             Phase::Entry => {
-                // Attempt to overwrite the entry with the next value.
-                let Some(mut next) = self.next.take() else {
-                    // If there is no next, we are done.
+                let next = self.entry.as_mut().unwrap().get_mut().next.take();
+                if let Some(next) = next {
+                    self.entry.as_mut().unwrap().get_mut().value = next.value;
+                    self.entry.as_mut().unwrap().get_mut().next = next.next;
+                    self.phase = Phase::PostDeleteEntry;
+                } else {
                     self.phase = Phase::Done;
                     self.entry_deleted = true;
-                    return;
-                };
-
-                // Update in-place.
-                let next_next = next.next.take();
-                self.entry.as_mut().unwrap().get_mut().value = next.value;
-                self.next = next_next;
+                }
             }
-            Phase::Next => {
-                let next = self.next.take().unwrap();
-                self.next = next.next;
+            Phase::Next(current) => {
+                self.phase = Phase::PostDeleteNext(current);
             }
-            Phase::Done => {
-                unreachable!("{NO_ACTIVE_ITEM}")
-            }
+            Phase::Done => unreachable!("{NO_ACTIVE_ITEM}"),
+            Phase::PostDeleteEntry | Phase::PostDeleteNext(_) => unreachable!("{NO_ACTIVE_ITEM}"),
         }
     }
 }
 
-impl<T: Translator, V> Drop for Cursor<'_, T, V> {
+impl<T: Translator, V> Drop for Cursor<'_, T, V>
+where
+    V: PartialEq + Eq,
+{
     fn drop(&mut self) {
-        // Take entry
         let mut entry = self.entry.take().unwrap();
-
-        // If there is nothing left, delete the entry.
         if self.entry_deleted {
             entry.remove();
             return;
         }
-
-        // If there is a next, we should add it to past.
-        if let Some(next) = self.next.take() {
-            if self.past.is_none() {
-                self.past = Some(next);
-            } else {
-                let mut past = self.past.take().unwrap();
-                past.next = Some(next);
-                self.past = Some(past);
-            }
-        }
-
-        // Take past and attach it to the entry.
-        let past = self.past.take();
-        entry.get_mut().next = past;
+        entry.get_mut().next = self.past.take();
     }
 }
 
 /// An immutable iterator over the values associated with a translated key.
-pub struct ImmutableCursor<'a, V> {
+pub struct ImmutableCursor<'a, V: PartialEq + Eq> {
     current: Option<&'a Record<V>>,
 }
 
-impl<'a, V> ImmutableCursor<'a, V> {
+impl<'a, V: PartialEq + Eq> ImmutableCursor<'a, V> {
     /// Creates a new `ImmutableCursor` from a `Record`.
     fn new(record: &'a Record<V>) -> Self {
         Self {
@@ -345,7 +234,7 @@ impl<'a, V> ImmutableCursor<'a, V> {
     }
 }
 
-impl<'a, V> Iterator for ImmutableCursor<'a, V> {
+impl<'a, V: PartialEq + Eq> Iterator for ImmutableCursor<'a, V> {
     type Item = &'a V;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -358,14 +247,14 @@ impl<'a, V> Iterator for ImmutableCursor<'a, V> {
 }
 
 /// A memory-efficient index that maps translated keys to arbitrary values.
-pub struct Index<T: Translator, V> {
+pub struct Index<T: Translator, V: PartialEq + Eq> {
     translator: T,
     map: HashMap<T::Key, Record<V>, T>,
     collisions: Counter,
     pruned: Counter,
 }
 
-impl<T: Translator, V> Index<T, V> {
+impl<T: Translator, V: PartialEq + Eq> Index<T, V> {
     /// Create a new index with the given translator.
     pub fn init(ctx: impl Metrics, tr: T) -> Self {
         let s = Self {
