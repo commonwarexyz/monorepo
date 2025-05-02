@@ -834,6 +834,23 @@ mod tests {
     }
 
     #[test_traced]
+    #[should_panic(expected = "must call Cursor::next()")]
+    fn test_inserts_without_next() {
+        let ctx = deterministic::Context::default();
+        let mut index = Index::init(ctx.clone(), TwoCap);
+
+        index.insert(b"key", 10);
+        index.insert(b"key", 20);
+
+        {
+            let mut cur = index.get_mut(b"key").unwrap();
+            assert_eq!(*cur.next().unwrap(), 10);
+            cur.insert(15);
+            cur.insert(25);
+        }
+    }
+
+    #[test_traced]
     fn test_delete_last_then_insert_while_done() {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx.clone(), TwoCap);
