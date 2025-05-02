@@ -365,7 +365,7 @@ impl<
                     responder: _,
                 } = &waiters[i];
 
-                // Keep the waiter if either filter does not match.
+                // Keep the waiter if either filter does not match
                 if peer_filter.as_ref().is_some_and(|s| s != &peer)
                     || digest_filter.is_some_and(|d| d != pair.digest)
                 {
@@ -381,7 +381,7 @@ impl<
                 self.respond_subscribe(responder, msg.clone());
             }
 
-            // Re-insert if any waiters remain for this commitment.
+            // Re-insert if any waiters remain for this commitment
             if !waiters.is_empty() {
                 self.waiters.insert(pair.commitment, waiters);
             }
