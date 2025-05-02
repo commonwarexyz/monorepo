@@ -234,11 +234,11 @@ where
         // If there is a dangling next, we should add it to past.
         match std::mem::replace(&mut self.phase, Phase::Done) {
             Phase::Next(current) => {
-                // Take the next record and push the current one to the past list.
+                // If there is a next, we should add it to past.
                 self.past_push(current);
             }
             Phase::Stale(Some(stale)) => {
-                // If the stale value is some, we set it to be the current record.
+                // If there is a stale record, we should add it to past.
                 self.past_push(stale);
             }
             _ => {}
