@@ -60,7 +60,7 @@ pub struct Any<
 > {
     /// An MMR over digests of the operations applied to the db. The number of leaves in this MMR
     /// always equals the number of operations in the unpruned `log`.
-    pub(crate) ops: Mmr<E, H>,
+    pub(super) ops: Mmr<E, H>,
 
     /// A (pruned) log of all operations applied to the db in order of occurrence. The position
     /// of each operation in the log is called its _location_, which is a stable identifier. Pruning
@@ -69,19 +69,19 @@ pub struct Any<
     ///
     /// Invariant: An operation's location is always equal to the number of the MMR leaf storing the
     /// digest of the operation.
-    pub(crate) log: Journal<E, Operation<K, V>>,
+    pub(super) log: Journal<E, Operation<K, V>>,
 
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
-    pub(crate) inactivity_floor_loc: u64,
+    pub(super) inactivity_floor_loc: u64,
 
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// location in the log containing its most recent update. Only contains the keys that currently
     /// have a value (that is, deleted keys are not in the map).
-    pub(crate) snapshot: Index<T, u64>,
+    pub(super) snapshot: Index<T, u64>,
 
     /// The number of operations that are pending commit.
-    pub(crate) uncommitted_ops: u64,
+    pub(super) uncommitted_ops: u64,
 }
 
 /// The result of a database `update` operation.
@@ -132,7 +132,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// Initialize and return the mmr and log from the given config, correcting any inconsistencies
     /// between them. Any uncommitted operations in the log will be rolled back and the state of the
     /// db will be as of the last committed operation.
-    pub(crate) async fn init_mmr_and_log(
+    pub(super) async fn init_mmr_and_log(
         context: E,
         hasher: &mut H,
         cfg: Config,
@@ -209,7 +209,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// reflecting its activity status. The bitmap is expected to already have a number of bits
     /// corresponding to the portion of the database below the inactivity floor, and this method
     /// will panic otherwise.
-    pub(crate) async fn build_snapshot_from_log<const N: usize>(
+    pub(super) async fn build_snapshot_from_log<const N: usize>(
         hasher: &mut H,
         start_leaf_num: u64,
         log: &Journal<E, Operation<K, V>>,
@@ -448,7 +448,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
     /// Update the operations MMR with the given operation, and append the operation to the log. The
     /// `commit` method must be called to make any applied operation persistent & recoverable.
-    pub(crate) async fn apply_op(
+    pub(super) async fn apply_op(
         &mut self,
         hasher: &mut H,
         op: Operation<K, V>,
@@ -535,7 +535,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     }
 
     /// Sync the db to disk ensuring the current state is persisted.
-    pub(crate) async fn sync(&mut self) -> Result<(), Error> {
+    pub(super) async fn sync(&mut self) -> Result<(), Error> {
         try_join!(
             self.log.sync().map_err(Error::JournalError),
             self.ops.sync().map_err(Error::MmrError),
@@ -603,7 +603,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     ///
     /// This method does not change the state of the db's snapshot, but it always changes the root
     /// since it applies at least one operation.
-    pub(crate) async fn raise_inactivity_floor<const N: usize>(
+    pub(super) async fn raise_inactivity_floor<const N: usize>(
         &mut self,
         hasher: &mut H,
         max_steps: u64,
@@ -637,7 +637,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
     /// Prune any historical operations that are known to be inactive (those preceding the
     /// inactivity floor). This does not affect the db's root or current snapshot.
-    pub(crate) async fn prune_inactive(&mut self) -> Result<(), Error> {
+    pub(super) async fn prune_inactive(&mut self) -> Result<(), Error> {
         let Some(oldest_retained_loc) = self.log.oldest_retained_pos().await? else {
             return Ok(());
         };

@@ -105,9 +105,8 @@ impl<
         .await?;
 
         // Initialize the db's mmr/log.
-        let (mmr, log) = Any::<_, _, _, _, T>::init_mmr_and_log(context.clone(), hasher, cfg)
-            .await
-            .unwrap();
+        let (mmr, log) =
+            Any::<_, _, _, _, T>::init_mmr_and_log(context.clone(), hasher, cfg).await?;
 
         // Ensure consistency between the bitmap and the db's MMR.
         let start_leaf_num = leaf_pos_to_num(mmr.pruned_to_pos()).unwrap();
@@ -197,7 +196,7 @@ impl<
         key: K,
         value: V,
     ) -> Result<UpdateResult, Error> {
-        let update_result = self.any.update(hasher, key.clone(), value.clone()).await?;
+        let update_result = self.any.update(hasher, key, value).await?;
         match update_result {
             UpdateResult::NoOp => return Ok(update_result),
             UpdateResult::Inserted(_) => (),
@@ -214,7 +213,7 @@ impl<
     /// The operation is reflected in the snapshot, but will be subject to rollback until the next
     /// successful `commit`.
     pub async fn delete(&mut self, hasher: &mut H, key: K) -> Result<(), Error> {
-        let Some(old_loc) = self.any.delete(hasher, key.clone()).await? else {
+        let Some(old_loc) = self.any.delete(hasher, key).await? else {
             return Ok(());
         };
 
@@ -236,9 +235,7 @@ impl<
             )
             .await?;
         self.any.uncommitted_ops = 0;
-        self.any.sync().await?;
-
-        Ok(())
+        self.any.sync().await
     }
 
     /// Commit any pending operations to the db, ensuring they are persisted to disk &
@@ -283,9 +280,7 @@ impl<
     /// Simulate a crash that happens during commit and prevents the any db from being pruned of
     /// inactive operations, and bitmap state from being written/pruned.
     async fn simulate_failure_after_any_db_commit(mut self, hasher: &mut H) -> Result<(), Error> {
-        self.commit_ops(hasher).await?;
-
-        Ok(())
+        self.commit_ops(hasher).await
     }
 
     #[cfg(test)]
@@ -295,9 +290,7 @@ impl<
         self.commit_ops(hasher).await?;
 
         // Prune inactive elements from the any db.
-        self.any.prune_inactive().await?;
-
-        Ok(())
+        self.any.prune_inactive().await
     }
 
     #[cfg(test)]
