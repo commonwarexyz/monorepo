@@ -2,7 +2,7 @@ use crate::index::Translator;
 use commonware_runtime::Metrics;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{
-    hash_map::{Entry, OccupiedEntry},
+    hash_map::{Entry, OccupiedEntry, VacantEntry},
     HashMap,
 };
 
@@ -428,6 +428,16 @@ impl<T: Translator, V: PartialEq + Eq> Index<T, V> {
         }
     }
 
+    /// Create a new entry in the index.
+    fn create(keys: &Gauge, items: &Gauge, vacant: VacantEntry<T::Key, Record<V>>, v: V) {
+        keys.inc();
+        items.inc();
+        vacant.insert(Record {
+            value: v,
+            next: None,
+        });
+    }
+
     /// Provides mutable access to the values associated with a translated key (if the key exists), otherwise
     /// inserts a new value and returns `None`.
     pub fn get_mut_or_insert(&mut self, key: &[u8], v: V) -> Option<Cursor<T, V>> {
@@ -441,13 +451,7 @@ impl<T: Translator, V: PartialEq + Eq> Index<T, V> {
                 &self.pruned,
             )),
             Entry::Vacant(entry) => {
-                self.keys.inc();
-                self.items.inc();
-                let record = Record {
-                    value: v,
-                    next: None,
-                };
-                entry.insert(record);
+                Self::create(&self.keys, &self.items, entry, v);
                 None
             }
         }
@@ -477,12 +481,7 @@ impl<T: Translator, V: PartialEq + Eq> Index<T, V> {
                 cursor.insert(v);
             }
             Entry::Vacant(entry) => {
-                self.keys.inc();
-                self.items.inc();
-                entry.insert(Record {
-                    value: v,
-                    next: None,
-                });
+                Self::create(&self.keys, &self.items, entry, v);
             }
         }
     }
@@ -519,13 +518,7 @@ impl<T: Translator, V: PartialEq + Eq> Index<T, V> {
                 }
             }
             Entry::Vacant(entry) => {
-                // No collision, so we can just insert the value.
-                self.keys.inc();
-                self.items.inc();
-                entry.insert(Record {
-                    value: v,
-                    next: None,
-                });
+                Self::create(&self.keys, &self.items, entry, v);
             }
         }
     }
