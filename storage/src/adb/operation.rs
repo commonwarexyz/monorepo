@@ -13,7 +13,7 @@ use std::{
 };
 use thiserror::Error;
 
-/// Errors returned by `Operation` functions.
+/// Errors returned by [Operation] functions.
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("invalid length")]
@@ -30,21 +30,7 @@ pub enum Error {
     InvalidCommitOp,
 }
 
-// /// The types of operations that can change the state of a database.
-// #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-// pub enum Type<K: Array, V: Array> {
-//     /// Indicates the key no longer has a value.
-//     Deleted(K),
-
-//     /// Indicates the key now has the wrapped value.
-//     Update(K, V),
-
-//     /// Indicates all prior operations are no longer subject to rollback, and the floor on inactive
-//     /// operations has been raised to the wrapped value.
-//     Commit(u64),
-// }
-
-/// An `Array` implementation for operations applied to an authenticated database.
+/// An operation applied to an authenticated database.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub enum Operation<K: Array, V: Array> {
     /// Indicates the key no longer has a value.
@@ -127,11 +113,11 @@ impl<K: Array, V: Array> Read for Operation<K, V> {
 
         // Now, read-over and verify the data.
         let mut buf: &[u8] = data.as_ref();
-        let op = match u8::read(&mut buf)? {
+        match u8::read(&mut buf)? {
             Self::UPDATE_CONTEXT => {
                 let key = K::read(&mut buf)?;
                 let value = V::read(&mut buf)?;
-                Self::Update(key, value)
+                Ok(Self::Update(key, value))
             }
             Self::DELETE_CONTEXT => {
                 let key = K::read(&mut buf)?;
@@ -141,7 +127,7 @@ impl<K: Array, V: Array> Read for Operation<K, V> {
                         return Err(CodecError::Invalid("Operation", "Delete value non-zero"));
                     }
                 }
-                Self::Deleted(key)
+                Ok(Self::Deleted(key))
             }
             Self::COMMIT_CONTEXT => {
                 let loc = u64::read(&mut buf)?;
@@ -150,14 +136,10 @@ impl<K: Array, V: Array> Read for Operation<K, V> {
                         return Err(CodecError::Invalid("Operation", "Commit value non-zero"));
                     }
                 }
-                Self::Commit(loc)
+                Ok(Self::Commit(loc))
             }
-            e => {
-                return Err(CodecError::InvalidEnum(e));
-            }
-        };
-
-        Ok(op)
+            e => Err(CodecError::InvalidEnum(e)),
+        }
     }
 }
 
@@ -183,6 +165,9 @@ mod tests {
         let value = U64::new(56789);
 
         let update_op = Operation::Update(key.clone(), value.clone());
+        assert_eq!(key, update_op.to_key());
+        assert_eq!(value, update_op.to_value().unwrap());
+
         let from = Operation::decode(update_op.encode()).unwrap();
         assert_eq!(key, from.to_key());
         assert_eq!(value, from.to_value().unwrap());

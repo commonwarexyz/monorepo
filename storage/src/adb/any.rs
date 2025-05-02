@@ -159,7 +159,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         let mut rewind_leaf_num = log_size;
         while rewind_leaf_num > 0 {
             let op: Operation<K, V> = log.read(rewind_leaf_num - 1).await?;
-            match &op {
+            match op {
                 Operation::Commit(_) => {
                     break; // floor is our commit indicator
                 }
@@ -401,9 +401,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         // Iterate over all conflicting keys in the snapshot.
         while let Some(loc) = cursor.next() {
             let op = self.log.read(*loc).await?;
-            match &op {
+            match op {
                 Operation::Update(k, _) => {
-                    if *k == key {
+                    if k == key {
                         // The key is in the snapshot, so delete it.
                         //
                         // If there are no longer any conflicting keys in the cursor, it will
