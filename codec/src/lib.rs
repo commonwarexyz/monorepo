@@ -6,8 +6,8 @@
 //! deserialization of structured data. The library focuses on:
 //!
 //! - **Performance:** Uses the [`bytes`] crate and aims to minimize allocations.
-//! - **Safety:** Deserialization of untrusted data is made safer via the [`Config`] system for the
-//!   [`Read`] trait, allowing users to impose limits (like maximum lengths) or other strict
+//! - **Safety:** Deserialization of untrusted data is made safer via the `Cfg` associated type in
+//!   the [`Read`] trait, allowing users to impose limits (like maximum lengths) or other strict
 //!   constraints on the data.
 //! - **Ease of Use:** Provides implementations for common Rust types and uses extension traits
 //!   ([`ReadExt`], [`DecodeExt`], etc.) for ergonomic usage.
@@ -17,9 +17,9 @@
 //! The library revolves around a few core traits:
 //!
 //! - [`Write`]: Implement this to define how your type is written to a byte buffer.
-//! - [`Read<Cfg>`]: Implement this to define how your type is read from a byte buffer.
-//!   It takes a configuration `Cfg` parameter, primarily used to enforce constraints
-//!   (e.g., size limits) when reading untrusted data. Use `()` if no config is needed.
+//! - [`Read`]: Implement this to define how your type is read from a byte buffer.
+//!   It has an associated `Cfg` type, primarily used to enforce constraints (e.g., size limits)
+//!   when reading untrusted data. Use `()` if no config is needed.
 //! - [`EncodeSize`]: Implement this to calculate the exact encoded byte size of a value.
 //!   Required for efficient buffer pre-allocation.
 //! - [`FixedSize`]: Marker trait for types whose encoded size is constant. Automatically
@@ -28,9 +28,9 @@
 //! Helper traits combine these for convenience:
 //!
 //! - [`Encode`]: Combines [`Write`] + [`EncodeSize`]. Provides [`Encode::encode()`] method.
-//! - [`Decode<Cfg>`]: Requires [`Read<Cfg>`]. Provides [`Decode::decode_cfg()`] method that ensures
+//! - [`Decode`]: Requires [`Read`]. Provides [`Decode::decode_cfg()`] method that ensures
 //!   that the entire buffer is consumed.
-//! - [`Codec<Cfg>`]: Combines [`Encode`] + [`Decode<Cfg>`].
+//! - [`Codec`]: Combines [`Encode`] + [`Decode`].
 //!
 //! # Supported Types
 //!
@@ -38,7 +38,8 @@
 //! - Primitives: [`bool`],
 //!   [`u8`], [`u16`], [`u32`], [`u64`], [`u128`],
 //!   [`i8`], [`i16`], [`i32`], [`i64`], [`i128`],
-//!   [`f32`], [`f64`], `[u8; N]`
+//!   [`f32`], [`f64`], `[u8; N]`,
+//!   and [`usize`] (must fit within a [`u32`] for cross-platform compatibility).
 //! - Collections: [`Vec<T>`], [`Option<T>`]
 //! - Tuples: `(T1, T2, ...)` (up to 12 elements)
 //! - Networking:
@@ -51,7 +52,7 @@
 //!
 //! # Implementing for Custom Types
 //!
-//! You typically need to implement [`Write`], [`EncodeSize`] (unless [`FixedSize`]), and [`Read<Cfg>`]
+//! You typically need to implement [`Write`], [`EncodeSize`] (unless [`FixedSize`]), and [`Read`]
 //! for your custom structs and enums.
 //!
 //! ## Example 1. Fixed-Size Type
@@ -84,6 +85,7 @@
 //!
 //! // 3. Implement Read: How to deserialize the struct (uses default Cfg = ())
 //! impl Read for Point {
+//!     type Cfg = ();
 //!     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
 //!         // Use ReadExt::read for ergonomic reading when Cfg is ()
 //!         let x = u32::read(buf)?;
@@ -99,7 +101,7 @@
 //! let bytes = point.encode();
 //! assert_eq!(bytes.len(), Point::SIZE);
 //!
-//! // Decode is available via Read<()>, use DecodeExt
+//! // Decode is available via Read, use DecodeExt
 //! let decoded_point = Point::decode(bytes).unwrap();
 //! assert_eq!(point, decoded_point);
 //! ```
@@ -109,10 +111,10 @@
 //! ```
 //! use bytes::{Buf, BufMut};
 //! use commonware_codec::{
-//!     Config, Decode, Encode, EncodeSize, Error, FixedSize, Read, ReadExt,
-//!     ReadRangeExt, Write, RangeConfig
+//!     Decode, Encode, EncodeSize, Error, FixedSize, Read, ReadExt,
+//!     ReadRangeExt, Write, RangeCfg
 //! };
-//! use std::ops::RangeInclusive; // Example RangeConfig
+//! use std::ops::RangeInclusive; // Example RangeCfg
 //!
 //! // Define a simple configuration for reading Item
 //! // Here, it just specifies the maximum allowed metadata length.
@@ -148,9 +150,9 @@
 //!     }
 //! }
 //!
-//! // 3. Implement Read<Cfg>
-//! impl Read<ItemConfig> for Item {
-//!     // Use the config Cfg = ItemConfig
+//! // 3. Implement Read
+//! impl Read for Item {
+//!     type Cfg = ItemConfig;
 //!     fn read_cfg(buf: &mut impl Buf, cfg: &ItemConfig) -> Result<Self, Error> {
 //!         // u64 requires Cfg = (), uses ReadExt::read
 //!         let id = <u64>::read(buf)?;
@@ -158,11 +160,11 @@
 //!         // Option<u32> requires Cfg = (), uses ReadExt::read
 //!         let name = <Option<u32>>::read(buf)?;
 //!
-//!         // For Vec<u8>, the required config is (RangeConfig, InnerConfig)
-//!         // InnerConfig for u8 is (), so we need (RangeConfig, ())
+//!         // For Vec<u8>, the required config is (RangeCfg, InnerConfig)
+//!         // InnerConfig for u8 is (), so we need (RangeCfg, ())
 //!         // We use ReadRangeExt::read_range which handles the () for us.
-//!         // The RangeConfig limits the vector length using our ItemConfig.
-//!         let metadata_range = 0..=cfg.max_metadata_len; // Create the RangeConfig
+//!         // The RangeCfg limits the vector length using our ItemConfig.
+//!         let metadata_range = 0..=cfg.max_metadata_len; // Create the RangeCfg
 //!         let metadata = <Vec<u8>>::read_range(buf, metadata_range)?;
 //!
 //!         Ok(Self { id, name, metadata })
@@ -176,13 +178,14 @@
 //! // Encode the item (uses Write + EncodeSize)
 //! let bytes = item.encode(); // Returns BytesMut
 //!
-//! // Decode the item (uses Read<ItemConfig>)
+//! // Decode the item
 //! // decode_cfg ensures all bytes are consumed.
 //! let decoded_item = Item::decode_cfg(bytes, &config).unwrap();
 //! assert_eq!(item, decoded_item);
 //! ```
 
 pub mod codec;
+pub mod config;
 pub mod error;
 pub mod extensions;
 pub mod types;
@@ -191,5 +194,6 @@ pub mod varint;
 
 // Re-export main types and traits
 pub use codec::*;
+pub use config::RangeCfg;
 pub use error::Error;
 pub use extensions::*;

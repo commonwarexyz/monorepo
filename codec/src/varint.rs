@@ -50,6 +50,8 @@ const DATA_BITS_MASK: u8 = 0x7F;
 const CONTINUATION_BIT_MASK: u8 = 0x80;
 
 // ---------- Traits ----------
+
+#[doc(hidden)]
 mod sealed {
     use super::*;
     use std::ops::{BitOrAssign, Shl, ShrAssign};
@@ -171,6 +173,7 @@ impl<U: UPrim> Write for UInt<U> {
 }
 
 impl<U: UPrim> Read for UInt<U> {
+    type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         read(buf).map(UInt)
     }
@@ -209,6 +212,7 @@ impl<S: SPrim> Write for SInt<S> {
 }
 
 impl<S: SPrim> Read for SInt<S> {
+    type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         read_signed::<S>(buf).map(SInt)
     }

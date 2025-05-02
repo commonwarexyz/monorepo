@@ -25,7 +25,9 @@ impl<Sig: Array> Write for Dkg<Sig> {
     }
 }
 
-impl<Sig: Array> Read<usize> for Dkg<Sig> {
+impl<Sig: Array> Read for Dkg<Sig> {
+    type Cfg = usize;
+
     fn read_cfg(buf: &mut impl Buf, num_players: &usize) -> Result<Self, Error> {
         let round = UInt::read(buf)?.into();
         let payload = Payload::<Sig>::read_cfg(buf, num_players)?;
@@ -150,7 +152,9 @@ impl<Sig: Array> Write for Payload<Sig> {
     }
 }
 
-impl<Sig: Array> Read<usize> for Payload<Sig> {
+impl<Sig: Array> Read for Payload<Sig> {
+    type Cfg = usize;
+
     fn read_cfg(buf: &mut impl Buf, p: &usize) -> Result<Self, Error> {
         let tag = u8::read(buf)?;
         let t = quorum(u32::try_from(*p).unwrap()) as usize; // threshold
@@ -178,7 +182,8 @@ impl<Sig: Array> Read<usize> for Payload<Sig> {
                 }
             }
             4 => {
-                let commitments = HashMap::<u32, poly::Public>::read_cfg(buf, &(..=*p, ((), t)))?;
+                let commitments =
+                    HashMap::<u32, poly::Public>::read_cfg(buf, &((..=*p).into(), ((), t)))?;
                 let reveals = HashMap::<u32, group::Share>::read_range(buf, ..=*p)?;
                 Payload::Success {
                     commitments,
@@ -235,6 +240,8 @@ impl Write for Vrf {
 }
 
 impl Read for Vrf {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let round = UInt::read(buf)?.into();
         let signature = Eval::<group::Signature>::read(buf)?;

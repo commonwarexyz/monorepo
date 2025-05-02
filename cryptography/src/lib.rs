@@ -131,10 +131,30 @@ pub trait BatchScheme: Specification {
 /// (which should be cheap to clone).
 pub trait Digest: Array + Copy {}
 
-/// An object that can generate a digest.
-pub trait Digestible<D: Digest>: Clone + Send + Sync + 'static {
-    /// Generate a digest from the object.
+/// An object that can be uniquely represented as a [Digest].
+pub trait Digestible<D: Digest>: Clone + Sized + Send + Sync + 'static {
+    /// Returns a unique representation of the object as a [Digest].
+    ///
+    /// If many objects with [Digest]s are related (map to some higher-level
+    /// group [Digest]), you should also implement [Committable].
     fn digest(&self) -> D;
+}
+
+/// An object that shares a (commitment) [Digest] with other, related values.
+pub trait Committable<D: Digest>: Clone + Sized + Send + Sync + 'static {
+    /// Returns the unique commitment of the object as a [Digest].
+    ///
+    /// For simple objects (like a block), this is often just the digest of the object
+    /// itself. For more complex objects, however, this may represent some root or base
+    /// of a proof structure (where many unique objects map to the same commitment).
+    ///
+    /// # Warning
+    ///
+    /// It must not be possible for two objects with the same [Digest] to map
+    /// to different commitments. Primitives assume there is a one-to-one
+    /// relation between digest and commitment and a one-to-many relation
+    /// between commitment and digest.
+    fn commitment(&self) -> D;
 }
 
 /// Interface that commonware crates rely on for hashing.

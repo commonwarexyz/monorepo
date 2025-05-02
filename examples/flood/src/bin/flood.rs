@@ -67,7 +67,10 @@ fn main() {
         // Configure telemetry
         tokio::telemetry::init(
             context.with_label("telemetry"),
-            Level::DEBUG,
+            tokio::telemetry::Logging {
+                level: Level::DEBUG,
+                json: true,
+            },
             Some(SocketAddr::new(
                 IpAddr::V4(Ipv4Addr::UNSPECIFIED),
                 METRICS_PORT,

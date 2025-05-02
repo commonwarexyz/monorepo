@@ -148,7 +148,7 @@ pub struct Engine<
     journal_compression: Option<u8>,
 
     // A map of sequencer public keys to their journals.
-    journals: BTreeMap<C::PublicKey, Journal<E, (), Node<C, D>>>,
+    journals: BTreeMap<C::PublicKey, Journal<E, Node<C, D>>>,
 
     ////////////////////////////////////////
     // State
@@ -471,7 +471,7 @@ impl<
         &mut self,
         context: &Context<C::PublicKey>,
         payload: &D,
-        ack_sender: &mut WrappedSender<NetS, (), Ack<C::PublicKey, D>>,
+        ack_sender: &mut WrappedSender<NetS, Ack<C::PublicKey, D>>,
     ) -> Result<(), Error> {
         // Get the tip
         let Some(tip) = self.tip_manager.get(&context.sequencer) else {
@@ -667,7 +667,7 @@ impl<
         &mut self,
         context: Context<C::PublicKey>,
         payload: D,
-        node_sender: &mut WrappedSender<NetS, (), Node<C, D>>,
+        node_sender: &mut WrappedSender<NetS, Node<C, D>>,
     ) -> Result<(), Error> {
         let mut guard = self.metrics.propose.guard(Status::Dropped);
         let me = self.crypto.public_key();
@@ -734,7 +734,7 @@ impl<
     /// - this instance has not yet collected the threshold signature for the chunk.
     async fn rebroadcast(
         &mut self,
-        node_sender: &mut WrappedSender<NetS, (), Node<C, D>>,
+        node_sender: &mut WrappedSender<NetS, Node<C, D>>,
     ) -> Result<(), Error> {
         let mut guard = self.metrics.rebroadcast.guard(Status::Dropped);
 
@@ -772,7 +772,7 @@ impl<
     async fn broadcast(
         &mut self,
         node: Node<C, D>,
-        node_sender: &mut WrappedSender<NetS, (), Node<C, D>>,
+        node_sender: &mut WrappedSender<NetS, Node<C, D>>,
         epoch: Epoch,
     ) -> Result<(), Error> {
         // Get the validators for the epoch
@@ -960,10 +960,9 @@ impl<
             compression: self.journal_compression,
             codec_config: (),
         };
-        let mut journal =
-            Journal::<_, _, Node<C, D>>::init(self.context.with_label("journal"), cfg)
-                .await
-                .expect("unable to init journal");
+        let mut journal = Journal::<_, Node<C, D>>::init(self.context.with_label("journal"), cfg)
+            .await
+            .expect("unable to init journal");
 
         // Replay journal
         {

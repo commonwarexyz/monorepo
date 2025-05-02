@@ -295,7 +295,7 @@ impl<
     /// Handles the case where the application responds to a request from an external peer.
     async fn handle_serve(
         &mut self,
-        sender: &mut WrappedSender<NetS, (), wire::Message<Key>>,
+        sender: &mut WrappedSender<NetS, wire::Message<Key>>,
         peer: P,
         id: u64,
         response: Result<Bytes, oneshot::Canceled>,
@@ -342,7 +342,7 @@ impl<
     /// Handle a network response from a peer.
     async fn handle_network_response(
         &mut self,
-        sender: &mut WrappedSender<NetS, (), wire::Message<Key>>,
+        sender: &mut WrappedSender<NetS, wire::Message<Key>>,
         peer: P,
         id: u64,
         response: Bytes,
@@ -372,7 +372,7 @@ impl<
     /// Handle a network response from a peer that did not have the data.
     async fn handle_network_error_response(
         &mut self,
-        sender: &mut WrappedSender<NetS, (), wire::Message<Key>>,
+        sender: &mut WrappedSender<NetS, wire::Message<Key>>,
         peer: P,
         id: u64,
     ) {

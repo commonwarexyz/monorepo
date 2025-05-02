@@ -46,6 +46,8 @@ impl<C: Scheme> Write for Info<C> {
 }
 
 impl<C: Scheme> Read for Info<C> {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let recipient = C::PublicKey::read(buf)?;
         let ephemeral_public_key = x25519::PublicKey::read(buf)?;
@@ -160,6 +162,8 @@ impl<C: Scheme> Write for Signed<C> {
 }
 
 impl<C: Scheme> Read for Signed<C> {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let info = Info::<C>::read(buf)?;
         let signer = C::PublicKey::read(buf)?;

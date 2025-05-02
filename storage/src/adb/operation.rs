@@ -155,6 +155,8 @@ impl<K: Array, V: Array> Write for Operation<K, V> {
 }
 
 impl<K: Array, V: Array> Read for Operation<K, V> {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         // Create a vector of the required size and copy the data into it.
         at_least(buf, Self::SIZE)?;

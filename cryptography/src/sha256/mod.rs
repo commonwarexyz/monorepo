@@ -100,6 +100,8 @@ impl Write for Digest {
 }
 
 impl Read for Digest {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let array = <[u8; DIGEST_LENGTH]>::read(buf)?;
         Ok(Self(array))

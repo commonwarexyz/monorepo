@@ -39,8 +39,8 @@ impl<H: CHasher + Send + Sync> Storage<H::Digest> for BitmapStorage<'_, H> {
         }
     }
 
-    async fn size(&self) -> Result<u64, Error> {
-        Ok(self.last_chunk_mmr.size())
+    fn size(&self) -> u64 {
+        self.last_chunk_mmr.size()
     }
 }
 

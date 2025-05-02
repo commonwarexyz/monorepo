@@ -36,6 +36,8 @@ impl Write for PublicKey {
 }
 
 impl Read for PublicKey {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let public_key = <[u8; Self::SIZE]>::read(buf)?;
         Ok(PublicKey {

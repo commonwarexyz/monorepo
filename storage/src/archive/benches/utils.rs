@@ -22,7 +22,7 @@ pub type Key = FixedBytes<64>;
 pub type Val = FixedBytes<32>;
 
 /// Concrete archive type reused by every benchmark.
-pub type ArchiveType = Archive<TwoCap, Context, Key, (), Val>;
+pub type ArchiveType = Archive<TwoCap, Context, Key, Val>;
 
 /// Open (or create) a fresh archive with optional compression.
 ///

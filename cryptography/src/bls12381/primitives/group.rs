@@ -42,7 +42,9 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 pub type DST = &'static [u8];
 
 /// An element of a group.
-pub trait Element: Read + Write + FixedSize + Clone + Eq + PartialEq + Send + Sync {
+pub trait Element:
+    Read<Cfg = ()> + Write + FixedSize + Clone + Eq + PartialEq + Send + Sync
+{
     /// Returns the additive identity.
     fn zero() -> Self;
 
@@ -266,6 +268,8 @@ impl Write for Scalar {
 }
 
 impl Read for Scalar {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let bytes = <[u8; Self::SIZE]>::read(buf)?;
         let mut ret = blst_fr::default();
@@ -355,6 +359,8 @@ impl Write for Share {
 }
 
 impl Read for Share {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let index = UInt::read(buf)?.into();
         let private = Private::read(buf)?;
@@ -429,6 +435,8 @@ impl Write for G1 {
 }
 
 impl Read for G1 {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let bytes = <[u8; Self::SIZE]>::read(buf)?;
         let mut ret = blst_p1::default();
@@ -548,6 +556,8 @@ impl Write for G2 {
 }
 
 impl Read for G2 {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let bytes = <[u8; Self::SIZE]>::read(buf)?;
         let mut ret = blst_p2::default();

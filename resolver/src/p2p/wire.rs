@@ -27,6 +27,8 @@ impl<Key: Array> EncodeSize for Message<Key> {
 }
 
 impl<Key: Array> Read for Message<Key> {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let id = buf.get_u64();
         let payload = Payload::read(buf)?;
@@ -78,6 +80,8 @@ impl<Key: Array> EncodeSize for Payload<Key> {
 }
 
 impl<Key: Array> Read for Payload<Key> {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let payload_type = buf.get_u8();
         match payload_type {
@@ -91,7 +95,7 @@ impl<Key: Array> Read for Payload<Key> {
                 // we can safely read the bytes with no limit. If an attacker encodes the length of
                 // the bytes with a value greater than the buffer size, the read will fail without
                 // allocating more memory.
-                let data = Bytes::read_cfg(buf, &..)?;
+                let data = Bytes::read_cfg(buf, &(..).into())?;
                 Ok(Payload::Response(data))
             }
             2 => Ok(Payload::ErrorResponse),

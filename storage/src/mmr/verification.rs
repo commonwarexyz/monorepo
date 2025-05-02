@@ -36,7 +36,7 @@ pub struct Proof<H: CHasher> {
 /// A trait that allows generic generation of an MMR inclusion proof.
 pub trait Storage<D: Digest> {
     /// Return the number of elements in the MMR.
-    fn size(&self) -> impl Future<Output = Result<u64, Error>>;
+    fn size(&self) -> u64;
 
     /// Return the specified node of the MMR if it exists & hasn't been pruned.
     fn get_node(&self, position: u64) -> impl Future<Output = Result<Option<D>, Error>> + Send;
@@ -300,11 +300,8 @@ impl<H: CHasher> Proof<H> {
         end_element_pos: u64,
     ) -> Result<Proof<H>, Error> {
         let mut hashes: Vec<H::Digest> = Vec::new();
-        let positions = Self::nodes_required_for_range_proof(
-            mmr.size().await?,
-            start_element_pos,
-            end_element_pos,
-        );
+        let positions =
+            Self::nodes_required_for_range_proof(mmr.size(), start_element_pos, end_element_pos);
 
         let node_futures = positions.iter().map(|pos| mmr.get_node(*pos));
         let hash_results = try_join_all(node_futures).await?;
@@ -317,7 +314,7 @@ impl<H: CHasher> Proof<H> {
         }
 
         Ok(Proof {
-            size: mmr.size().await?,
+            size: mmr.size(),
             hashes,
         })
     }

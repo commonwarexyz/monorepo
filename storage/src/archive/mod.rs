@@ -141,7 +141,6 @@
 //! ```
 
 mod storage;
-use commonware_codec::Config as CodecConfig;
 pub use storage::{Archive, Identifier};
 
 pub use crate::index::Translator;
@@ -162,7 +161,7 @@ pub enum Error {
 
 /// Configuration for `Archive` storage.
 #[derive(Clone)]
-pub struct Config<T: Translator, C: CodecConfig> {
+pub struct Config<T: Translator, C> {
     /// Logic to transform keys into their index representation.
     ///
     /// `Archive` assumes that all internal keys are spread uniformly across the key space.
@@ -353,7 +352,7 @@ mod tests {
                 replay_concurrency: 4,
                 section_mask: DEFAULT_SECTION_MASK,
             };
-            let result = Archive::<_, _, FixedBytes<64>, (), i32>::init(context, cfg.clone()).await;
+            let result = Archive::<_, _, FixedBytes<64>, i32>::init(context, cfg.clone()).await;
             assert!(matches!(
                 result,
                 Err(Error::Journal(JournalError::Codec(CodecError::EndOfBuffer)))
@@ -404,7 +403,7 @@ mod tests {
             blob.close().await.unwrap();
 
             // Initialize the archive again
-            let result = Archive::<_, _, FixedBytes<64>, _, i32>::init(
+            let result = Archive::<_, _, FixedBytes<64>, i32>::init(
                 context,
                 Config {
                     partition: "test_partition".into(),
@@ -801,7 +800,7 @@ mod tests {
                 section_mask,
             };
             let mut archive =
-                Archive::<_, _, _, _, FixedBytes<1024>>::init(context.clone(), cfg.clone())
+                Archive::<_, _, _, FixedBytes<1024>>::init(context.clone(), cfg.clone())
                     .await
                     .expect("Failed to initialize archive");
 
@@ -940,7 +939,7 @@ mod tests {
 
             // Close and check again
             archive.close().await.expect("Failed to close archive");
-            let archive = Archive::<_, _, FixedBytes<64>, _, i32>::init(context, cfg.clone())
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 

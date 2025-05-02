@@ -1,8 +1,7 @@
-use commonware_codec::Config as CodecConfig;
 use commonware_utils::Array;
 
 /// Configuration for the [`Engine`](super::Engine).
-pub struct Config<P: Array, CodecCfg: CodecConfig> {
+pub struct Config<P: Array, MCfg> {
     /// The public key of the participant.
     pub public_key: P,
 
@@ -16,5 +15,5 @@ pub struct Config<P: Array, CodecCfg: CodecConfig> {
     pub priority: bool,
 
     /// The configuration for the codec item.
-    pub codec_config: CodecCfg,
+    pub codec_config: MCfg,
 }

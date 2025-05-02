@@ -229,17 +229,21 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             let op: Operation<K, V> = log.read(i).await?;
             match op.to_type() {
                 Type::Deleted(key) => {
-                    let mut loc_iter = snapshot.remove_iter(&key);
-                    while let Some(loc) = loc_iter.next() {
-                        let op = log.read(*loc).await?;
-                        if op.to_key() != key {
-                            continue;
+                    // If the translated key is in the snapshot, get a cursor to look for the key.
+                    if let Some(mut cursor) = snapshot.get_mut(&key) {
+                        while let Some(loc) = cursor.next() {
+                            let op = log.read(*loc).await?;
+                            if op.to_key() != key {
+                                continue;
+                            }
+                            if let Some(ref mut bitmap_ref) = bitmap {
+                                bitmap_ref.set_bit(hasher, *loc, false);
+                            }
+
+                            // If the mapped key is the same, delete it from the snapshot.
+                            cursor.delete();
+                            break;
                         }
-                        if let Some(ref mut bitmap_ref) = bitmap {
-                            bitmap_ref.set_bit(hasher, *loc, false);
-                        }
-                        loc_iter.remove();
-                        break;
                     }
                 }
                 Type::Update(key, _) => {
@@ -283,8 +287,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         value: Option<&V>,
         new_loc: u64,
     ) -> Result<UpdateResult, Error> {
-        let mut loc_iter = snapshot.update_iter(&key);
-        for loc in &mut loc_iter {
+        // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
+        // cursor to look for the key.
+        let Some(mut cursor) = snapshot.get_mut_or_insert(&key, new_loc) else {
+            return Ok(UpdateResult::Inserted(new_loc));
+        };
+
+        // Iterate over conflicts in the snapshot.
+        while let Some(loc) = cursor.next() {
             let op = log.read(*loc).await?;
             if op.to_key() != key {
                 continue;
@@ -295,14 +305,15 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                     return Ok(UpdateResult::NoOp);
                 }
             }
+
+            // Update the location of the matching operation in the snapshot.
             let old_loc = *loc;
-            *loc = new_loc;
+            cursor.update(new_loc);
             return Ok(UpdateResult::Updated(old_loc, new_loc));
         }
 
-        // The key wasn't in the snapshot, so add it.
-        loc_iter.insert(new_loc);
-
+        // The key wasn't in the snapshot, so add it to the cursor.
+        cursor.insert(new_loc);
         Ok(UpdateResult::Inserted(new_loc))
     }
 
@@ -314,7 +325,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        for loc in self.snapshot.get_iter(key) {
+        for loc in self.snapshot.get(key) {
             let op = self.log.read(*loc).await?;
             match op.to_type() {
                 Type::Update(k, v) => {
@@ -384,14 +395,24 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// The operation is reflected in the snapshot, but will be subject to rollback until the next
     /// successful `commit`. Returns the location of the deleted value for the key (if any).
     pub async fn delete(&mut self, hasher: &mut H, key: K) -> Result<Option<u64>, Error> {
-        let mut loc_iter = self.snapshot.remove_iter(&key);
-        for loc in &mut loc_iter {
+        // If the translated key is in the snapshot, get a cursor to look for the key.
+        let Some(mut cursor) = self.snapshot.get_mut(&key) else {
+            return Ok(None);
+        };
+
+        // Iterate over all conflicting keys in the snapshot.
+        while let Some(loc) = cursor.next() {
             let op = self.log.read(*loc).await?;
             match op.to_type() {
                 Type::Update(k, _) => {
                     if k == key {
+                        // The key is in the snapshot, so delete it.
+                        //
+                        // If there are no longer any conflicting keys in the cursor, it will
+                        // automatically be removed from the snapshot.
                         let old_loc = *loc;
-                        loc_iter.remove();
+                        cursor.delete();
+                        drop(cursor);
                         self.apply_op(hasher, Operation::delete(key)).await?;
                         return Ok(Some(old_loc));
                     }
@@ -405,7 +426,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             }
         }
 
-        // The key wasn't in the snapshot, so this is a no-op.
+        // The key isn't in the conflicting keys, so this is a no-op.
         Ok(None)
     }
 
@@ -537,19 +558,27 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         op: Operation<K, V>,
         old_loc: u64,
     ) -> Result<Option<u64>, Error> {
+        // If the translated key is not in the snapshot, get a cursor to look for the key.
         let key = op.to_key();
         let new_loc = self.op_count();
-        let loc_iter = self.snapshot.update_iter(&key);
+        let Some(mut cursor) = self.snapshot.get_mut(&key) else {
+            return Ok(None);
+        };
 
-        for loc in loc_iter {
+        // Iterate over all conflicting keys in the snapshot.
+        while let Some(loc) = cursor.next() {
             if *loc == old_loc {
-                let old_loc = *loc;
-                *loc = new_loc;
+                // Update the location of the operation in the snapshot.
+                cursor.update(new_loc);
+                drop(cursor);
+
+                // Update the MMR with the operation.
                 self.apply_op(hasher, op).await?;
                 return Ok(Some(old_loc));
             }
         }
 
+        // The operation is not active, so this is a no-op.
         Ok(None)
     }
 
@@ -1043,7 +1072,7 @@ mod test {
 
             // Simulate a failed commit and test that the log replay doesn't leave behind old data.
             let db = open_db(context.clone(), &mut hasher).await;
-            let iter = db.snapshot.get_iter(&k);
+            let iter = db.snapshot.get(&k);
             assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
             assert_eq!(db.root(&mut hasher), root);
         });
@@ -1178,7 +1207,7 @@ mod test {
             // This loop checks that the expected true bits are true in the bitmap.
             for pos in db.inactivity_floor_loc..items {
                 let item = db.log.read(pos).await.unwrap();
-                let iter = db.snapshot.get_iter(&item.to_key());
+                let iter = db.snapshot.get(&item.to_key());
                 for loc in iter {
                     if *loc == pos {
                         // Found an active op.

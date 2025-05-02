@@ -129,7 +129,9 @@ impl<S: Array, D: Digest> Write for Voter<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> Read<usize> for Voter<S, D> {
+impl<S: Array, D: Digest> Read for Voter<S, D> {
+    type Cfg = usize;
+
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let tag = u8::read(reader)?;
         match tag {
@@ -208,6 +210,8 @@ impl<D: Digest> Write for Proposal<D> {
 }
 
 impl<D: Digest> Read for Proposal<D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let view = UInt::read_cfg(reader, &())?.into();
         let parent = UInt::read_cfg(reader, &())?.into();
@@ -260,6 +264,8 @@ impl<S: Array> Write for Signature<S> {
 }
 
 impl<S: Array> Read for Signature<S> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let public_key = UInt::read(reader)?.into();
         let signature = S::read(reader)?;
@@ -343,6 +349,8 @@ impl<S: Array, D: Digest> Write for Notarize<S, D> {
 }
 
 impl<S: Array, D: Digest> Read for Notarize<S, D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::<D>::read_cfg(reader, &())?;
         let signature = Signature::<S>::read_cfg(reader, &())?;
@@ -446,7 +454,9 @@ impl<S: Array, D: Digest> Write for Notarization<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> Read<usize> for Notarization<S, D> {
+impl<S: Array, D: Digest> Read for Notarization<S, D> {
+    type Cfg = usize;
+
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let proposal = Proposal::<D>::read(reader)?;
         let signatures = Vec::<Signature<S>>::read_range(reader, ..=*max_len)?;
@@ -536,6 +546,8 @@ impl<S: Array> Write for Nullify<S> {
 }
 
 impl<S: Array> Read for Nullify<S> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let view = UInt::read(reader)?.into();
         let signature = Signature::<S>::read(reader)?;
@@ -628,7 +640,9 @@ impl<S: Array> Write for Nullification<S> {
     }
 }
 
-impl<S: Array> Read<usize> for Nullification<S> {
+impl<S: Array> Read for Nullification<S> {
+    type Cfg = usize;
+
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let view = UInt::read(reader)?.into();
         let signatures = Vec::<Signature<S>>::read_range(reader, ..=*max_len)?;
@@ -719,6 +733,8 @@ impl<S: Array, D: Digest> Write for Finalize<S, D> {
 }
 
 impl<S: Array, D: Digest> Read for Finalize<S, D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::<D>::read(reader)?;
         let signature = Signature::<S>::read(reader)?;
@@ -817,7 +833,9 @@ impl<S: Array, D: Digest> Write for Finalization<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> Read<usize> for Finalization<S, D> {
+impl<S: Array, D: Digest> Read for Finalization<S, D> {
+    type Cfg = usize;
+
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let proposal = Proposal::<D>::read(reader)?;
         let signatures = Vec::<Signature<S>>::read_range(reader, ..=*max_len)?;
@@ -875,7 +893,9 @@ impl<S: Array, D: Digest> Write for Backfiller<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> Read<(usize, usize)> for Backfiller<S, D> {
+impl<S: Array, D: Digest> Read for Backfiller<S, D> {
+    type Cfg = (usize, usize);
+
     fn read_cfg(reader: &mut impl Buf, cfg: &(usize, usize)) -> Result<Self, Error> {
         let tag = u8::read(reader)?;
         match tag {
@@ -931,7 +951,9 @@ impl Write for Request {
     }
 }
 
-impl Read<usize> for Request {
+impl Read for Request {
+    type Cfg = usize;
+
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let id = UInt::read(reader)?.into();
         let notarizations = Vec::<View>::read_range(reader, ..=*max_len)?;
@@ -988,13 +1010,16 @@ impl<S: Array, D: Digest> Write for Response<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> Read<(usize, usize)> for Response<S, D> {
-    fn read_cfg(reader: &mut impl Buf, max_len: &(usize, usize)) -> Result<Self, Error> {
+impl<S: Array, D: Digest> Read for Response<S, D> {
+    type Cfg = (usize, usize);
+
+    fn read_cfg(reader: &mut impl Buf, (total, max_sigs): &(usize, usize)) -> Result<Self, Error> {
         let id = UInt::read(reader)?.into();
         let notarizations =
-            Vec::<Notarization<S, D>>::read_cfg(reader, &(..=max_len.0, max_len.1))?;
-        let remaining = max_len.0 - notarizations.len();
-        let nullifications = Vec::<Nullification<S>>::read_cfg(reader, &(..=remaining, max_len.1))?;
+            Vec::<Notarization<S, D>>::read_cfg(reader, &((..=total).into(), *max_sigs))?;
+        let rem = total - notarizations.len();
+        let nullifications =
+            Vec::<Nullification<S>>::read_cfg(reader, &((..=rem).into(), *max_sigs))?;
         Ok(Self {
             id,
             notarizations,
@@ -1078,7 +1103,9 @@ impl<S: Array, D: Digest> Write for Activity<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> Read<usize> for Activity<S, D> {
+impl<S: Array, D: Digest> Read for Activity<S, D> {
+    type Cfg = usize;
+
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let tag = u8::read(reader)?;
         match tag {
@@ -1222,6 +1249,8 @@ impl<S: Array, D: Digest> Write for ConflictingNotarize<S, D> {
 }
 
 impl<S: Array, D: Digest> Read for ConflictingNotarize<S, D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let view = UInt::read(reader)?.into();
         let parent_1 = UInt::read(reader)?.into();
@@ -1347,6 +1376,8 @@ impl<S: Array, D: Digest> Write for ConflictingFinalize<S, D> {
 }
 
 impl<S: Array, D: Digest> Read for ConflictingFinalize<S, D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let view = UInt::read(reader)?.into();
         let parent_1 = UInt::read(reader)?.into();
@@ -1443,6 +1474,8 @@ impl<S: Array, D: Digest> Write for NullifyFinalize<S, D> {
 }
 
 impl<S: Array, D: Digest> Read for NullifyFinalize<S, D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::<D>::read(reader)?;
         let view_signature = Signature::<S>::read(reader)?;

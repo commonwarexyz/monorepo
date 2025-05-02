@@ -48,6 +48,8 @@ impl<C: Element> Write for Eval<C> {
 }
 
 impl<C: Element> Read for Eval<C> {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let index = UInt::read(buf)?.into();
         let value = C::read(buf)?;
@@ -275,8 +277,10 @@ impl<C: Element> Write for Poly<C> {
     }
 }
 
-impl<C: Element> Read<usize> for Poly<C> {
-    fn read_cfg(buf: &mut impl Buf, expected: &usize) -> Result<Self, CodecError> {
+impl<C: Element> Read for Poly<C> {
+    type Cfg = usize;
+
+    fn read_cfg(buf: &mut impl Buf, expected: &Self::Cfg) -> Result<Self, CodecError> {
         let expected_size = C::SIZE * (*expected);
         if buf.remaining() < expected_size {
             return Err(CodecError::EndOfBuffer);
