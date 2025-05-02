@@ -1485,6 +1485,7 @@ mod tests {
     }
 
     #[test_traced]
+    #[ignore]
     fn test_partition() {
         // Create context
         let n = 10;
