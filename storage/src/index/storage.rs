@@ -288,9 +288,9 @@ where
             Phase::Initial | Phase::Entry => {
                 // No action needed.
             }
-            Phase::Next(current) => {
+            Phase::Next(next) => {
                 // If there is a next, we should add it to past.
-                self.past_push(current);
+                self.past_push(next);
             }
             Phase::Done => {
                 // No action needed.
@@ -303,16 +303,16 @@ where
             Phase::PostDeleteEntry => {
                 // No action needed.
             }
-            Phase::PostDeleteNext(Some(stale)) => {
+            Phase::PostDeleteNext(Some(next)) => {
                 // If there is a stale record, we should add it to past.
-                self.past_push(stale);
+                self.past_push(next);
             }
             Phase::PostDeleteNext(None) => {
                 // No action needed.
             }
-            Phase::PostInsert(current) => {
+            Phase::PostInsert(next) => {
                 // If there is a current record, we should add it to past.
-                self.past_push(current);
+                self.past_push(next);
             }
         }
 
