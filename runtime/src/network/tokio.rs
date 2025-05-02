@@ -18,6 +18,7 @@ pub struct Sink {
 
 impl crate::Sink for Sink {
     async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
+        // Time out if we take too long to write
         timeout(self.write_timeout, self.sink.write_all(msg))
             .await
             .map_err(|_| Error::Timeout)?
@@ -34,7 +35,7 @@ pub struct Stream {
 
 impl crate::Stream for Stream {
     async fn recv(&mut self, buf: &mut [u8]) -> Result<(), Error> {
-        // Wait for the stream to be readable
+        // Time out if we take too long to read
         timeout(self.read_timeout, self.stream.read_exact(buf))
             .await
             .map_err(|_| Error::Timeout)?
@@ -80,21 +81,8 @@ impl crate::Listener for Listener {
     }
 }
 
-impl axum::serve::Listener for Listener {
-    type Io = TcpStream;
-    type Addr = SocketAddr;
-
-    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
-        let (stream, addr) = self.listener.accept().await.unwrap();
-        (stream, addr)
-    }
-
-    fn local_addr(&self) -> std::io::Result<Self::Addr> {
-        self.listener.local_addr()
-    }
-}
-
 #[derive(Clone, Debug)]
+/// Configuration for the tokio [Network] implementation of the [crate::Network] trait.
 pub(crate) struct Config {
     /// Whether or not to disable Nagle's algorithm.
     ///
