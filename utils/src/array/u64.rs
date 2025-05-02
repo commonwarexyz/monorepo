@@ -38,6 +38,8 @@ impl Write for U64 {
 }
 
 impl Read for U64 {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         <[u8; U64::SIZE]>::read(buf).map(Self)
     }
@@ -82,9 +84,8 @@ impl Display for U64 {
 
 #[cfg(test)]
 mod tests {
-    use commonware_codec::{DecodeExt, Encode};
-
     use super::*;
+    use commonware_codec::{DecodeExt, Encode};
 
     #[test]
     fn test_u64() {

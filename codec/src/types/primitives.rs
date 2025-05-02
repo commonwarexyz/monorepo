@@ -9,7 +9,7 @@
 //! of an object in memory, values are biased towards smaller values. Therefore,
 //! it uses variable-length (varint) encoding to save space.  This means that
 //! it **does not implement [`FixedSize`]**.  When decoding a `usize`, callers
-//! must supply a [`RangeConfig`] to bound the allowable value — this protects
+//! must supply a [`RangeCfg`] to bound the allowable value — this protects
 //! against denial-of-service attacks that would allocate oversized buffers.
 //!
 //! ## Safety & portability
@@ -19,8 +19,7 @@
 //!   endian ambiguity.
 
 use crate::{
-    util::at_least, varint::UInt, Config, EncodeSize, Error, FixedSize, RangeConfig, Read, ReadExt,
-    Write,
+    util::at_least, varint::UInt, EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt, Write,
 };
 use bytes::{Buf, BufMut};
 
@@ -35,6 +34,7 @@ macro_rules! impl_numeric {
         }
 
         impl Read for $type {
+            type Cfg = ();
             #[inline]
             fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
                 at_least(buf, std::mem::size_of::<$type>())?;
@@ -70,9 +70,11 @@ impl Write for usize {
     }
 }
 
-impl<R: RangeConfig> Read<R> for usize {
+impl Read for usize {
+    type Cfg = RangeCfg;
+
     #[inline]
-    fn read_cfg(buf: &mut impl Buf, range: &R) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
         let self_as_u32: u32 = UInt::read(buf)?.into();
         let result = usize::try_from(self_as_u32).map_err(|_| Error::InvalidUsize)?;
         if !range.contains(&result) {
@@ -100,6 +102,7 @@ impl Write for bool {
 }
 
 impl Read for bool {
+    type Cfg = ();
     #[inline]
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         match u8::read(buf)? {
@@ -123,6 +126,7 @@ impl<const N: usize> Write for [u8; N] {
 }
 
 impl<const N: usize> Read for [u8; N] {
+    type Cfg = ();
     #[inline]
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         at_least(buf, N)?;
@@ -157,9 +161,11 @@ impl<T: EncodeSize> EncodeSize for Option<T> {
     }
 }
 
-impl<Cfg: Config, T: Read<Cfg>> Read<Cfg> for Option<T> {
+impl<T: Read> Read for Option<T> {
+    type Cfg = T::Cfg;
+
     #[inline]
-    fn read_cfg(buf: &mut impl Buf, cfg: &Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         if bool::read(buf)? {
             Ok(Some(T::read_cfg(buf, cfg)?))
         } else {
@@ -246,7 +252,7 @@ mod tests {
         for value in values.iter() {
             let encoded = value.encode();
             assert_eq!(value.encode_size(), UInt(*value as u32).encode_size());
-            let decoded = usize::decode_cfg(encoded, &..).unwrap();
+            let decoded = usize::decode_cfg(encoded, &(..).into()).unwrap();
             assert_eq!(*value, decoded);
         }
     }
