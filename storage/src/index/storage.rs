@@ -44,13 +44,10 @@ enum Phase<V: PartialEq + Eq> {
 
 fn value<V: PartialEq + Eq>(phase: &Phase<V>) -> Option<&V> {
     match phase {
-        Phase::Next(next) => Some(&next.value),
-        Phase::Initial
-        | Phase::Entry
-        | Phase::Done
-        | Phase::EntryDeleted
-        | Phase::PostDeleteEntry
-        | Phase::Stale(_) => unreachable!(),
+        Phase::Next(current) => Some(&current.value),
+        Phase::Done => None,
+        Phase::EntryDeleted => None,
+        Phase::Initial | Phase::Entry | Phase::PostDeleteEntry | Phase::Stale(_) => unreachable!(),
     }
 }
 
@@ -77,10 +74,15 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
         }
     }
 
-    fn past_push(&mut self, new: Box<Record<V>>) {
-        let mut new = new;
-        new.next = self.past.take();
-        self.past = Some(new);
+    /// Pushes a `Record` to the past list, maintaining the linked list structure.
+    fn past_push(&mut self, mut new: Box<Record<V>>) {
+        if self.past.is_none() {
+            self.past = Some(new);
+        } else {
+            let past = self.past.take().unwrap();
+            new.next = Some(past);
+            self.past = Some(new);
+        }
     }
 
     pub fn update(&mut self, v: V) {
