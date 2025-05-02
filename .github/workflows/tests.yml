@@ -46,7 +46,7 @@ jobs:
       with:
         rust-version: ${{ steps.rust-version.outputs.rust_version}}
     - name: Run ignored tests
-      run: cargo test --verbose --ignored
+      run: cargo test --verbose -- --ignored
 
   Dependencies:
     runs-on: ubuntu-latest
