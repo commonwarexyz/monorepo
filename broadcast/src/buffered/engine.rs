@@ -21,8 +21,8 @@ use tracing::{debug, error, trace, warn};
 
 /// A responder waiting for a message.
 struct Waiter<P, Dd, M> {
-    /// The sender of the message.
-    sender: Option<P>,
+    /// The peer sending the message.
+    peer: Option<P>,
 
     /// The digest of the message.
     digest: Option<Dd>,
@@ -70,7 +70,7 @@ pub struct Engine<
     /// Whether messages are sent as priority
     priority: bool,
 
-    /// Number of messages to cache per sender
+    /// Number of messages to cache per peer
     deque_size: usize,
 
     /// Configuration for decoding messages
@@ -182,13 +182,13 @@ impl<
                             trace!("mailbox: broadcast");
                             self.handle_broadcast(&mut sender, recipients, message, responder).await;
                         }
-                        Message::Subscribe{ sender, identity, digest, responder } => {
+                        Message::Subscribe{ peer, identity, digest, responder } => {
                             trace!("mailbox: subscribe");
-                            self.handle_subscribe(sender, identity, digest, responder).await;
+                            self.handle_subscribe(peer, identity, digest, responder).await;
                         }
-                        Message::Get{ sender, identity, digest, responder } => {
+                        Message::Get{ peer, identity, digest, responder } => {
                             trace!("mailbox: get");
-                            self.handle_get(sender, identity, digest, responder).await;
+                            self.handle_get(peer, identity, digest, responder).await;
                         }
                     }
                 },
@@ -251,13 +251,13 @@ impl<
     /// Searches through all maintained messages for a match.
     fn find_messages(
         &mut self,
-        sender: &Option<P>,
+        peer: &Option<P>,
         identity: Di,
         digest: Option<Dd>,
         all: bool,
     ) -> Vec<M> {
-        match sender {
-            // Only consider messages from the sender filter
+        match peer {
+            // Only consider messages from the peer filter
             Some(s) => self
                 .deques
                 .get(s)
@@ -296,13 +296,13 @@ impl<
     /// Otherwise, the responder is stored in the waiters list.
     async fn handle_subscribe(
         &mut self,
-        sender: Option<P>,
+        peer: Option<P>,
         identity: Di,
         digest: Option<Dd>,
         responder: oneshot::Sender<M>,
     ) {
         // Check if the message is already in the cache
-        let mut items = self.find_messages(&sender, identity, digest, false);
+        let mut items = self.find_messages(&peer, identity, digest, false);
         if let Some(item) = items.pop() {
             self.respond_subscribe(responder, item);
             return;
@@ -310,7 +310,7 @@ impl<
 
         // Store the responder
         self.waiters.entry(identity).or_default().push(Waiter {
-            sender,
+            peer,
             digest,
             responder,
         });
@@ -319,12 +319,12 @@ impl<
     /// Handles a `get` request from the application.
     async fn handle_get(
         &mut self,
-        sender: Option<P>,
+        peer: Option<P>,
         identity: Di,
         digest: Option<Dd>,
         responder: oneshot::Sender<Vec<M>>,
     ) {
-        let items = self.find_messages(&sender, identity, digest, true);
+        let items = self.find_messages(&peer, identity, digest, true);
         self.respond_get(responder, items);
     }
 
@@ -358,15 +358,15 @@ impl<
         if let Some(mut waiters) = self.waiters.remove(&pair.identity) {
             let mut i = 0;
             while i < waiters.len() {
-                // Get the sender and digest filters
+                // Get the peer and digest filters
                 let Waiter {
-                    sender: sender_filter,
+                    peer: peer_filter,
                     digest: digest_filter,
                     responder: _,
                 } = &waiters[i];
 
                 // Keep the waiter if either filter does not match.
-                if sender_filter.as_ref().is_some_and(|s| s != &peer)
+                if peer_filter.as_ref().is_some_and(|s| s != &peer)
                     || digest_filter.is_some_and(|d| d != pair.digest)
                 {
                     i += 1;
