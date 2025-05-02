@@ -30,6 +30,8 @@ impl<D: Digest> Write for BlockFormat<D> {
 }
 
 impl<D: Digest> Read for BlockFormat<D> {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let tag = u8::read(buf)?;
         match tag {

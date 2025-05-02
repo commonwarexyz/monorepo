@@ -514,7 +514,7 @@ pub struct Actor<
     partition: String,
     compression: Option<u8>,
     replay_concurrency: usize,
-    journal: Option<Journal<E, (), Voter<D>>>,
+    journal: Option<Journal<E, Voter<D>>>,
 
     genesis: Option<D>,
 
@@ -801,7 +801,7 @@ impl<
         null_retry
     }
 
-    async fn timeout<Sr: Sender>(&mut self, sender: &mut WrappedSender<Sr, (), Voter<D>>) {
+    async fn timeout<Sr: Sender>(&mut self, sender: &mut WrappedSender<Sr, Voter<D>>) {
         // Set timeout fired
         let round = self.views.get_mut(&self.view).unwrap();
         let mut retry = false;
@@ -1563,7 +1563,7 @@ impl<
     async fn notify<Sr: Sender>(
         &mut self,
         backfiller: &mut resolver::Mailbox<D>,
-        sender: &mut WrappedSender<Sr, (), Voter<D>>,
+        sender: &mut WrappedSender<Sr, Voter<D>>,
         view: u64,
     ) {
         // Get public key index
@@ -1799,7 +1799,7 @@ impl<
         self.enter_view(1, group::Signature::zero());
 
         // Initialize journal
-        let mut journal = Journal::<_, _, Voter<D>>::init(
+        let mut journal = Journal::<_, Voter<D>>::init(
             self.context.with_label("journal"),
             JConfig {
                 partition: self.partition.clone(),

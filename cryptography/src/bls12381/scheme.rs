@@ -110,6 +110,8 @@ impl Write for PrivateKey {
 }
 
 impl Read for PrivateKey {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
         let key = group::Private::decode(raw.as_ref())
@@ -194,6 +196,8 @@ impl Write for PublicKey {
 }
 
 impl Read for PublicKey {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
         let key = group::Public::decode(raw.as_ref())
@@ -278,6 +282,8 @@ impl Write for Signature {
 }
 
 impl Read for Signature {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
         let signature = group::Signature::decode(raw.as_ref())
