@@ -20,25 +20,25 @@ use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use tracing::warn;
 
-/// Configuration for a `Current` authenticated db.
+/// Configuration for a [Current] authenticated db.
 #[derive(Clone)]
 pub struct Config {
-    /// The name of the `Storage` partition used for the MMR's backing journal.
+    /// The name of the [RStorage] partition used for the MMR's backing journal.
     pub mmr_journal_partition: String,
 
     /// The items per blob configuration value used by the MMR journal.
     pub mmr_items_per_blob: u64,
 
-    /// The name of the `Storage` partition used for the MMR's metadata.
+    /// The name of the [RStorage] partition used for the MMR's metadata.
     pub mmr_metadata_partition: String,
 
-    /// The name of the `Storage` partition used to persist the (pruned) log of operations.
+    /// The name of the [RStorage] partition used to persist the (pruned) log of operations.
     pub log_journal_partition: String,
 
     /// The items per blob configuration value used by the log journal.
     pub log_items_per_blob: u64,
 
-    /// The name of the `Storage` partition used for the bitmap metadata.
+    /// The name of the [RStorage] partition used for the bitmap metadata.
     pub bitmap_metadata_partition: String,
 }
 
@@ -52,11 +52,11 @@ pub struct Current<
     T: Translator,
     const N: usize,
 > {
-    /// An `Any` authenticated database that provides the ability to prove whether a key ever had a
+    /// An [Any] authenticated database that provides the ability to prove whether a key ever had a
     /// specific value.
     pub any: Any<E, K, V, H, T>,
 
-    /// The bitmap over the activity status of each operation. Supports augmenting `Any` proofs in
+    /// The bitmap over the activity status of each operation. Supports augmenting [Any] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
     pub is_active: Bitmap<H, N>,
 
@@ -81,7 +81,7 @@ impl<
         "chunk size must be expected multiple of the digest size",
     );
 
-    /// Initializes a `Current` authenticated database from the given `config`.
+    /// Initializes a [Current] authenticated database from the given `config`.
     pub async fn init(
         context: E,
         hasher: &mut H,
@@ -264,7 +264,7 @@ impl<
 
     /// Return the root hash of the db.
     ///
-    /// Current implementation just hashes the roots of the `Any` and `Bitmap` databases together.
+    /// Current implementation just hashes the roots of the [Any] and [Bitmap] databases together.
     pub fn root(&self, hasher: &mut H) -> H::Digest {
         let any_root = self.any.root(hasher);
         let bitmap_root = self.is_active.root(hasher);
@@ -329,7 +329,7 @@ pub mod test {
         }
     }
 
-    /// Return an `Any` database initialized with a fixed config.
+    /// Return an [Current] database initialized with a fixed config.
     async fn open_db<E: RStorage + Clock + Metrics>(
         context: E,
         hasher: &mut Sha256,
