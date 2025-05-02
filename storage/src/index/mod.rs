@@ -701,6 +701,9 @@ mod tests {
 
         // Call next() again, should keep returning None
         assert!(cursor.next().is_none());
+
+        assert!(context.encode().contains("keys 1"));
+        assert!(context.encode().contains("items 1"));
     }
 
     #[test_traced]
