@@ -142,11 +142,18 @@ pub trait Digestible<D: Digest>: Clone + Sized + Send + Sync + 'static {
 
 /// An object that shares a (commitment) [Digest] with other, related values.
 pub trait Committable<D: Digest>: Clone + Sized + Send + Sync + 'static {
-    /// Returns the commitment of the object as a [Digest].
+    /// Returns the unique commitment of the object as a [Digest].
     ///
     /// For simple objects (like a block), this is often just the digest of the object
     /// itself. For more complex objects, however, this may represent some root or base
     /// of a proof structure (where many unique objects map to the same commitment).
+    ///
+    /// # Warning
+    ///
+    /// It must not be possible for two objects with the same [Digest] to map
+    /// to different commitments. Primitives assume there is a one-to-one
+    /// relation between digest and commitment and a one-to-many relation
+    /// between commitment and digest.
     fn commitment(&self) -> D;
 }
 
