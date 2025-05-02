@@ -413,7 +413,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                         let old_loc = *loc;
                         cursor.delete();
                         drop(cursor);
-                        self.apply_op(hasher, Operation::delete(key)).await?;
+                        self.apply_op(hasher, Operation::delete(&key)).await?;
                         return Ok(Some(old_loc));
                     }
                 }

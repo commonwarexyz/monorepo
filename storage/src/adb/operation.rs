@@ -71,7 +71,7 @@ impl<K: Array, V: Array> Operation<K, V> {
     /// Create a new operation of the given type.
     pub fn new(t: Type<K, V>) -> Self {
         match t {
-            Type::Deleted(key) => Self::delete(key),
+            Type::Deleted(key) => Self::delete(&key),
             Type::Update(key, value) => Self::update(key, value),
             Type::Commit(loc) => Self::commit(loc),
         }
@@ -91,10 +91,10 @@ impl<K: Array, V: Array> Operation<K, V> {
     }
 
     /// Create a new delete operation that removes any value assigned to `key`.
-    pub fn delete(key: K) -> Self {
+    pub fn delete(key: &K) -> Self {
         let mut data = Vec::with_capacity(Self::SIZE);
         data.push(Self::DELETE_CONTEXT);
-        data.extend_from_slice(&key);
+        data.extend_from_slice(key);
         data.resize(Self::SIZE, 0);
 
         Self {
@@ -257,7 +257,7 @@ mod tests {
         assert_eq!(update_op, from);
 
         let key2 = U64::new(42);
-        let delete_op = Operation::<U64, U64>::delete(key2.clone());
+        let delete_op = Operation::<U64, U64>::delete(&key2);
         let from = Operation::<U64, U64>::decode(delete_op.as_ref()).unwrap();
         assert_eq!(key2, from.to_key());
         assert_eq!(None, from.to_value());
@@ -302,7 +302,7 @@ mod tests {
         );
 
         let key2 = U64::new(42);
-        let delete_op = Operation::<U64, U64>::delete(key2.clone());
+        let delete_op = Operation::<U64, U64>::delete(&key2);
         assert_eq!(
             format!("{}", delete_op),
             format!("[key:{} <deleted>]", key2)
