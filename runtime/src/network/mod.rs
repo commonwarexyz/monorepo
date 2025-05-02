@@ -2,19 +2,27 @@ pub(crate) mod metered;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod tokio;
 
-// Add this to the tests module
 #[cfg(test)]
-mod network_tests {
-    use crate::{tokio::Runner as TokioRunner, Network as _, Runner, Spawner};
+mod tests {
     use crate::{Listener, Sink, Stream};
     use futures::join;
     use std::net::SocketAddr;
-    use std::time::Duration;
 
     // TODO danlaine: remove
     const PORT_NUMBER: u16 = 5000;
-    const CLIENT_SEND_DATA: &'static str = "client_send_data";
-    const SERVER_SEND_DATA: &'static str = "server_send_data";
+    const CLIENT_SEND_DATA: &str = "client_send_data";
+    const SERVER_SEND_DATA: &str = "server_send_data";
+
+    pub(super) async fn run_network_tests<N, F>(new_network: F)
+    where
+        F: Fn() -> N,
+        N: crate::Network,
+    {
+        test_network_bind_and_dial(new_network()).await;
+        test_network_multiple_clients(new_network()).await;
+        test_network_large_data(new_network()).await;
+        test_network_connection_errors(new_network()).await;
+    }
 
     // Basic network connectivity test
     async fn test_network_bind_and_dial<N: crate::Network>(network: N) {
@@ -245,81 +253,5 @@ mod network_tests {
 
     //         // Don't wait for server to complete, it's deliberately hanging
     //     });
-    // }
-
-    // // Run the tests for each runtime implementation
-
-    // #[test]
-    // fn test_deterministic_network_bind_and_dial() {
-    //     let executor = deterministic::Runner::default();
-    //     test_network_bind_and_dial(executor);
-    // }
-
-    // #[test]
-    // fn test_deterministic_network_multiple_clients() {
-    //     let network = tokio::Config::default()
-    //         .with_read_timeout(Duration::from_secs(15))
-    //         .with_write_timeout(Duration::from_secs(15));
-    //     test_network_multiple_clients(network).await;
-    // }
-
-    // #[test]
-    // fn test_deterministic_network_large_data() {
-    //     let executor = deterministic::Runner::default();
-    //     test_network_large_data(executor);
-    // }
-
-    // #[test]
-    // fn test_deterministic_network_connection_errors() {
-    //     let executor = deterministic::Runner::default();
-    //     test_network_connection_errors(executor);
-    // }
-
-    // #[test]
-    // fn test_deterministic_network_timeouts() {
-    //     let executor = deterministic::Runner::default();
-    //     test_network_timeouts(executor);
-    // }
-
-    #[tokio::test]
-    async fn test_tokio_network_bind_and_dial() {
-        let network: super::tokio::Network = super::tokio::Config::default()
-            .with_read_timeout(Duration::from_secs(15))
-            .with_write_timeout(Duration::from_secs(15))
-            .into();
-        test_network_bind_and_dial(network).await;
-    }
-
-    #[tokio::test]
-    async fn test_tokio_network_multiple_clients() {
-        let network: super::tokio::Network = super::tokio::Config::default()
-            .with_read_timeout(Duration::from_secs(15))
-            .with_write_timeout(Duration::from_secs(15))
-            .into();
-        test_network_multiple_clients(network).await;
-    }
-
-    #[tokio::test]
-    async fn test_tokio_network_large_data() {
-        let network: super::tokio::Network = super::tokio::Config::default()
-            .with_read_timeout(Duration::from_secs(15))
-            .with_write_timeout(Duration::from_secs(15))
-            .into();
-        test_network_large_data(network).await;
-    }
-
-    #[tokio::test]
-    async fn test_tokio_network_connection_errors() {
-        let network: super::tokio::Network = super::tokio::Config::default()
-            .with_read_timeout(Duration::from_secs(15))
-            .with_write_timeout(Duration::from_secs(15))
-            .into();
-        test_network_connection_errors(network).await;
-    }
-
-    // #[test]
-    // fn test_tokio_network_timeouts() {
-    //     let executor = TokioRunner::default();
-    //     test_network_timeouts(executor);
     // }
 }
