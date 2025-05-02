@@ -10,7 +10,7 @@ env:
   UDEPS_VERSION: 0.1.50
 
 jobs:
-  All:
+  Lint:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
@@ -30,6 +30,19 @@ jobs:
       run: cargo doc --no-deps --document-private-items
       env:
         RUSTDOCFLAGS: "-D warnings"
+
+  All:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Get Rust version
+      id: rust-version
+      run: echo "rust_version=$(rustc --version)" >> "$GITHUB_OUTPUT"
+    - name: Run setup
+      uses: ./.github/actions/setup
+      with:
+        rust-version: ${{ steps.rust-version.outputs.rust_version}}
     - name: Run tests
       run: cargo test --verbose
 
