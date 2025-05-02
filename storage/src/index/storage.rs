@@ -187,8 +187,8 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
             }
             Phase::PostDeleteNext(current) => {
                 // If the stale value is some, we set it to be the current record.
-                if current.is_some() {
-                    self.phase = Phase::Next(current.unwrap());
+                if let Some(current) = current {
+                    self.phase = Phase::Next(current);
                 }
                 self.value()
             }
