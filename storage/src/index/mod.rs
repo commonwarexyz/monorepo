@@ -441,6 +441,7 @@ mod tests {
             cursor.delete();
             assert_eq!(cursor.next(), None);
             cursor.insert(4);
+            assert_eq!(cursor.next(), None);
             cursor.insert(5);
         }
 
@@ -553,7 +554,7 @@ mod tests {
     }
 
     #[test_traced]
-    #[should_panic(expected = "must call Cursor::next() before interacting")]
+    #[should_panic(expected = "must call Cursor::next()")]
     fn test_cursor_update_before_next_panics() {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx, TwoCap);
@@ -565,7 +566,7 @@ mod tests {
     }
 
     #[test_traced]
-    #[should_panic(expected = "must call Cursor::next() before interacting")]
+    #[should_panic(expected = "must call Cursor::next()")]
     fn test_cursor_delete_before_next_panics() {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx, TwoCap);
@@ -577,9 +578,7 @@ mod tests {
     }
 
     #[test_traced]
-    #[should_panic(
-        expected = "only Cursor::insert() can be called after Cursor::next() returns None"
-    )]
+    #[should_panic(expected = "no active item in Cursor")]
     fn test_cursor_update_after_done() {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx, TwoCap);
@@ -594,7 +593,7 @@ mod tests {
     }
 
     #[test_traced]
-    #[should_panic(expected = "must call Cursor::next() before interacting")]
+    #[should_panic(expected = "must call Cursor::next()")]
     fn test_cursor_insert_before_next() {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx, TwoCap);
@@ -607,9 +606,7 @@ mod tests {
     }
 
     #[test_traced]
-    #[should_panic(
-        expected = "only Cursor::insert() can be called after Cursor::next() returns None"
-    )]
+    #[should_panic(expected = "no active item in Cursor")]
     fn test_cursor_delete_after_done() {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx, TwoCap);
@@ -651,7 +648,7 @@ mod tests {
     }
 
     #[test_traced]
-    #[should_panic]
+    #[should_panic(expected = "must call Cursor::next()")]
     fn test_cursor_double_delete() {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx, TwoCap);
@@ -759,5 +756,39 @@ mod tests {
             index.get(b"key").copied().collect::<Vec<_>>(),
             vec![3, 2, 4]
         );
+    }
+
+    #[test_traced]
+    fn test_insert_at_entry_then_next() {
+        let ctx = deterministic::Context::default();
+        let mut index = Index::init(ctx, TwoCap);
+
+        index.insert(b"key", 1);
+        index.insert(b"key", 2); // [1, 2]
+
+        let mut cur = index.get_mut(b"key").unwrap();
+        assert_eq!(*cur.next().unwrap(), 1); // Entry
+        cur.insert(99); // [1, 99, 2]  (move from Phase::Entry to Phase::Next)
+
+        // cursor must now iterate 99 to 2 to None
+        assert_eq!(*cur.next().unwrap(), 2); // Next
+        assert!(cur.next().is_none());
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next()")]
+    fn test_insert_at_entry_then_delete_head() {
+        let ctx = deterministic::Context::default();
+        let mut index = Index::init(ctx, TwoCap);
+
+        index.insert(b"key", 10);
+        index.insert(b"key", 20); // [10, 20]
+
+        {
+            let mut cur = index.get_mut(b"key").unwrap();
+            assert_eq!(*cur.next().unwrap(), 10); // Entry
+            cur.insert(15); // [10, 15, 20]
+            cur.delete(); // [15, 20]
+        }
     }
 }

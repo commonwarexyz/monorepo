@@ -11,6 +11,13 @@ use std::collections::{
 /// the entire [super::translator::OneCap] range).
 const INITIAL_CAPACITY: usize = 256;
 
+/// Panic message shown when `next()` is not called after `Cursor` creation or after `insert()` or ``delete()`.
+const MUST_CALL_NEXT: &str = "must call Cursor::next()";
+
+/// Panic message shown when `update()` is called after `Cursor` has returned `None` or after `insert()`
+/// or `delete()` (but before `next()`).
+const NO_ACTIVE_ITEM: &str = "no active item in Cursor";
+
 /// Each key is mapped to a `Record` that contains a linked list of potential values for that key.
 ///
 /// We avoid using a `Vec` to store values because the common case (where there are no collisions) would
@@ -60,6 +67,7 @@ pub struct Cursor<'a, T: Translator, V> {
     next: Option<Box<Record<V>>>,
     past: Option<Box<Record<V>>>,
 
+    next_required: bool,
     last_deleted: bool,
     entry_deleted: bool,
 
@@ -82,6 +90,7 @@ impl<'a, T: Translator, V> Cursor<'a, T, V> {
             next,
             past: None,
 
+            next_required: true,
             last_deleted: false,
             entry_deleted: false,
 
@@ -105,10 +114,10 @@ impl<'a, T: Translator, V> Cursor<'a, T, V> {
     ///
     /// Panics if called before `next()` or after iteration is complete (`Status::Done` phase).
     pub fn update(&mut self, v: V) {
-        assert!(!self.last_deleted);
+        assert!(!self.next_required, "{MUST_CALL_NEXT}");
         match self.phase {
             Phase::Initial => {
-                unreachable!("must call Cursor::next() before interacting")
+                unreachable!("{MUST_CALL_NEXT}")
             }
             Phase::Entry => {
                 self.entry.as_mut().unwrap().get_mut().value = v;
@@ -117,9 +126,7 @@ impl<'a, T: Translator, V> Cursor<'a, T, V> {
                 self.next.as_mut().unwrap().value = v;
             }
             Phase::Done => {
-                unreachable!(
-                    "only Cursor::insert() can be called after Cursor::next() returns None"
-                )
+                unreachable!("{NO_ACTIVE_ITEM}")
             }
         }
     }
@@ -130,6 +137,7 @@ impl<'a, T: Translator, V> Cursor<'a, T, V> {
     /// It is safe to call `next()` even after it returns `None`.
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<&V> {
+        self.next_required = false;
         let last_deleted = self.last_deleted;
         self.last_deleted = false;
         match self.phase {
@@ -198,11 +206,12 @@ impl<'a, T: Translator, V> Cursor<'a, T, V> {
     ///
     /// Increments the `collisions` counter as this adds to an existing key's chain.
     pub fn insert(&mut self, v: V) {
-        assert!(!self.last_deleted);
+        assert!(!self.next_required, "{MUST_CALL_NEXT}");
+        self.next_required = true;
         self.collisions.inc();
         match self.phase {
             Phase::Initial => {
-                unimplemented!("must call Cursor::next() before interacting")
+                unreachable!("{MUST_CALL_NEXT}")
             }
             Phase::Entry => {
                 // Create a new record that points to next.
@@ -255,12 +264,13 @@ impl<'a, T: Translator, V> Cursor<'a, T, V> {
     ///
     /// Increments the `pruned` counter to track removals.
     pub fn delete(&mut self) {
-        assert!(!self.last_deleted);
+        assert!(!self.next_required, "{MUST_CALL_NEXT}");
+        self.next_required = true;
         self.last_deleted = true;
         self.pruned.inc();
         match self.phase {
             Phase::Initial => {
-                unreachable!("must call Cursor::next() before interacting")
+                unreachable!("{MUST_CALL_NEXT}")
             }
             Phase::Entry => {
                 // Attempt to overwrite the entry with the next value.
@@ -281,9 +291,7 @@ impl<'a, T: Translator, V> Cursor<'a, T, V> {
                 self.next = next.next;
             }
             Phase::Done => {
-                unreachable!(
-                    "only Cursor::insert() can be called after Cursor::next() returns None"
-                )
+                unreachable!("{NO_ACTIVE_ITEM}")
             }
         }
     }
