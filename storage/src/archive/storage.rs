@@ -131,7 +131,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
                 // Store index in intervals
                 intervals.insert(index..=index);
             }
-            debug!(keys = keys.len(), "archive initialized");
+            debug!(keys = keys.keys(), "archive initialized");
         }
 
         // Initialize metrics

@@ -32,7 +32,7 @@ use crate::{
         metered::Storage as MeteredStorage,
     },
     utils::Signaler,
-    Clock, Error, Handle, Signal, METRICS_PREFIX,
+    Clock, Error, Handle, ListenerOf, Signal, METRICS_PREFIX,
 };
 use commonware_utils::{hex, SystemTimeExt};
 use futures::{
@@ -1001,7 +1001,7 @@ impl GClock for Context {
 impl ReasonablyRealtime for Context {}
 
 impl crate::Network for Context {
-    type Listener = crate::ListenerOf<Network>;
+    type Listener = ListenerOf<Network>;
 
     async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, Error> {
         self.network.bind(socket).await
@@ -1014,6 +1014,7 @@ impl crate::Network for Context {
         self.network.dial(socket).await
     }
 }
+
 impl RngCore for Context {
     fn next_u32(&mut self) -> u32 {
         self.executor.auditor.event(b"rand", |hasher| {
