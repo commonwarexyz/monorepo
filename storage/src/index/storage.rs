@@ -1,6 +1,6 @@
 use crate::index::Translator;
 use commonware_runtime::Metrics;
-use prometheus_client::metrics::counter::Counter;
+use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{
     hash_map::{Entry, OccupiedEntry},
     HashMap,
@@ -79,6 +79,8 @@ pub struct Cursor<'a, T: Translator, V: PartialEq + Eq> {
     entry: Option<OccupiedEntry<'a, T::Key, Record<V>>>,
     past: Option<Box<Record<V>>>,
 
+    keys: &'a Gauge,
+    items: &'a Gauge,
     collisions: &'a Counter,
     pruned: &'a Counter,
 }
@@ -87,6 +89,8 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
     /// Creates a new `Cursor` from a mutable record reference, detaching its `next` chain for iteration.
     fn new(
         entry: OccupiedEntry<'a, T::Key, Record<V>>,
+        keys: &'a Gauge,
+        items: &'a Gauge,
         collisions: &'a Counter,
         pruned: &'a Counter,
     ) -> Self {
@@ -96,6 +100,8 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
             entry: Some(entry),
             past: None,
 
+            keys,
+            items,
             collisions,
             pruned,
         }
@@ -206,6 +212,7 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
 
                 // Set the phase to the new record.
                 self.phase = Phase::PostInsert(new);
+                self.items.inc();
                 self.collisions.inc();
             }
             Phase::Next(mut current) => {
@@ -218,6 +225,7 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                 // Create a new record that points to the next's next.
                 let new = Box::new(Record { value: v, next });
                 self.phase = Phase::PostInsert(new);
+                self.items.inc();
                 self.collisions.inc();
             }
             Phase::Done => {
@@ -228,6 +236,7 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                     next: None,
                 });
                 self.past_push(new);
+                self.items.inc();
                 self.collisions.inc();
             }
             Phase::EntryDeleted => {
@@ -256,16 +265,19 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                     entry.value = next.value;
                     entry.next = next.next;
                     self.phase = Phase::PostDeleteEntry;
+                    self.items.dec();
                     return;
                 }
 
                 // If there is no next, we consider the entry deleted.
                 self.phase = Phase::EntryDeleted;
+                // We wait to update metrics until `drop()`.
             }
             Phase::Next(mut current) => {
                 // Drop current instead of pushing it to the past list.
                 let next = current.next.take();
                 self.phase = Phase::PostDeleteNext(next);
+                self.items.dec();
             }
             Phase::Done | Phase::EntryDeleted => unreachable!("{NO_ACTIVE_ITEM}"),
             Phase::PostDeleteEntry | Phase::PostDeleteNext(_) | Phase::PostInsert(_) => {
@@ -297,6 +309,8 @@ where
             }
             Phase::EntryDeleted => {
                 // If the entry is deleted, we should remove it.
+                self.keys.dec();
+                self.items.dec();
                 entry.remove();
                 return;
             }
@@ -353,6 +367,9 @@ impl<'a, V: PartialEq + Eq> Iterator for ImmutableCursor<'a, V> {
 pub struct Index<T: Translator, V: PartialEq + Eq> {
     translator: T,
     map: HashMap<T::Key, Record<V>, T>,
+
+    keys: Gauge,
+    items: Gauge,
     collisions: Counter,
     pruned: Counter,
 }
@@ -363,9 +380,18 @@ impl<T: Translator, V: PartialEq + Eq> Index<T, V> {
         let s = Self {
             translator: tr.clone(),
             map: HashMap::with_capacity_and_hasher(INITIAL_CAPACITY, tr),
+
+            keys: Gauge::default(),
+            items: Gauge::default(),
             collisions: Counter::default(),
             pruned: Counter::default(),
         };
+        ctx.register(
+            "keys",
+            "Number of translated keys in the index",
+            s.keys.clone(),
+        );
+        ctx.register("items", "Number of items in the index", s.items.clone());
         ctx.register("pruned", "Number of items pruned", s.pruned.clone());
         ctx.register(
             "collisions",
@@ -375,18 +401,16 @@ impl<T: Translator, V: PartialEq + Eq> Index<T, V> {
         s
     }
 
-    /// Return the number of translated keys in the index (there may
-    /// be many more total entries, with multiple keys per translated
-    /// key).
     #[inline]
-    pub fn len(&self) -> usize {
-        self.map.len()
+    /// Returns the number of translated keys in the index.
+    pub fn keys(&self) -> usize {
+        self.keys.get().try_into().unwrap_or(usize::MAX)
     }
 
-    /// Return whether the index is empty.
     #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
+    /// Returns the number of items in the index.
+    pub fn items(&self) -> usize {
+        self.items.get().try_into().unwrap_or(usize::MAX)
     }
 
     /// Returns an iterator over all values associated with a translated key.
@@ -403,7 +427,13 @@ impl<T: Translator, V: PartialEq + Eq> Index<T, V> {
     pub fn get_mut(&mut self, key: &[u8]) -> Option<Cursor<T, V>> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
-            Entry::Occupied(entry) => Some(Cursor::new(entry, &self.collisions, &self.pruned)),
+            Entry::Occupied(entry) => Some(Cursor::new(
+                entry,
+                &self.keys,
+                &self.items,
+                &self.collisions,
+                &self.pruned,
+            )),
             Entry::Vacant(_) => None,
         }
     }
@@ -413,8 +443,16 @@ impl<T: Translator, V: PartialEq + Eq> Index<T, V> {
     pub fn get_mut_or_insert(&mut self, key: &[u8], v: V) -> Option<Cursor<T, V>> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
-            Entry::Occupied(entry) => Some(Cursor::new(entry, &self.collisions, &self.pruned)),
+            Entry::Occupied(entry) => Some(Cursor::new(
+                entry,
+                &self.keys,
+                &self.items,
+                &self.collisions,
+                &self.pruned,
+            )),
             Entry::Vacant(entry) => {
+                self.keys.inc();
+                self.items.inc();
                 let record = Record {
                     value: v,
                     next: None,
@@ -438,11 +476,19 @@ impl<T: Translator, V: PartialEq + Eq> Index<T, V> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
             Entry::Occupied(entry) => {
-                let mut cursor = Cursor::<'_, T, V>::new(entry, &self.collisions, &self.pruned);
+                let mut cursor = Cursor::<'_, T, V>::new(
+                    entry,
+                    &self.keys,
+                    &self.items,
+                    &self.collisions,
+                    &self.pruned,
+                );
                 cursor.next();
                 cursor.insert(v);
             }
             Entry::Vacant(entry) => {
+                self.keys.inc();
+                self.items.inc();
                 entry.insert(Record {
                     value: v,
                     next: None,
@@ -459,7 +505,13 @@ impl<T: Translator, V: PartialEq + Eq> Index<T, V> {
         match self.map.entry(k) {
             Entry::Occupied(entry) => {
                 // Get entry
-                let mut cursor = Cursor::<'_, T, V>::new(entry, &self.collisions, &self.pruned);
+                let mut cursor = Cursor::<'_, T, V>::new(
+                    entry,
+                    &self.keys,
+                    &self.items,
+                    &self.collisions,
+                    &self.pruned,
+                );
 
                 // Remove anything that is prunable.
                 loop {
@@ -478,6 +530,8 @@ impl<T: Translator, V: PartialEq + Eq> Index<T, V> {
             }
             Entry::Vacant(entry) => {
                 // No collision, so we can just insert the value.
+                self.keys.inc();
+                self.items.inc();
                 entry.insert(Record {
                     value: v,
                     next: None,
@@ -492,7 +546,13 @@ impl<T: Translator, V: PartialEq + Eq> Index<T, V> {
         match self.map.entry(k) {
             Entry::Occupied(entry) => {
                 // Get cursor
-                let mut cursor = Cursor::<'_, T, V>::new(entry, &self.collisions, &self.pruned);
+                let mut cursor = Cursor::<'_, T, V>::new(
+                    entry,
+                    &self.keys,
+                    &self.items,
+                    &self.collisions,
+                    &self.pruned,
+                );
 
                 // Remove anything that is prunable.
                 loop {

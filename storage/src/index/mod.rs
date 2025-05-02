@@ -49,14 +49,16 @@ mod tests {
     fn test_index_basic() {
         let context = deterministic::Context::default();
         let mut index = Index::init(context.clone(), TwoCap);
-        assert_eq!(index.len(), 0);
+        assert!(context.encode().contains("keys 0"));
+        assert!(context.encode().contains("items 0"));
 
         // Generate a collision and check metrics to make sure it's captured
         let key = b"duplicate".as_slice();
         index.insert(key, 1);
         index.insert(key, 2);
         index.insert(key, 3);
-        assert_eq!(index.len(), 1);
+        assert!(context.encode().contains("keys 1"));
+        assert!(context.encode().contains("items 3"));
         assert!(context.encode().contains("collisions_total 2"));
 
         // Check that the values are in the correct order
@@ -82,11 +84,13 @@ mod tests {
             index.get(key).copied().collect::<Vec<_>>(),
             Vec::<u64>::new()
         );
-        assert!(index.is_empty());
+        assert!(context.encode().contains("keys 0"));
+        assert!(context.encode().contains("items 0"));
 
         // Removing a key that doesn't exist should be a no-op.
         index.prune(key, |_| true);
-        assert!(index.is_empty());
+        assert!(context.encode().contains("keys 0"));
+        assert!(context.encode().contains("items 0"));
     }
 
     #[test_traced]
@@ -151,7 +155,8 @@ mod tests {
             index.get(b"ab").copied().collect::<Vec<_>>(),
             Vec::<u64>::new()
         );
-        assert_eq!(index.len(), 1); // Only "a" remains
+        assert!(context.encode().contains("keys 1"));
+        assert!(context.encode().contains("items 1"));
 
         // Check that "a" is still present
         assert_eq!(index.get(b"a").copied().collect::<Vec<_>>(), vec![1]);
@@ -320,7 +325,8 @@ mod tests {
 
         // Test removing all values.
         index.remove(b"key");
-        assert_eq!(index.len(), 0);
+        assert!(context.encode().contains("keys 0"));
+        assert!(context.encode().contains("items 0"));
         assert!(context.encode().contains("pruned_total 6"));
     }
 
@@ -338,7 +344,8 @@ mod tests {
             assert!(context.encode().contains("collisions_total 1"));
         }
         assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![1, 3]);
-        assert_eq!(index.len(), 1);
+        assert!(context.encode().contains("keys 1"));
+        assert!(context.encode().contains("items 2"));
 
         // Try inserting into an iterator while iterating.
         {
@@ -415,7 +422,8 @@ mod tests {
         }
 
         // Ensure item is deleted from index
-        assert_eq!(index.len(), 0);
+        assert!(context.encode().contains("keys 0"));
+        assert!(context.encode().contains("items 0"));
     }
 
     #[test_traced]

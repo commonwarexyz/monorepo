@@ -792,7 +792,7 @@ mod test {
             assert_eq!(db.get(&d2).await.unwrap().unwrap(), d2);
 
             assert_eq!(db.log.size().await.unwrap(), 5); // 4 updates, 1 deletion.
-            assert_eq!(db.snapshot.len(), 2);
+            assert_eq!(db.snapshot.keys(), 2);
             assert_eq!(db.inactivity_floor_loc, 0);
             db.sync().await.unwrap();
 
@@ -863,7 +863,7 @@ mod test {
             db.delete(&mut hasher, d1).await.unwrap();
             db.update(&mut hasher, d2, d1).await.unwrap();
             db.update(&mut hasher, d1, d2).await.unwrap();
-            assert_eq!(db.snapshot.len(), 2);
+            assert_eq!(db.snapshot.keys(), 2);
 
             // Confirm close/reopen gets us back to the same state.
             db.commit(&mut hasher).await.unwrap();
@@ -871,7 +871,7 @@ mod test {
             db.close().await.unwrap();
             let mut db = open_db(context, &mut hasher).await;
             assert_eq!(db.root(&mut hasher), root);
-            assert_eq!(db.snapshot.len(), 2);
+            assert_eq!(db.snapshot.keys(), 2);
 
             // Commit will raise the inactivity floor, which won't affect state but will affect the
             // root.
@@ -882,7 +882,7 @@ mod test {
             // Pruning inactive ops should not affect current state or root
             let root = db.root(&mut hasher);
             db.prune_inactive().await.unwrap();
-            assert_eq!(db.snapshot.len(), 2);
+            assert_eq!(db.snapshot.keys(), 2);
             assert_eq!(db.root(&mut hasher), root);
             assert_eq!(db.inactivity_floor_loc, db.oldest_retained_loc().unwrap());
         });
@@ -931,13 +931,13 @@ mod test {
             assert_eq!(db.inactivity_floor_loc, 0);
             assert_eq!(db.log.size().await.unwrap(), 1477);
             assert_eq!(db.oldest_retained_loc().unwrap(), 0); // no pruning yet
-            assert_eq!(db.snapshot.len(), 857);
+            assert_eq!(db.snapshot.keys(), 857);
 
             // Test that commit will raise the activity floor.
             db.commit(&mut hasher).await.unwrap();
             assert_eq!(db.op_count(), 2336);
             assert_eq!(db.oldest_retained_loc().unwrap(), 1478);
-            assert_eq!(db.snapshot.len(), 857);
+            assert_eq!(db.snapshot.keys(), 857);
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
             let root_hash = db.root(&mut hasher);
@@ -946,7 +946,7 @@ mod test {
             assert_eq!(root_hash, db.root(&mut hasher));
             assert_eq!(db.op_count(), 2336);
             assert_eq!(db.inactivity_floor_loc, 1478);
-            assert_eq!(db.snapshot.len(), 857);
+            assert_eq!(db.snapshot.keys(), 857);
 
             // Raise the inactivity floor to the point where all inactive operations can be pruned.
             let mut old_locs = Vec::new();
@@ -959,7 +959,7 @@ mod test {
             // Inactivity floor should be 858 operations from tip since 858 operations are active
             // (counting the floor op itself).
             assert_eq!(db.op_count(), 4478 + 858);
-            assert_eq!(db.snapshot.len(), 857);
+            assert_eq!(db.snapshot.keys(), 857);
 
             // Confirm the db's state matches that of the separate map we computed independently.
             for i in 0u64..1000 {
