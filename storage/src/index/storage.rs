@@ -174,7 +174,6 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
             }
             Phase::EntryDeleted => {
                 // If entry is deleted, we need to update it.
-                self.phase = Phase::Done;
                 self.entry.as_mut().unwrap().get_mut().value = v;
             }
             Phase::Done => {
@@ -196,16 +195,18 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
         match std::mem::replace(&mut self.phase, Phase::Done) {
             Phase::Initial => unreachable!("{MUST_CALL_NEXT}"),
             Phase::Entry => {
-                let next = self.entry.as_mut().unwrap().get_mut().next.take();
-                if let Some(next) = next {
+                // Attempt to overwrite the entry with the next value.
+                if let Some(next) = self.entry.as_mut().unwrap().get_mut().next.take() {
                     self.entry.as_mut().unwrap().get_mut().value = next.value;
                     self.entry.as_mut().unwrap().get_mut().next = next.next;
                     self.phase = Phase::PostDeleteEntry;
-                } else {
-                    self.phase = Phase::EntryDeleted;
                 }
+
+                // If there is no next, we consider the entry deleted.
+                self.phase = Phase::EntryDeleted;
             }
             Phase::Next(mut current) => {
+                // Drop current instead of pushing it to the past list.
                 let next = current.next.take();
                 self.phase = Phase::Stale(next);
             }
