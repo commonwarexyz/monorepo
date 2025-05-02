@@ -39,7 +39,8 @@ enum Phase<V: PartialEq + Eq> {
     Done,
     EntryDeleted,
     PostDeleteEntry,
-    Stale(Option<Box<Record<V>>>),
+    PostDeleteNext(Option<Box<Record<V>>>),
+    PostInsert(Option<Box<Record<V>>>),
 }
 
 fn value<V: PartialEq + Eq>(phase: &Phase<V>) -> Option<&V> {
@@ -47,7 +48,13 @@ fn value<V: PartialEq + Eq>(phase: &Phase<V>) -> Option<&V> {
         Phase::Next(current) => Some(&current.value),
         Phase::Done => None,
         Phase::EntryDeleted => None,
-        Phase::Initial | Phase::Entry | Phase::PostDeleteEntry | Phase::Stale(_) => unreachable!(),
+        Phase::Initial
+        | Phase::Entry
+        | Phase::PostDeleteEntry
+        | Phase::PostDeleteNext(_)
+        | Phase::PostInsert(_) => {
+            unreachable!()
+        }
     }
 }
 
@@ -91,13 +98,14 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
             Phase::Entry => {
                 self.entry.as_mut().unwrap().get_mut().value = v;
             }
-            Phase::Stale(_) => unreachable!("{NO_ACTIVE_ITEM}"),
+            Phase::PostDeleteNext(_) => unreachable!("{NO_ACTIVE_ITEM}"),
             Phase::Next(next) => {
                 next.value = v;
             }
             Phase::Done => unreachable!("{NO_ACTIVE_ITEM}"),
             Phase::EntryDeleted => unreachable!("{NO_ACTIVE_ITEM}"),
             Phase::PostDeleteEntry => unreachable!("{NO_ACTIVE_ITEM}"),
+            Phase::PostInsert(_) => unreachable!("{NO_ACTIVE_ITEM}"),
         }
     }
 
@@ -128,7 +136,7 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                 }
                 value(&self.phase)
             }
-            Phase::Stale(current) => {
+            Phase::PostInsert(current) | Phase::PostDeleteNext(current) => {
                 // If the stale value is some, we set it to be the current record.
                 if current.is_some() {
                     self.phase = Phase::Next(current.unwrap());
@@ -154,7 +162,7 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                 });
 
                 // Set the phase to the new record.
-                self.phase = Phase::Stale(Some(new));
+                self.phase = Phase::PostDeleteNext(Some(new));
                 self.collisions.inc();
             }
             Phase::Next(mut current) => {
@@ -183,7 +191,9 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                 self.past_push(new);
                 self.collisions.inc();
             }
-            Phase::PostDeleteEntry | Phase::Stale(_) => unreachable!("{MUST_CALL_NEXT}"),
+            Phase::PostDeleteEntry | Phase::PostDeleteNext(_) | Phase::PostInsert(_) => {
+                unreachable!("{MUST_CALL_NEXT}")
+            }
         }
     }
 
@@ -206,9 +216,11 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
             Phase::Next(mut current) => {
                 // Drop current instead of pushing it to the past list.
                 let next = current.next.take();
-                self.phase = Phase::Stale(next);
+                self.phase = Phase::PostDeleteNext(next);
             }
-            Phase::PostDeleteEntry | Phase::Stale(_) => unreachable!("{MUST_CALL_NEXT}"),
+            Phase::PostDeleteEntry | Phase::PostDeleteNext(_) | Phase::PostInsert(_) => {
+                unreachable!("{MUST_CALL_NEXT}")
+            }
             Phase::Done | Phase::EntryDeleted => unreachable!("{NO_ACTIVE_ITEM}"),
         }
     }
@@ -234,7 +246,7 @@ where
                 // If there is a next, we should add it to past.
                 self.past_push(current);
             }
-            Phase::Stale(Some(stale)) => {
+            Phase::PostDeleteNext(Some(stale)) => {
                 // If there is a stale record, we should add it to past.
                 self.past_push(stale);
             }
