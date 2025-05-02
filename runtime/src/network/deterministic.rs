@@ -88,6 +88,10 @@ impl crate::Listener for Listener {
             },
         ))
     }
+
+    fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {
+        Ok(self.address)
+    }
 }
 
 type Dialable = mpsc::UnboundedSender<(
