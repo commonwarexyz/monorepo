@@ -184,29 +184,21 @@ mod network_tests {
         assert_eq!(client_received, 123 * 8192);
     }
 
-    // // Test connection errors
-    // fn test_network_connection_errors<R: Runner>(runner: R)
-    // where
-    //     R::Context: crate::Network + Spawner,
-    // {
-    //     runner.start(|context| async move {
-    //         // Test dialing an invalid address
-    //         let invalid_addr = SocketAddr::from(([127, 0, 0, 1], 1));
-    //         let result = context.dial(invalid_addr).await;
-    //         assert!(matches!(result, Err(Error::ConnectionFailed)));
+    // Tests dialing and binding errors
+    async fn test_network_connection_errors<N: crate::Network>(network: N) {
+        // Test dialing an invalid address
+        let invalid_addr = SocketAddr::from(([127, 0, 0, 1], 1));
+        let result = network.dial(invalid_addr).await;
+        assert!(matches!(result, Err(crate::Error::ConnectionFailed)));
 
-    //         // Test binding to an already bound address
-    //         let socket = SocketAddr::from(([127, 0, 0, 1], 0));
-    //         let listener1 = context.bind(socket).await.expect("Failed to bind");
-    //         let bound_addr = listener1
-    //             .local_addr()
-    //             .expect("Failed to get server address");
+        // Test binding to an already bound address
+        let listener_addr = SocketAddr::from(([127, 0, 0, 1], PORT_NUMBER));
+        let _listener = network.bind(listener_addr).await.expect("Failed to bind");
 
-    //         // Try to bind to the same address
-    //         let result = context.bind(bound_addr).await;
-    //         assert!(matches!(result, Err(Error::BindFailed)));
-    //     });
-    // }
+        // Try to bind to the same address
+        let result = network.bind(listener_addr).await;
+        assert!(matches!(result, Err(crate::Error::BindFailed)));
+    }
 
     // // Test timeouts and partial reads/writes
     // fn test_network_timeouts<R: Runner>(runner: R)
@@ -316,11 +308,14 @@ mod network_tests {
         test_network_large_data(network).await;
     }
 
-    // #[test]
-    // fn test_tokio_network_connection_errors() {
-    //     let executor = TokioRunner::default();
-    //     test_network_connection_errors(executor);
-    // }
+    #[tokio::test]
+    async fn test_tokio_network_connection_errors() {
+        let network: super::tokio::Network = super::tokio::Config::default()
+            .with_read_timeout(Duration::from_secs(15))
+            .with_write_timeout(Duration::from_secs(15))
+            .into();
+        test_network_connection_errors(network).await;
+    }
 
     // #[test]
     // fn test_tokio_network_timeouts() {
