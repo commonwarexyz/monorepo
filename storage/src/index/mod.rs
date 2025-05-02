@@ -667,7 +667,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_cursor_delete_last_then_next_panic() {
+    fn test_cursor_delete_last_then_next() {
         let context = deterministic::Context::default();
         let mut index = Index::init(context.clone(), TwoCap);
 
@@ -688,7 +688,76 @@ mod tests {
         // Call next() once, should return None
         assert!(cursor.next().is_none());
 
-        // Call next() again, triggers panic in original code
-        assert!(cursor.next().is_none()); // Panics at unwrap() of None
+        // Call next() again, should keep returning None
+        assert!(cursor.next().is_none());
+    }
+
+    #[test_traced]
+    fn test_delete_in_middle_then_continue() {
+        let ctx = deterministic::Context::default();
+        let mut index = Index::init(ctx, TwoCap);
+
+        index.insert(b"key", 1);
+        index.insert(b"key", 2);
+        index.insert(b"key", 3);
+
+        let mut cur = index.get_mut(b"key").unwrap();
+        assert_eq!(*cur.next().unwrap(), 1); // Entry
+        assert_eq!(*cur.next().unwrap(), 3); // Next
+        cur.delete(); // remove 3
+                      // iterator must yield 2, then None, then keep returning None
+        assert_eq!(*cur.next().unwrap(), 2);
+        assert!(cur.next().is_none());
+        assert!(cur.next().is_none());
+    }
+
+    #[test_traced]
+    fn test_delete_first() {
+        let ctx = deterministic::Context::default();
+        let mut index = Index::init(ctx, TwoCap);
+
+        index.insert(b"key", 1);
+        index.insert(b"key", 2);
+        index.insert(b"key", 3);
+
+        {
+            let mut cur = index.get_mut(b"key").unwrap();
+            assert_eq!(*cur.next().unwrap(), 1); // Entry
+            cur.delete(); // remove 1
+            assert_eq!(*cur.next().unwrap(), 3); // Next
+            assert_eq!(*cur.next().unwrap(), 2);
+            assert!(cur.next().is_none());
+            assert!(cur.next().is_none());
+        }
+
+        // Check that the values are still in the index
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![3, 2]);
+    }
+
+    #[test_traced]
+    fn test_delete_first_and_insert() {
+        let ctx = deterministic::Context::default();
+        let mut index = Index::init(ctx, TwoCap);
+
+        index.insert(b"key", 1);
+        index.insert(b"key", 2);
+        index.insert(b"key", 3);
+
+        {
+            let mut cur = index.get_mut(b"key").unwrap();
+            assert_eq!(*cur.next().unwrap(), 1); // Entry
+            cur.delete(); // remove 1
+            assert_eq!(*cur.next().unwrap(), 3); // Next
+            cur.insert(4); // insert 4
+            assert_eq!(*cur.next().unwrap(), 2);
+            assert!(cur.next().is_none());
+            assert!(cur.next().is_none());
+        }
+
+        // Check that new values are around
+        assert_eq!(
+            index.get(b"key").copied().collect::<Vec<_>>(),
+            vec![3, 2, 4]
+        );
     }
 }

@@ -213,6 +213,10 @@ impl<'a, T: Translator, V> Cursor<'a, T, V> {
 
                 // Set current next to be the new record.
                 self.next = Some(new);
+
+                // Now that the current item is in next, we need to update
+                // the phase.
+                self.phase = Phase::Next;
             }
             Phase::Next => {
                 // Take next
