@@ -31,42 +31,57 @@ struct Record<V: PartialEq + Eq> {
     next: Option<Box<Record<V>>>,
 }
 
+/// Phases of the `Cursor` during iteration.
 #[derive(PartialEq, Eq)]
 enum Phase<V: PartialEq + Eq> {
+    /// Before iteration starts.
     Initial,
+    /// The current entry.
     Entry,
+    /// Some item after the current entry.
     Next(Box<Record<V>>),
+    /// Iteration is done.
     Done,
+    /// The current entry has no valid item.
     EntryDeleted,
+    /// The current entry has been deleted and we've updated its value in-place
+    /// to be the value of the next record.
     PostDeleteEntry,
+    /// The item has been deleted and we may be pointing to the next item.
     PostDeleteNext(Option<Box<Record<V>>>),
+    /// An item has been inserted.
     PostInsert(Box<Record<V>>),
 }
 
-fn value<V: PartialEq + Eq>(phase: &Phase<V>) -> Option<&V> {
-    match phase {
-        Phase::Next(current) => Some(&current.value),
-        Phase::Done => None,
-        Phase::EntryDeleted => None,
-        Phase::Initial
-        | Phase::Entry
-        | Phase::PostDeleteEntry
-        | Phase::PostDeleteNext(_)
-        | Phase::PostInsert(_) => {
-            unreachable!()
-        }
-    }
-}
-
+/// A mutable iterator over the values associated with a translated key, allowing in-place modifications.
+///
+/// The `Cursor` provides a way to traverse and modify the linked list of `Record`s while maintaining its
+/// structure. It supports:
+///
+/// - Iteration via `next()` to access values.
+/// - Modification via `update()` to change the current value.
+/// - Insertion via `insert()` to add new values.
+/// - Deletion via `delete()` to remove values.
+///
+/// # Safety
+///
+/// - Must call `next()` before `update()`, `insert()`, or `delete()` to establish a valid position.
+/// - Once `next()` returns `None`, only `insert()` can be called.
+/// - Dropping the `Cursor` automatically restores the list structure by reattaching any detached `next` nodes.
+///
+/// _If you don't need advanced functionality, just use `insert()`, `insert_and_prune()`, or `remove()` instead._
 pub struct Cursor<'a, T: Translator, V: PartialEq + Eq> {
     phase: Phase<V>,
+
     entry: Option<OccupiedEntry<'a, T::Key, Record<V>>>,
     past: Option<Box<Record<V>>>,
+
     collisions: &'a Counter,
     pruned: &'a Counter,
 }
 
 impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
+    /// Creates a new `Cursor` from a mutable record reference, detaching its `next` chain for iteration.
     fn new(
         entry: OccupiedEntry<'a, T::Key, Record<V>>,
         collisions: &'a Counter,
@@ -74,8 +89,10 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
     ) -> Self {
         Self {
             phase: Phase::Initial,
+
             entry: Some(entry),
             past: None,
+
             collisions,
             pruned,
         }
@@ -92,6 +109,9 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
         }
     }
 
+    /// Updates the value at the current position in the iteration.
+    ///
+    /// Panics if called before `next()` or after iteration is complete (`Status::Done` phase).
     pub fn update(&mut self, v: V) {
         match &mut self.phase {
             Phase::Initial => unreachable!("{MUST_CALL_NEXT}"),
@@ -109,6 +129,31 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
         }
     }
 
+    /// If we are in a phase where we could return a value, return it.
+    fn value(&self) -> Option<&V> {
+        match &self.phase {
+            Phase::Next(current) => Some(&current.value),
+            Phase::Done => None,
+            Phase::EntryDeleted => None,
+            Phase::Initial
+            | Phase::Entry
+            | Phase::PostDeleteEntry
+            | Phase::PostDeleteNext(_)
+            | Phase::PostInsert(_) => {
+                unreachable!()
+            }
+        }
+    }
+
+    /// Advances the cursor to the next value in the chain, returning a reference to it.
+    ///
+    /// This method must be called before any other operations (`insert()`, `delete()`, etc.). If
+    /// either `insert()` or `delete()` is called, `next()` must be called to set a new active
+    /// item. If after `insert()`, the next active item is the item after the inserted item. If after
+    /// `delete()`, the next active item is the item after the deleted item.
+    ///
+    /// Handles transitions between phases and adjusts for deletions. Returns `None` when the list is exhausted.
+    /// It is safe to call `next()` even after it returns `None`.
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<&V> {
         match std::mem::replace(&mut self.phase, Phase::Done) {
@@ -123,7 +168,7 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                 if let Some(next) = next {
                     self.phase = Phase::Next(next);
                 }
-                value(&self.phase)
+                self.value()
             }
             Phase::Next(mut current) | Phase::PostInsert(mut current) => {
                 // Take the next record and push the current one to the past list.
@@ -134,14 +179,14 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                 if let Some(next) = next {
                     self.phase = Phase::Next(next);
                 }
-                value(&self.phase)
+                self.value()
             }
             Phase::PostDeleteNext(current) => {
                 // If the stale value is some, we set it to be the current record.
                 if current.is_some() {
                     self.phase = Phase::Next(current.unwrap());
                 }
-                value(&self.phase)
+                self.value()
             }
             Phase::Done => None,
             Phase::EntryDeleted => {
@@ -151,6 +196,9 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
         }
     }
 
+    /// Inserts a new value at the current position.
+    ///
+    /// Increments the `collisions` counter as this adds to an existing key's chain.
     pub fn insert(&mut self, v: V) {
         match std::mem::replace(&mut self.phase, Phase::Done) {
             Phase::Initial => unreachable!("{MUST_CALL_NEXT}"),
@@ -197,6 +245,9 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
         }
     }
 
+    /// Deletes the current value, adjusting the list structure.
+    ///
+    /// Increments the `pruned` counter to track removals.
     pub fn delete(&mut self) {
         self.pruned.inc();
         match std::mem::replace(&mut self.phase, Phase::Done) {
