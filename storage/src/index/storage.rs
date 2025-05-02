@@ -142,69 +142,68 @@ impl<'a, T: Translator, V> Cursor<'a, T, V> {
     /// It is safe to call `next()` even after it returns `None`.
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<&V> {
+        // Mark that we have called next.
         self.next_required = false;
-        let last_deleted = self.last_deleted;
-        self.last_deleted = false;
+
+        // Early exit if we are done.
+        if self.phase == Phase::Done {
+            return None;
+        }
+
+        // If we just deleted the last item, we should return the current value.
+        if self.last_deleted {
+            self.last_deleted = false;
+            let value = match self.phase {
+                Phase::Entry => self.entry.as_ref().map(|r| &r.get().value),
+                Phase::Next => self.next.as_deref().map(|r| &r.value),
+                _ => None,
+            };
+
+            // If there is no value, we are done.
+            if value.is_none() {
+                self.phase = Phase::Done;
+            }
+            return value;
+        }
+
+        // If we didn't just delete, we need to move to the next item.
         match self.phase {
             Phase::Initial => {
                 // We must start with some entry, so this will always be some non-None value.
                 self.phase = Phase::Entry;
-                return self.entry.as_ref().map(|r| &r.get().value);
+                self.entry.as_ref().map(|r| &r.get().value)
             }
             Phase::Entry => {
-                // If the last operation was a delete, do nothing.
-                if last_deleted {
-                    let value = self.entry.as_ref().map(|r| &r.get().value);
-                    if value.is_none() {
-                        self.phase = Phase::Done;
-                    }
-                    return value;
-                }
-
-                // If there is an entry after, we set it to be the current record.
+                // If there is a record after, we set it to be the current record.
                 let value = self.next.as_deref().map(|r| &r.value);
-                if value.is_none() {
-                    // If there is no next, we are done.
-                    self.phase = Phase::Done;
+                self.phase = if value.is_some() {
+                    // If there is a next, we enter the next phase.
+                    Phase::Next
                 } else {
-                    // If there is a next, we set it to be the current record.
-                    self.phase = Phase::Next;
-                }
-                return value;
+                    // If there is no next, we are done.
+                    Phase::Done
+                };
+                value
             }
             Phase::Next => {
-                // If last deleted, do noting.
-                if last_deleted {
-                    let value = self.next.as_deref().map(|r| &r.value);
-                    if value.is_none() {
-                        self.phase = Phase::Done;
-                    }
-                    return value;
-                }
-
-                // Take ownership of all records.
+                // Remove the current record from the list and push it to past.
                 let mut next = self.next.take().unwrap();
                 let next_next = next.next.take();
-
-                // Add next to the past list.
                 self.past_push(next);
 
-                // Set next to be next's next.
+                // Set next to be the next record of what we just took.
                 self.next = next_next;
-
-                // If we have a next record, return it.
-                let value = self.next.as_deref().map(|r| &r.value);
-                if value.is_none() {
-                    self.phase = Phase::Done;
-                }
-                return value;
+                self.next.as_deref().map(|r| &r.value).map_or_else(
+                    || {
+                        // If there is no next, we are done.
+                        self.phase = Phase::Done;
+                        None
+                    },
+                    Some,
+                )
             }
-            Phase::Done => {
-                // We allow calling next() unnecessarily as inner ops may move us to `Phase::Done` (unbenownst to
-                // the caller).
-            }
+            Phase::Done => unreachable!(),
         }
-        None
     }
 
     /// Inserts a new value at the current position.
