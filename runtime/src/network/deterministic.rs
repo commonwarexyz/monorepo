@@ -34,6 +34,7 @@ impl crate::Stream for Stream {
 
 /// Implementation of [crate::Listener] for a deterministic [Network].
 pub struct Listener {
+    address: SocketAddr,
     listener: mpsc::UnboundedReceiver<(SocketAddr, mocks::Sink, mocks::Stream)>,
 }
 
@@ -44,6 +45,10 @@ impl crate::Listener for Listener {
     async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
         let (socket, sender, receiver) = self.listener.next().await.ok_or(Error::ReadFailed)?;
         Ok((socket, Sink { sender }, Stream { receiver }))
+    }
+
+    fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {
+        Ok(self.address)
     }
 }
 
@@ -95,7 +100,10 @@ impl crate::Network for Network {
         // Bind the socket
         let (sender, receiver) = mpsc::unbounded();
         listeners.insert(socket, sender);
-        Ok(Listener { listener: receiver })
+        Ok(Listener {
+            address: socket,
+            listener: receiver,
+        })
     }
 
     async fn dial(&self, socket: SocketAddr) -> Result<(Sink, Stream), Error> {
