@@ -534,30 +534,12 @@ impl<B: Blob> Buffer<B> {
         let bytes_to_read = std::cmp::min(self.buffer_size, blob_remaining as usize);
 
         // Read the data - we only need a single read operation since we know exactly how much data is available
-        if bytes_to_read < self.buffer_size {
-            // Partial buffer read
-            let read_buffer = &mut self.buffer[0..bytes_to_read];
-            match self.blob.read_at(read_buffer, self.blob_position).await {
-                Ok(()) => {
-                    self.buffer_valid_len = bytes_to_read;
-                    Ok(bytes_to_read)
-                }
-                Err(e) => Err(e),
-            }
-        } else {
-            // Full buffer read
-            match self
-                .blob
-                .read_at(&mut self.buffer, self.blob_position)
-                .await
-            {
-                Ok(()) => {
-                    self.buffer_valid_len = self.buffer_size;
-                    Ok(self.buffer_size)
-                }
-                Err(e) => Err(e),
-            }
-        }
+        self.blob
+            .read_at(&mut self.buffer[..bytes_to_read], self.blob_position)
+            .await?;
+        self.buffer_valid_len = bytes_to_read;
+
+        Ok(bytes_to_read)
     }
 
     /// Reads exactly `size` bytes into the provided buffer.
