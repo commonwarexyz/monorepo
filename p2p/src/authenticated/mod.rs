@@ -96,9 +96,9 @@
 //! use commonware_p2p::{authenticated::{self, Network}, Sender, Recipients};
 //! use commonware_cryptography::{Ed25519, Signer, Verifier};
 //! use commonware_runtime::{tokio, Spawner, Runner, Metrics};
+//! use commonware_utils::NZU32;
 //! use governor::Quota;
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-//! use std::num::NonZeroU32;
 //!
 //! // Configure context
 //! let runtime_cfg = tokio::Config::default();
@@ -156,7 +156,7 @@
 //!     const COMPRESSION_LEVEL: Option<i32> = Some(3);
 //!     let (mut sender, receiver) = network.register(
 //!         0,
-//!         Quota::per_second(NonZeroU32::new(1).unwrap()),
+//!         Quota::per_second(NZU32!(1)),
 //!         MAX_MESSAGE_BACKLOG,
 //!         COMPRESSION_LEVEL,
 //!     );
@@ -209,12 +209,12 @@ mod tests {
     use commonware_runtime::{
         deterministic, tokio, Clock, Metrics, Network as RNetwork, Runner, Spawner,
     };
+    use commonware_utils::NZU32;
     use governor::{clock::ReasonablyRealtime, Quota};
     use rand::{CryptoRng, Rng};
     use std::collections::HashSet;
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
-        num::NonZeroU32,
         time::Duration,
     };
 
@@ -279,7 +279,7 @@ mod tests {
             // Register basic application
             let (mut sender, mut receiver) = network.register(
                 0,
-                Quota::per_second(NonZeroU32::new(5).unwrap()), // Ensure we hit the rate limit
+                Quota::per_second(NZU32!(5)), // Ensure we hit the rate limit
                 DEFAULT_MESSAGE_BACKLOG,
                 None,
             );
@@ -531,7 +531,7 @@ mod tests {
                 // Register basic application
                 let (mut sender, mut receiver) = network.register(
                     0,
-                    Quota::per_second(NonZeroU32::new(10).unwrap()),
+                    Quota::per_second(NZU32!(10)),
                     DEFAULT_MESSAGE_BACKLOG,
                     None,
                 );
@@ -609,7 +609,7 @@ mod tests {
             // Register basic application
             let (mut sender, _) = network.register(
                 0,
-                Quota::per_second(NonZeroU32::new(10).unwrap()),
+                Quota::per_second(NZU32!(10)),
                 DEFAULT_MESSAGE_BACKLOG,
                 compression,
             );

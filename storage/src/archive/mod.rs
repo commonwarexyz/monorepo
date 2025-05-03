@@ -129,6 +129,7 @@
 //!         section_mask: 0xffff_ffff_ffff_0000u64,
 //!         pending_writes: 10,
 //!         replay_concurrency: 4,
+//!         replay_buffer: 4096,
 //!     };
 //!     let mut archive = Archive::init(context, cfg).await.unwrap();
 //!
@@ -189,6 +190,9 @@ pub struct Config<T: Translator, C> {
 
     /// The number of blobs to replay concurrently on initialization.
     pub replay_concurrency: usize,
+
+    /// The buffer size to use when replaying a blob.
+    pub replay_buffer: usize,
 }
 
 #[cfg(test)]
@@ -226,6 +230,7 @@ mod tests {
                 codec_config: (),
                 pending_writes: 10,
                 replay_concurrency: 4,
+                replay_buffer: 4096,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -324,6 +329,7 @@ mod tests {
                 compression: Some(3),
                 pending_writes: 10,
                 replay_concurrency: 4,
+                replay_buffer: 4096,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -350,6 +356,7 @@ mod tests {
                 compression: None,
                 pending_writes: 10,
                 replay_concurrency: 4,
+                replay_buffer: 4096,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let result = Archive::<_, _, FixedBytes<64>, i32>::init(context, cfg.clone()).await;
@@ -373,6 +380,7 @@ mod tests {
                 compression: None,
                 pending_writes: 10,
                 replay_concurrency: 4,
+                replay_buffer: 4096,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -412,6 +420,7 @@ mod tests {
                     compression: None,
                     pending_writes: 10,
                     replay_concurrency: 4,
+                    replay_buffer: 4096,
                     section_mask: DEFAULT_SECTION_MASK,
                 },
             )
@@ -436,6 +445,7 @@ mod tests {
                 compression: None,
                 pending_writes: 10,
                 replay_concurrency: 4,
+                replay_buffer: 4096,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -494,6 +504,7 @@ mod tests {
                 compression: None,
                 pending_writes: 10,
                 replay_concurrency: 4,
+                replay_buffer: 4096,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let archive = Archive::init(context.clone(), cfg.clone())
@@ -537,6 +548,7 @@ mod tests {
                 compression: None,
                 pending_writes: 10,
                 replay_concurrency: 4,
+                replay_buffer: 4096,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -599,6 +611,7 @@ mod tests {
                 compression: None,
                 pending_writes: 10,
                 replay_concurrency: 4,
+                replay_buffer: 4096,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -655,6 +668,7 @@ mod tests {
                 compression: None,
                 pending_writes: 10,
                 replay_concurrency: 4,
+                replay_buffer: 4096,
                 section_mask: 0xffff_ffff_ffff_ffffu64, // no mask
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -740,6 +754,7 @@ mod tests {
                 compression: None,
                 pending_writes: 10,
                 replay_concurrency: 4,
+                replay_buffer: 4096,
                 section_mask,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -797,6 +812,7 @@ mod tests {
                 compression: None,
                 pending_writes: 10,
                 replay_concurrency: 4,
+                replay_buffer: 4096,
                 section_mask,
             };
             let mut archive =
@@ -894,6 +910,7 @@ mod tests {
                 compression: None,
                 pending_writes: 10,
                 replay_concurrency: 4,
+                replay_buffer: 4096,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())

@@ -99,7 +99,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
     /// by replaying the journal.
     pub async fn init(context: E, cfg: Config<T, V::Cfg>) -> Result<Self, Error> {
         // Initialize journal
-        let mut journal = Journal::<E, Record<K, V>>::init(
+        let journal = Journal::<E, Record<K, V>>::init(
             context.with_label("journal"),
             JConfig {
                 partition: cfg.partition,
@@ -115,7 +115,9 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         let mut intervals = RangeInclusiveSet::new();
         {
             debug!("initializing archive");
-            let stream = journal.replay(cfg.replay_concurrency).await?;
+            let stream = journal
+                .replay(cfg.replay_concurrency, cfg.replay_buffer)
+                .await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 // Extract key from record

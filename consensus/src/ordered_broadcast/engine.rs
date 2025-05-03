@@ -140,6 +140,9 @@ pub struct Engine<
     // The number of concurrent operations when replaying journals.
     journal_replay_concurrency: usize,
 
+    // The number of bytes to buffer when replaying a journal.
+    journal_replay_buffer: usize,
+
     // A prefix for the journal names.
     // The rest of the name is the hex-encoded public keys of the relevant sequencer.
     journal_name_prefix: String,
@@ -231,6 +234,7 @@ impl<
             pending_verifies: FuturesPool::default(),
             journal_heights_per_section: cfg.journal_heights_per_section,
             journal_replay_concurrency: cfg.journal_replay_concurrency,
+            journal_replay_buffer: cfg.journal_replay_buffer,
             journal_name_prefix: cfg.journal_name_prefix,
             journal_compression: cfg.journal_compression,
             journals: BTreeMap::new(),
@@ -960,7 +964,7 @@ impl<
             compression: self.journal_compression,
             codec_config: (),
         };
-        let mut journal = Journal::<_, Node<C, D>>::init(self.context.with_label("journal"), cfg)
+        let journal = Journal::<_, Node<C, D>>::init(self.context.with_label("journal"), cfg)
             .await
             .expect("unable to init journal");
 
@@ -970,7 +974,7 @@ impl<
 
             // Prepare the stream
             let stream = journal
-                .replay(self.journal_replay_concurrency)
+                .replay(self.journal_replay_concurrency, self.journal_replay_buffer)
                 .await
                 .expect("unable to replay journal");
             pin_mut!(stream);

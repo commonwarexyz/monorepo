@@ -51,7 +51,7 @@
 use super::Error;
 use bytes::BufMut;
 use commonware_codec::{Codec, DecodeExt, FixedSize};
-use commonware_runtime::{Blob, Error as RError, Metrics, Storage};
+use commonware_runtime::{Blob, Buffer, Error as RError, Metrics, Storage};
 use commonware_utils::hex;
 use futures::stream::{self, Stream, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -344,23 +344,24 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
     /// dramatically speed up the replay process if the underlying storage supports concurrent reads
     /// across different blobs.
     pub async fn replay(
-        &mut self,
+        &self,
         concurrency: usize,
+        buffer: usize,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + '_, Error> {
         assert!(concurrency > 0);
         // Collect all blobs to replay
         let mut blobs = Vec::with_capacity(self.blobs.len());
         let (newest_blob_index, _) = self.newest_blob();
-        for (index, (blob, len)) in self.blobs.iter() {
+        for (index, (blob, size)) in self.blobs.iter() {
             let len = {
                 if index == newest_blob_index {
-                    *len
+                    *size
                 } else {
                     self.cfg.items_per_blob * Self::CHUNK_SIZE_U64
                 }
             };
             if len > 0 {
-                blobs.push((index, blob, len));
+                blobs.push((index, blob.clone(), *size));
             }
         }
 
@@ -368,30 +369,33 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         // much memory with buffered data)
         let items_per_blob = self.cfg.items_per_blob;
         Ok(stream::iter(blobs)
-            .map(move |(index, blob, len)| async move {
+            .map(move |(index, blob, size)| async move {
+                // Create buffered reader
+                let reader = Buffer::new(blob, size, buffer);
+
+                // Read over the blob in chunks of `CHUNK_SIZE` bytes
                 stream::unfold(
-                    (index, blob, 0u64),
-                    move |(index, blob, offset)| async move {
+                    (index, reader, 0u64),
+                    move |(index, mut reader, offset)| async move {
                         // Check if we are at the end of the blob
-                        if offset == len {
+                        if offset >= size {
                             return None;
                         }
-                        // Get next item
+
+                        // Try to read the full item (data + checksum)
                         let mut buf = vec![0u8; Self::CHUNK_SIZE];
-                        let item = blob.read_at(&mut buf, offset).await.map_err(Error::Runtime);
-                        let next_offset = offset + Self::CHUNK_SIZE_U64;
-                        match item {
-                            Ok(_) => match Self::verify_integrity(&buf) {
-                                Ok(item) => Some((
-                                    Ok((
-                                        items_per_blob * *index + offset / Self::CHUNK_SIZE_U64,
-                                        item,
-                                    )),
-                                    (index, blob, next_offset),
-                                )),
-                                Err(err) => Some((Err(err), (index, blob, next_offset))),
-                            },
-                            Err(err) => Some((Err(err), (index, blob, len))),
+                        let item_pos = items_per_blob * *index + offset / Self::CHUNK_SIZE_U64;
+                        match reader.read_exact(&mut buf, Self::CHUNK_SIZE).await {
+                            Ok(()) => {
+                                let next_offset = offset + Self::CHUNK_SIZE_U64;
+                                match Self::verify_integrity(&buf) {
+                                    Ok(item) => {
+                                        Some((Ok((item_pos, item)), (index, reader, next_offset)))
+                                    }
+                                    Err(err) => Some((Err(err), (index, reader, next_offset))),
+                                }
+                            }
+                            Err(err) => Some((Err(Error::Runtime(err)), (index, reader, size))),
                         }
                     },
                 )
@@ -612,7 +616,10 @@ mod tests {
             // will be empty, and there will be no retained items.
             assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
 
-            let stream = journal.replay(1).await.expect("failed to replay journal");
+            let stream = journal
+                .replay(1, 1024)
+                .await
+                .expect("failed to replay journal");
             pin_mut!(stream);
             let mut items = Vec::new();
             while let Some(result) = stream.next().await {
@@ -659,7 +666,10 @@ mod tests {
 
             // Replay should return all items
             {
-                let stream = journal.replay(10).await.expect("failed to replay journal");
+                let stream = journal
+                    .replay(10, 1024)
+                    .await
+                    .expect("failed to replay journal");
                 let mut items = Vec::new();
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
@@ -700,7 +710,7 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
             let err = journal.read(corrupted_item_pos).await.unwrap_err();
@@ -708,7 +718,10 @@ mod tests {
 
             // Replay all items, making sure the checksum mismatch error is handled correctly
             {
-                let stream = journal.replay(10).await.expect("failed to replay journal");
+                let stream = journal
+                    .replay(10, 1024)
+                    .await
+                    .expect("failed to replay journal");
                 let mut items = Vec::new();
                 pin_mut!(stream);
                 let mut error_count = 0;
@@ -746,7 +759,7 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
             let err = journal.read(corrupted_item_pos).await.unwrap_err();
@@ -754,7 +767,10 @@ mod tests {
 
             // Replay all items, making sure the partial read error is handled correctly
             {
-                let stream = journal.replay(10).await.expect("failed to replay journal");
+                let stream = journal
+                    .replay(10, 1024)
+                    .await
+                    .expect("failed to replay journal");
                 let mut items = Vec::new();
                 pin_mut!(stream);
                 let mut error_count = 0;

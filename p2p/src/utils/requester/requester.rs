@@ -259,8 +259,8 @@ mod tests {
     use commonware_cryptography::{Ed25519, Signer};
     use commonware_runtime::deterministic;
     use commonware_runtime::Runner;
+    use commonware_utils::NZU32;
     use governor::Quota;
-    use std::num::NonZeroU32;
     use std::time::Duration;
 
     #[test]
@@ -274,7 +274,7 @@ mod tests {
             let timeout = Duration::from_secs(5);
             let config = Config {
                 public_key: scheme.public_key(),
-                rate_limit: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                rate_limit: Quota::per_second(NZU32!(1)),
                 initial: Duration::from_millis(100),
                 timeout,
             };
@@ -382,7 +382,7 @@ mod tests {
             let timeout = Duration::from_secs(5);
             let config = Config {
                 public_key: scheme.public_key(),
-                rate_limit: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                rate_limit: Quota::per_second(NZU32!(1)),
                 initial: Duration::from_millis(100),
                 timeout,
             };
