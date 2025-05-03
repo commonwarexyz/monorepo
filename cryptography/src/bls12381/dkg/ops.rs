@@ -2,7 +2,11 @@
 
 use crate::bls12381::{
     dkg::Error,
-    primitives::{group::Share, lagrange::{compute_lagrange_weights, PolyOps}, poly},
+    primitives::{
+        group::Share,
+        lagrange::{compute_weights, Interpolation},
+        poly,
+    },
 };
 use rand::RngCore;
 use rayon::{prelude::*, ThreadPoolBuilder};
@@ -96,8 +100,6 @@ pub fn construct_public(
     Ok(public)
 }
 
-
-
 /// Recover public polynomial by interpolating coefficient-wise all
 /// polynomials using precomputed Lagrange weights.
 ///
@@ -114,11 +116,11 @@ pub fn recover_public(
         return Err(Error::InsufficientDealings);
     }
 
-    // Extract dealer indices 
+    // Extract dealer indices
     let dealer_indices: Vec<u32> = commitments.keys().cloned().collect();
-    
+
     // Precompute Lagrange weights once for all coefficients
-    let weights = compute_lagrange_weights(&dealer_indices, required)
+    let weights = compute_weights(&dealer_indices, required)
         .map_err(|_| Error::PublicKeyInterpolationFailed)?;
 
     // Construct pool to perform interpolation
@@ -140,7 +142,7 @@ pub fn recover_public(
                         value: commitment.get(coeff),
                     })
                     .collect::<Vec<_>>();
-                
+
                 // Use precomputed weights for interpolation
                 match poly::Public::recover_with_weights(&evals, &weights) {
                     Ok(point) => Ok(point),
