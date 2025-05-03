@@ -268,6 +268,18 @@ where
     poly::Signature::recover(threshold, partials)
 }
 
+/// Recovers multiple signatures from multiple sets of at least `threshold`
+/// partial signatures.
+///
+/// # Determinism
+///
+/// Signatures recovered by this function are deterministic and are safe
+/// to use in a consensus-critical context.
+///
+/// # Warning
+///
+/// This function assumes that each partial signature is unique and that
+/// each set of partial signatures has the same indices.
 pub fn threshold_signature_recover_multiple<'a, I>(
     threshold: u32,
     mut many_evals: Vec<I>,
@@ -314,6 +326,9 @@ where
     Ok(signatures)
 }
 
+/// Recovers a pair of signatures from two sets of at least `threshold` partial signatures.
+///
+/// This is just a wrapper around `threshold_signature_recover_multiple`.
 pub fn threshold_signature_recover_pair<'a, I>(
     threshold: u32,
     first: I,
