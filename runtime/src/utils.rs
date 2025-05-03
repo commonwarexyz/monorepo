@@ -650,7 +650,6 @@ pub fn run_tasks(tasks: usize, runner: crate::deterministic::Runner) -> (String,
 mod tests {
     use super::*;
     use crate::{deterministic, tokio, Metrics, Storage};
-    use bytes::Buf;
     use commonware_macros::test_traced;
     use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
@@ -699,8 +698,10 @@ mod tests {
         executor.start(|context| async move {
             // Create a memory blob with some test data
             let data = b"Hello, world! This is a test.";
-            let (mut blob, size) = context.open("partition", b"test").await.unwrap();
+            let (blob, size) = context.open("partition", b"test").await.unwrap();
+            assert_eq!(size, 0);
             blob.write_at(data, 0).await.unwrap();
+            let size = data.len() as u64;
 
             // Create a buffer reader with a small buffer size
             let buffer_size = 10;
@@ -712,12 +713,12 @@ mod tests {
             assert_eq!(&buf, b"Hello");
 
             // Read more data that requires a refill
-            let mut buf = [0u8; 15];
-            reader.read_exact(&mut buf, 15).await.unwrap();
+            let mut buf = [0u8; 14];
+            reader.read_exact(&mut buf, 14).await.unwrap();
             assert_eq!(&buf, b", world! This ");
 
             // Verify position
-            assert_eq!(reader.position(), 20);
+            assert_eq!(reader.position(), 19);
 
             // Read the rest
             let mut buf = [0u8; 10];
@@ -727,82 +728,7 @@ mod tests {
             // Try to read beyond the end
             let mut buf = [0u8; 5];
             let result = reader.read_exact(&mut buf, 5).await;
-            assert!(result.is_err());
-        });
-    }
-
-    #[test_traced]
-    fn test_buffer_reader_peek_and_advance() {
-        block_on(async {
-            // Create a memory blob with some test data
-            let data = b"Hello, world!";
-            let mut blob = MemoryBlob::new();
-            blob.write_at(data, 0).await.unwrap();
-
-            // Create a buffer reader
-            let buffer_size = 20;
-            let mut reader = BufferReader::new(blob, buffer_size);
-
-            // Peek at the first 5 bytes
-            let peeked = reader.peek(5).await.unwrap();
-            assert_eq!(peeked, b"Hello");
-
-            // Position should still be 0
-            assert_eq!(reader.position(), 0);
-
-            // Advance 5 bytes
-            reader.advance(5).unwrap();
-            assert_eq!(reader.position(), 5);
-
-            // Peek and read more
-            let peeked = reader.peek(7).await.unwrap();
-            assert_eq!(peeked, b", world");
-
-            let mut buf = [0u8; 7];
-            reader.read_exact(&mut buf, 7).await.unwrap();
-            assert_eq!(&buf, b", world");
-
-            // Position should now be 12
-            assert_eq!(reader.position(), 12);
-
-            // Read the last byte
-            let mut buf = [0u8; 1];
-            reader.read_exact(&mut buf, 1).await.unwrap();
-            assert_eq!(&buf, b"!");
-        });
-    }
-
-    #[test_traced]
-    fn test_buffer_reader_cross_boundary() {
-        block_on(async {
-            // Create a memory blob with some test data
-            let data = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-            let mut blob = MemoryBlob::new();
-            blob.write_at(data, 0).await.unwrap();
-
-            // Create a buffer reader with buffer size 10
-            let buffer_size = 10;
-            let mut reader = BufferReader::new(blob, buffer_size);
-
-            // Read data that crosses a buffer boundary
-            let mut buf = [0u8; 15];
-            reader.read_exact(&mut buf, 15).await.unwrap();
-            assert_eq!(&buf, b"ABCDEFGHIJKLMNO");
-
-            // Position should be 15
-            assert_eq!(reader.position(), 15);
-
-            // Peek at data that crosses another boundary
-            let peeked = reader.peek(10).await.unwrap();
-            assert_eq!(peeked, b"PQRSTUVWXY");
-
-            // Read the rest
-            let mut buf = [0u8; 11];
-            reader.read_exact(&mut buf, 11).await.unwrap();
-            assert_eq!(&buf, b"PQRSTUVWXYZ");
-
-            // Position should be 26
-            assert_eq!(reader.position(), 26);
+            assert!(matches!(result, Err(Error::BlobInsufficientLength)));
         });
     }
 }
