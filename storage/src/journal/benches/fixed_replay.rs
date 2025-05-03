@@ -60,7 +60,7 @@ fn bench_fixed_replay(c: &mut Criterion) {
 
         // Run the benchmarks
         let runner = tokio::Runner::new(cfg.clone());
-        for lookahead in [0, 1_024, 4_096, 16_384, 32_768, 65_536, 131_072, 262_144] {
+        for lookahead in [0, 16_384, 65_536, 262_144, 1_048_576] {
             c.bench_function(
                 &format!("{}/items={} size={}", module_path!(), items, ITEM_SIZE),
                 |b| {

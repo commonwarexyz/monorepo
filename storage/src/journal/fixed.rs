@@ -373,7 +373,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                 // Create buffered reader
                 let reader = Buffer::new(blob, size, lookahead);
 
-                // Read over the blob in chunks of `CHUNK_SIZE` bytes.
+                // Read over the blob in chunks of `CHUNK_SIZE` bytes
                 stream::unfold(
                     (index, reader, 0u64),
                     move |(index, mut reader, offset)| async move {

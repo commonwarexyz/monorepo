@@ -427,17 +427,17 @@ impl<T> RwLock<T> {
 /// of a full scan of contents.
 pub struct Buffer<B: Blob> {
     /// The underlying blob to read from.
-    blob: B,
+    pub blob: B,
     /// The buffer storing the data read from the blob.
     buffer: Vec<u8>,
     /// The current position in the blob from where the buffer was filled.
-    blob_position: u64,
+    pub blob_position: u64,
     /// The size of the blob.
     blob_size: u64,
     /// The current position within the buffer for reading.
-    buffer_position: usize,
+    pub buffer_position: usize,
     /// The valid data length in the buffer.
-    buffer_valid_len: usize,
+    pub buffer_valid_len: usize,
     /// The maximum size of the buffer.
     buffer_size: usize,
 }
