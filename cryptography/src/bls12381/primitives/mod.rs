@@ -63,6 +63,4 @@ pub enum Error {
     DuplicateEval,
     #[error("Invalid Index")]
     InvalidIndex,
-    #[error("recovered polynomial constant does not match original constant")]
-    ReshareMismatch,
 }
