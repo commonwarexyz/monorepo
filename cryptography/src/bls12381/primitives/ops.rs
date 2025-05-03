@@ -326,7 +326,7 @@ where
         .iter()
         .map(|e| e.index)
         .collect::<Vec<_>>();
-    let weights = compute_weights(indices).map_err(|_| Error::PublicKeyInterpolationFailed)?;
+    let weights = compute_weights(indices).map_err(|_| Error::InvalidIndex)?;
 
     // Recover signatures
     let mut signatures = Vec::with_capacity(prepared_evals.len());

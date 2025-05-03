@@ -63,8 +63,6 @@ pub enum Error {
     DuplicateEval,
     #[error("Invalid Index")]
     InvalidIndex,
-    #[error("reshared commitment does not match original constant term")]
+    #[error("recovered polynomial constant does not match original constant")]
     ReshareMismatch,
-    #[error("failed to interpolate public key")]
-    PublicKeyInterpolationFailed,
 }
