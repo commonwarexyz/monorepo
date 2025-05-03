@@ -35,6 +35,7 @@ pub struct Config<
     pub activity_timeout: View,
     pub skip_timeout: View,
     pub replay_concurrency: usize,
+    pub replay_lookahead: usize,
 }
 
 #[cfg(test)]
@@ -131,6 +132,7 @@ mod tests {
                 activity_timeout: 10,
                 skip_timeout: 10,
                 replay_concurrency: 1,
+                replay_lookahead: 1024 * 1024,
             };
             let (actor, mut mailbox) = Actor::new(context.clone(), cfg);
 
