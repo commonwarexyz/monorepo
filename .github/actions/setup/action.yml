@@ -3,7 +3,7 @@ runs:
   using: 'composite'
   steps:
     - name: Run sccache-cache
-      uses: mozilla-actions/sccache-action@v0.0.8
+      uses: mozilla-actions/sccache-action@v0.0.9
     - name: Configure sccache
       shell: bash
       run: |
