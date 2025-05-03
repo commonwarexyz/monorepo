@@ -96,9 +96,9 @@
 //! use commonware_p2p::{authenticated::{self, Network}, Sender, Recipients};
 //! use commonware_cryptography::{Ed25519, Signer, Verifier};
 //! use commonware_runtime::{tokio, Spawner, Runner, Metrics};
+//! use commonware_utils::NZU32;
 //! use governor::Quota;
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-//! use std::num::NonZeroU32;
 //!
 //! // Configure context
 //! let runtime_cfg = tokio::Config::default();
