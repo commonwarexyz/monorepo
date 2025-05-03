@@ -1,8 +1,4 @@
 name: 'Setup'
-inputs:
-  rust-version:
-    description: 'The version of Rust to use in cache keys'
-    required: true
 runs:
   using: 'composite'
   steps:
