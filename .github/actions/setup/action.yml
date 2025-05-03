@@ -9,6 +9,7 @@ runs:
       run: |
         echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
         echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+        echo "SCCACHE_CACHE_SIZE=6G"
     - name: Cache cargo registry
       uses: actions/cache@v4
       with:
@@ -23,4 +24,4 @@ runs:
       shell: bash
       run: |
         cargo install --locked cargo-cache >/dev/null 2>&1 || true
-        cargo cache --autoclean 3G
+        cargo cache --autoclean --limit 3G
