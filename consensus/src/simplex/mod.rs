@@ -139,14 +139,13 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
-    use commonware_utils::{quorum, Array};
+    use commonware_utils::{quorum, Array, NZU32};
     use engine::Engine;
     use futures::{future::join_all, StreamExt};
     use governor::Quota;
     use rand::Rng as _;
     use std::{
         collections::{BTreeMap, HashMap},
-        num::NonZeroU32,
         sync::{Arc, Mutex},
         time::Duration,
     };
@@ -321,7 +320,7 @@ mod tests {
                     skip_timeout,
                     max_fetch_count: 1,
                     max_participants: n as usize,
-                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
@@ -565,7 +564,7 @@ mod tests {
                         skip_timeout,
                         max_participants: n as usize,
                         max_fetch_count: 1,
-                        fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                        fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
                         replay_concurrency: 1,
                         replay_buffer: 1024 * 1024,
@@ -733,7 +732,7 @@ mod tests {
                     skip_timeout,
                     max_fetch_count: 1, // force many fetches
                     max_participants: n as usize,
-                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
@@ -851,7 +850,7 @@ mod tests {
                 skip_timeout,
                 max_fetch_count: 1,
                 max_participants: n as usize,
-                fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                 fetch_concurrent: 1,
                 replay_concurrency: 1,
                 replay_buffer: 1024 * 1024,
@@ -972,7 +971,7 @@ mod tests {
                     skip_timeout,
                     max_participants: n as usize,
                     max_fetch_count: 1,
-                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
@@ -1167,7 +1166,7 @@ mod tests {
                     skip_timeout,
                     max_fetch_count: 1,
                     max_participants: n as usize,
-                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
@@ -1324,7 +1323,7 @@ mod tests {
                     skip_timeout,
                     max_fetch_count: 1,
                     max_participants: n as usize,
-                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
@@ -1474,7 +1473,7 @@ mod tests {
                     skip_timeout,
                     max_fetch_count: 1,
                     max_participants: n as usize,
-                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
@@ -1652,7 +1651,7 @@ mod tests {
                     skip_timeout,
                     max_fetch_count: 1,
                     max_participants: n as usize,
-                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
@@ -1818,7 +1817,7 @@ mod tests {
                         skip_timeout,
                         max_fetch_count: 1,
                         max_participants: n as usize,
-                        fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                        fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
                         replay_concurrency: 1,
                         replay_buffer: 1024 * 1024,
@@ -1985,7 +1984,7 @@ mod tests {
                         skip_timeout,
                         max_fetch_count: 1,
                         max_participants: n as usize,
-                        fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                        fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
                         replay_concurrency: 1,
                         replay_buffer: 1024 * 1024,
@@ -2148,7 +2147,7 @@ mod tests {
                         skip_timeout,
                         max_fetch_count: 1,
                         max_participants: n as usize,
-                        fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                        fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
                         replay_concurrency: 1,
                         replay_buffer: 1024 * 1024,
@@ -2283,7 +2282,7 @@ mod tests {
                     skip_timeout,
                     max_fetch_count: 1,
                     max_participants: n as usize,
-                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
