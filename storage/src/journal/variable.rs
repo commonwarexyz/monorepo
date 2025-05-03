@@ -138,66 +138,6 @@ fn compute_next_offset(mut offset: u64) -> Result<u32, Error> {
     Ok(aligned_offset)
 }
 
-/// Helper function to read an item from a buffered reader
-async fn read_item_buffered<V: Codec>(
-    reader: &mut Buffer<impl Blob>,
-    offset: u32,
-    cfg: &V::Cfg,
-    compressed: bool,
-) -> Result<(u32, u32, V), Error> {
-    // Calculate absolute file offset from the item offset
-    let file_offset = offset as u64 * ITEM_ALIGNMENT;
-
-    // If we're not at the right position, seek to it
-    if reader.position() != file_offset {
-        reader.seek_to(file_offset).map_err(Error::Runtime)?;
-        // Refill the buffer at the new position
-        reader.refill().await.map_err(Error::Runtime)?;
-    }
-
-    // Read item size (4 bytes)
-    let mut size_buf = [0u8; 4];
-    reader
-        .read_exact(&mut size_buf, 4)
-        .await
-        .map_err(Error::Runtime)?;
-    let size = u32::from_be_bytes(size_buf);
-
-    // Read item
-    let mut item = vec![0u8; size as usize];
-    reader
-        .read_exact(&mut item, size as usize)
-        .await
-        .map_err(Error::Runtime)?;
-
-    // Read checksum
-    let mut checksum_buf = [0u8; 4];
-    reader
-        .read_exact(&mut checksum_buf, 4)
-        .await
-        .map_err(Error::Runtime)?;
-    let stored_checksum = u32::from_be_bytes(checksum_buf);
-    let checksum = crc32fast::hash(&item);
-    if checksum != stored_checksum {
-        return Err(Error::ChecksumMismatch(stored_checksum, checksum));
-    }
-
-    // Calculate next offset
-    let current_pos = reader.position();
-    let aligned_offset = compute_next_offset(current_pos)?;
-
-    // If compression is enabled, decompress the item
-    let item = if compressed {
-        zstd::bulk::decompress(&item, u32::MAX as usize).map_err(|_| Error::DecompressionFailed)?
-    } else {
-        item
-    };
-
-    // Return item
-    let item = V::decode_cfg(item.as_ref(), cfg).map_err(Error::Codec)?;
-    Ok((aligned_offset, size, item))
-}
-
 /// Implementation of `Journal` storage.
 pub struct Journal<E: Storage + Metrics, V: Codec> {
     context: E,
@@ -320,6 +260,67 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         Ok((aligned_offset, size, item))
     }
 
+    /// Helper function to read an item from a [Buffer].
+    async fn read_buffered(
+        reader: &mut Buffer<E::Blob>,
+        offset: u32,
+        cfg: &V::Cfg,
+        compressed: bool,
+    ) -> Result<(u32, u32, V), Error> {
+        // Calculate absolute file offset from the item offset
+        let file_offset = offset as u64 * ITEM_ALIGNMENT;
+
+        // If we're not at the right position, seek to it
+        if reader.position() != file_offset {
+            reader.seek_to(file_offset).map_err(Error::Runtime)?;
+            // Refill the buffer at the new position
+            reader.refill().await.map_err(Error::Runtime)?;
+        }
+
+        // Read item size (4 bytes)
+        let mut size_buf = [0u8; 4];
+        reader
+            .read_exact(&mut size_buf, 4)
+            .await
+            .map_err(Error::Runtime)?;
+        let size = u32::from_be_bytes(size_buf);
+
+        // Read item
+        let mut item = vec![0u8; size as usize];
+        reader
+            .read_exact(&mut item, size as usize)
+            .await
+            .map_err(Error::Runtime)?;
+
+        // Read checksum
+        let mut checksum_buf = [0u8; 4];
+        reader
+            .read_exact(&mut checksum_buf, 4)
+            .await
+            .map_err(Error::Runtime)?;
+        let stored_checksum = u32::from_be_bytes(checksum_buf);
+        let checksum = crc32fast::hash(&item);
+        if checksum != stored_checksum {
+            return Err(Error::ChecksumMismatch(stored_checksum, checksum));
+        }
+
+        // Calculate next offset
+        let current_pos = reader.position();
+        let aligned_offset = compute_next_offset(current_pos)?;
+
+        // If compression is enabled, decompress the item
+        let item = if compressed {
+            zstd::bulk::decompress(&item, u32::MAX as usize)
+                .map_err(|_| Error::DecompressionFailed)?
+        } else {
+            item
+        };
+
+        // Return item
+        let item = V::decode_cfg(item.as_ref(), cfg).map_err(Error::Codec)?;
+        Ok((aligned_offset, size, item))
+    }
+
     /// Reads an item from the blob at the given offset and of a given size.
     async fn read_exact(
         compressed: bool,
@@ -414,26 +415,15 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                             }
 
                             // Read an item from the buffer
-                            match read_item_buffered(&mut reader, offset, &codec_config, compressed)
-                                .await
+                            match Self::read_buffered(
+                                &mut reader,
+                                offset,
+                                &codec_config,
+                                compressed,
+                            )
+                            .await
                             {
                                 Ok((next_offset, size, item)) => {
-                                    // Ensure next offset doesn't exceed the blob size
-                                    if next_offset > aligned_len {
-                                        return Some((
-                                            Err(Error::Runtime(
-                                                commonware_runtime::Error::BlobInsufficientLength,
-                                            )),
-                                            (
-                                                section,
-                                                reader,
-                                                aligned_len,
-                                                codec_config,
-                                                compressed,
-                                            ),
-                                        ));
-                                    }
-
                                     trace!(
                                         blob = section,
                                         cursor = offset,
@@ -459,9 +449,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                         (section, reader, aligned_len, codec_config, compressed),
                                     ))
                                 }
-                                Err(Error::Runtime(
-                                    commonware_runtime::Error::BlobInsufficientLength,
-                                )) => {
+                                Err(Error::Runtime(RError::BlobInsufficientLength)) => {
                                     // If we encounter trailing bytes, we prune to the last
                                     // valid item. This can happen during an unclean file close (where
                                     // pending data is not fully synced to disk).
