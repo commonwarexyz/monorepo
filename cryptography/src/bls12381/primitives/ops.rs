@@ -9,14 +9,14 @@
 
 use super::{
     group::{self, equal, Element, Point, Share, DST, MESSAGE, PROOF_OF_POSSESSION},
-    poly::{self, Eval, PartialSignature},
+    poly::{self, Eval, PartialSignature, Weight},
     Error,
 };
 use commonware_codec::Encode;
 use commonware_utils::union_unique;
 use rand::RngCore;
 use rayon::{prelude::*, ThreadPoolBuilder};
-use std::borrow::Cow;
+use std::{borrow::Cow, collections::BTreeMap};
 
 /// Returns a new keypair derived from the provided randomness.
 pub fn keypair<R: RngCore>(rng: &mut R) -> (group::Private, group::Public) {
@@ -234,6 +234,13 @@ where
         return Err(Error::InvalidSignature);
     }
     Ok(())
+}
+
+pub fn threshold_signature_recover_with_weights<'a, I>(
+    weights: &BTreeMap<u32, Weight>,
+    partials: I,
+) {
+    poly::Signature::recover_with_weights(weights, partials)
 }
 
 /// Recovers a signature from at least `threshold` partial signatures.

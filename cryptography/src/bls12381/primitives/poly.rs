@@ -15,7 +15,7 @@ use commonware_codec::{
     varint::UInt, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
 };
 use rand::{rngs::OsRng, RngCore};
-use std::hash::Hash;
+use std::{collections::BTreeMap, hash::Hash};
 
 /// Private polynomials are used to generate secret shares.
 pub type Private = Poly<group::Private>;
@@ -89,6 +89,76 @@ pub fn new_from<R: RngCore>(degree: u32, rng: &mut R) -> Poly<Scalar> {
     // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L46-L52
     let coeffs = (0..=degree).map(|_| Scalar::rand(rng)).collect::<Vec<_>>();
     Poly::<Scalar>(coeffs)
+}
+
+/// A Barycentric Weight for interpolation at x=0.
+pub struct Weight(Scalar);
+
+/// Computes Barycentric Weights for a given set of indices.
+///
+/// These weights can be reused for multiple interpolations with the same set of points.
+///
+/// # Arguments
+/// * `indices` - The indices of the points used for interpolation (x = index + 1)
+/// * `required` - The threshold number of points required for interpolation
+///
+/// # Returns
+/// * `Result<BTreeMap<u32, Weight>, Error>` - Map of index to its corresponding weight
+pub fn compute_weights(indices: &[u32], required: u32) -> Result<BTreeMap<u32, Weight>, Error> {
+    // Ensure we have enough indices for interpolation.
+    if indices.len() < required as usize {
+        return Err(Error::NotEnoughPartialSignatures(
+            required as usize,
+            indices.len(),
+        ));
+    }
+
+    // Sort indices (just as in the original recover function)
+    let mut sorted_indices = indices.to_vec();
+    sorted_indices.sort();
+    let sorted_indices = sorted_indices
+        .into_iter()
+        .take(required as usize)
+        .collect::<Vec<_>>();
+    let mut weights = BTreeMap::new();
+
+    // For each index, compute its Lagrange basis polynomial evaluated at x=0
+    for &index in &sorted_indices {
+        // Convert index to x-coordinate (x = index + 1)
+        let mut xi = Scalar::zero();
+        xi.set_int(index + 1);
+
+        // Initialize numerator and denominator for Lagrange coefficient
+        let (mut num, mut den) = (Scalar::one(), Scalar::one());
+
+        // Compute product terms for Lagrange basis polynomial
+        for &j_index in &sorted_indices {
+            if index != j_index {
+                // Convert j_index to x-coordinate (x = j_index + 1)
+                let mut xj = Scalar::zero();
+                xj.set_int(j_index + 1);
+
+                // Numerator: product of all xj (since we're evaluating at x=0)
+                num.mul(&xj);
+
+                // Denominator: product of all (xj - xi)
+                let mut diff = xj;
+                diff.sub(&xi);
+                den.mul(&diff);
+            }
+        }
+
+        // Compute inverse of denominator
+        let inv = den.inverse().ok_or(Error::NoInverse)?;
+
+        // Compute weight: numerator * inverse of denominator
+        num.mul(&inv);
+
+        // Store the weight
+        weights.insert(index, Weight(num));
+    }
+
+    Ok(weights)
 }
 
 impl<C> Poly<C> {
@@ -189,11 +259,63 @@ impl<C: Element> Poly<C> {
         }
     }
 
-    /// Recovers the constant term of a polynomial of degree less than `t` using at least `t` evaluations of the polynomial.
+    /// Recovers the constant term of a polynomial of degree less than `t` using `t` evaluations of the polynomial
+    /// and precomputed Barycentric Weights.
     ///
     /// This function uses Lagrange interpolation to compute the constant term (i.e., the value of the polynomial at `x=0`)
     /// given at least `t` distinct evaluations of the polynomial. Each evaluation is assumed to have a unique index,
     /// which is mapped to a unique x-value as `x = index + 1`.
+    ///
+    /// # References
+    ///
+    /// This implementation is based on [J.-P. Berrut and L. N.
+    /// Trefethen, “Barycentric Lagrange Interpolation,” SIAM Rev., vol. 46, no. 3,
+    /// pp. 501–517, 2004](https://people.maths.ox.ac.uk/trefethen/barycentric.pdf).
+    ///
+    /// # Warning
+    ///
+    /// This function assumes that each evaluation has a unique index. If there are duplicate indices, the function may
+    /// fail with an error when attempting to compute the inverse of zero.
+    pub fn recover_with_weights(
+        weights: &BTreeMap<u32, Weight>,
+        evals: Vec<Eval<C>>,
+    ) -> Result<C, Error> {
+        assert_eq!(
+            evals.len(),
+            weights.len(),
+            "number of evaluations must match number of weights"
+        );
+
+        // Combine the evaluation points using the precomputed weights
+        let mut result = C::zero();
+        for eval in evals {
+            if let Some(weight) = weights.get(&eval.index) {
+                // Scale the y-value by the precomputed weight
+                let mut scaled_value = eval.value;
+                scaled_value.mul(&weight.0);
+
+                // Add to the result
+                result.add(&scaled_value);
+            } else {
+                return Err(Error::InvalidIndex);
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Recovers the constant term of a polynomial of degree less than `t` using at least `t` evaluations of
+    /// the polynomial.
+    ///
+    /// This function uses Lagrange interpolation to compute the constant term (i.e., the value of the polynomial at `x=0`)
+    /// given at least `t` distinct evaluations of the polynomial. Each evaluation is assumed to have a unique index,
+    /// which is mapped to a unique x-value as `x = index + 1`.
+    ///
+    /// # References
+    ///
+    /// This implementation is based on [J.-P. Berrut and L. N.
+    /// Trefethen, “Barycentric Lagrange Interpolation,” SIAM Rev., vol. 46, no. 3,
+    /// pp. 501–517, 2004](https://people.maths.ox.ac.uk/trefethen/barycentric.pdf).
     ///
     /// # Warning
     ///
@@ -204,11 +326,9 @@ impl<C: Element> Poly<C> {
         C: 'a,
         I: IntoIterator<Item = &'a Eval<C>>,
     {
-        // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L131-L165
-
         // Check if we have at least `t` evaluations; if not, return an error
         let t = t as usize;
-        let mut evals = evals.into_iter().collect::<Vec<_>>();
+        let mut evals = evals.into_iter().cloned().collect::<Vec<_>>();
         if evals.len() < t {
             return Err(Error::NotEnoughPartialSignatures(t, evals.len()));
         }
@@ -219,53 +339,12 @@ impl<C: Element> Poly<C> {
         // `recover` select the same evals.
         evals.sort_by_key(|e| e.index);
 
-        // Take the first `t` evaluations and prepare them for interpolation
-        //
-        // Each index `i` is mapped to `x = i + 1` to avoid `x=0` (the constant term we’re recovering).
-        let xs = evals
-            .into_iter()
-            .take(t)
-            .fold(Vec::with_capacity(t), |mut m, sh| {
-                let mut xi = Scalar::zero();
-                xi.set_int(sh.index + 1);
-                m.push((sh.index, (xi, &sh.value)));
-                m
-            });
+        // Generate weights
+        let weights =
+            compute_weights(&evals.iter().map(|e| e.index).collect::<Vec<_>>(), t as u32)?;
 
-        // Use Lagrange interpolation to compute the constant term at `x=0`
-        //
-        // The constant term is `sum_{i=1 to t} yi * l_i(0)`, where `l_i(0) = product_{j != i} (xj / (xj - xi))`.
-        xs.iter().try_fold(C::zero(), |mut acc, (i, (xi, yi))| {
-            let (mut num, den) = xs.iter().fold(
-                (Scalar::one(), Scalar::one()),
-                |(mut num, mut den), (j, (xj, _))| {
-                    if i != j {
-                        // Include `xj` in the numerator product for `l_i(0)`
-                        num.mul(xj);
-
-                        // Compute `xj - xi` and include it in the denominator product
-                        let mut tmp = xj.clone();
-                        tmp.sub(xi);
-                        den.mul(&tmp);
-                    }
-                    (num, den)
-                },
-            );
-
-            // Compute the inverse of the denominator product; fails if den is zero (e.g., duplicate `xj`)
-            let inv = den.inverse().ok_or(Error::NoInverse)?;
-
-            // Compute `l_i(0) = num * inv`, the Lagrange basis coefficient at `x=0`
-            num.mul(&inv);
-
-            // Scale `yi` by `l_i(0)` to contribute to the constant term
-            let mut yi_scaled = (*yi).clone();
-            yi_scaled.mul(&num);
-
-            // Add `yi * l_i(0)` to the running sum
-            acc.add(&yi_scaled);
-            Ok(acc)
-        })
+        // Perform interpolation using the precomputed weights
+        Self::recover_with_weights(&weights, evals)
     }
 }
 
