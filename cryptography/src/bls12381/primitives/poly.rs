@@ -287,27 +287,20 @@ impl<C: Element> Poly<C> {
         C: 'a,
         I: IntoIterator<Item = &'a Eval<C>>,
     {
-        // Check if we have the same number of evaluations and weights.
-        let evals = evals.into_iter().cloned().collect::<Vec<_>>();
-        assert_eq!(
-            evals.len(),
-            weights.len(),
-            "number of evaluations must match number of weights"
-        );
-
-        // Combine the evaluation points using the precomputed weights
+        // Scale all evaluations by their corresponding weight
         let mut result = C::zero();
-        for eval in evals {
-            if let Some(weight) = weights.get(&eval.index) {
-                // Scale the y-value by the precomputed weight
-                let mut scaled_value = eval.value;
-                scaled_value.mul(&weight.0);
-
-                // Add to the result
-                result.add(&scaled_value);
-            } else {
+        for eval in evals.into_iter() {
+            // Get the weight for the current evaluation index
+            let Some(weight) = weights.get(&eval.index) else {
                 return Err(Error::InvalidIndex);
-            }
+            };
+
+            // Scale `yi` by `l_i(0)` to contribute to the constant term
+            let mut scaled_value = eval.value.clone();
+            scaled_value.mul(&weight.0);
+
+            // Add `yi * l_i(0)` to the running sum
+            result.add(&scaled_value);
         }
 
         Ok(result)
