@@ -444,7 +444,12 @@ pub struct Buffer<B: Blob> {
 
 impl<B: Blob> Buffer<B> {
     /// Creates a new `Buffer` that reads from the given blob with the specified buffer size.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `lookahead` is zero.
     pub fn new(blob: B, size: u64, lookahead: usize) -> Self {
+        assert!(lookahead > 0, "Buffer size must be greater than zero");
         Self {
             blob,
             buffer: vec![0; lookahead],
@@ -726,6 +731,24 @@ mod tests {
             let mut buf = [0u8; 5];
             let result = reader.read_exact(&mut buf, 5).await;
             assert!(matches!(result, Err(Error::BlobInsufficientLength)));
+        });
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "Buffer size must be greater than zero")]
+    fn test_buffer_empty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create a memory blob with some test data
+            let data = b"Hello, world! This is a test.";
+            let (blob, size) = context.open("partition", b"test").await.unwrap();
+            assert_eq!(size, 0);
+            blob.write_at(data, 0).await.unwrap();
+            let size = data.len() as u64;
+
+            // Create a buffer reader with a small buffer size
+            let lookahead = 0;
+            Buffer::new(blob, size, lookahead);
         });
     }
 
