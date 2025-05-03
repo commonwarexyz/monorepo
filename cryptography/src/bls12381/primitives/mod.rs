@@ -61,6 +61,6 @@ pub enum Error {
     NoInverse,
     #[error("duplicate polynomial evaluation point")]
     DuplicateEval,
-    #[error("Invalid Index")]
+    #[error("evaluation index is invalid")]
     InvalidIndex,
 }
