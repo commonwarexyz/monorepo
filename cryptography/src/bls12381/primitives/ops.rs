@@ -349,8 +349,8 @@ where
     I: IntoIterator<Item = &'a PartialSignature>,
 {
     let mut sigs = threshold_signature_recover_multiple(threshold, vec![first, second])?;
-    let second_sig = sigs.pop().ok_or(Error::InvalidRecovery)?;
-    let first_sig = sigs.pop().ok_or(Error::InvalidRecovery)?;
+    let second_sig = sigs.pop().unwrap();
+    let first_sig = sigs.pop().unwrap();
     Ok((first_sig, second_sig))
 }
 
