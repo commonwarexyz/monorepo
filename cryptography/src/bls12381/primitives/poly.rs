@@ -124,16 +124,19 @@ where
 ///
 /// The `indices` of the points used for interpolation (x = index + 1). These indices
 /// should be of length `threshold`, deduped, and sorted.
-pub fn compute_weights<C: Element>(evals: Vec<&Eval<C>>) -> Result<BTreeMap<u32, Weight>, Error> {
+pub fn compute_weights<'a, C: Element>(
+    evals: &[&'a Eval<C>],
+) -> Result<BTreeMap<u32, Weight>, Error> {
+    // Compute weights for all provided evaluation indices
     let mut weights = BTreeMap::new();
-    for i_eval in &evals {
+    for i_eval in evals {
         // Convert i_eval.index to x-coordinate (x = index + 1)
         let mut xi = Scalar::zero();
         xi.set_int(i_eval.index + 1);
 
         // Compute product terms for Lagrange basis polynomial
         let (mut num, mut den) = (Scalar::one(), Scalar::one());
-        for j_eval in &evals {
+        for j_eval in evals {
             // Skip if i_eval and j_eval are the same
             if i_eval.index == j_eval.index {
                 continue;
@@ -328,26 +331,14 @@ impl<C: Element> Poly<C> {
         C: 'a,
         I: IntoIterator<Item = &'a Eval<C>>,
     {
-        // Check if we have at least `t` evaluations; if not, return an error
-        let t = t as usize;
-        let mut evals = evals.into_iter().cloned().collect::<Vec<_>>();
-        if evals.len() < t {
-            return Err(Error::NotEnoughPartialSignatures(t, evals.len()));
-        }
-
-        // Convert the first `t` sorted shares into scalars
-        //
-        // We sort the evaluations by index to ensure that two invocations of
-        // `recover` select the same evals.
-        evals.sort_by_key(|e| e.index);
-        evals.truncate(t);
+        // Prepare evaluations
+        let evals = prepare_evaluations(t, evals)?;
 
         // Generate weights
-        let weights =
-            compute_weights(&evals.iter().map(|e| e.index).collect::<Vec<_>>(), t as u32)?;
+        let weights = compute_weights(&evals)?;
 
         // Perform interpolation using the precomputed weights
-        Self::recover_with_weights(&weights, &evals)
+        Self::recover_with_weights(&weights, evals)
     }
 }
 
