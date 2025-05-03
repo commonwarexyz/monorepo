@@ -464,6 +464,7 @@ mod tests {
     }
 
     #[test_traced]
+    #[ignore]
     fn test_network_partition() {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;

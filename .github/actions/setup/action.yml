@@ -17,9 +17,14 @@ runs:
       uses: actions/cache@v4
       with:
         path: ~/.cargo/registry
-        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}-${{ inputs.rust-version }}
+        key: ${{ runner.os }}-cargo-registry
     - name: Cache cargo index
       uses: actions/cache@v4
       with:
         path: ~/.cargo/git
-        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}-${{ inputs.rust-version }}
+        key: ${{ runner.os }}-cargo-index
+    - name: Maintain cargo cache
+      shell: bash
+      run: |
+        cargo install --locked cargo-cache >/dev/null 2>&1 || true
+        cargo cache --autoclean 3G
