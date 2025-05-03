@@ -24,4 +24,4 @@ runs:
       shell: bash
       run: |
         cargo install --locked cargo-cache >/dev/null 2>&1 || true
-        cargo cache --autoclean --limit 3G
+        cargo cache --autoclean -- --limit 3G
