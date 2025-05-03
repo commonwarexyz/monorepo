@@ -124,27 +124,25 @@ where
 ///
 /// The `indices` of the points used for interpolation (x = index + 1). These indices
 /// should be of length `threshold`, deduped, and sorted.
-pub fn compute_weights<'a, C: Element>(
-    evals: &[&'a Eval<C>],
-) -> Result<BTreeMap<u32, Weight>, Error> {
+pub fn compute_weights(indices: Vec<u32>) -> Result<BTreeMap<u32, Weight>, Error> {
     // Compute weights for all provided evaluation indices
     let mut weights = BTreeMap::new();
-    for i_eval in evals {
+    for i in &indices {
         // Convert i_eval.index to x-coordinate (x = index + 1)
         let mut xi = Scalar::zero();
-        xi.set_int(i_eval.index + 1);
+        xi.set_int(i + 1);
 
         // Compute product terms for Lagrange basis polynomial
         let (mut num, mut den) = (Scalar::one(), Scalar::one());
-        for j_eval in evals {
+        for j in &indices {
             // Skip if i_eval and j_eval are the same
-            if i_eval.index == j_eval.index {
+            if i == j {
                 continue;
             }
 
             // Convert j_eval.index to x-coordinate
             let mut xj = Scalar::zero();
-            xj.set_int(j_eval.index + 1);
+            xj.set_int(j + 1);
 
             // Include `xj` in the numerator product for `l_i(0)`
             num.mul(&xj);
@@ -162,7 +160,7 @@ pub fn compute_weights<'a, C: Element>(
         num.mul(&inv);
 
         // Store the weight
-        weights.insert(i_eval.index, Weight(num));
+        weights.insert(*i, Weight(num));
     }
     Ok(weights)
 }
@@ -335,7 +333,8 @@ impl<C: Element> Poly<C> {
         let evals = prepare_evaluations(t, evals)?;
 
         // Generate weights
-        let weights = compute_weights(&evals)?;
+        let indices = evals.iter().map(|e| e.index).collect::<Vec<_>>();
+        let weights = compute_weights(indices)?;
 
         // Perform interpolation using the precomputed weights
         Self::recover_with_weights(&weights, evals)

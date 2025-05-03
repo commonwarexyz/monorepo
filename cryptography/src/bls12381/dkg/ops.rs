@@ -116,11 +116,18 @@ pub fn recover_public(
     }
 
     // Extract dealer indices
-    let dealer_indices: Vec<u32> = commitments.keys().cloned().collect();
+    let mut indices: Vec<u32> = commitments.keys().cloned().collect();
+    indices.sort();
+    indices.truncate(threshold as usize);
+
+    // Delete any commitments that are not in the indices
+    let commitments = commitments
+        .into_iter()
+        .filter(|(dealer, _)| indices.contains(dealer))
+        .collect::<BTreeMap<_, _>>();
 
     // Precompute Lagrange weights once for all coefficients
-    let weights = compute_weights(&dealer_indices, required)
-        .map_err(|_| Error::PublicKeyInterpolationFailed)?;
+    let weights = compute_weights(indices).map_err(|_| Error::PublicKeyInterpolationFailed)?;
 
     // Construct pool to perform interpolation
     let pool = ThreadPoolBuilder::new()
