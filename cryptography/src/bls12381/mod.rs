@@ -14,6 +14,7 @@ pub use scheme::{Bls12381, PrivateKey, PublicKey, Signature};
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_utils::default_seed;
     use dkg::ops::generate_shares;
     use primitives::group::Private;
     use primitives::ops::{
@@ -26,7 +27,7 @@ mod tests {
     #[test]
     fn test_partial_aggregate_signature() {
         let (n, t) = (5, 4);
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create the private key polynomial and evaluate it at `n`
         // points to generate the shares.
@@ -57,7 +58,7 @@ mod tests {
     #[test]
     fn test_partial_aggregate_signature_bad_namespace() {
         let (n, t) = (5, 4);
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create the private key polynomial and evaluate it at `n`
         // points to generate the shares.
@@ -95,7 +96,7 @@ mod tests {
     #[test]
     fn test_partial_aggregate_signature_insufficient() {
         let (n, t) = (5, 4);
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create the private key polynomial and evaluate it at `n`
         // points to generate the shares
@@ -128,7 +129,7 @@ mod tests {
     #[should_panic(expected = "InvalidSignature")]
     fn test_partial_aggregate_signature_bad_share() {
         let (n, t) = (5, 4);
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
 
         // Create the private key polynomial and evaluate it at `n`
         // points to generate the shares

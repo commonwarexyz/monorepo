@@ -1,6 +1,6 @@
 use commonware_cryptography::bls12381::dkg::{Dealer, Player};
 use commonware_cryptography::{Ed25519, Signer};
-use commonware_utils::quorum;
+use commonware_utils::{default_seed, quorum};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -11,7 +11,7 @@ use std::hint::black_box;
 const CONCURRENCY: usize = 1;
 
 fn benchmark_dkg_recovery(c: &mut Criterion) {
-    let mut rng = StdRng::seed_from_u64(0);
+    let mut rng = StdRng::seed_from_u64(default_seed());
     for &n in &[5, 10, 20, 50, 100, 250, 500] {
         let t = quorum(n);
         c.bench_function(&format!("{}/n={} t={}", module_path!(), n, t), |b| {

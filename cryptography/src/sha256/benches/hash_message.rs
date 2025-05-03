@@ -1,9 +1,10 @@
 use commonware_cryptography::{Hasher, Sha256};
+use commonware_utils::default_seed;
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 
 fn benchmark_hash_message(c: &mut Criterion) {
-    let mut sampler = StdRng::seed_from_u64(0);
+    let mut sampler = StdRng::seed_from_u64(default_seed());
     for message_length in [100, 1000, 10000].into_iter() {
         let mut msg = vec![0u8; message_length];
         sampler.fill_bytes(msg.as_mut_slice());

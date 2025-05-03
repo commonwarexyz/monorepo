@@ -7,6 +7,7 @@ use commonware_runtime::{
     Runner,
 };
 use commonware_storage::archive::Identifier;
+use commonware_utils::default_seed;
 use criterion::{black_box, criterion_group, Criterion};
 use futures::future::try_join_all;
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -16,7 +17,7 @@ use std::time::Instant;
 const ITEMS: u64 = 250_000;
 
 fn select_keys(keys: &[Key], reads: usize) -> Vec<Key> {
-    let mut rng = StdRng::seed_from_u64(42);
+    let mut rng = StdRng::seed_from_u64(default_seed());
     let mut selected_keys = Vec::with_capacity(reads);
     for _ in 0..reads {
         selected_keys.push(keys[rng.gen_range(0..ITEMS as usize)].clone());
@@ -25,7 +26,7 @@ fn select_keys(keys: &[Key], reads: usize) -> Vec<Key> {
 }
 
 fn select_indices(reads: usize) -> Vec<u64> {
-    let mut rng = StdRng::seed_from_u64(42);
+    let mut rng = StdRng::seed_from_u64(default_seed());
     let mut selected_indices = Vec::with_capacity(reads);
     for _ in 0..reads {
         selected_indices.push(rng.gen_range(0..ITEMS));

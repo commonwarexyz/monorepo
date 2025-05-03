@@ -1,6 +1,6 @@
 use commonware_runtime::tokio::Context;
 use commonware_storage::journal::fixed::{Config as JConfig, Journal};
-use commonware_utils::array::FixedBytes;
+use commonware_utils::{array::FixedBytes, default_seed};
 use criterion::criterion_main;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 
@@ -36,7 +36,7 @@ async fn append_random_data<const ITEM_SIZE: usize>(
     items_to_write: u64,
 ) {
     // Append `items_to_write` random items to the journal.
-    let mut rng = StdRng::seed_from_u64(0);
+    let mut rng = StdRng::seed_from_u64(default_seed());
     let mut arr = [0; ITEM_SIZE];
     for _ in 0..items_to_write {
         rng.fill_bytes(&mut arr);

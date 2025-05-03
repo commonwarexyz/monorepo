@@ -395,7 +395,7 @@ mod tests {
     use crate::bls12381::dkg::ops::generate_shares;
     use blst::BLST_ERROR;
     use commonware_codec::DecodeExt;
-    use commonware_utils::quorum;
+    use commonware_utils::{default_seed, quorum};
     use group::{G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION};
     use rand::prelude::*;
 
@@ -454,7 +454,7 @@ mod tests {
     fn test_threshold_proof_of_possession() {
         // Generate PoP
         let (n, t) = (5, 4);
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
         let (public, shares) = generate_shares(&mut rng, None, n, t);
         let partials: Vec<_> = shares
             .iter()
@@ -545,7 +545,7 @@ mod tests {
     fn test_threshold_message() {
         // Generate signature
         let (n, t) = (5, 4);
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = StdRng::seed_from_u64(default_seed());
         let (public, shares) = generate_shares(&mut rng, None, n, t);
         let msg = &[1, 9, 6, 9];
         let namespace = b"test";

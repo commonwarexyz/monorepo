@@ -1,5 +1,6 @@
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_storage::bmt::Builder;
+use commonware_utils::default_seed;
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 
@@ -10,7 +11,7 @@ fn bench_prove_single_element(c: &mut Criterion) {
         // Populate Binary Merkle Tree
         let mut builder = Builder::<Sha256>::new(n);
         let mut queries = Vec::with_capacity(n);
-        let mut sampler = StdRng::seed_from_u64(0);
+        let mut sampler = StdRng::seed_from_u64(default_seed());
         for pos in 0..n {
             let element = Sha256::random(&mut sampler);
             builder.add(&element);

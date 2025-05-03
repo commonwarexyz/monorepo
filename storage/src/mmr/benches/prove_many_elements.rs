@@ -1,5 +1,6 @@
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_storage::mmr::mem::Mmr;
+use commonware_utils::default_seed;
 use criterion::{criterion_group, Criterion};
 use futures::executor::block_on;
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
@@ -12,7 +13,7 @@ fn bench_prove_many_elements(c: &mut Criterion) {
         let mut mmr = Mmr::<Sha256>::new();
         let mut positions = Vec::with_capacity(n);
         let mut elements = Vec::with_capacity(n);
-        let mut sampler = StdRng::seed_from_u64(0);
+        let mut sampler = StdRng::seed_from_u64(default_seed());
         let mut hasher = Sha256::new();
         for i in 0..n {
             let element = Sha256::random(&mut sampler);

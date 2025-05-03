@@ -8,7 +8,7 @@ use commonware_deployer::ec2::{Hosts, METRICS_PORT};
 use commonware_flood::Config;
 use commonware_p2p::{authenticated, Receiver, Recipients, Sender};
 use commonware_runtime::{tokio, Metrics, Runner, Spawner};
-use commonware_utils::{from_hex_formatted, union};
+use commonware_utils::{default_seed, from_hex_formatted, union};
 use futures::future::try_join_all;
 use governor::Quota;
 use prometheus_client::metrics::counter::Counter;
@@ -144,7 +144,7 @@ fn main() {
         let flood_sender = context
             .with_label("flood_sender")
             .spawn(move |context| async move {
-                let mut rng = StdRng::seed_from_u64(0);
+                let mut rng = StdRng::seed_from_u64(default_seed());
                 let messages: Counter<u64, AtomicU64> = Counter::default();
                 context.register("messages", "Sent messages", messages.clone());
                 loop {
