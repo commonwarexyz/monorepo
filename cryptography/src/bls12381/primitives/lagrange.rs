@@ -1,18 +1,20 @@
-//!Polynomial reconstruction using precomputed Lagrange weights.
-//! https://scicomp.stackexchange.com/questions/24667/efficient-way-to-compute-lagrange-polynomials: only computes at 0
+//! Lagrange interpolation for BLS12-381 threshold signatures.
+//!
+//! This implementation is based on [J.-P. Berrut and L. N.
+//! Trefethen, “Barycentric Lagrange Interpolation,” SIAM Rev., vol. 46, no. 3,
+//! pp. 501–517, 2004](https://people.maths.ox.ac.uk/trefethen/barycentric.pdf).
 
+use super::poly::{Eval, PartialSignature, Poly};
 use crate::bls12381::primitives::{
     group::{self, Element, Scalar},
     Error,
 };
 use std::collections::{BTreeMap, HashMap};
 
-use super::poly::{Eval, PartialSignature, Poly};
+/// A Barycentric Weight for interpolation at x=0.
+pub struct Weight(Scalar);
 
-/// A precomputed Lagrange weight for interpolation at x=0
-pub struct LagrangeWeight(Scalar);
-
-/// Computes Lagrange interpolation weights for a given set of indices
+/// Computes Barycentric Weights for a given set of indices.
 ///
 /// These weights can be reused for multiple interpolations with the same set of points.
 ///
@@ -21,11 +23,8 @@ pub struct LagrangeWeight(Scalar);
 /// * `required` - The threshold number of points required for interpolation
 ///
 /// # Returns
-/// * `Result<BTreeMap<u32, LagrangeWeight>, Error>` - Map of index to its corresponding weight
-pub fn compute_lagrange_weights(
-    indices: &[u32],
-    required: u32,
-) -> Result<BTreeMap<u32, LagrangeWeight>, Error> {
+/// * `Result<BTreeMap<u32, Weight>, Error>` - Map of index to its corresponding weight
+pub fn compute_weights(indices: &[u32], required: u32) -> Result<BTreeMap<u32, Weight>, Error> {
     if indices.len() < required as usize {
         return Err(Error::NotEnoughPartialSignatures(
             required as usize,
@@ -76,34 +75,32 @@ pub fn compute_lagrange_weights(
         num.mul(&inv);
 
         // Store the weight
-        weights.insert(index, LagrangeWeight(num));
+        weights.insert(index, Weight(num));
     }
 
     Ok(weights)
 }
 
-/// Extension trait for polynomial operations using precomputed weights
-pub trait PolyOps<C: Element> {
-    /// Recovers a point using precomputed Lagrange weights
-    fn recover_with_weights(
-        evals: &[Eval<C>],
-        weights: &BTreeMap<u32, LagrangeWeight>,
-    ) -> Result<C, Error>;
+/// Extension trait for Lagrange Interpolation.
+pub trait Interpolation<C: Element> {
+    /// Recovers a point using the Barycentric Weights.
+    fn recover_with_weights(evals: &[Eval<C>], weights: &BTreeMap<u32, Weight>)
+        -> Result<C, Error>;
 }
 
-/// Implementation of polynomial operations for any element type
-impl<C: Element> PolyOps<C> for Poly<C> {
-    /// Recovers a polynomial value at x=0 using precomputed Lagrange weights
+/// Implementation of the Interpolation trait for [Poly].
+impl<C: Element> Interpolation<C> for Poly<C> {
+    /// Recovers a polynomial value at x=0 using Barycentric Weights.
     ///
     /// # Arguments
     /// * `evals` - The evaluations to interpolate (must be sorted by index)
-    /// * `weights` - Precomputed Lagrange weights for the corresponding indices
+    /// * `weights` - Precomputed weights for the corresponding indices
     ///
     /// # Returns
     /// * `Result<C, Error>` - The interpolated value at x=0
     fn recover_with_weights(
         evals: &[Eval<C>],
-        weights: &BTreeMap<u32, LagrangeWeight>,
+        weights: &BTreeMap<u32, Weight>,
     ) -> Result<C, Error> {
         let mut result = C::zero();
 
@@ -128,7 +125,7 @@ impl<C: Element> PolyOps<C> for Poly<C> {
 /// Computes and caches Lagrange weights for threshold signatures
 pub struct SignatureWeights {
     // Map of signature set configuration to precomputed weights
-    weights_cache: HashMap<Vec<u32>, BTreeMap<u32, LagrangeWeight>>,
+    weights_cache: HashMap<Vec<u32>, BTreeMap<u32, Weight>>,
 }
 
 impl Default for SignatureWeights {
