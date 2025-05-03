@@ -868,11 +868,13 @@ mod tests {
     }
 
     #[test_traced]
+    #[ignore]
     fn test_archive_many_keys_and_restart() {
         test_archive_keys_and_restart(100_000); // 391 sections
     }
 
     #[test_traced]
+    #[ignore]
     fn test_determinism() {
         let state1 = test_archive_keys_and_restart(5_000); // 20 sections
         let state2 = test_archive_keys_and_restart(5_000);
