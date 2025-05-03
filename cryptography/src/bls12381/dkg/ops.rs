@@ -115,11 +115,8 @@ pub fn recover_public(
         return Err(Error::InsufficientDealings);
     }
 
-    // Extract dealer indices
-    let mut indices: Vec<u32> = commitments.keys().cloned().collect();
-    indices.sort();
-
-    // Precompute Lagrange weights once for all coefficients
+    // Precompute Barycentric Weights for all coefficients
+    let indices: Vec<u32> = commitments.keys().cloned().collect();
     let weights = compute_weights(indices).map_err(|_| Error::PublicKeyInterpolationFailed)?;
 
     // Construct pool to perform interpolation
