@@ -44,7 +44,7 @@ pub struct Config<
     /// Number of views to replay concurrently during startup.
     pub replay_concurrency: usize,
 
-    /// Number of bytes to look ahead when replaying during startup.
+    /// Number of bytes to buffer when replaying during startup.
     pub replay_buffer: usize,
 
     /// Amount of time to wait for a leader to propose a payload

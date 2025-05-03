@@ -20,7 +20,7 @@ const SECTION_MASK: u64 = 0xffff_ffff_ffff_ff00u64;
 /// Number of blobs to read concurrently during replay.
 const REPLAY_CONCURRENCY: usize = 1;
 
-/// Number of bytes to look ahead when replaying.
+/// Number of bytes to buffer when replaying.
 const REPLAY_BUFFER: usize = 1024 * 1024; // 1MB
 
 /// Fixed-length key and value types.

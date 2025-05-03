@@ -140,7 +140,7 @@ pub struct Engine<
     // The number of concurrent operations when replaying journals.
     journal_replay_concurrency: usize,
 
-    // The number of bytes to look ahead when replaying a journal.
+    // The number of bytes to buffer when replaying a journal.
     journal_replay_buffer: usize,
 
     // A prefix for the journal names.
