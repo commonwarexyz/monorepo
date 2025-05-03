@@ -444,15 +444,15 @@ pub struct Buffer<B: Blob> {
 
 impl<B: Blob> Buffer<B> {
     /// Creates a new `Buffer` that reads from the given blob with the specified buffer size.
-    pub fn new(blob: B, size: u64, buffer_size: usize) -> Self {
+    pub fn new(blob: B, size: u64, lookahead: usize) -> Self {
         Self {
             blob,
-            buffer: vec![0; buffer_size],
+            buffer: vec![0; lookahead],
             blob_position: 0,
             blob_size: size,
             buffer_position: 0,
             buffer_valid_len: 0,
-            buffer_size,
+            buffer_size: lookahead,
         }
     }
 
@@ -476,14 +476,14 @@ impl<B: Blob> Buffer<B> {
         self.buffer_valid_len = 0;
 
         // Calculate how many bytes remain in the blob
-        let remaining_in_blob = self.blob_size.saturating_sub(self.blob_position);
+        let blob_remaining = self.blob_size.saturating_sub(self.blob_position);
 
-        if remaining_in_blob == 0 {
+        if blob_remaining == 0 {
             return Err(Error::BlobInsufficientLength);
         }
 
         // Calculate how much to read (minimum of buffer size and remaining bytes)
-        let bytes_to_read = std::cmp::min(self.buffer_size, remaining_in_blob as usize);
+        let bytes_to_read = std::cmp::min(self.buffer_size, blob_remaining as usize);
 
         // Read the data - we only need a single read operation since we know exactly how much data is available
         if bytes_to_read < self.buffer_size {
@@ -577,11 +577,8 @@ impl<B: Blob> Buffer<B> {
 
         // Read more data into the buffer after the remaining data
         let read_pos = self.blob_position + remaining as u64;
-        let bytes_remaining_in_blob = self.blob_size.saturating_sub(read_pos);
-        let read_size = std::cmp::min(
-            self.buffer_size - remaining,
-            bytes_remaining_in_blob as usize,
-        );
+        let bytes_blob_remaining = self.blob_size.saturating_sub(read_pos);
+        let read_size = std::cmp::min(self.buffer_size - remaining, bytes_blob_remaining as usize);
 
         if read_size > 0 {
             match self
@@ -693,7 +690,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_buffer_reader_basic() {
+    fn test_buffer_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create a memory blob with some test data
@@ -704,8 +701,8 @@ mod tests {
             let size = data.len() as u64;
 
             // Create a buffer reader with a small buffer size
-            let buffer_size = 10;
-            let mut reader = Buffer::new(blob, size, buffer_size);
+            let lookahead = 10;
+            let mut reader = Buffer::new(blob, size, lookahead);
 
             // Read some data
             let mut buf = [0u8; 5];
@@ -729,6 +726,221 @@ mod tests {
             let mut buf = [0u8; 5];
             let result = reader.read_exact(&mut buf, 5).await;
             assert!(matches!(result, Err(Error::BlobInsufficientLength)));
+        });
+    }
+
+    #[test_traced]
+    fn test_buffer_peek_and_advance() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create a memory blob with some test data
+            let data = b"Hello, world!";
+            let (blob, size) = context.open("partition", b"test").await.unwrap();
+            assert_eq!(size, 0);
+            blob.write_at(data, 0).await.unwrap();
+            let size = data.len() as u64;
+
+            // Create a buffer reader
+            let buffer_size = 20;
+            let mut reader = Buffer::new(blob, size, buffer_size);
+
+            // Peek at the first 5 bytes
+            let peeked = reader.peek(5).await.unwrap();
+            assert_eq!(peeked, b"Hello");
+
+            // Position should still be 0
+            assert_eq!(reader.position(), 0);
+
+            // Advance 5 bytes
+            reader.advance(5).unwrap();
+            assert_eq!(reader.position(), 5);
+
+            // Peek and read more
+            let peeked = reader.peek(7).await.unwrap();
+            assert_eq!(peeked, b", world");
+
+            let mut buf = [0u8; 7];
+            reader.read_exact(&mut buf, 7).await.unwrap();
+            assert_eq!(&buf, b", world");
+
+            // Position should now be 12
+            assert_eq!(reader.position(), 12);
+
+            // Read the last byte
+            let mut buf = [0u8; 1];
+            reader.read_exact(&mut buf, 1).await.unwrap();
+            assert_eq!(&buf, b"!");
+
+            // Should be at the end now
+            assert_eq!(reader.blob_remaining(), 0);
+        });
+    }
+
+    #[test_traced]
+    fn test_buffer_cross_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create a memory blob with some test data
+            let data = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+            let (blob, size) = context.open("partition", b"test").await.unwrap();
+            assert_eq!(size, 0);
+            blob.write_at(data, 0).await.unwrap();
+            let size = data.len() as u64;
+
+            // Create a buffer reader with buffer size 10
+            let buffer_size = 10;
+            let mut reader = Buffer::new(blob, size, buffer_size);
+
+            // Read data that crosses a buffer boundary
+            let mut buf = [0u8; 15];
+            reader.read_exact(&mut buf, 15).await.unwrap();
+            assert_eq!(&buf, b"ABCDEFGHIJKLMNO");
+
+            // Position should be 15
+            assert_eq!(reader.position(), 15);
+
+            // Peek at data that crosses another boundary
+            let peeked = reader.peek(10).await.unwrap();
+            assert_eq!(peeked, b"PQRSTUVWXY");
+
+            // Read the rest
+            let mut buf = [0u8; 11];
+            reader.read_exact(&mut buf, 11).await.unwrap();
+            assert_eq!(&buf, b"PQRSTUVWXYZ");
+
+            // Position should be 26
+            assert_eq!(reader.position(), 26);
+            assert_eq!(reader.blob_remaining(), 0);
+        });
+    }
+
+    #[test_traced]
+    fn test_buffer_with_known_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create a memory blob with some test data
+            let data = b"This is a test with known size limitations.";
+            let (blob, size) = context.open("partition", b"test").await.unwrap();
+            assert_eq!(size, 0);
+            blob.write_at(data, 0).await.unwrap();
+            let size = data.len() as u64;
+
+            // Create a buffer reader with a buffer smaller than the data
+            let buffer_size = 10;
+            let mut reader = Buffer::new(blob, size, buffer_size);
+
+            // Check remaining bytes in the blob
+            assert_eq!(reader.blob_remaining(), size);
+
+            // Read half the buffer size
+            let mut buf = [0u8; 5];
+            reader.read_exact(&mut buf, 5).await.unwrap();
+            assert_eq!(&buf, b"This ");
+
+            // Check remaining after read
+            assert_eq!(reader.blob_remaining(), size - 5);
+
+            // Try to read exactly up to the size limit
+            let mut buf = vec![0u8; (size - 5) as usize];
+            reader
+                .read_exact(&mut buf, (size - 5) as usize)
+                .await
+                .unwrap();
+            assert_eq!(&buf, b"is a test with known size limitations.");
+
+            // Now we should be at the end
+            assert_eq!(reader.blob_remaining(), 0);
+
+            // Trying to read more should fail
+            let mut buf = [0u8; 1];
+            let result = reader.read_exact(&mut buf, 1).await;
+            assert!(matches!(result, Err(Error::BlobInsufficientLength)));
+        });
+    }
+
+    #[test_traced]
+    fn test_buffer_large_data() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create a larger blob for testing with larger data
+            let data_size = 1024 * 256; // 256KB of data
+            let data = vec![0x42; data_size];
+            let (blob, size) = context.open("partition", b"test").await.unwrap();
+            assert_eq!(size, 0);
+            blob.write_at(&data, 0).await.unwrap();
+            let size = data.len() as u64;
+
+            // Create a buffer with size smaller than the data
+            let buffer_size = 64 * 1024; // 64KB
+            let mut reader = Buffer::new(blob, size, buffer_size);
+
+            // Read all the data in chunks
+            let mut total_read = 0;
+            let chunk_size = 8 * 1024; // 8KB chunks
+            let mut buf = vec![0u8; chunk_size];
+
+            while total_read < data_size {
+                let to_read = std::cmp::min(chunk_size, data_size - total_read);
+                reader
+                    .read_exact(&mut buf[..to_read], to_read)
+                    .await
+                    .unwrap();
+
+                // Verify the data is correct (all bytes should be 0x42)
+                assert!(
+                    buf[..to_read].iter().all(|&b| b == 0x42),
+                    "Data at position {} is not correct",
+                    total_read
+                );
+
+                total_read += to_read;
+            }
+
+            // Verify we read everything
+            assert_eq!(total_read, data_size);
+
+            // Trying to read more should fail
+            let mut extra_buf = [0u8; 1];
+            let result = reader.read_exact(&mut extra_buf, 1).await;
+            assert!(matches!(result, Err(Error::BlobInsufficientLength)));
+        });
+    }
+
+    #[test_traced]
+    fn test_buffer_exact_size_reads() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create a blob with exactly 2.5 buffer sizes of data
+            let buffer_size = 1024;
+            let data_size = buffer_size * 5 / 2; // 2.5 buffers
+            let data = vec![0x37; data_size];
+
+            let (blob, size) = context.open("partition", b"test").await.unwrap();
+            assert_eq!(size, 0);
+            blob.write_at(&data, 0).await.unwrap();
+            let size = data.len() as u64;
+
+            let mut reader = Buffer::new(blob, size, buffer_size);
+
+            // Read exactly one buffer size
+            let mut buf1 = vec![0u8; buffer_size];
+            reader.read_exact(&mut buf1, buffer_size).await.unwrap();
+            assert!(buf1.iter().all(|&b| b == 0x37));
+
+            // Read exactly one buffer size more
+            let mut buf2 = vec![0u8; buffer_size];
+            reader.read_exact(&mut buf2, buffer_size).await.unwrap();
+            assert!(buf2.iter().all(|&b| b == 0x37));
+
+            // Read the remaining half buffer
+            let half_buffer = buffer_size / 2;
+            let mut buf3 = vec![0u8; half_buffer];
+            reader.read_exact(&mut buf3, half_buffer).await.unwrap();
+            assert!(buf3.iter().all(|&b| b == 0x37));
+
+            // Verify we're at the end
+            assert_eq!(reader.blob_remaining(), 0);
+            assert_eq!(reader.position(), size);
         });
     }
 }
