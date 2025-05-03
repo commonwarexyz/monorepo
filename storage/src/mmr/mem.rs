@@ -241,12 +241,12 @@ impl<H: CHasher, S: Storage<H::Digest>> Mmr<'_, H, S> {
         right_digest: &H::Digest,
         node_pos: u64,
     ) -> Result<H::Digest, Error> {
-        // todo: compute proper position for the node in the destination tree based on its height.
-        if cfg.from_height != cfg.to_height {
-            // todo: compute proper position for the node in the destination tree based on its height.
-        }
-        let grafted_child_digest = cfg.tree.get_node(node_pos).await?.unwrap();
-        Ok(hasher.grafted_node_hash(node_pos, left_digest, right_digest, &grafted_child_digest))
+        let grafting_pos = node_pos << (cfg.to_height - cfg.from_height);
+        let grafting_digest = cfg.tree.get_node(grafting_pos).await?.unwrap();
+        let digest =
+            hasher.grafted_node_hash(node_pos, left_digest, right_digest, &grafting_digest);
+
+        Ok(digest)
     }
 
     /// Pop the most recent leaf element out of the MMR if it exists, returning Empty or
