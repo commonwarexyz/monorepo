@@ -23,5 +23,5 @@ runs:
     - name: Maintain cargo cache
       shell: bash
       run: |
-        cargo install --locked cargo-cache
+        cargo install cargo-cache
         cargo cache --autoclean
