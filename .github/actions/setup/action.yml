@@ -20,8 +20,17 @@ runs:
       with:
         path: ~/.cargo/git
         key: ${{ runner.os }}-cargo-index
+    - name: Get Rust version
+      id: rust-version
+      run: echo "rust_version=$(rustc +nightly --version)" >> "$GITHUB_OUTPUT"
+    - name: Cache cargo-cache
+      id: cargo-cache-cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/bin/cargo-cache
+        key: ${{ runner.os }}-cargo-cache-${{ steps.rust-version.outputs.rust_version }}
     - name: Maintain cargo cache
       shell: bash
       run: |
-        cargo install cargo-cache
+        cargo install cargo-cache || true
         cargo cache --autoclean
