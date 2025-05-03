@@ -425,6 +425,50 @@ impl<T> RwLock<T> {
 
 /// A reader that buffers content from a [Blob] to optimize the performance
 /// of a full scan of contents.
+///
+/// # Performance Considerations
+///
+/// - Choose an appropriate buffer size based on your access patterns:
+///   - Larger buffers (e.g., 1 MB) for sequential scanning of large files
+///   - Medium buffers (e.g., 64 KB) for general purpose usage
+///   - Smaller buffers (e.g., 4 KB) for random access patterns or memory-constrained environments
+///
+/// - For sequential reading, let the buffer's automatic refilling handle data loading
+/// - For random access patterns, use `seek_to` followed by `refill` for best performance
+/// - Use `peek` when you need to examine data without committing to consuming it
+/// - Check `blob_remaining()` to avoid attempting to read past the end of the blob
+///
+/// # Example
+///
+/// ```
+/// use commonware_runtime::{Runner, Buffer, Blob, Error, Storage, deterministic};
+///
+/// let executor = deterministic::Runner::default();
+/// executor.start(|context| async move {
+///     // Open a blob and add some data (e.g., a journal file)
+///     let (blob, size) = context.open("my_partition", b"my_data").await.expect("unable to open blob");
+///     let data = b"Hello, world! This is a test.";
+///     blob.write_at(data, 0).await.expect("unable to write data");
+///     let size = data.len() as u64;
+///
+///     // Create a buffer
+///     let buffer = 64 * 1024;
+///     let mut reader = Buffer::new(blob, size, buffer);
+///
+///     // Read data sequentially
+///     let mut header = [0u8; 16];
+///     reader.read_exact(&mut header, 16).await.expect("unable to read data");
+///     println!("Read header: {:?}", header);
+///
+///     // Peek at upcoming data without advancing the read position
+///     let peek_size = 8;
+///     let peeked_data = reader.peek(peek_size).await.expect("unable to peek data");
+///     println!("Peeked data: {:?}", peeked_data);
+///
+///     // Position is still at 16 (after header)
+///     assert_eq!(reader.position(), 16);
+/// });
+/// ```
 pub struct Buffer<B: Blob> {
     /// The underlying blob to read from.
     blob: B,
