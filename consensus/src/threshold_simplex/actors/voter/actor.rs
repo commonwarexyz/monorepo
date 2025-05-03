@@ -14,10 +14,7 @@ use crate::{
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
-        ops::{
-            threshold_signature_recover, threshold_signature_recover_multiple,
-            threshold_signature_recover_pair,
-        },
+        ops::{threshold_signature_recover, threshold_signature_recover_pair},
         poly,
     },
     Digest, Scheme,
