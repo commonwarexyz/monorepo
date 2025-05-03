@@ -14,7 +14,7 @@ use crate::{
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
-        ops::threshold_signature_recover,
+        ops::{threshold_signature_recover, threshold_signature_recover_multiple},
         poly,
     },
     Digest, Scheme,
@@ -365,12 +365,16 @@ impl<
                 .filter_map(|x| self.notarizes[*x as usize].as_ref());
 
             // Recover threshold signature
-            let proposals = notarizes.clone().map(|x| &x.proposal_signature);
-            let proposal_signature = threshold_signature_recover(threshold, proposals)
-                .expect("failed to recover threshold signature");
-            let seeds = notarizes.map(|x| &x.seed_signature);
-            let seed_signature = threshold_signature_recover(threshold, seeds)
-                .expect("failed to recover threshold signature");
+            let proposals = notarizes
+                .clone()
+                .map(|x| &x.proposal_signature)
+                .collect::<Vec<_>>();
+            let seeds = notarizes.map(|x| &x.seed_signature).collect::<Vec<_>>();
+            let mut signatures =
+                threshold_signature_recover_multiple(threshold, vec![proposals, seeds])
+                    .expect("failed to recover threshold signature");
+            let proposal_signature = signatures.swap_remove(0);
+            let seed_signature = signatures.swap_remove(0);
 
             // Construct notarization
             let notarization =
@@ -401,12 +405,15 @@ impl<
 
         // Recover threshold signature
         let nullifies = self.nullifies.values();
-        let views = nullifies.clone().map(|x| &x.view_signature);
-        let view_signature = threshold_signature_recover(threshold, views)
+        let views = nullifies
+            .clone()
+            .map(|x| &x.view_signature)
+            .collect::<Vec<_>>();
+        let seeds = nullifies.map(|x| &x.seed_signature).collect::<Vec<_>>();
+        let mut signatures = threshold_signature_recover_multiple(threshold, vec![views, seeds])
             .expect("failed to recover threshold signature");
-        let seeds = nullifies.map(|x| &x.seed_signature);
-        let seed_signature = threshold_signature_recover(threshold, seeds)
-            .expect("failed to recover threshold signature");
+        let view_signature = signatures.swap_remove(0);
+        let seed_signature = signatures.swap_remove(0);
 
         // Construct nullification
         let nullification = Nullification::new(self.view, view_signature, seed_signature);
