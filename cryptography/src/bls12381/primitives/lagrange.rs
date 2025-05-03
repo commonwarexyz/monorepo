@@ -9,7 +9,7 @@ use crate::bls12381::primitives::{
     group::{self, Element, Scalar},
     Error,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 /// A Barycentric Weight for interpolation at x=0.
 pub struct Weight(Scalar);
@@ -122,48 +122,6 @@ impl<C: Element> Interpolation<C> for Poly<C> {
     }
 }
 
-/// Computes and caches Lagrange weights for threshold signatures
-pub struct SignatureWeights {
-    // Map of signature set configuration to precomputed weights
-    weights_cache: HashMap<Vec<u32>, BTreeMap<u32, Weight>>,
-}
-
-impl Default for SignatureWeights {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl SignatureWeights {
-    /// Creates a new empty signature weights cache
-    pub fn new() -> Self {
-        Self {
-            weights_cache: HashMap::new(),
-        }
-    }
-
-    /// Gets or computes Lagrange weights for a set of signature indices
-    ///
-    /// # Arguments
-    /// * `indices` - The sorted indices of signers
-    /// * `threshold` - The threshold number of signatures required
-    ///
-    /// # Returns
-    /// * `Result<&BTreeMap<u32, LagrangeWeight>, Error>` - Precomputed weights
-    pub fn get_weights(
-        &mut self,
-        indices: &[u32],
-        threshold: u32,
-    ) -> Result<&BTreeMap<u32, LagrangeWeight>, Error> {
-        let key = indices.to_vec();
-        if !self.weights_cache.contains_key(&key) {
-            let weights = compute_lagrange_weights(indices, threshold)?;
-            self.weights_cache.insert(key.clone(), weights);
-        }
-        Ok(self.weights_cache.get(&key).unwrap())
-    }
-}
-
 /// Recovers a threshold signature using precomputed weights
 ///
 /// # Arguments
@@ -175,11 +133,9 @@ impl SignatureWeights {
 /// * `Result<group::Signature, Error>` - The recovered threshold signature
 pub fn threshold_signature_recover_with_weights(
     partial_sigs: &[PartialSignature],
-    weights: &BTreeMap<u32, LagrangeWeight>,
+    weights: &BTreeMap<u32, Weight>,
 ) -> Result<group::Signature, Error> {
-    // Use precomputed weights to combine the partial signatures
     let mut result = group::Signature::zero();
-
     for sig in partial_sigs {
         if let Some(weight) = weights.get(&sig.index) {
             // Scale the signature by the precomputed weight
@@ -194,29 +150,4 @@ pub fn threshold_signature_recover_with_weights(
     }
 
     Ok(result)
-}
-
-/// Example of optimized signature recovery for multiple signatures
-pub fn recover_multiple_signatures(
-    signature_sets: &[Vec<PartialSignature>],
-    threshold: u32,
-) -> Result<Vec<group::Signature>, Error> {
-    // Create or reuse a signature weights cache
-    let mut weights_cache = SignatureWeights::new();
-
-    // Process each signature set with the same precomputed weights when possible
-    signature_sets
-        .iter()
-        .map(|partial_sigs| {
-            // Extract and sort indices
-            let mut indices: Vec<u32> = partial_sigs.iter().map(|sig| sig.index).collect();
-            indices.sort();
-
-            // Get or compute weights for these indices
-            let weights = weights_cache.get_weights(&indices, threshold)?;
-
-            // Recover the signature using the precomputed weights
-            threshold_signature_recover_with_weights(partial_sigs, weights)
-        })
-        .collect()
 }
