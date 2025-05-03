@@ -308,6 +308,20 @@ where
     Ok(signatures)
 }
 
+pub fn threshold_signature_recover_pair<'a, I>(
+    threshold: u32,
+    first: I,
+    second: I,
+) -> Result<(group::Signature, group::Signature), Error>
+where
+    I: IntoIterator<Item = &'a PartialSignature>,
+{
+    let mut sigs = threshold_signature_recover_multiple(threshold, vec![first, second])?;
+    let second_sig = sigs.pop().ok_or(Error::InvalidRecovery)?;
+    let first_sig = sigs.pop().ok_or(Error::InvalidRecovery)?;
+    Ok((first_sig, second_sig))
+}
+
 /// Aggregates multiple public keys.
 ///
 /// # Warning

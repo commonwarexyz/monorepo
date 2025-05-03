@@ -14,7 +14,10 @@ use crate::{
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
-        ops::{threshold_signature_recover, threshold_signature_recover_multiple},
+        ops::{
+            threshold_signature_recover, threshold_signature_recover_multiple,
+            threshold_signature_recover_pair,
+        },
         poly,
     },
     Digest, Scheme,
@@ -370,11 +373,9 @@ impl<
                 .map(|x| &x.proposal_signature)
                 .collect::<Vec<_>>();
             let seeds = notarizes.map(|x| &x.seed_signature).collect::<Vec<_>>();
-            let mut signatures =
-                threshold_signature_recover_multiple(threshold, vec![proposals, seeds])
+            let (proposal_signature, seed_signature) =
+                threshold_signature_recover_pair(threshold, proposals, seeds)
                     .expect("failed to recover threshold signature");
-            let proposal_signature = signatures.swap_remove(0);
-            let seed_signature = signatures.swap_remove(0);
 
             // Construct notarization
             let notarization =
@@ -410,10 +411,9 @@ impl<
             .map(|x| &x.view_signature)
             .collect::<Vec<_>>();
         let seeds = nullifies.map(|x| &x.seed_signature).collect::<Vec<_>>();
-        let mut signatures = threshold_signature_recover_multiple(threshold, vec![views, seeds])
-            .expect("failed to recover threshold signature");
-        let view_signature = signatures.swap_remove(0);
-        let seed_signature = signatures.swap_remove(0);
+        let (view_signature, seed_signature) =
+            threshold_signature_recover_pair(threshold, views, seeds)
+                .expect("failed to recover threshold signature");
 
         // Construct nullification
         let nullification = Nullification::new(self.view, view_signature, seed_signature);
