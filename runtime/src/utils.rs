@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 use crate::Runner;
-use crate::{Error, Metrics, Spawner};
+use crate::{Blob, Error, Metrics, Spawner};
 #[cfg(test)]
 use futures::stream::{FuturesUnordered, StreamExt};
 use futures::{
@@ -423,6 +423,227 @@ impl<T> RwLock<T> {
     }
 }
 
+/// A reader that buffers content from a [Blob] to optimize the performance
+/// of a full scan of contents.
+pub struct Buffer<B: Blob> {
+    /// The underlying blob to read from.
+    blob: B,
+    /// The buffer storing the data read from the blob.
+    buffer: Vec<u8>,
+    /// The current position in the blob from where the buffer was filled.
+    blob_position: u64,
+    /// The size of the blob.
+    blob_size: u64,
+    /// The current position within the buffer for reading.
+    buffer_position: usize,
+    /// The valid data length in the buffer.
+    buffer_valid_len: usize,
+    /// The maximum size of the buffer.
+    buffer_size: usize,
+}
+
+impl<B: Blob> Buffer<B> {
+    /// Creates a new `Buffer` that reads from the given blob with the specified buffer size.
+    pub fn new(blob: B, size: u64, buffer_size: usize) -> Self {
+        Self {
+            blob,
+            buffer: vec![0; buffer_size],
+            blob_position: 0,
+            blob_size: size,
+            buffer_position: 0,
+            buffer_valid_len: 0,
+            buffer_size,
+        }
+    }
+
+    /// Returns how many valid bytes are remaining in the buffer.
+    fn remaining(&self) -> usize {
+        self.buffer_valid_len - self.buffer_position
+    }
+
+    /// Refills the buffer from the blob starting at the current blob position.
+    /// Returns the number of bytes read or an error if the read failed.
+    async fn refill(&mut self) -> Result<usize, Error> {
+        // Update blob position to account for consumed bytes
+        self.blob_position += self.buffer_position as u64;
+        self.buffer_position = 0;
+        self.buffer_valid_len = 0;
+
+        // Read as much as we can from the blob
+        match self
+            .blob
+            .read_at(&mut self.buffer, self.blob_position)
+            .await
+        {
+            Ok(()) => {
+                // Full buffer was filled
+                self.buffer_valid_len = self.buffer.len();
+                Ok(self.buffer_valid_len)
+            }
+            Err(Error::BlobInsufficientLength) => {
+                // We hit the end of the blob, try to read just what's available
+                let mut bytes_read = 0;
+                // Try to read as much as possible in smaller chunks
+                for chunk_size in [
+                    self.buffer_size / 2,
+                    self.buffer_size / 4,
+                    self.buffer_size / 8,
+                    1,
+                ]
+                .iter()
+                {
+                    if *chunk_size == 0 {
+                        continue;
+                    }
+
+                    let available_buffer = &mut self.buffer[bytes_read..bytes_read + *chunk_size];
+                    match self
+                        .blob
+                        .read_at(available_buffer, self.blob_position + bytes_read as u64)
+                        .await
+                    {
+                        Ok(()) => {
+                            bytes_read += *chunk_size;
+                        }
+                        Err(Error::BlobInsufficientLength) => {
+                            continue;
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+
+                if bytes_read == 0 {
+                    // We couldn't read anything, return insufficient length
+                    return Err(Error::BlobInsufficientLength);
+                }
+
+                self.buffer_valid_len = bytes_read;
+                Ok(bytes_read)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Reads exactly `size` bytes into the provided buffer.
+    /// Returns an error if not enough bytes are available.
+    pub async fn read_exact(&mut self, buf: &mut [u8], size: usize) -> Result<(), Error> {
+        let mut bytes_read = 0;
+
+        while bytes_read < size {
+            // Check if we need to refill
+            if self.buffer_position >= self.buffer_valid_len {
+                self.refill().await?;
+                if self.buffer_valid_len == 0 {
+                    return Err(Error::BlobInsufficientLength);
+                }
+            }
+
+            // Calculate how many bytes we can copy from the buffer
+            let bytes_to_copy = std::cmp::min(
+                size - bytes_read,
+                self.buffer_valid_len - self.buffer_position,
+            );
+
+            // Copy bytes from buffer to output
+            buf[bytes_read..(bytes_read + bytes_to_copy)].copy_from_slice(
+                &self.buffer[self.buffer_position..(self.buffer_position + bytes_to_copy)],
+            );
+
+            self.buffer_position += bytes_to_copy;
+            bytes_read += bytes_to_copy;
+        }
+
+        Ok(())
+    }
+
+    /// Peeks at the next `size` bytes without advancing the read position.
+    /// Returns a slice to the peeked data or an error if not enough bytes are available.
+    pub async fn peek(&mut self, size: usize) -> Result<&[u8], Error> {
+        // Check if we need to refill
+        if self.remaining() < size {
+            // We need to do a more complex operation: copy remaining data to beginning,
+            // then refill the rest of the buffer
+
+            let remaining = self.remaining();
+            if remaining > 0 {
+                // Copy the remaining data to the beginning of the buffer
+                self.buffer
+                    .copy_within(self.buffer_position..self.buffer_valid_len, 0);
+            }
+
+            // Update positions
+            self.blob_position += self.buffer_position as u64;
+            self.buffer_valid_len = remaining;
+            self.buffer_position = 0;
+
+            // Read more data into the buffer after the remaining data
+            let read_pos = self.blob_position + remaining as u64;
+            let read_size = self.buffer_size - remaining;
+
+            if read_size > 0 {
+                match self
+                    .blob
+                    .read_at(&mut self.buffer[remaining..], read_pos)
+                    .await
+                {
+                    Ok(()) => {
+                        self.buffer_valid_len = self.buffer_size;
+                    }
+                    Err(Error::BlobInsufficientLength) => {
+                        // Try to read partial data
+                        let mut bytes_read = 0;
+                        for chunk_size in [read_size / 2, read_size / 4, read_size / 8, 1].iter() {
+                            if *chunk_size == 0 || bytes_read + *chunk_size > read_size {
+                                continue;
+                            }
+
+                            let available_buffer = &mut self.buffer
+                                [remaining + bytes_read..remaining + bytes_read + *chunk_size];
+                            match self
+                                .blob
+                                .read_at(available_buffer, read_pos + bytes_read as u64)
+                                .await
+                            {
+                                Ok(()) => {
+                                    bytes_read += *chunk_size;
+                                }
+                                Err(Error::BlobInsufficientLength) => {
+                                    break;
+                                }
+                                Err(e) => return Err(e),
+                            }
+                        }
+
+                        self.buffer_valid_len = remaining + bytes_read;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+
+        if self.remaining() < size {
+            return Err(Error::BlobInsufficientLength);
+        }
+
+        Ok(&self.buffer[self.buffer_position..(self.buffer_position + size)])
+    }
+
+    /// Advances the read position by `bytes` without reading data.
+    pub fn advance(&mut self, bytes: usize) -> Result<(), Error> {
+        if self.buffer_position + bytes > self.buffer_valid_len {
+            return Err(Error::BlobInsufficientLength);
+        }
+
+        self.buffer_position += bytes;
+        Ok(())
+    }
+
+    /// Returns the current absolute position in the blob.
+    pub fn position(&self) -> u64 {
+        self.blob_position + self.buffer_position as u64
+    }
+}
+
 #[cfg(test)]
 async fn task(i: usize) -> usize {
     for _ in 0..5 {
@@ -453,7 +674,8 @@ pub fn run_tasks(tasks: usize, runner: crate::deterministic::Runner) -> (String,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, tokio, Metrics};
+    use crate::{deterministic, tokio, Metrics, Storage};
+    use bytes::Buf;
     use commonware_macros::test_traced;
     use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
@@ -493,6 +715,119 @@ mod tests {
 
             // Check the value
             assert_eq!(*w, 101);
+        });
+    }
+
+    #[test_traced]
+    fn test_buffer_reader_basic() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create a memory blob with some test data
+            let data = b"Hello, world! This is a test.";
+            let (mut blob, size) = context.open("partition", b"test").await.unwrap();
+            blob.write_at(data, 0).await.unwrap();
+
+            // Create a buffer reader with a small buffer size
+            let buffer_size = 10;
+            let mut reader = Buffer::new(blob, size, buffer_size);
+
+            // Read some data
+            let mut buf = [0u8; 5];
+            reader.read_exact(&mut buf, 5).await.unwrap();
+            assert_eq!(&buf, b"Hello");
+
+            // Read more data that requires a refill
+            let mut buf = [0u8; 15];
+            reader.read_exact(&mut buf, 15).await.unwrap();
+            assert_eq!(&buf, b", world! This ");
+
+            // Verify position
+            assert_eq!(reader.position(), 20);
+
+            // Read the rest
+            let mut buf = [0u8; 10];
+            reader.read_exact(&mut buf, 7).await.unwrap();
+            assert_eq!(&buf[..7], b"is a te");
+
+            // Try to read beyond the end
+            let mut buf = [0u8; 5];
+            let result = reader.read_exact(&mut buf, 5).await;
+            assert!(result.is_err());
+        });
+    }
+
+    #[test_traced]
+    fn test_buffer_reader_peek_and_advance() {
+        block_on(async {
+            // Create a memory blob with some test data
+            let data = b"Hello, world!";
+            let mut blob = MemoryBlob::new();
+            blob.write_at(data, 0).await.unwrap();
+
+            // Create a buffer reader
+            let buffer_size = 20;
+            let mut reader = BufferReader::new(blob, buffer_size);
+
+            // Peek at the first 5 bytes
+            let peeked = reader.peek(5).await.unwrap();
+            assert_eq!(peeked, b"Hello");
+
+            // Position should still be 0
+            assert_eq!(reader.position(), 0);
+
+            // Advance 5 bytes
+            reader.advance(5).unwrap();
+            assert_eq!(reader.position(), 5);
+
+            // Peek and read more
+            let peeked = reader.peek(7).await.unwrap();
+            assert_eq!(peeked, b", world");
+
+            let mut buf = [0u8; 7];
+            reader.read_exact(&mut buf, 7).await.unwrap();
+            assert_eq!(&buf, b", world");
+
+            // Position should now be 12
+            assert_eq!(reader.position(), 12);
+
+            // Read the last byte
+            let mut buf = [0u8; 1];
+            reader.read_exact(&mut buf, 1).await.unwrap();
+            assert_eq!(&buf, b"!");
+        });
+    }
+
+    #[test_traced]
+    fn test_buffer_reader_cross_boundary() {
+        block_on(async {
+            // Create a memory blob with some test data
+            let data = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+            let mut blob = MemoryBlob::new();
+            blob.write_at(data, 0).await.unwrap();
+
+            // Create a buffer reader with buffer size 10
+            let buffer_size = 10;
+            let mut reader = BufferReader::new(blob, buffer_size);
+
+            // Read data that crosses a buffer boundary
+            let mut buf = [0u8; 15];
+            reader.read_exact(&mut buf, 15).await.unwrap();
+            assert_eq!(&buf, b"ABCDEFGHIJKLMNO");
+
+            // Position should be 15
+            assert_eq!(reader.position(), 15);
+
+            // Peek at data that crosses another boundary
+            let peeked = reader.peek(10).await.unwrap();
+            assert_eq!(peeked, b"PQRSTUVWXY");
+
+            // Read the rest
+            let mut buf = [0u8; 11];
+            reader.read_exact(&mut buf, 11).await.unwrap();
+            assert_eq!(&buf, b"PQRSTUVWXYZ");
+
+            // Position should be 26
+            assert_eq!(reader.position(), 26);
         });
     }
 }
