@@ -385,7 +385,6 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                         // Try to read the full item (data + checksum)
                         let mut buf = vec![0u8; Self::CHUNK_SIZE];
                         let item_pos = items_per_blob * *index + offset / Self::CHUNK_SIZE_U64;
-
                         match reader.read_exact(&mut buf, Self::CHUNK_SIZE).await {
                             Ok(()) => {
                                 let next_offset = offset + Self::CHUNK_SIZE_U64;
@@ -396,11 +395,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                                     Err(err) => Some((Err(err), (index, reader, next_offset))),
                                 }
                             }
-                            Err(err) => {
-                                // If we hit the end of the blob and can't read a complete item,
-                                // we've reached the end or encountered an error
-                                Some((Err(Error::Runtime(err)), (index, reader, size)))
-                            }
+                            Err(err) => Some((Err(Error::Runtime(err)), (index, reader, size))),
                         }
                     },
                 )
