@@ -145,28 +145,37 @@ async fn read_item_buffered<V: Codec>(
     cfg: &V::Cfg,
     compressed: bool,
 ) -> Result<(u32, u32, V), Error> {
-    // Verify we're at the right position
+    // Calculate absolute file offset from the item offset
     let file_offset = offset as u64 * ITEM_ALIGNMENT;
+
+    // If we're not at the right position, seek to it
     if reader.position() != file_offset {
-        // Position the reader at the correct offset
-        reader.blob_position = file_offset;
-        reader.buffer_position = 0;
-        reader.buffer_valid_len = 0;
-        reader.refill().await?;
+        reader.seek_to(file_offset).map_err(Error::Runtime)?;
+        // Refill the buffer at the new position
+        reader.refill().await.map_err(Error::Runtime)?;
     }
 
     // Read item size (4 bytes)
     let mut size_buf = [0u8; 4];
-    reader.read_exact(&mut size_buf, 4).await?;
+    reader
+        .read_exact(&mut size_buf, 4)
+        .await
+        .map_err(Error::Runtime)?;
     let size = u32::from_be_bytes(size_buf);
 
     // Read item
     let mut item = vec![0u8; size as usize];
-    reader.read_exact(&mut item, size as usize).await?;
+    reader
+        .read_exact(&mut item, size as usize)
+        .await
+        .map_err(Error::Runtime)?;
 
     // Read checksum
     let mut checksum_buf = [0u8; 4];
-    reader.read_exact(&mut checksum_buf, 4).await?;
+    reader
+        .read_exact(&mut checksum_buf, 4)
+        .await
+        .map_err(Error::Runtime)?;
     let stored_checksum = u32::from_be_bytes(checksum_buf);
     let checksum = crc32fast::hash(&item);
     if checksum != stored_checksum {
@@ -462,12 +471,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                         old_size = aligned_len,
                                         "trailing bytes detected: truncating"
                                     );
-                                    reader
-                                        .blob
-                                        .truncate(offset as u64 * ITEM_ALIGNMENT)
-                                        .await
-                                        .ok()?;
-                                    reader.blob.sync().await.ok()?;
+                                    reader.truncate(offset as u64 * ITEM_ALIGNMENT).await.ok()?;
                                     None
                                 }
                                 Err(err) => Some((

@@ -427,17 +427,17 @@ impl<T> RwLock<T> {
 /// of a full scan of contents.
 pub struct Buffer<B: Blob> {
     /// The underlying blob to read from.
-    pub blob: B,
+    blob: B,
     /// The buffer storing the data read from the blob.
     buffer: Vec<u8>,
     /// The current position in the blob from where the buffer was filled.
-    pub blob_position: u64,
+    blob_position: u64,
     /// The size of the blob.
     blob_size: u64,
     /// The current position within the buffer for reading.
-    pub buffer_position: usize,
+    buffer_position: usize,
     /// The valid data length in the buffer.
-    pub buffer_valid_len: usize,
+    buffer_valid_len: usize,
     /// The maximum size of the buffer.
     buffer_size: usize,
 }
@@ -618,6 +618,29 @@ impl<B: Blob> Buffer<B> {
     /// Returns the current absolute position in the blob.
     pub fn position(&self) -> u64 {
         self.blob_position + self.buffer_position as u64
+    }
+
+    /// Repositions the buffer to read from the specified position in the blob.
+    pub fn seek_to(&mut self, position: u64) -> Result<(), Error> {
+        // Check if the seek position is valid
+        if position > self.blob_size {
+            return Err(Error::BlobInsufficientLength);
+        }
+
+        // Reset buffer state
+        self.blob_position = position;
+        self.buffer_position = 0;
+        self.buffer_valid_len = 0;
+
+        Ok(())
+    }
+
+    /// Truncates the blob to the specified size.
+    ///
+    /// This may be useful if reading some blob after unclean shutdown.
+    pub async fn truncate(self, size: u64) -> Result<(), Error> {
+        self.blob.truncate(size).await?;
+        self.blob.sync().await
     }
 }
 
