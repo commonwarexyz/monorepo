@@ -315,7 +315,7 @@ where
         }
         for (i, e) in prepared_evals[0].iter().enumerate() {
             if e.index != evals[i].index {
-                return Err(Error::InvalidRecovery);
+                return Err(Error::InvalidIndex);
             }
         }
         prepared_evals.push(evals);
