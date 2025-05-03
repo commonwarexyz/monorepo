@@ -327,6 +327,7 @@ pub struct Actor<
     partition: String,
     compression: Option<u8>,
     replay_concurrency: usize,
+    replay_lookahead: usize,
     journal: Option<Journal<E, Voter<C::Signature, D>>>,
 
     genesis: Option<D>,
@@ -418,6 +419,7 @@ impl<
                 partition: cfg.partition,
                 compression: cfg.compression,
                 replay_concurrency: cfg.replay_concurrency,
+                replay_lookahead: cfg.replay_lookahead,
                 journal: None,
 
                 genesis: None,
@@ -1678,7 +1680,7 @@ impl<
         self.enter_view(1);
 
         // Initialize journal
-        let mut journal = Journal::<_, Voter<C::Signature, D>>::init(
+        let journal = Journal::<_, Voter<C::Signature, D>>::init(
             self.context.with_label("journal"),
             JConfig {
                 partition: self.partition.clone(),
@@ -1693,7 +1695,7 @@ impl<
         let mut observed_view = 1;
         {
             let stream = journal
-                .replay(self.replay_concurrency)
+                .replay(self.replay_concurrency, self.replay_lookahead)
                 .await
                 .expect("unable to replay journal");
             pin_mut!(stream);
