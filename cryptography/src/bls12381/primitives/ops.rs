@@ -7,13 +7,12 @@
 //! the domain separation tag is `BLS_POP_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_`. For signatures over other messages, the
 //! domain separation tag is `BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_`. You can read more about DSTs [here](https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-05#section-4.2).
 
-use crate::bls12381::primitives::poly::{compute_weights, prepare_evaluations};
-
 use super::{
     group::{self, equal, Element, Point, Share, DST, MESSAGE, PROOF_OF_POSSESSION},
     poly::{self, Eval, PartialSignature, Weight},
     Error,
 };
+use crate::bls12381::primitives::poly::{compute_weights, prepare_evaluations};
 use commonware_codec::Encode;
 use commonware_utils::union_unique;
 use rand::RngCore;
@@ -238,6 +237,18 @@ where
     Ok(())
 }
 
+/// Recovers a signature from `threshold` partial signatures.
+///
+/// # Determinism
+///
+/// Signatures recovered by this function are deterministic and are safe
+/// to use in a consensus-critical context.
+///
+/// # Warning
+///
+/// This function assumes that each partial signature is unique and that
+/// that there exists exactly one partial signature for each index in
+/// the `weights` map.
 pub fn threshold_signature_recover_with_weights<'a, I>(
     weights: &BTreeMap<u32, Weight>,
     partials: I,
