@@ -26,14 +26,14 @@ const NO_ACTIVE_ITEM: &str = "no active item in Cursor";
 /// Again optimizing for the common case, we store the first value directly in the `Record` to avoid
 /// indirection (heap jumping).
 #[derive(PartialEq, Eq)]
-struct Record<V: PartialEq + Eq> {
+struct Record<V: Eq> {
     value: V,
     next: Option<Box<Record<V>>>,
 }
 
 /// Phases of the `Cursor` during iteration.
 #[derive(PartialEq, Eq)]
-enum Phase<V: PartialEq + Eq> {
+enum Phase<V: Eq> {
     /// Before iteration starts.
     Initial,
 
@@ -73,7 +73,7 @@ enum Phase<V: PartialEq + Eq> {
 /// - Dropping the `Cursor` automatically restores the list structure by reattaching any detached `next` nodes.
 ///
 /// _If you don't need advanced functionality, just use `insert()`, `insert_and_prune()`, or `remove()` instead._
-pub struct Cursor<'a, T: Translator, V: PartialEq + Eq> {
+pub struct Cursor<'a, T: Translator, V: Eq> {
     phase: Phase<V>,
 
     entry: Option<OccupiedEntry<'a, T::Key, Record<V>>>,
@@ -81,17 +81,15 @@ pub struct Cursor<'a, T: Translator, V: PartialEq + Eq> {
 
     keys: &'a Gauge,
     items: &'a Gauge,
-    collisions: &'a Counter,
     pruned: &'a Counter,
 }
 
-impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
+impl<'a, T: Translator, V: Eq> Cursor<'a, T, V> {
     /// Creates a new `Cursor` from a mutable record reference, detaching its `next` chain for iteration.
     fn new(
         entry: OccupiedEntry<'a, T::Key, Record<V>>,
         keys: &'a Gauge,
         items: &'a Gauge,
-        collisions: &'a Counter,
         pruned: &'a Counter,
     ) -> Self {
         Self {
@@ -102,7 +100,6 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
 
             keys,
             items,
-            collisions,
             pruned,
         }
     }
@@ -198,8 +195,6 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
     }
 
     /// Inserts a new value at the current position.
-    ///
-    /// Increments the `collisions` counter as this adds to an existing key's chain.
     pub fn insert(&mut self, v: V) {
         self.items.inc();
         match std::mem::replace(&mut self.phase, Phase::Done) {
@@ -213,7 +208,6 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
 
                 // Set the phase to the new record.
                 self.phase = Phase::PostInsert(new);
-                self.collisions.inc();
             }
             Phase::Next(mut current) => {
                 // Take next.
@@ -225,7 +219,6 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                 // Create a new record that points to the next's next.
                 let new = Box::new(Record { value: v, next });
                 self.phase = Phase::PostInsert(new);
-                self.collisions.inc();
             }
             Phase::Done => {
                 // If we are done, we need to create a new record and
@@ -235,7 +228,6 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
                     next: None,
                 });
                 self.past_push(new);
-                self.collisions.inc();
             }
             Phase::EntryDeleted => {
                 // If entry is deleted, we need to update it.
@@ -250,8 +242,6 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
     }
 
     /// Deletes the current value, adjusting the list structure.
-    ///
-    /// Increments the `pruned` counter to track removals.
     pub fn delete(&mut self) {
         self.pruned.inc();
         self.items.dec();
@@ -286,7 +276,7 @@ impl<'a, T: Translator, V: PartialEq + Eq> Cursor<'a, T, V> {
 
 impl<T: Translator, V> Drop for Cursor<'_, T, V>
 where
-    V: PartialEq + Eq,
+    V: Eq,
 {
     fn drop(&mut self) {
         // Take the entry.
@@ -334,11 +324,11 @@ where
 }
 
 /// An immutable iterator over the values associated with a translated key.
-pub struct ImmutableCursor<'a, V: PartialEq + Eq> {
+pub struct ImmutableCursor<'a, V: Eq> {
     current: Option<&'a Record<V>>,
 }
 
-impl<'a, V: PartialEq + Eq> ImmutableCursor<'a, V> {
+impl<'a, V: Eq> ImmutableCursor<'a, V> {
     /// Creates a new `ImmutableCursor` from a `Record`.
     fn new(record: &'a Record<V>) -> Self {
         Self {
@@ -347,7 +337,7 @@ impl<'a, V: PartialEq + Eq> ImmutableCursor<'a, V> {
     }
 }
 
-impl<'a, V: PartialEq + Eq> Iterator for ImmutableCursor<'a, V> {
+impl<'a, V: Eq> Iterator for ImmutableCursor<'a, V> {
     type Item = &'a V;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -360,17 +350,16 @@ impl<'a, V: PartialEq + Eq> Iterator for ImmutableCursor<'a, V> {
 }
 
 /// A memory-efficient index that maps translated keys to arbitrary values.
-pub struct Index<T: Translator, V: PartialEq + Eq> {
+pub struct Index<T: Translator, V: Eq> {
     translator: T,
     map: HashMap<T::Key, Record<V>, T>,
 
     keys: Gauge,
     items: Gauge,
-    collisions: Counter,
     pruned: Counter,
 }
 
-impl<T: Translator, V: PartialEq + Eq> Index<T, V> {
+impl<T: Translator, V: Eq> Index<T, V> {
     /// Create a new index with the given translator.
     pub fn init(ctx: impl Metrics, tr: T) -> Self {
         let s = Self {
@@ -379,7 +368,6 @@ impl<T: Translator, V: PartialEq + Eq> Index<T, V> {
 
             keys: Gauge::default(),
             items: Gauge::default(),
-            collisions: Counter::default(),
             pruned: Counter::default(),
         };
         ctx.register(
@@ -389,11 +377,6 @@ impl<T: Translator, V: PartialEq + Eq> Index<T, V> {
         );
         ctx.register("items", "Number of items in the index", s.items.clone());
         ctx.register("pruned", "Number of items pruned", s.pruned.clone());
-        ctx.register(
-            "collisions",
-            "Number of item collisions",
-            s.collisions.clone(),
-        );
         s
     }
 
@@ -417,13 +400,9 @@ impl<T: Translator, V: PartialEq + Eq> Index<T, V> {
     pub fn get_mut(&mut self, key: &[u8]) -> Option<Cursor<T, V>> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
-            Entry::Occupied(entry) => Some(Cursor::new(
-                entry,
-                &self.keys,
-                &self.items,
-                &self.collisions,
-                &self.pruned,
-            )),
+            Entry::Occupied(entry) => {
+                Some(Cursor::new(entry, &self.keys, &self.items, &self.pruned))
+            }
             Entry::Vacant(_) => None,
         }
     }
@@ -443,13 +422,9 @@ impl<T: Translator, V: PartialEq + Eq> Index<T, V> {
     pub fn get_mut_or_insert(&mut self, key: &[u8], v: V) -> Option<Cursor<T, V>> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
-            Entry::Occupied(entry) => Some(Cursor::new(
-                entry,
-                &self.keys,
-                &self.items,
-                &self.collisions,
-                &self.pruned,
-            )),
+            Entry::Occupied(entry) => {
+                Some(Cursor::new(entry, &self.keys, &self.items, &self.pruned))
+            }
             Entry::Vacant(entry) => {
                 Self::create(&self.keys, &self.items, entry, v);
                 None
@@ -470,13 +445,8 @@ impl<T: Translator, V: PartialEq + Eq> Index<T, V> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
             Entry::Occupied(entry) => {
-                let mut cursor = Cursor::<'_, T, V>::new(
-                    entry,
-                    &self.keys,
-                    &self.items,
-                    &self.collisions,
-                    &self.pruned,
-                );
+                let mut cursor =
+                    Cursor::<'_, T, V>::new(entry, &self.keys, &self.items, &self.pruned);
                 cursor.next();
                 cursor.insert(v);
             }
@@ -494,13 +464,8 @@ impl<T: Translator, V: PartialEq + Eq> Index<T, V> {
         match self.map.entry(k) {
             Entry::Occupied(entry) => {
                 // Get entry
-                let mut cursor = Cursor::<'_, T, V>::new(
-                    entry,
-                    &self.keys,
-                    &self.items,
-                    &self.collisions,
-                    &self.pruned,
-                );
+                let mut cursor =
+                    Cursor::<'_, T, V>::new(entry, &self.keys, &self.items, &self.pruned);
 
                 // Remove anything that is prunable.
                 loop {
@@ -529,13 +494,8 @@ impl<T: Translator, V: PartialEq + Eq> Index<T, V> {
         match self.map.entry(k) {
             Entry::Occupied(entry) => {
                 // Get cursor
-                let mut cursor = Cursor::<'_, T, V>::new(
-                    entry,
-                    &self.keys,
-                    &self.items,
-                    &self.collisions,
-                    &self.pruned,
-                );
+                let mut cursor =
+                    Cursor::<'_, T, V>::new(entry, &self.keys, &self.items, &self.pruned);
 
                 // Remove anything that is prunable.
                 loop {

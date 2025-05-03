@@ -59,7 +59,6 @@ mod tests {
         index.insert(key, 3);
         assert!(context.encode().contains("keys 1"));
         assert!(context.encode().contains("items 3"));
-        assert!(context.encode().contains("collisions_total 2"));
 
         // Check that the values are in the correct order
         assert_eq!(index.get(key).copied().collect::<Vec<_>>(), vec![1, 3, 2]);
@@ -122,7 +121,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_index_key_lengths_and_collisions() {
+    fn test_index_key_lengths_and_key_item_metrics() {
         let context = deterministic::Context::default();
         let mut index = Index::init(context.clone(), TwoCap);
 
@@ -347,7 +346,6 @@ mod tests {
             let mut cursor = index.get_mut(b"key").unwrap();
             assert_eq!(*cursor.next().unwrap(), 1);
             cursor.insert(3);
-            assert!(context.encode().contains("collisions_total 1"));
         }
         assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![1, 3]);
         assert!(context.encode().contains("keys 1"));
@@ -358,8 +356,9 @@ mod tests {
             let mut cursor = index.get_mut(b"key").unwrap();
             assert_eq!(*cursor.next().unwrap(), 1);
             cursor.insert(42);
-            assert!(context.encode().contains("collisions_total 2"));
         }
+        assert!(context.encode().contains("keys 1"));
+        assert!(context.encode().contains("items 3"));
 
         // Verify second value is new one
         {
@@ -370,7 +369,6 @@ mod tests {
 
         // Insert a new value
         index.insert(b"key", 100);
-        assert!(context.encode().contains("collisions_total 3"));
 
         // Iterate to end
         let mut iter = index.get(b"key");
@@ -486,12 +484,12 @@ mod tests {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx.clone(), TwoCap);
 
-        // Inserting into a *vacant* key behaves just like `insert`
-        // (no collisions and nothing to prune).
+        // Inserting into a *vacant* key behaves just like `insert`: 1 key, 1 item, nothing pruned.
         index.insert_and_prune(b"key", 1u64, |_| false);
 
         assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![1]);
-        assert!(ctx.encode().contains("collisions_total 0"));
+        assert!(ctx.encode().contains("items 1"));
+        assert!(ctx.encode().contains("keys 1"));
         assert!(ctx.encode().contains("pruned_total 0"));
     }
 
@@ -505,7 +503,8 @@ mod tests {
         index.insert_and_prune(b"key", 2u64, |v| *v == 1); // replace
 
         assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![2]);
-        assert!(ctx.encode().contains("collisions_total 0"));
+        assert!(ctx.encode().contains("items 1"));
+        assert!(ctx.encode().contains("keys 1"));
         assert!(ctx.encode().contains("pruned_total 1"));
     }
 
@@ -525,7 +524,8 @@ mod tests {
             index.get(b"key").copied().collect::<Vec<u64>>(),
             Vec::<u64>::new()
         );
-        assert!(ctx.encode().contains("collisions_total 1"));
+        assert!(ctx.encode().contains("items 0"));
+        assert!(ctx.encode().contains("keys 0"));
         assert!(ctx.encode().contains("pruned_total 2"));
     }
 
@@ -920,6 +920,5 @@ mod tests {
 
         assert!(ctx.encode().contains("keys 1"));
         assert!(ctx.encode().contains("items 1"));
-        assert!(ctx.encode().contains("collisions_total 0"));
     }
 }
