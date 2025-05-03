@@ -7,6 +7,8 @@
 //! the domain separation tag is `BLS_POP_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_`. For signatures over other messages, the
 //! domain separation tag is `BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_`. You can read more about DSTs [here](https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-05#section-4.2).
 
+use crate::bls12381::primitives::poly::compute_weights;
+
 use super::{
     group::{self, equal, Element, Point, Share, DST, MESSAGE, PROOF_OF_POSSESSION},
     poly::{self, Eval, PartialSignature, Weight},
@@ -264,6 +266,46 @@ where
     I: IntoIterator<Item = &'a PartialSignature>,
 {
     poly::Signature::recover(threshold, partials)
+}
+
+pub fn threshold_signature_recover_multiple<'a, I>(
+    threshold: u32,
+    mut partials: Vec<I>,
+) -> Result<Vec<group::Signature>, Error>
+where
+    I: IntoIterator<Item = &'a PartialSignature>,
+{
+    assert!(!partials.is_empty());
+
+    // Process first iterator
+    let mut first = partials.swap_remove(0).into_iter().collect::<Vec<_>>();
+    first.sort_by_key(|p| p.index);
+    first.truncate(threshold as usize);
+    let mut evals = vec![first];
+
+    // Ensure other iterators have the same length and indices
+    for partial in partials {
+        let mut partial = partial.into_iter().collect::<Vec<_>>();
+        partial.sort_by_key(|p| p.index);
+        partial.truncate(threshold as usize);
+        for (i, p) in evals[0].iter().enumerate() {
+            assert_eq!(p.index, partial[i].index);
+        }
+        evals.push(partial);
+    }
+
+    // Compute weights
+    let indices = evals[0].iter().map(|p| p.index).collect::<Vec<_>>();
+    let weights =
+        compute_weights(&indices, threshold).map_err(|_| Error::PublicKeyInterpolationFailed)?;
+
+    // Recover signatures
+    let mut signatures = Vec::with_capacity(evals.len());
+    for eval in evals {
+        let sig = threshold_signature_recover_with_weights(&weights, eval)?;
+        signatures.push(sig);
+    }
+    Ok(signatures)
 }
 
 /// Aggregates multiple public keys.
