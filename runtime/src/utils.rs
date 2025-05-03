@@ -491,17 +491,17 @@ impl<B: Blob> Buffer<B> {
     ///
     /// # Panics
     ///
-    /// Panics if `lookahead` is zero.
-    pub fn new(blob: B, size: u64, lookahead: usize) -> Self {
-        assert!(lookahead > 0, "Buffer size must be greater than zero");
+    /// Panics if `buffer_size` is zero.
+    pub fn new(blob: B, blob_size: u64, buffer_size: usize) -> Self {
+        assert!(buffer_size > 0, "Buffer size must be greater than zero");
         Self {
             blob,
-            buffer: vec![0; lookahead],
+            buffer: vec![0; buffer_size],
             blob_position: 0,
-            blob_size: size,
+            blob_size,
             buffer_position: 0,
             buffer_valid_len: 0,
-            buffer_size: lookahead,
+            buffer_size,
         }
     }
 
@@ -526,7 +526,6 @@ impl<B: Blob> Buffer<B> {
 
         // Calculate how many bytes remain in the blob
         let blob_remaining = self.blob_size.saturating_sub(self.blob_position);
-
         if blob_remaining == 0 {
             return Err(Error::BlobInsufficientLength);
         }
@@ -569,8 +568,8 @@ impl<B: Blob> Buffer<B> {
             return Err(Error::BlobInsufficientLength);
         }
 
+        // Read until we have enough bytes
         let mut bytes_read = 0;
-
         while bytes_read < size {
             // Check if we need to refill
             if self.buffer_position >= self.buffer_valid_len {
@@ -611,7 +610,6 @@ impl<B: Blob> Buffer<B> {
 
         // We need to do a more complex operation: copy remaining data to beginning,
         // then refill the rest of the buffer
-
         let remaining = self.buffer_remaining();
         if remaining > 0 {
             // Copy the remaining data to the beginning of the buffer
@@ -628,7 +626,6 @@ impl<B: Blob> Buffer<B> {
         let read_pos = self.blob_position + remaining as u64;
         let bytes_blob_remaining = self.blob_size.saturating_sub(read_pos);
         let read_size = std::cmp::min(self.buffer_size - remaining, bytes_blob_remaining as usize);
-
         if read_size > 0 {
             match self
                 .blob
