@@ -307,12 +307,6 @@ where
     for evals in many_evals {
         let evals = evals.into_iter().collect::<Vec<_>>();
         let evals = prepare_evaluations(threshold, evals)?;
-        if prepared_evals[0].len() != evals.len() {
-            return Err(Error::NotEnoughPartialSignatures(
-                evals.len(),
-                prepared_evals[0].len(),
-            ));
-        }
         for (i, e) in prepared_evals[0].iter().enumerate() {
             if e.index != evals[i].index {
                 return Err(Error::InvalidIndex);
