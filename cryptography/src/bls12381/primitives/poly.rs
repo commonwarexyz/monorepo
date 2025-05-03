@@ -351,7 +351,7 @@ impl<C: Element> Poly<C> {
             compute_weights(&evals.iter().map(|e| e.index).collect::<Vec<_>>(), t as u32)?;
 
         // Perform interpolation using the precomputed weights
-        Self::recover_with_weights(&weights, evals.iter())
+        Self::recover_with_weights(&weights, &evals)
     }
 }
 

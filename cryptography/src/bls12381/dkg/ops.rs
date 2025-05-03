@@ -2,7 +2,10 @@
 
 use crate::bls12381::{
     dkg::Error,
-    primitives::{group::Share, poly},
+    primitives::{
+        group::Share,
+        poly::{self, compute_weights},
+    },
 };
 use rand::RngCore;
 use rayon::{prelude::*, ThreadPoolBuilder};
@@ -140,7 +143,7 @@ pub fn recover_public(
                     .collect::<Vec<_>>();
 
                 // Use precomputed weights for interpolation
-                match poly::Public::recover_with_weights(&evals, &weights) {
+                match poly::Public::recover_with_weights(&weights, &evals) {
                     Ok(point) => Ok(point),
                     Err(_) => Err(Error::PublicKeyInterpolationFailed),
                 }
