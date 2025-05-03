@@ -175,7 +175,7 @@ impl<C: Verifier, D: Digest> Z for Mailbox<C, D> {
 
     async fn report(&mut self, activity: Self::Activity) {
         match activity {
-            Activity::Proposal(proposal) => {
+            Activity::Tip(proposal) => {
                 self.sender
                     .send(Message::Proposal(proposal))
                     .await

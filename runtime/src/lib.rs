@@ -18,6 +18,7 @@
 //! expect breaking changes and occasional instability.
 
 use prometheus_client::registry::Metric;
+use std::io::Error as IoError;
 use std::{
     future::Future,
     net::SocketAddr,
@@ -33,16 +34,17 @@ cfg_if::cfg_if! {
         pub mod benchmarks;
     }
 }
+mod network;
 mod storage;
 pub mod telemetry;
 mod utils;
-pub use utils::{create_pool, reschedule, Handle, Signal, Signaler};
+pub use utils::*;
 
 /// Prefix for runtime metrics.
 const METRICS_PREFIX: &str = "runtime";
 
 /// Errors that can occur when interacting with the runtime.
-#[derive(Error, Debug, PartialEq)]
+#[derive(Error, Debug)]
 pub enum Error {
     #[error("exited")]
     Exited,
@@ -68,16 +70,16 @@ pub enum Error {
     PartitionMissing(String),
     #[error("partition corrupt: {0}")]
     PartitionCorrupt(String),
-    #[error("blob open failed: {0}/{1}")]
-    BlobOpenFailed(String, String),
+    #[error("blob open failed: {0}/{1} error: {2}")]
+    BlobOpenFailed(String, String, IoError),
     #[error("blob missing: {0}/{1}")]
     BlobMissing(String, String),
-    #[error("blob truncate failed: {0}/{1}")]
-    BlobTruncateFailed(String, String),
-    #[error("blob sync failed: {0}/{1}")]
-    BlobSyncFailed(String, String),
-    #[error("blob close failed: {0}/{1}")]
-    BlobCloseFailed(String, String),
+    #[error("blob truncate failed: {0}/{1} error: {2}")]
+    BlobTruncateFailed(String, String, IoError),
+    #[error("blob sync failed: {0}/{1} error: {2}")]
+    BlobSyncFailed(String, String, IoError),
+    #[error("blob close failed: {0}/{1} error: {2}")]
+    BlobCloseFailed(String, String, IoError),
     #[error("blob insufficient length")]
     BlobInsufficientLength,
     #[error("offset overflow")]
@@ -87,13 +89,18 @@ pub enum Error {
 /// Interface that any task scheduler must implement to start
 /// running tasks.
 pub trait Runner {
+    /// Context defines the environment available to tasks.
+    /// Example of possible services provided by the context include:
+    /// - [Clock] for time-based operations
+    /// - [Network] for network operations
+    /// - [Storage] for storage operations
+    type Context;
+
     /// Start running a root task.
-    ///
-    /// The root task does not create the initial context because it can be useful to have a reference
-    /// to context before starting task execution.
-    fn start<F>(self, f: F) -> F::Output
+    fn start<F, Fut>(self, f: F) -> Fut::Output
     where
-        F: Future;
+        F: FnOnce(Self::Context) -> Fut,
+        Fut: Future;
 }
 
 /// Interface that any task scheduler must implement to spawn tasks.
@@ -212,30 +219,53 @@ pub trait Clock: Clone + Send + Sync + 'static {
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static;
 }
 
+/// Syntactic sugar for the type of [Sink] used by a given [Network] N.
+pub type SinkOf<N> = <<N as Network>::Listener as Listener>::Sink;
+
+/// Syntactic sugar for the type of [Stream] used by a given [Network] N.
+pub type StreamOf<N> = <<N as Network>::Listener as Listener>::Stream;
+
+/// Syntactic sugar for the type of [Listener] used by a given [Network] N.
+pub type ListenerOf<N> = <N as crate::Network>::Listener;
+
 /// Interface that any runtime must implement to create
 /// network connections.
-pub trait Network<L, Si, St>: Clone + Send + Sync + 'static
-where
-    L: Listener<Si, St>,
-    Si: Sink,
-    St: Stream,
-{
+pub trait Network: Clone + Send + Sync + 'static {
+    /// The type of [Listener] that's returned when binding to a socket.
+    /// Accepting a connection returns a [Sink] and [Stream] which are defined
+    /// by the [Listener] and used to send and receive data over the connection.
+    type Listener: Listener;
+
     /// Bind to the given socket address.
-    fn bind(&self, socket: SocketAddr) -> impl Future<Output = Result<L, Error>> + Send;
+    fn bind(
+        &self,
+        socket: SocketAddr,
+    ) -> impl Future<Output = Result<Self::Listener, Error>> + Send;
 
     /// Dial the given socket address.
-    fn dial(&self, socket: SocketAddr) -> impl Future<Output = Result<(Si, St), Error>> + Send;
+    fn dial(
+        &self,
+        socket: SocketAddr,
+    ) -> impl Future<Output = Result<(SinkOf<Self>, StreamOf<Self>), Error>> + Send;
 }
 
 /// Interface that any runtime must implement to handle
 /// incoming network connections.
-pub trait Listener<Si, St>: Sync + Send + 'static
-where
-    Si: Sink,
-    St: Stream,
-{
+pub trait Listener: Sync + Send + 'static {
+    /// The type of [Sink] that's returned when accepting a connection.
+    /// This is used to send data to the remote connection.
+    type Sink: Sink;
+    /// The type of [Stream] that's returned when accepting a connection.
+    /// This is used to receive data from the remote connection.
+    type Stream: Stream;
+
     /// Accept an incoming connection.
-    fn accept(&mut self) -> impl Future<Output = Result<(SocketAddr, Si, St), Error>> + Send;
+    fn accept(
+        &mut self,
+    ) -> impl Future<Output = Result<(SocketAddr, Self::Sink, Self::Stream), Error>> + Send;
+
+    /// Returns the local address of the listener.
+    fn local_addr(&self) -> Result<SocketAddr, std::io::Error>;
 }
 
 /// Interface that any runtime must implement to send
@@ -264,7 +294,8 @@ pub trait Storage: Clone + Send + Sync + 'static {
     /// The readable/writeable storage buffer that can be opened by this Storage.
     type Blob: Blob;
 
-    /// Open an existing blob in a given partition or create a new one.
+    /// Open an existing blob in a given partition or create a new one, returning
+    /// the blob and its length.
     ///
     /// Multiple instances of the same blob can be opened concurrently, however,
     /// writing to the same blob concurrently may lead to undefined behavior.
@@ -272,7 +303,7 @@ pub trait Storage: Clone + Send + Sync + 'static {
         &self,
         partition: &str,
         name: &[u8],
-    ) -> impl Future<Output = Result<Self::Blob, Error>> + Send;
+    ) -> impl Future<Output = Result<(Self::Blob, u64), Error>> + Send;
 
     /// Remove a blob from a given partition.
     ///
@@ -299,9 +330,6 @@ pub trait Storage: Clone + Send + Sync + 'static {
 /// and writing to both is undefined behavior.
 #[allow(clippy::len_without_is_empty)]
 pub trait Blob: Clone + Send + Sync + 'static {
-    /// Get the length of the blob.
-    fn len(&self) -> impl Future<Output = Result<u64, Error>> + Send;
-
     /// Read from the blob at the given offset.
     ///
     /// `read_at` does not return the number of bytes read because it
@@ -336,20 +364,22 @@ mod tests {
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::str::FromStr;
     use std::sync::Mutex;
-    use telemetry::metrics;
-    use tracing::error;
+    use tracing::{error, Level};
     use utils::reschedule;
 
-    fn test_error_future(runner: impl Runner) {
+    fn test_error_future<R: Runner>(runner: R) {
         async fn error_future() -> Result<&'static str, &'static str> {
             Err("An error occurred")
         }
-        let result = runner.start(error_future());
+        let result = runner.start(|_| error_future());
         assert_eq!(result, Err("An error occurred"));
     }
 
-    fn test_clock_sleep(runner: impl Runner, context: impl Spawner + Clock) {
-        runner.start(async move {
+    fn test_clock_sleep<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
             // Capture initial time
             let start = context.current();
             let sleep_duration = Duration::from_millis(10);
@@ -361,8 +391,11 @@ mod tests {
         });
     }
 
-    fn test_clock_sleep_until(runner: impl Runner, context: impl Spawner + Clock) {
-        runner.start(async move {
+    fn test_clock_sleep_until<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
             // Trigger sleep
             let now = context.current();
             context.sleep_until(now + Duration::from_millis(100)).await;
@@ -373,8 +406,11 @@ mod tests {
         });
     }
 
-    fn test_root_finishes(runner: impl Runner, context: impl Spawner) {
-        runner.start(async move {
+    fn test_root_finishes<R: Runner>(runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
             context.spawn(|_| async move {
                 loop {
                     reschedule().await;
@@ -383,33 +419,39 @@ mod tests {
         });
     }
 
-    fn test_spawn_abort(runner: impl Runner, context: impl Spawner) {
-        runner.start(async move {
+    fn test_spawn_abort<R: Runner>(runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
             let handle = context.spawn(|_| async move {
                 loop {
                     reschedule().await;
                 }
             });
             handle.abort();
-            assert_eq!(handle.await, Err(Error::Closed));
+            assert!(matches!(handle.await, Err(Error::Closed)));
         });
     }
 
-    fn test_panic_aborts_root(runner: impl Runner) {
+    fn test_panic_aborts_root<R: Runner>(runner: R) {
         let result = catch_unwind(AssertUnwindSafe(|| {
-            runner.start(async move {
+            runner.start(|_| async move {
                 panic!("blah");
             });
         }));
         result.unwrap_err();
     }
 
-    fn test_panic_aborts_spawn(runner: impl Runner, context: impl Spawner) {
-        let result = runner.start(async move {
+    fn test_panic_aborts_spawn<R: Runner>(runner: R)
+    where
+        R::Context: Spawner,
+    {
+        let result = runner.start(|context| async move {
             let result = context.spawn(|_| async move {
                 panic!("blah");
             });
-            assert_eq!(result.await, Err(Error::Exited));
+            assert!(matches!(result.await, Err(Error::Exited)));
             Result::<(), Error>::Ok(())
         });
 
@@ -417,8 +459,8 @@ mod tests {
         result.unwrap();
     }
 
-    fn test_select(runner: impl Runner) {
-        runner.start(async move {
+    fn test_select<R: Runner>(runner: R) {
+        runner.start(|_| async move {
             // Test first branch
             let output = Mutex::new(0);
             select! {
@@ -445,8 +487,11 @@ mod tests {
     }
 
     /// Ensure future fusing works as expected.
-    fn test_select_loop(runner: impl Runner, context: impl Clock) {
-        runner.start(async move {
+    fn test_select_loop<R: Runner>(runner: R)
+    where
+        R::Context: Clock,
+    {
+        runner.start(|context| async move {
             // Should hit timeout
             let (mut sender, mut receiver) = mpsc::unbounded();
             for _ in 0..2 {
@@ -488,13 +533,16 @@ mod tests {
         });
     }
 
-    fn test_storage_operations(runner: impl Runner, context: impl Spawner + Storage) {
-        runner.start(async move {
+    fn test_storage_operations<R: Runner>(runner: R)
+    where
+        R::Context: Storage,
+    {
+        runner.start(|context| async move {
             let partition = "test_partition";
             let name = b"test_blob";
 
             // Open a new blob
-            let blob = context
+            let (blob, _) = context
                 .open(partition, name)
                 .await
                 .expect("Failed to open blob");
@@ -515,10 +563,6 @@ mod tests {
                 .expect("Failed to read from blob");
             assert_eq!(&buffer, data);
 
-            // Get blob length
-            let length = blob.len().await.expect("Failed to get blob length");
-            assert_eq!(length, data.len() as u64);
-
             // Close the blob
             blob.close().await.expect("Failed to close blob");
 
@@ -530,10 +574,11 @@ mod tests {
             assert!(blobs.contains(&name.to_vec()));
 
             // Reopen the blob
-            let blob = context
+            let (blob, len) = context
                 .open(partition, name)
                 .await
                 .expect("Failed to reopen blob");
+            assert_eq!(len, data.len() as u64);
 
             // Read data part of message back
             let mut buffer = vec![0u8; 7];
@@ -570,13 +615,16 @@ mod tests {
         });
     }
 
-    fn test_blob_read_write(runner: impl Runner, context: impl Spawner + Storage) {
-        runner.start(async move {
+    fn test_blob_read_write<R: Runner>(runner: R)
+    where
+        R::Context: Storage,
+    {
+        runner.start(|context| async move {
             let partition = "test_partition";
             let name = b"test_blob_rw";
 
             // Open a new blob
-            let blob = context
+            let (blob, _) = context
                 .open(partition, name)
                 .await
                 .expect("Failed to open blob");
@@ -591,10 +639,6 @@ mod tests {
                 .await
                 .expect("Failed to write data2");
 
-            // Assert that length tracks pending data
-            let length = blob.len().await.expect("Failed to get blob length");
-            assert_eq!(length, 10);
-
             // Read data back
             let mut buffer = vec![0u8; 10];
             blob.read_at(&mut buffer, 0)
@@ -608,13 +652,9 @@ mod tests {
             blob.write_at(data3, 5)
                 .await
                 .expect("Failed to write data3");
-            let length = blob.len().await.expect("Failed to get blob length");
-            assert_eq!(length, 10);
 
             // Truncate the blob
             blob.truncate(5).await.expect("Failed to truncate blob");
-            let length = blob.len().await.expect("Failed to get blob length");
-            assert_eq!(length, 5);
             let mut buffer = vec![0u8; 5];
             blob.read_at(&mut buffer, 0)
                 .await
@@ -624,28 +664,31 @@ mod tests {
             // Full read after truncation
             let mut buffer = vec![0u8; 10];
             let result = blob.read_at(&mut buffer, 0).await;
-            assert!(matches!(result, Err(Error::BlobInsufficientLength)));
+            assert!(result.is_err());
 
             // Close the blob
             blob.close().await.expect("Failed to close blob");
         });
     }
 
-    fn test_many_partition_read_write(runner: impl Runner, context: impl Spawner + Storage) {
-        runner.start(async move {
+    fn test_many_partition_read_write<R: Runner>(runner: R)
+    where
+        R::Context: Storage,
+    {
+        runner.start(|context| async move {
             let partitions = ["partition1", "partition2", "partition3"];
             let name = b"test_blob_rw";
+            let data1 = b"Hello";
+            let data2 = b"World";
 
             for (additional, partition) in partitions.iter().enumerate() {
                 // Open a new blob
-                let blob = context
+                let (blob, _) = context
                     .open(partition, name)
                     .await
                     .expect("Failed to open blob");
 
                 // Write data at different offsets
-                let data1 = b"Hello";
-                let data2 = b"World";
                 blob.write_at(data1, 0)
                     .await
                     .expect("Failed to write data1");
@@ -659,10 +702,11 @@ mod tests {
 
             for (additional, partition) in partitions.iter().enumerate() {
                 // Open a new blob
-                let blob = context
+                let (blob, len) = context
                     .open(partition, name)
                     .await
                     .expect("Failed to open blob");
+                assert_eq!(len, (data1.len() + data2.len() + additional) as u64);
 
                 // Read data back
                 let mut buffer = vec![0u8; 10 + additional];
@@ -678,13 +722,16 @@ mod tests {
         });
     }
 
-    fn test_blob_read_past_length(runner: impl Runner, context: impl Spawner + Storage) {
-        runner.start(async move {
+    fn test_blob_read_past_length<R: Runner>(runner: R)
+    where
+        R::Context: Storage,
+    {
+        runner.start(|context| async move {
             let partition = "test_partition";
             let name = b"test_blob_rw";
 
             // Open a new blob
-            let blob = context
+            let (blob, _) = context
                 .open(partition, name)
                 .await
                 .expect("Failed to open blob");
@@ -692,7 +739,7 @@ mod tests {
             // Read data past file length (empty file)
             let mut buffer = vec![0u8; 10];
             let result = blob.read_at(&mut buffer, 0).await;
-            assert!(matches!(result, Err(Error::BlobInsufficientLength)));
+            assert!(result.is_err());
 
             // Write data to the blob
             let data = b"Hello, Storage!";
@@ -703,20 +750,20 @@ mod tests {
             // Read data past file length (non-empty file)
             let mut buffer = vec![0u8; 20];
             let result = blob.read_at(&mut buffer, 0).await;
-            assert!(matches!(result, Err(Error::BlobInsufficientLength)));
+            assert!(result.is_err());
         })
     }
 
-    fn test_blob_clone_and_concurrent_read(
-        runner: impl Runner,
-        context: impl Spawner + Storage + Metrics,
-    ) {
-        runner.start(async move {
+    fn test_blob_clone_and_concurrent_read<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Storage + Metrics,
+    {
+        runner.start(|context| async move {
             let partition = "test_partition";
             let name = b"test_blob_rw";
 
             // Open a new blob
-            let blob = context
+            let (blob, _) = context
                 .open(partition, name)
                 .await
                 .expect("Failed to open blob");
@@ -764,18 +811,21 @@ mod tests {
                 .expect("Failed to read from blob");
             assert_eq!(&buffer, data);
 
-            // Get blob length
-            let length = blob.len().await.expect("Failed to get blob length");
-            assert_eq!(length, data.len() as u64);
-
             // Close the blob
             blob.close().await.expect("Failed to close blob");
+
+            // Ensure no blobs still open
+            let buffer = context.encode();
+            assert!(buffer.contains("open_blobs 0"));
         });
     }
 
-    fn test_shutdown(runner: impl Runner, context: impl Spawner + Clock + Metrics) {
+    fn test_shutdown<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Metrics + Clock,
+    {
         let kill = 9;
-        runner.start(async move {
+        runner.start(|context| async move {
             // Spawn a task that waits for signal
             let before = context
                 .with_label("before")
@@ -817,48 +867,63 @@ mod tests {
         });
     }
 
-    fn test_spawn_ref(runner: impl Runner, mut context: impl Spawner) {
-        runner.start(async move {
+    fn test_spawn_ref<R: Runner>(runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|mut context| async move {
             let handle = context.spawn_ref();
             let result = handle(async move { 42 }).await;
-            assert_eq!(result, Ok(42));
+            assert!(matches!(result, Ok(42)));
         });
     }
 
-    fn test_spawn_ref_duplicate(runner: impl Runner, mut context: impl Spawner) {
-        runner.start(async move {
+    fn test_spawn_ref_duplicate<R: Runner>(runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|mut context| async move {
             let handle = context.spawn_ref();
             let result = handle(async move { 42 }).await;
-            assert_eq!(result, Ok(42));
+            assert!(matches!(result, Ok(42)));
 
             // Ensure context is consumed
             let handle = context.spawn_ref();
             let result = handle(async move { 42 }).await;
-            assert_eq!(result, Ok(42));
+            assert!(matches!(result, Ok(42)));
         });
     }
 
-    fn test_spawn_duplicate(runner: impl Runner, mut context: impl Spawner) {
-        runner.start(async move {
+    fn test_spawn_duplicate<R: Runner>(runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|mut context| async move {
             let handle = context.spawn_ref();
             let result = handle(async move { 42 }).await;
-            assert_eq!(result, Ok(42));
+            assert!(matches!(result, Ok(42)));
 
             // Ensure context is consumed
             context.spawn(|_| async move { 42 });
         });
     }
 
-    fn test_spawn_blocking(runner: impl Runner, context: impl Spawner) {
-        runner.start(async move {
+    fn test_spawn_blocking<R: Runner>(runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
             let handle = context.spawn_blocking(|| 42);
             let result = handle.await;
-            assert_eq!(result, Ok(42));
+            assert!(matches!(result, Ok(42)));
         });
     }
 
-    fn test_spawn_blocking_abort(runner: impl Runner, context: impl Spawner) {
-        runner.start(async move {
+    fn test_spawn_blocking_abort<R: Runner>(runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
             // Create task
             let (sender, mut receiver) = oneshot::channel();
             let handle = context.spawn_blocking(move || {
@@ -889,12 +954,15 @@ mod tests {
             sender.send(()).unwrap();
 
             // Wait for the task to complete
-            assert_eq!(handle.await, Ok(100_000_000));
+            assert!(matches!(handle.await, Ok(100_000_000)));
         });
     }
 
-    fn test_metrics(runner: impl Runner, context: impl Spawner + Metrics) {
-        runner.start(async move {
+    fn test_metrics<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
             // Assert label
             assert_eq!(context.label(), "");
 
@@ -924,35 +992,334 @@ mod tests {
         });
     }
 
-    fn test_metrics_label(runner: impl Runner, context: impl Spawner + Metrics) {
-        runner.start(async move {
+    fn test_metrics_label<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
             context.with_label(METRICS_PREFIX);
         })
     }
 
-    fn test_metrics_serve<L, Si, St>(
-        runner: impl Runner,
-        context: impl Clock + Spawner + Metrics + Network<L, Si, St>,
-    ) where
-        L: Listener<Si, St>,
-        Si: Sink,
-        St: Stream,
-    {
-        runner.start(async move {
+    #[test]
+    fn test_deterministic_future() {
+        let runner = deterministic::Runner::default();
+        test_error_future(runner);
+    }
+
+    #[test]
+    fn test_deterministic_clock_sleep() {
+        let executor = deterministic::Runner::default();
+        test_clock_sleep(executor);
+    }
+
+    #[test]
+    fn test_deterministic_clock_sleep_until() {
+        let executor = deterministic::Runner::default();
+        test_clock_sleep_until(executor);
+    }
+
+    #[test]
+    fn test_deterministic_root_finishes() {
+        let executor = deterministic::Runner::default();
+        test_root_finishes(executor);
+    }
+
+    #[test]
+    fn test_deterministic_spawn_abort() {
+        let executor = deterministic::Runner::default();
+        test_spawn_abort(executor);
+    }
+
+    #[test]
+    fn test_deterministic_panic_aborts_root() {
+        let runner = deterministic::Runner::default();
+        test_panic_aborts_root(runner);
+    }
+
+    #[test]
+    #[should_panic(expected = "blah")]
+    fn test_deterministic_panic_aborts_spawn() {
+        let executor = deterministic::Runner::default();
+        test_panic_aborts_spawn(executor);
+    }
+
+    #[test]
+    fn test_deterministic_select() {
+        let executor = deterministic::Runner::default();
+        test_select(executor);
+    }
+
+    #[test]
+    fn test_deterministic_select_loop() {
+        let executor = deterministic::Runner::default();
+        test_select_loop(executor);
+    }
+
+    #[test]
+    fn test_deterministic_storage_operations() {
+        let executor = deterministic::Runner::default();
+        test_storage_operations(executor);
+    }
+
+    #[test]
+    fn test_deterministic_blob_read_write() {
+        let executor = deterministic::Runner::default();
+        test_blob_read_write(executor);
+    }
+
+    #[test]
+    fn test_deterministic_many_partition_read_write() {
+        let executor = deterministic::Runner::default();
+        test_many_partition_read_write(executor);
+    }
+
+    #[test]
+    fn test_deterministic_blob_read_past_length() {
+        let executor = deterministic::Runner::default();
+        test_blob_read_past_length(executor);
+    }
+
+    #[test]
+    fn test_deterministic_blob_clone_and_concurrent_read() {
+        // Run test
+        let executor = deterministic::Runner::default();
+        test_blob_clone_and_concurrent_read(executor);
+    }
+
+    #[test]
+    fn test_deterministic_shutdown() {
+        let executor = deterministic::Runner::default();
+        test_shutdown(executor);
+    }
+
+    #[test]
+    fn test_deterministic_spawn_ref() {
+        let executor = deterministic::Runner::default();
+        test_spawn_ref(executor);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_deterministic_spawn_ref_duplicate() {
+        let executor = deterministic::Runner::default();
+        test_spawn_ref_duplicate(executor);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_deterministic_spawn_duplicate() {
+        let executor = deterministic::Runner::default();
+        test_spawn_duplicate(executor);
+    }
+
+    #[test]
+    fn test_deterministic_spawn_blocking() {
+        let executor = deterministic::Runner::default();
+        test_spawn_blocking(executor);
+    }
+
+    #[test]
+    #[should_panic(expected = "blocking task panicked")]
+    fn test_deterministic_spawn_blocking_panic() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let handle = context.spawn_blocking(|| {
+                panic!("blocking task panicked");
+            });
+            handle.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_deterministic_spawn_blocking_abort() {
+        let executor = deterministic::Runner::default();
+        test_spawn_blocking_abort(executor);
+    }
+
+    #[test]
+    fn test_deterministic_metrics() {
+        let executor = deterministic::Runner::default();
+        test_metrics(executor);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_deterministic_metrics_label() {
+        let executor = deterministic::Runner::default();
+        test_metrics_label(executor);
+    }
+
+    #[test]
+    fn test_tokio_error_future() {
+        let runner = tokio::Runner::default();
+        test_error_future(runner);
+    }
+
+    #[test]
+    fn test_tokio_clock_sleep() {
+        let executor = tokio::Runner::default();
+        test_clock_sleep(executor);
+    }
+
+    #[test]
+    fn test_tokio_clock_sleep_until() {
+        let executor = tokio::Runner::default();
+        test_clock_sleep_until(executor);
+    }
+
+    #[test]
+    fn test_tokio_root_finishes() {
+        let executor = tokio::Runner::default();
+        test_root_finishes(executor);
+    }
+
+    #[test]
+    fn test_tokio_spawn_abort() {
+        let executor = tokio::Runner::default();
+        test_spawn_abort(executor);
+    }
+
+    #[test]
+    fn test_tokio_panic_aborts_root() {
+        let executor = tokio::Runner::default();
+        test_panic_aborts_root(executor);
+    }
+
+    #[test]
+    fn test_tokio_panic_aborts_spawn() {
+        let executor = tokio::Runner::default();
+        test_panic_aborts_spawn(executor);
+    }
+
+    #[test]
+    fn test_tokio_select() {
+        let executor = tokio::Runner::default();
+        test_select(executor);
+    }
+
+    #[test]
+    fn test_tokio_select_loop() {
+        let executor = tokio::Runner::default();
+        test_select_loop(executor);
+    }
+
+    #[test]
+    fn test_tokio_storage_operations() {
+        let executor = tokio::Runner::default();
+        test_storage_operations(executor);
+    }
+
+    #[test]
+    fn test_tokio_blob_read_write() {
+        let executor = tokio::Runner::default();
+        test_blob_read_write(executor);
+    }
+
+    #[test]
+    fn test_tokio_many_partition_read_write() {
+        let executor = tokio::Runner::default();
+        test_many_partition_read_write(executor);
+    }
+
+    #[test]
+    fn test_tokio_blob_read_past_length() {
+        let executor = tokio::Runner::default();
+        test_blob_read_past_length(executor);
+    }
+
+    #[test]
+    fn test_tokio_blob_clone_and_concurrent_read() {
+        // Run test
+        let executor = tokio::Runner::default();
+        test_blob_clone_and_concurrent_read(executor);
+    }
+
+    #[test]
+    fn test_tokio_shutdown() {
+        let executor = tokio::Runner::default();
+        test_shutdown(executor);
+    }
+
+    #[test]
+    fn test_tokio_spawn_ref() {
+        let executor = tokio::Runner::default();
+        test_spawn_ref(executor);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_tokio_spawn_ref_duplicate() {
+        let executor = tokio::Runner::default();
+        test_spawn_ref_duplicate(executor);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_tokio_spawn_duplicate() {
+        let executor = tokio::Runner::default();
+        test_spawn_duplicate(executor);
+    }
+
+    #[test]
+    fn test_tokio_spawn_blocking() {
+        let executor = tokio::Runner::default();
+        test_spawn_blocking(executor);
+    }
+
+    #[test]
+    fn test_tokio_spawn_blocking_panic() {
+        let executor = tokio::Runner::default();
+        executor.start(|context| async move {
+            let handle = context.spawn_blocking(|| {
+                panic!("blocking task panicked");
+            });
+            let result = handle.await;
+            assert!(matches!(result, Err(Error::Exited)));
+        });
+    }
+
+    #[test]
+    fn test_tokio_spawn_blocking_abort() {
+        let executor = tokio::Runner::default();
+        test_spawn_blocking_abort(executor);
+    }
+
+    #[test]
+    fn test_tokio_metrics() {
+        let executor = tokio::Runner::default();
+        test_metrics(executor);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_tokio_metrics_label() {
+        let executor = tokio::Runner::default();
+        test_metrics_label(executor);
+    }
+
+    #[test]
+    fn test_tokio_telemetry() {
+        let executor = tokio::Runner::default();
+        executor.start(|context| async move {
+            // Define the server address
+            let address = SocketAddr::from_str("127.0.0.1:8000").unwrap();
+
+            // Configure telemetry
+            tokio::telemetry::init(
+                context.with_label("metrics"),
+                tokio::telemetry::Logging {
+                    level: Level::INFO,
+                    json: false,
+                },
+                Some(address),
+                None,
+            );
+
             // Register a test metric
             let counter: Counter<u64> = Counter::default();
             context.register("test_counter", "Test counter", counter.clone());
             counter.inc();
-
-            // Define the server address
-            let address = SocketAddr::from_str("127.0.0.1:8000").unwrap();
-
-            // Start the metrics server (serves one connection and exits)
-            context
-                .with_label("server")
-                .spawn(move |context| async move {
-                    metrics::server::serve(context, address).await;
-                });
 
             // Helper functions to parse HTTP response
             async fn read_line<St: Stream>(stream: &mut St) -> Result<String, Error> {
@@ -1001,7 +1368,7 @@ mod tests {
             let client_handle = context
                 .with_label("client")
                 .spawn(move |context| async move {
-                    let (_, mut stream) = loop {
+                    let (mut sink, mut stream) = loop {
                         match context.dial(address).await {
                             Ok((sink, stream)) => break (sink, stream),
                             Err(e) => {
@@ -1012,14 +1379,22 @@ mod tests {
                         }
                     };
 
+                    // Send a GET request to the server
+                    let request = format!(
+                        "GET /metrics HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                        address
+                    );
+                    sink.send(request.as_bytes()).await.unwrap();
+
                     // Read and verify the HTTP status line
                     let status_line = read_line(&mut stream).await.unwrap();
                     assert_eq!(status_line, "HTTP/1.1 200 OK");
 
                     // Read and parse headers
                     let headers = read_headers(&mut stream).await.unwrap();
+                    println!("Headers: {:?}", headers);
                     let content_length = headers
-                        .get("Content-Length")
+                        .get("content-length")
                         .unwrap()
                         .parse::<usize>()
                         .unwrap();
@@ -1032,323 +1407,5 @@ mod tests {
             // Wait for the client task to complete
             client_handle.await.unwrap();
         });
-    }
-
-    #[test]
-    fn test_deterministic_future() {
-        let (runner, _, _) = deterministic::Executor::default();
-        test_error_future(runner);
-    }
-
-    #[test]
-    fn test_deterministic_clock_sleep() {
-        let (executor, context, _) = deterministic::Executor::default();
-        assert_eq!(context.current(), SystemTime::UNIX_EPOCH);
-        test_clock_sleep(executor, context);
-    }
-
-    #[test]
-    fn test_deterministic_clock_sleep_until() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_clock_sleep_until(executor, context);
-    }
-
-    #[test]
-    fn test_deterministic_root_finishes() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_root_finishes(executor, context);
-    }
-
-    #[test]
-    fn test_deterministic_spawn_abort() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_spawn_abort(executor, context);
-    }
-
-    #[test]
-    fn test_deterministic_panic_aborts_root() {
-        let (runner, _, _) = deterministic::Executor::default();
-        test_panic_aborts_root(runner);
-    }
-
-    #[test]
-    #[should_panic(expected = "blah")]
-    fn test_deterministic_panic_aborts_spawn() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_panic_aborts_spawn(executor, context);
-    }
-
-    #[test]
-    fn test_deterministic_select() {
-        let (executor, _, _) = deterministic::Executor::default();
-        test_select(executor);
-    }
-
-    #[test]
-    fn test_deterministic_select_loop() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_select_loop(executor, context);
-    }
-
-    #[test]
-    fn test_deterministic_storage_operations() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_storage_operations(executor, context);
-    }
-
-    #[test]
-    fn test_deterministic_blob_read_write() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_blob_read_write(executor, context);
-    }
-
-    #[test]
-    fn test_deterministic_many_partition_read_write() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_many_partition_read_write(executor, context);
-    }
-
-    #[test]
-    fn test_deterministic_blob_read_past_length() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_blob_read_past_length(executor, context);
-    }
-
-    #[test]
-    fn test_deterministic_blob_clone_and_concurrent_read() {
-        // Run test
-        let (executor, context, _) = deterministic::Executor::default();
-        test_blob_clone_and_concurrent_read(executor, context.clone());
-
-        // Ensure no blobs still open
-        let buffer = context.encode();
-        assert!(buffer.contains("open_blobs 0"));
-    }
-
-    #[test]
-    fn test_deterministic_shutdown() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_shutdown(executor, context);
-    }
-
-    #[test]
-    fn test_deterministic_spawn_ref() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_spawn_ref(executor, context);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_deterministic_spawn_ref_duplicate() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_spawn_ref_duplicate(executor, context);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_deterministic_spawn_duplicate() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_spawn_duplicate(executor, context);
-    }
-
-    #[test]
-    fn test_deterministic_spawn_blocking() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_spawn_blocking(executor, context);
-    }
-
-    #[test]
-    #[should_panic(expected = "blocking task panicked")]
-    fn test_deterministic_spawn_blocking_panic() {
-        let (executor, context, _) = deterministic::Executor::default();
-        executor.start(async move {
-            let handle = context.spawn_blocking(|| {
-                panic!("blocking task panicked");
-            });
-            handle.await.unwrap();
-        });
-    }
-
-    #[test]
-    fn test_deterministic_spawn_blocking_abort() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_spawn_blocking_abort(executor, context);
-    }
-
-    #[test]
-    fn test_deterministic_metrics() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_metrics(executor, context);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_deterministic_metrics_label() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_metrics_label(executor, context);
-    }
-
-    #[test]
-    fn test_deterministic_metrics_serve() {
-        let (executor, context, _) = deterministic::Executor::default();
-        test_metrics_serve(executor, context);
-    }
-
-    #[test]
-    fn test_tokio_error_future() {
-        let (runner, _) = tokio::Executor::default();
-        test_error_future(runner);
-    }
-
-    #[test]
-    fn test_tokio_clock_sleep() {
-        let (executor, context) = tokio::Executor::default();
-        test_clock_sleep(executor, context);
-    }
-
-    #[test]
-    fn test_tokio_clock_sleep_until() {
-        let (executor, context) = tokio::Executor::default();
-        test_clock_sleep_until(executor, context);
-    }
-
-    #[test]
-    fn test_tokio_root_finishes() {
-        let (executor, context) = tokio::Executor::default();
-        test_root_finishes(executor, context);
-    }
-
-    #[test]
-    fn test_tokio_spawn_abort() {
-        let (executor, context) = tokio::Executor::default();
-        test_spawn_abort(executor, context);
-    }
-
-    #[test]
-    fn test_tokio_panic_aborts_root() {
-        let (runner, _) = tokio::Executor::default();
-        test_panic_aborts_root(runner);
-    }
-
-    #[test]
-    fn test_tokio_panic_aborts_spawn() {
-        let (executor, context) = tokio::Executor::default();
-        test_panic_aborts_spawn(executor, context);
-    }
-
-    #[test]
-    fn test_tokio_select() {
-        let (executor, _) = tokio::Executor::default();
-        test_select(executor);
-    }
-
-    #[test]
-    fn test_tokio_select_loop() {
-        let (executor, context) = tokio::Executor::default();
-        test_select_loop(executor, context);
-    }
-
-    #[test]
-    fn test_tokio_storage_operations() {
-        let (executor, context) = tokio::Executor::default();
-        test_storage_operations(executor, context);
-    }
-
-    #[test]
-    fn test_tokio_blob_read_write() {
-        let (executor, context) = tokio::Executor::default();
-        test_blob_read_write(executor, context);
-    }
-
-    #[test]
-    fn test_tokio_many_partition_read_write() {
-        let (executor, context) = tokio::Executor::default();
-        test_many_partition_read_write(executor, context);
-    }
-
-    #[test]
-    fn test_tokio_blob_read_past_length() {
-        let (executor, context) = tokio::Executor::default();
-        test_blob_read_past_length(executor, context);
-    }
-
-    #[test]
-    fn test_tokio_blob_clone_and_concurrent_read() {
-        // Run test
-        let (executor, context) = tokio::Executor::default();
-        test_blob_clone_and_concurrent_read(executor, context.clone());
-
-        // Ensure no blobs still open
-        let buffer = context.encode();
-        assert!(buffer.contains("open_blobs 0"));
-    }
-
-    #[test]
-    fn test_tokio_shutdown() {
-        let (executor, context) = tokio::Executor::default();
-        test_shutdown(executor, context);
-    }
-
-    #[test]
-    fn test_tokio_spawn_ref() {
-        let (executor, context) = tokio::Executor::default();
-        test_spawn_ref(executor, context);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_tokio_spawn_ref_duplicate() {
-        let (executor, context) = tokio::Executor::default();
-        test_spawn_ref_duplicate(executor, context);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_tokio_spawn_duplicate() {
-        let (executor, context) = tokio::Executor::default();
-        test_spawn_duplicate(executor, context);
-    }
-
-    #[test]
-    fn test_tokio_spawn_blocking() {
-        let (executor, context) = tokio::Executor::default();
-        test_spawn_blocking(executor, context);
-    }
-
-    #[test]
-    fn test_tokio_spawn_blocking_panic() {
-        let (executor, context) = tokio::Executor::default();
-        executor.start(async move {
-            let handle = context.spawn_blocking(|| {
-                panic!("blocking task panicked");
-            });
-            let result = handle.await;
-            assert_eq!(result, Err(Error::Exited));
-        });
-    }
-
-    #[test]
-    fn test_tokio_spawn_blocking_abort() {
-        let (executor, context) = tokio::Executor::default();
-        test_spawn_blocking_abort(executor, context);
-    }
-
-    #[test]
-    fn test_tokio_metrics() {
-        let (executor, context) = tokio::Executor::default();
-        test_metrics(executor, context);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_tokio_metrics_label() {
-        let (executor, context) = tokio::Executor::default();
-        test_metrics_label(executor, context);
-    }
-
-    #[test]
-    fn test_tokio_metrics_serve() {
-        let (executor, context) = tokio::Executor::default();
-        test_metrics_serve(executor, context);
     }
 }

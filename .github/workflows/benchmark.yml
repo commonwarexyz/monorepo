@@ -28,7 +28,7 @@ jobs:
     name: Publish
     needs: has-new-commit # Only run if there are new commits
     runs-on: ubuntu-latest-8
-    timeout-minutes: 360
+    timeout-minutes: 720
     strategy:
       max-parallel: 1 # Run one package at a time
       matrix:
@@ -40,13 +40,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install nightly Rust toolchain
         run: rustup toolchain install nightly
-      - name: Get Rust version
-        id: rust-version
-        run: echo "rust_version=$(rustc +nightly --version)" >> "$GITHUB_OUTPUT"
       - name: Run setup
         uses: ./.github/actions/setup
-        with:
-          rust-version: ${{ steps.rust-version.outputs.rust_version}}
       - name: Compile benchmarks
         run: cargo bench --no-run
       - name: Run benchmark

@@ -1,8 +1,7 @@
-use commonware_codec::Config as CodecCfg;
 use commonware_utils::Array;
 
 /// Configuration for the [`Engine`](super::Engine).
-pub struct Config<Cfg: CodecCfg, P: Array> {
+pub struct Config<P: Array, MCfg> {
     /// The public key of the participant.
     pub public_key: P,
 
@@ -15,6 +14,6 @@ pub struct Config<Cfg: CodecCfg, P: Array> {
     /// Whether messages are sent over the network as priority.
     pub priority: bool,
 
-    /// The configuration for decoding messages.
-    pub decode_config: Cfg,
+    /// The configuration for the codec item.
+    pub codec_config: MCfg,
 }

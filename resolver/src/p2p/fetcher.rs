@@ -1,8 +1,10 @@
 use crate::p2p::wire;
 use bimap::BiHashMap;
-use commonware_codec::Encode;
 use commonware_p2p::{
-    utils::requester::{Config, Requester, ID},
+    utils::{
+        codec::WrappedSender,
+        requester::{Config, Requester, ID},
+    },
     Recipients, Sender,
 };
 use commonware_runtime::{Clock, Metrics};
@@ -14,7 +16,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 use thiserror::Error;
-use tracing::warn;
+use tracing::debug;
 
 /// Errors that can occur when sending network messages.
 #[derive(Error, Debug, PartialEq)]
@@ -89,7 +91,12 @@ impl<E: Clock + GClock + Rng + Metrics, P: Array, Key: Array, NetS: Sender<Publi
     /// If false, the fetch is treated as a retry.
     ///
     /// Panics if the key is already being fetched.
-    pub async fn fetch(&mut self, sender: &mut NetS, key: Key, is_new: bool) {
+    pub async fn fetch(
+        &mut self,
+        sender: &mut WrappedSender<NetS, wire::Message<Key>>,
+        key: Key,
+        is_new: bool,
+    ) {
         // Panic if the key is already being fetched
         assert!(!self.contains(&key));
 
@@ -97,16 +104,21 @@ impl<E: Clock + GClock + Rng + Metrics, P: Array, Key: Array, NetS: Sender<Publi
         let shuffle = !is_new;
         let Some((peer, id)) = self.requester.request(shuffle) else {
             // If there are no peers, add the key to the pending queue
-            warn!(?key, "requester failed");
+            debug!(?key, "requester failed");
             self.add_pending(key);
             return;
         };
 
         // Send message to peer
-        let payload = wire::Payload::Request(key.clone());
-        let msg = wire::Message { id, payload }.encode().into();
         let result = sender
-            .send(Recipients::One(peer.clone()), msg, self.priority_requests)
+            .send(
+                Recipients::One(peer.clone()),
+                wire::Message {
+                    id,
+                    payload: wire::Payload::Request(key.clone()),
+                },
+                self.priority_requests,
+            )
             .await;
         let result = match result {
             Err(err) => Err(SendError::Failed::<NetS>(err)),
@@ -118,9 +130,9 @@ impl<E: Clock + GClock + Rng + Metrics, P: Array, Key: Array, NetS: Sender<Publi
         match result {
             // If the message was not sent successfully, treat it instantly as a peer timeout
             Err(err) => {
-                warn!(?err, ?peer, "send failed");
+                debug!(?err, ?peer, "send failed");
                 let req = self.requester.handle(&peer, id).unwrap(); // Unwrap is safe
-                self.requester.timeout(req);
+                self.requester.fail(req);
                 self.add_pending(key);
             }
             // If the message was sent to someone, add the request to the map

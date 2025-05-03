@@ -36,7 +36,7 @@ pub struct Proof<H: CHasher> {
 /// A trait that allows generic generation of an MMR inclusion proof.
 pub trait Storage<D: Digest> {
     /// Return the number of elements in the MMR.
-    fn size(&self) -> impl Future<Output = Result<u64, Error>>;
+    fn size(&self) -> u64;
 
     /// Return the specified node of the MMR if it exists & hasn't been pruned.
     fn get_node(&self, position: u64) -> impl Future<Output = Result<Option<D>, Error>> + Send;
@@ -209,29 +209,13 @@ impl<H: CHasher> Proof<H> {
     /// in the retained section, but its immediate parent does. (A node meeting condition (2) can be
     /// shown to always be the left-child of its parent.)
     ///
-    /// Implementation: Iterate over peaks, adding each to the result, until we reach the first peak
-    /// that is retained.  For the first retained peak, we walk the path from peak to the left-most
-    /// retained leaf, adding the left-child of each node on this path to the result if it is
-    /// pruned.
-    pub fn nodes_to_pin(size: u64, start_pos: u64) -> Vec<u64> {
-        let mut positions = Vec::<u64>::new();
-        for (pos, height) in PeakIterator::new(size) {
-            if pos >= start_pos {
-                // Found the first unpruned peak, now walk the path towards the leftmost unpruned
-                // leaf (at position `start_pos`).
-                let iter = PathIterator::new(start_pos, pos, height);
-                for (_, sibling_pos) in iter {
-                    if sibling_pos < start_pos {
-                        // Found a left-sibling that is pruned, so include it in the set.
-                        positions.push(sibling_pos);
-                    }
-                }
-                break;
-            }
-            positions.push(pos);
-        }
-
-        positions
+    /// This set of nodes does not change with the MMR's size, only the pruning boundary. For a
+    /// given pruning boundary that happens to be a valid MMR size, one can prove that this set is
+    /// exactly the set of peaks for an MMR whose size equals the pruning boundary. If the pruning
+    /// boundary is not a valid MMR size, then the set corresponds to the peaks of the largest MMR
+    /// whose size is less than the pruning boundary.
+    pub fn nodes_to_pin(start_pos: u64) -> impl Iterator<Item = u64> {
+        PeakIterator::new(PeakIterator::to_nearest_size(start_pos)).map(|(pos, _)| pos)
     }
 
     /// Return the list of node positions required by the range proof for the specified range of
@@ -316,11 +300,8 @@ impl<H: CHasher> Proof<H> {
         end_element_pos: u64,
     ) -> Result<Proof<H>, Error> {
         let mut hashes: Vec<H::Digest> = Vec::new();
-        let positions = Self::nodes_required_for_range_proof(
-            mmr.size().await?,
-            start_element_pos,
-            end_element_pos,
-        );
+        let positions =
+            Self::nodes_required_for_range_proof(mmr.size(), start_element_pos, end_element_pos);
 
         let node_futures = positions.iter().map(|pos| mmr.get_node(*pos));
         let hash_results = try_join_all(node_futures).await?;
@@ -333,7 +314,7 @@ impl<H: CHasher> Proof<H> {
         }
 
         Ok(Proof {
-            size: mmr.size().await?,
+            size: mmr.size(),
             hashes,
         })
     }
@@ -418,7 +399,7 @@ mod tests {
     use super::Proof;
     use crate::mmr::mem::Mmr;
     use commonware_cryptography::{hash, sha256::Digest, Sha256};
-    use commonware_runtime::{deterministic::Executor, Runner};
+    use commonware_runtime::{deterministic, Runner};
 
     fn test_digest(v: u8) -> Digest {
         hash(&[v])
@@ -426,8 +407,8 @@ mod tests {
 
     #[test]
     fn test_verification_verify_element() {
-        let (executor, _, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
             // create an 11 element MMR over which we'll test single-element inclusion proofs
             let mut mmr = Mmr::<Sha256>::new();
             let element = Digest::from(*b"01234567012345670123456701234567");
@@ -519,9 +500,9 @@ mod tests {
 
     #[test]
     fn test_verification_verify_range() {
-        let (executor, _, _) = Executor::default();
+        let executor = deterministic::Runner::default();
 
-        executor.start(async move {
+        executor.start(|_| async move {
             // create a new MMR and add a non-trivial amount (49) of elements
             let mut mmr: Mmr<Sha256> = Mmr::default();
             let mut elements = Vec::new();
@@ -690,8 +671,8 @@ mod tests {
 
     #[test]
     fn test_verification_retained_nodes_provable_after_pruning() {
-        let (executor, _, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
             // create a new MMR and add a non-trivial amount (49) of elements
             let mut mmr: Mmr<Sha256> = Mmr::default();
             let mut elements = Vec::<Digest>::new();
@@ -728,8 +709,8 @@ mod tests {
 
     #[test]
     fn test_verification_ranges_provable_after_pruning() {
-        let (executor, _, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
             // create a new MMR and add a non-trivial amount (49) of elements
             let mut mmr: Mmr<Sha256> = Mmr::default();
             let mut elements = Vec::<Digest>::new();
@@ -806,8 +787,8 @@ mod tests {
 
     #[test]
     fn test_verification_proof_serialization() {
-        let (executor, _, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
             assert_eq!(
                 Proof::<Sha256>::max_serialization_size(),
                 8168,

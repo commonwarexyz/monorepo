@@ -16,6 +16,7 @@ use std::{
     hash::{Hash, Hasher},
     ops::Deref,
 };
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const CURVE_NAME: &str = "secp256r1";
 const PRIVATE_KEY_LENGTH: usize = 32;
@@ -62,7 +63,7 @@ impl CommonwareSigner for Secp256r1 {
     }
 
     fn from(private_key: PrivateKey) -> Option<Self> {
-        let signer = private_key.key;
+        let signer = private_key.key.clone();
         let verifier = signer.verifying_key().to_owned();
         Some(Self { signer, verifier })
     }
@@ -89,9 +90,13 @@ impl CommonwareSigner for Secp256r1 {
 }
 
 /// Secp256r1 Private Key.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, Zeroize, ZeroizeOnDrop)]
 pub struct PrivateKey {
     raw: [u8; PRIVATE_KEY_LENGTH],
+    // `ZeroizeOnDrop` is implemented for `SigningKey` and can't be called directly.
+    //
+    // Reference: https://github.com/RustCrypto/signatures/blob/a83c494216b6f3dacba5d4e4376785e2ea142044/ecdsa/src/signing.rs#L487-L493
+    #[zeroize(skip)]
     key: SigningKey,
 }
 
@@ -102,6 +107,8 @@ impl Write for PrivateKey {
 }
 
 impl Read for PrivateKey {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
         let key =
@@ -180,6 +187,8 @@ impl Write for PublicKey {
 }
 
 impl Read for PublicKey {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; PUBLIC_KEY_LENGTH]>::read(buf)?;
         let key = VerifyingKey::from_sec1_bytes(&raw)
@@ -247,6 +256,8 @@ impl Write for Signature {
 }
 
 impl Read for Signature {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
         let signature = p256::ecdsa::Signature::from_slice(&raw)

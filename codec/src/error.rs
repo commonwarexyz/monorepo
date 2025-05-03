@@ -26,8 +26,12 @@ pub enum Error {
     /// - The decoded varint value exceeds the capacity of the target integer type.
     ///
     /// See the [`varint`](crate::varint) module for encoding details.
-    #[error("Invalid Varint: Malformed or value out of range")]
-    InvalidVarint,
+    #[error("Invalid {0}-byte varint")]
+    InvalidVarint(usize),
+
+    /// Same as `InvalidVarint`, but specifically for `usize`-sized varints.
+    #[error("Invalid usize-sized varint")]
+    InvalidUsize,
 
     /// A byte representing a boolean was expected to be `0` (false) or `1` (true),
     /// but a different value was encountered during decoding.
@@ -42,7 +46,7 @@ pub enum Error {
     /// A length prefix (e.g., for `Vec<T>`, `Bytes`, `HashMap<K, V>`) was decoded,
     /// but its value fell outside the permitted range.
     ///
-    /// This range is typically configured via a [`RangeConfig`](crate::RangeConfig)
+    /// This range is typically configured via a [`RangeCfg`](crate::RangeCfg)
     /// passed within the `Cfg` parameter to [`Read::read_cfg`](crate::Read::read_cfg).
     /// The contained `usize` is the invalid length that was decoded.
     #[error("Invalid Length: Decoded length {0} is outside the allowed range")]

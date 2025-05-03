@@ -1,4 +1,5 @@
 use crate::{deterministic::Auditor, Error};
+use sha2::digest::Update;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -16,23 +17,38 @@ impl<S: crate::Storage> Storage<S> {
 impl<S: crate::Storage> crate::Storage for Storage<S> {
     type Blob = Blob<S::Blob>;
 
-    async fn open(&self, partition: &str, name: &[u8]) -> Result<Self::Blob, Error> {
-        self.auditor.open(partition, name);
-        self.inner.open(partition, name).await.map(|blob| Blob {
-            auditor: self.auditor.clone(),
-            inner: blob,
-            partition: partition.into(),
-            name: name.to_vec(),
+    async fn open(&self, partition: &str, name: &[u8]) -> Result<(Self::Blob, u64), Error> {
+        self.auditor.event(b"open", |hasher| {
+            hasher.update(partition.as_bytes());
+            hasher.update(name);
+        });
+        self.inner.open(partition, name).await.map(|(blob, len)| {
+            (
+                Blob {
+                    auditor: self.auditor.clone(),
+                    inner: blob,
+                    partition: partition.into(),
+                    name: name.to_vec(),
+                },
+                len,
+            )
         })
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        self.auditor.remove(partition, name);
+        self.auditor.event(b"remove", |hasher| {
+            hasher.update(partition.as_bytes());
+            if let Some(name) = name {
+                hasher.update(name);
+            }
+        });
         self.inner.remove(partition, name).await
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
-        self.auditor.scan(partition);
+        self.auditor.event(b"scan", |hasher| {
+            hasher.update(partition.as_bytes());
+        });
         self.inner.scan(partition).await
     }
 }
@@ -46,35 +62,48 @@ pub struct Blob<B: crate::Blob> {
 }
 
 impl<B: crate::Blob> crate::Blob for Blob<B> {
-    async fn len(&self) -> Result<u64, Error> {
-        self.auditor.len(&self.partition, &self.name);
-        self.inner.len().await
-    }
-
     async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
-        self.auditor
-            .read_at(&self.partition, &self.name, buf.len(), offset);
+        self.auditor.event(b"read_at", |hasher| {
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
+            hasher.update(buf);
+            hasher.update(&offset.to_be_bytes());
+        });
         self.inner.read_at(buf, offset).await
     }
 
     async fn write_at(&self, buf: &[u8], offset: u64) -> Result<(), Error> {
-        self.auditor
-            .write_at(&self.partition, &self.name, buf, offset);
+        self.auditor.event(b"write_at", |hasher| {
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
+            hasher.update(buf);
+            hasher.update(&offset.to_be_bytes());
+        });
         self.inner.write_at(buf, offset).await
     }
 
     async fn truncate(&self, len: u64) -> Result<(), Error> {
-        self.auditor.truncate(&self.partition, &self.name, len);
+        self.auditor.event(b"truncate", |hasher| {
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
+            hasher.update(&len.to_be_bytes());
+        });
         self.inner.truncate(len).await
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        self.auditor.sync(&self.partition, &self.name);
+        self.auditor.event(b"sync", |hasher| {
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
+        });
         self.inner.sync().await
     }
 
     async fn close(self) -> Result<(), Error> {
-        self.auditor.close(&self.partition, &self.name);
+        self.auditor.event(b"close", |hasher| {
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
+        });
         self.inner.close().await
     }
 }
@@ -114,8 +143,8 @@ mod tests {
         let storage2 = AuditedStorage::new(inner2, auditor2.clone());
 
         // Perform a sequence of operations on both storages simultaneously
-        let blob1 = storage1.open("partition", b"test_blob").await.unwrap();
-        let blob2 = storage2.open("partition", b"test_blob").await.unwrap();
+        let (blob1, _) = storage1.open("partition", b"test_blob").await.unwrap();
+        let (blob2, _) = storage2.open("partition", b"test_blob").await.unwrap();
 
         // Write data to the blobs
         blob1.write_at(b"hello world", 0).await.unwrap();
@@ -142,10 +171,6 @@ mod tests {
         // Truncate the blobs
         blob1.truncate(5).await.unwrap();
         blob2.truncate(5).await.unwrap();
-        let len1 = blob1.len().await.unwrap();
-        let len2 = blob2.len().await.unwrap();
-        assert_eq!(len1, 5, "Blob1 length after truncation is incorrect");
-        assert_eq!(len2, 5, "Blob2 length after truncation is incorrect");
         assert_eq!(
             auditor1.state(),
             auditor2.state(),

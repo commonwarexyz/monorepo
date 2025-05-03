@@ -4,33 +4,17 @@ use super::{
     actors::{dialer, listener, router, spawner, tracker},
     channels::{self, Channels},
     config::Config,
+    types,
 };
 use crate::Channel;
 use commonware_cryptography::Scheme;
 use commonware_macros::select;
-use commonware_runtime::{
-    Clock, Handle, Listener, Metrics, Network as RNetwork, Sink, Spawner, Stream,
-};
+use commonware_runtime::{Clock, Handle, Metrics, Network as RNetwork, Spawner};
 use commonware_stream::public_key;
 use commonware_utils::union;
 use governor::{clock::ReasonablyRealtime, Quota};
 use rand::{CryptoRng, Rng};
-use std::marker::PhantomData;
 use tracing::{debug, info, warn};
-
-// The maximum overhead of encoding a `message: Bytes` into a protobuf `message Message`
-// Should be at most 18 bytes for messages under 4GB, but we add a bit of padding.
-//
-// The byte overhead is calculated as follows:
-// - 1  Data field number
-// - 5* Data length varint
-// - 1  Channel field number
-// - 5  Channel value varint
-// - 1  Message field number
-// - 5* Message length varint
-//
-// (*) assumes that the length is no more than 4GB
-const PROTOBUF_OVERHEAD: usize = 64;
 
 /// Unique suffix for all messages signed by the tracker.
 const TRACKER_SUFFIX: &[u8] = b"_TRACKER";
@@ -40,10 +24,7 @@ const STREAM_SUFFIX: &[u8] = b"_STREAM";
 
 /// Implementation of an `authenticated` network.
 pub struct Network<
-    Si: Sink,
-    St: Stream,
-    L: Listener<Si, St>,
-    E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork<L, Si, St> + Metrics,
+    E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics,
     C: Scheme,
 > {
     context: E,
@@ -54,19 +35,10 @@ pub struct Network<
     tracker_mailbox: tracker::Mailbox<E, C>,
     router: router::Actor<E, C::PublicKey>,
     router_mailbox: router::Mailbox<C::PublicKey>,
-
-    _phantom_si: PhantomData<Si>,
-    _phantom_st: PhantomData<St>,
-    _phantom_l: PhantomData<L>,
 }
 
-impl<
-        Si: Sink,
-        St: Stream,
-        L: Listener<Si, St>,
-        E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork<L, Si, St> + Metrics,
-        C: Scheme,
-    > Network<Si, St, L, E, C>
+impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics, C: Scheme>
+    Network<E, C>
 {
     /// Create a new instance of an `authenticated` network.
     ///
@@ -113,10 +85,6 @@ impl<
                 tracker_mailbox,
                 router,
                 router_mailbox,
-
-                _phantom_si: PhantomData,
-                _phantom_st: PhantomData,
-                _phantom_l: PhantomData,
             },
             oracle,
         )
@@ -182,7 +150,7 @@ impl<
         let stream_cfg = public_key::Config {
             crypto: self.cfg.crypto,
             namespace: union(&self.cfg.namespace, STREAM_SUFFIX),
-            max_message_size: self.cfg.max_message_size + PROTOBUF_OVERHEAD,
+            max_message_size: self.cfg.max_message_size + types::MAX_PAYLOAD_DATA_OVERHEAD,
             synchrony_bound: self.cfg.synchrony_bound,
             max_handshake_age: self.cfg.max_handshake_age,
             handshake_timeout: self.cfg.handshake_timeout,

@@ -35,6 +35,7 @@ use std::{
     hash::{Hash, Hasher},
     ops::Deref,
 };
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const CURVE_NAME: &str = "bls12381";
 
@@ -75,14 +76,14 @@ impl Signer for Bls12381 {
     }
 
     fn from(private_key: PrivateKey) -> Option<Self> {
-        let private = private_key.key;
+        let private = private_key.key.clone();
         let mut public = group::Public::one();
         public.mul(&private);
         Some(Self { private, public })
     }
 
     fn private_key(&self) -> PrivateKey {
-        PrivateKey::from(self.private)
+        PrivateKey::from(self.private.clone())
     }
 
     fn public_key(&self) -> PublicKey {
@@ -96,7 +97,7 @@ impl Signer for Bls12381 {
 }
 
 /// BLS12-381 private key.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, Zeroize, ZeroizeOnDrop)]
 pub struct PrivateKey {
     raw: [u8; group::PRIVATE_KEY_LENGTH],
     key: group::Private,
@@ -109,6 +110,8 @@ impl Write for PrivateKey {
 }
 
 impl Read for PrivateKey {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
         let key = group::Private::decode(raw.as_ref())
@@ -180,6 +183,12 @@ pub struct PublicKey {
     key: group::Public,
 }
 
+impl AsRef<group::Public> for PublicKey {
+    fn as_ref(&self) -> &group::Public {
+        &self.key
+    }
+}
+
 impl Write for PublicKey {
     fn write(&self, buf: &mut impl BufMut) {
         self.raw.write(buf);
@@ -187,6 +196,8 @@ impl Write for PublicKey {
 }
 
 impl Read for PublicKey {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
         let key = group::Public::decode(raw.as_ref())
@@ -258,6 +269,12 @@ pub struct Signature {
     signature: group::Signature,
 }
 
+impl AsRef<group::Signature> for Signature {
+    fn as_ref(&self) -> &group::Signature {
+        &self.signature
+    }
+}
+
 impl Write for Signature {
     fn write(&self, buf: &mut impl BufMut) {
         self.raw.write(buf);
@@ -265,6 +282,8 @@ impl Write for Signature {
 }
 
 impl Read for Signature {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
         let signature = group::Signature::decode(raw.as_ref())

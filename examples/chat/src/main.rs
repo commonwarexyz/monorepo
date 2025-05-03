@@ -58,11 +58,12 @@ mod logger;
 use clap::{value_parser, Arg, Command};
 use commonware_cryptography::{Ed25519, Signer};
 use commonware_p2p::authenticated::{self, Network};
+use commonware_runtime::tokio;
 use commonware_runtime::Metrics;
-use commonware_runtime::{tokio::Executor, Runner};
+use commonware_runtime::Runner as _;
+use commonware_utils::NZU32;
 use governor::Quota;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::num::NonZeroU32;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use tracing::info;
@@ -73,7 +74,7 @@ const APPLICATION_NAMESPACE: &[u8] = b"commonware-chat";
 #[doc(hidden)]
 fn main() {
     // Initialize context
-    let (executor, context) = Executor::default();
+    let executor = tokio::Runner::default();
 
     // Parse arguments
     let matches = Command::new("commonware-chat")
@@ -160,7 +161,7 @@ fn main() {
     );
 
     // Start context
-    executor.start(async move {
+    executor.start(|context| async move {
         // Initialize network
         let (mut network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
 
@@ -175,7 +176,7 @@ fn main() {
         const COMPRESSION_LEVEL: Option<i32> = Some(3);
         let (chat_sender, chat_receiver) = network.register(
             handler::CHANNEL,
-            Quota::per_second(NonZeroU32::new(128).unwrap()),
+            Quota::per_second(NZU32!(128)),
             MAX_MESSAGE_BACKLOG,
             COMPRESSION_LEVEL,
         );

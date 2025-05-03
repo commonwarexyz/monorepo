@@ -77,6 +77,18 @@ impl PeakIterator {
         }
         true
     }
+
+    // Returns the largest valid MMR size that is no greater than the given size.
+    //
+    // TODO(https://github.com/commonwarexyz/monorepo/issues/820): This is an O(log2(n)^2)
+    // implementation but it's reasonably straightforward to make it O(log2(n)).
+    pub(crate) fn to_nearest_size(mut size: u64) -> u64 {
+        while !PeakIterator::check_validity(size) {
+            // A size-0 MMR is always valid so this loop must terminate before underflow.
+            size -= 1;
+        }
+        size
+    }
 }
 
 impl Iterator for PeakIterator {

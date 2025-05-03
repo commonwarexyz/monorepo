@@ -25,6 +25,8 @@ pub struct Config<
     pub reporter: F,
     pub supervisor: S,
 
+    pub partition: String,
+    pub compression: Option<u8>,
     pub namespace: Vec<u8>,
     pub mailbox_size: usize,
     pub leader_timeout: Duration,
@@ -33,6 +35,7 @@ pub struct Config<
     pub activity_timeout: View,
     pub skip_timeout: View,
     pub replay_concurrency: usize,
+    pub replay_buffer: usize,
 }
 
 #[cfg(test)]
@@ -53,8 +56,7 @@ mod tests {
         simulated::{Config as NConfig, Link, Network},
         Receiver, Recipients, Sender,
     };
-    use commonware_runtime::{deterministic::Executor, Metrics, Runner, Spawner};
-    use commonware_storage::journal::variable::{Config as JConfig, Journal};
+    use commonware_runtime::{deterministic, Metrics, Runner, Spawner};
     use commonware_utils::quorum;
     use futures::{channel::mpsc, StreamExt};
     use std::time::Duration;
@@ -65,8 +67,8 @@ mod tests {
         let n = 5;
         let threshold = quorum(n);
         let namespace = b"consensus".to_vec();
-        let (executor, mut context, _) = Executor::timed(Duration::from_secs(10));
-        executor.start(async move {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
@@ -95,7 +97,7 @@ mod tests {
             let scheme = schemes[0].clone();
             let validator = scheme.public_key();
             let mut participants = BTreeMap::new();
-            participants.insert(0, (public.clone(), validators.clone(), shares[0]));
+            participants.insert(0, (public.clone(), validators.clone(), shares[0].clone()));
             let supervisor_config = mocks::supervisor::Config {
                 namespace: namespace.clone(),
                 participants,
@@ -114,19 +116,14 @@ mod tests {
                 application_cfg,
             );
             actor.start();
-            let cfg = JConfig {
-                partition: "test".to_string(),
-            };
-            let journal = Journal::init(context.with_label("journal"), cfg)
-                .await
-                .expect("unable to create journal");
-
             let cfg = Config {
                 crypto: scheme,
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: supervisor.clone(),
                 supervisor,
+                partition: "test".to_string(),
+                compression: Some(3),
                 namespace: namespace.clone(),
                 mailbox_size: 10,
                 leader_timeout: Duration::from_secs(5),
@@ -135,8 +132,9 @@ mod tests {
                 activity_timeout: 10,
                 skip_timeout: 10,
                 replay_concurrency: 1,
+                replay_buffer: 1024 * 1024,
             };
-            let (actor, mut mailbox) = Actor::new(context.clone(), journal, cfg);
+            let (actor, mut mailbox) = Actor::new(context.clone(), cfg);
 
             // Create a dummy backfiller mailbox
             let (backfiller_sender, mut backfiller_receiver) = mpsc::channel(1);

@@ -8,10 +8,7 @@ use crate::{Channel, Message, Recipients};
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, FixedSize};
 use commonware_macros::select;
-use commonware_runtime::{
-    deterministic::{Listener, Sink, Stream},
-    Clock, Handle, Listener as _, Metrics, Network as RNetwork, Spawner,
-};
+use commonware_runtime::{Clock, Handle, Listener as _, Metrics, Network as RNetwork, Spawner};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::Array;
 use futures::{
@@ -38,8 +35,7 @@ pub struct Config {
 }
 
 /// Implementation of a simulated network.
-pub struct Network<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock + Metrics, P: Array>
-{
+pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: Array> {
     context: E,
 
     // Maximum size of a message that can be sent over the network
@@ -69,9 +65,7 @@ pub struct Network<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock +
     sent_messages: Family<metrics::Message, Counter>,
 }
 
-impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock + Metrics, P: Array>
-    Network<E, P>
-{
+impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: Array> Network<E, P> {
     /// Create a new simulated network with a given runtime and configuration.
     ///
     /// Returns a tuple containing the network instance and the oracle that can
@@ -492,7 +486,7 @@ impl<P: Array> Peer<P> {
     ///
     /// The peer will listen for incoming connections on the given `socket` address.
     /// `max_size` is the maximum size of a message that can be sent to the peer.
-    fn new<E: Spawner + RNetwork<Listener, Sink, Stream> + Metrics>(
+    fn new<E: Spawner + RNetwork + Metrics>(
         context: &mut E,
         public_key: P,
         socket: SocketAddr,
@@ -640,7 +634,7 @@ struct Link {
 }
 
 impl Link {
-    fn new<E: Spawner + RNetwork<Listener, Sink, Stream> + Metrics, P: Array>(
+    fn new<E: Spawner + RNetwork + Metrics, P: Array>(
         context: &mut E,
         dialer: P,
         socket: SocketAddr,
@@ -695,17 +689,14 @@ impl Link {
 mod tests {
     use super::*;
     use commonware_cryptography::{Ed25519, Signer, Specification};
-    use commonware_runtime::{
-        deterministic::{Context, Executor},
-        Runner,
-    };
+    use commonware_runtime::{deterministic, Runner};
 
     const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
     #[test]
     fn test_register_and_link() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
             };
@@ -753,27 +744,31 @@ mod tests {
         let cfg = Config {
             max_size: MAX_MESSAGE_SIZE,
         };
-        let (_, context, _) = Executor::default();
-        type PublicKey = <Ed25519 as Specification>::PublicKey;
-        let (mut network, _) = Network::<Context, PublicKey>::new(context.clone(), cfg);
+        let runner = deterministic::Runner::default();
 
-        // Test that the next socket address is incremented correctly
-        let mut original = network.next_addr;
-        let next = network.get_next_socket();
-        assert_eq!(next, original);
-        let next = network.get_next_socket();
-        original.set_port(1);
-        assert_eq!(next, original);
+        runner.start(|context| async move {
+            type PublicKey = <Ed25519 as Specification>::PublicKey;
+            let (mut network, _) =
+                Network::<deterministic::Context, PublicKey>::new(context.clone(), cfg);
 
-        // Test that the port number overflows correctly
-        let max_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(255, 0, 255, 255)), 65535);
-        network.next_addr = max_addr;
-        let next = network.get_next_socket();
-        assert_eq!(next, max_addr);
-        let next = network.get_next_socket();
-        assert_eq!(
-            next,
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(255, 1, 0, 0)), 0)
-        );
+            // Test that the next socket address is incremented correctly
+            let mut original = network.next_addr;
+            let next = network.get_next_socket();
+            assert_eq!(next, original);
+            let next = network.get_next_socket();
+            original.set_port(1);
+            assert_eq!(next, original);
+
+            // Test that the port number overflows correctly
+            let max_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(255, 0, 255, 255)), 65535);
+            network.next_addr = max_addr;
+            let next = network.get_next_socket();
+            assert_eq!(next, max_addr);
+            let next = network.get_next_socket();
+            assert_eq!(
+                next,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(255, 1, 0, 0)), 0)
+            );
+        });
     }
 }

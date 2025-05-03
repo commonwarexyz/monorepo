@@ -51,17 +51,10 @@ use clap::{value_parser, Arg, Command};
 use commonware_consensus::simplex;
 use commonware_cryptography::{Ed25519, Sha256, Signer};
 use commonware_p2p::authenticated::{self, Network};
-use commonware_runtime::{
-    tokio::{self, Executor},
-    Metrics, Runner,
-};
-use commonware_storage::journal::variable::{Config, Journal};
-use commonware_utils::union;
+use commonware_runtime::{tokio, Metrics, Runner};
+use commonware_utils::{union, NZU32};
 use governor::Quota;
-use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-    num::NonZeroU32,
-};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::{str::FromStr, time::Duration};
 
 /// Unique namespace to avoid message replay attacks.
@@ -144,11 +137,8 @@ fn main() {
         .expect("Please provide storage directory");
 
     // Initialize context
-    let runtime_cfg = tokio::Config {
-        storage_directory: storage_directory.into(),
-        ..Default::default()
-    };
-    let (executor, context) = Executor::init(runtime_cfg.clone());
+    let runtime_cfg = tokio::Config::new().with_storage_directory(storage_directory);
+    let executor = tokio::Runner::new(runtime_cfg.clone());
 
     // Configure network
     let p2p_cfg = authenticated::Config::aggressive(
@@ -161,7 +151,7 @@ fn main() {
     );
 
     // Start context
-    executor.start(async move {
+    executor.start(async |context| {
         // Initialize network
         let (mut network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
 
@@ -177,26 +167,16 @@ fn main() {
         // for this channel.
         let (voter_sender, voter_receiver) = network.register(
             0,
-            Quota::per_second(NonZeroU32::new(10).unwrap()),
+            Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
             Some(3),
         );
         let (resolver_sender, resolver_receiver) = network.register(
             1,
-            Quota::per_second(NonZeroU32::new(10).unwrap()),
+            Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
             Some(3),
         );
-
-        // Initialize storage
-        let journal = Journal::init(
-            context.with_label("journal"),
-            Config {
-                partition: String::from("log"),
-            },
-        )
-        .await
-        .expect("Failed to initialize journal");
 
         // Initialize application
         let namespace = union(APPLICATION_NAMESPACE, b"_CONSENSUS");
@@ -217,8 +197,11 @@ fn main() {
             reporter: supervisor.clone(),
             supervisor,
             namespace,
+            partition: String::from("log"),
+            compression: Some(3),
             mailbox_size: 1024,
             replay_concurrency: 1,
+            replay_buffer: 1024 * 1024,
             leader_timeout: Duration::from_secs(1),
             notarization_timeout: Duration::from_secs(2),
             nullify_retry: Duration::from_secs(10),
@@ -228,9 +211,9 @@ fn main() {
             max_fetch_count: 32,
             max_participants: participants.len(),
             fetch_concurrent: 2,
-            fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+            fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
         };
-        let engine = simplex::Engine::new(context.with_label("engine"), journal, cfg);
+        let engine = simplex::Engine::new(context.with_label("engine"), cfg);
 
         // Start consensus
         application.start();

@@ -58,7 +58,7 @@ pub async fn recv_frame<T: Stream>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_runtime::{deterministic::Executor, mocks, Runner};
+    use commonware_runtime::{deterministic, mocks, Runner};
     use rand::Rng;
 
     const MAX_MESSAGE_SIZE: usize = 1024;
@@ -67,8 +67,8 @@ mod tests {
     fn test_send_recv_at_max_message_size() {
         let (mut sink, mut stream) = mocks::Channel::init();
 
-        let (executor, mut context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
             let mut buf = [0u8; MAX_MESSAGE_SIZE];
             context.fill(&mut buf);
 
@@ -85,8 +85,8 @@ mod tests {
     fn test_send_recv_multiple() {
         let (mut sink, mut stream) = mocks::Channel::init();
 
-        let (executor, mut context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
             let mut buf1 = [0u8; MAX_MESSAGE_SIZE];
             let mut buf2 = [0u8; MAX_MESSAGE_SIZE / 2];
             context.fill(&mut buf1);
@@ -112,8 +112,8 @@ mod tests {
     fn test_send_frame() {
         let (mut sink, mut stream) = mocks::Channel::init();
 
-        let (executor, mut context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
             let mut buf = [0u8; MAX_MESSAGE_SIZE];
             context.fill(&mut buf);
 
@@ -135,8 +135,8 @@ mod tests {
         const MAX_MESSAGE_SIZE: usize = 1024;
         let (mut sink, _) = mocks::Channel::init();
 
-        let (executor, mut context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
             let mut buf = [0u8; MAX_MESSAGE_SIZE];
             context.fill(&mut buf);
 
@@ -149,8 +149,8 @@ mod tests {
     fn test_send_zero_size() {
         let (mut sink, _) = mocks::Channel::init();
 
-        let (executor, _, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
             let buf = [];
             let result = send_frame(&mut sink, &buf, MAX_MESSAGE_SIZE).await;
             assert!(matches!(&result, Err(Error::SendZeroSize)));
@@ -161,8 +161,8 @@ mod tests {
     fn test_read_frame() {
         let (mut sink, mut stream) = mocks::Channel::init();
 
-        let (executor, mut context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
             // Do the writing manually without using send_frame
             let mut buf = [0u8; MAX_MESSAGE_SIZE];
             context.fill(&mut buf);
@@ -181,8 +181,8 @@ mod tests {
     fn test_read_frame_too_large() {
         let (mut sink, mut stream) = mocks::Channel::init();
 
-        let (executor, _, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
             // Manually insert a frame that gives MAX_MESSAGE_SIZE as the size
             sink.send(&(MAX_MESSAGE_SIZE as u32).to_be_bytes())
                 .await
@@ -197,8 +197,8 @@ mod tests {
     fn test_read_zero_size() {
         let (mut sink, mut stream) = mocks::Channel::init();
 
-        let (executor, _, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
             // Manually insert a frame that gives zero as the size
             sink.send(&(0u32).to_be_bytes()).await.unwrap();
 

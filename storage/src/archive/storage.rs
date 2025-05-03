@@ -1,7 +1,10 @@
 use super::{Config, Error, Translator};
-use crate::{index::Index, journal::variable::Journal};
-use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::FixedSize;
+use crate::{
+    index::Index,
+    journal::variable::{Config as JConfig, Journal},
+};
+use bytes::{Buf, BufMut};
+use commonware_codec::{varint::UInt, Codec, EncodeSize, Read, ReadExt, Write};
 use commonware_runtime::{Metrics, Storage};
 use commonware_utils::Array;
 use futures::{pin_mut, StreamExt};
@@ -9,7 +12,6 @@ use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use rangemap::RangeInclusiveSet;
 use std::collections::BTreeMap;
 use tracing::{debug, trace};
-use zstd::bulk::{compress, decompress};
 
 /// Subject of a `get` or `has` operation.
 pub enum Identifier<'a, K: Array> {
@@ -23,10 +25,50 @@ struct Location {
     len: u32,
 }
 
+/// Record stored in the `Archive`.
+struct Record<K: Array, V: Codec> {
+    index: u64,
+    key: K,
+    value: V,
+}
+
+impl<K: Array, V: Codec> Record<K, V> {
+    /// Create a new `Record`.
+    fn new(index: u64, key: K, value: V) -> Self {
+        Self { index, key, value }
+    }
+}
+
+impl<K: Array, V: Codec> Write for Record<K, V> {
+    fn write(&self, buf: &mut impl BufMut) {
+        UInt(self.index).write(buf);
+        self.key.write(buf);
+        self.value.write(buf);
+    }
+}
+
+impl<K: Array, V: Codec> Read for Record<K, V> {
+    type Cfg = V::Cfg;
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let index = UInt::read(buf)?.into();
+        let key = K::read(buf)?;
+        let value = V::read_cfg(buf, cfg)?;
+        Ok(Self { index, key, value })
+    }
+}
+
+impl<K: Array, V: Codec> EncodeSize for Record<K, V> {
+    fn encode_size(&self) -> usize {
+        UInt(self.index).encode_size() + K::SIZE + self.value.encode_size()
+    }
+}
+
 /// Implementation of `Archive` storage.
-pub struct Archive<T: Translator, K: Array, E: Storage + Metrics> {
-    cfg: Config<T>,
-    journal: Journal<E>,
+pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
+    // The section mask is used to determine which section of the journal to write to.
+    section_mask: u64,
+    journal: Journal<E, Record<K, V>>,
 
     // Oldest allowed section to read from. This is updated when `prune` is called.
     oldest_allowed: Option<u64>,
@@ -39,7 +81,8 @@ pub struct Archive<T: Translator, K: Array, E: Storage + Metrics> {
     intervals: RangeInclusiveSet<u64>,
 
     // Track the number of writes pending for a section to determine when to sync.
-    pending_writes: BTreeMap<u64, usize>,
+    pending_writes: usize,
+    pending: BTreeMap<u64, usize>,
 
     items_tracked: Gauge,
     indices_pruned: Counter,
@@ -47,18 +90,25 @@ pub struct Archive<T: Translator, K: Array, E: Storage + Metrics> {
     gets: Counter,
     has: Counter,
     syncs: Counter,
-
-    _phantom: std::marker::PhantomData<K>,
 }
 
-impl<T: Translator, K: Array, E: Storage + Metrics> Archive<T, K, E> {
-    const PREFIX_LEN: u32 = (u64::SIZE + K::SIZE + u32::SIZE) as u32;
-
+impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V> {
     /// Initialize a new `Archive` instance.
     ///
     /// The in-memory index for `Archive` is populated during this call
     /// by replaying the journal.
-    pub async fn init(context: E, mut journal: Journal<E>, cfg: Config<T>) -> Result<Self, Error> {
+    pub async fn init(context: E, cfg: Config<T, V::Cfg>) -> Result<Self, Error> {
+        // Initialize journal
+        let journal = Journal::<E, Record<K, V>>::init(
+            context.with_label("journal"),
+            JConfig {
+                partition: cfg.partition,
+                compression: cfg.compression,
+                codec_config: cfg.codec_config,
+            },
+        )
+        .await?;
+
         // Initialize keys and run corruption check
         let mut indices = BTreeMap::new();
         let mut keys = Index::init(context.with_label("index"), cfg.translator.clone());
@@ -66,24 +116,24 @@ impl<T: Translator, K: Array, E: Storage + Metrics> Archive<T, K, E> {
         {
             debug!("initializing archive");
             let stream = journal
-                .replay(cfg.replay_concurrency, Some(Self::PREFIX_LEN))
+                .replay(cfg.replay_concurrency, cfg.replay_buffer)
                 .await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 // Extract key from record
                 let (_, offset, len, data) = result?;
-                let (index, key) = Self::parse_prefix(data)?;
 
                 // Store index
+                let index = data.index;
                 indices.insert(index, Location { offset, len });
 
                 // Store index in keys
-                keys.insert(&key, index);
+                keys.insert(&data.key, index);
 
                 // Store index in intervals
                 intervals.insert(index..=index);
             }
-            debug!(keys = keys.len(), "archive initialized");
+            debug!(keys = keys.keys(), "archive initialized");
         }
 
         // Initialize metrics
@@ -115,61 +165,28 @@ impl<T: Translator, K: Array, E: Storage + Metrics> Archive<T, K, E> {
 
         // Return populated archive
         Ok(Self {
-            cfg,
+            pending_writes: cfg.pending_writes,
+            section_mask: cfg.section_mask,
             journal,
             oldest_allowed: None,
             indices,
             intervals,
             keys,
-            pending_writes: BTreeMap::new(),
+            pending: BTreeMap::new(),
             items_tracked,
             indices_pruned,
             unnecessary_reads,
             gets,
             has,
             syncs,
-            _phantom: std::marker::PhantomData,
         })
-    }
-
-    fn parse_prefix(mut data: Bytes) -> Result<(u64, Bytes), Error> {
-        if data.remaining() != Self::PREFIX_LEN as usize {
-            return Err(Error::RecordCorrupted);
-        }
-        let found = crc32fast::hash(&data[..K::SIZE + u64::SIZE]);
-        let index = data.get_u64();
-        let key = data.copy_to_bytes(K::SIZE);
-        let expected = data.get_u32();
-        if found != expected {
-            return Err(Error::RecordCorrupted);
-        }
-        Ok((index, key))
-    }
-
-    fn parse_item(mut data: Bytes) -> Result<(Bytes, Bytes), Error> {
-        if data.remaining() < Self::PREFIX_LEN as usize {
-            return Err(Error::RecordCorrupted);
-        }
-
-        // We don't need the index, so we just skip it
-        data.get_u64();
-
-        // Read key from data
-        let key = data.copy_to_bytes(K::SIZE);
-
-        // We don't need to compute checksum here as the underlying journal
-        // already performs this check for us.
-        data.get_u32();
-
-        // Return remaining data as value
-        Ok((key, data))
     }
 
     /// Store an item in `Archive`. Both indices and keys are assumed to both be globally unique.
     ///
     /// If the index already exists, put does nothing and returns. If the same key is stored multiple times
     /// at different indices (not recommended), any value associated with the key may be returned.
-    pub async fn put(&mut self, index: u64, key: K, data: Bytes) -> Result<(), Error> {
+    pub async fn put(&mut self, index: u64, key: K, data: V) -> Result<(), Error> {
         // Check last pruned
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
         if index < oldest_allowed {
@@ -181,56 +198,25 @@ impl<T: Translator, K: Array, E: Storage + Metrics> Archive<T, K, E> {
             return Ok(());
         }
 
-        // If compression is enabled, compress the data before storing it.
-        let data = if let Some(level) = self.cfg.compression {
-            compress(&data, level as i32)
-                .map_err(|_| Error::CompressionFailed)?
-                .into()
-        } else {
-            data
-        };
-
         // Store item in journal
-        let buf_len = u64::SIZE
-            .checked_add(K::SIZE)
-            .and_then(|len| len.checked_add(u32::SIZE))
-            .and_then(|len| len.checked_add(data.len()))
-            .ok_or(Error::RecordTooLarge)?;
-        let mut buf = Vec::with_capacity(buf_len);
-        buf.put_u64(index);
-        buf.put(key.as_ref());
-        // We store the checksum of the key because we employ partial reads from
-        // the journal, which aren't verified before returning to `Archive`.
-        buf.put_u32(crc32fast::hash(&buf[..]));
-        buf.put(data); // we don't need to store data len because we already get this from the journal
-        let section = self.cfg.section_mask & index;
-        let offset = self.journal.append(section, buf.into()).await?;
+        let record = Record::new(index, key.clone(), data);
+        let section = self.section_mask & index;
+        let (offset, len) = self.journal.append(section, record).await?;
 
         // Store index
-        self.indices.insert(
-            index,
-            Location {
-                offset,
-                len: buf_len as u32,
-            },
-        );
+        self.indices.insert(index, Location { offset, len });
 
         // Store interval
         self.intervals.insert(index..=index);
 
-        // Store item
-        self.keys.insert(&key, index);
-
-        // Cleanup tracked keys
-        //
-        // We call this after insertion to avoid unnecessary underlying map
-        // operations.
-        self.keys.remove(&key, |index| *index < oldest_allowed);
+        // Insert and prune any useless keys
+        self.keys
+            .insert_and_prune(&key, index, |v| *v < oldest_allowed);
 
         // Update pending writes
-        let pending_writes = self.pending_writes.entry(section).or_default();
+        let pending_writes = self.pending.entry(section).or_default();
         *pending_writes += 1;
-        if *pending_writes > self.cfg.pending_writes {
+        if *pending_writes > self.pending_writes {
             self.journal.sync(section).await.map_err(Error::Journal)?;
             trace!(section, mode = "pending", "synced section");
             *pending_writes = 0;
@@ -243,51 +229,39 @@ impl<T: Translator, K: Array, E: Storage + Metrics> Archive<T, K, E> {
     }
 
     /// Retrieve an item from `Archive`.
-    pub async fn get(&self, identifier: Identifier<'_, K>) -> Result<Option<Bytes>, Error> {
+    pub async fn get(&self, identifier: Identifier<'_, K>) -> Result<Option<V>, Error> {
         match identifier {
             Identifier::Index(index) => self.get_index(index).await,
             Identifier::Key(key) => self.get_key(key).await,
         }
     }
 
-    async fn get_index(&self, index: u64) -> Result<Option<Bytes>, Error> {
+    async fn get_index(&self, index: u64) -> Result<Option<V>, Error> {
         // Update metrics
         self.gets.inc();
 
         // Get index location
         let location = match self.indices.get(&index) {
-            Some(location) => location,
+            Some(offset) => offset,
             None => return Ok(None),
         };
 
         // Fetch item from disk
-        let section = self.cfg.section_mask & index;
-        let item = self
+        let section = self.section_mask & index;
+        let record = self
             .journal
-            .get(section, location.offset, Some(location.len))
+            .get_exact(section, location.offset, location.len)
             .await?
             .ok_or(Error::RecordCorrupted)?;
-
-        // Get key from item
-        let (_, value) = Self::parse_item(item)?;
-
-        // If compression is enabled, decompress the data before returning.
-        if self.cfg.compression.is_some() {
-            return Ok(Some(
-                decompress(&value, u32::MAX as usize)
-                    .map_err(|_| Error::DecompressionFailed)?
-                    .into(),
-            ));
-        }
-        Ok(Some(value))
+        Ok(Some(record.value))
     }
 
-    async fn get_key(&self, key: &K) -> Result<Option<Bytes>, Error> {
+    async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
         // Update metrics
         self.gets.inc();
 
         // Fetch index
-        let iter = self.keys.get_iter(key);
+        let iter = self.keys.get(key);
         let min_allowed = self.oldest_allowed.unwrap_or(0);
         for index in iter {
             // Continue if index is no longer allowed due to pruning.
@@ -297,25 +271,16 @@ impl<T: Translator, K: Array, E: Storage + Metrics> Archive<T, K, E> {
 
             // Fetch item from disk
             let location = self.indices.get(index).ok_or(Error::RecordCorrupted)?;
-            let section = self.cfg.section_mask & index;
-            let item = self
+            let section = self.section_mask & index;
+            let record = self
                 .journal
-                .get(section, location.offset, Some(location.len))
+                .get_exact(section, location.offset, location.len)
                 .await?
                 .ok_or(Error::RecordCorrupted)?;
 
             // Get key from item
-            let (disk_key, value) = Self::parse_item(item)?;
-            if disk_key.as_ref() == key.as_ref() {
-                // If compression is enabled, decompress the data before returning.
-                if self.cfg.compression.is_some() {
-                    return Ok(Some(
-                        decompress(&value, u32::MAX as usize)
-                            .map_err(|_| Error::DecompressionFailed)?
-                            .into(),
-                    ));
-                }
-                return Ok(Some(value));
+            if record.key.as_ref() == key.as_ref() {
+                return Ok(Some(record.value));
             }
             self.unnecessary_reads.inc();
         }
@@ -328,42 +293,13 @@ impl<T: Translator, K: Array, E: Storage + Metrics> Archive<T, K, E> {
         self.has.inc();
         match identifier {
             Identifier::Index(index) => Ok(self.has_index(index)),
-            Identifier::Key(key) => self.has_key(key).await,
+            Identifier::Key(key) => self.get_key(key).await.map(|result| result.is_some()),
         }
     }
 
     fn has_index(&self, index: u64) -> bool {
         // Check if index exists
         self.indices.contains_key(&index)
-    }
-
-    async fn has_key(&self, key: &[u8]) -> Result<bool, Error> {
-        let iter = self.keys.get_iter(key);
-        let min_allowed = self.oldest_allowed.unwrap_or(0);
-        for index in iter {
-            // Continue if index is no longer allowed due to pruning.
-            if *index < min_allowed {
-                continue;
-            }
-
-            // Fetch item from disk
-            let section = self.cfg.section_mask & index;
-            let location = self.indices.get(index).ok_or(Error::RecordCorrupted)?;
-            let item = self
-                .journal
-                .get_prefix(section, location.offset, Self::PREFIX_LEN)
-                .await?
-                .ok_or(Error::RecordCorrupted)?;
-
-            // Get key from item
-            let (_, item_key) = Self::parse_prefix(item)?;
-            if key == item_key {
-                return Ok(true);
-            }
-            self.unnecessary_reads.inc();
-        }
-
-        Ok(false)
     }
 
     /// Prune `Archive` to the provided `min` (masked by the configured
@@ -373,7 +309,7 @@ impl<T: Translator, K: Array, E: Storage + Metrics> Archive<T, K, E> {
     /// will happen.
     pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
         // Update `min` to reflect section mask
-        let min = self.cfg.section_mask & min;
+        let min = self.section_mask & min;
 
         // Check if min is less than last pruned
         if let Some(oldest_allowed) = self.oldest_allowed {
@@ -390,11 +326,11 @@ impl<T: Translator, K: Array, E: Storage + Metrics> Archive<T, K, E> {
 
         // Remove pending writes (no need to call `sync` as we are pruning)
         loop {
-            let next = match self.pending_writes.first_key_value() {
+            let next = match self.pending.first_key_value() {
                 Some((section, _)) if *section < min => *section,
                 _ => break,
             };
-            self.pending_writes.remove(&next);
+            self.pending.remove(&next);
         }
 
         // Remove all indices that are less than min
@@ -421,7 +357,7 @@ impl<T: Translator, K: Array, E: Storage + Metrics> Archive<T, K, E> {
 
     /// Forcibly sync all pending writes across all `Journals`.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        for (section, count) in self.pending_writes.iter_mut() {
+        for (section, count) in self.pending.iter_mut() {
             if *count == 0 {
                 continue;
             }
@@ -459,5 +395,10 @@ impl<T: Translator, K: Array, E: Storage + Metrics> Archive<T, K, E> {
     /// to closing.
     pub async fn close(self) -> Result<(), Error> {
         self.journal.close().await.map_err(Error::Journal)
+    }
+
+    /// Remove all on-disk data created by this `Archive`.
+    pub async fn destroy(self) -> Result<(), Error> {
+        self.journal.destroy().await.map_err(Error::Journal)
     }
 }

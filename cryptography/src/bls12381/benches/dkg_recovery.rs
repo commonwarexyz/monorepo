@@ -39,7 +39,7 @@ fn benchmark_dkg_recovery(c: &mut Criterion) {
                         let (_, commitment, shares) =
                             Dealer::new(&mut rng, None, contributors.clone());
                         player
-                            .share(dealer.clone(), commitment.clone(), shares[0])
+                            .share(dealer.clone(), commitment.clone(), shares[0].clone())
                             .unwrap();
                         commitments.insert(idx as u32, commitment);
                     }

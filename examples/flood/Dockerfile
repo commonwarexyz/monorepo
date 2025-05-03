@@ -1,4 +1,5 @@
-FROM arm64v8/ubuntu
+# Use same Ubuntu version as `commonware-deployer`
+FROM arm64v8/ubuntu:24.04
 
 # Install necessary tools and libraries
 RUN apt-get update && apt-get install -y \

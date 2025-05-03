@@ -11,7 +11,6 @@ use crate::{
     },
     Automaton, Relay, Reporter, ThresholdSupervisor, LATENCY,
 };
-use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
@@ -21,9 +20,12 @@ use commonware_cryptography::{
     Digest, Scheme,
 };
 use commonware_macros::select;
-use commonware_p2p::{Receiver, Recipients, Sender};
+use commonware_p2p::{
+    utils::codec::{wrap, WrappedSender},
+    Receiver, Recipients, Sender,
+};
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
-use commonware_storage::journal::variable::Journal;
+use commonware_storage::journal::variable::{Config as JConfig, Journal};
 use commonware_utils::quorum;
 use futures::{
     channel::{mpsc, oneshot},
@@ -509,8 +511,11 @@ pub struct Actor<
     reporter: F,
     supervisor: S,
 
+    partition: String,
+    compression: Option<u8>,
     replay_concurrency: usize,
-    journal: Option<Journal<E>>,
+    replay_buffer: usize,
+    journal: Option<Journal<E, Voter<D>>>,
 
     genesis: Option<D>,
 
@@ -553,11 +558,7 @@ impl<
         >,
     > Actor<E, C, D, A, R, F, S>
 {
-    pub fn new(
-        context: E,
-        journal: Journal<E>,
-        cfg: Config<C, D, A, R, F, S>,
-    ) -> (Self, Mailbox<D>) {
+    pub fn new(context: E, cfg: Config<C, D, A, R, F, S>) -> (Self, Mailbox<D>) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -607,8 +608,11 @@ impl<
                 reporter: cfg.reporter,
                 supervisor: cfg.supervisor,
 
+                partition: cfg.partition,
+                compression: cfg.compression,
                 replay_concurrency: cfg.replay_concurrency,
-                journal: Some(journal),
+                replay_buffer: cfg.replay_buffer,
+                journal: None,
 
                 genesis: None,
 
@@ -799,7 +803,7 @@ impl<
         null_retry
     }
 
-    async fn timeout(&mut self, sender: &mut impl Sender) {
+    async fn timeout<Sr: Sender>(&mut self, sender: &mut WrappedSender<Sr, Voter<D>>) {
         // Set timeout fired
         let round = self.views.get_mut(&self.view).unwrap();
         let mut retry = false;
@@ -817,7 +821,7 @@ impl<
         let past_view = self.view - 1;
         if retry && past_view > 0 {
             if let Some(notarization) = self.construct_notarization(past_view, true).await {
-                let msg = Voter::Notarization(notarization).encode().into();
+                let msg = Voter::Notarization(notarization);
                 sender.send(Recipients::All, msg, true).await.unwrap();
                 self.broadcast_messages
                     .get_or_create(&metrics::NOTARIZATION)
@@ -825,7 +829,7 @@ impl<
                 debug!(view = past_view, "rebroadcast entry notarization");
             } else if let Some(nullification) = self.construct_nullification(past_view, true).await
             {
-                let msg = Voter::<D>::Nullification(nullification).encode().into();
+                let msg = Voter::Nullification(nullification);
                 sender.send(Recipients::All, msg, true).await.unwrap();
                 self.broadcast_messages
                     .get_or_create(&metrics::NULLIFICATION)
@@ -855,7 +859,7 @@ impl<
             .expect("unable to sync journal");
 
         // Broadcast nullify
-        let msg = Voter::<D>::Nullify(nullify).encode().into();
+        let msg = Voter::Nullify(nullify);
         sender.send(Recipients::All, msg, true).await.unwrap();
         self.broadcast_messages
             .get_or_create(&metrics::NULLIFY)
@@ -903,12 +907,12 @@ impl<
         });
 
         // Handle nullify
-        let nullify_bytes = Voter::<D>::Nullify(nullify.clone()).encode().into();
+        let msg = Voter::Nullify(nullify.clone());
         if round.add_verified_nullify(public_key_index, nullify).await && self.journal.is_some() {
             self.journal
                 .as_mut()
                 .unwrap()
-                .append(view, nullify_bytes)
+                .append(view, msg)
                 .await
                 .expect("unable to append nullify");
         }
@@ -1240,7 +1244,7 @@ impl<
         });
 
         // Handle notarize
-        let notarize_bytes = Voter::Notarize(notarize.clone()).encode().into();
+        let msg = Voter::Notarize(notarize.clone());
         if round
             .add_verified_notarize(public_key_index, notarize)
             .await
@@ -1249,7 +1253,7 @@ impl<
             self.journal
                 .as_mut()
                 .unwrap()
-                .append(view, notarize_bytes)
+                .append(view, msg)
                 .await
                 .expect("unable to append to journal");
         }
@@ -1297,13 +1301,13 @@ impl<
         });
 
         // Store notarization
-        let notarization_bytes = Voter::Notarization(notarization.clone()).encode().into();
+        let msg = Voter::Notarization(notarization.clone());
         let seed = notarization.seed_signature;
         if round.add_verified_notarization(notarization) && self.journal.is_some() {
             self.journal
                 .as_mut()
                 .unwrap()
-                .append(view, notarization_bytes)
+                .append(view, msg)
                 .await
                 .expect("unable to append to journal");
         }
@@ -1353,15 +1357,13 @@ impl<
         });
 
         // Store nullification
-        let nullification_bytes = Voter::<D>::Nullification(nullification.clone())
-            .encode()
-            .into();
+        let msg = Voter::Nullification(nullification.clone());
         let seed = nullification.seed_signature;
         if round.add_verified_nullification(nullification) && self.journal.is_some() {
             self.journal
                 .as_mut()
                 .unwrap()
-                .append(view, nullification_bytes)
+                .append(view, msg)
                 .await
                 .expect("unable to append to journal");
         }
@@ -1411,7 +1413,7 @@ impl<
         });
 
         // Handle finalize
-        let finalize_bytes = Voter::Finalize(finalize.clone()).encode().into();
+        let msg = Voter::Finalize(finalize.clone());
         if round
             .add_verified_finalize(public_key_index, finalize)
             .await
@@ -1420,7 +1422,7 @@ impl<
             self.journal
                 .as_mut()
                 .unwrap()
-                .append(view, finalize_bytes)
+                .append(view, msg)
                 .await
                 .expect("unable to append to journal");
         }
@@ -1468,13 +1470,13 @@ impl<
         });
 
         // Store finalization
-        let finalization_bytes = Voter::Finalization(finalization.clone()).encode().into();
+        let msg = Voter::Finalization(finalization.clone());
         let seed = finalization.seed_signature;
         if round.add_verified_finalization(finalization) && self.journal.is_some() {
             self.journal
                 .as_mut()
                 .unwrap()
-                .append(view, finalization_bytes)
+                .append(view, msg)
                 .await
                 .expect("unable to append to journal");
         }
@@ -1560,10 +1562,10 @@ impl<
         round.finalizable(threshold, force).await
     }
 
-    async fn notify(
+    async fn notify<Sr: Sender>(
         &mut self,
         backfiller: &mut resolver::Mailbox<D>,
-        sender: &mut impl Sender,
+        sender: &mut WrappedSender<Sr, Voter<D>>,
         view: u64,
     ) {
         // Get public key index
@@ -1584,7 +1586,7 @@ impl<
                 .expect("unable to sync journal");
 
             // Broadcast the notarize
-            let msg = Voter::Notarize(notarize.clone()).encode().into();
+            let msg = Voter::Notarize(notarize.clone());
             sender.send(Recipients::All, msg, true).await.unwrap();
             self.broadcast_messages
                 .get_or_create(&metrics::NOTARIZE)
@@ -1620,7 +1622,7 @@ impl<
                 .await;
 
             // Broadcast the notarization
-            let msg = Voter::Notarization(notarization.clone()).encode().into();
+            let msg = Voter::Notarization(notarization.clone());
             sender.send(Recipients::All, msg, true).await.unwrap();
             self.broadcast_messages
                 .get_or_create(&metrics::NOTARIZATION)
@@ -1651,9 +1653,7 @@ impl<
                 .await;
 
             // Broadcast the nullification
-            let msg = Voter::<D>::Nullification(nullification.clone())
-                .encode()
-                .into();
+            let msg = Voter::Nullification(nullification.clone());
             sender.send(Recipients::All, msg, true).await.unwrap();
             self.broadcast_messages
                 .get_or_create(&metrics::NULLIFICATION)
@@ -1694,7 +1694,7 @@ impl<
                     if let Some(finalization) =
                         self.construct_finalization(self.last_finalized, true).await
                     {
-                        let msg = Voter::Finalization(finalization.clone()).encode().into();
+                        let msg = Voter::Finalization(finalization.clone());
                         sender
                             .send(Recipients::All, msg, true)
                             .await
@@ -1727,7 +1727,7 @@ impl<
                 .expect("unable to sync journal");
 
             // Broadcast the finalize
-            let msg = Voter::Finalize(finalize.clone()).encode().into();
+            let msg = Voter::Finalize(finalize.clone());
             sender.send(Recipients::All, msg, true).await.unwrap();
             self.broadcast_messages
                 .get_or_create(&metrics::FINALIZE)
@@ -1763,7 +1763,7 @@ impl<
                 .await;
 
             // Broadcast the finalization
-            let msg = Voter::Finalization(finalization.clone()).encode().into();
+            let msg = Voter::Finalization(finalization.clone());
             sender.send(Recipients::All, msg, true).await.unwrap();
             self.broadcast_messages
                 .get_or_create(&metrics::FINALIZATION)
@@ -1785,9 +1785,12 @@ impl<
     async fn run(
         mut self,
         mut backfiller: resolver::Mailbox<D>,
-        mut sender: impl Sender<PublicKey = C::PublicKey>,
-        mut receiver: impl Receiver<PublicKey = C::PublicKey>,
+        sender: impl Sender<PublicKey = C::PublicKey>,
+        receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) {
+        // Wrap channel
+        let (mut sender, mut receiver) = wrap((), sender, receiver);
+
         // Compute genesis
         let genesis = self.automaton.genesis().await;
         self.genesis = Some(genesis);
@@ -1797,19 +1800,27 @@ impl<
         // We start on view 1 because the genesis container occupies view 0/height 0.
         self.enter_view(1, group::Signature::zero());
 
+        // Initialize journal
+        let journal = Journal::<_, Voter<D>>::init(
+            self.context.with_label("journal"),
+            JConfig {
+                partition: self.partition.clone(),
+                compression: self.compression,
+                codec_config: (),
+            },
+        )
+        .await
+        .expect("unable to open journal");
+
         // Rebuild from journal
-        let mut journal = self.journal.take().expect("missing journal");
         {
             let stream = journal
-                .replay(self.replay_concurrency, None)
+                .replay(self.replay_concurrency, self.replay_buffer)
                 .await
                 .expect("unable to replay journal");
             pin_mut!(stream);
             while let Some(msg) = stream.next().await {
-                let (_, _, _, msg) = msg.expect("unable to decode journal message");
-                // We must wrap the message in Voter so we decode the right type of message (otherwise,
-                // we can parse a finalize as a notarize)
-                let msg = Voter::decode(msg).expect("journal message is unexpected format");
+                let (_, _, _, msg) = msg.expect("unable to replay journal");
                 let view = msg.view();
                 match msg {
                     Voter::Notarize(notarize) => {
@@ -2048,11 +2059,13 @@ impl<
                     }
                 },
                 msg = receiver.recv() => {
-                    // Parse message
+                    // Break if there is an internal error
                     let Ok((s, msg)) = msg else {
                         break;
                     };
-                    let Ok(msg) = Voter::decode(msg) else {
+
+                    // Skip if there is a decoding error
+                    let Ok(msg) = msg else {
                         continue;
                     };
 

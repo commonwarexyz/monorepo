@@ -1,7 +1,9 @@
 use super::x25519;
 use crate::Error;
 use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{
+    varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
+};
 use commonware_cryptography::Scheme;
 use commonware_runtime::Clock;
 use commonware_utils::SystemTimeExt;
@@ -9,8 +11,15 @@ use std::time::Duration;
 
 /// Handshake information that is signed over by the sender.
 pub struct Info<C: Scheme> {
+    /// The public key of the recipient.
     recipient: C::PublicKey,
+
+    /// The ephemeral public key of the sender.
+    ///
+    /// This is used to derive the shared secret for the encrypted connection.
     ephemeral_public_key: x25519::PublicKey,
+
+    /// Timestamp of the handshake (in epoch milliseconds).
     timestamp: u64,
 }
 
@@ -32,15 +41,17 @@ impl<C: Scheme> Write for Info<C> {
     fn write(&self, buf: &mut impl BufMut) {
         self.recipient.write(buf);
         self.ephemeral_public_key.write(buf);
-        self.timestamp.write(buf);
+        UInt(self.timestamp).write(buf);
     }
 }
 
 impl<C: Scheme> Read for Info<C> {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let recipient = C::PublicKey::read(buf)?;
         let ephemeral_public_key = x25519::PublicKey::read(buf)?;
-        let timestamp = u64::read(buf)?;
+        let timestamp = UInt::read(buf)?.into();
         Ok(Info {
             recipient,
             ephemeral_public_key,
@@ -49,8 +60,12 @@ impl<C: Scheme> Read for Info<C> {
     }
 }
 
-impl<C: Scheme> FixedSize for Info<C> {
-    const SIZE: usize = C::PublicKey::SIZE + x25519::PublicKey::SIZE + u64::SIZE;
+impl<C: Scheme> EncodeSize for Info<C> {
+    fn encode_size(&self) -> usize {
+        self.recipient.encode_size()
+            + self.ephemeral_public_key.encode_size()
+            + UInt(self.timestamp).encode_size()
+    }
 }
 
 // Allows recipient to verify that the sender has the private key
@@ -147,6 +162,8 @@ impl<C: Scheme> Write for Signed<C> {
 }
 
 impl<C: Scheme> Read for Signed<C> {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let info = Info::<C>::read(buf)?;
         let signer = C::PublicKey::read(buf)?;
@@ -159,8 +176,10 @@ impl<C: Scheme> Read for Signed<C> {
     }
 }
 
-impl<C: Scheme> FixedSize for Signed<C> {
-    const SIZE: usize = Info::<C>::SIZE + C::PublicKey::SIZE + C::Signature::SIZE;
+impl<C: Scheme> EncodeSize for Signed<C> {
+    fn encode_size(&self) -> usize {
+        self.info.encode_size() + self.signer.encode_size() + self.signature.encode_size()
+    }
 }
 
 #[cfg(test)]
@@ -172,7 +191,7 @@ mod tests {
     };
     use commonware_codec::DecodeExt;
     use commonware_cryptography::{Ed25519, Signer, Verifier};
-    use commonware_runtime::{deterministic::Executor, mocks, Metrics, Runner, Spawner};
+    use commonware_runtime::{deterministic, mocks, Metrics, Runner, Spawner};
     use x25519::PublicKey;
 
     const TEST_NAMESPACE: &[u8] = b"test_namespace";
@@ -181,8 +200,8 @@ mod tests {
     #[test]
     fn test_handshake_create_verify() {
         // Initialize context
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Create participants
             let mut sender = Ed25519::from_seed(0);
             let recipient = Ed25519::from_seed(1);
@@ -242,8 +261,8 @@ mod tests {
     #[test]
     fn test_handshake() {
         // Initialize context
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Create participants
             let mut sender = Ed25519::from_seed(0);
             let recipient = Ed25519::from_seed(1);
@@ -293,8 +312,8 @@ mod tests {
     #[test]
     fn test_handshake_not_for_us() {
         // Initialize context
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Create participants
             let mut sender = Ed25519::from_seed(0);
             let ephemeral_public_key = PublicKey::from_bytes([3u8; 32]);
@@ -340,8 +359,8 @@ mod tests {
     #[test]
     fn test_incoming_handshake_invalid_data() {
         // Initialize context
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Setup a mock sink and stream
             let (sink, _) = mocks::Channel::init();
             let (mut stream_sender, stream) = mocks::Channel::init();
@@ -371,8 +390,8 @@ mod tests {
 
     #[test]
     fn test_incoming_handshake_verify_timeout() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Setup a mock sink and stream
             let (sink, _) = mocks::Channel::init();
             let (_, stream) = mocks::Channel::init();
@@ -395,8 +414,8 @@ mod tests {
 
     #[test]
     fn test_handshake_verify_invalid_signature() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             let mut crypto = Ed25519::from_seed(0);
             let recipient = crypto.public_key();
             let ephemeral_public_key = x25519::PublicKey::from_bytes([0u8; 32]);
@@ -430,8 +449,8 @@ mod tests {
 
     #[test]
     fn test_handshake_verify_invalid_timestamp_old() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             let mut crypto = Ed25519::from_seed(0);
             let recipient = crypto.public_key();
             let ephemeral_public_key = x25519::PublicKey::from_bytes([0u8; 32]);
@@ -482,8 +501,8 @@ mod tests {
 
     #[test]
     fn test_handshake_verify_invalid_timestamp_future() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             let mut crypto = Ed25519::from_seed(0);
             let recipient = crypto.public_key();
             let ephemeral_public_key = x25519::PublicKey::from_bytes([0u8; 32]);

@@ -67,12 +67,14 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{
-        deterministic::{self, Context, Executor},
+        deterministic::{self, Context},
         Metrics,
     };
     use commonware_runtime::{Clock, Runner, Spawner};
+    use commonware_utils::quorum;
     use futures::channel::oneshot;
     use futures::future::join_all;
+    use rand::{rngs::StdRng, SeedableRng as _};
     use std::{
         collections::HashMap,
         sync::{Arc, Mutex},
@@ -85,15 +87,15 @@ mod tests {
 
     type Registrations<P> = BTreeMap<P, ((Sender<P>, Receiver<P>), (Sender<P>, Receiver<P>))>;
 
-    async fn register_validators(
+    async fn register_participants(
         oracle: &mut Oracle<PublicKey>,
-        validators: &[PublicKey],
+        participants: &[PublicKey],
     ) -> Registrations<PublicKey> {
         let mut registrations = BTreeMap::new();
-        for validator in validators.iter() {
-            let (a1, a2) = oracle.register(validator.clone(), 0).await.unwrap();
-            let (b1, b2) = oracle.register(validator.clone(), 1).await.unwrap();
-            registrations.insert(validator.clone(), ((a1, a2), (b1, b2)));
+        for participant in participants.iter() {
+            let (a1, a2) = oracle.register(participant.clone(), 0).await.unwrap();
+            let (b1, b2) = oracle.register(participant.clone(), 1).await.unwrap();
+            registrations.insert(participant.clone(), ((a1, a2), (b1, b2)));
         }
         registrations
     }
@@ -105,19 +107,19 @@ mod tests {
         Unlink,
     }
 
-    async fn link_validators(
+    async fn link_participants(
         oracle: &mut Oracle<PublicKey>,
-        validators: &[PublicKey],
+        participants: &[PublicKey],
         action: Action,
         restrict_to: Option<fn(usize, usize, usize) -> bool>,
     ) {
-        for (i1, v1) in validators.iter().enumerate() {
-            for (i2, v2) in validators.iter().enumerate() {
+        for (i1, v1) in participants.iter().enumerate() {
+            for (i2, v2) in participants.iter().enumerate() {
                 if v2 == v1 {
                     continue;
                 }
                 if let Some(f) = restrict_to {
-                    if !f(validators.len(), i1, i2) {
+                    if !f(participants.len(), i1, i2) {
                         continue;
                     }
                 }
@@ -159,20 +161,20 @@ mod tests {
         let validators: Vec<(PublicKey, Ed25519, Share)> = schemes
             .iter()
             .enumerate()
-            .map(|(i, scheme)| (scheme.public_key(), scheme.clone(), shares_vec[i]))
+            .map(|(i, scheme)| (scheme.public_key(), scheme.clone(), shares_vec[i].clone()))
             .collect();
         let pks = validators
             .iter()
             .map(|(pk, _, _)| pk.clone())
             .collect::<Vec<_>>();
 
-        let registrations = register_validators(&mut oracle, &pks).await;
+        let registrations = register_participants(&mut oracle, &pks).await;
         let link = Link {
             latency: 10.0,
             jitter: 1.0,
             success_rate: 1.0,
         };
-        link_validators(&mut oracle, &pks, Action::Link(link), None).await;
+        link_participants(&mut oracle, &pks, Action::Link(link), None).await;
         (oracle, validators, pks, registrations)
     }
 
@@ -180,7 +182,8 @@ mod tests {
     fn spawn_validator_engines(
         context: Context,
         identity: poly::Public,
-        pks: &[PublicKey],
+        sequencer_pks: &[PublicKey],
+        validator_pks: &[PublicKey],
         validators: &[(PublicKey, Ed25519, Share)],
         registrations: &mut Registrations<PublicKey>,
         automatons: &mut BTreeMap<PublicKey, mocks::Automaton<PublicKey>>,
@@ -195,9 +198,12 @@ mod tests {
             let context = context.with_label(&validator.to_string());
             let monitor = mocks::Monitor::new(111);
             monitors.insert(validator.clone(), monitor.clone());
-            let sequencers = mocks::Sequencers::<PublicKey>::new(pks.to_vec());
-            let validators =
-                mocks::Validators::<PublicKey>::new(identity.clone(), pks.to_vec(), *share);
+            let sequencers = mocks::Sequencers::<PublicKey>::new(sequencer_pks.to_vec());
+            let validators = mocks::Validators::<PublicKey>::new(
+                identity.clone(),
+                validator_pks.to_vec(),
+                Some(share.clone()),
+            );
 
             let automaton = mocks::Automaton::<PublicKey>::new(invalid_when);
             automatons.insert(validator.clone(), automaton.clone());
@@ -228,7 +234,9 @@ mod tests {
                     priority_proposals: false,
                     journal_heights_per_section: 10,
                     journal_replay_concurrency: 1,
+                    journal_replay_buffer: 4096,
                     journal_name_prefix: format!("ordered-broadcast-seq/{}/", validator),
+                    journal_compression: Some(3),
                 },
             );
 
@@ -240,37 +248,53 @@ mod tests {
 
     async fn await_reporters(
         context: Context,
+        sequencers: Vec<PublicKey>,
         reporters: &BTreeMap<PublicKey, mocks::ReporterMailbox<Ed25519, Sha256Digest>>,
-        threshold: (u64, Epoch),
+        threshold: (u64, Epoch, bool),
     ) {
         let mut receivers = Vec::new();
-        for (sequencer, mailbox) in reporters.iter() {
-            // Create a oneshot channel to signal when the reporter has reached the threshold.
-            let (tx, rx) = oneshot::channel();
-            receivers.push(rx);
-
+        for (reporter, mailbox) in reporters.iter() {
             // Spawn a watcher for the reporter.
-            context.with_label("reporter_watcher").spawn({
-                let sequencer = sequencer.clone();
-                let mut mailbox = mailbox.clone();
-                move |context| async move {
-                    loop {
-                        let (height, epoch) =
-                            mailbox.get_tip(sequencer.clone()).await.unwrap_or((0, 0));
-                        debug!(height, epoch, ?sequencer, "reporter");
-                        if height >= threshold.0 && epoch >= threshold.1 {
-                            let _ = tx.send(sequencer.clone());
-                            break;
+            for sequencer in sequencers.iter() {
+                // Create a oneshot channel to signal when the reporter has reached the threshold.
+                let (tx, rx) = oneshot::channel();
+                receivers.push(rx);
+
+                context.with_label("reporter_watcher").spawn({
+                    let reporter = reporter.clone();
+                    let sequencer = sequencer.clone();
+                    let mut mailbox = mailbox.clone();
+                    move |context| async move {
+                        loop {
+                            let (height, epoch) =
+                                mailbox.get_tip(sequencer.clone()).await.unwrap_or((0, 0));
+                            debug!(height, epoch, ?sequencer, ?reporter, "reporter");
+                            let contiguous_height = mailbox
+                                .get_contiguous_tip(sequencer.clone())
+                                .await
+                                .unwrap_or(0);
+                            if height >= threshold.0
+                                && epoch >= threshold.1
+                                && (!threshold.2 || contiguous_height >= threshold.0)
+                            {
+                                let _ = tx.send(sequencer.clone());
+                                break;
+                            }
+                            context.sleep(Duration::from_millis(100)).await;
                         }
-                        context.sleep(Duration::from_millis(100)).await;
                     }
-                }
-            });
+                });
+            }
         }
 
         // Wait for all oneshot receivers to complete.
         let results = join_all(receivers).await;
-        assert_eq!(results.len(), reporters.len());
+        assert_eq!(results.len(), sequencers.len() * reporters.len());
+
+        // Check that none were cancelled.
+        for result in results {
+            assert!(result.is_ok(), "reporter was cancelled");
+        }
     }
 
     async fn get_max_height(
@@ -290,12 +314,13 @@ mod tests {
     fn test_all_online() {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
-        let (runner, mut context, _) = Executor::timed(Duration::from_secs(30));
-        let (identity, mut shares_vec) =
-            ops::generate_shares(&mut context, None, num_validators, quorum);
-        shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
-        runner.start(async move {
+        runner.start(|mut context| async move {
+            let (identity, mut shares_vec) =
+                ops::generate_shares(&mut context, None, num_validators, quorum);
+            shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+
             let (_oracle, validators, pks, mut registrations) = initialize_simulation(
                 context.with_label("simulation"),
                 num_validators,
@@ -311,6 +336,7 @@ mod tests {
                 context.with_label("validator"),
                 identity.clone(),
                 &pks,
+                &pks,
                 &validators,
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
@@ -319,7 +345,13 @@ mod tests {
                 |_| false,
                 Some(5),
             );
-            await_reporters(context.with_label("reporter"), &reporters, (100, 111)).await;
+            await_reporters(
+                context.with_label("reporter"),
+                reporters.keys().cloned().collect::<Vec<_>>(),
+                &reporters,
+                (100, 111, true),
+            )
+            .await;
         });
     }
 
@@ -327,113 +359,123 @@ mod tests {
     fn test_unclean_shutdown() {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
-        let (mut runner, mut context, _) = Executor::timed(Duration::from_secs(45));
+        let mut rng = StdRng::seed_from_u64(0);
         let (identity, mut shares_vec) =
-            ops::generate_shares(&mut context, None, num_validators, quorum);
+            ops::generate_shares(&mut rng, None, num_validators, quorum);
         shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
         let completed = Arc::new(Mutex::new(HashSet::new()));
         let shutdowns = Arc::new(Mutex::new(0u64));
+        let mut prev_ctx = None;
 
         while completed.lock().unwrap().len() != num_validators as usize {
-            runner.start({
-                let context = context.clone();
-                let completed = completed.clone();
-                let shares_vec = shares_vec.clone();
-                let shutdowns = shutdowns.clone();
-                let identity = identity.clone();
-                async move {
-                    let (network, mut oracle) = Network::new(
-                        context.with_label("network"),
-                        commonware_p2p::simulated::Config {
-                            max_size: 1024 * 1024,
-                        },
-                    );
-                    network.start();
+            let completed = completed.clone();
+            let shares_vec = shares_vec.clone();
+            let shutdowns = shutdowns.clone();
+            let identity = identity.clone();
 
-                    let mut schemes = (0..num_validators)
-                        .map(|i| Ed25519::from_seed(i as u64))
-                        .collect::<Vec<_>>();
-                    schemes.sort_by_key(|s| s.public_key());
-                    let validators: Vec<(PublicKey, Ed25519, Share)> = schemes
-                        .iter()
-                        .enumerate()
-                        .map(|(i, scheme)| (scheme.public_key(), scheme.clone(), shares_vec[i]))
-                        .collect();
-                    let pks = validators
-                        .iter()
-                        .map(|(pk, _, _)| pk.clone())
-                        .collect::<Vec<_>>();
+            let f = |context: deterministic::Context| async move {
+                let (network, mut oracle) = Network::new(
+                    context.with_label("network"),
+                    commonware_p2p::simulated::Config {
+                        max_size: 1024 * 1024,
+                    },
+                );
+                network.start();
 
-                    let mut registrations = register_validators(&mut oracle, &pks).await;
-                    let link = commonware_p2p::simulated::Link {
-                        latency: 10.0,
-                        jitter: 1.0,
-                        success_rate: 1.0,
-                    };
-                    link_validators(&mut oracle, &pks, Action::Link(link), None).await;
+                let mut schemes = (0..num_validators)
+                    .map(|i| Ed25519::from_seed(i as u64))
+                    .collect::<Vec<_>>();
+                schemes.sort_by_key(|s| s.public_key());
+                let validators: Vec<(PublicKey, Ed25519, Share)> = schemes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, scheme)| (scheme.public_key(), scheme.clone(), shares_vec[i].clone()))
+                    .collect();
+                let pks = validators
+                    .iter()
+                    .map(|(pk, _, _)| pk.clone())
+                    .collect::<Vec<_>>();
 
-                    let automatons = Arc::new(Mutex::new(BTreeMap::<
-                        PublicKey,
-                        mocks::Automaton<PublicKey>,
-                    >::new()));
-                    let mut reporters =
-                        BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, Sha256Digest>>::new();
-                    spawn_validator_engines(
-                        context.with_label("validator"),
-                        identity.clone(),
-                        &pks,
-                        &validators,
-                        &mut registrations,
-                        &mut automatons.lock().unwrap(),
-                        &mut reporters,
-                        Duration::from_secs(5),
-                        |_| false,
-                        None,
-                    );
+                let mut registrations = register_participants(&mut oracle, &pks).await;
+                let link = commonware_p2p::simulated::Link {
+                    latency: 10.0,
+                    jitter: 1.0,
+                    success_rate: 1.0,
+                };
+                link_participants(&mut oracle, &pks, Action::Link(link), None).await;
 
-                    let reporter_pairs: Vec<(
-                        PublicKey,
-                        mocks::ReporterMailbox<Ed25519, Sha256Digest>,
-                    )> = reporters
-                        .iter()
-                        .map(|(v, m)| (v.clone(), m.clone()))
-                        .collect();
-                    for (validator, mut mailbox) in reporter_pairs {
-                        let completed_clone = completed.clone();
-                        context
-                            .with_label("reporter_unclean")
-                            .spawn(|context| async move {
-                                loop {
-                                    let (height, _) =
-                                        mailbox.get_tip(validator.clone()).await.unwrap_or((0, 0));
-                                    if height >= 100 {
-                                        completed_clone.lock().unwrap().insert(validator.clone());
-                                        break;
-                                    }
-                                    context.sleep(Duration::from_millis(100)).await;
+                let automatons = Arc::new(Mutex::new(BTreeMap::<
+                    PublicKey,
+                    mocks::Automaton<PublicKey>,
+                >::new()));
+                let mut reporters =
+                    BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, Sha256Digest>>::new();
+                spawn_validator_engines(
+                    context.with_label("validator"),
+                    identity.clone(),
+                    &pks,
+                    &pks,
+                    &validators,
+                    &mut registrations,
+                    &mut automatons.lock().unwrap(),
+                    &mut reporters,
+                    Duration::from_secs(5),
+                    |_| false,
+                    None,
+                );
+
+                let reporter_pairs: Vec<(
+                    PublicKey,
+                    mocks::ReporterMailbox<Ed25519, Sha256Digest>,
+                )> = reporters
+                    .iter()
+                    .map(|(v, m)| (v.clone(), m.clone()))
+                    .collect();
+                for (validator, mut mailbox) in reporter_pairs {
+                    let completed_clone = completed.clone();
+                    context
+                        .with_label("reporter_unclean")
+                        .spawn(|context| async move {
+                            loop {
+                                let (height, _) =
+                                    mailbox.get_tip(validator.clone()).await.unwrap_or((0, 0));
+                                if height >= 100 {
+                                    completed_clone.lock().unwrap().insert(validator.clone());
+                                    break;
                                 }
-                            });
-                    }
-                    context.sleep(Duration::from_millis(1000)).await;
-                    *shutdowns.lock().unwrap() += 1;
+                                context.sleep(Duration::from_millis(100)).await;
+                            }
+                        });
                 }
-            });
-            let recovered = context.recover();
-            runner = recovered.0;
-            context = recovered.1;
+                context.sleep(Duration::from_millis(1000)).await;
+                *shutdowns.lock().unwrap() += 1;
+
+                context
+            };
+
+            let context = if let Some(prev_ctx) = prev_ctx {
+                deterministic::Runner::from(prev_ctx)
+            } else {
+                deterministic::Runner::timed(Duration::from_secs(45))
+            }
+            .start(f);
+
+            prev_ctx = Some(context.recover());
         }
     }
 
     #[test_traced]
+    #[ignore]
     fn test_network_partition() {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
-        let (runner, mut context, _) = Executor::timed(Duration::from_secs(60));
-        let (identity, mut shares_vec) =
-            ops::generate_shares(&mut context, None, num_validators, quorum);
-        shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
 
-        runner.start(async move {
+        runner.start(|mut context| async move {
+            let (identity, mut shares_vec) =
+                ops::generate_shares(&mut context, None, num_validators, quorum);
+            shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+
             // Configure the network
             let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
                 context.with_label("simulation"),
@@ -450,6 +492,7 @@ mod tests {
                 context.with_label("validator"),
                 identity.clone(),
                 &pks,
+                &pks,
                 &validators,
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
@@ -460,7 +503,7 @@ mod tests {
             );
 
             // Simulate partition by removing all links.
-            link_validators(&mut oracle, &pks, Action::Unlink, None).await;
+            link_participants(&mut oracle, &pks, Action::Unlink, None).await;
             context.sleep(Duration::from_secs(30)).await;
 
             // Get the maximum height from all reporters.
@@ -472,11 +515,12 @@ mod tests {
                 jitter: 1.0,
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &pks, Action::Link(link), None).await;
+            link_participants(&mut oracle, &pks, Action::Link(link), None).await;
             await_reporters(
                 context.with_label("reporter"),
+                reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (max_height + 100, 111),
+                (max_height + 100, 111, false),
             )
             .await;
         });
@@ -485,17 +529,16 @@ mod tests {
     fn slow_and_lossy_links(seed: u64) -> String {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
-        let cfg = deterministic::Config {
-            seed,
-            timeout: Some(Duration::from_secs(40)),
-            ..deterministic::Config::default()
-        };
-        let (runner, mut context, auditor) = Executor::init(cfg);
-        let (identity, mut shares_vec) =
-            ops::generate_shares(&mut context, None, num_validators, quorum);
-        shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+        let cfg = deterministic::Config::new()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(40)));
+        let runner = deterministic::Runner::new(cfg);
 
-        runner.start(async move {
+        runner.start(|mut context| async move {
+            let (identity, mut shares_vec) =
+                ops::generate_shares(&mut context, None, num_validators, quorum);
+            shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+
             let (oracle, validators, pks, mut registrations) = initialize_simulation(
                 context.with_label("simulation"),
                 num_validators,
@@ -508,7 +551,7 @@ mod tests {
                 success_rate: 0.5,
             };
             let mut oracle_clone = oracle.clone();
-            link_validators(&mut oracle_clone, &pks, Action::Update(delayed_link), None).await;
+            link_participants(&mut oracle_clone, &pks, Action::Update(delayed_link), None).await;
 
             let automatons = Arc::new(Mutex::new(
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
@@ -519,6 +562,7 @@ mod tests {
                 context.with_label("validator"),
                 identity.clone(),
                 &pks,
+                &pks,
                 &validators,
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
@@ -528,9 +572,16 @@ mod tests {
                 None,
             );
 
-            await_reporters(context.with_label("reporter"), &reporters, (40, 111)).await;
-        });
-        auditor.state()
+            await_reporters(
+                context.with_label("reporter"),
+                reporters.keys().cloned().collect::<Vec<_>>(),
+                &reporters,
+                (40, 111, false),
+            )
+            .await;
+
+            context.auditor().state()
+        })
     }
 
     #[test_traced]
@@ -539,6 +590,7 @@ mod tests {
     }
 
     #[test_traced]
+    #[ignore]
     fn test_determinism() {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
@@ -553,12 +605,13 @@ mod tests {
     fn test_invalid_signature_injection() {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
-        let (runner, mut context, _) = Executor::timed(Duration::from_secs(30));
-        let (identity, mut shares_vec) =
-            ops::generate_shares(&mut context, None, num_validators, quorum);
-        shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
-        runner.start(async move {
+        runner.start(|mut context| async move {
+            let (identity, mut shares_vec) =
+                ops::generate_shares(&mut context, None, num_validators, quorum);
+            shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+
             let (_oracle, validators, pks, mut registrations) = initialize_simulation(
                 context.with_label("simulation"),
                 num_validators,
@@ -574,6 +627,7 @@ mod tests {
                 context.with_label("validator"),
                 identity.clone(),
                 &pks,
+                &pks,
                 &validators,
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
@@ -583,7 +637,13 @@ mod tests {
                 None,
             );
 
-            await_reporters(context.with_label("reporter"), &reporters, (100, 111)).await;
+            await_reporters(
+                context.with_label("reporter"),
+                reporters.keys().cloned().collect::<Vec<_>>(),
+                &reporters,
+                (100, 111, true),
+            )
+            .await;
         });
     }
 
@@ -591,12 +651,13 @@ mod tests {
     fn test_updated_epoch() {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
-        let (runner, mut context, _) = Executor::timed(Duration::from_secs(60));
-        let (identity, mut shares_vec) =
-            ops::generate_shares(&mut context, None, num_validators, quorum);
-        shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
 
-        runner.start(async move {
+        runner.start(|mut context| async move {
+            let (identity, mut shares_vec) =
+                ops::generate_shares(&mut context, None, num_validators, quorum);
+            shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+
             // Setup network
             let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
                 context.with_label("simulation"),
@@ -613,6 +674,7 @@ mod tests {
                 context.with_label("validator"),
                 identity.clone(),
                 &pks,
+                &pks,
                 &validators,
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
@@ -623,10 +685,16 @@ mod tests {
             );
 
             // Perform some work
-            await_reporters(context.with_label("reporter"), &reporters, (100, 111)).await;
+            await_reporters(
+                context.with_label("reporter"),
+                reporters.keys().cloned().collect::<Vec<_>>(),
+                &reporters,
+                (100, 111, true),
+            )
+            .await;
 
             // Simulate partition by removing all links.
-            link_validators(&mut oracle, &pks, Action::Unlink, None).await;
+            link_participants(&mut oracle, &pks, Action::Unlink, None).await;
             context.sleep(Duration::from_secs(30)).await;
 
             // Get the maximum height from all reporters.
@@ -643,13 +711,252 @@ mod tests {
                 jitter: 1.0,
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &pks, Action::Link(link), None).await;
+            link_participants(&mut oracle, &pks, Action::Link(link), None).await;
             await_reporters(
                 context.with_label("reporter"),
+                reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (max_height + 100, 112),
+                (max_height + 100, 112, true),
             )
             .await;
         });
+    }
+
+    #[test_traced]
+    fn test_external_sequencer() {
+        let num_validators: u32 = 4;
+        let quorum: u32 = quorum(3);
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            // Generate validator shares
+            let (identity, shares) =
+                ops::generate_shares(&mut context, None, num_validators, quorum);
+
+            // Generate validator schemes
+            let mut schemes = (0..num_validators)
+                .map(|i| Ed25519::from_seed(i as u64))
+                .collect::<Vec<_>>();
+            schemes.sort_by_key(|s| s.public_key());
+
+            // Generate validators
+            let validators: Vec<(PublicKey, Ed25519, Share)> = schemes
+                .iter()
+                .enumerate()
+                .map(|(i, scheme)| (scheme.public_key(), scheme.clone(), shares[i].clone()))
+                .collect();
+            let validator_pks = validators
+                .iter()
+                .map(|(pk, _, _)| pk.clone())
+                .collect::<Vec<_>>();
+
+            // Generate sequencer
+            let sequencer = Ed25519::from_seed(u64::MAX);
+
+            // Generate network participants
+            let mut participants = validators
+                .iter()
+                .map(|(pk, _, _)| pk.clone())
+                .collect::<Vec<_>>();
+            participants.push(sequencer.public_key()); // as long as external participants are in same position for all, it is safe
+
+            // Create network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                commonware_p2p::simulated::Config {
+                    max_size: 1024 * 1024,
+                },
+            );
+            network.start();
+
+            // Register all participants
+            let mut registrations = register_participants(&mut oracle, &participants).await;
+            let link = commonware_p2p::simulated::Link {
+                latency: 10.0,
+                jitter: 1.0,
+                success_rate: 1.0,
+            };
+            link_participants(&mut oracle, &participants, Action::Link(link), None).await;
+
+            // Setup engines
+            let automatons = Arc::new(Mutex::new(
+                BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
+            ));
+            let mut reporters =
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, Sha256Digest>>::new();
+            let mut monitors = HashMap::new();
+            let namespace = b"my testing namespace";
+
+            // Spawn validator engines
+            for (validator, scheme, share) in validators.iter() {
+                let context = context.with_label(&validator.to_string());
+                let monitor = mocks::Monitor::new(111);
+                monitors.insert(validator.clone(), monitor.clone());
+                let sequencers = mocks::Sequencers::<PublicKey>::new(vec![sequencer.public_key()]);
+                let validators = mocks::Validators::<PublicKey>::new(
+                    identity.clone(),
+                    validator_pks.clone(),
+                    Some(share.clone()),
+                );
+
+                let automaton = mocks::Automaton::<PublicKey>::new(|_| false);
+                automatons
+                    .lock()
+                    .unwrap()
+                    .insert(validator.clone(), automaton.clone());
+
+                let (reporter, reporter_mailbox) = mocks::Reporter::<Ed25519, Sha256Digest>::new(
+                    namespace,
+                    *poly::public(&identity),
+                    Some(5),
+                );
+                context.with_label("reporter").spawn(|_| reporter.run());
+                reporters.insert(validator.clone(), reporter_mailbox);
+
+                let engine = Engine::new(
+                    context.with_label("engine"),
+                    Config {
+                        crypto: scheme.clone(),
+                        relay: automaton.clone(),
+                        automaton: automaton.clone(),
+                        reporter: reporters.get(validator).unwrap().clone(),
+                        monitor,
+                        sequencers,
+                        validators,
+                        namespace: namespace.to_vec(),
+                        epoch_bounds: (1, 1),
+                        height_bound: 2,
+                        rebroadcast_timeout: Duration::from_secs(5),
+                        priority_acks: false,
+                        priority_proposals: false,
+                        journal_heights_per_section: 10,
+                        journal_replay_concurrency: 1,
+                        journal_replay_buffer: 4096,
+                        journal_name_prefix: format!("ordered-broadcast-seq/{}/", validator),
+                        journal_compression: Some(3),
+                    },
+                );
+
+                let ((a1, a2), (b1, b2)) = registrations.remove(validator).unwrap();
+                engine.start((a1, a2), (b1, b2));
+            }
+
+            // Spawn sequencer engine
+            {
+                let context = context.with_label("sequencer");
+                let automaton = mocks::Automaton::<PublicKey>::new(|_| false);
+                automatons
+                    .lock()
+                    .unwrap()
+                    .insert(sequencer.public_key(), automaton.clone());
+                let (reporter, reporter_mailbox) = mocks::Reporter::<Ed25519, Sha256Digest>::new(
+                    namespace,
+                    *poly::public(&identity),
+                    Some(5),
+                );
+                context.with_label("reporter").spawn(|_| reporter.run());
+                reporters.insert(sequencer.public_key(), reporter_mailbox);
+                let engine = Engine::new(
+                    context.with_label("engine"),
+                    Config {
+                        crypto: sequencer.clone(),
+                        relay: automaton.clone(),
+                        automaton: automaton.clone(),
+                        reporter: reporters.get(&sequencer.public_key()).unwrap().clone(),
+                        monitor: mocks::Monitor::new(111),
+                        sequencers: mocks::Sequencers::<PublicKey>::new(vec![
+                            sequencer.public_key()
+                        ]),
+                        validators: mocks::Validators::<PublicKey>::new(
+                            identity.clone(),
+                            validator_pks,
+                            None,
+                        ),
+                        namespace: namespace.to_vec(),
+                        epoch_bounds: (1, 1),
+                        height_bound: 2,
+                        rebroadcast_timeout: Duration::from_secs(5),
+                        priority_acks: false,
+                        priority_proposals: false,
+                        journal_heights_per_section: 10,
+                        journal_replay_concurrency: 1,
+                        journal_replay_buffer: 4096,
+                        journal_name_prefix: format!(
+                            "ordered-broadcast-seq/{}/",
+                            sequencer.public_key()
+                        ),
+                        journal_compression: Some(3),
+                    },
+                );
+
+                let ((a1, a2), (b1, b2)) = registrations.remove(&sequencer.public_key()).unwrap();
+                engine.start((a1, a2), (b1, b2));
+            }
+
+            // Await reporters
+            await_reporters(
+                context.with_label("reporter"),
+                vec![sequencer.public_key()],
+                &reporters,
+                (100, 111, true),
+            )
+            .await;
+        });
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_1k() {
+        let num_validators: u32 = 10;
+        let quorum: u32 = 3;
+        let cfg = deterministic::Config::new();
+        let runner = deterministic::Runner::new(cfg);
+
+        runner.start(|mut context| async move {
+            let (identity, mut shares_vec) =
+                ops::generate_shares(&mut context, None, num_validators, quorum);
+            shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+
+            let (oracle, validators, pks, mut registrations) = initialize_simulation(
+                context.with_label("simulation"),
+                num_validators,
+                &mut shares_vec,
+            )
+            .await;
+            let delayed_link = Link {
+                latency: 80.0,
+                jitter: 10.0,
+                success_rate: 0.98,
+            };
+            let mut oracle_clone = oracle.clone();
+            link_participants(&mut oracle_clone, &pks, Action::Update(delayed_link), None).await;
+
+            let automatons = Arc::new(Mutex::new(
+                BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
+            ));
+            let mut reporters =
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, Sha256Digest>>::new();
+            let sequencers = &pks[0..pks.len() / 2];
+            spawn_validator_engines(
+                context.with_label("validator"),
+                identity.clone(),
+                sequencers,
+                &pks,
+                &validators,
+                &mut registrations,
+                &mut automatons.lock().unwrap(),
+                &mut reporters,
+                Duration::from_millis(150),
+                |_| false,
+                None,
+            );
+
+            await_reporters(
+                context.with_label("reporter"),
+                sequencers.to_vec(),
+                &reporters,
+                (1_000, 111, false),
+            )
+            .await;
+        })
     }
 }

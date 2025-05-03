@@ -44,8 +44,8 @@ impl<H: CHasher> Default for Mmr<H> {
 }
 
 impl<H: CHasher> Storage<H::Digest> for Mmr<H> {
-    async fn size(&self) -> Result<u64, Error> {
-        Ok(self.size())
+    fn size(&self) -> u64 {
+        self.size()
     }
 
     async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, Error> {
@@ -75,9 +75,7 @@ impl<H: CHasher> Mmr<H> {
             return mmr;
         }
 
-        let required_positions = Proof::<H>::nodes_to_pin(mmr.size(), pruned_to_pos);
-        assert_eq!(pinned_nodes.len(), required_positions.len());
-        for (i, pos) in required_positions.into_iter().enumerate() {
+        for (i, pos) in Proof::<H>::nodes_to_pin(pruned_to_pos).enumerate() {
             mmr.pinned_nodes.insert(pos, pinned_nodes[i]);
         }
 
@@ -198,14 +196,13 @@ impl<H: CHasher> Mmr<H> {
         Ok(self.size())
     }
 
-    /// Change the digest of an existing leaf.   Panics if `pos` does not correspond to a leaf.
+    /// Change the digest of any retained leaf. Panics if `pos` does not correspond to a leaf.
     ///
     /// # Warning
     ///
     /// This method will change the root hash and invalidate any previous inclusion proofs! This is
     /// useful if you want to use the MMR implementation as an updatable binary Merkle tree, and
-    /// otherwise should be avoided. Returns ElementPruned if some element required to update the
-    /// tree has been pruned.
+    /// otherwise should be avoided.
     pub fn update_leaf(&mut self, hasher: &mut H, pos: u64, element: &[u8]) -> Result<(), Error> {
         if pos < self.pruned_to_pos {
             return Err(ElementPruned(pos));
@@ -227,9 +224,6 @@ impl<H: CHasher> Mmr<H> {
             // Traverse up to the peak, recomputing each parent node hash along the way.
             let path: Vec<_> = PathIterator::new(pos, peak_pos, height).collect();
             for (parent_pos, sibling_pos) in path.into_iter().rev() {
-                if sibling_pos < self.pruned_to_pos {
-                    return Err(ElementPruned(sibling_pos));
-                }
                 if parent_pos == pos {
                     panic!("pos was not for a leaf");
                 }
@@ -300,9 +294,7 @@ impl<H: CHasher> Mmr<H> {
     /// Get the nodes (position + digest) that need to be pinned (those required for proof
     /// generation) in this MMR when pruned to position `prune_pos`.
     pub(crate) fn nodes_to_pin(&self, prune_pos: u64) -> HashMap<u64, H::Digest> {
-        let positions = Proof::<H>::nodes_to_pin(self.size(), prune_pos);
-        positions
-            .into_iter()
+        Proof::<H>::nodes_to_pin(prune_pos)
             .map(|pos| (pos, *self.get_node_unchecked(pos)))
             .collect()
     }
@@ -310,9 +302,7 @@ impl<H: CHasher> Mmr<H> {
     /// Get the digests of nodes that need to be pinned (those required for proof generation) in
     /// this MMR when pruned to position `prune_pos`.
     pub(crate) fn node_digests_to_pin(&self, start_pos: u64) -> Vec<H::Digest> {
-        let positions = Proof::<H>::nodes_to_pin(self.size(), start_pos);
-        positions
-            .into_iter()
+        Proof::<H>::nodes_to_pin(start_pos)
             .map(|pos| *self.get_node_unchecked(pos))
             .collect()
     }
@@ -349,14 +339,14 @@ pub(crate) mod tests {
     use super::*;
     use crate::mmr::iterator::leaf_num_to_pos;
     use commonware_cryptography::{Hasher as CHasher, Sha256};
-    use commonware_runtime::{deterministic::Executor, Runner};
+    use commonware_runtime::{deterministic, Runner};
     use commonware_utils::hex;
 
     /// Test empty MMR behavior.
     #[test]
     fn test_mem_mmr_empty() {
-        let (executor, _, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
             let mut mmr: Mmr<Sha256> = Mmr::<Sha256>::new();
             assert_eq!(
                 mmr.peak_iterator().next(),
@@ -387,8 +377,8 @@ pub(crate) mod tests {
     /// and 3 peaks.
     #[test]
     fn test_mem_mmr_add_eleven_values() {
-        let (executor, _, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
             let mut mmr: Mmr<Sha256> = Mmr::<Sha256>::new();
             let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
             let mut leaves: Vec<u64> = Vec::new();
@@ -533,8 +523,8 @@ pub(crate) mod tests {
     /// Test that the MMR validity check works as expected.
     #[test]
     fn test_mem_mmr_validity() {
-        let (executor, _, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
             let mut mmr: Mmr<Sha256> = Mmr::<Sha256>::new();
             let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
             let mut hasher = Sha256::default();
@@ -865,14 +855,14 @@ pub(crate) mod tests {
         // Confirm the function gracefully handles failures when the MMR is pruned.
         mmr.prune_to_pos(leaves[150]);
         assert!(matches!(
-            mmr.update_leaf(&mut hasher, leaves[150], &element),
-            Err(ElementPruned(_))
-        ));
-        assert!(matches!(
             mmr.update_leaf(&mut hasher, leaves[149], &element),
             Err(ElementPruned(_))
         ));
-        assert!(mmr.update_leaf(&mut hasher, leaves[190], &element).is_ok());
+        // Confirm the tree has all the hashes necessary to update any element after pruning.
+        for &leaf_pos in &leaves[150..=190] {
+            mmr.prune_to_pos(leaf_pos);
+            assert!(mmr.update_leaf(&mut hasher, leaf_pos, &element).is_ok());
+        }
     }
 
     #[test]

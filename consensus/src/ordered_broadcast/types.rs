@@ -1,7 +1,9 @@
 //! Types used in [`ordered_broadcast`](crate::ordered_broadcast).
 
 use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{
+    varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
+};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{Public, Share, Signature},
@@ -215,15 +217,17 @@ impl<P: Array, D: Digest> Chunk<P, D> {
 impl<P: Array, D: Digest> Write for Chunk<P, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.sequencer.write(writer);
-        self.height.write(writer);
+        UInt(self.height).write(writer);
         self.payload.write(writer);
     }
 }
 
 impl<P: Array, D: Digest> Read for Chunk<P, D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let sequencer = P::read(reader)?;
-        let height = u64::read(reader)?;
+        let height = UInt::read(reader)?.into();
         let payload = D::read(reader)?;
         Ok(Self {
             sequencer,
@@ -233,8 +237,10 @@ impl<P: Array, D: Digest> Read for Chunk<P, D> {
     }
 }
 
-impl<P: Array, D: Digest> FixedSize for Chunk<P, D> {
-    const SIZE: usize = P::SIZE + u64::SIZE + D::SIZE;
+impl<P: Array, D: Digest> EncodeSize for Chunk<P, D> {
+    fn encode_size(&self) -> usize {
+        self.sequencer.encode_size() + UInt(self.height).encode_size() + self.payload.encode_size()
+    }
 }
 
 /// Parent is a message that contains information about the parent (previous height) of a Chunk.
@@ -272,15 +278,17 @@ impl<D: Digest> Parent<D> {
 impl<D: Digest> Write for Parent<D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.digest.write(writer);
-        self.epoch.write(writer);
+        UInt(self.epoch).write(writer);
         self.signature.write(writer);
     }
 }
 
 impl<D: Digest> Read for Parent<D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let digest = D::read(reader)?;
-        let epoch = Epoch::read(reader)?;
+        let epoch = UInt::read(reader)?.into();
         let signature = Signature::read(reader)?;
         Ok(Self {
             digest,
@@ -290,8 +298,10 @@ impl<D: Digest> Read for Parent<D> {
     }
 }
 
-impl<D: Digest> FixedSize for Parent<D> {
-    const SIZE: usize = D::SIZE + Epoch::SIZE + Signature::SIZE;
+impl<D: Digest> EncodeSize for Parent<D> {
+    fn encode_size(&self) -> usize {
+        self.digest.encode_size() + UInt(self.epoch).encode_size() + self.signature.encode_size()
+    }
 }
 
 /// Node is a message from a sequencer that contains a Chunk and a proof that the parent was correctly broadcasted.
@@ -428,6 +438,8 @@ impl<C: Verifier, D: Digest> Write for Node<C, D> {
 }
 
 impl<C: Verifier, D: Digest> Read for Node<C, D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let chunk = Chunk::read(reader)?;
         let signature = C::Signature::read(reader)?;
@@ -453,7 +465,7 @@ impl<C: Verifier, D: Digest> Read for Node<C, D> {
 
 impl<C: Verifier, D: Digest> EncodeSize for Node<C, D> {
     fn encode_size(&self) -> usize {
-        Chunk::<C::PublicKey, D>::SIZE + C::Signature::SIZE + self.parent.encode_size()
+        self.chunk.encode_size() + self.signature.encode_size() + self.parent.encode_size()
     }
 }
 
@@ -515,7 +527,8 @@ impl<P: Array, D: Digest> Ack<P, D> {
     /// It contains both the chunk and the epoch to ensure domain separation and prevent
     /// signature reuse across epochs.
     fn payload(chunk: &Chunk<P, D>, epoch: &Epoch) -> Vec<u8> {
-        let mut message = Vec::with_capacity(Chunk::<P, D>::SIZE + Epoch::SIZE);
+        let epoch = UInt(*epoch);
+        let mut message = Vec::with_capacity(chunk.encode_size() + epoch.encode_size());
         chunk.write(&mut message);
         epoch.write(&mut message);
         message
@@ -560,15 +573,17 @@ impl<P: Array, D: Digest> Ack<P, D> {
 impl<P: Array, D: Digest> Write for Ack<P, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.chunk.write(writer);
-        self.epoch.write(writer);
+        UInt(self.epoch).write(writer);
         self.signature.write(writer);
     }
 }
 
 impl<P: Array, D: Digest> Read for Ack<P, D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let chunk = Chunk::read(reader)?;
-        let epoch = Epoch::read(reader)?;
+        let epoch = UInt::read(reader)?.into();
         let signature = PartialSignature::read(reader)?;
         Ok(Self {
             chunk,
@@ -578,14 +593,16 @@ impl<P: Array, D: Digest> Read for Ack<P, D> {
     }
 }
 
-impl<P: Array, D: Digest> FixedSize for Ack<P, D> {
-    const SIZE: usize = Chunk::<P, D>::SIZE + Epoch::SIZE + PartialSignature::SIZE;
+impl<P: Array, D: Digest> EncodeSize for Ack<P, D> {
+    fn encode_size(&self) -> usize {
+        self.chunk.encode_size() + UInt(self.epoch).encode_size() + self.signature.encode_size()
+    }
 }
 
 /// Activity is the type associated with the [`Reporter`](crate::Reporter) trait.
 ///
 /// This enum represents the two main types of activities that are reported:
-/// 1. Proposals - when a new chunk is proposed by a sequencer
+/// 1. Tips - when a new chunk at the latest tip is verified for some sequencer
 /// 2. Locks - when a threshold signature is formed for a chunk
 ///
 /// The Reporter is notified of these activities so it can track the state of the system
@@ -593,10 +610,10 @@ impl<P: Array, D: Digest> FixedSize for Ack<P, D> {
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Activity<C: Verifier, D: Digest> {
-    /// A new proposal from a sequencer
+    /// A new tip for a sequencer
     ///
-    /// This activity is only emitted when the application has verified a peer proposal.
-    Proposal(Proposal<C, D>),
+    /// This activity is only emitted when the application has verified some peer proposal.
+    Tip(Proposal<C, D>),
     /// A threshold signature for a chunk, indicating it has been acknowledged by a quorum
     Lock(Lock<C::PublicKey, D>),
 }
@@ -604,7 +621,7 @@ pub enum Activity<C: Verifier, D: Digest> {
 impl<C: Verifier, D: Digest> Write for Activity<C, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
-            Activity::Proposal(proposal) => {
+            Activity::Tip(proposal) => {
                 0u8.write(writer);
                 proposal.write(writer);
             }
@@ -617,9 +634,11 @@ impl<C: Verifier, D: Digest> Write for Activity<C, D> {
 }
 
 impl<C: Verifier, D: Digest> Read for Activity<C, D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         match u8::read(reader)? {
-            0 => Ok(Activity::Proposal(Proposal::read(reader)?)),
+            0 => Ok(Activity::Tip(Proposal::read(reader)?)),
             1 => Ok(Activity::Lock(Lock::read(reader)?)),
             _ => Err(CodecError::Invalid(
                 "consensus::ordered_broadcast::Activity",
@@ -632,7 +651,7 @@ impl<C: Verifier, D: Digest> Read for Activity<C, D> {
 impl<C: Verifier, D: Digest> EncodeSize for Activity<C, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Activity::Proposal(proposal) => proposal.encode_size(),
+            Activity::Tip(proposal) => proposal.encode_size(),
             Activity::Lock(lock) => lock.encode_size(),
         }
     }
@@ -684,6 +703,8 @@ impl<C: Verifier, D: Digest> Write for Proposal<C, D> {
 }
 
 impl<C: Verifier, D: Digest> Read for Proposal<C, D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let chunk = Chunk::read(reader)?;
         let signature = C::Signature::read(reader)?;
@@ -691,8 +712,10 @@ impl<C: Verifier, D: Digest> Read for Proposal<C, D> {
     }
 }
 
-impl<C: Verifier, D: Digest> FixedSize for Proposal<C, D> {
-    const SIZE: usize = Chunk::<C::PublicKey, D>::SIZE + C::Signature::SIZE;
+impl<C: Verifier, D: Digest> EncodeSize for Proposal<C, D> {
+    fn encode_size(&self) -> usize {
+        self.chunk.encode_size() + self.signature.encode_size()
+    }
 }
 
 impl<C: Verifier, D: Digest> Hash for Proposal<C, D> {
@@ -768,15 +791,17 @@ impl<P: Array, D: Digest> Lock<P, D> {
 impl<P: Array, D: Digest> Write for Lock<P, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.chunk.write(writer);
-        self.epoch.write(writer);
+        UInt(self.epoch).write(writer);
         self.signature.write(writer);
     }
 }
 
 impl<P: Array, D: Digest> Read for Lock<P, D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let chunk = Chunk::read(reader)?;
-        let epoch = Epoch::read(reader)?;
+        let epoch = UInt::read(reader)?.into();
         let signature = Signature::read(reader)?;
         Ok(Self {
             chunk,
@@ -786,8 +811,10 @@ impl<P: Array, D: Digest> Read for Lock<P, D> {
     }
 }
 
-impl<P: Array, D: Digest> FixedSize for Lock<P, D> {
-    const SIZE: usize = Chunk::<P, D>::SIZE + Epoch::SIZE + Signature::SIZE;
+impl<P: Array, D: Digest> EncodeSize for Lock<P, D> {
+    fn encode_size(&self) -> usize {
+        self.chunk.encode_size() + UInt(self.epoch).encode_size() + self.signature.encode_size()
+    }
 }
 
 #[cfg(test)]
@@ -971,12 +998,12 @@ mod tests {
         let message = chunk.encode();
         let signature = scheme.sign(Some(chunk_namespace.as_ref()), &message);
         let proposal = Proposal::<Ed25519, Sha256Digest>::new(chunk.clone(), signature.clone());
-        let activity = Activity::Proposal(proposal);
+        let activity = Activity::Tip(proposal);
         let encoded = activity.encode();
         let decoded = Activity::<Ed25519, Sha256Digest>::decode(encoded).unwrap();
 
         match decoded {
-            Activity::Proposal(p) => {
+            Activity::Tip(p) => {
                 assert_eq!(p.chunk, chunk);
                 assert_eq!(p.signature, signature);
             }

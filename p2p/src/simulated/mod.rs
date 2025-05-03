@@ -14,7 +14,7 @@
 //! ```rust
 //! use commonware_p2p::simulated::{Config, Link, Network};
 //! use commonware_cryptography::{Ed25519, Signer, Verifier};
-//! use commonware_runtime::{deterministic::Executor, Spawner, Runner, Metrics};
+//! use commonware_runtime::{deterministic, Spawner, Runner, Metrics};
 //!
 //! // Generate peers
 //! let peers = vec![
@@ -30,8 +30,8 @@
 //! };
 //!
 //! // Start context
-//! let (executor, context, _) = Executor::seeded(0);
-//! executor.start(async move {
+//! let executor = deterministic::Runner::seeded(0);
+//! executor.start(|context| async move {
 //!     // Initialize network
 //!     let (network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
 //!
@@ -126,7 +126,7 @@ mod tests {
     use bytes::Bytes;
     use commonware_cryptography::{Ed25519, Signer};
     use commonware_macros::select;
-    use commonware_runtime::{deterministic::Executor, Clock, Metrics, Runner, Spawner};
+    use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use rand::Rng;
     use std::{
@@ -135,8 +135,8 @@ mod tests {
     };
 
     fn simulate_messages(seed: u64, size: usize) -> (String, Vec<usize>) {
-        let (executor, context, auditor) = Executor::seeded(seed);
-        executor.start(async move {
+        let executor = deterministic::Runner::seeded(seed);
+        executor.start(|context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
@@ -226,7 +226,7 @@ mod tests {
             for _ in 0..size {
                 results.push(seen_receiver.next().await.unwrap());
             }
-            (auditor.state(), results)
+            (context.auditor().state(), results)
         })
     }
 
@@ -251,8 +251,8 @@ mod tests {
 
     #[test]
     fn test_message_too_big() {
-        let (executor, mut context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
@@ -291,8 +291,8 @@ mod tests {
 
     #[test]
     fn test_linking_self() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
@@ -328,8 +328,8 @@ mod tests {
 
     #[test]
     fn test_duplicate_channel() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
@@ -353,8 +353,8 @@ mod tests {
 
     #[test]
     fn test_invalid_success_rate() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
@@ -392,8 +392,8 @@ mod tests {
 
     #[test]
     fn test_invalid_behavior() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
@@ -447,8 +447,8 @@ mod tests {
 
     #[test]
     fn test_simple_message_delivery() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
@@ -520,8 +520,8 @@ mod tests {
 
     #[test]
     fn test_send_wrong_channel() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
@@ -572,8 +572,8 @@ mod tests {
 
     #[test]
     fn test_dynamic_peers() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
@@ -641,8 +641,8 @@ mod tests {
 
     #[test]
     fn test_dynamic_links() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),

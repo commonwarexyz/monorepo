@@ -14,7 +14,7 @@ use commonware_cryptography::{
     sha256::Digest as Sha256Digest,
     Digest, Ed25519, Hasher, Sha256, Signer,
 };
-use commonware_runtime::{tokio::Executor, Listener, Metrics, Network, Runner, Spawner};
+use commonware_runtime::{tokio, Listener, Metrics, Network, Runner, Spawner};
 use commonware_stream::{
     public_key::{Config, Connection, IncomingConnection},
     Receiver, Sender,
@@ -131,8 +131,8 @@ fn main() {
     }
 
     // Create context
-    let (executor, context) = Executor::default();
-    executor.start(async move {
+    let executor = tokio::Runner::default();
+    executor.start(|context| async move {
         // Create message handler
         let (handler, mut receiver) = mpsc::unbounded();
 

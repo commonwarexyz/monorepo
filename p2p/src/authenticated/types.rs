@@ -1,11 +1,22 @@
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
-    varint, Encode, EncodeSize, Error, RangeConfig, Read, ReadExt, ReadRangeExt, Write,
+    varint::UInt, Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, ReadRangeExt, Write,
 };
 use commonware_cryptography::Verifier;
 use commonware_utils::BitVec as UtilsBitVec;
 use std::net::SocketAddr;
 
+/// The maximum overhead (in bytes) when encoding a `message` into a [`Payload::Data`].
+///
+/// The byte overhead is calculated as the sum of the following:
+/// - 1: Payload enum value
+/// - 5: Channel varint
+/// - 5: Message length varint (lengths longer than 32 bits are forbidden by the codec)
+pub const MAX_PAYLOAD_DATA_OVERHEAD: usize = 1 + 5 + 5;
+
+/// Configuration when deserializing messages.
+///
+/// This is used to limit the size of the messages received from peers.
 #[derive(Clone)]
 pub struct Config {
     /// The maximum number of peers that can be sent in a `Peers` message.
@@ -15,7 +26,7 @@ pub struct Config {
     pub max_bitvec: usize,
 }
 
-// Payload is the only allowed message format that can be sent between peers.
+/// Payload is the only allowed message format that can be sent between peers.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Payload<C: Verifier> {
     /// Bit vector that represents the peers a peer knows about.
@@ -59,8 +70,10 @@ impl<C: Verifier> Write for Payload<C> {
     }
 }
 
-impl<C: Verifier> Read<Config> for Payload<C> {
-    fn read_cfg(buf: &mut impl Buf, cfg: &Config) -> Result<Self, Error> {
+impl<C: Verifier> Read for Payload<C> {
+    type Cfg = Config;
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let payload_type = <u8>::read(buf)?;
         match payload_type {
             0 => {
@@ -74,7 +87,7 @@ impl<C: Verifier> Read<Config> for Payload<C> {
             2 => {
                 // Don't limit the size of the data to be read.
                 // The max message size should already be limited by the p2p layer.
-                let data = Data::read_cfg(buf, &(..))?;
+                let data = Data::read_cfg(buf, &(..).into())?;
                 Ok(Payload::Data(data))
             }
             _ => Err(Error::Invalid(
@@ -99,21 +112,23 @@ pub struct BitVec {
 
 impl EncodeSize for BitVec {
     fn encode_size(&self) -> usize {
-        self.index.encode_size() + self.bits.encode_size()
+        UInt(self.index).encode_size() + self.bits.encode_size()
     }
 }
 
 impl Write for BitVec {
     fn write(&self, buf: &mut impl BufMut) {
-        self.index.write(buf);
+        UInt(self.index).write(buf);
         self.bits.write(buf);
     }
 }
 
-impl Read<usize> for BitVec {
+impl Read for BitVec {
+    type Cfg = usize;
+
     fn read_cfg(buf: &mut impl Buf, max_bits: &usize) -> Result<Self, Error> {
-        let index = u64::read(buf)?;
-        let bits = UtilsBitVec::read_cfg(buf, &..=*max_bits)?;
+        let index = UInt::read(buf)?.into();
+        let bits = UtilsBitVec::read_cfg(buf, &(..=*max_bits).into())?;
         Ok(Self { index, bits })
     }
 }
@@ -127,7 +142,7 @@ pub struct PeerInfo<C: Verifier> {
     /// The socket address of the peer.
     pub socket: SocketAddr,
 
-    /// The timestamp at which the socket was signed over.
+    /// The timestamp (epoch milliseconds) at which the socket was signed over.
     pub timestamp: u64,
 
     /// The public key of the peer.
@@ -152,7 +167,7 @@ impl<C: Verifier> PeerInfo<C> {
 impl<C: Verifier> EncodeSize for PeerInfo<C> {
     fn encode_size(&self) -> usize {
         self.socket.encode_size()
-            + self.timestamp.encode_size()
+            + UInt(self.timestamp).encode_size()
             + self.public_key.encode_size()
             + self.signature.encode_size()
     }
@@ -161,16 +176,18 @@ impl<C: Verifier> EncodeSize for PeerInfo<C> {
 impl<C: Verifier> Write for PeerInfo<C> {
     fn write(&self, buf: &mut impl BufMut) {
         self.socket.write(buf);
-        self.timestamp.write(buf);
+        UInt(self.timestamp).write(buf);
         self.public_key.write(buf);
         self.signature.write(buf);
     }
 }
 
 impl<C: Verifier> Read for PeerInfo<C> {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let socket = SocketAddr::read(buf)?;
-        let timestamp = u64::read(buf)?;
+        let timestamp = UInt::read(buf)?.into();
         let public_key = C::PublicKey::read(buf)?;
         let signature = C::Signature::read(buf)?;
         Ok(PeerInfo {
@@ -182,7 +199,7 @@ impl<C: Verifier> Read for PeerInfo<C> {
     }
 }
 
-// Data is an arbitrary message sent between peers.
+/// Data is an arbitrary message sent between peers.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Data {
     /// A unique identifier for the channel the message is sent on.
@@ -196,20 +213,22 @@ pub struct Data {
 
 impl EncodeSize for Data {
     fn encode_size(&self) -> usize {
-        varint::size(self.channel) + self.message.encode_size()
+        UInt(self.channel).encode_size() + self.message.encode_size()
     }
 }
 
 impl Write for Data {
     fn write(&self, buf: &mut impl BufMut) {
-        varint::write(self.channel, buf);
+        UInt(self.channel).write(buf);
         self.message.write(buf);
     }
 }
 
-impl<R: RangeConfig> Read<R> for Data {
-    fn read_cfg(buf: &mut impl Buf, range: &R) -> Result<Self, Error> {
-        let channel = varint::read::<u32>(buf)?;
+impl Read for Data {
+    type Cfg = RangeCfg;
+
+    fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
+        let channel = UInt::read(buf)?.into();
         let message = Bytes::read_cfg(buf, range)?;
         Ok(Data { channel, message })
     }
@@ -272,13 +291,13 @@ mod tests {
             message: Bytes::from("Hello, world!"),
         };
         let encoded = original.encode();
-        let decoded = Data::decode_cfg(encoded, &(13..=13)).unwrap();
+        let decoded = Data::decode_cfg(encoded, &(13..=13).into()).unwrap();
         assert_eq!(original, decoded);
 
-        let too_short = Data::decode_cfg(original.encode(), &(0..13));
+        let too_short = Data::decode_cfg(original.encode(), &(0..13).into());
         assert!(matches!(too_short, Err(Error::InvalidLength(13))));
 
-        let too_long = Data::decode_cfg(original.encode(), &(14..));
+        let too_long = Data::decode_cfg(original.encode(), &(14..).into());
         assert!(matches!(too_long, Err(Error::InvalidLength(13))));
     }
 
@@ -338,5 +357,19 @@ mod tests {
         let invalid_payload = [3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
         let result = Payload::<Secp256r1>::decode_cfg(&invalid_payload[..], &cfg);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_max_payload_data_overhead() {
+        let message = Bytes::from(vec![0; 1 << 29]);
+        let message_len = message.len();
+        let payload = Payload::<Secp256r1>::Data(Data {
+            channel: u32::MAX,
+            message,
+        });
+        assert_eq!(
+            payload.encode_size(),
+            message_len + MAX_PAYLOAD_DATA_OVERHEAD
+        );
     }
 }

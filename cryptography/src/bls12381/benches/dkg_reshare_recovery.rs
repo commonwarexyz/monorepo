@@ -42,7 +42,11 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
             let (_, commitment, shares) = Dealer::new(&mut rng, None, contributors.clone());
             for (player_idx, player) in players.iter_mut().enumerate() {
                 player
-                    .share(dealer.clone(), commitment.clone(), shares[player_idx])
+                    .share(
+                        dealer.clone(),
+                        commitment.clone(),
+                        shares[player_idx].clone(),
+                    )
                     .unwrap();
             }
             commitments.insert(dealer_idx as u32, commitment);
@@ -79,11 +83,11 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
                             for (idx, dealer) in contributors.iter().take(t as usize).enumerate() {
                                 let (_, commitment, shares) = Dealer::new(
                                     &mut rng,
-                                    Some(outputs[idx].share),
+                                    Some(outputs[idx].share.clone()),
                                     contributors.clone(),
                                 );
                                 player
-                                    .share(dealer.clone(), commitment.clone(), shares[0])
+                                    .share(dealer.clone(), commitment.clone(), shares[0].clone())
                                     .unwrap();
                                 commitments.insert(idx as u32, commitment);
                             }

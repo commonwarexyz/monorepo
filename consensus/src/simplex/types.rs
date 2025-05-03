@@ -1,7 +1,9 @@
 //! Types used in [`simplex`](crate::simplex).
 
 use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, EncodeSize, Error, FixedSize, Read, ReadExt, ReadRangeExt, Write};
+use commonware_codec::{
+    varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write,
+};
 use commonware_cryptography::{Digest, Scheme, Verifier};
 use commonware_utils::{quorum, union, Array};
 
@@ -127,7 +129,9 @@ impl<S: Array, D: Digest> Write for Voter<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> Read<usize> for Voter<S, D> {
+impl<S: Array, D: Digest> Read for Voter<S, D> {
+    type Cfg = usize;
+
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let tag = u8::read(reader)?;
         match tag {
@@ -199,16 +203,18 @@ impl<D: Digest> Proposal<D> {
 
 impl<D: Digest> Write for Proposal<D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.view.write(writer);
-        self.parent.write(writer);
+        UInt(self.view).write(writer);
+        UInt(self.parent).write(writer);
         self.payload.write(writer);
     }
 }
 
 impl<D: Digest> Read for Proposal<D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let view = View::read_cfg(reader, &())?;
-        let parent = View::read_cfg(reader, &())?;
+        let view = UInt::read_cfg(reader, &())?.into();
+        let parent = UInt::read_cfg(reader, &())?.into();
         let payload = D::read_cfg(reader, &())?;
         Ok(Self {
             view,
@@ -218,8 +224,10 @@ impl<D: Digest> Read for Proposal<D> {
     }
 }
 
-impl<D: Digest> FixedSize for Proposal<D> {
-    const SIZE: usize = View::SIZE + View::SIZE + D::SIZE;
+impl<D: Digest> EncodeSize for Proposal<D> {
+    fn encode_size(&self) -> usize {
+        UInt(self.view).encode_size() + UInt(self.parent).encode_size() + self.payload.encode_size()
+    }
 }
 
 impl<D: Digest> Viewable for Proposal<D> {
@@ -250,14 +258,16 @@ impl<S: Array> Signature<S> {
 
 impl<S: Array> Write for Signature<S> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.public_key.write(writer);
+        UInt(self.public_key).write(writer);
         self.signature.write(writer);
     }
 }
 
 impl<S: Array> Read for Signature<S> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let public_key = u32::read(reader)?;
+        let public_key = UInt::read(reader)?.into();
         let signature = S::read(reader)?;
         Ok(Self {
             public_key,
@@ -266,8 +276,10 @@ impl<S: Array> Read for Signature<S> {
     }
 }
 
-impl<S: Array> FixedSize for Signature<S> {
-    const SIZE: usize = u32::SIZE + S::SIZE;
+impl<S: Array> EncodeSize for Signature<S> {
+    fn encode_size(&self) -> usize {
+        UInt(self.public_key).encode_size() + self.signature.encode_size()
+    }
 }
 
 impl<S: Array> Attributable for Signature<S> {
@@ -337,6 +349,8 @@ impl<S: Array, D: Digest> Write for Notarize<S, D> {
 }
 
 impl<S: Array, D: Digest> Read for Notarize<S, D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::<D>::read_cfg(reader, &())?;
         let signature = Signature::<S>::read_cfg(reader, &())?;
@@ -347,8 +361,10 @@ impl<S: Array, D: Digest> Read for Notarize<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> FixedSize for Notarize<S, D> {
-    const SIZE: usize = Proposal::<D>::SIZE + Signature::<S>::SIZE;
+impl<S: Array, D: Digest> EncodeSize for Notarize<S, D> {
+    fn encode_size(&self) -> usize {
+        self.proposal.encode_size() + self.signature.encode_size()
+    }
 }
 
 impl<S: Array, D: Digest> Viewable for Notarize<S, D> {
@@ -438,7 +454,9 @@ impl<S: Array, D: Digest> Write for Notarization<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> Read<usize> for Notarization<S, D> {
+impl<S: Array, D: Digest> Read for Notarization<S, D> {
+    type Cfg = usize;
+
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let proposal = Proposal::<D>::read(reader)?;
         let signatures = Vec::<Signature<S>>::read_range(reader, ..=*max_len)?;
@@ -522,21 +540,25 @@ impl<S: Array> Nullify<S> {
 
 impl<S: Array> Write for Nullify<S> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.view.write(writer);
+        UInt(self.view).write(writer);
         self.signature.write(writer);
     }
 }
 
 impl<S: Array> Read for Nullify<S> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let view = View::read(reader)?;
+        let view = UInt::read(reader)?.into();
         let signature = Signature::<S>::read(reader)?;
         Ok(Self { view, signature })
     }
 }
 
-impl<S: Array> FixedSize for Nullify<S> {
-    const SIZE: usize = View::SIZE + Signature::<S>::SIZE;
+impl<S: Array> EncodeSize for Nullify<S> {
+    fn encode_size(&self) -> usize {
+        UInt(self.view).encode_size() + self.signature.encode_size()
+    }
 }
 
 impl<S: Array> Viewable for Nullify<S> {
@@ -613,14 +635,16 @@ impl<S: Array> Nullification<S> {
 
 impl<S: Array> Write for Nullification<S> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.view.write(writer);
+        UInt(self.view).write(writer);
         self.signatures.write(writer);
     }
 }
 
-impl<S: Array> Read<usize> for Nullification<S> {
+impl<S: Array> Read for Nullification<S> {
+    type Cfg = usize;
+
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
-        let view = View::read(reader)?;
+        let view = UInt::read(reader)?.into();
         let signatures = Vec::<Signature<S>>::read_range(reader, ..=*max_len)?;
 
         // Ensure the signatures are sorted by public key index and are unique
@@ -638,7 +662,7 @@ impl<S: Array> Read<usize> for Nullification<S> {
 
 impl<S: Array> EncodeSize for Nullification<S> {
     fn encode_size(&self) -> usize {
-        self.view.encode_size() + self.signatures.encode_size()
+        UInt(self.view).encode_size() + self.signatures.encode_size()
     }
 }
 
@@ -709,6 +733,8 @@ impl<S: Array, D: Digest> Write for Finalize<S, D> {
 }
 
 impl<S: Array, D: Digest> Read for Finalize<S, D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::<D>::read(reader)?;
         let signature = Signature::<S>::read(reader)?;
@@ -719,8 +745,10 @@ impl<S: Array, D: Digest> Read for Finalize<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> FixedSize for Finalize<S, D> {
-    const SIZE: usize = Proposal::<D>::SIZE + Signature::<S>::SIZE;
+impl<S: Array, D: Digest> EncodeSize for Finalize<S, D> {
+    fn encode_size(&self) -> usize {
+        self.proposal.encode_size() + self.signature.encode_size()
+    }
 }
 
 impl<S: Array, D: Digest> Viewable for Finalize<S, D> {
@@ -805,7 +833,9 @@ impl<S: Array, D: Digest> Write for Finalization<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> Read<usize> for Finalization<S, D> {
+impl<S: Array, D: Digest> Read for Finalization<S, D> {
+    type Cfg = usize;
+
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let proposal = Proposal::<D>::read(reader)?;
         let signatures = Vec::<Signature<S>>::read_range(reader, ..=*max_len)?;
@@ -863,7 +893,9 @@ impl<S: Array, D: Digest> Write for Backfiller<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> Read<(usize, usize)> for Backfiller<S, D> {
+impl<S: Array, D: Digest> Read for Backfiller<S, D> {
+    type Cfg = (usize, usize);
+
     fn read_cfg(reader: &mut impl Buf, cfg: &(usize, usize)) -> Result<Self, Error> {
         let tag = u8::read(reader)?;
         match tag {
@@ -913,15 +945,17 @@ impl Request {
 
 impl Write for Request {
     fn write(&self, writer: &mut impl BufMut) {
-        self.id.write(writer);
+        UInt(self.id).write(writer);
         self.notarizations.write(writer);
         self.nullifications.write(writer);
     }
 }
 
-impl Read<usize> for Request {
+impl Read for Request {
+    type Cfg = usize;
+
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
-        let id = u64::read(reader)?;
+        let id = UInt::read(reader)?.into();
         let notarizations = Vec::<View>::read_range(reader, ..=*max_len)?;
         let remaining = max_len - notarizations.len();
         let nullifications = Vec::<View>::read_range(reader, ..=remaining)?;
@@ -935,7 +969,9 @@ impl Read<usize> for Request {
 
 impl EncodeSize for Request {
     fn encode_size(&self) -> usize {
-        self.id.encode_size() + self.notarizations.encode_size() + self.nullifications.encode_size()
+        UInt(self.id).encode_size()
+            + self.notarizations.encode_size()
+            + self.nullifications.encode_size()
     }
 }
 
@@ -968,19 +1004,22 @@ impl<S: Array, D: Digest> Response<S, D> {
 
 impl<S: Array, D: Digest> Write for Response<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.id.write(writer);
+        UInt(self.id).write(writer);
         self.notarizations.write(writer);
         self.nullifications.write(writer);
     }
 }
 
-impl<S: Array, D: Digest> Read<(usize, usize)> for Response<S, D> {
-    fn read_cfg(reader: &mut impl Buf, max_len: &(usize, usize)) -> Result<Self, Error> {
-        let id = u64::read(reader)?;
+impl<S: Array, D: Digest> Read for Response<S, D> {
+    type Cfg = (usize, usize);
+
+    fn read_cfg(reader: &mut impl Buf, (total, max_sigs): &(usize, usize)) -> Result<Self, Error> {
+        let id = UInt::read(reader)?.into();
         let notarizations =
-            Vec::<Notarization<S, D>>::read_cfg(reader, &(..=max_len.0, max_len.1))?;
-        let remaining = max_len.0 - notarizations.len();
-        let nullifications = Vec::<Nullification<S>>::read_cfg(reader, &(..=remaining, max_len.1))?;
+            Vec::<Notarization<S, D>>::read_cfg(reader, &((..=total).into(), *max_sigs))?;
+        let rem = total - notarizations.len();
+        let nullifications =
+            Vec::<Nullification<S>>::read_cfg(reader, &((..=rem).into(), *max_sigs))?;
         Ok(Self {
             id,
             notarizations,
@@ -991,7 +1030,9 @@ impl<S: Array, D: Digest> Read<(usize, usize)> for Response<S, D> {
 
 impl<S: Array, D: Digest> EncodeSize for Response<S, D> {
     fn encode_size(&self) -> usize {
-        self.id.encode_size() + self.notarizations.encode_size() + self.nullifications.encode_size()
+        UInt(self.id).encode_size()
+            + self.notarizations.encode_size()
+            + self.nullifications.encode_size()
     }
 }
 
@@ -1062,7 +1103,9 @@ impl<S: Array, D: Digest> Write for Activity<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> Read<usize> for Activity<S, D> {
+impl<S: Array, D: Digest> Read for Activity<S, D> {
+    type Cfg = usize;
+
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let tag = u8::read(reader)?;
         match tag {
@@ -1195,23 +1238,25 @@ impl<S: Array, D: Digest> ConflictingNotarize<S, D> {
 
 impl<S: Array, D: Digest> Write for ConflictingNotarize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.view.write(writer);
-        self.parent_1.write(writer);
+        UInt(self.view).write(writer);
+        UInt(self.parent_1).write(writer);
         self.payload_1.write(writer);
         self.signature_1.write(writer);
-        self.parent_2.write(writer);
+        UInt(self.parent_2).write(writer);
         self.payload_2.write(writer);
         self.signature_2.write(writer);
     }
 }
 
 impl<S: Array, D: Digest> Read for ConflictingNotarize<S, D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let view = View::read(reader)?;
-        let parent_1 = View::read(reader)?;
+        let view = UInt::read(reader)?.into();
+        let parent_1 = UInt::read(reader)?.into();
         let payload_1 = D::read_cfg(reader, &())?;
         let signature_1 = Signature::<S>::read(reader)?;
-        let parent_2 = View::read(reader)?;
+        let parent_2 = UInt::read(reader)?.into();
         let payload_2 = D::read_cfg(reader, &())?;
         let signature_2 = Signature::<S>::read(reader)?;
         if signature_1.signer() != signature_2.signer() {
@@ -1232,14 +1277,16 @@ impl<S: Array, D: Digest> Read for ConflictingNotarize<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> FixedSize for ConflictingNotarize<S, D> {
-    const SIZE: usize = View::SIZE
-        + View::SIZE
-        + D::SIZE
-        + Signature::<S>::SIZE
-        + View::SIZE
-        + D::SIZE
-        + Signature::<S>::SIZE;
+impl<S: Array, D: Digest> EncodeSize for ConflictingNotarize<S, D> {
+    fn encode_size(&self) -> usize {
+        UInt(self.view).encode_size()
+            + UInt(self.parent_1).encode_size()
+            + self.payload_1.encode_size()
+            + self.signature_1.encode_size()
+            + UInt(self.parent_2).encode_size()
+            + self.payload_2.encode_size()
+            + self.signature_2.encode_size()
+    }
 }
 
 impl<S: Array, D: Digest> Viewable for ConflictingNotarize<S, D> {
@@ -1318,23 +1365,25 @@ impl<S: Array, D: Digest> ConflictingFinalize<S, D> {
 
 impl<S: Array, D: Digest> Write for ConflictingFinalize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.view.write(writer);
-        self.parent_1.write(writer);
+        UInt(self.view).write(writer);
+        UInt(self.parent_1).write(writer);
         self.payload_1.write(writer);
         self.signature_1.write(writer);
-        self.parent_2.write(writer);
+        UInt(self.parent_2).write(writer);
         self.payload_2.write(writer);
         self.signature_2.write(writer);
     }
 }
 
 impl<S: Array, D: Digest> Read for ConflictingFinalize<S, D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let view = View::read(reader)?;
-        let parent_1 = View::read(reader)?;
+        let view = UInt::read(reader)?.into();
+        let parent_1 = UInt::read(reader)?.into();
         let payload_1 = D::read_cfg(reader, &())?;
         let signature_1 = Signature::<S>::read(reader)?;
-        let parent_2 = View::read(reader)?;
+        let parent_2 = UInt::read(reader)?.into();
         let payload_2 = D::read_cfg(reader, &())?;
         let signature_2 = Signature::<S>::read(reader)?;
         if signature_1.signer() != signature_2.signer() {
@@ -1355,14 +1404,16 @@ impl<S: Array, D: Digest> Read for ConflictingFinalize<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> FixedSize for ConflictingFinalize<S, D> {
-    const SIZE: usize = View::SIZE
-        + View::SIZE
-        + D::SIZE
-        + Signature::<S>::SIZE
-        + View::SIZE
-        + D::SIZE
-        + Signature::<S>::SIZE;
+impl<S: Array, D: Digest> EncodeSize for ConflictingFinalize<S, D> {
+    fn encode_size(&self) -> usize {
+        UInt(self.view).encode_size()
+            + UInt(self.parent_1).encode_size()
+            + self.payload_1.encode_size()
+            + self.signature_1.encode_size()
+            + UInt(self.parent_2).encode_size()
+            + self.payload_2.encode_size()
+            + self.signature_2.encode_size()
+    }
 }
 
 impl<S: Array, D: Digest> Viewable for ConflictingFinalize<S, D> {
@@ -1423,6 +1474,8 @@ impl<S: Array, D: Digest> Write for NullifyFinalize<S, D> {
 }
 
 impl<S: Array, D: Digest> Read for NullifyFinalize<S, D> {
+    type Cfg = ();
+
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::<D>::read(reader)?;
         let view_signature = Signature::<S>::read(reader)?;
@@ -1441,8 +1494,12 @@ impl<S: Array, D: Digest> Read for NullifyFinalize<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> FixedSize for NullifyFinalize<S, D> {
-    const SIZE: usize = Proposal::<D>::SIZE + Signature::<S>::SIZE + Signature::<S>::SIZE;
+impl<S: Array, D: Digest> EncodeSize for NullifyFinalize<S, D> {
+    fn encode_size(&self) -> usize {
+        self.proposal.encode_size()
+            + self.view_signature.encode_size()
+            + self.finalize_signature.encode_size()
+    }
 }
 
 impl<S: Array, D: Digest> Viewable for NullifyFinalize<S, D> {
@@ -1473,14 +1530,6 @@ mod tests {
 
     fn sample_scheme(v: u64) -> Ed25519 {
         Ed25519::from_seed(v)
-    }
-
-    #[test]
-    fn test_view_encode_decode() {
-        let view: View = 42;
-        let encoded = view.encode();
-        let decoded = View::decode(encoded).unwrap();
-        assert_eq!(view, decoded);
     }
 
     #[test]

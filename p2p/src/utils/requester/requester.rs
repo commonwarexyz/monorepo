@@ -1,7 +1,10 @@
 //! Requester for sending rate-limited requests to peers.
 
 use super::{Config, PeerLabel};
-use commonware_runtime::{Clock, Metrics};
+use commonware_runtime::{
+    telemetry::metrics::status::{CounterExt, Status},
+    Clock, Metrics,
+};
 use commonware_utils::{Array, PrioritySet};
 use either::Either;
 use governor::{
@@ -149,10 +152,12 @@ impl<E: Clock + GClock + Rng + Metrics, P: Array> Requester<E, P> {
             self.deadlines.put(id, deadline);
 
             // Increment metric if-and-only-if request is successful
-            self.metrics.requests.inc();
-
+            self.metrics.created.inc(Status::Success);
             return Some((participant.clone(), id));
         }
+
+        // Increment failed metric if no participants are available
+        self.metrics.created.inc(Status::Failure);
         None
     }
 
@@ -211,14 +216,23 @@ impl<E: Clock + GClock + Rng + Metrics, P: Array> Requester<E, P> {
 
         // Update performance
         self.update(request.participant, elapsed);
+        self.metrics.requests.inc(Status::Success);
         self.metrics.resolves.observe(elapsed.as_secs_f64());
     }
 
     /// Timeout an outstanding request.
     pub fn timeout(&mut self, request: Request<P>) {
-        // Update performance
         self.update(request.participant, self.timeout);
-        self.metrics.timeouts.inc();
+        self.metrics.requests.inc(Status::Timeout);
+    }
+
+    /// Fail an outstanding request and penalize the request
+    /// participant with the timeout duration.
+    ///
+    /// This is used when we fail to send a request to a participant.
+    pub fn fail(&mut self, request: Request<P>) {
+        self.update(request.participant, self.timeout);
+        self.metrics.requests.inc(Status::Failure);
     }
 
     /// Get the next outstanding ID and deadline.
@@ -243,24 +257,24 @@ impl<E: Clock + GClock + Rng + Metrics, P: Array> Requester<E, P> {
 mod tests {
     use super::*;
     use commonware_cryptography::{Ed25519, Signer};
-    use commonware_runtime::deterministic::Executor;
+    use commonware_runtime::deterministic;
     use commonware_runtime::Runner;
+    use commonware_utils::NZU32;
     use governor::Quota;
-    use std::num::NonZeroU32;
     use std::time::Duration;
 
     #[test]
     fn test_requester_basic() {
         // Instantiate context
-        let (executor, context, _auditor) = Executor::seeded(0);
-        executor.start(async move {
+        let executor = deterministic::Runner::seeded(0);
+        executor.start(|context| async move {
             // Create requester
             let scheme = Ed25519::from_seed(0);
             let me = scheme.public_key();
             let timeout = Duration::from_secs(5);
             let config = Config {
                 public_key: scheme.public_key(),
-                rate_limit: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                rate_limit: Quota::per_second(NZU32!(1)),
                 initial: Duration::from_millis(100),
                 timeout,
             };
@@ -360,15 +374,15 @@ mod tests {
     #[test]
     fn test_requester_multiple() {
         // Instantiate context
-        let (executor, context, _auditor) = Executor::seeded(0);
-        executor.start(async move {
+        let executor = deterministic::Runner::seeded(0);
+        executor.start(|context| async move {
             // Create requester
             let scheme = Ed25519::from_seed(0);
             let me = scheme.public_key();
             let timeout = Duration::from_secs(5);
             let config = Config {
                 public_key: scheme.public_key(),
-                rate_limit: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                rate_limit: Quota::per_second(NZU32!(1)),
                 initial: Duration::from_millis(100),
                 timeout,
             };

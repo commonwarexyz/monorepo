@@ -11,11 +11,11 @@ pub struct Validators<P: Array> {
     identity: Poly<Public>,
     validators: Vec<P>,
     validators_map: HashMap<P, u32>,
-    share: Share,
+    share: Option<Share>,
 }
 
 impl<P: Array> Validators<P> {
-    pub fn new(identity: Poly<Public>, mut validators: Vec<P>, share: Share) -> Self {
+    pub fn new(identity: Poly<Public>, mut validators: Vec<P>, share: Option<Share>) -> Self {
         // Setup validators
         validators.sort();
         let mut validators_map = HashMap::new();
@@ -63,6 +63,6 @@ impl<P: Array> ThresholdSupervisor for Validators<P> {
     }
 
     fn share(&self, _: Self::Index) -> Option<&Self::Share> {
-        Some(&self.share)
+        self.share.as_ref()
     }
 }

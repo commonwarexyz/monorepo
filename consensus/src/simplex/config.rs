@@ -1,9 +1,8 @@
+use super::types::{Activity, Context, View};
 use crate::{Automaton, Relay, Reporter, Supervisor};
 use commonware_cryptography::{Digest, Scheme};
 use governor::Quota;
 use std::time::Duration;
-
-use super::types::{Activity, Context, View};
 
 /// Configuration for the consensus engine.
 pub struct Config<
@@ -29,6 +28,12 @@ pub struct Config<
     /// Supervisor for the consensus engine.
     pub supervisor: S,
 
+    /// Partition for consensus engine storage.
+    pub partition: String,
+
+    /// Compression level for consensus engine storage.
+    pub compression: Option<u8>,
+
     /// Maximum number of messages to buffer on channels inside the consensus
     /// engine before blocking.
     pub mailbox_size: usize,
@@ -38,6 +43,9 @@ pub struct Config<
 
     /// Number of views to replay concurrently during startup.
     pub replay_concurrency: usize,
+
+    /// Number of bytes to buffer when replaying during startup.
+    pub replay_buffer: usize,
 
     /// Amount of time to wait for a leader to propose a payload
     /// in a view.

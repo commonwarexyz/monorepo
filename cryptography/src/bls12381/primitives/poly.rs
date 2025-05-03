@@ -11,7 +11,9 @@ use crate::bls12381::primitives::{
     Error,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{
+    varint::UInt, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
+};
 use rand::{rngs::OsRng, RngCore};
 use std::hash::Hash;
 
@@ -40,21 +42,25 @@ pub struct Eval<C: Element> {
 
 impl<C: Element> Write for Eval<C> {
     fn write(&self, buf: &mut impl BufMut) {
-        self.index.write(buf);
+        UInt(self.index).write(buf);
         self.value.write(buf);
     }
 }
 
 impl<C: Element> Read for Eval<C> {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let index = buf.get_u32();
+        let index = UInt::read(buf)?.into();
         let value = C::read(buf)?;
         Ok(Self { index, value })
     }
 }
 
-impl<C: Element> FixedSize for Eval<C> {
-    const SIZE: usize = u32::SIZE + C::SIZE;
+impl<C: Element> EncodeSize for Eval<C> {
+    fn encode_size(&self) -> usize {
+        UInt(self.index).encode_size() + C::SIZE
+    }
 }
 
 /// A polynomial that is using a scalar for the variable x and a generic
@@ -139,7 +145,7 @@ impl<C: Element> Poly<C> {
     ///
     /// It panics if the index is out of range.
     pub fn get(&self, i: u32) -> C {
-        self.0[i as usize]
+        self.0[i as usize].clone()
     }
 
     /// Set the given element at the specified index.
@@ -238,7 +244,7 @@ impl<C: Element> Poly<C> {
                         num.mul(xj);
 
                         // Compute `xj - xi` and include it in the denominator product
-                        let mut tmp = *xj;
+                        let mut tmp = xj.clone();
                         tmp.sub(xi);
                         den.mul(&tmp);
                     }
@@ -253,7 +259,7 @@ impl<C: Element> Poly<C> {
             num.mul(&inv);
 
             // Scale `yi` by `l_i(0)` to contribute to the constant term
-            let mut yi_scaled = **yi;
+            let mut yi_scaled = (*yi).clone();
             yi_scaled.mul(&num);
 
             // Add `yi * l_i(0)` to the running sum
@@ -271,8 +277,10 @@ impl<C: Element> Write for Poly<C> {
     }
 }
 
-impl<C: Element> Read<usize> for Poly<C> {
-    fn read_cfg(buf: &mut impl Buf, expected: &usize) -> Result<Self, CodecError> {
+impl<C: Element> Read for Poly<C> {
+    type Cfg = usize;
+
+    fn read_cfg(buf: &mut impl Buf, expected: &Self::Cfg) -> Result<Self, CodecError> {
         let expected_size = C::SIZE * (*expected);
         if buf.remaining() < expected_size {
             return Err(CodecError::EndOfBuffer);
@@ -379,7 +387,7 @@ pub mod tests {
                 for i in 0..larger.degree() + 1 {
                     let i = i as usize;
                     if i < (smaller.degree() + 1) as usize {
-                        let mut coeff_sum = p1.0[i];
+                        let mut coeff_sum = p1.0[i].clone();
                         coeff_sum.add(&p2.0[i]);
                         assert_eq!(res.0[i], coeff_sum);
                     } else {
@@ -402,7 +410,7 @@ pub mod tests {
         for degree in 0..100u32 {
             for num_evals in 0..100u32 {
                 let poly = new(degree);
-                let expected = poly.0[0];
+                let expected = poly.0[0].clone();
 
                 let shares = (0..num_evals).map(|i| poly.evaluate(i)).collect::<Vec<_>>();
                 let recovered_constant = Poly::recover(num_evals, &shares).unwrap();
@@ -435,14 +443,14 @@ pub mod tests {
                 let evaluation = p1.evaluate(idx).value;
 
                 let coeffs = p1.0;
-                let mut sum = coeffs[0];
+                let mut sum = coeffs[0].clone();
                 for (i, coeff) in coeffs
                     .into_iter()
                     .enumerate()
                     .take((d + 1) as usize)
                     .skip(1)
                 {
-                    let xi = pow(x, i);
+                    let xi = pow(x.clone(), i);
                     let mut var = coeff;
                     var.mul(&xi);
                     sum.add(&var);

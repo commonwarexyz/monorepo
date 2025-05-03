@@ -321,13 +321,13 @@ mod tests {
     use super::*;
     use crate::{Receiver as _, Sender as _};
     use commonware_cryptography::{Ed25519, Signer};
-    use commonware_runtime::{deterministic::Executor, mocks, Metrics, Runner};
+    use commonware_runtime::{deterministic, mocks, Metrics, Runner};
     use std::time::Duration;
 
     #[test]
     fn test_decryption_failure() {
-        let (executor, _, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
             let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
             let (mut sink, stream) = mocks::Channel::init();
             let mut receiver = Receiver {
@@ -349,8 +349,8 @@ mod tests {
 
     #[test]
     fn test_send_too_large() {
-        let (executor, _, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
             let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
             let message = b"hello world";
             let (sink, _) = mocks::Channel::init();
@@ -369,8 +369,8 @@ mod tests {
 
     #[test]
     fn test_receive_too_large() {
-        let (executor, _, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
             let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
             let message = b"hello world";
             let (sink, stream) = mocks::Channel::init();
@@ -397,8 +397,8 @@ mod tests {
 
     #[test]
     fn test_send_receive() {
-        let (executor, _, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
             let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
             let max_message_size = 1024;
 
@@ -457,8 +457,8 @@ mod tests {
     }
     #[test]
     fn test_full_connection_establishment_and_exchange() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Create cryptographic identities
             let dialer_crypto = Ed25519::from_seed(0);
             let listener_crypto = Ed25519::from_seed(1);
@@ -544,8 +544,8 @@ mod tests {
 
     #[test]
     fn test_upgrade_dialer_wrong_peer() {
-        let (executor, context, _) = Executor::default();
-        executor.start(async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Create cryptographic identities
             let dialer_crypto = Ed25519::from_seed(0);
             let expected_peer = Ed25519::from_seed(1).public_key();
