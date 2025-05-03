@@ -94,70 +94,73 @@ pub fn new_from<R: RngCore>(degree: u32, rng: &mut R) -> Poly<Scalar> {
 /// A Barycentric Weight for interpolation at x=0.
 pub struct Weight(Scalar);
 
-/// Computes Barycentric Weights for a given set of indices.
-///
-/// These weights can be reused for multiple interpolations with the same set of points.
-///
-/// # Arguments
-/// * `indices` - The indices of the points used for interpolation (x = index + 1)
-/// * `required` - The threshold number of points required for interpolation
-///
-/// # Returns
-/// * `Result<BTreeMap<u32, Weight>, Error>` - Map of index to its corresponding weight
-pub fn compute_weights(indices: &[u32], required: u32) -> Result<BTreeMap<u32, Weight>, Error> {
-    // Ensure we have enough indices for interpolation.
-    if indices.len() < required as usize {
-        return Err(Error::NotEnoughPartialSignatures(
-            required as usize,
-            indices.len(),
-        ));
+/// Prepares at least `t` evaluations for Lagrange interpolation.
+pub fn prepare_evaluations<'a, C, I>(threshold: u32, evals: I) -> Result<Vec<&'a Eval<C>>, Error>
+where
+    C: 'a + Element,
+    I: IntoIterator<Item = &'a Eval<C>>,
+{
+    // Check if we have at least `t` evaluations; if not, return an error
+    let t = threshold as usize;
+    let mut evals = evals.into_iter().collect::<Vec<_>>();
+    if evals.len() < t {
+        return Err(Error::NotEnoughPartialSignatures(t, evals.len()));
     }
 
-    // Sort indices (just as in the original recover function)
-    let mut sorted_indices = indices.to_vec();
-    sorted_indices.sort();
-    let sorted_indices = sorted_indices
-        .into_iter()
-        .take(required as usize)
-        .collect::<Vec<_>>();
+    // Convert the first `t` sorted shares into scalars
+    //
+    // We sort the evaluations by index to ensure that two invocations of
+    // `recover` select the same evals.
+    evals.sort_by_key(|e| e.index);
+    evals.truncate(t);
+    Ok(evals)
+}
+
+/// Computes Barycentric Weights for Lagrange interpolation at x=0.
+///
+/// These weights can be reused for multiple interpolations with the same set of points,
+/// which significantly improves performance when recovering a group polynomial or multiple
+/// signatures.
+///
+/// The `indices` of the points used for interpolation (x = index + 1). These indices
+/// should be of length `threshold`, deduped, and sorted.
+pub fn compute_weights<C: Element>(evals: Vec<&Eval<C>>) -> Result<BTreeMap<u32, Weight>, Error> {
     let mut weights = BTreeMap::new();
-
-    // For each index, compute its Lagrange basis polynomial evaluated at x=0
-    for &index in &sorted_indices {
-        // Convert index to x-coordinate (x = index + 1)
+    for i_eval in &evals {
+        // Convert i_eval.index to x-coordinate (x = index + 1)
         let mut xi = Scalar::zero();
-        xi.set_int(index + 1);
-
-        // Initialize numerator and denominator for Lagrange coefficient
-        let (mut num, mut den) = (Scalar::one(), Scalar::one());
+        xi.set_int(i_eval.index + 1);
 
         // Compute product terms for Lagrange basis polynomial
-        for &j_index in &sorted_indices {
-            if index != j_index {
-                // Convert j_index to x-coordinate (x = j_index + 1)
-                let mut xj = Scalar::zero();
-                xj.set_int(j_index + 1);
-
-                // Numerator: product of all xj (since we're evaluating at x=0)
-                num.mul(&xj);
-
-                // Denominator: product of all (xj - xi)
-                let mut diff = xj;
-                diff.sub(&xi);
-                den.mul(&diff);
+        let (mut num, mut den) = (Scalar::one(), Scalar::one());
+        for j_eval in &evals {
+            // Skip if i_eval and j_eval are the same
+            if i_eval.index == j_eval.index {
+                continue;
             }
+
+            // Convert j_eval.index to x-coordinate
+            let mut xj = Scalar::zero();
+            xj.set_int(j_eval.index + 1);
+
+            // Include `xj` in the numerator product for `l_i(0)`
+            num.mul(&xj);
+
+            // Compute `xj - xi` and include it in the denominator product
+            let mut diff = xj;
+            diff.sub(&xi);
+            den.mul(&diff);
         }
 
-        // Compute inverse of denominator
+        // Compute the inverse of the denominator product; fails if den is zero (e.g., duplicate `xj`)
         let inv = den.inverse().ok_or(Error::NoInverse)?;
 
-        // Compute weight: numerator * inverse of denominator
+        // Compute `l_i(0) = num * inv`, the Lagrange basis coefficient at `x=0`
         num.mul(&inv);
 
         // Store the weight
-        weights.insert(index, Weight(num));
+        weights.insert(i_eval.index, Weight(num));
     }
-
     Ok(weights)
 }
 
