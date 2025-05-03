@@ -531,7 +531,7 @@ impl<B: Blob> Buffer<B> {
         }
 
         // Calculate how much to read (minimum of buffer size and remaining bytes)
-        let bytes_to_read = std::cmp::min(self.buffer_size, blob_remaining as usize);
+        let bytes_to_read = std::cmp::min(self.buffer_size as u64, blob_remaining) as usize;
 
         // Read the data - we only need a single read operation since we know exactly how much data is available
         self.blob
@@ -585,7 +585,7 @@ impl<B: Blob> Buffer<B> {
         }
 
         // Check if enough total bytes are available
-        let total_available = self.buffer_remaining() + self.blob_remaining() as usize;
+        let total_available = (self.buffer_remaining() as u64 + self.blob_remaining()) as usize;
         if total_available < size {
             return Err(Error::BlobInsufficientLength);
         }
@@ -607,7 +607,8 @@ impl<B: Blob> Buffer<B> {
         // Read more data into the buffer after the remaining data
         let read_pos = self.blob_position + remaining as u64;
         let bytes_blob_remaining = self.blob_size.saturating_sub(read_pos);
-        let read_size = std::cmp::min(self.buffer_size - remaining, bytes_blob_remaining as usize);
+        let read_size =
+            std::cmp::min((self.buffer_size - remaining) as u64, bytes_blob_remaining) as usize;
         if read_size > 0 {
             match self
                 .blob
@@ -621,6 +622,7 @@ impl<B: Blob> Buffer<B> {
             }
         }
 
+        // If we could not fill the buffer, return an error
         if self.buffer_valid_len < size {
             return Err(Error::BlobInsufficientLength);
         }
