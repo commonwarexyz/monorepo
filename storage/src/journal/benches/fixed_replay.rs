@@ -22,12 +22,12 @@ const ITEM_SIZE: usize = 32;
 /// Replay all items in the given `journal`.
 async fn bench_run(
     journal: &Journal<Context, FixedBytes<ITEM_SIZE>>,
-    lookahead: usize,
+    buffer: usize,
     items_to_read: u64,
 ) {
     let concurrency = std::cmp::max(1, (items_to_read / ITEMS_PER_BLOB) as usize);
     let stream = journal
-        .replay(concurrency, lookahead)
+        .replay(concurrency, buffer)
         .await
         .expect("failed to replay journal");
     pin_mut!(stream);
@@ -60,7 +60,7 @@ fn bench_fixed_replay(c: &mut Criterion) {
 
         // Run the benchmarks
         let runner = tokio::Runner::new(cfg.clone());
-        for lookahead in [0, 16_384, 65_536, 262_144, 1_048_576] {
+        for buffer in [0, 16_384, 65_536, 262_144, 1_048_576] {
             c.bench_function(
                 &format!("{}/items={} size={}", module_path!(), items, ITEM_SIZE),
                 |b| {
@@ -70,7 +70,7 @@ fn bench_fixed_replay(c: &mut Criterion) {
                         let mut duration = Duration::ZERO;
                         for _ in 0..iters {
                             let start = Instant::now();
-                            bench_run(&j, lookahead, items).await;
+                            bench_run(&j, buffer, items).await;
                             duration += start.elapsed();
                         }
 

@@ -77,7 +77,7 @@ pub struct Config<
     pub journal_replay_concurrency: usize,
 
     /// The number of bytes to look ahead when replaying a journal.
-    pub journal_replay_lookahead: usize,
+    pub journal_replay_buffer: usize,
 
     /// Compression level for the journal.
     pub journal_compression: Option<u8>,

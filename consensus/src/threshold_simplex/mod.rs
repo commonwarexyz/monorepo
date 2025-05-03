@@ -357,7 +357,7 @@ mod tests {
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
-                    replay_lookahead: 1024 * 1024,
+                    replay_buffer: 1024 * 1024,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -620,7 +620,7 @@ mod tests {
                         fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                         fetch_concurrent: 1,
                         replay_concurrency: 1,
-                        replay_lookahead: 1024 * 1024,
+                        replay_buffer: 1024 * 1024,
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -800,7 +800,7 @@ mod tests {
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
-                    replay_lookahead: 1024 * 1024,
+                    replay_buffer: 1024 * 1024,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -918,7 +918,7 @@ mod tests {
                 fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                 fetch_concurrent: 1,
                 replay_concurrency: 1,
-                replay_lookahead: 1024 * 1024,
+                replay_buffer: 1024 * 1024,
             };
             let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1051,7 +1051,7 @@ mod tests {
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
-                    replay_lookahead: 1024 * 1024,
+                    replay_buffer: 1024 * 1024,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1268,7 +1268,7 @@ mod tests {
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
-                    replay_lookahead: 1024 * 1024,
+                    replay_buffer: 1024 * 1024,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1430,7 +1430,7 @@ mod tests {
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
-                    replay_lookahead: 1024 * 1024,
+                    replay_buffer: 1024 * 1024,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1588,7 +1588,7 @@ mod tests {
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
-                    replay_lookahead: 1024 * 1024,
+                    replay_buffer: 1024 * 1024,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1771,7 +1771,7 @@ mod tests {
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
-                    replay_lookahead: 1024 * 1024,
+                    replay_buffer: 1024 * 1024,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1947,7 +1947,7 @@ mod tests {
                         fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                         fetch_concurrent: 1,
                         replay_concurrency: 1,
-                        replay_lookahead: 1024 * 1024,
+                        replay_buffer: 1024 * 1024,
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(voter, resolver);
@@ -2120,7 +2120,7 @@ mod tests {
                         fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                         fetch_concurrent: 1,
                         replay_concurrency: 1,
-                        replay_lookahead: 1024 * 1024,
+                        replay_buffer: 1024 * 1024,
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(voter, resolver);
@@ -2289,7 +2289,7 @@ mod tests {
                         fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                         fetch_concurrent: 1,
                         replay_concurrency: 1,
-                        replay_lookahead: 1024 * 1024,
+                        replay_buffer: 1024 * 1024,
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(voter, resolver);
@@ -2424,7 +2424,7 @@ mod tests {
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
-                    replay_lookahead: 1024 * 1024,
+                    replay_buffer: 1024 * 1024,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 

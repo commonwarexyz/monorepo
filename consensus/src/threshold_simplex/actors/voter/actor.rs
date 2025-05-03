@@ -514,7 +514,7 @@ pub struct Actor<
     partition: String,
     compression: Option<u8>,
     replay_concurrency: usize,
-    replay_lookahead: usize,
+    replay_buffer: usize,
     journal: Option<Journal<E, Voter<D>>>,
 
     genesis: Option<D>,
@@ -611,7 +611,7 @@ impl<
                 partition: cfg.partition,
                 compression: cfg.compression,
                 replay_concurrency: cfg.replay_concurrency,
-                replay_lookahead: cfg.replay_lookahead,
+                replay_buffer: cfg.replay_buffer,
                 journal: None,
 
                 genesis: None,
@@ -1815,7 +1815,7 @@ impl<
         // Rebuild from journal
         {
             let stream = journal
-                .replay(self.replay_concurrency, self.replay_lookahead)
+                .replay(self.replay_concurrency, self.replay_buffer)
                 .await
                 .expect("unable to replay journal");
             pin_mut!(stream);

@@ -369,7 +369,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     pub async fn replay(
         &self,
         concurrency: usize,
-        lookahead: usize,
+        buffer: usize,
     ) -> Result<impl Stream<Item = Result<(u64, u32, u32, V), Error>> + '_, Error> {
         // Collect all blobs to replay
         let codec_config = self.cfg.codec_config.clone();
@@ -393,7 +393,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             .map(
                 move |(section, blob, aligned_len, size, codec_config, compressed)| async move {
                     // Created buffered reader
-                    let reader = Buffer::new(blob, size, lookahead);
+                    let reader = Buffer::new(blob, size, buffer);
 
                     // Read over the blob
                     stream::unfold(

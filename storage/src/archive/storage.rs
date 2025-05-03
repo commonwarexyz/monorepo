@@ -116,7 +116,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         {
             debug!("initializing archive");
             let stream = journal
-                .replay(cfg.replay_concurrency, cfg.replay_lookahead)
+                .replay(cfg.replay_concurrency, cfg.replay_buffer)
                 .await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {

@@ -346,7 +346,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
     pub async fn replay(
         &self,
         concurrency: usize,
-        lookahead: usize,
+        buffer: usize,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + '_, Error> {
         assert!(concurrency > 0);
         // Collect all blobs to replay
@@ -371,7 +371,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         Ok(stream::iter(blobs)
             .map(move |(index, blob, size)| async move {
                 // Create buffered reader
-                let reader = Buffer::new(blob, size, lookahead);
+                let reader = Buffer::new(blob, size, buffer);
 
                 // Read over the blob in chunks of `CHUNK_SIZE` bytes
                 stream::unfold(

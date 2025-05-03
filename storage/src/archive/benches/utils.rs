@@ -21,7 +21,7 @@ const SECTION_MASK: u64 = 0xffff_ffff_ffff_ff00u64;
 const REPLAY_CONCURRENCY: usize = 1;
 
 /// Number of bytes to look ahead when replaying.
-const REPLAY_LOOKAHEAD: usize = 1024 * 1024; // 1MB
+const REPLAY_BUFFER: usize = 1024 * 1024; // 1MB
 
 /// Fixed-length key and value types.
 pub type Key = FixedBytes<64>;
@@ -42,7 +42,7 @@ pub async fn get_archive(ctx: Context, compression: Option<u8>) -> ArchiveType {
         section_mask: SECTION_MASK,
         pending_writes: PENDING_WRITES,
         replay_concurrency: REPLAY_CONCURRENCY,
-        replay_lookahead: REPLAY_LOOKAHEAD,
+        replay_buffer: REPLAY_BUFFER,
     };
     Archive::init(ctx, cfg).await.unwrap()
 }
