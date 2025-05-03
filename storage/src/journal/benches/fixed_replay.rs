@@ -60,9 +60,15 @@ fn bench_fixed_replay(c: &mut Criterion) {
 
         // Run the benchmarks
         let runner = tokio::Runner::new(cfg.clone());
-        for buffer in [0, 16_384, 65_536, 262_144, 1_048_576] {
+        for buffer in [128, 16_384, 65_536, 262_144, 1_048_576] {
             c.bench_function(
-                &format!("{}/items={} size={}", module_path!(), items, ITEM_SIZE),
+                &format!(
+                    "{}/items={} buffer={} size={}",
+                    module_path!(),
+                    items,
+                    buffer,
+                    ITEM_SIZE
+                ),
                 |b| {
                     b.to_async(&runner).iter_custom(|iters| async move {
                         let ctx = context::get::<commonware_runtime::tokio::Context>();
