@@ -989,4 +989,172 @@ mod tests {
             assert_eq!(reader.position(), size);
         });
     }
+
+    #[test_traced]
+    fn test_buffer_seek_to() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create a memory blob with some test data
+            let data = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+            let (blob, size) = context.open("partition", b"test").await.unwrap();
+            assert_eq!(size, 0);
+            blob.write_at(data, 0).await.unwrap();
+            let size = data.len() as u64;
+
+            // Create a buffer reader
+            let buffer_size = 10;
+            let mut reader = Buffer::new(blob, size, buffer_size);
+
+            // Read some data to advance the position
+            let mut buf = [0u8; 5];
+            reader.read_exact(&mut buf, 5).await.unwrap();
+            assert_eq!(&buf, b"ABCDE");
+            assert_eq!(reader.position(), 5);
+
+            // Seek to a specific position
+            reader.seek_to(10).unwrap();
+            assert_eq!(reader.position(), 10);
+
+            // Read data from the new position
+            let mut buf = [0u8; 5];
+            reader.read_exact(&mut buf, 5).await.unwrap();
+            assert_eq!(&buf, b"KLMNO");
+
+            // Seek to beginning
+            reader.seek_to(0).unwrap();
+            assert_eq!(reader.position(), 0);
+
+            let mut buf = [0u8; 5];
+            reader.read_exact(&mut buf, 5).await.unwrap();
+            assert_eq!(&buf, b"ABCDE");
+
+            // Seek to end
+            reader.seek_to(size).unwrap();
+            assert_eq!(reader.position(), size);
+
+            // Trying to read should fail
+            let mut buf = [0u8; 1];
+            let result = reader.read_exact(&mut buf, 1).await;
+            assert!(matches!(result, Err(Error::BlobInsufficientLength)));
+
+            // Seek beyond end should fail
+            let result = reader.seek_to(size + 10);
+            assert!(matches!(result, Err(Error::BlobInsufficientLength)));
+        });
+    }
+
+    #[test_traced]
+    fn test_buffer_seek_with_refill() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create a memory blob with longer data
+            let data = vec![0x41; 1000]; // 1000 'A' characters
+            let (blob, size) = context.open("partition", b"test").await.unwrap();
+            assert_eq!(size, 0);
+            blob.write_at(&data, 0).await.unwrap();
+            let size = data.len() as u64;
+
+            // Create a buffer reader with small buffer
+            let buffer_size = 10;
+            let mut reader = Buffer::new(blob, size, buffer_size);
+
+            // Read some data
+            let mut buf = [0u8; 5];
+            reader.read_exact(&mut buf, 5).await.unwrap();
+
+            // Seek far ahead, past the current buffer
+            reader.seek_to(500).unwrap();
+
+            // Refill the buffer at the new position
+            reader.refill().await.unwrap();
+
+            // Read data - should get data from position 500
+            let mut buf = [0u8; 5];
+            reader.read_exact(&mut buf, 5).await.unwrap();
+            assert_eq!(&buf, b"AAAAA"); // Should still be 'A's
+            assert_eq!(reader.position(), 505);
+
+            // Seek backwards
+            reader.seek_to(100).unwrap();
+            reader.refill().await.unwrap();
+
+            // Read again - should be at position 100
+            let mut buf = [0u8; 5];
+            reader.read_exact(&mut buf, 5).await.unwrap();
+            assert_eq!(reader.position(), 105);
+        });
+    }
+
+    #[test_traced]
+    fn test_buffer_truncate() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create a memory blob with some test data
+            let data = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+            let (blob, size) = context.open("partition", b"test").await.unwrap();
+            assert_eq!(size, 0);
+            blob.write_at(data, 0).await.unwrap();
+            let data_len = data.len() as u64;
+
+            // Create a buffer reader
+            let buffer_size = 10;
+            let reader = Buffer::new(blob.clone(), data_len, buffer_size);
+
+            // Truncate the blob to half its size
+            let truncate_len = data_len / 2;
+            reader.truncate(truncate_len).await.unwrap();
+
+            // Reopen to check truncation
+            let (blob, size) = context.open("partition", b"test").await.unwrap();
+            assert_eq!(size, truncate_len, "Blob should be truncated to half size");
+
+            // Create a new buffer and read to verify truncation
+            let mut new_reader = Buffer::new(blob, size, buffer_size);
+
+            // Read the content
+            let mut buf = vec![0u8; size as usize];
+            new_reader
+                .read_exact(&mut buf, size as usize)
+                .await
+                .unwrap();
+            assert_eq!(&buf, b"ABCDEFGHIJKLM", "Truncated content should match");
+
+            // Reading beyond truncated size should fail
+            let mut extra_buf = [0u8; 1];
+            let result = new_reader.read_exact(&mut extra_buf, 1).await;
+            assert!(matches!(result, Err(Error::BlobInsufficientLength)));
+        });
+    }
+
+    #[test_traced]
+    fn test_buffer_truncate_to_zero() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create a memory blob with some test data
+            let data = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+            let (blob, size) = context.open("partition", b"test").await.unwrap();
+            assert_eq!(size, 0);
+            blob.write_at(data, 0).await.unwrap();
+            let data_len = data.len() as u64;
+
+            // Create a buffer reader
+            let buffer_size = 10;
+            let reader = Buffer::new(blob.clone(), data_len, buffer_size);
+
+            // Truncate the blob to zero
+            reader.truncate(0).await.unwrap();
+
+            // Reopen to check truncation
+            let (blob, size) = context.open("partition", b"test").await.unwrap();
+            assert_eq!(size, 0, "Blob should be truncated to zero");
+
+            // Create a new buffer and try to read (should fail)
+            let mut new_reader = Buffer::new(blob, size, buffer_size);
+
+            // Reading from truncated blob should fail
+            let mut buf = [0u8; 1];
+            let result = new_reader.read_exact(&mut buf, 1).await;
+            assert!(matches!(result, Err(Error::BlobInsufficientLength)));
+        });
+    }
 }
