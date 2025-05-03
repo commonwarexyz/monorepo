@@ -332,7 +332,7 @@ impl<C: Element> Poly<C> {
         // Prepare evaluations
         let evals = prepare_evaluations(t, evals)?;
 
-        // Generate weights
+        // Compute weights
         let indices = evals.iter().map(|e| e.index).collect::<Vec<_>>();
         let weights = compute_weights(indices)?;
 
