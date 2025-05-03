@@ -276,10 +276,16 @@ impl<C: Element> Poly<C> {
     ///
     /// This function assumes that each evaluation has a unique index. If there are duplicate indices, the function may
     /// fail with an error when attempting to compute the inverse of zero.
-    pub fn recover_with_weights(
+    pub fn recover_with_weights<'a, I>(
         weights: &BTreeMap<u32, Weight>,
-        evals: Vec<Eval<C>>,
-    ) -> Result<C, Error> {
+        evals: I,
+    ) -> Result<C, Error>
+    where
+        C: 'a,
+        I: IntoIterator<Item = &'a Eval<C>>,
+    {
+        // Check if we have the same number of evaluations and weights.
+        let evals = evals.into_iter().cloned().collect::<Vec<_>>();
         assert_eq!(
             evals.len(),
             weights.len(),
@@ -338,13 +344,14 @@ impl<C: Element> Poly<C> {
         // We sort the evaluations by index to ensure that two invocations of
         // `recover` select the same evals.
         evals.sort_by_key(|e| e.index);
+        evals.truncate(t);
 
         // Generate weights
         let weights =
             compute_weights(&evals.iter().map(|e| e.index).collect::<Vec<_>>(), t as u32)?;
 
         // Perform interpolation using the precomputed weights
-        Self::recover_with_weights(&weights, evals)
+        Self::recover_with_weights(&weights, evals.iter())
     }
 }
 

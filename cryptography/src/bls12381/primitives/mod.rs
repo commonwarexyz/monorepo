@@ -45,7 +45,6 @@
 pub mod group;
 pub mod ops;
 pub mod poly;
-pub mod lagrange;
 
 use thiserror::Error;
 

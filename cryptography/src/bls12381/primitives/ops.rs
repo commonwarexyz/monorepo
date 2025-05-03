@@ -239,7 +239,10 @@ where
 pub fn threshold_signature_recover_with_weights<'a, I>(
     weights: &BTreeMap<u32, Weight>,
     partials: I,
-) {
+) -> Result<group::Signature, Error>
+where
+    I: IntoIterator<Item = &'a PartialSignature>,
+{
     poly::Signature::recover_with_weights(weights, partials)
 }
 

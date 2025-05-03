@@ -2,11 +2,7 @@
 
 use crate::bls12381::{
     dkg::Error,
-    primitives::{
-        group::Share,
-        lagrange::{compute_weights, Interpolation},
-        poly,
-    },
+    primitives::{group::Share, poly},
 };
 use rand::RngCore;
 use rayon::{prelude::*, ThreadPoolBuilder};
