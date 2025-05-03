@@ -22,6 +22,7 @@ runs:
         key: ${{ runner.os }}-cargo-index
     - name: Get Rust version
       id: rust-version
+      shell: bash
       run: echo "rust_version=$(rustc +nightly --version)" >> "$GITHUB_OUTPUT"
     - name: Cache cargo-cache
       id: cargo-cache-cache
