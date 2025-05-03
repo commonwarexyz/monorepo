@@ -100,7 +100,7 @@ pub fn construct_public(
 }
 
 /// Recover public polynomial by interpolating coefficient-wise all
-/// polynomials using precomputed Lagrange weights.
+/// polynomials.
 ///
 /// It is assumed that the required number of commitments are provided.
 pub fn recover_public(
@@ -118,13 +118,6 @@ pub fn recover_public(
     // Extract dealer indices
     let mut indices: Vec<u32> = commitments.keys().cloned().collect();
     indices.sort();
-    indices.truncate(threshold as usize);
-
-    // Delete any commitments that are not in the indices
-    let commitments = commitments
-        .into_iter()
-        .filter(|(dealer, _)| indices.contains(dealer))
-        .collect::<BTreeMap<_, _>>();
 
     // Precompute Lagrange weights once for all coefficients
     let weights = compute_weights(indices).map_err(|_| Error::PublicKeyInterpolationFailed)?;
