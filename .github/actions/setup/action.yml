@@ -4,6 +4,8 @@ runs:
   steps:
     - name: Run sccache-cache
       uses: mozilla-actions/sccache-action@v0.0.8
+      with:
+        cache-mode: 'local'
     - name: Configure sccache
       shell: bash
       run: |
