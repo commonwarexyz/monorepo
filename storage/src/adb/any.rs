@@ -195,7 +195,7 @@ impl<'a, E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Trans
             while next_mmr_leaf_num < log_size {
                 let op = log.read(next_mmr_leaf_num).await?;
                 let digest = Self::op_digest(&mut H::new(), &op);
-                mmr.add(hasher, &digest);
+                mmr.add(hasher, &digest).await?;
                 next_mmr_leaf_num += 1;
             }
         }
@@ -219,7 +219,7 @@ impl<'a, E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Trans
         mut bitmap: Option<&mut Bitmap<'a, H, N>>,
     ) -> Result<u64, Error> {
         let mut inactivity_floor_loc = start_leaf_num;
-        let log_size = log.size().await.unwrap();
+        let log_size = log.size().await?;
         if let Some(ref bitmap) = bitmap {
             assert_eq!(start_leaf_num, bitmap.bit_count());
         }
@@ -260,11 +260,11 @@ impl<'a, E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Trans
                         match update_result {
                             UpdateResult::NoOp => unreachable!("unexpected no-op update"),
                             UpdateResult::Inserted(_) => {
-                                bitmap_ref.append(hasher, true);
+                                bitmap_ref.append(hasher, true).await?;
                             }
                             UpdateResult::Updated(old_loc, _) => {
                                 bitmap_ref.set_bit(hasher, old_loc, false);
-                                bitmap_ref.append(hasher, true);
+                                bitmap_ref.append(hasher, true).await?;
                             }
                         }
                     }
@@ -275,7 +275,7 @@ impl<'a, E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Trans
                 // If we reach this point and a bit hasn't been added for the operation, then it's
                 // an inactive operation and we need to tag it as such in the bitmap.
                 if bitmap_ref.bit_count() == i {
-                    bitmap_ref.append(hasher, false);
+                    bitmap_ref.append(hasher, false).await?;
                 }
             }
         }
@@ -457,7 +457,7 @@ impl<'a, E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Trans
     ) -> Result<u64, Error> {
         // Update the ops MMR.
         let digest = Self::op_digest(hasher, &op);
-        self.ops.add(hasher, &digest);
+        self.ops.add(hasher, &digest).await?;
         self.uncommitted_ops += 1;
 
         // Append the operation to the log.
@@ -621,7 +621,7 @@ impl<'a, E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Trans
             if let Some(bitmap_ref) = &mut bitmap {
                 if let Some(old_loc) = old_loc {
                     bitmap_ref.set_bit(hasher, old_loc, false);
-                    bitmap_ref.append(hasher, true);
+                    bitmap_ref.append(hasher, true).await?;
                 }
             }
             self.inactivity_floor_loc += 1;
@@ -630,7 +630,7 @@ impl<'a, E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Trans
         self.apply_op(hasher, Operation::Commit(self.inactivity_floor_loc))
             .await?;
         if let Some(bitmap_ref) = &mut bitmap {
-            bitmap_ref.append(hasher, false);
+            bitmap_ref.append(hasher, false).await?;
         }
 
         Ok(())
@@ -1181,7 +1181,7 @@ mod test {
             // Create a bitmap based on the current db's pruned/inactive state.
             let mut bitmap = Bitmap::<_, 32>::new();
             for _ in 0..db.inactivity_floor_loc {
-                bitmap.append(&mut hasher, false);
+                bitmap.append(&mut hasher, false).await.unwrap();
             }
             assert_eq!(bitmap.bit_count(), db.inactivity_floor_loc);
             db.close().await.unwrap();

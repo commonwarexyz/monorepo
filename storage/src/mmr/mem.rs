@@ -194,50 +194,17 @@ impl<H: CHasher, S: Storage<H::Digest>> Mmr<'_, H, S> {
     }
 
     /// Add an element to the MMR and return its position in the MMR.
-    pub fn add(&mut self, hasher: &mut H, element: &[u8]) -> u64 {
-        assert!(self.grafting_cfg.is_none(), "not supported when grafting");
-
+    pub async fn add(&mut self, hasher: &mut H, element: &[u8]) -> Result<u64, Error> {
         let element_pos = self.size();
         let hash = Hasher::new(hasher).leaf_hash(element_pos, element);
-        self.add_leaf_digest(hasher, hash);
-
-        element_pos
-    }
-
-    /// Add an element to the MMR and return its position in the MMR.
-    pub async fn add_with_grafting(
-        &mut self,
-        hasher: &mut H,
-        element: &[u8],
-    ) -> Result<u64, Error> {
-        let element_pos = self.size();
-        let hash = Hasher::new(hasher).leaf_hash(element_pos, element);
-        self.add_leaf_digest_with_grafting(hasher, hash).await?;
+        self.add_leaf_digest(hasher, hash).await?;
 
         Ok(element_pos)
     }
 
     /// Add a leaf's `digest` to the MMR, generating the necessary parent nodes to maintain the
     /// MMR's structure.
-    pub(crate) fn add_leaf_digest(&mut self, hasher: &mut H, mut digest: H::Digest) {
-        assert!(self.grafting_cfg.is_none(), "not supported when grafting");
-
-        let peaks = nodes_needing_parents(self.peak_iterator());
-        self.nodes.push_back(digest);
-
-        // Compute the new parent nodes if any, and insert them into the MMR.
-        let mut h = Hasher::new(hasher);
-        for sibling_pos in peaks.into_iter().rev() {
-            let new_node_pos = self.size();
-            let sibling_hash = self.get_node_unchecked(sibling_pos);
-            digest = h.node_hash(new_node_pos, sibling_hash, &digest);
-            self.nodes.push_back(digest);
-        }
-    }
-
-    /// Add a leaf's `digest` to the MMR, generating the necessary parent nodes to maintain the
-    /// MMR's structure.
-    pub(crate) async fn add_leaf_digest_with_grafting(
+    pub(crate) async fn add_leaf_digest(
         &mut self,
         hasher: &mut H,
         mut digest: H::Digest,
@@ -493,7 +460,7 @@ pub(crate) mod tests {
             let mut leaves: Vec<u64> = Vec::new();
             let mut hasher = Sha256::default();
             for _ in 0..11 {
-                leaves.push(mmr.add(&mut hasher, &element));
+                leaves.push(mmr.add(&mut hasher, &element).await.unwrap());
                 assert_eq!(mmr.last_leaf_pos().unwrap(), *leaves.last().unwrap());
                 let peaks: Vec<(u64, u32)> = mmr.peak_iterator().collect();
                 assert_ne!(peaks.len(), 0);
@@ -620,13 +587,16 @@ pub(crate) mod tests {
     /// Test that pruning all nodes never breaks adding new nodes.
     #[test]
     fn test_mem_mmr_prune_all() {
-        let mut mmr: Mmr<Sha256> = Mmr::<Sha256>::new();
-        let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
-        let mut hasher = Sha256::default();
-        for _ in 0..1000 {
-            mmr.prune_all();
-            mmr.add(&mut hasher, &element);
-        }
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut mmr: Mmr<Sha256> = Mmr::<Sha256>::new();
+            let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
+            let mut hasher = Sha256::default();
+            for _ in 0..1000 {
+                mmr.prune_all();
+                mmr.add(&mut hasher, &element).await.unwrap();
+            }
+        });
     }
 
     /// Test that the MMR validity check works as expected.
@@ -644,7 +614,7 @@ pub(crate) mod tests {
                     mmr.size()
                 );
                 let old_size = mmr.size();
-                mmr.add(&mut hasher, &element);
+                mmr.add(&mut hasher, &element).await.unwrap();
                 for size in old_size + 1..mmr.size() {
                     assert!(
                         !PeakIterator::check_validity(size),
@@ -867,112 +837,121 @@ pub(crate) mod tests {
     /// roots.
     #[test]
     fn test_mem_mmr_root_stability() {
-        let mut hasher = Sha256::new();
-        for i in 0u64..200 {
-            let mut mmr = Mmr::<Sha256>::new();
-            for j in 0u64..i {
-                hasher.update(&j.to_be_bytes());
-                let element = hasher.finalize();
-                mmr.add(&mut hasher, &element);
-            }
-            let root = mmr.root(&mut hasher);
-            let expected_root = ROOTS[i as usize];
-            assert_eq!(hex(&root), expected_root);
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher = Sha256::new();
+            for i in 0u64..200 {
+                let mut mmr = Mmr::<Sha256>::new();
+                for j in 0u64..i {
+                    hasher.update(&j.to_be_bytes());
+                    let element = hasher.finalize();
+                    mmr.add(&mut hasher, &element).await.unwrap();
+                }
+                let root = mmr.root(&mut hasher);
+                let expected_root = ROOTS[i as usize];
+                assert_eq!(hex(&root), expected_root);
 
-            // confirm pruning doesn't affect the root computation
-            mmr.prune_all();
-            let root2 = mmr.root(&mut hasher);
-            assert_eq!(root, root2);
-        }
+                // confirm pruning doesn't affect the root computation
+                mmr.prune_all();
+                let root2 = mmr.root(&mut hasher);
+                assert_eq!(root, root2);
+            }
+        });
     }
 
-    fn compute_big_mmr() -> (Mmr<'static, Sha256>, Vec<u64>) {
+    async fn compute_big_mmr() -> Result<(Mmr<'static, Sha256>, Vec<u64>), Error> {
         let mut hasher = Sha256::new();
         let mut mmr = Mmr::<Sha256>::new();
         let mut leaves = Vec::new();
         for i in 0u64..199 {
             hasher.update(&i.to_be_bytes());
             let element = hasher.finalize();
-            leaves.push(mmr.add(&mut hasher, &element));
+            leaves.push(mmr.add(&mut hasher, &element).await.unwrap());
         }
-        (mmr, leaves)
+
+        Ok((mmr, leaves))
     }
 
     #[test]
     fn test_mem_mmr_pop() {
-        let mut hasher = Sha256::new();
-        let (mut mmr, _) = compute_big_mmr();
-        let root = mmr.root(&mut hasher);
-        let expected_root = ROOTS[199];
-        assert_eq!(hex(&root), expected_root);
-
-        // Pop off one node at a time until empty, confirming the root hash is still is as expected.
-        for i in (0..199u64).rev() {
-            assert!(mmr.pop().is_ok());
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher = Sha256::new();
+            let (mut mmr, _) = compute_big_mmr().await.unwrap();
             let root = mmr.root(&mut hasher);
-            let expected_root = ROOTS[i as usize];
+            let expected_root = ROOTS[199];
             assert_eq!(hex(&root), expected_root);
-        }
 
-        assert!(
-            matches!(mmr.pop().unwrap_err(), Empty),
-            "pop on empty MMR should fail"
-        );
+            // Pop off one node at a time until empty, confirming the root hash is still is as expected.
+            for i in (0..199u64).rev() {
+                assert!(mmr.pop().is_ok());
+                let root = mmr.root(&mut hasher);
+                let expected_root = ROOTS[i as usize];
+                assert_eq!(hex(&root), expected_root);
+            }
 
-        // Test that we can pop all elements up to and including the oldest retained leaf.
-        for i in 0u64..199 {
-            hasher.update(&i.to_be_bytes());
-            let element = hasher.finalize();
-            mmr.add(&mut hasher, &element);
-        }
+            assert!(
+                matches!(mmr.pop().unwrap_err(), Empty),
+                "pop on empty MMR should fail"
+            );
 
-        let leaf_pos = leaf_num_to_pos(100);
-        mmr.prune_to_pos(leaf_pos);
-        while mmr.size() > leaf_pos {
-            assert!(mmr.pop().is_ok());
-        }
-        assert_eq!(hex(&mmr.root(&mut hasher)), ROOTS[100]);
-        assert!(matches!(mmr.pop().unwrap_err(), ElementPruned(_)));
-        assert_eq!(mmr.oldest_retained_pos(), None);
+            // Test that we can pop all elements up to and including the oldest retained leaf.
+            for i in 0u64..199 {
+                hasher.update(&i.to_be_bytes());
+                let element = hasher.finalize();
+                mmr.add(&mut hasher, &element).await.unwrap();
+            }
+
+            let leaf_pos = leaf_num_to_pos(100);
+            mmr.prune_to_pos(leaf_pos);
+            while mmr.size() > leaf_pos {
+                assert!(mmr.pop().is_ok());
+            }
+            assert_eq!(hex(&mmr.root(&mut hasher)), ROOTS[100]);
+            assert!(matches!(mmr.pop().unwrap_err(), ElementPruned(_)));
+            assert_eq!(mmr.oldest_retained_pos(), None);
+        });
     }
 
     #[test]
     fn test_mem_mmr_update_leaf() {
         let mut hasher = Sha256::new();
         let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let (mut mmr, leaves) = compute_big_mmr().await.unwrap();
+            let root = mmr.root(&mut hasher);
 
-        let (mut mmr, leaves) = compute_big_mmr();
-        let root = mmr.root(&mut hasher);
+            // For a few leaves, update the leaf and ensure the root hash changes, and the root hash
+            // reverts to its previous state then we update the leaf to its original value.
+            for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
+                // Change the leaf.
+                mmr.update_leaf(&mut hasher, leaves[leaf], &element)
+                    .unwrap();
+                let updated_root = mmr.root(&mut hasher);
+                assert!(root != updated_root);
 
-        // For a few leaves, update the leaf and ensure the root hash changes, and the root hash
-        // reverts to its previous state then we update the leaf to its original value.
-        for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
-            // Change the leaf.
-            mmr.update_leaf(&mut hasher, leaves[leaf], &element)
-                .unwrap();
-            let updated_root = mmr.root(&mut hasher);
-            assert!(root != updated_root);
+                // Restore the leaf to its original value, ensure the root hash is as before.
+                hasher.update(&leaf.to_be_bytes());
+                let element = hasher.finalize();
+                mmr.update_leaf(&mut hasher, leaves[leaf], &element)
+                    .unwrap();
+                let restored_root = mmr.root(&mut hasher);
+                assert_eq!(root, restored_root);
+            }
 
-            // Restore the leaf to its original value, ensure the root hash is as before.
-            hasher.update(&leaf.to_be_bytes());
-            let element = hasher.finalize();
-            mmr.update_leaf(&mut hasher, leaves[leaf], &element)
-                .unwrap();
-            let restored_root = mmr.root(&mut hasher);
-            assert_eq!(root, restored_root);
-        }
-
-        // Confirm the function gracefully handles failures when the MMR is pruned.
-        mmr.prune_to_pos(leaves[150]);
-        assert!(matches!(
-            mmr.update_leaf(&mut hasher, leaves[149], &element),
-            Err(ElementPruned(_))
-        ));
-        // Confirm the tree has all the hashes necessary to update any element after pruning.
-        for &leaf_pos in &leaves[150..=190] {
-            mmr.prune_to_pos(leaf_pos);
-            assert!(mmr.update_leaf(&mut hasher, leaf_pos, &element).is_ok());
-        }
+            // Confirm the function gracefully handles failures when the MMR is pruned.
+            mmr.prune_to_pos(leaves[150]);
+            assert!(matches!(
+                mmr.update_leaf(&mut hasher, leaves[149], &element),
+                Err(ElementPruned(_))
+            ));
+            // Confirm the tree has all the hashes necessary to update any element after pruning.
+            for &leaf_pos in &leaves[150..=190] {
+                mmr.prune_to_pos(leaf_pos);
+                assert!(mmr.update_leaf(&mut hasher, leaf_pos, &element).is_ok());
+            }
+        });
     }
 
     #[test]
@@ -981,9 +960,12 @@ pub(crate) mod tests {
         let mut hasher = Sha256::new();
         let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
 
-        let (mut mmr, _) = compute_big_mmr();
-        let not_a_leaf_pos = 2;
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let (mut mmr, _) = compute_big_mmr().await.unwrap();
+            let not_a_leaf_pos = 2;
 
-        let _ = mmr.update_leaf(&mut hasher, not_a_leaf_pos, &element);
+            let _ = mmr.update_leaf(&mut hasher, not_a_leaf_pos, &element);
+        });
     }
 }

@@ -127,7 +127,7 @@ impl<
             // Prepend the missing (inactive) bits needed to align the bitmap, which can only be
             // pruned to a chunk boundary, with the MMR's pruning boundary.
             for _ in pruned_bits..mmr_pruned_leaves {
-                status.append(hasher, false);
+                status.append(hasher, false).await?;
             }
             if mmr_pruned_leaves > Bitmap::<'static, H, N>::CHUNK_SIZE_BITS
                 && pruned_bits < mmr_pruned_leaves - Bitmap::<H, N>::CHUNK_SIZE_BITS
@@ -210,7 +210,7 @@ impl<
                 self.status.set_bit(hasher, old_loc, false);
             }
         }
-        self.status.append(hasher, true);
+        self.status.append(hasher, true).await?;
 
         Ok(update_result)
     }
@@ -223,7 +223,7 @@ impl<
             return Ok(());
         };
 
-        self.status.append(hasher, false);
+        self.status.append(hasher, false).await?;
         self.status.set_bit(hasher, old_loc, false);
 
         Ok(())
@@ -264,13 +264,13 @@ impl<
     /// Return the root hash of the db.
     ///
     /// Current implementation just hashes the roots of the [Any] and [Bitmap] databases together.
-    pub fn root(&self, hasher: &mut H) -> H::Digest {
+    pub async fn root(&self, hasher: &mut H) -> Result<H::Digest, Error> {
         let any_root = self.any.root(hasher);
-        let bitmap_root = self.status.root(hasher);
+        let bitmap_root = self.status.root(hasher).await?;
         hasher.update(any_root.as_ref());
         hasher.update(bitmap_root.as_ref());
 
-        hasher.finalize()
+        Ok(hasher.finalize())
     }
 
     /// Close the db. Operations that have not been committed will be lost.
@@ -347,11 +347,11 @@ pub mod test {
             let mut db = open_db(context.clone(), &mut hasher, partition).await;
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.oldest_retained_loc(), None);
-            let root0 = db.root(&mut hasher);
+            let root0 = db.root(&mut hasher).await.unwrap();
             db.close().await.unwrap();
             db = open_db(context.clone(), &mut hasher, partition).await;
             assert_eq!(db.op_count(), 0);
-            assert_eq!(db.root(&mut hasher), root0);
+            assert_eq!(db.root(&mut hasher).await.unwrap(), root0);
 
             // Add one key.
             let k1 = hash(&0u64.to_be_bytes());
@@ -360,7 +360,7 @@ pub mod test {
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             db.commit(&mut hasher).await.unwrap();
             assert_eq!(db.op_count(), 4); // 1 update, 1 commit, 2 moves.
-            let root1 = db.root(&mut hasher);
+            let root1 = db.root(&mut hasher).await.unwrap();
             assert!(root1 != root0);
             db.close().await.unwrap();
             db = open_db(context.clone(), &mut hasher, partition).await;
@@ -370,17 +370,17 @@ pub mod test {
                 UpdateResult::NoOp
             ));
             assert_eq!(db.op_count(), 4); // 1 update, 1 commit, 2 moves.
-            assert_eq!(db.root(&mut hasher), root1);
+            assert_eq!(db.root(&mut hasher).await.unwrap(), root1);
 
             // Delete that one key.
             db.delete(&mut hasher, k1).await.unwrap();
             db.commit(&mut hasher).await.unwrap();
             assert_eq!(db.op_count(), 6); // 1 update, 2 commits, 2 moves, 1 delete.
-            let root2 = db.root(&mut hasher);
+            let root2 = db.root(&mut hasher).await.unwrap();
             db.close().await.unwrap();
             db = open_db(context.clone(), &mut hasher, partition).await;
             assert_eq!(db.op_count(), 6); // 1 update, 2 commits, 2 moves, 1 delete.
-            assert_eq!(db.root(&mut hasher), root2);
+            assert_eq!(db.root(&mut hasher).await.unwrap(), root2);
 
             // Confirm all activity bits are false
             for i in 0..db.op_count() {
@@ -448,12 +448,12 @@ pub mod test {
                 .unwrap();
 
             // Close the db, then replay its operations with a bitmap.
-            let root = db.root(&mut hasher);
+            let root = db.root(&mut hasher).await.unwrap();
             // Create a bitmap based on the current db's pruned/inactive state.
             db.close().await.unwrap();
 
             let db = open_db(context, &mut hasher, partition).await;
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(&mut hasher).await.unwrap(), root);
         });
     }
 
@@ -473,28 +473,28 @@ pub mod test {
             apply_random_ops(&mut hasher, ELEMENTS, true, rng_seed, &mut db)
                 .await
                 .unwrap();
-            let committed_root = db.root(&mut hasher);
+            let committed_root = db.root(&mut hasher).await.unwrap();
             let committed_op_count = db.op_count();
 
             // Perform more random operations without committing any of them.
             apply_random_ops(&mut hasher, ELEMENTS, false, rng_seed + 1, &mut db)
                 .await
                 .unwrap();
-            let uncommitted_root = db.root(&mut hasher);
+            let uncommitted_root = db.root(&mut hasher).await.unwrap();
             assert!(uncommitted_root != committed_root);
 
             // SCENARIO #1: Simulate a crash that happens before any writes. Upon reopening, the
             // state of the DB should be as of the last commit.
             db.simulate_failure_before_any_writes();
             let mut db = open_db(context.clone(), &mut hasher, partition).await;
-            assert_eq!(db.root(&mut hasher), committed_root);
+            assert_eq!(db.root(&mut hasher).await.unwrap(), committed_root);
             assert_eq!(db.op_count(), committed_op_count);
 
             // Re-apply the exact same uncommitted operations.
             apply_random_ops(&mut hasher, ELEMENTS, false, rng_seed + 1, &mut db)
                 .await
                 .unwrap();
-            assert_eq!(db.root(&mut hasher), uncommitted_root);
+            assert_eq!(db.root(&mut hasher).await.unwrap(), uncommitted_root);
 
             // SCENARIO #2: Simulate a crash that happens after the any db has been committed, but
             // before any pruning or bitmap writing.
@@ -505,7 +505,7 @@ pub mod test {
             // We should be able to recover, so the root hash should differ from the previous
             // commit, and the op count should be greater than before.
             let db = open_db(context.clone(), &mut hasher, partition).await;
-            let second_committed_root = db.root(&mut hasher);
+            let second_committed_root = db.root(&mut hasher).await.unwrap();
             assert!(second_committed_root != uncommitted_root);
             let failed_pruning_loc = db.any.oldest_retained_loc().unwrap();
 
@@ -520,7 +520,7 @@ pub mod test {
                 .await
                 .unwrap();
             db.commit(&mut hasher).await.unwrap();
-            assert_eq!(db.root(&mut hasher), second_committed_root);
+            assert_eq!(db.root(&mut hasher).await.unwrap(), second_committed_root);
             let successful_pruning_loc = db.any.oldest_retained_loc().unwrap();
             // pruning points will differ, but this is OK since it doesn't affect state.
             assert!(successful_pruning_loc > failed_pruning_loc);
@@ -541,7 +541,7 @@ pub mod test {
                 .await
                 .unwrap();
             let db = open_db(context.clone(), &mut hasher, fresh_partition).await;
-            assert_eq!(db.root(&mut hasher), second_committed_root);
+            assert_eq!(db.root(&mut hasher).await.unwrap(), second_committed_root);
             // State & pruning boundary should match that of the successful commit.
             assert_eq!(
                 db.any.oldest_retained_loc().unwrap(),

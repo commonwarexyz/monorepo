@@ -415,7 +415,7 @@ mod tests {
             let mut leaves: Vec<u64> = Vec::new();
             let mut hasher = Sha256::default();
             for _ in 0..11 {
-                leaves.push(mmr.add(&mut hasher, &element));
+                leaves.push(mmr.add(&mut hasher, &element).await.unwrap());
             }
 
             let root_hash = mmr.root(&mut hasher);
@@ -510,7 +510,11 @@ mod tests {
             let mut hasher = Sha256::default();
             for i in 0..49 {
                 elements.push(test_digest(i));
-                element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
+                element_positions.push(
+                    mmr.add(&mut hasher, elements.last().unwrap())
+                        .await
+                        .unwrap(),
+                );
             }
             // test range proofs over all possible ranges of at least 2 elements
             let root_hash = mmr.root(&mut hasher);
@@ -680,7 +684,11 @@ mod tests {
             let mut hasher = Sha256::default();
             for i in 0..49 {
                 elements.push(test_digest(i));
-                element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
+                element_positions.push(
+                    mmr.add(&mut hasher, elements.last().unwrap())
+                        .await
+                        .unwrap(),
+                );
             }
 
             // Confirm we can successfully prove all retained elements in the MMR after pruning.
@@ -718,7 +726,7 @@ mod tests {
             let mut hasher = Sha256::default();
             for i in 0..49 {
                 elements.push(test_digest(i));
-                element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
+                element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()).await.unwrap());
             }
 
             // prune up to the first peak
@@ -756,7 +764,7 @@ mod tests {
             // add a few more nodes, prune again, and test again to make sure repeated pruning works
             for i in 0..37 {
                 elements.push(test_digest(i));
-                element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
+                element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()).await.unwrap());
             }
             mmr.prune_to_pos(130); // a bit after the new highest peak
             assert_eq!(mmr.oldest_retained_pos().unwrap(), 130);
@@ -801,7 +809,11 @@ mod tests {
             let mut hasher = Sha256::default();
             for i in 0..25 {
                 elements.push(test_digest(i));
-                element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
+                element_positions.push(
+                    mmr.add(&mut hasher, elements.last().unwrap())
+                        .await
+                        .unwrap(),
+                );
             }
 
             // Generate proofs over all possible ranges of elements and confirm each

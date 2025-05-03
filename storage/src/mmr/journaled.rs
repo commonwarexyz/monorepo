@@ -188,7 +188,7 @@ impl<E: RStorage + Clock + Metrics, H: Hasher> Mmr<'_, E, H> {
             let pos = s.mem_mmr.size();
             warn!(pos, "recovering orphaned leaf");
             let mut hasher = H::new();
-            s.mem_mmr.add_leaf_digest(&mut hasher, leaf);
+            s.mem_mmr.add_leaf_digest(&mut hasher, leaf).await.unwrap();
             assert_eq!(pos, journal_size);
             s.sync().await?;
             assert_eq!(s.size(), s.journal.size().await?);
@@ -246,8 +246,8 @@ impl<E: RStorage + Clock + Metrics, H: Hasher> Mmr<'_, E, H> {
 
     /// Add an element to the MMR and return its position in the MMR. Elements added to the MMR
     /// aren't persisted to disk until `sync` is called.
-    pub fn add(&mut self, h: &mut H, element: &[u8]) -> u64 {
-        self.mem_mmr.add(h, element)
+    pub async fn add(&mut self, h: &mut H, element: &[u8]) -> Result<u64, Error> {
+        self.mem_mmr.add(h, element).await
     }
 
     /// Pop the given number of elements from the tip of the MMR assuming they exist, and otherwise
@@ -526,7 +526,7 @@ mod tests {
             for i in 0u64..199 {
                 hasher.update(&i.to_be_bytes());
                 let element = hasher.finalize();
-                mmr.add(&mut hasher, &element);
+                mmr.add(&mut hasher, &element).await.unwrap();
             }
             assert_eq!(ROOTS[199], hex(&mmr.root(&mut hasher)));
 
@@ -546,7 +546,7 @@ mod tests {
             for i in 0u64..199 {
                 hasher.update(&i.to_be_bytes());
                 let element = hasher.finalize();
-                mmr.add(&mut hasher, &element);
+                mmr.add(&mut hasher, &element).await.unwrap();
                 if i == 101 {
                     mmr.sync().await.unwrap();
                 }
@@ -565,7 +565,7 @@ mod tests {
             for i in 0u64..199 {
                 hasher.update(&i.to_be_bytes());
                 let element = hasher.finalize();
-                mmr.add(&mut hasher, &element);
+                mmr.add(&mut hasher, &element).await.unwrap();
             }
             let leaf_pos = leaf_num_to_pos(50);
             mmr.prune_to_pos(leaf_pos).await.unwrap();
@@ -596,7 +596,7 @@ mod tests {
             for i in 0..LEAF_COUNT {
                 let digest = test_digest(i);
                 leaves.push(digest);
-                let pos = mmr.add(&mut hasher, leaves.last().unwrap());
+                let pos = mmr.add(&mut hasher, leaves.last().unwrap()).await.unwrap();
                 positions.push(pos);
             }
             assert_eq!(mmr.size(), 502);
@@ -667,7 +667,7 @@ mod tests {
             for i in 0..LEAF_COUNT {
                 let digest = test_digest(i);
                 leaves.push(digest);
-                let pos = mmr.add(&mut hasher, leaves.last().unwrap());
+                let pos = mmr.add(&mut hasher, leaves.last().unwrap()).await.unwrap();
                 positions.push(pos);
             }
             assert_eq!(mmr.size(), 498);
@@ -765,9 +765,9 @@ mod tests {
                 let digest = test_digest(i);
                 leaves.push(digest);
                 let last_leaf = leaves.last().unwrap();
-                let pos = mmr.add(&mut hasher, last_leaf);
+                let pos = mmr.add(&mut hasher, last_leaf).await.unwrap();
                 positions.push(pos);
-                pruned_mmr.add(&mut hasher, last_leaf);
+                pruned_mmr.add(&mut hasher, last_leaf).await.unwrap();
             }
             assert_eq!(mmr.size(), 3994);
             assert_eq!(pruned_mmr.size(), 3994);
@@ -783,9 +783,9 @@ mod tests {
                 let digest = test_digest(LEAF_COUNT + i);
                 leaves.push(digest);
                 let last_leaf = leaves.last().unwrap();
-                let pos = pruned_mmr.add(&mut hasher, last_leaf);
+                let pos = pruned_mmr.add(&mut hasher, last_leaf).await.unwrap();
                 positions.push(pos);
-                mmr.add(&mut hasher, last_leaf);
+                mmr.add(&mut hasher, last_leaf).await.unwrap();
                 assert_eq!(pruned_mmr.root(&mut hasher), mmr.root(&mut hasher));
             }
 
@@ -809,8 +809,13 @@ mod tests {
 
             // Close MMR after adding a new node without syncing and make sure state is as expected
             // on reopening.
-            mmr.add(&mut hasher, &test_digest(LEAF_COUNT));
-            pruned_mmr.add(&mut hasher, &test_digest(LEAF_COUNT));
+            mmr.add(&mut hasher, &test_digest(LEAF_COUNT))
+                .await
+                .unwrap();
+            pruned_mmr
+                .add(&mut hasher, &test_digest(LEAF_COUNT))
+                .await
+                .unwrap();
             assert!(pruned_mmr.size() % cfg.items_per_blob != 0);
             pruned_mmr.close().await.unwrap();
             let mut pruned_mmr = Mmr::<_, Sha256>::init(context.clone(), cfg.clone())
@@ -823,7 +828,10 @@ mod tests {
             // Add nodes until we are on a blob boundary, and confirm prune_all still removes all
             // retained nodes.
             while pruned_mmr.size() % cfg.items_per_blob != 0 {
-                pruned_mmr.add(&mut hasher, &test_digest(LEAF_COUNT));
+                pruned_mmr
+                    .add(&mut hasher, &test_digest(LEAF_COUNT))
+                    .await
+                    .unwrap();
             }
             pruned_mmr.prune_all().await.unwrap();
             assert_eq!(pruned_mmr.oldest_retained_pos(), None);
@@ -853,7 +861,7 @@ mod tests {
                 let digest = test_digest(i);
                 leaves.push(digest);
                 let last_leaf = leaves.last().unwrap();
-                let pos = mmr.add(&mut hasher, last_leaf);
+                let pos = mmr.add(&mut hasher, last_leaf).await.unwrap();
                 positions.push(pos);
             }
             assert_eq!(mmr.size(), 3994);
@@ -878,16 +886,16 @@ mod tests {
                     let digest = test_digest(100 * (i + 1) + j);
                     leaves.push(digest);
                     let last_leaf = leaves.last().unwrap();
-                    let pos = mmr.add(&mut hasher, last_leaf);
+                    let pos = mmr.add(&mut hasher, last_leaf).await.unwrap();
                     positions.push(pos);
-                    mmr.add(&mut hasher, last_leaf);
+                    mmr.add(&mut hasher, last_leaf).await.unwrap();
                     assert_eq!(mmr.root(&mut hasher), mmr.root(&mut hasher));
                     let digest = test_digest(LEAF_COUNT + i);
                     leaves.push(digest);
                     let last_leaf = leaves.last().unwrap();
-                    let pos = mmr.add(&mut hasher, last_leaf);
+                    let pos = mmr.add(&mut hasher, last_leaf).await.unwrap();
                     positions.push(pos);
-                    mmr.add(&mut hasher, last_leaf);
+                    mmr.add(&mut hasher, last_leaf).await.unwrap();
                 }
                 let end_size = mmr.size();
                 let total_to_write = (end_size - start_size) as usize;
