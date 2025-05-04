@@ -971,6 +971,19 @@ mod tests {
         let result_empty_g1 = G1::msm(&empty_points_g1, &empty_scalars);
         assert_eq!(expected_empty_g1, G1::zero(), "G1 MSM empty (naive) failed");
         assert_eq!(result_empty_g1, G1::zero(), "G1 MSM empty failed");
+
+        // Case 8: Random points and scalars (big)
+        let points_g1: Vec<G1> = (0..50_000)
+            .map(|_| {
+                let mut point = G1::one();
+                point.mul(&Scalar::rand(&mut rng));
+                point
+            })
+            .collect();
+        let scalars: Vec<Scalar> = (0..50_000).map(|_| Scalar::rand(&mut rng)).collect();
+        let expected_g1 = naive_msm(&points_g1, &scalars);
+        let result_g1 = G1::msm(&points_g1, &scalars);
+        assert_eq!(expected_g1, result_g1, "G1 MSM basic case failed");
     }
 
     #[test]
@@ -1058,5 +1071,18 @@ mod tests {
         let result_empty_g2 = G2::msm(&empty_points_g2, &empty_scalars);
         assert_eq!(expected_empty_g2, G2::zero(), "G2 MSM empty (naive) failed");
         assert_eq!(result_empty_g2, G2::zero(), "G2 MSM empty failed");
+
+        // Case 8: Random points and scalars (big)
+        let points_g2: Vec<G2> = (0..50_000)
+            .map(|_| {
+                let mut point = G2::one();
+                point.mul(&Scalar::rand(&mut rng));
+                point
+            })
+            .collect();
+        let scalars: Vec<Scalar> = (0..50_000).map(|_| Scalar::rand(&mut rng)).collect();
+        let expected_g2 = naive_msm(&points_g2, &scalars);
+        let result_g2 = G2::msm(&points_g2, &scalars);
+        assert_eq!(expected_g2, result_g2, "G2 MSM basic case failed");
     }
 }
