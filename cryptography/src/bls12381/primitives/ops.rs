@@ -237,6 +237,22 @@ where
     Ok(())
 }
 
+/// Interpolate the constant term with a *single* MSM instead of a loop.
+fn msm_interpolate<'a, P, I>(weights: &BTreeMap<u32, Weight>, evals: I) -> Result<P, Error>
+where
+    P: Point + 'a,
+    I: IntoIterator<Item = &'a Eval<P>>,
+{
+    let mut points = Vec::new();
+    let mut scalars = Vec::new();
+
+    for e in evals {
+        points.push(e.value.clone());
+        scalars.push(weights.get(&e.index).ok_or(Error::InvalidIndex)?.0.clone());
+    }
+    Ok(P::msm(&points, &scalars))
+}
+
 /// Recovers a signature from `threshold` partial signatures.
 ///
 /// # Determinism
@@ -256,7 +272,7 @@ pub fn threshold_signature_recover_with_weights<'a, I>(
 where
     I: IntoIterator<Item = &'a PartialSignature>,
 {
-    poly::Signature::recover_with_weights(weights, partials)
+    msm_interpolate(weights, partials)
 }
 
 /// Recovers a signature from at least `threshold` partial signatures.
@@ -276,7 +292,18 @@ pub fn threshold_signature_recover<'a, I>(
 where
     I: IntoIterator<Item = &'a PartialSignature>,
 {
-    poly::Signature::recover(threshold, partials)
+    // Prepare evaluations
+    let evals = prepare_evaluations(threshold, partials)?;
+
+    // Compute weights
+    let indicies = evals.iter().map(|e| e.index).collect::<Vec<_>>();
+    let weights = compute_weights(indicies)?;
+
+    // Perform interpolation with the precomputed weights.
+    //
+    // We call this function instead of `poly::recover_with_weights` because
+    // it will use multi-scalar multiplication (MSM) to recover the signature.
+    threshold_signature_recover_with_weights(&weights, evals)
 }
 
 /// Recovers multiple signatures from multiple sets of at least `threshold`
