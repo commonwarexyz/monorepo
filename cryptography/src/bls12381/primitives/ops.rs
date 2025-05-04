@@ -1107,11 +1107,11 @@ mod tests {
         let threshold = degree + 1;
         let poly_scalar = poly::new_from(degree, &mut rng);
 
-        // Commit to G2 (Signature group)
-        let poly_g2 = Poly::<G2>::commit(poly_scalar);
+        // Commit to G1 (Signature group)
+        let poly_g1 = Poly::<G1>::commit(poly_scalar);
 
         // Generate evaluations (enough to meet threshold)
-        let evals: Vec<_> = (0..threshold).map(|i| poly_g2.evaluate(i)).collect();
+        let evals: Vec<_> = (0..threshold).map(|i| poly_g1.evaluate(i)).collect();
         let eval_refs: Vec<_> = evals.iter().collect(); // Get references
 
         // Compute weights
@@ -1134,7 +1134,7 @@ mod tests {
         // Also check against the known constant term
         assert_eq!(
             expected_result,
-            *poly_g2.constant(),
+            *poly_g1.constant(),
             "Recovered value does not match original constant term"
         );
     }

@@ -19,7 +19,7 @@ use blst::{
     blst_p2_add_or_double, blst_p2_affine, blst_p2_compress, blst_p2_from_affine, blst_p2_in_g2,
     blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
     blst_p2s_mult_pippenger_scratch_sizeof, blst_scalar, blst_scalar_from_bendian,
-    blst_scalar_from_fr, blst_sk_check, Pairing, BLS12_381_G1, BLS12_381_G2, BLS12_381_NEG_G1,
+    blst_scalar_from_fr, blst_sk_check, Pairing, BLS12_381_G1, BLS12_381_G2, BLS12_381_NEG_G2,
     BLST_ERROR,
 };
 use bytes::{Buf, BufMut};
@@ -778,31 +778,31 @@ impl Display for G2 {
     }
 }
 
-/// Verifies that `e(pk,hm)` is equal to `e(G1::one(),sig)` using a single product check with
-/// a negated G1 generator (`e(pk,hm) * e(-G1::one(),sig) == 1`).
-pub(super) fn equal(pk: &G1, sig: &G2, hm: &G2) -> bool {
+/// Verifies that `e(pk,hm)` is equal to `e(G2::one(),sig)` using a single product check with
+/// a negated G2 generator (`e(pk,hm) * e(-G2::one(),sig) == 1`).
+pub(super) fn equal(pk: &G2, sig: &G1, hm: &G1) -> bool {
     // Create a pairing context
     //
     // We only handle pre-hashed messages, so we leave the domain separator tag (`DST`) empty.
     let mut pairing = Pairing::new(false, &[]);
 
     // Convert `sig` into affine and aggregate `e(-G1::one(), sig)`
-    let mut q = blst_p2_affine::default();
+    let mut q = blst_p1_affine::default();
     unsafe {
-        blst_p2_to_affine(&mut q, &sig.0);
-        pairing.raw_aggregate(&q, &BLS12_381_NEG_G1);
+        blst_p1_to_affine(&mut q, &sig.0);
+        pairing.raw_aggregate(&BLS12_381_NEG_G2, &q);
     }
 
     // Convert `pk` and `hm` into affine
-    let mut p = blst_p1_affine::default();
-    let mut q = blst_p2_affine::default();
+    let mut p = blst_p2_affine::default();
+    let mut q = blst_p1_affine::default();
     unsafe {
-        blst_p1_to_affine(&mut p, &pk.0);
-        blst_p2_to_affine(&mut q, &hm.0);
+        blst_p2_to_affine(&mut p, &pk.0);
+        blst_p1_to_affine(&mut q, &hm.0);
     }
 
     // Aggregate `e(pk, hm)`
-    pairing.raw_aggregate(&q, &p);
+    pairing.raw_aggregate(&p, &q);
 
     // Finalize the pairing accumulation and verify the result
     //
