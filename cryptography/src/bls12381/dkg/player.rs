@@ -174,6 +174,7 @@ impl<P: Array> Player<P> {
         if self.dealings.len() != dealer_threshold {
             return Err(Error::MissingShare);
         }
+        assert_eq!(self.dealings.len(), commitments.len());
 
         // Construct secret
         let mut public = poly::Public::zero();
