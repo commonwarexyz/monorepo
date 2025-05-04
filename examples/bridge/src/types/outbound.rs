@@ -77,7 +77,7 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode, FixedSize};
     use commonware_consensus::threshold_simplex::types::Proposal;
     use commonware_cryptography::{
-        bls12381::primitives::group::{self, Element, G2},
+        bls12381::primitives::group::{self, Element, G1},
         sha256::Digest as Sha256Digest,
     };
     use rand::thread_rng;
@@ -92,9 +92,9 @@ mod tests {
 
     fn new_finalization() -> Finalization<Sha256Digest> {
         let scalar = group::Scalar::rand(&mut thread_rng());
-        let mut proposal_signature = G2::one();
+        let mut proposal_signature = G1::one();
         proposal_signature.mul(&scalar);
-        let mut seed_signature = G2::one();
+        let mut seed_signature = G1::one();
         seed_signature.mul(&scalar);
         Finalization {
             proposal: Proposal {

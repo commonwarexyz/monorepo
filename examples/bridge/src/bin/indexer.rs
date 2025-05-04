@@ -10,7 +10,7 @@ use commonware_bridge::{
 use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::threshold_simplex::types::{Finalization, Viewable};
 use commonware_cryptography::{
-    bls12381::primitives::group::{self, G1},
+    bls12381::primitives::group::{self, G2},
     sha256::Digest as Sha256Digest,
     Digest, Ed25519, Hasher, Sha256, Signer,
 };
@@ -112,9 +112,9 @@ fn main() {
     }
 
     // Configure networks
-    let mut namespaces: HashMap<G1, (G1, Vec<u8>)> = HashMap::new();
-    let mut blocks: HashMap<G1, HashMap<Sha256Digest, BlockFormat<Sha256Digest>>> = HashMap::new();
-    let mut finalizations: HashMap<G1, BTreeMap<u64, Finalization<Sha256Digest>>> = HashMap::new();
+    let mut namespaces: HashMap<G2, (G2, Vec<u8>)> = HashMap::new();
+    let mut blocks: HashMap<G2, HashMap<Sha256Digest, BlockFormat<Sha256Digest>>> = HashMap::new();
+    let mut finalizations: HashMap<G2, BTreeMap<u64, Finalization<Sha256Digest>>> = HashMap::new();
     let networks = matches
         .get_many::<String>("networks")
         .expect("Please provide networks");

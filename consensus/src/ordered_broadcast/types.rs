@@ -825,7 +825,7 @@ mod tests {
         bls12381::{
             dkg::ops,
             primitives::{
-                group::{Element, Share, G2},
+                group::{Element, Share, G1},
                 ops::{partial_sign_message, threshold_signature_recover},
                 poly,
             },
@@ -1418,7 +1418,7 @@ mod tests {
 
         // Create an ack with invalid signature
         let mut invalid_signature = ack.signature.clone();
-        invalid_signature.value.add(&G2::one());
+        invalid_signature.value.add(&G1::one());
         let invalid_ack = Ack::new(chunk, epoch, invalid_signature);
 
         // Verification should fail
