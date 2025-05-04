@@ -305,8 +305,8 @@ where
     let evals = prepare_evaluations(threshold, partials)?;
 
     // Compute weights
-    let indicies = evals.iter().map(|e| e.index).collect::<Vec<_>>();
-    let weights = compute_weights(indicies)?;
+    let indices = evals.iter().map(|e| e.index).collect::<Vec<_>>();
+    let weights = compute_weights(indices)?;
 
     // Perform interpolation with the precomputed weights.
     //
