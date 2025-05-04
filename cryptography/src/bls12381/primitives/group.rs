@@ -410,7 +410,7 @@ impl G1 {
     }
 
     /// Converts the G1 point to its affine representation.
-    pub(crate) fn as_affine(&self) -> blst_p1_affine {
+    pub(crate) fn as_blst_p1_affine(&self) -> blst_p1_affine {
         let mut affine = blst_p1_affine::default();
         unsafe { blst_p1_to_affine(&mut affine, &self.0) };
         affine
@@ -542,7 +542,7 @@ impl Point for G1 {
             }
 
             // Add to filtered vectors
-            points_filtered.push(point.as_affine());
+            points_filtered.push(point.as_blst_p1_affine());
             scalars_filtered.push(scalar.as_blst_scalar());
         }
 
@@ -601,7 +601,7 @@ impl G2 {
     }
 
     /// Converts the G2 point to its affine representation.
-    pub(crate) fn as_affine(&self) -> blst_p2_affine {
+    pub(crate) fn as_blst_p2_affine(&self) -> blst_p2_affine {
         let mut affine = blst_p2_affine::default();
         unsafe { blst_p2_to_affine(&mut affine, &self.0) };
         affine
@@ -731,7 +731,7 @@ impl Point for G2 {
             if *point == G2::zero() || scalar == &Scalar::zero() {
                 continue;
             }
-            points_filtered.push(point.as_affine());
+            points_filtered.push(point.as_blst_p2_affine());
             scalars_filtered.push(scalar.as_blst_scalar());
         }
 
