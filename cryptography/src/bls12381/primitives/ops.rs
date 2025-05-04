@@ -545,8 +545,8 @@ mod tests {
         assert_eq!(public, public_decoded);
 
         // Ensure blst compatibility
-        blst::min_pk::SecretKey::from_bytes(&private_bytes).unwrap();
-        let blst_public_decoded = blst::min_pk::PublicKey::from_bytes(&public_bytes).unwrap();
+        blst::min_sig::SecretKey::from_bytes(&private_bytes).unwrap();
+        let blst_public_decoded = blst::min_sig::PublicKey::from_bytes(&public_bytes).unwrap();
         blst_public_decoded.validate().unwrap();
         let blst_public_encoded = blst_public_decoded.compress().to_vec();
         assert_eq!(public_bytes, blst_public_encoded.as_slice());
@@ -558,8 +558,8 @@ mod tests {
         signature: &group::Signature,
     ) -> Result<(), BLST_ERROR> {
         let msg = public.encode();
-        let public = blst::min_pk::PublicKey::from_bytes(&public.encode()).unwrap();
-        let signature = blst::min_pk::Signature::from_bytes(&signature.encode()).unwrap();
+        let public = blst::min_sig::PublicKey::from_bytes(&public.encode()).unwrap();
+        let signature = blst::min_sig::Signature::from_bytes(&signature.encode()).unwrap();
         match signature.verify(true, &msg, PROOF_OF_POSSESSION, &[], &public, true) {
             BLST_ERROR::BLST_SUCCESS => Ok(()),
             e => Err(e),
@@ -640,8 +640,8 @@ mod tests {
         msg: &[u8],
         signature: &group::Signature,
     ) -> Result<(), BLST_ERROR> {
-        let public = blst::min_pk::PublicKey::from_bytes(&public.encode()).unwrap();
-        let signature = blst::min_pk::Signature::from_bytes(&signature.encode()).unwrap();
+        let public = blst::min_sig::PublicKey::from_bytes(&public.encode()).unwrap();
+        let signature = blst::min_sig::Signature::from_bytes(&signature.encode()).unwrap();
         match signature.verify(true, msg, MESSAGE, &[], &public, true) {
             BLST_ERROR::BLST_SUCCESS => Ok(()),
             e => Err(e),
@@ -734,10 +734,10 @@ mod tests {
     {
         let public = public
             .into_iter()
-            .map(|pk| blst::min_pk::PublicKey::from_bytes(&pk.encode()).unwrap())
+            .map(|pk| blst::min_sig::PublicKey::from_bytes(&pk.encode()).unwrap())
             .collect::<Vec<_>>();
         let public = public.iter().collect::<Vec<_>>();
-        let signature = blst::min_pk::Signature::from_bytes(&signature.encode()).unwrap();
+        let signature = blst::min_sig::Signature::from_bytes(&signature.encode()).unwrap();
         match signature.fast_aggregate_verify(true, message, MESSAGE, &public) {
             BLST_ERROR::BLST_SUCCESS => Ok(()),
             e => Err(e),
@@ -834,10 +834,10 @@ mod tests {
     where
         I: IntoIterator<Item = &'a [u8]>,
     {
-        let public = blst::min_pk::PublicKey::from_bytes(&public.encode()).unwrap();
+        let public = blst::min_sig::PublicKey::from_bytes(&public.encode()).unwrap();
         let msgs = msgs.into_iter().collect::<Vec<_>>();
         let pks = vec![&public; msgs.len()];
-        let signature = blst::min_pk::Signature::from_bytes(&signature.encode()).unwrap();
+        let signature = blst::min_sig::Signature::from_bytes(&signature.encode()).unwrap();
         match signature.aggregate_verify(true, &msgs, MESSAGE, &pks, true) {
             BLST_ERROR::BLST_SUCCESS => Ok(()),
             e => Err(e),
