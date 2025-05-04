@@ -1035,4 +1035,31 @@ mod tests {
         let pk = poly::public(&group_poly);
         verify_message(pk, None, b"payload", &sig1).unwrap();
     }
+
+    #[test]
+    fn test_threshold_signature_recover_multiple() {
+        let mut rng = StdRng::seed_from_u64(3333);
+        let (n, t) = (6, quorum(6));
+        let (group_poly, shares) = crate::bls12381::dkg::ops::generate_shares(&mut rng, None, n, t);
+
+        // Produce partial signatures for the first `t` shares.
+        let partials_1: Vec<_> = shares
+            .iter()
+            .take(t as usize)
+            .map(|s| partial_sign_message(s, None, b"payload1"))
+            .collect();
+        let partials_2: Vec<_> = shares
+            .iter()
+            .take(t as usize)
+            .map(|s| partial_sign_message(s, None, b"payload2"))
+            .collect();
+
+        // Recover signatures
+        let (sig_1, sig_2) = threshold_signature_recover_pair(t, &partials_1, &partials_2).unwrap();
+
+        // Verify with the aggregated public key.
+        let pk = poly::public(&group_poly);
+        verify_message(pk, None, b"payload1", &sig_1).unwrap();
+        verify_message(pk, None, b"payload2", &sig_2).unwrap();
+    }
 }
