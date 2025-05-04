@@ -701,12 +701,14 @@ pub(super) fn equal(pk: &G1, sig: &G2, hm: &G2) -> bool {
 ///
 /// Filters out pairs where the point is the identity element (infinity).
 /// Returns an error if the lengths of the input slices mismatch.
-pub(crate) fn msm_g1(points: &[G1], scalars: &[Scalar]) -> G1 {
+pub fn msm_g1(points: &[G1], scalars: &[Scalar]) -> G1 {
     // Prepare points (affine) and scalars (raw blst_scalar), filtering identity points
     assert_eq!(points.len(), scalars.len(), "mismatched lengths");
     let mut points_affine_filtered = Vec::with_capacity(points.len());
     let mut scalars_raw_filtered = Vec::with_capacity(scalars.len());
 
+    // Document skipping any paris where both aren't zero
+    // TODO: https://github.com/supranational/blst/blob/cbc7e166a10d7286b91a3a7bea341e708962db13/src/multi_scalar.c#L10-L12
     for (point, scalar) in points.iter().zip(scalars.iter()) {
         // Skip identity points, as scalar * identity = identity
         if *point == G1::zero() {
@@ -756,7 +758,7 @@ pub(crate) fn msm_g1(points: &[G1], scalars: &[Scalar]) -> G1 {
 ///
 /// Filters out pairs where the point is the identity element (infinity).
 /// Returns an error if the lengths of the input slices mismatch.
-pub(crate) fn msm_g2(points: &[G2], scalars: &[Scalar]) -> G2 {
+pub fn msm_g2(points: &[G2], scalars: &[Scalar]) -> G2 {
     // Prepare points (affine) and scalars (raw blst_scalar), filtering identity points
     assert_eq!(points.len(), scalars.len(), "mismatched lengths");
     let mut points_affine_filtered = Vec::with_capacity(points.len());
