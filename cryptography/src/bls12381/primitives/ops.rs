@@ -9,14 +9,15 @@
 
 use super::{
     group::{self, equal, Element, Point, Share, DST, MESSAGE, PROOF_OF_POSSESSION},
-    poly::{self, Eval, PartialSignature},
+    poly::{self, Eval, PartialSignature, Weight},
     Error,
 };
+use crate::bls12381::primitives::poly::{compute_weights, prepare_evaluations};
 use commonware_codec::Encode;
 use commonware_utils::union_unique;
 use rand::RngCore;
 use rayon::{prelude::*, ThreadPoolBuilder};
-use std::borrow::Cow;
+use std::{borrow::Cow, collections::BTreeMap};
 
 /// Returns a new keypair derived from the provided randomness.
 pub fn keypair<R: RngCore>(rng: &mut R) -> (group::Private, group::Public) {
@@ -236,6 +237,28 @@ where
     Ok(())
 }
 
+/// Recovers a signature from `threshold` partial signatures.
+///
+/// # Determinism
+///
+/// Signatures recovered by this function are deterministic and are safe
+/// to use in a consensus-critical context.
+///
+/// # Warning
+///
+/// This function assumes that each partial signature is unique and that
+/// that there exists exactly one partial signature for each index in
+/// the `weights` map.
+pub fn threshold_signature_recover_with_weights<'a, I>(
+    weights: &BTreeMap<u32, Weight>,
+    partials: I,
+) -> Result<group::Signature, Error>
+where
+    I: IntoIterator<Item = &'a PartialSignature>,
+{
+    poly::Signature::recover_with_weights(weights, partials)
+}
+
 /// Recovers a signature from at least `threshold` partial signatures.
 ///
 /// # Determinism
@@ -254,6 +277,75 @@ where
     I: IntoIterator<Item = &'a PartialSignature>,
 {
     poly::Signature::recover(threshold, partials)
+}
+
+/// Recovers multiple signatures from multiple sets of at least `threshold`
+/// partial signatures.
+///
+/// # Determinism
+///
+/// Signatures recovered by this function are deterministic and are safe
+/// to use in a consensus-critical context.
+///
+/// # Warning
+///
+/// This function assumes that each partial signature is unique and that
+/// each set of partial signatures has the same indices.
+pub fn threshold_signature_recover_multiple<'a, I>(
+    threshold: u32,
+    mut many_evals: Vec<I>,
+) -> Result<Vec<group::Signature>, Error>
+where
+    I: IntoIterator<Item = &'a PartialSignature>,
+{
+    // Process first set of evaluations
+    let evals = many_evals.swap_remove(0).into_iter().collect::<Vec<_>>();
+    let evals = prepare_evaluations(threshold, evals)?;
+    let mut prepared_evals = vec![evals];
+
+    // Prepare other evaluations and ensure they have the same indices
+    for evals in many_evals {
+        let evals = evals.into_iter().collect::<Vec<_>>();
+        let evals = prepare_evaluations(threshold, evals)?;
+        for (i, e) in prepared_evals[0].iter().enumerate() {
+            if e.index != evals[i].index {
+                return Err(Error::InvalidIndex);
+            }
+        }
+        prepared_evals.push(evals);
+    }
+
+    // Compute weights
+    let indices = prepared_evals[0]
+        .iter()
+        .map(|e| e.index)
+        .collect::<Vec<_>>();
+    let weights = compute_weights(indices)?;
+
+    // Recover signatures
+    let mut signatures = Vec::with_capacity(prepared_evals.len());
+    for evals in prepared_evals {
+        let signature = threshold_signature_recover_with_weights(&weights, evals)?;
+        signatures.push(signature);
+    }
+    Ok(signatures)
+}
+
+/// Recovers a pair of signatures from two sets of at least `threshold` partial signatures.
+///
+/// This is just a wrapper around `threshold_signature_recover_multiple`.
+pub fn threshold_signature_recover_pair<'a, I>(
+    threshold: u32,
+    first: I,
+    second: I,
+) -> Result<(group::Signature, group::Signature), Error>
+where
+    I: IntoIterator<Item = &'a PartialSignature>,
+{
+    let mut sigs = threshold_signature_recover_multiple(threshold, vec![first, second])?;
+    let second_sig = sigs.pop().unwrap();
+    let first_sig = sigs.pop().unwrap();
+    Ok((first_sig, second_sig))
 }
 
 /// Aggregates multiple public keys.
@@ -912,5 +1004,62 @@ mod tests {
             ),
             Err(Error::InvalidSignature)
         ));
+    }
+
+    #[test]
+    fn test_threshold_signature_recover_with_weights() {
+        let mut rng = StdRng::seed_from_u64(3333);
+        let (n, t) = (6, quorum(6));
+        let (group_poly, shares) = crate::bls12381::dkg::ops::generate_shares(&mut rng, None, n, t);
+
+        // Produce partial signatures for the first `t` shares.
+        let partials: Vec<_> = shares
+            .iter()
+            .take(t as usize)
+            .map(|s| partial_sign_message(s, None, b"payload"))
+            .collect();
+
+        // Compute barycentric weights once.
+        let indices = partials.iter().map(|e| e.index).collect::<Vec<_>>();
+        let weights = compute_weights(indices).unwrap();
+
+        // Path-1: generic recover
+        let sig1 = threshold_signature_recover(t, &partials).unwrap();
+
+        // Path-2: recover with *pre-computed* weights
+        let sig2 = threshold_signature_recover_with_weights(&weights, &partials).unwrap();
+
+        assert_eq!(sig1, sig2);
+
+        // Verify with the aggregated public key.
+        let pk = poly::public(&group_poly);
+        verify_message(pk, None, b"payload", &sig1).unwrap();
+    }
+
+    #[test]
+    fn test_threshold_signature_recover_multiple() {
+        let mut rng = StdRng::seed_from_u64(3333);
+        let (n, t) = (6, quorum(6));
+        let (group_poly, shares) = crate::bls12381::dkg::ops::generate_shares(&mut rng, None, n, t);
+
+        // Produce partial signatures for the first `t` shares.
+        let partials_1: Vec<_> = shares
+            .iter()
+            .take(t as usize)
+            .map(|s| partial_sign_message(s, None, b"payload1"))
+            .collect();
+        let partials_2: Vec<_> = shares
+            .iter()
+            .take(t as usize)
+            .map(|s| partial_sign_message(s, None, b"payload2"))
+            .collect();
+
+        // Recover signatures
+        let (sig_1, sig_2) = threshold_signature_recover_pair(t, &partials_1, &partials_2).unwrap();
+
+        // Verify with the aggregated public key.
+        let pk = poly::public(&group_poly);
+        verify_message(pk, None, b"payload1", &sig_1).unwrap();
+        verify_message(pk, None, b"payload2", &sig_2).unwrap();
     }
 }
