@@ -4,6 +4,7 @@ use crate::bls12381::{
     dkg::Error,
     primitives::{
         group::Share,
+        ops::msm_interpolate,
         poly::{self, compute_weights},
     },
 };
@@ -137,10 +138,7 @@ pub fn recover_public_with_weights(
                     .collect::<Vec<_>>();
 
                 // Use precomputed weights for interpolation
-                match poly::Public::recover_with_weights(weights, &evals) {
-                    Ok(point) => Ok(point),
-                    Err(_) => Err(Error::PublicKeyInterpolationFailed),
-                }
+                msm_interpolate(weights, &evals).map_err(|_| Error::PublicKeyInterpolationFailed)
             })
             .collect::<Result<Vec<_>, _>>()
     }) {

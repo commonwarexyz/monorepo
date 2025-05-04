@@ -237,6 +237,31 @@ where
     Ok(())
 }
 
+/// Interpolate the value of some [Point] with precomputed Barycentric Weights
+/// and multi-scalar multiplication (MSM).
+pub fn msm_interpolate<'a, P, I>(weights: &BTreeMap<u32, Weight>, evals: I) -> Result<P, Error>
+where
+    P: Point + 'a,
+    I: IntoIterator<Item = &'a Eval<P>>,
+{
+    // Populate points and scalars
+    let mut points = Vec::with_capacity(weights.len());
+    let mut scalars = Vec::with_capacity(weights.len());
+    for e in evals {
+        points.push(e.value.clone());
+        scalars.push(
+            weights
+                .get(&e.index)
+                .ok_or(Error::InvalidIndex)?
+                .as_scalar()
+                .clone(),
+        );
+    }
+
+    // Perform multi-scalar multiplication
+    Ok(P::msm(&points, &scalars))
+}
+
 /// Recovers a signature from `threshold` partial signatures.
 ///
 /// # Determinism
@@ -256,7 +281,7 @@ pub fn threshold_signature_recover_with_weights<'a, I>(
 where
     I: IntoIterator<Item = &'a PartialSignature>,
 {
-    poly::Signature::recover_with_weights(weights, partials)
+    msm_interpolate(weights, partials)
 }
 
 /// Recovers a signature from at least `threshold` partial signatures.
@@ -276,7 +301,18 @@ pub fn threshold_signature_recover<'a, I>(
 where
     I: IntoIterator<Item = &'a PartialSignature>,
 {
-    poly::Signature::recover(threshold, partials)
+    // Prepare evaluations
+    let evals = prepare_evaluations(threshold, partials)?;
+
+    // Compute weights
+    let indices = evals.iter().map(|e| e.index).collect::<Vec<_>>();
+    let weights = compute_weights(indices)?;
+
+    // Perform interpolation with the precomputed weights.
+    //
+    // We call this function instead of `poly::recover_with_weights` because
+    // it will use multi-scalar multiplication (MSM) to recover the signature.
+    threshold_signature_recover_with_weights(&weights, evals)
 }
 
 /// Recovers multiple signatures from multiple sets of at least `threshold`
@@ -488,7 +524,8 @@ mod tests {
     use blst::BLST_ERROR;
     use commonware_codec::DecodeExt;
     use commonware_utils::quorum;
-    use group::{G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION};
+    use group::{G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2};
+    use poly::Poly;
     use rand::prelude::*;
 
     #[test]
@@ -1061,5 +1098,87 @@ mod tests {
         let pk = poly::public(&group_poly);
         verify_message(pk, None, b"payload1", &sig_1).unwrap();
         verify_message(pk, None, b"payload2", &sig_2).unwrap();
+    }
+
+    #[test]
+    fn test_msm_interpolate_vs_poly_recover() {
+        let mut rng = StdRng::seed_from_u64(4242);
+        let degree = 5;
+        let threshold = degree + 1;
+        let poly_scalar = poly::new_from(degree, &mut rng);
+
+        // Commit to G2 (Signature group)
+        let poly_g2 = Poly::<G2>::commit(poly_scalar);
+
+        // Generate evaluations (enough to meet threshold)
+        let evals: Vec<_> = (0..threshold).map(|i| poly_g2.evaluate(i)).collect();
+        let eval_refs: Vec<_> = evals.iter().collect(); // Get references
+
+        // Compute weights
+        let indices: Vec<u32> = eval_refs.iter().map(|e| e.index).collect();
+        let weights = poly::compute_weights(indices).expect("Failed to compute weights");
+
+        // Calculate using original polynomial recovery (naive interpolation)
+        let expected_result = poly::Signature::recover_with_weights(&weights, eval_refs.clone())
+            .expect("poly::recover_with_weights failed");
+
+        // Calculate using MSM interpolation
+        let msm_result = msm_interpolate(&weights, eval_refs).expect("msm_interpolate failed");
+
+        // Compare results
+        assert_eq!(
+            expected_result, msm_result,
+            "MSM interpolation result differs from polynomial recovery"
+        );
+
+        // Also check against the known constant term
+        assert_eq!(
+            expected_result,
+            *poly_g2.constant(),
+            "Recovered value does not match original constant term"
+        );
+    }
+
+    #[test]
+    fn test_msm_interpolate_invalid_index() {
+        let mut rng = StdRng::seed_from_u64(5555);
+        let degree = 2;
+        let threshold = degree + 1;
+        let poly_scalar = poly::new_from(degree, &mut rng);
+        let poly_g2 = Poly::<G2>::commit(poly_scalar);
+
+        // Generate threshold evaluations
+        let evals: Vec<_> = (0..threshold).map(|i| poly_g2.evaluate(i)).collect();
+        let eval_refs: Vec<_> = evals.iter().collect();
+
+        // Compute weights for *different* indices
+        let wrong_indices: Vec<u32> = (threshold..threshold * 2).collect();
+        let weights = poly::compute_weights(wrong_indices).expect("Failed to compute weights");
+
+        // Try to interpolate with mismatched weights/evals
+        let result = msm_interpolate::<G2, _>(&weights, eval_refs);
+
+        // Expect InvalidIndex error
+        assert!(
+            matches!(result, Err(Error::InvalidIndex)),
+            "Expected InvalidIndex error for mismatched weights"
+        );
+    }
+
+    #[test]
+    fn test_msm_interpolate_empty() {
+        let weights: BTreeMap<u32, Weight> = BTreeMap::new();
+        let evals: Vec<Eval<G2>> = Vec::new();
+        let eval_refs: Vec<&Eval<G2>> = evals.iter().collect();
+
+        // Interpolate with empty inputs
+        let result = msm_interpolate(&weights, eval_refs).expect("msm_interpolate failed on empty");
+
+        // Expect identity element
+        assert_eq!(
+            result,
+            G2::zero(),
+            "Expected G2 identity for empty interpolation"
+        );
     }
 }

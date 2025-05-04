@@ -94,6 +94,13 @@ pub fn new_from<R: RngCore>(degree: u32, rng: &mut R) -> Poly<Scalar> {
 /// A Barycentric Weight for interpolation at x=0.
 pub struct Weight(Scalar);
 
+impl Weight {
+    /// Returns the weight as a [Scalar].
+    pub fn as_scalar(&self) -> &Scalar {
+        &self.0
+    }
+}
+
 /// Prepares at least `t` evaluations for Lagrange interpolation.
 pub fn prepare_evaluations<'a, C, I>(threshold: u32, evals: I) -> Result<Vec<&'a Eval<C>>, Error>
 where
