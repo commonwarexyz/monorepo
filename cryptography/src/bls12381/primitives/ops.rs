@@ -1005,4 +1005,34 @@ mod tests {
             Err(Error::InvalidSignature)
         ));
     }
+
+    #[test]
+    fn test_threshold_signature_recover_with_weights() {
+        let mut rng = StdRng::seed_from_u64(3333);
+        let (n, t) = (6, quorum(6));
+        let (group_poly, shares) = crate::bls12381::dkg::ops::generate_shares(&mut rng, None, n, t);
+
+        // Produce partial signatures for the first `t` shares.
+        let partials: Vec<_> = shares
+            .iter()
+            .take(t as usize)
+            .map(|s| partial_sign_message(s, None, b"payload"))
+            .collect();
+
+        // Compute barycentric weights once.
+        let indices = partials.iter().map(|e| e.index).collect::<Vec<_>>();
+        let weights = compute_weights(indices).unwrap();
+
+        // Path-1: generic recover
+        let sig1 = threshold_signature_recover(t, &partials).unwrap();
+
+        // Path-2: recover with *pre-computed* weights
+        let sig2 = threshold_signature_recover_with_weights(&weights, &partials).unwrap();
+
+        assert_eq!(sig1, sig2);
+
+        // Verify with the aggregated public key.
+        let pk = poly::public(&group_poly);
+        verify_message(pk, None, b"payload", &sig1).unwrap();
+    }
 }
