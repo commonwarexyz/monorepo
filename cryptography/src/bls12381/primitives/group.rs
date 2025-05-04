@@ -15,11 +15,12 @@ use blst::{
     blst_fr_from_uint64, blst_fr_inverse, blst_fr_mul, blst_fr_sub, blst_hash_to_g1,
     blst_hash_to_g2, blst_keygen, blst_p1, blst_p1_add_or_double, blst_p1_affine, blst_p1_compress,
     blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult, blst_p1_to_affine,
-    blst_p1_uncompress, blst_p2, blst_p2_add_or_double, blst_p2_affine, blst_p2_compress,
-    blst_p2_from_affine, blst_p2_in_g2, blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine,
-    blst_p2_uncompress, blst_p2s_mult_pippenger, blst_p2s_mult_pippenger_scratch_sizeof,
-    blst_scalar, blst_scalar_from_bendian, blst_scalar_from_fr, blst_sk_check, Pairing,
-    BLS12_381_G1, BLS12_381_G2, BLS12_381_NEG_G1, BLST_ERROR,
+    blst_p1_uncompress, blst_p1s_mult_pippenger, blst_p1s_mult_pippenger_scratch_sizeof, blst_p2,
+    blst_p2_add_or_double, blst_p2_affine, blst_p2_compress, blst_p2_from_affine, blst_p2_in_g2,
+    blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
+    blst_p2s_mult_pippenger_scratch_sizeof, blst_scalar, blst_scalar_from_bendian,
+    blst_scalar_from_fr, blst_sk_check, Pairing, BLS12_381_G1, BLS12_381_G2, BLS12_381_NEG_G1,
+    BLST_ERROR,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -693,6 +694,128 @@ pub(super) fn equal(pk: &G1, sig: &G2, hm: &G2) -> bool {
     // is equivalent to `e(pk,hm) == e(G1::one(),sig)`.
     pairing.commit();
     pairing.finalverify(None)
+}
+
+/// Performs multi-scalar multiplication (MSM) on G1 points using Pippenger's algorithm.
+/// Computes `sum(scalars[i] * points[i])`.
+///
+/// Filters out pairs where the point is the identity element (infinity).
+/// Returns an error if the lengths of the input slices mismatch.
+pub(crate) fn msm_g1(points: &[G1], scalars: &[Scalar]) -> Result<G1, super::Error> {
+    // Check for mismatched lengths
+    if points.len() != scalars.len() {
+        return Err(super::Error::MismatchedLengths(points.len(), scalars.len()));
+    }
+
+    // Prepare points (affine) and scalars (raw blst_scalar), filtering identity points
+    let mut points_affine_filtered = Vec::with_capacity(points.len());
+    let mut scalars_raw_filtered = Vec::with_capacity(scalars.len());
+
+    for (point, scalar) in points.iter().zip(scalars.iter()) {
+        // Skip identity points, as scalar * identity = identity
+        if *point == G1::zero() {
+            continue;
+        }
+        points_affine_filtered.push(point.to_affine());
+        scalars_raw_filtered.push(scalar.to_blst_scalar());
+    }
+
+    // If all points were identity, the result is identity
+    let n_points = points_affine_filtered.len();
+    if n_points == 0 {
+        return Ok(G1::zero());
+    }
+
+    // Create vectors of pointers for the blst API
+    // These vectors hold pointers *to* the elements in the filtered vectors above.
+    let points_ptrs: Vec<*const blst_p1_affine> = points_affine_filtered
+        .iter()
+        .map(|p| p as *const _)
+        .collect();
+    let scalars_ptrs: Vec<*const blst_scalar> =
+        scalars_raw_filtered.iter().map(|s| s as *const _).collect();
+
+    // Allocate scratch space for Pippenger algorithm
+    // Reference: https://github.com/supranational/blst/blob/master/bindings/rust/src/pippenger.rs#L21-L29
+    let scratch_size = unsafe { blst_p1s_mult_pippenger_scratch_sizeof(n_points) };
+    let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8]; // Ensure alignment
+
+    // Perform multi-scalar multiplication
+    let mut msm_result = blst_p1::default();
+
+    unsafe {
+        // Use the p1s variant which takes *const *const blst_scalar
+        blst_p1s_mult_pippenger(
+            &mut msm_result,
+            points_ptrs.as_ptr(), // Pass pointer to array of pointers to points
+            n_points,
+            scalars_ptrs.as_ptr(), // Pass pointer to array of pointers to scalars
+            SCALAR_BITS,           // Using SCALAR_BITS (255) ensures full scalar range
+            scratch.as_mut_ptr() as *mut _,
+        );
+    }
+
+    Ok(G1::from_blst_p1(msm_result))
+}
+
+/// Performs multi-scalar multiplication (MSM) on G2 points using Pippenger's algorithm.
+/// Computes `sum(scalars[i] * points[i])`.
+///
+/// Filters out pairs where the point is the identity element (infinity).
+/// Returns an error if the lengths of the input slices mismatch.
+pub(crate) fn msm_g2(points: &[G2], scalars: &[Scalar]) -> Result<G2, super::Error> {
+    // Check for mismatched lengths
+    if points.len() != scalars.len() {
+        return Err(super::Error::MismatchedLengths(points.len(), scalars.len()));
+    }
+
+    // Prepare points (affine) and scalars (raw blst_scalar), filtering identity points
+    let mut points_affine_filtered = Vec::with_capacity(points.len());
+    let mut scalars_raw_filtered = Vec::with_capacity(scalars.len());
+
+    for (point, scalar) in points.iter().zip(scalars.iter()) {
+        // Skip identity points, as scalar * identity = identity
+        if *point == G2::zero() {
+            continue;
+        }
+        points_affine_filtered.push(point.to_affine());
+        scalars_raw_filtered.push(scalar.to_blst_scalar());
+    }
+
+    // If all points were identity, the result is identity
+    let n_points = points_affine_filtered.len();
+    if n_points == 0 {
+        return Ok(G2::zero());
+    }
+
+    // Create vectors of pointers for the blst API
+    let points_ptrs: Vec<*const blst_p2_affine> = points_affine_filtered
+        .iter()
+        .map(|p| p as *const _)
+        .collect();
+    let scalars_ptrs: Vec<*const blst_scalar> =
+        scalars_raw_filtered.iter().map(|s| s as *const _).collect();
+
+    // Allocate scratch space for Pippenger algorithm
+    let scratch_size = unsafe { blst_p2s_mult_pippenger_scratch_sizeof(n_points) };
+    let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8]; // Ensure alignment
+
+    // Perform multi-scalar multiplication
+    let mut msm_result = blst_p2::default();
+
+    unsafe {
+        // Use the p2s variant which takes *const *const blst_scalar
+        blst_p2s_mult_pippenger(
+            &mut msm_result,
+            points_ptrs.as_ptr(), // Pass pointer to array of pointers to points
+            n_points,
+            scalars_ptrs.as_ptr(), // Pass pointer to array of pointers to scalars
+            SCALAR_BITS,           // Using SCALAR_BITS (255) ensures full scalar range
+            scratch.as_mut_ptr() as *mut _,
+        );
+    }
+
+    Ok(G2::from_blst_p2(msm_result))
 }
 
 #[cfg(test)]
