@@ -99,6 +99,10 @@ pub fn construct_public(
     Ok(public)
 }
 
+/// Recover public polynomial by interpolating coefficient-wise all
+/// polynomials using precomputed Barycentric Weights.
+///
+/// It is assumed that the required number of commitments are provided.
 pub fn recover_public_with_weights(
     previous: &poly::Public,
     commitments: BTreeMap<u32, poly::Public>,
