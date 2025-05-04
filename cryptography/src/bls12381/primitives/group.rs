@@ -697,17 +697,13 @@ pub(super) fn equal(pk: &G1, sig: &G2, hm: &G2) -> bool {
 }
 
 /// Performs multi-scalar multiplication (MSM) on G1 points using Pippenger's algorithm.
-/// Computes `sum(scalars[i] * points[i])`.
+/// Computes `scalar * points`.
 ///
 /// Filters out pairs where the point is the identity element (infinity).
 /// Returns an error if the lengths of the input slices mismatch.
-pub(crate) fn msm_g1(points: &[G1], scalars: &[Scalar]) -> Result<G1, super::Error> {
-    // Check for mismatched lengths
-    if points.len() != scalars.len() {
-        return Err(super::Error::MismatchedLengths(points.len(), scalars.len()));
-    }
-
+pub(crate) fn msm_g1(points: &[G1], scalars: &[Scalar]) -> G1 {
     // Prepare points (affine) and scalars (raw blst_scalar), filtering identity points
+    assert_eq!(points.len(), scalars.len(), "mismatched lengths");
     let mut points_affine_filtered = Vec::with_capacity(points.len());
     let mut scalars_raw_filtered = Vec::with_capacity(scalars.len());
 
@@ -723,7 +719,7 @@ pub(crate) fn msm_g1(points: &[G1], scalars: &[Scalar]) -> Result<G1, super::Err
     // If all points were identity, the result is identity
     let n_points = points_affine_filtered.len();
     if n_points == 0 {
-        return Ok(G1::zero());
+        return G1::zero();
     }
 
     // Create vectors of pointers for the blst API
@@ -732,8 +728,7 @@ pub(crate) fn msm_g1(points: &[G1], scalars: &[Scalar]) -> Result<G1, super::Err
         .iter()
         .map(|p| p as *const _)
         .collect();
-    let scalars_ptrs: Vec<*const blst_scalar> =
-        scalars_raw_filtered.iter().map(|s| s as *const _).collect();
+    let scalars_ptrs: Vec<*const u8> = scalars_raw_filtered.iter().map(|s| s.b.as_ptr()).collect();
 
     // Allocate scratch space for Pippenger algorithm
     // Reference: https://github.com/supranational/blst/blob/master/bindings/rust/src/pippenger.rs#L21-L29
@@ -742,9 +737,7 @@ pub(crate) fn msm_g1(points: &[G1], scalars: &[Scalar]) -> Result<G1, super::Err
 
     // Perform multi-scalar multiplication
     let mut msm_result = blst_p1::default();
-
     unsafe {
-        // Use the p1s variant which takes *const *const blst_scalar
         blst_p1s_mult_pippenger(
             &mut msm_result,
             points_ptrs.as_ptr(), // Pass pointer to array of pointers to points
@@ -755,7 +748,7 @@ pub(crate) fn msm_g1(points: &[G1], scalars: &[Scalar]) -> Result<G1, super::Err
         );
     }
 
-    Ok(G1::from_blst_p1(msm_result))
+    G1::from_blst_p1(msm_result)
 }
 
 /// Performs multi-scalar multiplication (MSM) on G2 points using Pippenger's algorithm.
@@ -763,13 +756,9 @@ pub(crate) fn msm_g1(points: &[G1], scalars: &[Scalar]) -> Result<G1, super::Err
 ///
 /// Filters out pairs where the point is the identity element (infinity).
 /// Returns an error if the lengths of the input slices mismatch.
-pub(crate) fn msm_g2(points: &[G2], scalars: &[Scalar]) -> Result<G2, super::Error> {
-    // Check for mismatched lengths
-    if points.len() != scalars.len() {
-        return Err(super::Error::MismatchedLengths(points.len(), scalars.len()));
-    }
-
+pub(crate) fn msm_g2(points: &[G2], scalars: &[Scalar]) -> G2 {
     // Prepare points (affine) and scalars (raw blst_scalar), filtering identity points
+    assert_eq!(points.len(), scalars.len(), "mismatched lengths");
     let mut points_affine_filtered = Vec::with_capacity(points.len());
     let mut scalars_raw_filtered = Vec::with_capacity(scalars.len());
 
@@ -785,7 +774,7 @@ pub(crate) fn msm_g2(points: &[G2], scalars: &[Scalar]) -> Result<G2, super::Err
     // If all points were identity, the result is identity
     let n_points = points_affine_filtered.len();
     if n_points == 0 {
-        return Ok(G2::zero());
+        return G2::zero();
     }
 
     // Create vectors of pointers for the blst API
@@ -793,8 +782,7 @@ pub(crate) fn msm_g2(points: &[G2], scalars: &[Scalar]) -> Result<G2, super::Err
         .iter()
         .map(|p| p as *const _)
         .collect();
-    let scalars_ptrs: Vec<*const blst_scalar> =
-        scalars_raw_filtered.iter().map(|s| s as *const _).collect();
+    let scalars_ptrs: Vec<*const u8> = scalars_raw_filtered.iter().map(|s| s.b.as_ptr()).collect();
 
     // Allocate scratch space for Pippenger algorithm
     let scratch_size = unsafe { blst_p2s_mult_pippenger_scratch_sizeof(n_points) };
@@ -802,9 +790,7 @@ pub(crate) fn msm_g2(points: &[G2], scalars: &[Scalar]) -> Result<G2, super::Err
 
     // Perform multi-scalar multiplication
     let mut msm_result = blst_p2::default();
-
     unsafe {
-        // Use the p2s variant which takes *const *const blst_scalar
         blst_p2s_mult_pippenger(
             &mut msm_result,
             points_ptrs.as_ptr(), // Pass pointer to array of pointers to points
@@ -815,7 +801,7 @@ pub(crate) fn msm_g2(points: &[G2], scalars: &[Scalar]) -> Result<G2, super::Err
         );
     }
 
-    Ok(G2::from_blst_p2(msm_result))
+    G2::from_blst_p2(msm_result)
 }
 
 #[cfg(test)]
