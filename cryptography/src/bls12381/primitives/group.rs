@@ -66,6 +66,7 @@ pub trait Point: Element {
     /// Maps the provided data to a group element.
     fn map(&mut self, dst: DST, message: &[u8]);
 
+    /// Performs a multi‑scalar multiplication of the provided points and scalars.
     fn msm(points: &[Self], scalars: &[Scalar]) -> Self;
 }
 
@@ -243,7 +244,7 @@ impl Scalar {
     }
 
     /// Converts the scalar to the raw `blst_scalar` type.
-    pub(crate) fn to_blst_scalar(&self) -> blst_scalar {
+    pub(crate) fn as_blst_scalar(&self) -> blst_scalar {
         let mut scalar = blst_scalar::default();
         unsafe { blst_scalar_from_fr(&mut scalar, &self.0) };
         scalar
@@ -409,7 +410,7 @@ impl G1 {
     }
 
     /// Converts the G1 point to its affine representation.
-    pub(crate) fn to_affine(&self) -> blst_p1_affine {
+    pub(crate) fn as_affine(&self) -> blst_p1_affine {
         let mut affine = blst_p1_affine::default();
         unsafe { blst_p1_to_affine(&mut affine, &self.0) };
         affine
@@ -518,8 +519,62 @@ impl Point for G1 {
         }
     }
 
+    /// Performs multi-scalar multiplication (MSM) on G1 points using Pippenger's algorithm.
+    /// Computes `sum(scalars[i] * points[i])`.
+    ///
+    /// Filters out pairs where the point is the identity element (infinity).
+    /// Returns an error if the lengths of the input slices mismatch.
     fn msm(points: &[Self], scalars: &[Scalar]) -> Self {
-        msm_g1(points, scalars)
+        // Assert input validity
+        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
+
+        // Prepare points (affine) and scalars (raw blst_scalar)
+        let mut points_filtered = Vec::with_capacity(points.len());
+        let mut scalars_filtered = Vec::with_capacity(scalars.len());
+        for (point, scalar) in points.iter().zip(scalars.iter()) {
+            // `blst` does not filter out infinity, so we must ensure it is impossible.
+            //
+            // Sources:
+            // * https://github.com/supranational/blst/blob/cbc7e166a10d7286b91a3a7bea341e708962db13/src/multi_scalar.c#L10-L12
+            // * https://github.com/MystenLabs/fastcrypto/blob/0acf0ff1a163c60e0dec1e16e4fbad4a4cf853bd/fastcrypto/src/groups/bls12381.rs#L160-L194
+            if *point == G1::zero() || scalar == &Scalar::zero() {
+                continue;
+            }
+
+            // Add to filtered vectors
+            points_filtered.push(point.as_affine());
+            scalars_filtered.push(scalar.as_blst_scalar());
+        }
+
+        // If all points were filtered, return zero.
+        if points_filtered.is_empty() {
+            return G1::zero();
+        }
+
+        // Create vectors of pointers for the blst API.
+        // These vectors hold pointers *to* the elements in the filtered vectors above.
+        let points: Vec<*const blst_p1_affine> =
+            points_filtered.iter().map(|p| p as *const _).collect();
+        let scalars: Vec<*const u8> = scalars_filtered.iter().map(|s| s.b.as_ptr()).collect();
+
+        // Allocate scratch space for Pippenger's algorithm.
+        let scratch_size = unsafe { blst_p1s_mult_pippenger_scratch_sizeof(points.len()) };
+        let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8];
+
+        // Perform multi-scalar multiplication
+        let mut msm_result = blst_p1::default();
+        unsafe {
+            blst_p1s_mult_pippenger(
+                &mut msm_result,
+                points.as_ptr(),
+                points.len(),
+                scalars.as_ptr(),
+                SCALAR_BITS, // Using SCALAR_BITS (255) ensures full scalar range
+                scratch.as_mut_ptr() as *mut _,
+            );
+        }
+
+        G1::from_blst_p1(msm_result)
     }
 }
 
@@ -546,7 +601,7 @@ impl G2 {
     }
 
     /// Converts the G2 point to its affine representation.
-    pub(crate) fn to_affine(&self) -> blst_p2_affine {
+    pub(crate) fn as_affine(&self) -> blst_p2_affine {
         let mut affine = blst_p2_affine::default();
         unsafe { blst_p2_to_affine(&mut affine, &self.0) };
         affine
@@ -655,8 +710,59 @@ impl Point for G2 {
         }
     }
 
+    /// Performs multi-scalar multiplication (MSM) on G2 points using Pippenger's algorithm.
+    /// Computes `sum(scalars[i] * points[i])`.
+    ///
+    /// Filters out pairs where the point is the identity element (infinity).
+    /// Returns an error if the lengths of the input slices mismatch.
     fn msm(points: &[Self], scalars: &[Scalar]) -> Self {
-        msm_g2(points, scalars)
+        // Assert input validity
+        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
+
+        // Prepare points (affine) and scalars (raw blst_scalar), filtering identity points
+        let mut points_filtered = Vec::with_capacity(points.len());
+        let mut scalars_filtered = Vec::with_capacity(scalars.len());
+        for (point, scalar) in points.iter().zip(scalars.iter()) {
+            // `blst` does not filter out infinity, so we must ensure it is impossible.
+            //
+            // Sources:
+            // * https://github.com/supranational/blst/blob/cbc7e166a10d7286b91a3a7bea341e708962db13/src/multi_scalar.c#L10-L12
+            // * https://github.com/MystenLabs/fastcrypto/blob/0acf0ff1a163c60e0dec1e16e4fbad4a4cf853bd/fastcrypto/src/groups/bls12381.rs#L160-L194
+            if *point == G2::zero() || scalar == &Scalar::zero() {
+                continue;
+            }
+            points_filtered.push(point.as_affine());
+            scalars_filtered.push(scalar.as_blst_scalar());
+        }
+
+        // If all points were filtered, return zero.
+        if points_filtered.is_empty() {
+            return G2::zero();
+        }
+
+        // Create vectors of pointers for the blst API
+        let points: Vec<*const blst_p2_affine> =
+            points_filtered.iter().map(|p| p as *const _).collect();
+        let scalars: Vec<*const u8> = scalars_filtered.iter().map(|s| s.b.as_ptr()).collect();
+
+        // Allocate scratch space for Pippenger algorithm
+        let scratch_size = unsafe { blst_p2s_mult_pippenger_scratch_sizeof(points.len()) };
+        let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8];
+
+        // Perform multi-scalar multiplication
+        let mut msm_result = blst_p2::default();
+        unsafe {
+            blst_p2s_mult_pippenger(
+                &mut msm_result,
+                points.as_ptr(),
+                points.len(),
+                scalars.as_ptr(),
+                SCALAR_BITS, // Using SCALAR_BITS (255) ensures full scalar range
+                scratch.as_mut_ptr() as *mut _,
+            );
+        }
+
+        G2::from_blst_p2(msm_result)
     }
 }
 
@@ -704,116 +810,6 @@ pub(super) fn equal(pk: &G1, sig: &G2, hm: &G2) -> bool {
     // is equivalent to `e(pk,hm) == e(G1::one(),sig)`.
     pairing.commit();
     pairing.finalverify(None)
-}
-
-/// Performs multi-scalar multiplication (MSM) on G1 points using Pippenger's algorithm.
-/// Computes `scalar * points`.
-///
-/// Filters out pairs where the point is the identity element (infinity).
-/// Returns an error if the lengths of the input slices mismatch.
-pub fn msm_g1(points: &[G1], scalars: &[Scalar]) -> G1 {
-    // Prepare points (affine) and scalars (raw blst_scalar), filtering identity points
-    assert_eq!(points.len(), scalars.len(), "mismatched lengths");
-    let mut points_affine_filtered = Vec::with_capacity(points.len());
-    let mut scalars_raw_filtered = Vec::with_capacity(scalars.len());
-
-    // Document skipping any paris where both aren't zero
-    // TODO: https://github.com/supranational/blst/blob/cbc7e166a10d7286b91a3a7bea341e708962db13/src/multi_scalar.c#L10-L12
-    for (point, scalar) in points.iter().zip(scalars.iter()) {
-        // Skip identity points, as scalar * identity = identity
-        if *point == G1::zero() {
-            continue;
-        }
-        points_affine_filtered.push(point.to_affine());
-        scalars_raw_filtered.push(scalar.to_blst_scalar());
-    }
-
-    // If all points were identity, the result is identity
-    let n_points = points_affine_filtered.len();
-    if n_points == 0 {
-        return G1::zero();
-    }
-
-    // Create vectors of pointers for the blst API
-    // These vectors hold pointers *to* the elements in the filtered vectors above.
-    let points_ptrs: Vec<*const blst_p1_affine> = points_affine_filtered
-        .iter()
-        .map(|p| p as *const _)
-        .collect();
-    let scalars_ptrs: Vec<*const u8> = scalars_raw_filtered.iter().map(|s| s.b.as_ptr()).collect();
-
-    // Allocate scratch space for Pippenger algorithm
-    // Reference: https://github.com/supranational/blst/blob/master/bindings/rust/src/pippenger.rs#L21-L29
-    let scratch_size = unsafe { blst_p1s_mult_pippenger_scratch_sizeof(n_points) };
-    let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8]; // Ensure alignment
-
-    // Perform multi-scalar multiplication
-    let mut msm_result = blst_p1::default();
-    unsafe {
-        blst_p1s_mult_pippenger(
-            &mut msm_result,
-            points_ptrs.as_ptr(), // Pass pointer to array of pointers to points
-            n_points,
-            scalars_ptrs.as_ptr(), // Pass pointer to array of pointers to scalars
-            SCALAR_BITS,           // Using SCALAR_BITS (255) ensures full scalar range
-            scratch.as_mut_ptr() as *mut _,
-        );
-    }
-
-    G1::from_blst_p1(msm_result)
-}
-
-/// Performs multi-scalar multiplication (MSM) on G2 points using Pippenger's algorithm.
-/// Computes `sum(scalars[i] * points[i])`.
-///
-/// Filters out pairs where the point is the identity element (infinity).
-/// Returns an error if the lengths of the input slices mismatch.
-pub fn msm_g2(points: &[G2], scalars: &[Scalar]) -> G2 {
-    // Prepare points (affine) and scalars (raw blst_scalar), filtering identity points
-    assert_eq!(points.len(), scalars.len(), "mismatched lengths");
-    let mut points_affine_filtered = Vec::with_capacity(points.len());
-    let mut scalars_raw_filtered = Vec::with_capacity(scalars.len());
-
-    for (point, scalar) in points.iter().zip(scalars.iter()) {
-        // Skip identity points, as scalar * identity = identity
-        if *point == G2::zero() {
-            continue;
-        }
-        points_affine_filtered.push(point.to_affine());
-        scalars_raw_filtered.push(scalar.to_blst_scalar());
-    }
-
-    // If all points were identity, the result is identity
-    let n_points = points_affine_filtered.len();
-    if n_points == 0 {
-        return G2::zero();
-    }
-
-    // Create vectors of pointers for the blst API
-    let points_ptrs: Vec<*const blst_p2_affine> = points_affine_filtered
-        .iter()
-        .map(|p| p as *const _)
-        .collect();
-    let scalars_ptrs: Vec<*const u8> = scalars_raw_filtered.iter().map(|s| s.b.as_ptr()).collect();
-
-    // Allocate scratch space for Pippenger algorithm
-    let scratch_size = unsafe { blst_p2s_mult_pippenger_scratch_sizeof(n_points) };
-    let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8]; // Ensure alignment
-
-    // Perform multi-scalar multiplication
-    let mut msm_result = blst_p2::default();
-    unsafe {
-        blst_p2s_mult_pippenger(
-            &mut msm_result,
-            points_ptrs.as_ptr(), // Pass pointer to array of pointers to points
-            n_points,
-            scalars_ptrs.as_ptr(), // Pass pointer to array of pointers to scalars
-            SCALAR_BITS,           // Using SCALAR_BITS (255) ensures full scalar range
-            scratch.as_mut_ptr() as *mut _,
-        );
-    }
-
-    G2::from_blst_p2(msm_result)
 }
 
 #[cfg(test)]

@@ -136,6 +136,8 @@ pub fn recover_public_with_weights(
                         value: commitment.get(coeff),
                     })
                     .collect::<Vec<_>>();
+
+                // Use precomputed weights for interpolation
                 msm_interpolate(weights, &evals).map_err(|_| Error::PublicKeyInterpolationFailed)
             })
             .collect::<Result<Vec<_>, _>>()
