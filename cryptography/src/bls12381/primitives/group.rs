@@ -19,8 +19,8 @@ use blst::{
     blst_p2_add_or_double, blst_p2_affine, blst_p2_compress, blst_p2_from_affine, blst_p2_in_g2,
     blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
     blst_p2s_mult_pippenger_scratch_sizeof, blst_scalar, blst_scalar_from_bendian,
-    blst_scalar_from_fr, blst_sk_check, Pairing, BLS12_381_G1, BLS12_381_G2, BLS12_381_NEG_G2,
-    BLST_ERROR,
+    blst_scalar_from_fr, blst_sk_check, Pairing, BLS12_381_G1, BLS12_381_G2, BLS12_381_NEG_G1,
+    BLS12_381_NEG_G2, BLST_ERROR,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -68,6 +68,11 @@ pub trait Point: Element {
 
     /// Performs a multi‑scalar multiplication of the provided points and scalars.
     fn msm(points: &[Self], scalars: &[Scalar]) -> Self;
+
+    // TODO: improve naming
+    /// Verifies that `e(pk,hm)` is equal to `e(G2::one(),sig)` using a single product check with
+    /// a negated G2 generator (`e(pk,hm) * e(-G2::one(),sig) == 1`).
+    fn equal<O>(&self, other: &O, hm: &O) -> bool;
 }
 
 /// Wrapper around [`blst_fr`] that represents an element of the BLS12‑381
@@ -576,6 +581,33 @@ impl Point for G1 {
 
         G1::from_blst_p1(msm_result)
     }
+
+    fn equal<G2>(&self, sig: &G2, hm: &G2) -> bool {
+        // Create a pairing context
+        //
+        // We only handle pre-hashed messages, so we leave the domain separator tag (`DST`) empty.
+        let mut pairing = Pairing::new(false, &[]);
+
+        // Convert `sig` into affine and aggregate `e(-G1::one(), sig)`
+        let q = sig.as_blst_p2_affine();
+        unsafe {
+            pairing.raw_aggregate(&q, &BLS12_381_NEG_G1);
+        }
+
+        // Convert `pk` and `hm` into affine
+        let p = self.as_blst_p1_affine();
+        let q = hm.as_blst_p2_affine();
+
+        // Aggregate `e(pk, hm)`
+        pairing.raw_aggregate(&q, &p);
+
+        // Finalize the pairing accumulation and verify the result
+        //
+        // If `finalverify()` returns `true`, it means `e(pk,hm) * e(-G1::one(),sig) == 1`. This
+        // is equivalent to `e(pk,hm) == e(G1::one(),sig)`.
+        pairing.commit();
+        pairing.finalverify(None)
+    }
 }
 
 impl Debug for G1 {
@@ -764,6 +796,33 @@ impl Point for G2 {
 
         G2::from_blst_p2(msm_result)
     }
+
+    fn equal<G1>(&self, sig: &G1, hm: &G1) -> bool {
+        // Create a pairing context
+        //
+        // We only handle pre-hashed messages, so we leave the domain separator tag (`DST`) empty.
+        let mut pairing = Pairing::new(false, &[]);
+
+        // Convert `sig` into affine and aggregate `e(-G2::one(), sig)`
+        let q = sig.as_blst_p1_affine();
+        unsafe {
+            pairing.raw_aggregate(&BLS12_381_NEG_G2, &q);
+        }
+
+        // Convert `pk` and `hm` into affine
+        let mut p = self.as_blst_p2_affine();
+        let mut q = hm.as_blst_p1_affine();
+
+        // Aggregate `e(pk, hm)`
+        pairing.raw_aggregate(&p, &q);
+
+        // Finalize the pairing accumulation and verify the result
+        //
+        // If `finalverify()` returns `true`, it means `e(pk,hm) * e(-G2::one(),sig) == 1`. This
+        // is equivalent to `e(pk,hm) == e(G2::one(),sig)`.
+        pairing.commit();
+        pairing.finalverify(None)
+    }
 }
 
 impl Debug for G2 {
@@ -776,40 +835,6 @@ impl Display for G2 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", hex(&self.as_slice()))
     }
-}
-
-/// Verifies that `e(pk,hm)` is equal to `e(G2::one(),sig)` using a single product check with
-/// a negated G2 generator (`e(pk,hm) * e(-G2::one(),sig) == 1`).
-pub(super) fn equal(pk: &G2, sig: &G1, hm: &G1) -> bool {
-    // Create a pairing context
-    //
-    // We only handle pre-hashed messages, so we leave the domain separator tag (`DST`) empty.
-    let mut pairing = Pairing::new(false, &[]);
-
-    // Convert `sig` into affine and aggregate `e(-G2::one(), sig)`
-    let mut q = blst_p1_affine::default();
-    unsafe {
-        blst_p1_to_affine(&mut q, &sig.0);
-        pairing.raw_aggregate(&BLS12_381_NEG_G2, &q);
-    }
-
-    // Convert `pk` and `hm` into affine
-    let mut p = blst_p2_affine::default();
-    let mut q = blst_p1_affine::default();
-    unsafe {
-        blst_p2_to_affine(&mut p, &pk.0);
-        blst_p1_to_affine(&mut q, &hm.0);
-    }
-
-    // Aggregate `e(pk, hm)`
-    pairing.raw_aggregate(&p, &q);
-
-    // Finalize the pairing accumulation and verify the result
-    //
-    // If `finalverify()` returns `true`, it means `e(pk,hm) * e(-G1::one(),sig) == 1`. This
-    // is equivalent to `e(pk,hm) == e(G1::one(),sig)`.
-    pairing.commit();
-    pairing.finalverify(None)
 }
 
 #[cfg(test)]
