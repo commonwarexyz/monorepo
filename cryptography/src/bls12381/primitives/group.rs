@@ -19,8 +19,8 @@ use blst::{
     blst_p2_add_or_double, blst_p2_affine, blst_p2_compress, blst_p2_from_affine, blst_p2_in_g2,
     blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
     blst_p2s_mult_pippenger_scratch_sizeof, blst_scalar, blst_scalar_from_bendian,
-    blst_scalar_from_fr, blst_sk_check, Pairing, BLS12_381_G1, BLS12_381_G2, BLS12_381_NEG_G1,
-    BLS12_381_NEG_G2, BLST_ERROR,
+    blst_scalar_from_fr, blst_sk_check, Pairing as blst_pairing, BLS12_381_G1, BLS12_381_G2,
+    BLS12_381_NEG_G1, BLS12_381_NEG_G2, BLST_ERROR,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -68,11 +68,15 @@ pub trait Point: Element {
 
     /// Performs a multi‑scalar multiplication of the provided points and scalars.
     fn msm(points: &[Self], scalars: &[Scalar]) -> Self;
+}
 
-    // TODO: improve naming
+pub trait Verifier: Point {
+    type Signature: Point;
+    type Message: Point;
+
     /// Verifies that `e(pk,hm)` is equal to `e(G2::one(),sig)` using a single product check with
     /// a negated G2 generator (`e(pk,hm) * e(-G2::one(),sig) == 1`).
-    fn equal<O>(&self, other: &O, hm: &O) -> bool;
+    fn equal(&self, signature: &Self::Signature, hm: &Self::Message) -> bool;
 }
 
 /// Wrapper around [`blst_fr`] that represents an element of the BLS12‑381
@@ -581,12 +585,17 @@ impl Point for G1 {
 
         G1::from_blst_p1(msm_result)
     }
+}
 
-    fn equal<G2>(&self, sig: &G2, hm: &G2) -> bool {
+impl Verifier for G1 {
+    type Signature = G2;
+    type Message = G2;
+
+    fn equal(&self, sig: &G2, hm: &G2) -> bool {
         // Create a pairing context
         //
         // We only handle pre-hashed messages, so we leave the domain separator tag (`DST`) empty.
-        let mut pairing = Pairing::new(false, &[]);
+        let mut pairing = blst_pairing::new(false, &[]);
 
         // Convert `sig` into affine and aggregate `e(-G1::one(), sig)`
         let q = sig.as_blst_p2_affine();
@@ -796,12 +805,17 @@ impl Point for G2 {
 
         G2::from_blst_p2(msm_result)
     }
+}
 
-    fn equal<G1>(&self, sig: &G1, hm: &G1) -> bool {
+impl Verifier for G2 {
+    type Signature = G1;
+    type Message = G1;
+
+    fn equal(&self, sig: &G1, hm: &G1) -> bool {
         // Create a pairing context
         //
         // We only handle pre-hashed messages, so we leave the domain separator tag (`DST`) empty.
-        let mut pairing = Pairing::new(false, &[]);
+        let mut pairing = blst_pairing::new(false, &[]);
 
         // Convert `sig` into affine and aggregate `e(-G2::one(), sig)`
         let q = sig.as_blst_p1_affine();
@@ -810,8 +824,8 @@ impl Point for G2 {
         }
 
         // Convert `pk` and `hm` into affine
-        let mut p = self.as_blst_p2_affine();
-        let mut q = hm.as_blst_p1_affine();
+        let p = self.as_blst_p2_affine();
+        let q = hm.as_blst_p1_affine();
 
         // Aggregate `e(pk, hm)`
         pairing.raw_aggregate(&p, &q);
