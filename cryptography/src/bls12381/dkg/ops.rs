@@ -99,13 +99,10 @@ pub fn construct_public(
     Ok(public)
 }
 
-/// Recover public polynomial by interpolating coefficient-wise all
-/// polynomials.
-///
-/// It is assumed that the required number of commitments are provided.
-pub fn recover_public(
+pub fn recover_public_with_weights(
     previous: &poly::Public,
     commitments: BTreeMap<u32, poly::Public>,
+    weights: &BTreeMap<u32, poly::Weight>,
     threshold: u32,
     concurrency: usize,
 ) -> Result<poly::Public, Error> {
@@ -114,10 +111,6 @@ pub fn recover_public(
     if commitments.len() < required as usize {
         return Err(Error::InsufficientDealings);
     }
-
-    // Precompute Barycentric Weights for all coefficients
-    let indices: Vec<u32> = commitments.keys().cloned().collect();
-    let weights = compute_weights(indices).map_err(|_| Error::PublicKeyInterpolationFailed)?;
 
     // Construct pool to perform interpolation
     let pool = ThreadPoolBuilder::new()
@@ -140,7 +133,7 @@ pub fn recover_public(
                     .collect::<Vec<_>>();
 
                 // Use precomputed weights for interpolation
-                match poly::Public::recover_with_weights(&weights, &evals) {
+                match poly::Public::recover_with_weights(weights, &evals) {
                     Ok(point) => Ok(point),
                     Err(_) => Err(Error::PublicKeyInterpolationFailed),
                 }
@@ -156,4 +149,28 @@ pub fn recover_public(
         return Err(Error::ReshareMismatch);
     }
     Ok(new)
+}
+
+/// Recover public polynomial by interpolating coefficient-wise all
+/// polynomials.
+///
+/// It is assumed that the required number of commitments are provided.
+pub fn recover_public(
+    previous: &poly::Public,
+    commitments: BTreeMap<u32, poly::Public>,
+    threshold: u32,
+    concurrency: usize,
+) -> Result<poly::Public, Error> {
+    // Ensure we have enough commitments to interpolate
+    let required = previous.required();
+    if commitments.len() < required as usize {
+        return Err(Error::InsufficientDealings);
+    }
+
+    // Precompute Barycentric Weights for all coefficients
+    let indices: Vec<u32> = commitments.keys().cloned().collect();
+    let weights = compute_weights(indices).map_err(|_| Error::PublicKeyInterpolationFailed)?;
+
+    // Perform interpolation over each coefficient using the precomputed weights
+    recover_public_with_weights(previous, commitments, &weights, threshold, concurrency)
 }
