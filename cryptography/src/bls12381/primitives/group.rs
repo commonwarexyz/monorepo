@@ -869,4 +869,194 @@ mod tests {
         let decoded = G2::decode(&mut encoded).unwrap();
         assert_eq!(original, decoded);
     }
+
+    /// Naive calculation of Multi-Scalar Multiplication: sum(scalar * point)
+    fn naive_msm<P: Point>(points: &[P], scalars: &[Scalar]) -> P {
+        assert_eq!(points.len(), scalars.len());
+        let mut total = P::zero();
+        for (point, scalar) in points.iter().zip(scalars.iter()) {
+            // Skip identity points or zero scalars, similar to the optimized MSM
+            if *point == P::zero() || *scalar == Scalar::zero() {
+                continue;
+            }
+            let mut term = point.clone();
+            term.mul(scalar);
+            total.add(&term);
+        }
+        total
+    }
+
+    #[test]
+    fn test_g1_msm() {
+        let mut rng = thread_rng();
+        let n = 10; // Number of points/scalars
+
+        // Case 1: Random points and scalars
+        let points_g1: Vec<G1> = (0..n)
+            .map(|_| {
+                let mut point = G1::one();
+                point.mul(&Scalar::rand(&mut rng));
+                point
+            })
+            .collect();
+        let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::rand(&mut rng)).collect();
+        let expected_g1 = naive_msm(&points_g1, &scalars);
+        let result_g1 = G1::msm(&points_g1, &scalars);
+        assert_eq!(expected_g1, result_g1, "G1 MSM basic case failed");
+
+        // Case 2: Include identity point
+        let mut points_with_zero_g1 = points_g1.clone();
+        points_with_zero_g1[n / 2] = G1::zero();
+        let expected_zero_pt_g1 = naive_msm(&points_with_zero_g1, &scalars);
+        let result_zero_pt_g1 = G1::msm(&points_with_zero_g1, &scalars);
+        assert_eq!(
+            expected_zero_pt_g1, result_zero_pt_g1,
+            "G1 MSM with identity point failed"
+        );
+
+        // Case 3: Include zero scalar
+        let mut scalars_with_zero = scalars.clone();
+        scalars_with_zero[n / 2] = Scalar::zero();
+        let expected_zero_sc_g1 = naive_msm(&points_g1, &scalars_with_zero);
+        let result_zero_sc_g1 = G1::msm(&points_g1, &scalars_with_zero);
+        assert_eq!(
+            expected_zero_sc_g1, result_zero_sc_g1,
+            "G1 MSM with zero scalar failed"
+        );
+
+        // Case 4: All points identity
+        let zero_points_g1 = vec![G1::zero(); n];
+        let expected_all_zero_pt_g1 = naive_msm(&zero_points_g1, &scalars);
+        let result_all_zero_pt_g1 = G1::msm(&zero_points_g1, &scalars);
+        assert_eq!(
+            expected_all_zero_pt_g1,
+            G1::zero(),
+            "G1 MSM all identity points (naive) failed"
+        );
+        assert_eq!(
+            result_all_zero_pt_g1,
+            G1::zero(),
+            "G1 MSM all identity points failed"
+        );
+
+        // Case 5: All scalars zero
+        let zero_scalars = vec![Scalar::zero(); n];
+        let expected_all_zero_sc_g1 = naive_msm(&points_g1, &zero_scalars);
+        let result_all_zero_sc_g1 = G1::msm(&points_g1, &zero_scalars);
+        assert_eq!(
+            expected_all_zero_sc_g1,
+            G1::zero(),
+            "G1 MSM all zero scalars (naive) failed"
+        );
+        assert_eq!(
+            result_all_zero_sc_g1,
+            G1::zero(),
+            "G1 MSM all zero scalars failed"
+        );
+
+        // Case 6: Single element
+        let single_point_g1 = [points_g1[0]];
+        let single_scalar = [scalars[0].clone()];
+        let expected_single_g1 = naive_msm(&single_point_g1, &single_scalar);
+        let result_single_g1 = G1::msm(&single_point_g1, &single_scalar);
+        assert_eq!(
+            expected_single_g1, result_single_g1,
+            "G1 MSM single element failed"
+        );
+
+        // Case 7: Empty input
+        let empty_points_g1: [G1; 0] = [];
+        let empty_scalars: [Scalar; 0] = [];
+        let expected_empty_g1 = naive_msm(&empty_points_g1, &empty_scalars);
+        let result_empty_g1 = G1::msm(&empty_points_g1, &empty_scalars);
+        assert_eq!(expected_empty_g1, G1::zero(), "G1 MSM empty (naive) failed");
+        assert_eq!(result_empty_g1, G1::zero(), "G1 MSM empty failed");
+    }
+
+    #[test]
+    fn test_g2_msm() {
+        let mut rng = thread_rng();
+        let n = 10; // Number of points/scalars
+
+        // Case 1: Random points and scalars
+        let points_g2: Vec<G2> = (0..n)
+            .map(|_| {
+                let mut point = G2::one();
+                point.mul(&Scalar::rand(&mut rng));
+                point
+            })
+            .collect();
+        let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::rand(&mut rng)).collect();
+        let expected_g2 = naive_msm(&points_g2, &scalars);
+        let result_g2 = G2::msm(&points_g2, &scalars);
+        assert_eq!(expected_g2, result_g2, "G2 MSM basic case failed");
+
+        // Case 2: Include identity point
+        let mut points_with_zero_g2 = points_g2.clone();
+        points_with_zero_g2[n / 2] = G2::zero();
+        let expected_zero_pt_g2 = naive_msm(&points_with_zero_g2, &scalars);
+        let result_zero_pt_g2 = G2::msm(&points_with_zero_g2, &scalars);
+        assert_eq!(
+            expected_zero_pt_g2, result_zero_pt_g2,
+            "G2 MSM with identity point failed"
+        );
+
+        // Case 3: Include zero scalar
+        let mut scalars_with_zero = scalars.clone();
+        scalars_with_zero[n / 2] = Scalar::zero();
+        let expected_zero_sc_g2 = naive_msm(&points_g2, &scalars_with_zero);
+        let result_zero_sc_g2 = G2::msm(&points_g2, &scalars_with_zero);
+        assert_eq!(
+            expected_zero_sc_g2, result_zero_sc_g2,
+            "G2 MSM with zero scalar failed"
+        );
+
+        // Case 4: All points identity
+        let zero_points_g2 = vec![G2::zero(); n];
+        let expected_all_zero_pt_g2 = naive_msm(&zero_points_g2, &scalars);
+        let result_all_zero_pt_g2 = G2::msm(&zero_points_g2, &scalars);
+        assert_eq!(
+            expected_all_zero_pt_g2,
+            G2::zero(),
+            "G2 MSM all identity points (naive) failed"
+        );
+        assert_eq!(
+            result_all_zero_pt_g2,
+            G2::zero(),
+            "G2 MSM all identity points failed"
+        );
+
+        // Case 5: All scalars zero
+        let zero_scalars = vec![Scalar::zero(); n];
+        let expected_all_zero_sc_g2 = naive_msm(&points_g2, &zero_scalars);
+        let result_all_zero_sc_g2 = G2::msm(&points_g2, &zero_scalars);
+        assert_eq!(
+            expected_all_zero_sc_g2,
+            G2::zero(),
+            "G2 MSM all zero scalars (naive) failed"
+        );
+        assert_eq!(
+            result_all_zero_sc_g2,
+            G2::zero(),
+            "G2 MSM all zero scalars failed"
+        );
+
+        // Case 6: Single element
+        let single_point_g2 = [points_g2[0]];
+        let single_scalar = [scalars[0].clone()];
+        let expected_single_g2 = naive_msm(&single_point_g2, &single_scalar);
+        let result_single_g2 = G2::msm(&single_point_g2, &single_scalar);
+        assert_eq!(
+            expected_single_g2, result_single_g2,
+            "G2 MSM single element failed"
+        );
+
+        // Case 7: Empty input
+        let empty_points_g2: [G2; 0] = [];
+        let empty_scalars: [Scalar; 0] = [];
+        let expected_empty_g2 = naive_msm(&empty_points_g2, &empty_scalars);
+        let result_empty_g2 = G2::msm(&empty_points_g2, &empty_scalars);
+        assert_eq!(expected_empty_g2, G2::zero(), "G2 MSM empty (naive) failed");
+        assert_eq!(result_empty_g2, G2::zero(), "G2 MSM empty failed");
+    }
 }
