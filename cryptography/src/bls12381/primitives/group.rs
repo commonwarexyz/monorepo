@@ -169,23 +169,23 @@ pub type Private = Scalar;
 /// The private key length.
 pub const PRIVATE_KEY_LENGTH: usize = SCALAR_LENGTH;
 
-/// The default public key type (G1).
-pub type Public = G1;
+/// The default public key type (G2).
+pub type Public = G2;
 
-/// The default public key length (G1).
-pub const PUBLIC_KEY_LENGTH: usize = G1_ELEMENT_BYTE_LENGTH;
+/// The default public key length (G2).
+pub const PUBLIC_KEY_LENGTH: usize = G2_ELEMENT_BYTE_LENGTH;
 
-/// The default signature type (G2).
-pub type Signature = G2;
+/// The default signature type (G1).
+pub type Signature = G1;
 
-/// The default signature length (G2).
-pub const SIGNATURE_LENGTH: usize = G2_ELEMENT_BYTE_LENGTH;
+/// The default signature length (G1).
+pub const SIGNATURE_LENGTH: usize = G1_ELEMENT_BYTE_LENGTH;
 
-/// The DST for hashing a proof of possession to the default signature type (G2).
-pub const PROOF_OF_POSSESSION: DST = G2_PROOF_OF_POSSESSION;
+/// The DST for hashing a proof of possession to the default signature type (G1).
+pub const PROOF_OF_POSSESSION: DST = G1_PROOF_OF_POSSESSION;
 
-/// The DST for hashing a message to the default signature type (G2).
-pub const MESSAGE: DST = G2_MESSAGE;
+/// The DST for hashing a message to the default signature type (G1).
+pub const MESSAGE: DST = G1_MESSAGE;
 
 impl Scalar {
     /// Generates a random scalar using the provided RNG.
