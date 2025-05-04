@@ -237,19 +237,22 @@ where
     Ok(())
 }
 
-/// Interpolate the constant term with a *single* MSM instead of a loop.
+/// Interpolate the value of some [Point] with precomputed Barycentric Weights
+/// and multi-scalar multiplication (MSM).
 pub fn msm_interpolate<'a, P, I>(weights: &BTreeMap<u32, Weight>, evals: I) -> Result<P, Error>
 where
     P: Point + 'a,
     I: IntoIterator<Item = &'a Eval<P>>,
 {
-    let mut points = Vec::new();
-    let mut scalars = Vec::new();
-
+    // Populate points and scalars
+    let mut points = Vec::with_capacity(weights.len());
+    let mut scalars = Vec::with_capacity(weights.len());
     for e in evals {
         points.push(e.value.clone());
         scalars.push(weights.get(&e.index).ok_or(Error::InvalidIndex)?.0.clone());
     }
+
+    // Perform multi-scalar multiplication
     Ok(P::msm(&points, &scalars))
 }
 
