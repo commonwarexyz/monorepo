@@ -249,7 +249,13 @@ where
     let mut scalars = Vec::with_capacity(weights.len());
     for e in evals {
         points.push(e.value.clone());
-        scalars.push(weights.get(&e.index).ok_or(Error::InvalidIndex)?.0.clone());
+        scalars.push(
+            weights
+                .get(&e.index)
+                .ok_or(Error::InvalidIndex)?
+                .as_scalar()
+                .clone(),
+        );
     }
 
     // Perform multi-scalar multiplication
