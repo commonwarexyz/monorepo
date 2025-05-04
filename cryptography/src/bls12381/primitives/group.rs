@@ -17,8 +17,9 @@ use blst::{
     blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult, blst_p1_to_affine,
     blst_p1_uncompress, blst_p2, blst_p2_add_or_double, blst_p2_affine, blst_p2_compress,
     blst_p2_from_affine, blst_p2_in_g2, blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine,
-    blst_p2_uncompress, blst_scalar, blst_scalar_from_bendian, blst_scalar_from_fr, blst_sk_check,
-    Pairing, BLS12_381_G1, BLS12_381_G2, BLS12_381_NEG_G1, BLST_ERROR,
+    blst_p2_uncompress, blst_p2s_mult_pippenger, blst_p2s_mult_pippenger_scratch_sizeof,
+    blst_scalar, blst_scalar_from_bendian, blst_scalar_from_fr, blst_sk_check, Pairing,
+    BLS12_381_G1, BLS12_381_G2, BLS12_381_NEG_G1, BLST_ERROR,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -32,6 +33,7 @@ use rand::RngCore;
 use std::{
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
+    mem::MaybeUninit,
     ptr,
 };
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -236,6 +238,13 @@ impl Scalar {
         }
         slice
     }
+
+    /// Converts the scalar to the raw `blst_scalar` type.
+    pub(crate) fn to_blst_scalar(&self) -> blst_scalar {
+        let mut scalar = blst_scalar::default();
+        unsafe { blst_scalar_from_fr(&mut scalar, &self.0) };
+        scalar
+    }
 }
 
 impl Element for Scalar {
@@ -395,6 +404,18 @@ impl G1 {
         }
         slice
     }
+
+    /// Converts the G1 point to its affine representation.
+    pub(crate) fn to_affine(&self) -> blst_p1_affine {
+        let mut affine = blst_p1_affine::default();
+        unsafe { blst_p1_to_affine(&mut affine, &self.0) };
+        affine
+    }
+
+    /// Creates a G1 point from a raw `blst_p1`.
+    pub(crate) fn from_blst_p1(p: blst_p1) -> Self {
+        Self(p)
+    }
 }
 
 impl Element for G1 {
@@ -515,6 +536,18 @@ impl G2 {
             blst_p2_compress(slice.as_mut_ptr(), &self.0);
         }
         slice
+    }
+
+    /// Converts the G2 point to its affine representation.
+    pub(crate) fn to_affine(&self) -> blst_p2_affine {
+        let mut affine = blst_p2_affine::default();
+        unsafe { blst_p2_to_affine(&mut affine, &self.0) };
+        affine
+    }
+
+    /// Creates a G2 point from a raw `blst_p2`.
+    pub(crate) fn from_blst_p2(p: blst_p2) -> Self {
+        Self(p)
     }
 }
 
