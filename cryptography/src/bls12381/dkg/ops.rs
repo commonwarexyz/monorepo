@@ -3,7 +3,8 @@
 use crate::bls12381::{
     dkg::Error,
     primitives::{
-        group::{self, Point, Share},
+        group::Share,
+        ops::msm_interpolate,
         poly::{self, compute_weights},
     },
 };
@@ -127,20 +128,15 @@ pub fn recover_public_with_weights(
         (0..threshold)
             .into_par_iter()
             .map(|coeff| {
-                // Extract evaluations and interpolate with one MSM
-                let mut points = Vec::with_capacity(commitments.len());
-                let mut scalars = Vec::with_capacity(commitments.len());
-                for (dealer, commitment) in &commitments {
-                    points.push(commitment.get(coeff));
-                    scalars.push(
-                        weights
-                            .get(dealer)
-                            .ok_or(Error::PublicKeyInterpolationFailed)?
-                            .0
-                            .clone(),
-                    );
-                }
-                Ok(group::Public::msm(&points, &scalars))
+                // Extract evaluations for this coefficient from all commitments
+                let evals = commitments
+                    .iter()
+                    .map(|(dealer, commitment)| poly::Eval {
+                        index: *dealer,
+                        value: commitment.get(coeff),
+                    })
+                    .collect::<Vec<_>>();
+                msm_interpolate(weights, &evals).map_err(|_| Error::PublicKeyInterpolationFailed)
             })
             .collect::<Result<Vec<_>, _>>()
     }) {

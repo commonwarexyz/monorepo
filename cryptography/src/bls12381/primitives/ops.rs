@@ -238,7 +238,7 @@ where
 }
 
 /// Interpolate the constant term with a *single* MSM instead of a loop.
-fn msm_interpolate<'a, P, I>(weights: &BTreeMap<u32, Weight>, evals: I) -> Result<P, Error>
+pub fn msm_interpolate<'a, P, I>(weights: &BTreeMap<u32, Weight>, evals: I) -> Result<P, Error>
 where
     P: Point + 'a,
     I: IntoIterator<Item = &'a Eval<P>>,
@@ -321,6 +321,7 @@ where
 pub fn threshold_signature_recover_multiple<'a, I>(
     threshold: u32,
     mut many_evals: Vec<I>,
+    concurrency: usize,
 ) -> Result<Vec<group::Signature>, Error>
 where
     I: IntoIterator<Item = &'a PartialSignature>,
@@ -365,11 +366,13 @@ pub fn threshold_signature_recover_pair<'a, I>(
     threshold: u32,
     first: I,
     second: I,
+    concurrency: usize,
 ) -> Result<(group::Signature, group::Signature), Error>
 where
     I: IntoIterator<Item = &'a PartialSignature>,
 {
-    let mut sigs = threshold_signature_recover_multiple(threshold, vec![first, second])?;
+    let mut sigs =
+        threshold_signature_recover_multiple(threshold, vec![first, second], concurrency)?;
     let second_sig = sigs.pop().unwrap();
     let first_sig = sigs.pop().unwrap();
     Ok((first_sig, second_sig))
@@ -1082,7 +1085,8 @@ mod tests {
             .collect();
 
         // Recover signatures
-        let (sig_1, sig_2) = threshold_signature_recover_pair(t, &partials_1, &partials_2).unwrap();
+        let (sig_1, sig_2) =
+            threshold_signature_recover_pair(t, &partials_1, &partials_2, 1).unwrap();
 
         // Verify with the aggregated public key.
         let pk = poly::public(&group_poly);
