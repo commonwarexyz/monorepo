@@ -65,6 +65,8 @@ pub trait Element:
 pub trait Point: Element {
     /// Maps the provided data to a group element.
     fn map(&mut self, dst: DST, message: &[u8]);
+
+    fn msm(points: &[Self], scalars: &[Scalar]) -> Self;
 }
 
 /// Wrapper around [`blst_fr`] that represents an element of the BLS12‑381
@@ -515,6 +517,10 @@ impl Point for G1 {
             );
         }
     }
+
+    fn msm(points: &[Self], scalars: &[Scalar]) -> Self {
+        msm_g1(points, scalars)
+    }
 }
 
 impl Debug for G1 {
@@ -647,6 +653,10 @@ impl Point for G2 {
                 0,
             );
         }
+    }
+
+    fn msm(points: &[Self], scalars: &[Scalar]) -> Self {
+        msm_g2(points, scalars)
     }
 }
 
