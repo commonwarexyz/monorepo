@@ -786,7 +786,7 @@ pub(super) fn equal(pk: &G2, sig: &G1, hm: &G1) -> bool {
     // We only handle pre-hashed messages, so we leave the domain separator tag (`DST`) empty.
     let mut pairing = Pairing::new(false, &[]);
 
-    // Convert `sig` into affine and aggregate `e(-G1::one(), sig)`
+    // Convert `sig` into affine and aggregate `e(-G2::one(), sig)`
     let mut q = blst_p1_affine::default();
     unsafe {
         blst_p1_to_affine(&mut q, &sig.0);
