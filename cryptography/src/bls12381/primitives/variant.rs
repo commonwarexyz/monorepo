@@ -1,14 +1,30 @@
 use std::fmt::Debug;
 
 use super::group::{
-    Element, Point, Scalar, DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE,
-    G2_PROOF_OF_POSSESSION,
+    Element, Point, Scalar, DST, G1, G1_ELEMENT_BYTE_LENGTH, G1_MESSAGE, G1_PROOF_OF_POSSESSION,
+    G2, G2_ELEMENT_BYTE_LENGTH, G2_MESSAGE, G2_PROOF_OF_POSSESSION,
 };
 use super::Error;
 use blst::{Pairing as blst_pairing, BLS12_381_NEG_G1, BLS12_381_NEG_G2};
 use commonware_codec::FixedSize;
 
-pub trait Variant {
+pub type MIN_PK_PUBLIC = G1;
+
+pub const MIN_PK_PUBLIC_LENGTH: usize = G1_ELEMENT_BYTE_LENGTH;
+
+pub type MIN_PK_SIGNATURE = G2;
+
+pub const MIN_PK_SIGNATURE_LENGTH: usize = G2_ELEMENT_BYTE_LENGTH;
+
+pub type MIN_SIG_PUBLIC = G2;
+
+pub const MIN_SIG_PUBLIC_LENGTH: usize = G2_ELEMENT_BYTE_LENGTH;
+
+pub type MIN_SIG_SIGNATURE = G1;
+
+pub const MIN_SIG_SIGNATURE_LENGTH: usize = G1_ELEMENT_BYTE_LENGTH;
+
+pub trait Variant: Clone + 'static + Send + Sync {
     type Public: Point + FixedSize + Debug;
     type Signature: Point + FixedSize + Debug;
 
@@ -33,6 +49,7 @@ pub trait Variant {
     ) -> Result<(), Error>;
 }
 
+#[derive(Clone)]
 pub struct MinPk {}
 
 impl Variant for MinPk {
@@ -98,6 +115,7 @@ impl Variant for MinPk {
     }
 }
 
+#[derive(Clone)]
 pub struct MinSig {}
 
 impl Variant for MinSig {
