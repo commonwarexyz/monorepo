@@ -4,7 +4,10 @@ use crate::handlers::{
 };
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{
-    bls12381::{dkg, primitives::poly},
+    bls12381::{
+        dkg,
+        primitives::{poly, variant::MinSig},
+    },
     Scheme,
 };
 use commonware_macros::select;
@@ -44,10 +47,10 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
     async fn run_round(
         &self,
         round: u64,
-        previous: Option<poly::Public>,
+        previous: Option<poly::Public<MinSig>>,
         sender: &mut impl Sender<PublicKey = C::PublicKey>,
         receiver: &mut impl Receiver<PublicKey = C::PublicKey>,
-    ) -> (Option<poly::Public>, HashSet<C::PublicKey>) {
+    ) -> (Option<poly::Public<MinSig>>, HashSet<C::PublicKey>) {
         // Create a new round
         let start = self.context.current();
         let timeout = start + 4 * self.dkg_phase_timeout; // start -> commitment/share -> ack -> arbiter
@@ -75,7 +78,7 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
             .expect("failed to send start message");
 
         // Collect commitments
-        let mut arbiter = dkg::Arbiter::new(
+        let mut arbiter = dkg::Arbiter::<_, MinSig>::new(
             previous,
             self.contributors.clone(),
             self.contributors.clone(),
