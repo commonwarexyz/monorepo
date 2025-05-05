@@ -667,149 +667,200 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_bad_namespace() {
-        let (private, public) = keypair(&mut thread_rng());
+    fn bad_namespace<V: Variant>() {
+        let (private, public) = keypair::<_, V>(&mut thread_rng());
         let msg = &[1, 9, 6, 9];
-        let sig = sign_message(&private, Some(b"good"), msg);
+        let sig = sign_message::<V>(&private, Some(b"good"), msg);
         assert!(matches!(
-            verify_message(&public, Some(b"bad"), msg, &sig).unwrap_err(),
+            verify_message::<V>(&public, Some(b"bad"), msg, &sig).unwrap_err(),
             Error::InvalidSignature
         ));
     }
 
     #[test]
-    fn test_single_message() {
-        let (private, public) = keypair(&mut thread_rng());
+    fn test_bad_namespace() {
+        bad_namespace::<MinPk>();
+        bad_namespace::<MinSig>();
+    }
+
+    fn single_message<V: Variant>() {
+        let (private, public) = keypair::<_, V>(&mut thread_rng());
         let msg = &[1, 9, 6, 9];
         let namespace = b"test";
-        let sig = sign_message(&private, Some(namespace), msg);
-        verify_message(&public, Some(namespace), msg, &sig).expect("signature should be valid");
+        let sig = sign_message::<V>(&private, Some(namespace), msg);
+        verify_message::<V>(&public, Some(namespace), msg, &sig)
+            .expect("signature should be valid");
         let payload = union_unique(namespace, msg);
-        blst_verify_message(&public, &payload, &sig).expect("signature should be valid");
+        blst_verify_message::<V>(&public, &payload, &sig).expect("signature should be valid");
     }
 
     #[test]
-    fn test_threshold_message() {
+    fn test_single_message() {
+        single_message::<MinPk>();
+        single_message::<MinSig>();
+    }
+
+    fn threshold_message<V: Variant>() {
         // Generate signature
         let (n, t) = (5, 4);
         let mut rng = StdRng::seed_from_u64(0);
-        let (public, shares) = generate_shares(&mut rng, None, n, t);
+        let (public, shares) = generate_shares::<_, V>(&mut rng, None, n, t);
         let msg = &[1, 9, 6, 9];
         let namespace = b"test";
         let partials: Vec<_> = shares
             .iter()
-            .map(|s| partial_sign_message(s, Some(namespace), msg))
+            .map(|s| partial_sign_message::<V>(s, Some(namespace), msg))
             .collect();
         for p in &partials {
-            partial_verify_message(&public, Some(namespace), msg, p)
+            partial_verify_message::<V>(&public, Some(namespace), msg, p)
                 .expect("signature should be valid");
         }
-        let threshold_sig = threshold_signature_recover(t, &partials).unwrap();
-        let threshold_pub = poly::public(&public);
+        let threshold_sig = threshold_signature_recover::<V, _>(t, &partials).unwrap();
+        let threshold_pub = poly::public::<V>(&public);
 
         // Verify the signature
-        verify_message(threshold_pub, Some(namespace), msg, &threshold_sig)
+        verify_message::<V>(threshold_pub, Some(namespace), msg, &threshold_sig)
             .expect("signature should be valid");
 
         // Verify the signature using blst
         let payload = union_unique(namespace, msg);
-        blst_verify_message(threshold_pub, &payload, &threshold_sig)
+        blst_verify_message::<V>(threshold_pub, &payload, &threshold_sig)
             .expect("signature should be valid");
     }
 
     #[test]
-    fn test_single_message_min_sig() {
-        // Generate keypair
-        let private = group::Private::rand(&mut thread_rng());
-        let mut public = group::G2::one();
-        public.mul(&private);
-
-        // Sign message
-        let msg = &[1, 9, 6, 9];
-        let namespace = b"test";
-        let payload = union_unique(namespace, msg);
-        let mut signature = G1::zero();
-        signature.map(G1_MESSAGE, &payload);
-        signature.mul(&private);
-
-        // Verify signature using blst
-        let public = blst::min_sig::PublicKey::from_bytes(&public.encode()).unwrap();
-        let signature = blst::min_sig::Signature::from_bytes(&signature.encode()).unwrap();
-        let result = match signature.verify(true, &payload, G1_MESSAGE, &[], &public, true) {
-            BLST_ERROR::BLST_SUCCESS => Ok(()),
-            e => Err(e),
-        };
-        result.expect("signature should be valid");
+    fn test_threshold_message() {
+        threshold_message::<MinPk>();
+        threshold_message::<MinSig>();
     }
 
-    fn blst_aggregate_verify_multiple_public_keys<'a, I>(
+    fn blst_aggregate_verify_multiple_public_keys<'a, V, I>(
         public: I,
         message: &[u8],
-        signature: &group::Signature,
+        signature: &V::Signature,
     ) -> Result<(), BLST_ERROR>
     where
-        I: IntoIterator<Item = &'a group::Public>,
+        V: Variant,
+        I: IntoIterator<Item = &'a V::Public>,
+        V::Public: 'a,
     {
-        let public = public
-            .into_iter()
-            .map(|pk| blst::min_sig::PublicKey::from_bytes(&pk.encode()).unwrap())
-            .collect::<Vec<_>>();
-        let public = public.iter().collect::<Vec<_>>();
-        let signature = blst::min_sig::Signature::from_bytes(&signature.encode()).unwrap();
-        match signature.fast_aggregate_verify(true, message, MESSAGE, &public) {
-            BLST_ERROR::BLST_SUCCESS => Ok(()),
-            e => Err(e),
+        match V::MESSAGE {
+            G1_MESSAGE => {
+                let public = public
+                    .into_iter()
+                    .map(|pk| blst::min_sig::PublicKey::from_bytes(&pk.encode()).unwrap())
+                    .collect::<Vec<_>>();
+                let public = public.iter().collect::<Vec<_>>();
+                let signature = blst::min_sig::Signature::from_bytes(&signature.encode()).unwrap();
+                match signature.fast_aggregate_verify(true, message, V::MESSAGE, &public) {
+                    BLST_ERROR::BLST_SUCCESS => Ok(()),
+                    e => Err(e),
+                }
+            }
+            G2_MESSAGE => {
+                let public = public
+                    .into_iter()
+                    .map(|pk| blst::min_pk::PublicKey::from_bytes(&pk.encode()).unwrap())
+                    .collect::<Vec<_>>();
+                let public = public.iter().collect::<Vec<_>>();
+                let signature = blst::min_pk::Signature::from_bytes(&signature.encode()).unwrap();
+                match signature.fast_aggregate_verify(true, message, V::MESSAGE, &public) {
+                    BLST_ERROR::BLST_SUCCESS => Ok(()),
+                    e => Err(e),
+                }
+            }
+            _ => panic!("Unsupported Variant"),
         }
     }
 
-    #[test]
-    fn test_aggregate_verify_multiple_public_keys() {
+    fn aggregate_verify_multiple_public_keys_correct<V: Variant>() {
         // Generate signatures
-        let (private1, public1) = keypair(&mut thread_rng());
-        let (private2, public2) = keypair(&mut thread_rng());
-        let (private3, public3) = keypair(&mut thread_rng());
+        let (private1, public1) = keypair::<_, V>(&mut thread_rng());
+        let (private2, public2) = keypair::<_, V>(&mut thread_rng());
+        let (private3, public3) = keypair::<_, V>(&mut thread_rng());
         let namespace = b"test";
         let message = b"message";
-        let sig1 = sign_message(&private1, Some(namespace), message);
-        let sig2 = sign_message(&private2, Some(namespace), message);
-        let sig3 = sign_message(&private3, Some(namespace), message);
+        let sig1 = sign_message::<V>(&private1, Some(namespace), message);
+        let sig2 = sign_message::<V>(&private2, Some(namespace), message);
+        let sig3 = sign_message::<V>(&private3, Some(namespace), message);
         let pks = vec![public1, public2, public3];
         let signatures = vec![sig1, sig2, sig3];
 
         // Aggregate the signatures
-        let aggregate_sig = aggregate_signatures(&signatures);
+        let aggregate_sig = aggregate_signatures::<V, _>(&signatures);
 
         // Verify the aggregated signature
-        aggregate_verify_multiple_public_keys(&pks, Some(namespace), message, &aggregate_sig)
-            .expect("Aggregated signature should be valid");
+        aggregate_verify_multiple_public_keys::<V, _>(
+            &pks,
+            Some(namespace),
+            message,
+            &aggregate_sig,
+        )
+        .expect("Aggregated signature should be valid");
 
         // Verify the aggregated signature using blst
         let payload = union_unique(namespace, message);
-        blst_aggregate_verify_multiple_public_keys(&pks, &payload, &aggregate_sig)
+        blst_aggregate_verify_multiple_public_keys::<V, _>(&pks, &payload, &aggregate_sig)
             .expect("Aggregated signature should be valid");
     }
 
     #[test]
-    fn test_aggregate_verify_wrong_public_keys() {
+    fn test_aggregate_verify_multiple_public_keys() {
+        aggregate_verify_multiple_public_keys_correct::<MinPk>();
+        aggregate_verify_multiple_public_keys_correct::<MinSig>();
+    }
+
+    fn aggregate_verify_wrong_public_keys<V: Variant>() {
         // Generate signatures
-        let (private1, public1) = keypair(&mut thread_rng());
-        let (private2, public2) = keypair(&mut thread_rng());
-        let (private3, _) = keypair(&mut thread_rng());
+        let (private1, public1) = keypair::<_, V>(&mut thread_rng());
+        let (private2, public2) = keypair::<_, V>(&mut thread_rng());
+        let (private3, _) = keypair::<_, V>(&mut thread_rng());
         let namespace = b"test";
         let message = b"message";
-        let sig1 = sign_message(&private1, Some(namespace), message);
-        let sig2 = sign_message(&private2, Some(namespace), message);
-        let sig3 = sign_message(&private3, Some(namespace), message);
+        let sig1 = sign_message::<V>(&private1, Some(namespace), message);
+        let sig2 = sign_message::<V>(&private2, Some(namespace), message);
+        let sig3 = sign_message::<V>(&private3, Some(namespace), message);
         let signatures = vec![sig1, sig2, sig3];
 
         // Aggregate the signatures
-        let aggregate_sig = aggregate_signatures(&signatures);
+        let aggregate_sig = aggregate_signatures::<V, _>(&signatures);
 
         // Verify the aggregated signature
-        let (_, public4) = keypair(&mut thread_rng());
+        let (_, public4) = keypair::<_, V>(&mut thread_rng());
         let wrong_pks = vec![public1, public2, public4];
-        let result = aggregate_verify_multiple_public_keys(
+        let result = aggregate_verify_multiple_public_keys::<V, _>(
+            &wrong_pks,
+            Some(namespace),
+            message,
+            &aggregate_sig,
+        );
+        assert!(matches!(result, Err(Error::InvalidSignature)));
+    }
+
+    #[test]
+    fn test_aggregate_verify_wrong_public_keys() {
+        aggregate_verify_wrong_public_keys::<MinPk>();
+        aggregate_verify_wrong_public_keys::<MinSig>();
+    }
+
+    fn aggregate_verify_wrong_public_key_count<V: Variant>() {
+        // Generate signatures
+        let (private1, public1) = keypair::<_, V>(&mut thread_rng());
+        let (private2, public2) = keypair::<_, V>(&mut thread_rng());
+        let (private3, _) = keypair::<_, V>(&mut thread_rng());
+        let namespace = b"test";
+        let message = b"message";
+        let sig1 = sign_message::<V>(&private1, Some(namespace), message);
+        let sig2 = sign_message::<V>(&private2, Some(namespace), message);
+        let sig3 = sign_message::<V>(&private3, Some(namespace), message);
+        let signatures = vec![sig1, sig2, sig3];
+
+        // Aggregate the signatures
+        let aggregate_sig = aggregate_signatures::<V, _>(&signatures);
+
+        // Verify the aggregated signature
+        let wrong_pks = vec![public1, public2];
+        let result = aggregate_verify_multiple_public_keys::<V, _>(
             &wrong_pks,
             Some(namespace),
             message,
@@ -820,33 +871,12 @@ mod tests {
 
     #[test]
     fn test_aggregate_verify_wrong_public_key_count() {
-        // Generate signatures
-        let (private1, public1) = keypair(&mut thread_rng());
-        let (private2, public2) = keypair(&mut thread_rng());
-        let (private3, _) = keypair(&mut thread_rng());
-        let namespace = b"test";
-        let message = b"message";
-        let sig1 = sign_message(&private1, Some(namespace), message);
-        let sig2 = sign_message(&private2, Some(namespace), message);
-        let sig3 = sign_message(&private3, Some(namespace), message);
-        let signatures = vec![sig1, sig2, sig3];
-
-        // Aggregate the signatures
-        let aggregate_sig = aggregate_signatures(&signatures);
-
-        // Verify the aggregated signature
-        let wrong_pks = vec![public1, public2];
-        let result = aggregate_verify_multiple_public_keys(
-            &wrong_pks,
-            Some(namespace),
-            message,
-            &aggregate_sig,
-        );
-        assert!(matches!(result, Err(Error::InvalidSignature)));
+        aggregate_verify_wrong_public_key_count::<MinPk>();
+        aggregate_verify_wrong_public_key_count::<MinSig>();
     }
 
-    fn blst_aggregate_verify_multiple_messages<'a, I>(
-        public: &group::Public,
+    fn blst_aggregate_verify_multiple_messages<'a, V, I>(
+        public: &V::Public,
         msgs: I,
         signature: &group::Signature,
     ) -> Result<(), BLST_ERROR>
