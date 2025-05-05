@@ -2,7 +2,13 @@ use super::block::BlockFormat;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_consensus::threshold_simplex::types::Finalization;
-use commonware_cryptography::{bls12381::primitives::group, Digest};
+use commonware_cryptography::{
+    bls12381::primitives::{
+        group,
+        variant::{MinSig, MinSigPublic},
+    },
+    Digest,
+};
 
 /// Enum representing incoming messages from validators to the indexer.
 ///
@@ -15,7 +21,7 @@ pub enum Inbound<D: Digest> {
     /// Request to retrieve a block from the indexer's storage.
     GetBlock(GetBlock<D>),
     /// Request to store a finality certificate in the indexer's storage.
-    PutFinalization(PutFinalization<D>),
+    PutFinalization(PutFinalization<MinSig, D>),
     /// Request to retrieve the latest finality certificate from the indexer's storage.
     GetFinalization(GetFinalization),
 }
@@ -85,7 +91,7 @@ impl<D: Digest> EncodeSize for Inbound<D> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PutBlock<D: Digest> {
     /// The network identifier for which the block belongs.
-    pub network: group::Public,
+    pub network: MinSigPublic,
     /// The block to be stored.
     pub block: BlockFormat<D>,
 }
@@ -101,7 +107,7 @@ impl<D: Digest> Read for PutBlock<D> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let network = group::Public::read(buf)?;
+        let network = MinSigPublic::read(buf)?;
         let block = BlockFormat::<D>::read(buf)?;
         Ok(PutBlock { network, block })
     }
@@ -109,7 +115,7 @@ impl<D: Digest> Read for PutBlock<D> {
 
 impl<D: Digest> EncodeSize for PutBlock<D> {
     fn encode_size(&self) -> usize {
-        group::Public::SIZE + self.block.encode_size()
+        MinSigPublic::SIZE + self.block.encode_size()
     }
 }
 
@@ -212,7 +218,10 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode};
     use commonware_consensus::threshold_simplex::types::Proposal;
     use commonware_cryptography::{
-        bls12381::primitives::group::{self, Element, G1},
+        bls12381::primitives::{
+            group::{self, Element, G1},
+            variant::{MinSig, MinSigPublic},
+        },
         sha256::Digest as Sha256Digest,
     };
     use rand::thread_rng;
@@ -225,14 +234,14 @@ mod tests {
         Sha256Digest::decode(&[123u8; Sha256Digest::SIZE][..]).unwrap()
     }
 
-    fn new_group_public() -> group::Public {
-        let mut result = group::Public::one();
+    fn new_group_public() -> MinSigPublic {
+        let mut result = MinSigPublic::one();
         let scalar = group::Scalar::rand(&mut thread_rng());
         result.mul(&scalar);
         result
     }
 
-    fn new_finalization() -> Finalization<Sha256Digest> {
+    fn new_finalization() -> Finalization<MinSig, Sha256Digest> {
         let scalar = group::Scalar::rand(&mut thread_rng());
         let mut proposal_signature = G1::one();
         proposal_signature.mul(&scalar);

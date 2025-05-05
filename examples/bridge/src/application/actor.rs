@@ -11,7 +11,10 @@ use crate::types::{
 use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::threshold_simplex::types::{Activity, Viewable};
 use commonware_cryptography::{
-    bls12381::primitives::{group, poly},
+    bls12381::primitives::{
+        group, poly,
+        variant::{MinSigPublic, MinSigSignature},
+    },
     Hasher,
 };
 use commonware_runtime::{Sink, Spawner, Stream};
@@ -29,8 +32,8 @@ pub struct Application<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> {
     context: R,
     indexer: Connection<Si, St>,
     namespace: Vec<u8>,
-    public: group::Public,
-    other_public: group::Public,
+    public: MinSigPublic,
+    other_public: MinSigPublic,
     hasher: H,
     mailbox: mpsc::Receiver<Message<H::Digest>>,
 }
