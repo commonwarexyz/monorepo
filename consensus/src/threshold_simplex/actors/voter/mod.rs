@@ -291,7 +291,7 @@ mod tests {
 
     #[test_traced]
     fn test_stale_backfill() {
-        stale_backfill::<MinSig>();
         stale_backfill::<MinPk>();
+        stale_backfill::<MinSig>();
     }
 }
