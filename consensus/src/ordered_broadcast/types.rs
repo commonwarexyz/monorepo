@@ -1256,35 +1256,40 @@ mod tests {
         threshold_recovery::<MinSig>();
     }
 
-    #[test]
-    fn test_lock_verify() {
+    fn lock_verify<V: Variant>() {
         let n = 4;
         let t = quorum(n as u32);
-        let (identity, shares) = generate_test_data(n, t, 0);
+        let (identity, shares) = generate_test_data::<V>(n, t, 0);
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
         let epoch = 5;
 
         // Create threshold signature
-        let message = Ack::payload(&chunk, &epoch);
+        let message = Ack::<_, V, _>::payload(&chunk, &epoch);
         let ack_namespace = ack_namespace(NAMESPACE);
         let partials: Vec<_> = shares
             .iter()
             .take(t as usize)
-            .map(|s| partial_sign_message(s, Some(ack_namespace.as_ref()), &message))
+            .map(|s| partial_sign_message::<V>(s, Some(ack_namespace.as_ref()), &message))
             .collect();
-        let threshold = threshold_signature_recover(t, &partials).unwrap();
+        let threshold = threshold_signature_recover::<V, _>(t, &partials).unwrap();
 
         // Create lock
-        let lock = Lock::new(chunk, epoch, threshold);
+        let lock = Lock::<_, V, _>::new(chunk, epoch, threshold);
 
         // Verify lock
-        let public = poly::public(&identity);
+        let public = poly::public::<V>(&identity);
         assert!(lock.verify(NAMESPACE, public));
 
         // Test that verification fails with wrong namespace
         assert!(!lock.verify(b"wrong", public));
+    }
+
+    #[test]
+    fn test_lock_verify() {
+        lock_verify::<MinPk>();
+        lock_verify::<MinSig>();
     }
 
     #[test]
@@ -1318,23 +1323,26 @@ mod tests {
         // Generate a valid parent signature
         let n = 4;
         let t = quorum(n as u32);
-        let (_, shares) = generate_test_data(n, t, 0);
+        let (_, shares) = generate_test_data::<MinSig>(n, t, 0);
 
         let parent_chunk = Chunk::new(public_key, 0, sample_digest(0));
         let parent_epoch = 5;
-        let parent_message = Ack::payload(&parent_chunk, &parent_epoch);
+        let parent_message = Ack::<_, MinSig, _>::payload(&parent_chunk, &parent_epoch);
         let ack_namespace = ack_namespace(NAMESPACE);
         let partials: Vec<_> = shares
             .iter()
             .take(t as usize)
-            .map(|s| partial_sign_message(s, Some(ack_namespace.as_ref()), &parent_message))
+            .map(|s| {
+                partial_sign_message::<MinSig>(s, Some(ack_namespace.as_ref()), &parent_message)
+            })
             .collect();
-        let parent_signature = threshold_signature_recover(t, &partials).unwrap();
+        let parent_signature = threshold_signature_recover::<MinSig, _>(t, &partials).unwrap();
 
         let parent = Parent::new(sample_digest(0), parent_epoch, parent_signature);
 
-        let encoded = Node::<Ed25519, Sha256Digest>::new(chunk, signature, Some(parent)).encode();
-        let _decoded = Node::<Ed25519, Sha256Digest>::decode(encoded).unwrap();
+        let encoded =
+            Node::<Ed25519, MinSig, Sha256Digest>::new(chunk, signature, Some(parent)).encode();
+        let _decoded = Node::<Ed25519, MinSig, Sha256Digest>::decode(encoded).unwrap();
     }
 
     #[test]
@@ -1347,12 +1355,11 @@ mod tests {
         let message = chunk.encode();
         let signature = sample_scheme(0).sign(Some(chunk_namespace.as_ref()), &message);
 
-        let encoded = Node::<Ed25519, Sha256Digest>::new(chunk, signature, None).encode();
-        let _decoded = Node::<Ed25519, Sha256Digest>::decode(encoded).unwrap();
+        let encoded = Node::<Ed25519, MinSig, Sha256Digest>::new(chunk, signature, None).encode();
+        let _decoded = Node::<Ed25519, MinSig, Sha256Digest>::decode(encoded).unwrap();
     }
 
-    #[test]
-    fn test_node_verify_invalid_signature() {
+    fn node_verify_invalid_signature<V: Variant>() {
         let mut scheme = sample_scheme(0);
         let public_key = scheme.public_key();
 
@@ -1365,20 +1372,26 @@ mod tests {
         let signature = scheme.sign(Some(chunk_namespace.as_ref()), &message);
 
         // Create a node with valid signature
-        let node = Node::<Ed25519, Sha256Digest>::new(chunk.clone(), signature, None);
+        let node = Node::<Ed25519, V, Sha256Digest>::new(chunk.clone(), signature, None);
 
         // Verification should succeed
         assert!(node.verify(NAMESPACE, None).is_ok());
 
         // Now create a node with invalid signature
         let tampered_signature = scheme.sign(Some(chunk_namespace.as_ref()), &node.encode());
-        let invalid_node = Node::<Ed25519, Sha256Digest>::new(chunk, tampered_signature, None);
+        let invalid_node = Node::<Ed25519, V, Sha256Digest>::new(chunk, tampered_signature, None);
 
         // Verification should fail
         assert!(matches!(
             invalid_node.verify(NAMESPACE, None),
             Err(Error::InvalidSequencerSignature)
         ));
+    }
+
+    #[test]
+    fn test_node_verify_invalid_signature() {
+        node_verify_invalid_signature::<MinPk>();
+        node_verify_invalid_signature::<MinSig>();
     }
 
     #[test]
