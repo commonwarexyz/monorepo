@@ -6,12 +6,13 @@ use commonware_codec::{
 };
 use commonware_cryptography::{
     bls12381::primitives::{
-        group::{Public, Share, Signature},
+        group::Share,
         ops::{
             aggregate_signatures, aggregate_verify_multiple_messages, partial_sign_message,
             partial_verify_message, partial_verify_multiple_messages, verify_message,
         },
         poly::{PartialSignature, Poly},
+        variant::Variant,
     },
     Digest,
 };
@@ -274,21 +275,21 @@ impl<D: Digest> Viewable for Proposal<D> {
 /// In threshold_simplex, it contains a partial signature on the proposal and a partial signature for the seed.
 /// The seed is used for leader election and as a source of randomness.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
-pub struct Notarize<D: Digest> {
+pub struct Notarize<D: Digest, V: Variant> {
     /// The proposal that is being notarized
     pub proposal: Proposal<D>,
     /// The validator's partial signature on the proposal
-    pub proposal_signature: PartialSignature,
+    pub proposal_signature: PartialSignature<V>,
     /// The validator's partial signature on the seed (for leader election/randomness)
-    pub seed_signature: PartialSignature,
+    pub seed_signature: PartialSignature<V>,
 }
 
-impl<D: Digest> Notarize<D> {
+impl<D: Digest, V: Variant> Notarize<D, V> {
     /// Creates a new notarize with the given proposal and signatures.
     pub fn new(
         proposal: Proposal<D>,
-        proposal_signature: PartialSignature,
-        seed_signature: PartialSignature,
+        proposal_signature: PartialSignature<V>,
+        seed_signature: PartialSignature<V>,
     ) -> Self {
         Notarize {
             proposal,
@@ -303,14 +304,14 @@ impl<D: Digest> Notarize<D> {
     /// 1. The notarize signature is valid for the claimed proposal
     /// 2. The seed signature is valid for the view
     /// 3. Both signatures are from the same signer
-    pub fn verify(&self, namespace: &[u8], identity: &Poly<Public>) -> bool {
+    pub fn verify(&self, namespace: &[u8], identity: &Poly<V::Public>) -> bool {
         let notarize_namespace = notarize_namespace(namespace);
         let notarize_message = self.proposal.encode();
         let notarize_message = (Some(notarize_namespace.as_ref()), notarize_message.as_ref());
         let seed_namespace = seed_namespace(namespace);
         let seed_message = view_message(self.proposal.view);
         let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
-        partial_verify_multiple_messages(
+        partial_verify_multiple_messages::<V, _, _>(
             identity,
             self.signer(),
             &[notarize_message, seed_message],
@@ -324,28 +325,28 @@ impl<D: Digest> Notarize<D> {
         let notarize_namespace = notarize_namespace(namespace);
         let proposal_message = proposal.encode();
         let proposal_signature =
-            partial_sign_message(share, Some(notarize_namespace.as_ref()), &proposal_message);
+            partial_sign_message::<V>(share, Some(notarize_namespace.as_ref()), &proposal_message);
         let seed_namespace = seed_namespace(namespace);
         let seed_message = view_message(proposal.view);
         let seed_signature =
-            partial_sign_message(share, Some(seed_namespace.as_ref()), &seed_message);
+            partial_sign_message::<V>(share, Some(seed_namespace.as_ref()), &seed_message);
         Notarize::new(proposal, proposal_signature, seed_signature)
     }
 }
 
-impl<D: Digest> Attributable for Notarize<D> {
+impl<D: Digest, V: Variant> Attributable for Notarize<D, V> {
     fn signer(&self) -> u32 {
         self.proposal_signature.index
     }
 }
 
-impl<D: Digest> Viewable for Notarize<D> {
+impl<D: Digest, V: Variant> Viewable for Notarize<D, V> {
     fn view(&self) -> View {
         self.proposal.view()
     }
 }
 
-impl<D: Digest> Write for Notarize<D> {
+impl<D: Digest, V: Variant> Write for Notarize<D, V> {
     fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
         self.proposal_signature.write(writer);
@@ -353,13 +354,13 @@ impl<D: Digest> Write for Notarize<D> {
     }
 }
 
-impl<D: Digest> Read for Notarize<D> {
+impl<D: Digest, V: Variant> Read for Notarize<D, V> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
-        let proposal_signature = PartialSignature::read(reader)?;
-        let seed_signature = PartialSignature::read(reader)?;
+        let proposal_signature = PartialSignature::<V>::read(reader)?;
+        let seed_signature = PartialSignature::<V>::read(reader)?;
         if proposal_signature.index != seed_signature.index {
             return Err(Error::Invalid(
                 "consensus::threshold_simplex::Notarize",
@@ -374,7 +375,7 @@ impl<D: Digest> Read for Notarize<D> {
     }
 }
 
-impl<D: Digest> EncodeSize for Notarize<D> {
+impl<D: Digest, V: Variant> EncodeSize for Notarize<D, V> {
     fn encode_size(&self) -> usize {
         self.proposal.encode_size()
             + self.proposal_signature.encode_size()
@@ -386,21 +387,21 @@ impl<D: Digest> EncodeSize for Notarize<D> {
 /// When a proposal is notarized, it means at least 2f+1 validators have voted for it.
 /// The threshold signatures provide compact verification compared to collecting individual signatures.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
-pub struct Notarization<D: Digest> {
+pub struct Notarization<D: Digest, V: Variant> {
     /// The proposal that has been notarized
     pub proposal: Proposal<D>,
     /// The recovered threshold signature on the proposal
-    pub proposal_signature: Signature,
+    pub proposal_signature: V::Signature,
     /// The recovered threshold signature on the seed (for leader election/randomness)
-    pub seed_signature: Signature,
+    pub seed_signature: V::Signature,
 }
 
-impl<D: Digest> Notarization<D> {
+impl<D: Digest, V: Variant> Notarization<D, V> {
     /// Creates a new notarization with the given proposal and aggregated signatures.
     pub fn new(
         proposal: Proposal<D>,
-        proposal_signature: Signature,
-        seed_signature: Signature,
+        proposal_signature: V::Signature,
+        seed_signature: V::Signature,
     ) -> Self {
         Notarization {
             proposal,
@@ -414,15 +415,16 @@ impl<D: Digest> Notarization<D> {
     /// This ensures that:
     /// 1. The notarization signature is a valid threshold signature for the proposal
     /// 2. The seed signature is a valid threshold signature for the view
-    pub fn verify(&self, namespace: &[u8], public_key: &Public) -> bool {
+    pub fn verify(&self, namespace: &[u8], public_key: &V::Public) -> bool {
         let notarize_namespace = notarize_namespace(namespace);
         let notarize_message = self.proposal.encode();
         let notarize_message = (Some(notarize_namespace.as_ref()), notarize_message.as_ref());
         let seed_namespace = seed_namespace(namespace);
         let seed_message = view_message(self.proposal.view);
         let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
-        let signature = aggregate_signatures(&[self.proposal_signature, self.seed_signature]);
-        aggregate_verify_multiple_messages(
+        let signature =
+            aggregate_signatures::<V, _>(&[self.proposal_signature, self.seed_signature]);
+        aggregate_verify_multiple_messages::<V, _>(
             public_key,
             &[notarize_message, seed_message],
             &signature,
@@ -432,13 +434,13 @@ impl<D: Digest> Notarization<D> {
     }
 }
 
-impl<D: Digest> Viewable for Notarization<D> {
+impl<D: Digest, V: Variant> Viewable for Notarization<D, V> {
     fn view(&self) -> View {
         self.proposal.view()
     }
 }
 
-impl<D: Digest> Write for Notarization<D> {
+impl<D: Digest, V: Variant> Write for Notarization<D, V> {
     fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
         self.proposal_signature.write(writer);
@@ -446,13 +448,13 @@ impl<D: Digest> Write for Notarization<D> {
     }
 }
 
-impl<D: Digest> Read for Notarization<D> {
+impl<D: Digest, V: Variant> Read for Notarization<D, V> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
-        let proposal_signature = Signature::read(reader)?;
-        let seed_signature = Signature::read(reader)?;
+        let proposal_signature = V::Signature::read(reader)?;
+        let seed_signature = V::Signature::read(reader)?;
         Ok(Notarization {
             proposal,
             proposal_signature,
@@ -461,7 +463,7 @@ impl<D: Digest> Read for Notarization<D> {
     }
 }
 
-impl<D: Digest> EncodeSize for Notarization<D> {
+impl<D: Digest, V: Variant> EncodeSize for Notarization<D, V> {
     fn encode_size(&self) -> usize {
         self.proposal.encode_size()
             + self.proposal_signature.encode_size()
@@ -469,7 +471,7 @@ impl<D: Digest> EncodeSize for Notarization<D> {
     }
 }
 
-impl<D: Digest> Seedable for Notarization<D> {
+impl<D: Digest, V: Variant> Seedable for Notarization<D, V> {
     fn seed(&self) -> Seed {
         Seed::new(self.view(), self.seed_signature)
     }
@@ -479,21 +481,21 @@ impl<D: Digest> Seedable for Notarization<D> {
 /// This is typically used when the leader is unresponsive or fails to propose a valid block.
 /// It contains partial signatures for the view and seed.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
-pub struct Nullify {
+pub struct Nullify<V: Variant> {
     /// The view to be nullified (skipped)
     pub view: View,
     /// The validator's partial signature on the view
-    pub view_signature: PartialSignature,
+    pub view_signature: PartialSignature<V>,
     /// The validator's partial signature on the seed (for leader election/randomness)
-    pub seed_signature: PartialSignature,
+    pub seed_signature: PartialSignature<V>,
 }
 
-impl Nullify {
+impl<V: Variant> Nullify<V> {
     /// Creates a new nullify with the given view and signatures.
     pub fn new(
         view: View,
-        view_signature: PartialSignature,
-        seed_signature: PartialSignature,
+        view_signature: PartialSignature<V>,
+        seed_signature: PartialSignature<V>,
     ) -> Self {
         Nullify {
             view,
@@ -508,7 +510,7 @@ impl Nullify {
     /// 1. The view signature is valid for the given view
     /// 2. The seed signature is valid for the view
     /// 3. Both signatures are from the same signer
-    pub fn verify(&self, namespace: &[u8], identity: &Poly<Public>) -> bool {
+    pub fn verify(&self, namespace: &[u8], identity: &Poly<V::Public>) -> bool {
         let nullify_namespace = nullify_namespace(namespace);
         let view_message = view_message(self.view);
         let nullify_message = (Some(nullify_namespace.as_ref()), view_message.as_ref());
@@ -528,21 +530,21 @@ impl Nullify {
         let nullify_namespace = nullify_namespace(namespace);
         let view_message = view_message(view);
         let view_signature =
-            partial_sign_message(share, Some(nullify_namespace.as_ref()), &view_message);
+            partial_sign_message::<V>(share, Some(nullify_namespace.as_ref()), &view_message);
         let seed_namespace = seed_namespace(namespace);
         let seed_signature =
-            partial_sign_message(share, Some(seed_namespace.as_ref()), &view_message);
+            partial_sign_message::<V>(share, Some(seed_namespace.as_ref()), &view_message);
         Nullify::new(view, view_signature, seed_signature)
     }
 }
 
-impl Attributable for Nullify {
+impl<V: Variant> Attributable for Nullify<V> {
     fn signer(&self) -> u32 {
         self.view_signature.index
     }
 }
 
-impl Viewable for Nullify {
+impl<V: Variant> Viewable for Nullify<V> {
     fn view(&self) -> View {
         self.view
     }
@@ -681,7 +683,7 @@ pub struct Finalize<D: Digest> {
     /// The proposal to be finalized
     pub proposal: Proposal<D>,
     /// The validator's partial signature on the proposal
-    pub proposal_signature: PartialSignature,
+    pub proposal_signature: PartialSignature<MinSig>,
 }
 
 impl<D: Digest> Finalize<D> {
@@ -1231,13 +1233,13 @@ pub struct ConflictingNotarize<D: Digest> {
     /// The payload of the first conflicting proposal
     pub payload_1: D,
     /// The signature on the first conflicting proposal
-    pub signature_1: PartialSignature,
+    pub signature_1: PartialSignature<MinSig>,
     /// The parent view of the second conflicting proposal
     pub parent_2: View,
     /// The payload of the second conflicting proposal
     pub payload_2: D,
     /// The signature on the second conflicting proposal
-    pub signature_2: PartialSignature,
+    pub signature_2: PartialSignature<MinSig>,
 }
 
 impl<D: Digest> ConflictingNotarize<D> {
@@ -1364,13 +1366,13 @@ pub struct ConflictingFinalize<D: Digest> {
     /// The payload of the first conflicting proposal
     pub payload_1: D,
     /// The signature on the first conflicting proposal
-    pub signature_1: PartialSignature,
+    pub signature_1: PartialSignature<MinSig>,
     /// The parent view of the second conflicting proposal
     pub parent_2: View,
     /// The payload of the second conflicting proposal
     pub payload_2: D,
     /// The signature on the second conflicting proposal
-    pub signature_2: PartialSignature,
+    pub signature_2: PartialSignature<MinSig>,
 }
 
 impl<D: Digest> ConflictingFinalize<D> {
@@ -1494,9 +1496,9 @@ pub struct NullifyFinalize<D: Digest> {
     /// The proposal that the validator tried to finalize
     pub proposal: Proposal<D>,
     /// The signature on the nullify
-    pub view_signature: PartialSignature,
+    pub view_signature: PartialSignature<MinSig>,
     /// The signature on the finalize
-    pub finalize_signature: PartialSignature,
+    pub finalize_signature: PartialSignature<MinSig>,
 }
 
 impl<D: Digest> NullifyFinalize<D> {

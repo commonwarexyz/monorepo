@@ -1,4 +1,5 @@
 use std::fmt::Debug;
+use std::hash::Hash;
 
 use super::group::{
     Element, Point, Scalar, DST, G1, G1_ELEMENT_BYTE_LENGTH, G1_MESSAGE, G1_PROOF_OF_POSSESSION,
@@ -24,9 +25,9 @@ pub type MinSigSignature = G1;
 
 pub const MIN_SIG_SIGNATURE_LENGTH: usize = G1_ELEMENT_BYTE_LENGTH;
 
-pub trait Variant: Clone + 'static + Send + Sync {
-    type Public: Point + FixedSize + Debug;
-    type Signature: Point + FixedSize + Debug;
+pub trait Variant: Clone + 'static + Send + Sync + Hash + Eq {
+    type Public: Point + FixedSize + Debug + Hash;
+    type Signature: Point + FixedSize + Debug + Hash;
 
     const PROOF_OF_POSSESSION: DST;
     const MESSAGE: DST;
@@ -49,7 +50,7 @@ pub trait Variant: Clone + 'static + Send + Sync {
     ) -> Result<(), Error>;
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq, Eq)]
 pub struct MinPk {}
 
 impl Variant for MinPk {
@@ -115,7 +116,7 @@ impl Variant for MinPk {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq, Eq)]
 pub struct MinSig {}
 
 impl Variant for MinSig {
