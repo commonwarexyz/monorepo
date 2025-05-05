@@ -70,15 +70,6 @@ pub trait Point: Element {
     fn msm(points: &[Self], scalars: &[Scalar]) -> Self;
 }
 
-pub trait Verifier: Point {
-    type Signature: Point;
-    type Message: Point;
-
-    /// Verifies that `e(pk,hm)` is equal to `e(G2::one(),sig)` using a single product check with
-    /// a negated G2 generator (`e(pk,hm) * e(-G2::one(),sig) == 1`).
-    fn equal(&self, signature: &Self::Signature, hm: &Self::Message) -> bool;
-}
-
 /// Wrapper around [`blst_fr`] that represents an element of the BLS12‑381
 /// scalar field `F_r`.
 ///
@@ -177,24 +168,6 @@ pub type Private = Scalar;
 
 /// The private key length.
 pub const PRIVATE_KEY_LENGTH: usize = SCALAR_LENGTH;
-
-/// The default public key type (G2).
-pub type Public = G2;
-
-/// The default public key length (G2).
-pub const PUBLIC_KEY_LENGTH: usize = G2_ELEMENT_BYTE_LENGTH;
-
-/// The default signature type (G1).
-pub type Signature = G1;
-
-/// The default signature length (G1).
-pub const SIGNATURE_LENGTH: usize = G1_ELEMENT_BYTE_LENGTH;
-
-/// The DST for hashing a proof of possession to the default signature type (G1).
-pub const PROOF_OF_POSSESSION: DST = G1_PROOF_OF_POSSESSION;
-
-/// The DST for hashing a message to the default signature type (G1).
-pub const MESSAGE: DST = G1_MESSAGE;
 
 impl Scalar {
     /// Generates a random scalar using the provided RNG.
@@ -804,38 +777,6 @@ impl Point for G2 {
         }
 
         G2::from_blst_p2(msm_result)
-    }
-}
-
-impl Verifier for G2 {
-    type Signature = G1;
-    type Message = G1;
-
-    fn equal(&self, sig: &G1, hm: &G1) -> bool {
-        // Create a pairing context
-        //
-        // We only handle pre-hashed messages, so we leave the domain separator tag (`DST`) empty.
-        let mut pairing = blst_pairing::new(false, &[]);
-
-        // Convert `sig` into affine and aggregate `e(-G2::one(), sig)`
-        let q = sig.as_blst_p1_affine();
-        unsafe {
-            pairing.raw_aggregate(&BLS12_381_NEG_G2, &q);
-        }
-
-        // Convert `pk` and `hm` into affine
-        let p = self.as_blst_p2_affine();
-        let q = hm.as_blst_p1_affine();
-
-        // Aggregate `e(pk, hm)`
-        pairing.raw_aggregate(&p, &q);
-
-        // Finalize the pairing accumulation and verify the result
-        //
-        // If `finalverify()` returns `true`, it means `e(pk,hm) * e(-G2::one(),sig) == 1`. This
-        // is equivalent to `e(pk,hm) == e(G2::one(),sig)`.
-        pairing.commit();
-        pairing.finalverify(None)
     }
 }
 

@@ -45,6 +45,7 @@
 pub mod group;
 pub mod ops;
 pub mod poly;
+pub mod variant;
 
 use thiserror::Error;
 
