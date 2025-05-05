@@ -912,8 +912,7 @@ mod tests {
         parent_encode_decode::<MinSig>();
     }
 
-    #[test]
-    fn test_node_encode_decode() {
+    fn node_encode_decode<V: Variant>() {
         let mut scheme = sample_scheme(0);
         let public_key = scheme.public_key();
         let chunk_namespace = chunk_namespace(NAMESPACE);
@@ -922,9 +921,9 @@ mod tests {
         let chunk = Chunk::new(public_key.clone(), 0, sample_digest(1));
         let message = chunk.encode();
         let signature = scheme.sign(Some(chunk_namespace.as_ref()), &message);
-        let node = Node::<Ed25519, Sha256Digest>::new(chunk, signature.clone(), None);
+        let node = Node::<Ed25519, V, Sha256Digest>::new(chunk, signature.clone(), None);
         let encoded = node.encode();
-        let decoded = Node::<Ed25519, Sha256Digest>::decode(encoded).unwrap();
+        let decoded = Node::<Ed25519, V, Sha256Digest>::decode(encoded).unwrap();
         assert_eq!(decoded.chunk, node.chunk);
         assert_eq!(decoded.signature, node.signature);
         assert_eq!(decoded.parent, node.parent);
@@ -932,23 +931,23 @@ mod tests {
         // Test with parent - generate a proper threshold signature
         let n = 4;
         let t = quorum(n as u32);
-        let (identity, shares) = generate_test_data(n, t, 0);
+        let (identity, shares) = generate_test_data::<V>(n, t, 0);
 
         // Create parent chunk and signature
         let parent_chunk = Chunk::new(public_key.clone(), 0, sample_digest(0));
         let parent_epoch = 5;
 
         // Generate partial signatures for the parent chunk
-        let parent_message = Ack::payload(&parent_chunk, &parent_epoch);
+        let parent_message = Ack::<_, V, _>::payload(&parent_chunk, &parent_epoch);
         let ack_namespace = ack_namespace(NAMESPACE);
         let partials: Vec<_> = shares
             .iter()
             .take(t as usize)
-            .map(|s| partial_sign_message(s, Some(ack_namespace.as_ref()), &parent_message))
+            .map(|s| partial_sign_message::<V>(s, Some(ack_namespace.as_ref()), &parent_message))
             .collect();
 
         // Recover threshold signature for parent
-        let parent_signature = threshold_signature_recover(t, &partials).unwrap();
+        let parent_signature = threshold_signature_recover::<V, _>(t, &partials).unwrap();
 
         // Create proper parent with valid threshold signature
         let parent = Some(Parent::new(
@@ -961,34 +960,39 @@ mod tests {
         let chunk2 = Chunk::new(public_key.clone(), 1, sample_digest(2));
         let message2 = chunk2.encode();
         let signature2 = scheme.sign(Some(chunk_namespace.as_ref()), &message2);
-        let node2 = Node::<Ed25519, Sha256Digest>::new(chunk2, signature2, parent);
+        let node2 = Node::<Ed25519, V, Sha256Digest>::new(chunk2, signature2, parent);
 
         // Test encode/decode
         let encoded2 = node2.encode();
-        let decoded2 = Node::<Ed25519, Sha256Digest>::decode(encoded2).unwrap();
+        let decoded2 = Node::<Ed25519, V, Sha256Digest>::decode(encoded2).unwrap();
         assert_eq!(decoded2.chunk, node2.chunk);
         assert_eq!(decoded2.signature, node2.signature);
         assert_eq!(decoded2.parent, node2.parent);
 
         // Verify that the parent signature is valid
-        let public = poly::public(&identity);
-        let lock = Lock::new(parent_chunk, parent_epoch, parent_signature);
+        let public = poly::public::<V>(&identity);
+        let lock = Lock::<_, V, _>::new(parent_chunk, parent_epoch, parent_signature);
         assert!(lock.verify(NAMESPACE, public));
     }
 
     #[test]
-    fn test_ack_encode_decode() {
+    fn test_node_encode_decode() {
+        node_encode_decode::<MinPk>();
+        node_encode_decode::<MinSig>();
+    }
+
+    fn ack_encode_decode<V: Variant>() {
         let n = 4;
         let t = quorum(n as u32);
-        let (identity, shares) = generate_test_data(n, t, 0);
+        let (identity, shares) = generate_test_data::<V>(n, t, 0);
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
         let epoch = 5;
 
-        let ack = Ack::sign(NAMESPACE, &shares[0], chunk, epoch);
+        let ack = Ack::<_, V, _>::sign(NAMESPACE, &shares[0], chunk, epoch);
         let encoded = ack.encode();
-        let decoded = Ack::<PublicKey, Sha256Digest>::decode(encoded).unwrap();
+        let decoded = Ack::<PublicKey, V, Sha256Digest>::decode(encoded).unwrap();
 
         assert_eq!(decoded.chunk, ack.chunk);
         assert_eq!(decoded.epoch, ack.epoch);
@@ -997,6 +1001,12 @@ mod tests {
 
         // Verify signature
         assert!(decoded.verify(NAMESPACE, &identity));
+    }
+
+    #[test]
+    fn test_ack_encode_decode() {
+        ack_encode_decode::<MinPk>();
+        ack_encode_decode::<MinSig>();
     }
 
     #[test]
