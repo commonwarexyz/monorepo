@@ -518,7 +518,7 @@ mod tests {
     use blst::BLST_ERROR;
     use commonware_codec::DecodeExt;
     use commonware_utils::quorum;
-    use group::{G1_MESSAGE, G2_MESSAGE};
+    use group::{Private, G1_MESSAGE, G2_MESSAGE};
     use poly::Poly;
     use rand::prelude::*;
 
@@ -1317,5 +1317,159 @@ mod tests {
     fn test_msm_interpolate_empty() {
         msm_interpolate_empty::<MinPk>();
         msm_interpolate_empty::<MinSig>();
+    }
+
+    fn partial_aggregate_signature_correct<V: Variant>() {
+        let (n, t) = (5, 4);
+        let mut rng = StdRng::seed_from_u64(0);
+
+        // Create the private key polynomial and evaluate it at `n`
+        // points to generate the shares.
+        //
+        // If receiving a share from an untrusted party, the recipient
+        // should verify the share is on the public polynomial.
+        let (group, shares) = generate_shares::<_, V>(&mut rng, None, n, t);
+
+        // Generate the partial signatures
+        let namespace = Some(&b"test"[..]);
+        let msg = b"hello";
+        let partials = shares
+            .iter()
+            .map(|s| partial_sign_message::<V>(s, namespace, msg))
+            .collect::<Vec<_>>();
+
+        // Each partial sig can be partially verified against the public polynomial
+        partials.iter().for_each(|partial| {
+            partial_verify_message::<V>(&group, namespace, msg, partial).unwrap();
+        });
+
+        // Generate and verify the threshold sig
+        let threshold_sig = threshold_signature_recover::<V, _>(t, &partials).unwrap();
+        let threshold_pub = poly::public::<V>(&group);
+        verify_message::<V>(threshold_pub, namespace, msg, &threshold_sig).unwrap();
+    }
+
+    #[test]
+    fn test_partial_aggregate_signature_correct() {
+        partial_aggregate_signature_correct::<MinPk>();
+        partial_aggregate_signature_correct::<MinSig>();
+    }
+
+    fn partial_aggregate_signature_bad_namespace<V: Variant>() {
+        let (n, t) = (5, 4);
+        let mut rng = StdRng::seed_from_u64(0);
+
+        // Create the private key polynomial and evaluate it at `n`
+        // points to generate the shares.
+        //
+        // If receiving a share from an untrusted party, the recipient
+        // should verify the share is on the public polynomial.
+        let (group, shares) = generate_shares::<_, V>(&mut rng, None, n, t);
+
+        // Generate the partial signatures
+        let namespace = Some(&b"test"[..]);
+        let msg = b"hello";
+        let partials = shares
+            .iter()
+            .map(|s| partial_sign_message::<V>(s, namespace, msg))
+            .collect::<Vec<_>>();
+
+        // Each partial sig can be partially verified against the public polynomial
+        let namespace = Some(&b"bad"[..]);
+        partials.iter().for_each(|partial| {
+            assert!(matches!(
+                partial_verify_message::<V>(&group, namespace, msg, partial).unwrap_err(),
+                Error::InvalidSignature
+            ));
+        });
+
+        // Generate and verify the threshold sig
+        let threshold_sig = threshold_signature_recover::<V, _>(t, &partials).unwrap();
+        let threshold_pub = poly::public::<V>(&group);
+        assert!(matches!(
+            verify_message::<V>(threshold_pub, namespace, msg, &threshold_sig).unwrap_err(),
+            Error::InvalidSignature
+        ));
+    }
+
+    #[test]
+    fn test_partial_aggregate_signature_bad_namespace() {
+        partial_aggregate_signature_bad_namespace::<MinPk>();
+        partial_aggregate_signature_bad_namespace::<MinSig>();
+    }
+
+    fn partial_aggregate_signature_insufficient<V: Variant>() {
+        let (n, t) = (5, 4);
+        let mut rng = StdRng::seed_from_u64(0);
+
+        // Create the private key polynomial and evaluate it at `n`
+        // points to generate the shares
+        let (group, shares) = generate_shares::<_, V>(&mut rng, None, n, t);
+
+        // Only take t-1 shares
+        let shares = shares.into_iter().take(t as usize - 1).collect::<Vec<_>>();
+
+        // Generate the partial signatures
+        let namespace = Some(&b"test"[..]);
+        let msg = b"hello";
+        let partials = shares
+            .iter()
+            .map(|s| partial_sign_message::<V>(s, namespace, msg))
+            .collect::<Vec<_>>();
+
+        // Each partial sig can be partially verified against the public polynomial
+        partials.iter().for_each(|partial| {
+            partial_verify_message::<V>(&group, namespace, msg, partial).unwrap();
+        });
+
+        // Generate the threshold sig
+        assert!(matches!(
+            threshold_signature_recover::<V, _>(t, &partials).unwrap_err(),
+            Error::NotEnoughPartialSignatures(4, 3)
+        ));
+    }
+
+    #[test]
+    fn test_partial_aggregate_signature_insufficient() {
+        partial_aggregate_signature_insufficient::<MinPk>();
+        partial_aggregate_signature_insufficient::<MinSig>();
+    }
+
+    fn partial_aggregate_signature_bad_share<V: Variant>() {
+        let (n, t) = (5, 4);
+        let mut rng = StdRng::seed_from_u64(0);
+
+        // Create the private key polynomial and evaluate it at `n`
+        // points to generate the shares
+        let (group, mut shares) = generate_shares::<_, V>(&mut rng, None, n, t);
+
+        // Corrupt a share
+        let share = shares.get_mut(3).unwrap();
+        share.private = Private::rand(&mut rand::thread_rng());
+
+        // Generate the partial signatures
+        let namespace = Some(&b"test"[..]);
+        let msg = b"hello";
+        let partials = shares
+            .iter()
+            .map(|s| partial_sign_message::<V>(s, namespace, msg))
+            .collect::<Vec<_>>();
+
+        // Each partial sig can be partially verified against the public polynomial
+        partials.iter().for_each(|partial| {
+            partial_verify_message::<V>(&group, namespace, msg, partial).unwrap();
+        });
+
+        // Generate and verify the threshold sig
+        let threshold_sig = threshold_signature_recover::<V, _>(t, &partials).unwrap();
+        let threshold_pub = poly::public::<V>(&group);
+        verify_message::<V>(threshold_pub, namespace, msg, &threshold_sig).unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "InvalidSignature")]
+    fn test_partial_aggregate_signature_bad_share() {
+        partial_aggregate_signature_bad_share::<MinPk>();
+        partial_aggregate_signature_bad_share::<MinSig>();
     }
 }

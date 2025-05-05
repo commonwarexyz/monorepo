@@ -31,7 +31,6 @@ use commonware_codec::{
 use commonware_utils::hex;
 use rand::{CryptoRng, Rng};
 use std::{
-    env::var,
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
     ops::Deref,
