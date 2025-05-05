@@ -21,17 +21,17 @@ use std::{collections::BTreeMap, hash::Hash};
 pub type Private = Poly<group::Private>;
 
 /// Public polynomials represent commitments to secrets on a private polynomial.
-pub type Public = Poly<group::Public>;
+pub type Public = Poly<group::G2>;
 
 /// Signature polynomials are used in threshold signing (where a signature
 /// is interpolated using at least `threshold` evaluations).
-pub type Signature = Poly<group::Signature>;
+pub type Signature = Poly<group::G1>;
 
-/// The default partial signature type (G1).
-pub type PartialSignature = Eval<group::Signature>;
+/// The partial signature type (G1).
+pub type PartialSignature = Eval<group::G1>;
 
-/// The default partial signature length (G1).
-pub const PARTIAL_SIGNATURE_LENGTH: usize = u32::SIZE + group::SIGNATURE_LENGTH;
+/// The partial signature length (G1).
+pub const PARTIAL_SIGNATURE_LENGTH: usize = u32::SIZE + group::G1_ELEMENT_BYTE_LENGTH;
 
 /// A polynomial evaluation at a specific index.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -379,7 +379,7 @@ impl<C: Element> EncodeSize for Poly<C> {
 }
 
 /// Returns the public key of the polynomial (constant term).
-pub fn public(public: &Public) -> &group::Public {
+pub fn public(public: &Public) -> &group::G2 {
     public.constant()
 }
 

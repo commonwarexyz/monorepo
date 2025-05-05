@@ -8,8 +8,9 @@
 //! domain separation tag is `BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_`. You can read more about DSTs [here](https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-05#section-4.2).
 
 use super::{
-    group::{self, equal, Element, Point, Share, DST, MESSAGE, PROOF_OF_POSSESSION},
+    group::{self, Element, Point, Share, DST},
     poly::{self, Eval, PartialSignature, Weight},
+    variant::Variant,
     Error,
 };
 use crate::bls12381::primitives::poly::{compute_weights, prepare_evaluations};
@@ -20,52 +21,29 @@ use rayon::{prelude::*, ThreadPoolBuilder};
 use std::{borrow::Cow, collections::BTreeMap};
 
 /// Returns a new keypair derived from the provided randomness.
-pub fn keypair<R: RngCore>(rng: &mut R) -> (group::Private, group::Public) {
+pub fn keypair<R: RngCore, V: Variant>(rng: &mut R) -> (group::Private, V::Public) {
     let private = group::Private::rand(rng);
-    let mut public = group::Public::one();
+    let mut public = V::Public::one();
     public.mul(&private);
     (private, public)
 }
 
-/// Sign the provided payload with the private key.
-pub fn sign(private: &group::Private, dst: DST, payload: &[u8]) -> group::Signature {
-    let mut s = group::Signature::zero();
-    s.map(dst, payload);
-    s.mul(private);
-    s
-}
-
-/// Verify the signature from the provided public key.
-pub fn verify(
-    public: &group::Public,
-    dst: DST,
-    payload: &[u8],
-    signature: &group::Signature,
-) -> Result<(), Error> {
-    let mut hm = group::Signature::zero();
-    hm.map(dst, payload);
-    if !equal(public, signature, &hm) {
-        return Err(Error::InvalidSignature);
-    }
-    Ok(())
-}
-
 /// Generates a proof of possession for the private key.
-pub fn sign_proof_of_possession(private: &group::Private) -> group::Signature {
+pub fn sign_proof_of_possession<V: Variant>(private: &group::Private) -> V::Signature {
     // Get public key
-    let mut public = group::Public::one();
+    let mut public = V::Public::one();
     public.mul(private);
 
     // Sign the public key
-    sign(private, PROOF_OF_POSSESSION, &public.encode())
+    V::sign(private, V::PROOF_OF_POSSESSION, &public.encode())
 }
 
 /// Verifies a proof of possession for the provided public key.
-pub fn verify_proof_of_possession(
-    public: &group::Public,
-    signature: &group::Signature,
+pub fn verify_proof_of_possession<V: Variant>(
+    public: &V::Public,
+    signature: &V::Signature,
 ) -> Result<(), Error> {
-    verify(public, PROOF_OF_POSSESSION, &public.encode(), signature)
+    V::verify(public, V::PROOF_OF_POSSESSION, &public.encode(), signature)
 }
 
 /// Signs the provided message with the private key.
@@ -74,16 +52,16 @@ pub fn verify_proof_of_possession(
 ///
 /// Signatures produced by this function are deterministic and are safe
 /// to use in a consensus-critical context.
-pub fn sign_message(
+pub fn sign_message<V: Variant>(
     private: &group::Private,
     namespace: Option<&[u8]>,
     message: &[u8],
-) -> group::Signature {
+) -> V::Signature {
     let payload = match namespace {
         Some(namespace) => Cow::Owned(union_unique(namespace, message)),
         None => Cow::Borrowed(message),
     };
-    sign(private, MESSAGE, &payload)
+    V::sign(private, V::MESSAGE, &payload)
 }
 
 /// Verifies the signature with the provided public key.
@@ -92,17 +70,17 @@ pub fn sign_message(
 ///
 /// This function assumes a group check was already performed on
 /// `public` and `signature`.
-pub fn verify_message(
-    public: &group::Public,
+pub fn verify_message<V: Variant>(
+    public: &V::Public,
     namespace: Option<&[u8]>,
     message: &[u8],
-    signature: &group::Signature,
+    signature: &V::Signature,
 ) -> Result<(), Error> {
     let payload = match namespace {
         Some(namespace) => Cow::Owned(union_unique(namespace, message)),
         None => Cow::Borrowed(message),
     };
-    verify(public, MESSAGE, &payload, signature)
+    V::verify(public, V::MESSAGE, &payload, signature)
 }
 
 /// Generates a proof of possession for the private key share.

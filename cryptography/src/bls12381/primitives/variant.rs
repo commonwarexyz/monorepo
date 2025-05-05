@@ -13,8 +13,10 @@ pub trait Variant {
     const PROOF_OF_POSSESSION: DST;
     const MESSAGE: DST;
 
+    /// Sign the provided payload with the private key.
     fn sign(private: &Scalar, dst: DST, payload: &[u8]) -> Self::Signature;
 
+    /// Verify the signature from the provided public key.
     fn verify(
         public: &Self::Public,
         dst: DST,
