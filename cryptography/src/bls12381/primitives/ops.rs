@@ -559,16 +559,16 @@ mod tests {
         let msg = public.encode();
         match V::MESSAGE {
             G1_MESSAGE => {
-                let public = blst::min_pk::PublicKey::from_bytes(&public.encode()).unwrap();
-                let signature = blst::min_pk::Signature::from_bytes(&signature.encode()).unwrap();
+                let public = blst::min_sig::PublicKey::from_bytes(&public.encode()).unwrap();
+                let signature = blst::min_sig::Signature::from_bytes(&signature.encode()).unwrap();
                 match signature.verify(true, &msg, V::PROOF_OF_POSSESSION, &[], &public, true) {
                     BLST_ERROR::BLST_SUCCESS => Ok(()),
                     e => Err(e),
                 }
             }
             G2_MESSAGE => {
-                let public = blst::min_sig::PublicKey::from_bytes(&public.encode()).unwrap();
-                let signature = blst::min_sig::Signature::from_bytes(&signature.encode()).unwrap();
+                let public = blst::min_pk::PublicKey::from_bytes(&public.encode()).unwrap();
+                let signature = blst::min_pk::Signature::from_bytes(&signature.encode()).unwrap();
                 match signature.verify(true, &msg, V::PROOF_OF_POSSESSION, &[], &public, true) {
                     BLST_ERROR::BLST_SUCCESS => Ok(()),
                     e => Err(e),
@@ -626,47 +626,30 @@ mod tests {
         threshold_proof_of_possession::<MinSig>();
     }
 
-    #[test]
-    fn test_single_proof_of_possession_min_sig() {
-        // Generate keypair
-        let private = group::Private::rand(&mut thread_rng());
-        let mut public = group::G2::one();
-        public.mul(&private);
-        let public_compressed = public.encode();
-
-        // Generate PoP
-        let mut pop = G1::zero();
-        pop.map(G1_PROOF_OF_POSSESSION, &public_compressed);
-        pop.mul(&private);
-
-        // Verify PoP using blst
-        let public = blst::min_sig::PublicKey::from_bytes(&public_compressed).unwrap();
-        let signature = blst::min_sig::Signature::from_bytes(&pop.encode()).unwrap();
-        let result = match signature.verify(
-            true,
-            &public_compressed,
-            G1_PROOF_OF_POSSESSION,
-            &[],
-            &public,
-            true,
-        ) {
-            BLST_ERROR::BLST_SUCCESS => Ok(()),
-            e => Err(e),
-        };
-        result.expect("signature should be valid");
-    }
-
     /// Verify that a given message signature is valid according to `blst`.
-    fn blst_verify_message(
-        public: &group::Public,
+    fn blst_verify_message<V: Variant>(
+        public: &V::Public,
         msg: &[u8],
-        signature: &group::Signature,
+        signature: &V::Signature,
     ) -> Result<(), BLST_ERROR> {
-        let public = blst::min_sig::PublicKey::from_bytes(&public.encode()).unwrap();
-        let signature = blst::min_sig::Signature::from_bytes(&signature.encode()).unwrap();
-        match signature.verify(true, msg, MESSAGE, &[], &public, true) {
-            BLST_ERROR::BLST_SUCCESS => Ok(()),
-            e => Err(e),
+        match V::MESSAGE {
+            G1_MESSAGE => {
+                let public = blst::min_sig::PublicKey::from_bytes(&public.encode()).unwrap();
+                let signature = blst::min_sig::Signature::from_bytes(&signature.encode()).unwrap();
+                match signature.verify(true, msg, V::MESSAGE, &[], &public, true) {
+                    BLST_ERROR::BLST_SUCCESS => Ok(()),
+                    e => Err(e),
+                }
+            }
+            G2_MESSAGE => {
+                let public = blst::min_pk::PublicKey::from_bytes(&public.encode()).unwrap();
+                let signature = blst::min_pk::Signature::from_bytes(&signature.encode()).unwrap();
+                match signature.verify(true, msg, V::MESSAGE, &[], &public, true) {
+                    BLST_ERROR::BLST_SUCCESS => Ok(()),
+                    e => Err(e),
+                }
+            }
+            _ => panic!("Unsupported Variant"),
         }
     }
 
