@@ -878,25 +878,40 @@ mod tests {
     fn blst_aggregate_verify_multiple_messages<'a, V, I>(
         public: &V::Public,
         msgs: I,
-        signature: &group::Signature,
+        signature: &V::Signature,
     ) -> Result<(), BLST_ERROR>
     where
+        V: Variant,
         I: IntoIterator<Item = &'a [u8]>,
     {
-        let public = blst::min_sig::PublicKey::from_bytes(&public.encode()).unwrap();
-        let msgs = msgs.into_iter().collect::<Vec<_>>();
-        let pks = vec![&public; msgs.len()];
-        let signature = blst::min_sig::Signature::from_bytes(&signature.encode()).unwrap();
-        match signature.aggregate_verify(true, &msgs, MESSAGE, &pks, true) {
-            BLST_ERROR::BLST_SUCCESS => Ok(()),
-            e => Err(e),
+        match V::MESSAGE {
+            G1_MESSAGE => {
+                let public = blst::min_sig::PublicKey::from_bytes(&public.encode()).unwrap();
+                let msgs = msgs.into_iter().collect::<Vec<_>>();
+                let pks = vec![&public; msgs.len()];
+                let signature = blst::min_sig::Signature::from_bytes(&signature.encode()).unwrap();
+                match signature.aggregate_verify(true, &msgs, V::MESSAGE, &pks, true) {
+                    BLST_ERROR::BLST_SUCCESS => Ok(()),
+                    e => Err(e),
+                }
+            }
+            G2_MESSAGE => {
+                let public = blst::min_pk::PublicKey::from_bytes(&public.encode()).unwrap();
+                let msgs = msgs.into_iter().collect::<Vec<_>>();
+                let pks = vec![&public; msgs.len()];
+                let signature = blst::min_pk::Signature::from_bytes(&signature.encode()).unwrap();
+                match signature.aggregate_verify(true, &msgs, V::MESSAGE, &pks, true) {
+                    BLST_ERROR::BLST_SUCCESS => Ok(()),
+                    e => Err(e),
+                }
+            }
+            _ => panic!("Unsupported Variant"),
         }
     }
 
-    #[test]
-    fn test_aggregate_verify_multiple_messages() {
+    fn aggregate_verify_multiple_messages_correct<V: Variant>() {
         // Generate signatures
-        let (private, public) = keypair(&mut thread_rng());
+        let (private, public) = keypair::<_, V>(&mut thread_rng());
         let namespace = Some(&b"test"[..]);
         let messages: Vec<(Option<&[u8]>, &[u8])> = vec![
             (namespace, b"Message 1"),
@@ -905,18 +920,18 @@ mod tests {
         ];
         let signatures: Vec<_> = messages
             .iter()
-            .map(|(namespace, msg)| sign_message(&private, *namespace, msg))
+            .map(|(namespace, msg)| sign_message::<V>(&private, *namespace, msg))
             .collect();
 
         // Aggregate the signatures
-        let aggregate_sig = aggregate_signatures(&signatures);
+        let aggregate_sig = aggregate_signatures::<V, _>(&signatures);
 
         // Verify the aggregated signature without parallelism
-        aggregate_verify_multiple_messages(&public, &messages, &aggregate_sig, 1)
+        aggregate_verify_multiple_messages::<V, _>(&public, &messages, &aggregate_sig, 1)
             .expect("Aggregated signature should be valid");
 
         // Verify the aggregated signature with parallelism
-        aggregate_verify_multiple_messages(&public, &messages, &aggregate_sig, 4)
+        aggregate_verify_multiple_messages::<V, _>(&public, &messages, &aggregate_sig, 4)
             .expect("Aggregated signature should be valid");
 
         // Verify the aggregated signature using blst
@@ -928,14 +943,19 @@ mod tests {
             .iter()
             .map(|msg| msg.as_slice())
             .collect::<Vec<_>>();
-        blst_aggregate_verify_multiple_messages(&public, messages, &aggregate_sig)
+        blst_aggregate_verify_multiple_messages::<V, _>(&public, messages, &aggregate_sig)
             .expect("Aggregated signature should be valid");
     }
 
     #[test]
-    fn test_aggregate_verify_wrong_messages() {
+    fn test_aggregate_verify_multiple_messages() {
+        aggregate_verify_multiple_messages_correct::<MinPk>();
+        aggregate_verify_multiple_messages_correct::<MinSig>();
+    }
+
+    fn aggregate_verify_wrong_messages<V: Variant>() {
         // Generate signatures
-        let (private, public) = keypair(&mut thread_rng());
+        let (private, public) = keypair::<_, V>(&mut thread_rng());
         let namespace = Some(&b"test"[..]);
         let messages: Vec<(Option<&[u8]>, &[u8])> = vec![
             (namespace, b"Message 1"),
@@ -944,11 +964,11 @@ mod tests {
         ];
         let signatures: Vec<_> = messages
             .iter()
-            .map(|(namespace, msg)| sign_message(&private, *namespace, msg))
+            .map(|(namespace, msg)| sign_message::<V>(&private, *namespace, msg))
             .collect();
 
         // Aggregate the signatures
-        let aggregate_sig = aggregate_signatures(&signatures);
+        let aggregate_sig = aggregate_signatures::<V, _>(&signatures);
 
         // Construct wrong messages
         let wrong_messages: Vec<(Option<&[u8]>, &[u8])> = vec![
@@ -959,19 +979,24 @@ mod tests {
 
         // Verify the aggregated signature without parallelism
         let result =
-            aggregate_verify_multiple_messages(&public, &wrong_messages, &aggregate_sig, 1);
+            aggregate_verify_multiple_messages::<V, _>(&public, &wrong_messages, &aggregate_sig, 1);
         assert!(matches!(result, Err(Error::InvalidSignature)));
 
         // Verify the aggregated signature with parallelism
         let result =
-            aggregate_verify_multiple_messages(&public, &wrong_messages, &aggregate_sig, 4);
+            aggregate_verify_multiple_messages::<V, _>(&public, &wrong_messages, &aggregate_sig, 4);
         assert!(matches!(result, Err(Error::InvalidSignature)));
     }
 
     #[test]
-    fn test_aggregate_verify_wrong_message_count() {
+    fn test_aggregate_verify_wrong_messages() {
+        aggregate_verify_wrong_messages::<MinPk>();
+        aggregate_verify_wrong_messages::<MinSig>();
+    }
+
+    fn aggregate_verify_wrong_message_count<V: Variant>() {
         // Generate signatures
-        let (private, public) = keypair(&mut thread_rng());
+        let (private, public) = keypair::<_, V>(&mut thread_rng());
         let namespace = Some(&b"test"[..]);
         let messages: Vec<(Option<&[u8]>, &[u8])> = vec![
             (namespace, b"Message 1"),
@@ -980,11 +1005,11 @@ mod tests {
         ];
         let signatures: Vec<_> = messages
             .iter()
-            .map(|(namespace, msg)| sign_message(&private, *namespace, msg))
+            .map(|(namespace, msg)| sign_message::<V>(&private, *namespace, msg))
             .collect();
 
         // Aggregate the signatures
-        let aggregate_sig = aggregate_signatures(&signatures);
+        let aggregate_sig = aggregate_signatures::<V, _>(&signatures);
 
         // Construct wrong messages
         let wrong_messages: Vec<(Option<&[u8]>, &[u8])> =
@@ -992,21 +1017,26 @@ mod tests {
 
         // Verify the aggregated signature without parallelism
         let result =
-            aggregate_verify_multiple_messages(&public, &wrong_messages, &aggregate_sig, 1);
+            aggregate_verify_multiple_messages::<V, _>(&public, &wrong_messages, &aggregate_sig, 1);
         assert!(matches!(result, Err(Error::InvalidSignature)));
 
         // Verify the aggregated signature with parallelism
         let result =
-            aggregate_verify_multiple_messages(&public, &wrong_messages, &aggregate_sig, 4);
+            aggregate_verify_multiple_messages::<V, _>(&public, &wrong_messages, &aggregate_sig, 4);
         assert!(matches!(result, Err(Error::InvalidSignature)));
     }
 
     #[test]
-    fn test_partial_verify_multiple_messages() {
+    fn test_aggregate_verify_wrong_message_count() {
+        aggregate_verify_wrong_message_count::<MinPk>();
+        aggregate_verify_wrong_message_count::<MinSig>();
+    }
+
+    fn partial_verify_multiple_messages_correct<V: Variant>() {
         // Generate polynomial and shares
         let n = 5;
         let t = quorum(n);
-        let (public, shares) = generate_shares(&mut thread_rng(), None, n, t);
+        let (public, shares) = generate_shares::<_, V>(&mut thread_rng(), None, n, t);
 
         // Select signer with index 0
         let signer = &shares[0];
@@ -1017,22 +1047,27 @@ mod tests {
             (Some(&b"ns"[..]), b"msg2"),
             (Some(&b"ns"[..]), b"msg3"),
         ];
-        let partials: Vec<PartialSignature> = messages
+        let partials: Vec<PartialSignature<V>> = messages
             .iter()
-            .map(|(ns, msg)| partial_sign_message(signer, *ns, msg))
+            .map(|(ns, msg)| partial_sign_message::<V>(signer, *ns, msg))
             .collect();
-        partial_verify_multiple_messages(&public, signer.index, &messages, &partials)
+        partial_verify_multiple_messages::<V, _, _>(&public, signer.index, &messages, &partials)
             .expect("Verification with namespaced messages should succeed");
 
         // Successful verification with non-namespaced messages
         let messages_no_ns: Vec<(Option<&[u8]>, &[u8])> =
             vec![(None, b"msg1"), (None, b"msg2"), (None, b"msg3")];
-        let partials_no_ns: Vec<PartialSignature> = messages_no_ns
+        let partials_no_ns: Vec<PartialSignature<V>> = messages_no_ns
             .iter()
-            .map(|(ns, msg)| partial_sign_message(signer, *ns, msg))
+            .map(|(ns, msg)| partial_sign_message::<V>(signer, *ns, msg))
             .collect();
-        partial_verify_multiple_messages(&public, signer.index, &messages_no_ns, &partials_no_ns)
-            .expect("Verification with non-namespaced messages should succeed");
+        partial_verify_multiple_messages::<V, _, _>(
+            &public,
+            signer.index,
+            &messages_no_ns,
+            &partials_no_ns,
+        )
+        .expect("Verification with non-namespaced messages should succeed");
 
         // Successful verification with mixed namespaces
         let messages_mixed: Vec<(Option<&[u8]>, &[u8])> = vec![
@@ -1040,49 +1075,69 @@ mod tests {
             (None, b"msg2"),
             (Some(&b"ns2"[..]), b"msg3"),
         ];
-        let partials_mixed: Vec<PartialSignature> = messages_mixed
+        let partials_mixed: Vec<PartialSignature<V>> = messages_mixed
             .iter()
-            .map(|(ns, msg)| partial_sign_message(signer, *ns, msg))
+            .map(|(ns, msg)| partial_sign_message::<V>(signer, *ns, msg))
             .collect();
-        partial_verify_multiple_messages(&public, signer.index, &messages_mixed, &partials_mixed)
-            .expect("Verification with mixed namespaces should succeed");
+        partial_verify_multiple_messages::<V, _, _>(
+            &public,
+            signer.index,
+            &messages_mixed,
+            &partials_mixed,
+        )
+        .expect("Verification with mixed namespaces should succeed");
 
         // Failure with wrong signer index
         assert!(matches!(
-            partial_verify_multiple_messages(&public, 1, &messages, &partials),
+            partial_verify_multiple_messages::<V, _, _>(&public, 1, &messages, &partials),
             Err(Error::InvalidSignature)
         ));
 
         // Success with swapped partial signatures
         let mut partials_swapped = partials.clone();
         partials_swapped.swap(0, 1);
-        partial_verify_multiple_messages(&public, signer.index, &messages, &partials_swapped)
-            .expect("Verification with swapped partials should succeed");
+        partial_verify_multiple_messages::<V, _, _>(
+            &public,
+            signer.index,
+            &messages,
+            &partials_swapped,
+        )
+        .expect("Verification with swapped partials should succeed");
 
         // Failure with fewer signatures than messages
         let partials_fewer = partials[..2].to_vec();
         assert!(matches!(
-            partial_verify_multiple_messages(&public, signer.index, &messages, &partials_fewer),
+            partial_verify_multiple_messages::<V, _, _>(
+                &public,
+                signer.index,
+                &messages,
+                &partials_fewer
+            ),
             Err(Error::InvalidSignature)
         ));
 
         // Failure with more signatures than messages
         let extra_message = (Some(&b"ns"[..]), b"msg4");
-        let extra_partial = partial_sign_message(signer, extra_message.0, extra_message.1);
+        let extra_partial = partial_sign_message::<V>(signer, extra_message.0, extra_message.1);
         let mut partials_more = partials.clone();
         partials_more.push(extra_partial);
         assert!(matches!(
-            partial_verify_multiple_messages(&public, signer.index, &messages, &partials_more),
+            partial_verify_multiple_messages::<V, _, _>(
+                &public,
+                signer.index,
+                &messages,
+                &partials_more
+            ),
             Err(Error::InvalidSignature)
         ));
 
         // Failure with signatures from different signers
         let signer2 = &shares[1];
-        let partial2 = partial_sign_message(signer2, messages[0].0, messages[0].1);
+        let partial2 = partial_sign_message::<V>(signer2, messages[0].0, messages[0].1);
         let mut partials_mixed_signers = partials.clone();
         partials_mixed_signers[0] = partial2;
         assert!(matches!(
-            partial_verify_multiple_messages(
+            partial_verify_multiple_messages::<V, _, _>(
                 &public,
                 signer.index,
                 &messages,
@@ -1093,16 +1148,21 @@ mod tests {
     }
 
     #[test]
-    fn test_threshold_signature_recover_with_weights() {
+    fn test_partial_verify_multiple_messages() {
+        partial_verify_multiple_messages_correct::<MinPk>();
+        partial_verify_multiple_messages_correct::<MinSig>();
+    }
+
+    fn threshold_signature_recover_with_weights_correct<V: Variant>() {
         let mut rng = StdRng::seed_from_u64(3333);
         let (n, t) = (6, quorum(6));
-        let (group_poly, shares) = crate::bls12381::dkg::ops::generate_shares(&mut rng, None, n, t);
+        let (group_poly, shares) = generate_shares::<_, V>(&mut rng, None, n, t);
 
         // Produce partial signatures for the first `t` shares.
         let partials: Vec<_> = shares
             .iter()
             .take(t as usize)
-            .map(|s| partial_sign_message(s, None, b"payload"))
+            .map(|s| partial_sign_message::<V>(s, None, b"payload"))
             .collect();
 
         // Compute barycentric weights once.
@@ -1110,54 +1170,65 @@ mod tests {
         let weights = compute_weights(indices).unwrap();
 
         // Path-1: generic recover
-        let sig1 = threshold_signature_recover(t, &partials).unwrap();
+        let sig1 = threshold_signature_recover::<V, _>(t, &partials).unwrap();
 
         // Path-2: recover with *pre-computed* weights
-        let sig2 = threshold_signature_recover_with_weights(&weights, &partials).unwrap();
+        let sig2 = threshold_signature_recover_with_weights::<V, _>(&weights, &partials).unwrap();
 
         assert_eq!(sig1, sig2);
 
         // Verify with the aggregated public key.
-        let pk = poly::public(&group_poly);
-        verify_message(pk, None, b"payload", &sig1).unwrap();
+        let pk = poly::public::<V>(&group_poly);
+        verify_message::<V>(pk, None, b"payload", &sig1).unwrap();
     }
 
     #[test]
-    fn test_threshold_signature_recover_multiple() {
+    fn test_threshold_signature_recover_with_weights() {
+        threshold_signature_recover_with_weights_correct::<MinPk>();
+        threshold_signature_recover_with_weights_correct::<MinSig>();
+    }
+
+    fn threshold_signature_recover_multiple<V: Variant>() {
         let mut rng = StdRng::seed_from_u64(3333);
         let (n, t) = (6, quorum(6));
-        let (group_poly, shares) = crate::bls12381::dkg::ops::generate_shares(&mut rng, None, n, t);
+        let (group_poly, shares) = generate_shares::<_, V>(&mut rng, None, n, t);
 
         // Produce partial signatures for the first `t` shares.
         let partials_1: Vec<_> = shares
             .iter()
             .take(t as usize)
-            .map(|s| partial_sign_message(s, None, b"payload1"))
+            .map(|s| partial_sign_message::<V>(s, None, b"payload1"))
             .collect();
         let partials_2: Vec<_> = shares
             .iter()
             .take(t as usize)
-            .map(|s| partial_sign_message(s, None, b"payload2"))
+            .map(|s| partial_sign_message::<V>(s, None, b"payload2"))
             .collect();
 
         // Recover signatures
-        let (sig_1, sig_2) = threshold_signature_recover_pair(t, &partials_1, &partials_2).unwrap();
+        let (sig_1, sig_2) =
+            threshold_signature_recover_pair::<V, _>(t, &partials_1, &partials_2).unwrap();
 
         // Verify with the aggregated public key.
-        let pk = poly::public(&group_poly);
-        verify_message(pk, None, b"payload1", &sig_1).unwrap();
-        verify_message(pk, None, b"payload2", &sig_2).unwrap();
+        let pk = poly::public::<V>(&group_poly);
+        verify_message::<V>(pk, None, b"payload1", &sig_1).unwrap();
+        verify_message::<V>(pk, None, b"payload2", &sig_2).unwrap();
     }
 
     #[test]
-    fn test_msm_interpolate_vs_poly_recover() {
+    fn test_threshold_signature_recover_multiple() {
+        threshold_signature_recover_multiple::<MinPk>();
+        threshold_signature_recover_multiple::<MinSig>();
+    }
+
+    fn msm_interpolate_vs_poly_recover<V: Variant>() {
         let mut rng = StdRng::seed_from_u64(4242);
         let degree = 5;
         let threshold = degree + 1;
         let poly_scalar = poly::new_from(degree, &mut rng);
 
-        // Commit to G1 (Signature group)
-        let poly_g1 = Poly::<G1>::commit(poly_scalar);
+        // Commit to Signature group
+        let poly_g1 = Poly::<V::Signature>::commit(poly_scalar);
 
         // Generate evaluations (enough to meet threshold)
         let evals: Vec<_> = (0..threshold).map(|i| poly_g1.evaluate(i)).collect();
@@ -1168,8 +1239,9 @@ mod tests {
         let weights = poly::compute_weights(indices).expect("Failed to compute weights");
 
         // Calculate using original polynomial recovery (naive interpolation)
-        let expected_result = poly::Signature::recover_with_weights(&weights, eval_refs.clone())
-            .expect("poly::recover_with_weights failed");
+        let expected_result =
+            poly::Signature::<V>::recover_with_weights(&weights, eval_refs.clone())
+                .expect("poly::recover_with_weights failed");
 
         // Calculate using MSM interpolation
         let msm_result = msm_interpolate(&weights, eval_refs).expect("msm_interpolate failed");
@@ -1189,12 +1261,17 @@ mod tests {
     }
 
     #[test]
-    fn test_msm_interpolate_invalid_index() {
+    fn test_msm_interpolate_vs_poly_recover() {
+        msm_interpolate_vs_poly_recover::<MinPk>();
+        msm_interpolate_vs_poly_recover::<MinSig>();
+    }
+
+    fn msm_interpolate_invalid_index<V: Variant>() {
         let mut rng = StdRng::seed_from_u64(5555);
         let degree = 2;
         let threshold = degree + 1;
         let poly_scalar = poly::new_from(degree, &mut rng);
-        let poly_g2 = Poly::<G2>::commit(poly_scalar);
+        let poly_g2 = Poly::<V::Public>::commit(poly_scalar);
 
         // Generate threshold evaluations
         let evals: Vec<_> = (0..threshold).map(|i| poly_g2.evaluate(i)).collect();
@@ -1205,7 +1282,7 @@ mod tests {
         let weights = poly::compute_weights(wrong_indices).expect("Failed to compute weights");
 
         // Try to interpolate with mismatched weights/evals
-        let result = msm_interpolate::<G2, _>(&weights, eval_refs);
+        let result = msm_interpolate::<V::Public, _>(&weights, eval_refs);
 
         // Expect InvalidIndex error
         assert!(
@@ -1215,10 +1292,15 @@ mod tests {
     }
 
     #[test]
-    fn test_msm_interpolate_empty() {
+    fn test_msm_interpolate_invalid_index() {
+        msm_interpolate_invalid_index::<MinPk>();
+        msm_interpolate_invalid_index::<MinSig>();
+    }
+
+    fn msm_interpolate_empty<V: Variant>() {
         let weights: BTreeMap<u32, Weight> = BTreeMap::new();
-        let evals: Vec<Eval<G2>> = Vec::new();
-        let eval_refs: Vec<&Eval<G2>> = evals.iter().collect();
+        let evals: Vec<Eval<V::Public>> = Vec::new();
+        let eval_refs: Vec<&Eval<V::Public>> = evals.iter().collect();
 
         // Interpolate with empty inputs
         let result = msm_interpolate(&weights, eval_refs).expect("msm_interpolate failed on empty");
@@ -1226,8 +1308,14 @@ mod tests {
         // Expect identity element
         assert_eq!(
             result,
-            G2::zero(),
+            V::Public::zero(),
             "Expected G2 identity for empty interpolation"
         );
+    }
+
+    #[test]
+    fn test_msm_interpolate_empty() {
+        msm_interpolate_empty::<MinPk>();
+        msm_interpolate_empty::<MinSig>();
     }
 }
