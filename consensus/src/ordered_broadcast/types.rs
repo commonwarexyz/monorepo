@@ -1198,17 +1198,16 @@ mod tests {
         node_sign_verify::<MinSig>();
     }
 
-    #[test]
-    fn test_ack_sign_verify() {
+    fn ack_sign_verify<V: Variant>() {
         let n = 4;
         let t = quorum(n as u32);
-        let (identity, shares) = generate_test_data(n, t, 0);
+        let (identity, shares) = generate_test_data::<V>(n, t, 0);
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
         let epoch = 5;
 
-        let ack = Ack::sign(NAMESPACE, &shares[0], chunk, epoch);
+        let ack = Ack::<_, V, _>::sign(NAMESPACE, &shares[0], chunk, epoch);
         assert!(ack.verify(NAMESPACE, &identity));
 
         // Test that verification fails with wrong namespace
@@ -1216,10 +1215,15 @@ mod tests {
     }
 
     #[test]
-    fn test_threshold_recovery() {
+    fn test_ack_sign_verify() {
+        ack_sign_verify::<MinPk>();
+        ack_sign_verify::<MinSig>();
+    }
+
+    fn threshold_recovery<V: Variant>() {
         let n = 4;
         let t = quorum(n as u32);
-        let (identity, shares) = generate_test_data(n, t, 0);
+        let (identity, shares) = generate_test_data::<V>(n, t, 0);
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
@@ -1229,21 +1233,27 @@ mod tests {
         let acks: Vec<_> = shares
             .iter()
             .take(t as usize)
-            .map(|s| Ack::sign(NAMESPACE, s, chunk.clone(), epoch))
+            .map(|s| Ack::<_, V, _>::sign(NAMESPACE, s, chunk.clone(), epoch))
             .collect();
 
         // Extract partial signatures
         let partials: Vec<_> = acks.iter().map(|a| a.signature.clone()).collect();
 
         // Recover threshold signature
-        let threshold = threshold_signature_recover(t, &partials).unwrap();
+        let threshold = threshold_signature_recover::<V, _>(t, &partials).unwrap();
 
         // Create lock with threshold signature
-        let lock = Lock::new(chunk, epoch, threshold);
+        let lock = Lock::<_, V, _>::new(chunk, epoch, threshold);
 
         // Verify lock
-        let public = poly::public(&identity);
+        let public = poly::public::<V>(&identity);
         assert!(lock.verify(NAMESPACE, public));
+    }
+
+    #[test]
+    fn test_threshold_recovery() {
+        threshold_recovery::<MinPk>();
+        threshold_recovery::<MinSig>();
     }
 
     #[test]
@@ -1441,11 +1451,10 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn test_ack_verify_invalid_signature() {
+    fn ack_verify_invalid_signature<V: Variant>() {
         let n = 4;
         let t = quorum(n as u32);
-        let (identity, shares) = generate_test_data(n, t, 0);
+        let (identity, shares) = generate_test_data::<V>(n, t, 0);
 
         // Create a chunk and ack
         let public_key = sample_scheme(0).public_key();
@@ -1453,28 +1462,33 @@ mod tests {
         let epoch = 5;
 
         // Create a valid ack
-        let ack = Ack::sign(NAMESPACE, &shares[0], chunk.clone(), epoch);
+        let ack = Ack::<_, V, _>::sign(NAMESPACE, &shares[0], chunk.clone(), epoch);
 
         // Verification should succeed
         assert!(ack.verify(NAMESPACE, &identity));
 
         // Create an ack with invalid signature
         let mut invalid_signature = ack.signature.clone();
-        invalid_signature.value.add(&G1::one());
-        let invalid_ack = Ack::new(chunk, epoch, invalid_signature);
+        invalid_signature.value.add(&V::Signature::one());
+        let invalid_ack = Ack::<_, V, _>::new(chunk, epoch, invalid_signature);
 
         // Verification should fail
         assert!(!invalid_ack.verify(NAMESPACE, &identity));
     }
 
     #[test]
-    fn test_ack_verify_wrong_validator() {
+    fn test_ack_verify_invalid_signature() {
+        ack_verify_invalid_signature::<MinPk>();
+        ack_verify_invalid_signature::<MinSig>();
+    }
+
+    fn ack_verify_wrong_validator<V: Variant>() {
         let n = 4;
         let t = quorum(n as u32);
-        let (identity, shares) = generate_test_data(n, t, 0);
+        let (identity, shares) = generate_test_data::<V>(n, t, 0);
 
         // Create another set of BLS shares with a different polynomial
-        let (wrong_identity, _) = generate_test_data(n, t, 1);
+        let (wrong_identity, _) = generate_test_data::<V>(n, t, 1);
 
         // Create a chunk and ack
         let public_key = sample_scheme(0).public_key();
@@ -1482,13 +1496,19 @@ mod tests {
         let epoch = 5;
 
         // Create a valid ack
-        let ack = Ack::sign(NAMESPACE, &shares[0], chunk, epoch);
+        let ack = Ack::<_, V, _>::sign(NAMESPACE, &shares[0], chunk, epoch);
 
         // Verification should succeed with correct identity
         assert!(ack.verify(NAMESPACE, &identity));
 
         // Verification should fail with wrong identity
         assert!(!ack.verify(NAMESPACE, &wrong_identity));
+    }
+
+    #[test]
+    fn test_ack_verify_wrong_validator() {
+        ack_verify_wrong_validator::<MinPk>();
+        ack_verify_wrong_validator::<MinSig>();
     }
 
     fn lock_verify_invalid_signature<V: Variant>() {
