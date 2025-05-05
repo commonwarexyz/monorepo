@@ -5,10 +5,11 @@ use futures::{
 };
 use io_uring::{squeue::Entry as SqueueEntry, types::Fd, IoUring};
 use std::{
-    net::{SocketAddr, TcpListener, TcpStream},
+    net::SocketAddr,
     os::fd::{AsRawFd, OwnedFd},
     sync::Arc,
 };
+use tokio::net::{TcpListener, TcpStream};
 
 #[derive(Clone, Debug)]
 pub struct IoUringConfig {
@@ -133,7 +134,9 @@ impl crate::Network for Network {
     type Listener = Listener;
 
     async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, crate::Error> {
-        let listener = TcpListener::bind(socket).map_err(|_| crate::Error::BindFailed)?;
+        let listener = TcpListener::bind(socket)
+            .await
+            .map_err(|_| crate::Error::BindFailed)?;
         Ok(Listener {
             inner: listener,
             submitter: self.submitter.clone(),
@@ -144,7 +147,14 @@ impl crate::Network for Network {
         &self,
         socket: SocketAddr,
     ) -> Result<(crate::SinkOf<Self>, crate::StreamOf<Self>), crate::Error> {
-        let stream = TcpStream::connect(socket).map_err(|_| crate::Error::ConnectionFailed)?;
+        let stream = TcpStream::connect(socket)
+            .await
+            .map_err(|_| crate::Error::ConnectionFailed)?;
+
+        let stream = stream
+            .into_std()
+            .map_err(|_| crate::Error::ConnectionFailed)?;
+
         let fd = Arc::new(OwnedFd::from(stream));
 
         Ok((
@@ -173,6 +183,11 @@ impl crate::Listener for Listener {
         let (stream, remote_addr) = self
             .inner
             .accept()
+            .await
+            .map_err(|_| crate::Error::ConnectionFailed)?;
+
+        let stream = stream
+            .into_std()
             .map_err(|_| crate::Error::ConnectionFailed)?;
 
         let fd = Arc::new(OwnedFd::from(stream));
