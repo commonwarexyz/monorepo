@@ -6,12 +6,12 @@ use crate::mmr::{
     iterator::{PathIterator, PeakIterator},
     Error,
     Error::*,
+    Storage,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{FixedSize, ReadExt};
-use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_cryptography::Hasher as CHasher;
 use futures::future::try_join_all;
-use std::future::Future;
 use tracing::debug;
 
 /// Contains the information necessary for proving the inclusion of an element, or some range of elements, in the MMR
@@ -31,15 +31,6 @@ pub struct Proof<H: CHasher> {
     /// The hashes necessary for proving the inclusion of an element, or range of elements, in the
     /// MMR.
     pub hashes: Vec<H::Digest>,
-}
-
-/// A trait that allows generic generation of an MMR inclusion proof.
-pub trait Storage<D: Digest>: Send + Sync {
-    /// Return the number of elements in the MMR.
-    fn size(&self) -> u64;
-
-    /// Return the specified node of the MMR if it exists & hasn't been pruned.
-    fn get_node(&self, position: u64) -> impl Future<Output = Result<Option<D>, Error>> + Send;
 }
 
 impl<H: CHasher> PartialEq for Proof<H> {

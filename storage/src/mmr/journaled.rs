@@ -10,10 +10,7 @@ use crate::journal::{
 };
 use crate::metadata::{Config as MConfig, Metadata};
 use crate::mmr::{
-    iterator::PeakIterator,
-    mem::Mmr as MemMmr,
-    verification::{Proof, Storage},
-    Error,
+    iterator::PeakIterator, mem::Mmr as MemMmr, verification::Proof, Builder, Error, Storage,
 };
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Hasher;
@@ -58,6 +55,16 @@ pub struct Mmr<'a, E: RStorage + Clock + Metrics, H: Hasher> {
     // The highest position for which this MMR has been pruned, or 0 if this MMR has never been
     // pruned.
     pruned_to_pos: u64,
+}
+
+impl<E: RStorage + Clock + Metrics, H: Hasher> Builder<H> for Mmr<'_, E, H> {
+    async fn add(&mut self, hasher: &mut H, element: &[u8]) -> Result<u64, Error> {
+        self.add(hasher, element).await
+    }
+
+    fn root(&self, hasher: &mut H) -> H::Digest {
+        self.root(hasher)
+    }
 }
 
 impl<E: RStorage + Clock + Metrics, H: Hasher> Storage<H::Digest> for Mmr<'_, E, H> {
@@ -475,7 +482,10 @@ impl<E: RStorage + Clock + Metrics, H: Hasher> Mmr<'_, E, H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{iterator::leaf_num_to_pos, mem::tests::ROOTS};
+    use crate::mmr::{
+        iterator::leaf_num_to_pos,
+        tests::{build_test_roots_mmr, ROOTS},
+    };
     use commonware_cryptography::{hash, sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob as _, Runner};
@@ -483,6 +493,24 @@ mod tests {
 
     fn test_digest(v: usize) -> Digest {
         hash(&v.to_be_bytes())
+    }
+
+    /// Test that the MMR root computation remains stable.
+    #[test]
+    fn test_journaled_mmr_root_stability() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                journal_partition: "journal_partition".into(),
+                metadata_partition: "metadata_partition".into(),
+                items_per_blob: 7,
+            };
+            let mut mmr = Mmr::<_, Sha256>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+            let mut hasher = Sha256::new();
+            build_test_roots_mmr(&mut hasher, &mut mmr).await;
+        });
     }
 
     #[test_traced]

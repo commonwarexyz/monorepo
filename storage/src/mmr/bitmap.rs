@@ -12,7 +12,7 @@
 
 use crate::{
     metadata::{Config as MConfig, Metadata},
-    mmr::{iterator::leaf_num_to_pos, mem::Mmr, verification::Proof, verification::Storage, Error},
+    mmr::{iterator::leaf_num_to_pos, mem::Mmr, verification::Proof, Error, Storage},
 };
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Hasher as CHasher;
