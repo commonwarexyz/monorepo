@@ -11,27 +11,24 @@ use crate::bls12381::primitives::{
     Error,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{
-    varint::UInt, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
-};
+use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use rand::{rngs::OsRng, RngCore};
 use std::{collections::BTreeMap, hash::Hash};
+
+use super::variant::Variant;
 
 /// Private polynomials are used to generate secret shares.
 pub type Private = Poly<group::Private>;
 
 /// Public polynomials represent commitments to secrets on a private polynomial.
-pub type Public = Poly<group::G2>;
+pub type Public<V: Variant> = Poly<V::Public>;
 
 /// Signature polynomials are used in threshold signing (where a signature
 /// is interpolated using at least `threshold` evaluations).
-pub type Signature = Poly<group::G1>;
+pub type Signature<V: Variant> = Poly<V::Signature>;
 
-/// The partial signature type (G1).
-pub type PartialSignature = Eval<group::G1>;
-
-/// The partial signature length (G1).
-pub const PARTIAL_SIGNATURE_LENGTH: usize = u32::SIZE + group::G1_ELEMENT_BYTE_LENGTH;
+/// The partial signature type.
+pub type PartialSignature<V: Variant> = Eval<V::Signature>;
 
 /// A polynomial evaluation at a specific index.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -379,7 +376,7 @@ impl<C: Element> EncodeSize for Poly<C> {
 }
 
 /// Returns the public key of the polynomial (constant term).
-pub fn public(public: &Public) -> &group::G2 {
+pub fn public<V: Variant>(public: &Public<V>) -> &V::Public {
     public.constant()
 }
 

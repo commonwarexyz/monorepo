@@ -8,7 +8,7 @@
 //! domain separation tag is `BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_`. You can read more about DSTs [here](https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-05#section-4.2).
 
 use super::{
-    group::{self, Element, Point, Share, DST},
+    group::{self, Element, Point, Share},
     poly::{self, Eval, PartialSignature, Weight},
     variant::Variant,
     Error,
