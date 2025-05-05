@@ -511,24 +511,26 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bls12381::dkg::ops::generate_shares;
+    use crate::bls12381::{
+        dkg::ops::generate_shares,
+        primitives::variant::{MinPk, MinSig},
+    };
     use blst::BLST_ERROR;
     use commonware_codec::DecodeExt;
     use commonware_utils::quorum;
-    use group::{G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2};
+    use group::{G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE};
     use poly::Poly;
     use rand::prelude::*;
 
-    #[test]
-    fn test_codec() {
+    fn codec<V: Variant>() {
         // Encode private/public key
-        let (private, public) = keypair(&mut thread_rng());
+        let (private, public) = keypair::<_, V>(&mut thread_rng());
         let (private_bytes, public_bytes) = (private.encode(), public.encode());
 
         // Decode private/public key
         let (private_decoded, public_decoded) = (
             group::Private::decode(private_bytes.clone()).unwrap(),
-            group::Public::decode(public_bytes.clone()).unwrap(),
+            V::Public::decode(public_bytes.clone()).unwrap(),
         );
 
         // Ensure equal
@@ -543,56 +545,85 @@ mod tests {
         assert_eq!(public_bytes, blst_public_encoded.as_slice());
     }
 
+    #[test]
+    fn test_codec() {
+        codec::<MinPk>();
+        codec::<MinSig>();
+    }
+
     /// Verify that a given proof-of-possession signature is valid according to `blst`.
-    fn blst_verify_proof_of_possession(
-        public: &group::Public,
-        signature: &group::Signature,
+    fn blst_verify_proof_of_possession<V: Variant>(
+        public: &V::Public,
+        signature: &V::Signature,
     ) -> Result<(), BLST_ERROR> {
         let msg = public.encode();
-        let public = blst::min_sig::PublicKey::from_bytes(&public.encode()).unwrap();
-        let signature = blst::min_sig::Signature::from_bytes(&signature.encode()).unwrap();
-        match signature.verify(true, &msg, PROOF_OF_POSSESSION, &[], &public, true) {
-            BLST_ERROR::BLST_SUCCESS => Ok(()),
-            e => Err(e),
+        match V::MESSAGE {
+            G1_MESSAGE => {
+                let public = blst::min_pk::PublicKey::from_bytes(&public.encode()).unwrap();
+                let signature = blst::min_pk::Signature::from_bytes(&signature.encode()).unwrap();
+                match signature.verify(true, &msg, V::PROOF_OF_POSSESSION, &[], &public, true) {
+                    BLST_ERROR::BLST_SUCCESS => Ok(()),
+                    e => Err(e),
+                }
+            }
+            G2_MESSAGE => {
+                let public = blst::min_sig::PublicKey::from_bytes(&public.encode()).unwrap();
+                let signature = blst::min_sig::Signature::from_bytes(&signature.encode()).unwrap();
+                match signature.verify(true, &msg, V::PROOF_OF_POSSESSION, &[], &public, true) {
+                    BLST_ERROR::BLST_SUCCESS => Ok(()),
+                    e => Err(e),
+                }
+            }
+            _ => panic!("Unsupported Variant"),
         }
+    }
+
+    fn single_proof_of_possession<V: Variant>() {
+        // Generate PoP
+        let (private, public) = keypair::<_, V>(&mut thread_rng());
+        let pop = sign_proof_of_possession::<V>(&private);
+
+        // Verify PoP
+        verify_proof_of_possession::<V>(&public, &pop).expect("PoP should be valid");
+
+        // Verify PoP using blst
+        blst_verify_proof_of_possession::<V>(&public, &pop).expect("PoP should be valid");
     }
 
     #[test]
     fn test_single_proof_of_possession() {
+        single_proof_of_possession::<MinPk>();
+        single_proof_of_possession::<MinSig>();
+    }
+
+    fn threshold_proof_of_possession<V: Variant>() {
         // Generate PoP
-        let (private, public) = keypair(&mut thread_rng());
-        let pop = sign_proof_of_possession(&private);
+        let (n, t) = (5, 4);
+        let mut rng = StdRng::seed_from_u64(0);
+        let (public, shares) = generate_shares::<_, V>(&mut rng, None, n, t);
+        let partials: Vec<_> = shares
+            .iter()
+            .map(|s| partial_sign_proof_of_possession::<V>(&public, s))
+            .collect();
+        for p in &partials {
+            partial_verify_proof_of_possession::<V>(&public, p).expect("signature should be valid");
+        }
+        let threshold_sig = threshold_signature_recover::<V, _>(t, &partials).unwrap();
+        let threshold_pub = poly::public::<V>(&public);
 
         // Verify PoP
-        verify_proof_of_possession(&public, &pop).expect("PoP should be valid");
+        verify_proof_of_possession::<V>(threshold_pub, &threshold_sig)
+            .expect("signature should be valid");
 
         // Verify PoP using blst
-        blst_verify_proof_of_possession(&public, &pop).expect("PoP should be valid");
+        blst_verify_proof_of_possession::<V>(threshold_pub, &threshold_sig)
+            .expect("signature should be valid");
     }
 
     #[test]
     fn test_threshold_proof_of_possession() {
-        // Generate PoP
-        let (n, t) = (5, 4);
-        let mut rng = StdRng::seed_from_u64(0);
-        let (public, shares) = generate_shares(&mut rng, None, n, t);
-        let partials: Vec<_> = shares
-            .iter()
-            .map(|s| partial_sign_proof_of_possession(&public, s))
-            .collect();
-        for p in &partials {
-            partial_verify_proof_of_possession(&public, p).expect("signature should be valid");
-        }
-        let threshold_sig = threshold_signature_recover(t, &partials).unwrap();
-        let threshold_pub = poly::public(&public);
-
-        // Verify PoP
-        verify_proof_of_possession(threshold_pub, &threshold_sig)
-            .expect("signature should be valid");
-
-        // Verify PoP using blst
-        blst_verify_proof_of_possession(threshold_pub, &threshold_sig)
-            .expect("signature should be valid");
+        threshold_proof_of_possession::<MinPk>();
+        threshold_proof_of_possession::<MinSig>();
     }
 
     #[test]
