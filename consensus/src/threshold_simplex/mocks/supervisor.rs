@@ -11,6 +11,7 @@ use commonware_cryptography::{
     bls12381::primitives::{
         group,
         poly::{self, public},
+        variant::Variant,
     },
     Digest,
 };
@@ -21,43 +22,38 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-type ViewInfo<P> = (
-    poly::Poly<group::Public>,
-    HashMap<P, u32>,
-    Vec<P>,
-    group::Share,
-);
+type ViewInfo<P, V> = (poly::Public<V>, HashMap<P, u32>, Vec<P>, group::Share);
 
-pub struct Config<P: Array> {
+pub struct Config<P: Array, V: Variant> {
     pub namespace: Vec<u8>,
-    pub participants: BTreeMap<View, (poly::Poly<group::Public>, Vec<P>, group::Share)>,
+    pub participants: BTreeMap<View, (poly::Public<V>, Vec<P>, group::Share)>,
 }
 
-type Participation<D, P> = HashMap<View, HashMap<D, HashSet<P>>>;
-type Faults<D, P> = HashMap<P, HashMap<View, HashSet<Activity<D>>>>;
+type Participation<P, D> = HashMap<View, HashMap<D, HashSet<P>>>;
+type Faults<P, V, D> = HashMap<P, HashMap<View, HashSet<Activity<V, D>>>>;
 
 #[derive(Clone)]
-pub struct Supervisor<P: Array, D: Digest> {
-    participants: BTreeMap<View, ViewInfo<P>>,
+pub struct Supervisor<P: Array, V: Variant, D: Digest> {
+    participants: BTreeMap<View, ViewInfo<P, V>>,
 
     namespace: Vec<u8>,
 
     pub leaders: Arc<Mutex<HashMap<View, P>>>,
-    pub seeds: Arc<Mutex<HashMap<View, Seed>>>,
-    pub notarizes: Arc<Mutex<Participation<D, P>>>,
-    pub notarizations: Arc<Mutex<HashMap<View, Notarization<D>>>>,
+    pub seeds: Arc<Mutex<HashMap<View, Seed<V>>>>,
+    pub notarizes: Arc<Mutex<Participation<P, D>>>,
+    pub notarizations: Arc<Mutex<HashMap<View, Notarization<V, D>>>>,
     pub nullifies: Arc<Mutex<HashMap<View, HashSet<P>>>>,
-    pub nullifications: Arc<Mutex<HashMap<View, Nullification>>>,
-    pub finalizes: Arc<Mutex<Participation<D, P>>>,
-    pub finalizations: Arc<Mutex<HashMap<View, Finalization<D>>>>,
-    pub faults: Arc<Mutex<Faults<D, P>>>,
+    pub nullifications: Arc<Mutex<HashMap<View, Nullification<V>>>>,
+    pub finalizes: Arc<Mutex<Participation<P, D>>>,
+    pub finalizations: Arc<Mutex<HashMap<View, Finalization<V, D>>>>,
+    pub faults: Arc<Mutex<Faults<P, V, D>>>,
 
     latest: Arc<Mutex<View>>,
     subscribers: Arc<Mutex<Vec<Sender<View>>>>,
 }
 
-impl<P: Array, D: Digest> Supervisor<P, D> {
-    pub fn new(cfg: Config<P>) -> Self {
+impl<P: Array, V: Variant, D: Digest> Supervisor<P, V, D> {
+    pub fn new(cfg: Config<P, V>) -> Self {
         let mut parsed_participants = BTreeMap::new();
         for (view, (identity, mut validators, share)) in cfg.participants.into_iter() {
             let mut map = HashMap::new();
@@ -85,7 +81,7 @@ impl<P: Array, D: Digest> Supervisor<P, D> {
     }
 }
 
-impl<P: Array, D: Digest> Su for Supervisor<P, D> {
+impl<P: Array, V: Variant, D: Digest> Su for Supervisor<P, V, D> {
     type Index = View;
     type PublicKey = P;
 
@@ -114,9 +110,9 @@ impl<P: Array, D: Digest> Su for Supervisor<P, D> {
     }
 }
 
-impl<P: Array, D: Digest> TSu for Supervisor<P, D> {
-    type Seed = group::Signature;
-    type Identity = poly::Public;
+impl<P: Array, V: Variant, D: Digest> TSu for Supervisor<P, V, D> {
+    type Seed = V::Signature;
+    type Identity = poly::Public<V>;
     type Share = group::Share;
 
     fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<Self::PublicKey> {
@@ -158,8 +154,8 @@ impl<P: Array, D: Digest> TSu for Supervisor<P, D> {
     }
 }
 
-impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
-    type Activity = Activity<D>;
+impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
+    type Activity = Activity<V, D>;
 
     async fn report(&mut self, activity: Self::Activity) {
         // We check signatures for all messages to ensure that the prover is working correctly
@@ -178,7 +174,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                     panic!("signature verification failed");
                 }
                 let encoded = notarize.encode();
-                Notarize::<D>::decode(encoded).unwrap();
+                Notarize::<V, D>::decode(encoded).unwrap();
                 let public_key = validators[notarize.signer() as usize].clone();
                 self.notarizes
                     .lock()
@@ -197,7 +193,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                         panic!("no participants in required range");
                     }
                 };
-                let public = public(identity);
+                let public = public::<V>(identity);
 
                 // Verify notarization
                 let seed = notarization.seed();
@@ -205,7 +201,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                     panic!("signature verification failed");
                 }
                 let encoded = notarization.encode();
-                Notarization::<D>::decode(encoded).unwrap();
+                Notarization::<V, D>::decode(encoded).unwrap();
                 self.notarizations
                     .lock()
                     .unwrap()
@@ -216,7 +212,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                     panic!("signature verification failed");
                 }
                 let encoded = seed.encode();
-                Seed::decode(encoded).unwrap();
+                Seed::<V>::decode(encoded).unwrap();
                 self.seeds.lock().unwrap().insert(view, seed);
             }
             Activity::Nullify(nullify) => {
@@ -231,7 +227,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                     panic!("signature verification failed");
                 }
                 let encoded = nullify.encode();
-                Nullify::decode(encoded).unwrap();
+                Nullify::<V>::decode(encoded).unwrap();
                 let public_key = validators[nullify.signer() as usize].clone();
                 self.nullifies
                     .lock()
@@ -248,7 +244,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                         panic!("no participants in required range");
                     }
                 };
-                let public = public(identity);
+                let public = public::<V>(identity);
 
                 // Verify nullification
                 let seed = nullification.seed();
@@ -256,7 +252,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                     panic!("signature verification failed");
                 }
                 let encoded = nullification.encode();
-                Nullification::decode(encoded).unwrap();
+                Nullification::<V>::decode(encoded).unwrap();
                 self.nullifications
                     .lock()
                     .unwrap()
@@ -267,7 +263,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                     panic!("signature verification failed");
                 }
                 let encoded = seed.encode();
-                Seed::decode(encoded).unwrap();
+                Seed::<V>::decode(encoded).unwrap();
                 self.seeds.lock().unwrap().insert(view, seed);
             }
             Activity::Finalize(finalize) => {
@@ -282,7 +278,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                     panic!("signature verification failed");
                 }
                 let encoded = finalize.encode();
-                Finalize::<D>::decode(encoded).unwrap();
+                Finalize::<V, D>::decode(encoded).unwrap();
                 let public_key = validators[finalize.signer() as usize].clone();
                 self.finalizes
                     .lock()
@@ -301,7 +297,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                         panic!("no participants in required range");
                     }
                 };
-                let public = public(identity);
+                let public = public::<V>(identity);
 
                 // Verify finalization
                 let seed = finalization.seed();
@@ -309,7 +305,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                     panic!("signature verification failed");
                 }
                 let encoded = finalization.encode();
-                Finalization::<D>::decode(encoded).unwrap();
+                Finalization::<V, D>::decode(encoded).unwrap();
                 self.finalizations
                     .lock()
                     .unwrap()
@@ -320,7 +316,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                     panic!("signature verification failed");
                 }
                 let encoded = seed.encode();
-                Seed::decode(encoded).unwrap();
+                Seed::<V>::decode(encoded).unwrap();
                 self.seeds.lock().unwrap().insert(view, seed);
 
                 // Send message to subscribers
@@ -342,7 +338,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                     panic!("signature verification failed");
                 }
                 let encoded = conflicting.encode();
-                ConflictingNotarize::<D>::decode(encoded).unwrap();
+                ConflictingNotarize::<V, D>::decode(encoded).unwrap();
                 let public_key = validators[conflicting.signer() as usize].clone();
                 self.faults
                     .lock()
@@ -365,7 +361,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                     panic!("signature verification failed");
                 }
                 let encoded = conflicting.encode();
-                ConflictingFinalize::<D>::decode(encoded).unwrap();
+                ConflictingFinalize::<V, D>::decode(encoded).unwrap();
                 let public_key = validators[conflicting.signer() as usize].clone();
                 self.faults
                     .lock()
@@ -388,7 +384,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
                     panic!("signature verification failed");
                 }
                 let encoded = nullify_finalize.encode();
-                NullifyFinalize::<D>::decode(encoded).unwrap();
+                NullifyFinalize::<V, D>::decode(encoded).unwrap();
                 let public_key = validators[nullify_finalize.signer() as usize].clone();
                 self.faults
                     .lock()
@@ -403,7 +399,7 @@ impl<P: Array, D: Digest> Reporter for Supervisor<P, D> {
     }
 }
 
-impl<P: Array, D: Digest> Monitor for Supervisor<P, D> {
+impl<P: Array, V: Variant, D: Digest> Monitor for Supervisor<P, V, D> {
     type Index = View;
     async fn subscribe(&mut self) -> (Self::Index, Receiver<Self::Index>) {
         let (tx, rx) = futures::channel::mpsc::channel(128);
