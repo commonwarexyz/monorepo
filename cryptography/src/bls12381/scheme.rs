@@ -21,7 +21,8 @@
 
 use super::primitives::{
     group::{self, Element, Scalar},
-    ops, variant,
+    ops,
+    variant::{self, MinPkPublic, MinPkSignature},
 };
 use crate::{Array, Signer, Specification, Verifier};
 use bytes::{Buf, BufMut};
@@ -185,7 +186,7 @@ impl Display for PrivateKey {
 /// BLS12-381 public key.
 #[derive(Clone, Eq, PartialEq)]
 pub struct PublicKey {
-    raw: [u8; variant::MIN_PK_PUBLIC_LENGTH],
+    raw: [u8; MinPkPublic::SIZE],
     key: variant::MinPkPublic,
 }
 
@@ -213,7 +214,7 @@ impl Read for PublicKey {
 }
 
 impl FixedSize for PublicKey {
-    const SIZE: usize = variant::MIN_PK_PUBLIC_LENGTH;
+    const SIZE: usize = MinPkPublic::SIZE;
 }
 
 impl Array for PublicKey {}
@@ -271,7 +272,7 @@ impl Display for PublicKey {
 /// BLS12-381 signature.
 #[derive(Clone, Eq, PartialEq)]
 pub struct Signature {
-    raw: [u8; variant::MIN_PK_SIGNATURE_LENGTH],
+    raw: [u8; MinPkSignature::SIZE],
     signature: variant::MinPkSignature,
 }
 
@@ -299,7 +300,7 @@ impl Read for Signature {
 }
 
 impl FixedSize for Signature {
-    const SIZE: usize = variant::MIN_PK_SIGNATURE_LENGTH;
+    const SIZE: usize = MinPkSignature::SIZE;
 }
 
 impl Array for Signature {}
