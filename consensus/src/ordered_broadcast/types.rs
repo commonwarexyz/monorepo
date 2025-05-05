@@ -1491,55 +1491,60 @@ mod tests {
         assert!(!ack.verify(NAMESPACE, &wrong_identity));
     }
 
-    #[test]
-    fn test_lock_verify_invalid_signature() {
+    fn lock_verify_invalid_signature<V: Variant>() {
         let n = 4;
         let t = quorum(n as u32);
-        let (identity, shares) = generate_test_data(n, t, 0);
+        let (identity, shares) = generate_test_data::<V>(n, t, 0);
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
         let epoch = 5;
 
         // Generate threshold signature
-        let message = Ack::payload(&chunk, &epoch);
+        let message = Ack::<_, V, _>::payload(&chunk, &epoch);
         let ack_namespace = ack_namespace(NAMESPACE);
         let partials: Vec<_> = shares
             .iter()
             .take(t as usize)
-            .map(|s| partial_sign_message(s, Some(ack_namespace.as_ref()), &message))
+            .map(|s| partial_sign_message::<V>(s, Some(ack_namespace.as_ref()), &message))
             .collect();
-        let signature = threshold_signature_recover(t, &partials).unwrap();
+        let signature = threshold_signature_recover::<V, _>(t, &partials).unwrap();
 
         // Create lock
-        let lock = Lock::new(chunk.clone(), epoch, signature);
+        let lock = Lock::<_, V, _>::new(chunk.clone(), epoch, signature);
 
         // Get the BLS public key from the commitment
-        let public = poly::public(&identity);
+        let public = poly::public::<V>(&identity);
 
         // Verification should succeed
         assert!(lock.verify(NAMESPACE, public));
 
         // Create another set of BLS shares with a different polynomial
-        let (wrong_identity, wrong_shares) = generate_test_data(n, t, 1);
+        let (wrong_identity, wrong_shares) = generate_test_data::<V>(n, t, 1);
 
         // Generate threshold signature with the wrong keys
         let partials: Vec<_> = wrong_shares
             .iter()
             .take(t as usize)
-            .map(|s| partial_sign_message(s, Some(ack_namespace.as_ref()), &message))
+            .map(|s| partial_sign_message::<V>(s, Some(ack_namespace.as_ref()), &message))
             .collect();
-        let wrong_signature = threshold_signature_recover(t, &partials).unwrap();
+        let wrong_signature = threshold_signature_recover::<V, _>(t, &partials).unwrap();
 
         // Create lock with wrong signature
-        let wrong_lock = Lock::new(chunk, epoch, wrong_signature);
+        let wrong_lock = Lock::<_, V, _>::new(chunk, epoch, wrong_signature);
 
         // Verification should fail with the original public key
         assert!(!wrong_lock.verify(NAMESPACE, public));
 
         // But succeed with the matching wrong public key
-        let wrong_public = poly::public(&wrong_identity);
+        let wrong_public = poly::public::<V>(&wrong_identity);
         assert!(wrong_lock.verify(NAMESPACE, wrong_public));
+    }
+
+    #[test]
+    fn test_lock_verify_invalid_signature() {
+        lock_verify_invalid_signature::<MinPk>();
+        lock_verify_invalid_signature::<MinSig>();
     }
 
     #[test]
@@ -1578,8 +1583,7 @@ mod tests {
         assert!(!proposal.verify(NAMESPACE));
     }
 
-    #[test]
-    fn test_node_genesis_with_parent_fails() {
+    fn node_genesis_with_parent_fails<V: Variant>() {
         // Try to create a node with height 0 and a parent
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key.clone(), 0, sample_digest(1));
@@ -1590,27 +1594,33 @@ mod tests {
         // Create a parent with a random BLS signature (content doesn't matter for this test)
         let n = 4;
         let t = quorum(n as u32);
-        let (_, shares) = generate_test_data(n, t, 0);
+        let (_, shares) = generate_test_data::<V>(n, t, 0);
 
         let dummy_message = vec![0u8; 32];
-        let dummy_sig = partial_sign_message(&shares[0], None, &dummy_message);
+        let dummy_sig = partial_sign_message::<V>(&shares[0], None, &dummy_message);
 
         // Convert the partial signature to a full signature
         let signatures = vec![dummy_sig];
-        let full_sig = threshold_signature_recover(1, &signatures).unwrap();
+        let full_sig = threshold_signature_recover::<V, _>(1, &signatures).unwrap();
 
         let parent = Parent::new(sample_digest(0), 5, full_sig);
 
         // Create the genesis node with a parent - should fail to decode
-        let encoded = Node::<Ed25519, Sha256Digest>::new(chunk, signature, Some(parent)).encode();
+        let encoded =
+            Node::<Ed25519, V, Sha256Digest>::new(chunk, signature, Some(parent)).encode();
 
         // This should error because genesis nodes can't have parents
-        let result = Node::<Ed25519, Sha256Digest>::decode(encoded);
+        let result = Node::<Ed25519, V, Sha256Digest>::decode(encoded);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_node_non_genesis_without_parent_fails() {
+    fn test_node_genesis_with_parent_fails() {
+        node_genesis_with_parent_fails::<MinPk>();
+        node_genesis_with_parent_fails::<MinSig>();
+    }
+
+    fn node_non_genesis_without_parent_fails<V: Variant>() {
         // Try to create a non-genesis node without a parent
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 1, sample_digest(1)); // Height > 0
@@ -1619,10 +1629,16 @@ mod tests {
         let signature = sample_scheme(0).sign(Some(chunk_namespace.as_ref()), &message);
 
         // Create the node without a parent - should fail to decode
-        let encoded = Node::<Ed25519, Sha256Digest>::new(chunk, signature, None).encode();
+        let encoded = Node::<Ed25519, V, Sha256Digest>::new(chunk, signature, None).encode();
 
         // This should error because non-genesis nodes must have parents
-        let result = Node::<Ed25519, Sha256Digest>::decode(encoded);
+        let result = Node::<Ed25519, V, Sha256Digest>::decode(encoded);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_node_non_genesis_without_parent_fails() {
+        node_non_genesis_without_parent_fails::<MinPk>();
+        node_non_genesis_without_parent_fails::<MinSig>();
     }
 }
