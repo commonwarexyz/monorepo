@@ -97,13 +97,10 @@ mod tests {
                 sink.send(SERVER_SEND_DATA.as_bytes())
                     .await
                     .expect("Failed to send");
-                // });
             }
         });
 
-        // Create multiple clients
-        // let mut client_handles = Vec::new();
-
+        // Start multiple clients
         let client = runtime.spawn(async move {
             for _ in 0..3 {
                 // Connect to the server
@@ -124,13 +121,9 @@ mod tests {
                 assert_eq!(&buf, SERVER_SEND_DATA.as_bytes());
             }
         });
-        // client_handles.push(client);
 
         // Wait for server and all clients
         server.await.expect("Server task failed");
-        // for (i, handle) in client_handles.into_iter().enumerate() {
-        //     handle.await.expect(&format!("Client {} failed", i));
-        // }
         client.await.expect("Client task failed");
     }
 
@@ -198,7 +191,7 @@ mod tests {
         let server_total = server_result.expect("Server task failed");
         let (client_sent, client_received) = client_result.expect("Client task failed");
 
-        assert_eq!(server_total, 123 * 8192); // Smallest multiple of 8192 greater than 1_000_000
+        assert_eq!(server_total, 123 * 8192);
         assert_eq!(client_sent, 123 * 8192);
         assert_eq!(client_received, 123 * 8192);
     }
@@ -221,51 +214,4 @@ mod tests {
         let result = network.bind(listener_addr).await;
         assert!(matches!(result, Err(crate::Error::BindFailed)));
     }
-
-    // // Test timeouts and partial reads/writes
-    // fn test_network_timeouts<R: Runner>(runner: R)
-    // where
-    //     R::Context: crate::Network + Spawner + Clock,
-    // {
-    //     runner.start(|context| async move {
-    //         let socket = SocketAddr::from(([127, 0, 0, 1], 0));
-
-    //         // Start a server that deliberately doesn't respond
-    //         let mut listener = context.bind(socket).await.expect("Failed to bind");
-    //         let server_addr = listener.local_addr().expect("Failed to get server address");
-
-    //         // Server task that accepts but doesn't respond
-    //         let server = context.spawn(move |_| async move {
-    //             let (_, _, _) = listener.accept().await.expect("Failed to accept");
-    //             // Don't respond, just wait
-    //             tokio::time::sleep(Duration::from_secs(2)).await;
-    //         });
-
-    //         // Client task with timeout
-    //         let client = context.spawn(move |context| async move {
-    //             let (mut sink, mut stream) = context
-    //                 .dial(server_addr)
-    //                 .await
-    //                 .expect("Failed to dial server");
-
-    //             // Send data
-    //             sink.send(b"Hello").await.expect("Failed to send data");
-
-    //             // Try to receive with a short timeout
-    //             let mut buf = [0u8; 10];
-
-    //             // Wrap in a timeout
-    //             let result =
-    //                 tokio::time::timeout(Duration::from_millis(100), stream.recv(&mut buf)).await;
-
-    //             // Should timeout
-    //             assert!(result.is_err());
-    //         });
-
-    //         // Wait for client to complete
-    //         client.await.expect("Client task failed");
-
-    //         // Don't wait for server to complete, it's deliberately hanging
-    //     });
-    // }
 }
