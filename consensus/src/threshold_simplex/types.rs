@@ -103,13 +103,13 @@ fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
 /// Voter represents all possible message types that can be sent by validators
 /// in the consensus protocol.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Voter<D: Digest> {
+pub enum Voter<D: Digest, V: Variant> {
     /// A single validator notarize over a proposal
-    Notarize(Notarize<D>),
+    Notarize(Notarize<D, V>),
     /// A recovered threshold signature for a notarization
-    Notarization(Notarization<D>),
+    Notarization(Notarization<D, V>),
     /// A single validator nullify to skip the current view (usually when leader is unresponsive)
-    Nullify(Nullify),
+    Nullify(Nullify<V>),
     /// A recovered threshold signature for a nullification
     Nullification(Nullification),
     /// A single validator finalize over a proposal
@@ -118,7 +118,7 @@ pub enum Voter<D: Digest> {
     Finalization(Finalization<D>),
 }
 
-impl<D: Digest> Write for Voter<D> {
+impl<D: Digest, V: Variant> Write for Voter<D, V> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Voter::Notarize(v) => {
@@ -149,7 +149,7 @@ impl<D: Digest> Write for Voter<D> {
     }
 }
 
-impl<D: Digest> EncodeSize for Voter<D> {
+impl<D: Digest, V: Variant> EncodeSize for Voter<D, V> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Voter::Notarize(v) => v.encode_size(),
@@ -162,7 +162,7 @@ impl<D: Digest> EncodeSize for Voter<D> {
     }
 }
 
-impl<D: Digest> Read for Voter<D> {
+impl<D: Digest, V: Variant> Read for Voter<D, V> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
@@ -200,7 +200,7 @@ impl<D: Digest> Read for Voter<D> {
     }
 }
 
-impl<D: Digest> Viewable for Voter<D> {
+impl<D: Digest, V: Variant> Viewable for Voter<D, V> {
     fn view(&self) -> View {
         match self {
             Voter::Notarize(v) => v.view(),
@@ -516,7 +516,7 @@ impl<V: Variant> Nullify<V> {
         let nullify_message = (Some(nullify_namespace.as_ref()), view_message.as_ref());
         let seed_namespace = seed_namespace(namespace);
         let seed_message = (Some(seed_namespace.as_ref()), view_message.as_ref());
-        partial_verify_multiple_messages(
+        partial_verify_multiple_messages::<V, _, _>(
             identity,
             self.signer(),
             &[nullify_message, seed_message],
@@ -550,7 +550,7 @@ impl<V: Variant> Viewable for Nullify<V> {
     }
 }
 
-impl Write for Nullify {
+impl<V: Variant> Write for Nullify<V> {
     fn write(&self, writer: &mut impl BufMut) {
         UInt(self.view).write(writer);
         self.view_signature.write(writer);
@@ -558,7 +558,7 @@ impl Write for Nullify {
     }
 }
 
-impl Read for Nullify {
+impl<V: Variant> Read for Nullify<V> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
@@ -579,7 +579,7 @@ impl Read for Nullify {
     }
 }
 
-impl EncodeSize for Nullify {
+impl<V: Variant> EncodeSize for Nullify<V> {
     fn encode_size(&self) -> usize {
         UInt(self.view).encode_size()
             + self.view_signature.encode_size()
