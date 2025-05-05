@@ -34,10 +34,10 @@ pub struct Engine<
 > {
     context: E,
 
-    voter: voter::Actor<E, C, D, A, R, F, S>,
-    voter_mailbox: voter::Mailbox<D>,
-    resolver: resolver::Actor<E, C, D, S>,
-    resolver_mailbox: resolver::Mailbox<D>,
+    voter: voter::Actor<E, C, V, D, A, R, F, S>,
+    voter_mailbox: voter::Mailbox<V, D>,
+    resolver: resolver::Actor<E, C, V, D, S>,
+    resolver_mailbox: resolver::Mailbox<V, D>,
 }
 
 impl<

@@ -1628,10 +1628,10 @@ mod tests {
         let (commitment, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
-        let notarize = Notarize::<_, MinSig>::sign(NAMESPACE, &shares[0], proposal);
+        let notarize = Notarize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal);
 
         let encoded = notarize.encode();
-        let decoded = Notarize::<Sha256, MinSig>::decode(encoded).unwrap();
+        let decoded = Notarize::<MinSig, Sha256>::decode(encoded).unwrap();
 
         assert_eq!(notarize, decoded);
         assert!(decoded.verify(NAMESPACE, &commitment));
@@ -1648,7 +1648,7 @@ mod tests {
         // Create notarizes
         let notarizes: Vec<_> = shares
             .iter()
-            .map(|s| Notarize::<_, MinSig>::sign(NAMESPACE, s, proposal.clone()))
+            .map(|s| Notarize::<MinSig, _>::sign(NAMESPACE, s, proposal.clone()))
             .collect();
 
         // Recover threshold signature
@@ -1661,7 +1661,7 @@ mod tests {
         // Create notarization
         let notarization = Notarization::new(proposal, proposal_signature, seed_signature);
         let encoded = notarization.encode();
-        let decoded = Notarization::<Sha256, MinSig>::decode(encoded).unwrap();
+        let decoded = Notarization::<MinSig, Sha256>::decode(encoded).unwrap();
         assert_eq!(notarization, decoded);
 
         // Verify the notarization
@@ -1738,10 +1738,10 @@ mod tests {
         let (commitment, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
-        let finalize = Finalize::<_, MinSig>::sign(NAMESPACE, &shares[0], proposal);
+        let finalize = Finalize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal);
 
         let encoded = finalize.encode();
-        let decoded = Finalize::<Sha256, MinSig>::decode(encoded).unwrap();
+        let decoded = Finalize::<MinSig, Sha256>::decode(encoded).unwrap();
 
         assert_eq!(finalize, decoded);
         assert!(decoded.verify(NAMESPACE, &commitment));
@@ -1758,11 +1758,11 @@ mod tests {
         // Create finalizes
         let notarizes: Vec<_> = shares
             .iter()
-            .map(|s| Notarize::<_, MinSig>::sign(NAMESPACE, s, proposal.clone()))
+            .map(|s| Notarize::<MinSig, _>::sign(NAMESPACE, s, proposal.clone()))
             .collect();
         let finalizes: Vec<_> = shares
             .iter()
-            .map(|s| Finalize::<_, MinSig>::sign(NAMESPACE, s, proposal.clone()))
+            .map(|s| Finalize::<MinSig, _>::sign(NAMESPACE, s, proposal.clone()))
             .collect();
 
         // Recover threshold signatures
@@ -1775,7 +1775,7 @@ mod tests {
         // Create finalization
         let finalization = Finalization::new(proposal, proposal_signature, seed_signature);
         let encoded = finalization.encode();
-        let decoded = Finalization::<Sha256, MinSig>::decode(encoded).unwrap();
+        let decoded = Finalization::<MinSig, Sha256>::decode(encoded).unwrap();
         assert_eq!(finalization, decoded);
 
         // Verify the finalization
@@ -1796,9 +1796,9 @@ mod tests {
     fn test_backfiller_encode_decode() {
         // Test Request
         let request = Request::new(1, vec![10, 11], vec![12, 13]);
-        let backfiller = Backfiller::<Sha256, MinSig>::Request(request.clone());
+        let backfiller = Backfiller::<MinSig, Sha256>::Request(request.clone());
         let encoded = backfiller.encode();
-        let decoded = Backfiller::<Sha256, MinSig>::decode_cfg(encoded, &usize::MAX).unwrap();
+        let decoded = Backfiller::<MinSig, Sha256>::decode_cfg(encoded, &usize::MAX).unwrap();
         assert!(matches!(decoded, Backfiller::Request(r) if r == request));
 
         // Test Response
@@ -1810,7 +1810,7 @@ mod tests {
         let proposal = Proposal::new(10, 5, sample_digest(1));
         let notarizes: Vec<_> = shares
             .iter()
-            .map(|s| Notarize::<_, MinSig>::sign(NAMESPACE, s, proposal.clone()))
+            .map(|s| Notarize::<MinSig, _>::sign(NAMESPACE, s, proposal.clone()))
             .collect();
 
         let proposal_partials = notarizes.iter().map(|n| &n.proposal_signature);
@@ -1836,9 +1836,9 @@ mod tests {
 
         // Create a response
         let response = Response::new(1, vec![notarization], vec![nullification]);
-        let backfiller = Backfiller::<Sha256, MinSig>::Response(response.clone());
+        let backfiller = Backfiller::<MinSig, Sha256>::Response(response.clone());
         let encoded = backfiller.encode();
-        let decoded = Backfiller::<Sha256, MinSig>::decode_cfg(encoded, &usize::MAX).unwrap();
+        let decoded = Backfiller::<MinSig, Sha256>::decode_cfg(encoded, &usize::MAX).unwrap();
         assert!(matches!(decoded, Backfiller::Response(r) if r.id == response.id));
     }
 
@@ -1860,7 +1860,7 @@ mod tests {
         let proposal = Proposal::new(10, 5, sample_digest(1));
         let notarizes: Vec<_> = shares
             .iter()
-            .map(|s| Notarize::<_, MinSig>::sign(NAMESPACE, s, proposal.clone()))
+            .map(|s| Notarize::<MinSig, _>::sign(NAMESPACE, s, proposal.clone()))
             .collect();
 
         let proposal_partials = notarizes.iter().map(|n| &n.proposal_signature);
@@ -1885,9 +1885,9 @@ mod tests {
         let nullification = Nullification::new(11, view_signature, seed_signature);
 
         // Create a response
-        let response = Response::<Sha256, MinSig>::new(1, vec![notarization], vec![nullification]);
+        let response = Response::<MinSig, Sha256>::new(1, vec![notarization], vec![nullification]);
         let encoded = response.encode();
-        let decoded = Response::<Sha256, MinSig>::decode_cfg(encoded, &usize::MAX).unwrap();
+        let decoded = Response::<MinSig, Sha256>::decode_cfg(encoded, &usize::MAX).unwrap();
         assert_eq!(response.id, decoded.id);
         assert_eq!(response.notarizations.len(), decoded.notarizations.len());
         assert_eq!(response.nullifications.len(), decoded.nullifications.len());
@@ -1901,12 +1901,12 @@ mod tests {
 
         let proposal1 = Proposal::new(10, 5, sample_digest(1));
         let proposal2 = Proposal::new(10, 5, sample_digest(2));
-        let notarize1 = Notarize::<_, MinSig>::sign(NAMESPACE, &shares[0], proposal1);
-        let notarize2 = Notarize::<_, MinSig>::sign(NAMESPACE, &shares[0], proposal2);
+        let notarize1 = Notarize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal1);
+        let notarize2 = Notarize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal2);
         let conflicting_notarize = ConflictingNotarize::new(notarize1, notarize2);
 
         let encoded = conflicting_notarize.encode();
-        let decoded = ConflictingNotarize::<Sha256, MinSig>::decode(encoded).unwrap();
+        let decoded = ConflictingNotarize::<MinSig, Sha256>::decode(encoded).unwrap();
 
         assert_eq!(conflicting_notarize, decoded);
         assert!(decoded.verify(NAMESPACE, &commitment));
@@ -1920,12 +1920,12 @@ mod tests {
 
         let proposal1 = Proposal::new(10, 5, sample_digest(1));
         let proposal2 = Proposal::new(10, 5, sample_digest(2));
-        let finalize1 = Finalize::<_, MinSig>::sign(NAMESPACE, &shares[0], proposal1);
-        let finalize2 = Finalize::<_, MinSig>::sign(NAMESPACE, &shares[0], proposal2);
+        let finalize1 = Finalize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal1);
+        let finalize2 = Finalize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal2);
         let conflicting_finalize = ConflictingFinalize::new(finalize1, finalize2);
 
         let encoded = conflicting_finalize.encode();
-        let decoded = ConflictingFinalize::<Sha256, MinSig>::decode(encoded).unwrap();
+        let decoded = ConflictingFinalize::<MinSig, Sha256>::decode(encoded).unwrap();
 
         assert_eq!(conflicting_finalize, decoded);
         assert!(decoded.verify(NAMESPACE, &commitment));
@@ -1939,11 +1939,11 @@ mod tests {
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
         let nullify = Nullify::<MinSig>::sign(NAMESPACE, &shares[0], 10);
-        let finalize = Finalize::<_, MinSig>::sign(NAMESPACE, &shares[0], proposal);
+        let finalize = Finalize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal);
         let nullify_finalize = NullifyFinalize::new(nullify, finalize);
 
         let encoded = nullify_finalize.encode();
-        let decoded = NullifyFinalize::<Sha256, MinSig>::decode(encoded).unwrap();
+        let decoded = NullifyFinalize::<MinSig, Sha256>::decode(encoded).unwrap();
 
         assert_eq!(nullify_finalize, decoded);
         assert!(decoded.verify(NAMESPACE, &commitment));
@@ -1956,7 +1956,7 @@ mod tests {
         let (commitment, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
-        let notarize = Notarize::<_, MinSig>::sign(NAMESPACE, &shares[0], proposal);
+        let notarize = Notarize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal);
 
         // Verify with correct namespace and identity - should pass
         assert!(notarize.verify(NAMESPACE, &commitment));
@@ -1975,7 +1975,7 @@ mod tests {
         let (commitment2, _) = generate_test_data(n, t, 1);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
-        let notarize = Notarize::<_, MinSig>::sign(NAMESPACE, &shares1[0], proposal);
+        let notarize = Notarize::<MinSig, _>::sign(NAMESPACE, &shares1[0], proposal);
 
         // Verify with correct identity - should pass
         assert!(notarize.verify(NAMESPACE, &commitment1));
@@ -1995,7 +1995,7 @@ mod tests {
         // Create notarizes
         let notarizes: Vec<_> = shares
             .iter()
-            .map(|s| Notarize::<_, MinSig>::sign(NAMESPACE, s, proposal.clone()))
+            .map(|s| Notarize::<MinSig, _>::sign(NAMESPACE, s, proposal.clone()))
             .collect();
 
         // Recover threshold signature
@@ -2007,7 +2007,7 @@ mod tests {
 
         // Create notarization
         let notarization =
-            Notarization::<_, MinSig>::new(proposal, proposal_signature, seed_signature);
+            Notarization::<MinSig, _>::new(proposal, proposal_signature, seed_signature);
 
         // Verify with correct public key - should pass
         let public_key = poly::public::<MinSig>(&commitment);
@@ -2032,7 +2032,7 @@ mod tests {
         // Create notarizes
         let notarizes: Vec<_> = shares
             .iter()
-            .map(|s| Notarize::<_, MinSig>::sign(NAMESPACE, s, proposal.clone()))
+            .map(|s| Notarize::<MinSig, _>::sign(NAMESPACE, s, proposal.clone()))
             .collect();
 
         // Recover threshold signature
@@ -2044,7 +2044,7 @@ mod tests {
 
         // Create notarization
         let notarization =
-            Notarization::<_, MinSig>::new(proposal, proposal_signature, seed_signature);
+            Notarization::<MinSig, _>::new(proposal, proposal_signature, seed_signature);
 
         // Verify with correct namespace - should pass
         let public_key = poly::public::<MinSig>(&commitment);
@@ -2066,7 +2066,7 @@ mod tests {
         let notarizes: Vec<_> = shares
             .iter()
             .take((t as usize) - 1) // One less than the threshold
-            .map(|s| Notarize::<_, MinSig>::sign(NAMESPACE, s, proposal.clone()))
+            .map(|s| Notarize::<MinSig, _>::sign(NAMESPACE, s, proposal.clone()))
             .collect();
 
         // Try to recover threshold signature with insufficient partials - should fail
@@ -2088,8 +2088,8 @@ mod tests {
         let proposal2 = Proposal::new(10, 5, sample_digest(2)); // Same view, different payload
 
         // Create notarizes for both proposals from the same validator
-        let notarize1 = Notarize::<_, MinSig>::sign(NAMESPACE, &shares[0], proposal1.clone());
-        let notarize2 = Notarize::<_, MinSig>::sign(NAMESPACE, &shares[0], proposal2);
+        let notarize1 = Notarize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal1.clone());
+        let notarize2 = Notarize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal2);
 
         // Create conflict evidence
         let conflict = ConflictingNotarize::new(notarize1, notarize2.clone());
@@ -2098,11 +2098,11 @@ mod tests {
         assert!(conflict.verify(NAMESPACE, &commitment));
 
         // Now create invalid evidence using different validator keys
-        let notarize3 = Notarize::<_, MinSig>::sign(NAMESPACE, &shares[1], proposal1.clone());
+        let notarize3 = Notarize::<MinSig, _>::sign(NAMESPACE, &shares[1], proposal1.clone());
 
         // This should compile but verification should fail because the signatures
         // are from different validators
-        let invalid_conflict: ConflictingNotarize<Sha256, MinSig> = ConflictingNotarize {
+        let invalid_conflict: ConflictingNotarize<MinSig, Sha256> = ConflictingNotarize {
             view: conflict.view,
             parent_1: conflict.parent_1,
             payload_1: conflict.payload_1.clone(),
@@ -2129,7 +2129,7 @@ mod tests {
 
         // Create a finalize for the same view
         let proposal = Proposal::new(view, 5, sample_digest(1));
-        let finalize = Finalize::<_, MinSig>::sign(NAMESPACE, &shares[0], proposal);
+        let finalize = Finalize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal);
 
         // Create nullify+finalize evidence
         let conflict = NullifyFinalize::new(nullify, finalize.clone());
@@ -2144,7 +2144,7 @@ mod tests {
         let nullify2 = Nullify::<MinSig>::sign(NAMESPACE, &shares[1], view);
 
         // Compile but verification should fail because signatures are from different validators
-        let invalid_conflict: NullifyFinalize<Sha256, MinSig> = NullifyFinalize {
+        let invalid_conflict: NullifyFinalize<MinSig, Sha256> = NullifyFinalize {
             proposal: finalize.proposal.clone(),
             view_signature: conflict.view_signature.clone(),
             finalize_signature: nullify2.view_signature,
@@ -2168,11 +2168,11 @@ mod tests {
         // Create finalizes and notarizes for threshold signatures
         let finalizes: Vec<_> = shares
             .iter()
-            .map(|s| Finalize::<_, MinSig>::sign(NAMESPACE, s, proposal.clone()))
+            .map(|s| Finalize::<MinSig, _>::sign(NAMESPACE, s, proposal.clone()))
             .collect();
         let notarizes: Vec<_> = shares
             .iter()
-            .map(|s| Notarize::<_, MinSig>::sign(NAMESPACE, s, proposal.clone()))
+            .map(|s| Notarize::<MinSig, _>::sign(NAMESPACE, s, proposal.clone()))
             .collect();
 
         // Recover threshold signatures
@@ -2184,7 +2184,7 @@ mod tests {
 
         // Create finalization
         let finalization =
-            Finalization::<_, MinSig>::new(proposal, proposal_signature, seed_signature);
+            Finalization::<MinSig, _>::new(proposal, proposal_signature, seed_signature);
 
         // Verify with correct public key - should pass
         let public_key = poly::public::<MinSig>(&commitment);
