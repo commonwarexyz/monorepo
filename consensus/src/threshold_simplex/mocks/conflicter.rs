@@ -15,14 +15,9 @@ use rand::{CryptoRng, Rng};
 use std::marker::PhantomData;
 use tracing::debug;
 
-pub struct Config<
-    V: Variant,
-    S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
-> {
+pub struct Config<S: ThresholdSupervisor<Index = View, Share = group::Share>> {
     pub supervisor: S,
     pub namespace: Vec<u8>,
-
-    _phantom: PhantomData<V>,
 }
 
 pub struct Conflicter<
@@ -47,7 +42,7 @@ impl<
         S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
     > Conflicter<E, V, H, S>
 {
-    pub fn new(context: E, cfg: Config<V, S>) -> Self {
+    pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context,
             supervisor: cfg.supervisor,
