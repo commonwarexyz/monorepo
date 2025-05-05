@@ -45,6 +45,7 @@ pub struct AckManager<P: Array, V: Variant, D: Digest> {
     // The BTreeMaps are sorted by key, so we can prune old entries. In particular, we can prune
     // entries where the height is less than the height of the highest chunk for the sequencer.
     // We can often prune entries for old epochs as well.
+    #[allow(clippy::type_complexity)]
     acks: HashMap<P, BTreeMap<u64, BTreeMap<Epoch, Evidence<V, D>>>>,
 }
 

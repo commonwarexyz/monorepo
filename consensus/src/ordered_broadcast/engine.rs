@@ -152,6 +152,7 @@ pub struct Engine<
     journal_compression: Option<u8>,
 
     // A map of sequencer public keys to their journals.
+    #[allow(clippy::type_complexity)]
     journals: BTreeMap<C::PublicKey, Journal<E, Node<C, V, D>>>,
 
     ////////////////////////////////////////
@@ -166,7 +167,7 @@ pub struct Engine<
 
     // Tracks the acknowledgements for chunks.
     // This is comprised of partial signatures or threshold signatures.
-    ack_manager: AckManager<C::PublicKey, D>,
+    ack_manager: AckManager<C::PublicKey, V, D>,
 
     // The current epoch.
     epoch: Epoch,
@@ -241,7 +242,7 @@ impl<
             journal_compression: cfg.journal_compression,
             journals: BTreeMap::new(),
             tip_manager: TipManager::<C, V, D>::new(),
-            ack_manager: AckManager::<C::PublicKey, D>::new(),
+            ack_manager: AckManager::<C::PublicKey, V, D>::new(),
             epoch: 0,
             priority_proposals: cfg.priority_proposals,
             priority_acks: cfg.priority_acks,
