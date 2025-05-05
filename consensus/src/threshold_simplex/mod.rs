@@ -956,12 +956,6 @@ mod tests {
         backfill::<MinSig>();
     }
 
-    #[test_traced]
-    fn test_one_offline() {
-        one_offline::<MinPk>();
-        one_offline::<MinSig>();
-    }
-
     fn one_offline<V: Variant>() {
         // Create context
         let n = 5;
@@ -1181,9 +1175,9 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_slow_validator() {
-        slow_validator::<MinPk>();
-        slow_validator::<MinSig>();
+    fn test_one_offline() {
+        one_offline::<MinPk>();
+        one_offline::<MinSig>();
     }
 
     fn slow_validator<V: Variant>() {
@@ -1365,9 +1359,9 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_all_recovery() {
-        all_recovery::<MinPk>();
-        all_recovery::<MinSig>();
+    fn test_slow_validator() {
+        slow_validator::<MinPk>();
+        slow_validator::<MinSig>();
     }
 
     fn all_recovery<V: Variant>() {
@@ -1527,10 +1521,9 @@ mod tests {
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_partition() {
-        partition::<MinPk>();
-        partition::<MinSig>();
+    fn test_all_recovery() {
+        all_recovery::<MinPk>();
+        all_recovery::<MinSig>();
     }
 
     fn partition<V: Variant>() {
@@ -1711,6 +1704,13 @@ mod tests {
                 }
             }
         });
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_partition() {
+        partition::<MinPk>();
+        partition::<MinSig>();
     }
 
     fn slow_and_lossy_links<V: Variant>(seed: u64) -> String {
@@ -2376,14 +2376,7 @@ mod tests {
         }
     }
 
-    #[test_traced]
-    #[ignore]
-    fn test_1k() {
-        test_1k_internal::<MinPk>();
-        test_1k_internal::<MinSig>();
-    }
-
-    fn test_1k_internal<V: Variant>() {
+    fn run_1k<V: Variant>() {
         // Create context
         let n = 10;
         let threshold = quorum(n);
@@ -2511,5 +2504,12 @@ mod tests {
                 }
             }
         })
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_1k() {
+        run_1k::<MinPk>();
+        run_1k::<MinSig>();
     }
 }
