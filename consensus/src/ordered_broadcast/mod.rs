@@ -615,13 +615,16 @@ mod tests {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
         for seed in 1..6 {
-            let state_1 = slow_and_lossy_links::<MinPk>(seed);
-            let state_2 = slow_and_lossy_links::<MinPk>(seed);
-            assert_eq!(state_1, state_2);
+            let pk_state_1 = slow_and_lossy_links::<MinPk>(seed);
+            let pk_state_2 = slow_and_lossy_links::<MinPk>(seed);
+            assert_eq!(pk_state_1, pk_state_2);
 
-            let state_1 = slow_and_lossy_links::<MinSig>(seed);
-            let state_2 = slow_and_lossy_links::<MinSig>(seed);
-            assert_eq!(state_1, state_2);
+            let sig_state_1 = slow_and_lossy_links::<MinSig>(seed);
+            let sig_state_2 = slow_and_lossy_links::<MinSig>(seed);
+            assert_eq!(sig_state_1, sig_state_2);
+
+            // Sanity check that different types can't be identical.
+            assert_ne!(pk_state_1, sig_state_1);
         }
     }
 
