@@ -6,9 +6,10 @@ use commonware_codec::{
 };
 use commonware_cryptography::{
     bls12381::primitives::{
-        group::{Public, Share, Signature},
+        group::Share,
         ops,
         poly::{self, PartialSignature},
+        variant::Variant,
     },
     Digest, Scheme, Verifier,
 };
@@ -249,7 +250,7 @@ impl<P: Array, D: Digest> EncodeSize for Chunk<P, D> {
 /// The parent includes a threshold signature which proves that a quorum of validators have seen and
 /// acknowledged the parent chunk, making it an essential part of the chain linking mechanism.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Parent<D: Digest> {
+pub struct Parent<V: Variant, D: Digest> {
     /// Digest of the parent chunk.
     pub digest: D,
 
@@ -258,15 +259,15 @@ pub struct Parent<D: Digest> {
 
     /// Threshold signature over the parent, proving that a quorum of validators
     /// in the specified epoch have acknowledged the parent chunk.
-    pub signature: Signature,
+    pub signature: V::Signature,
 }
 
-impl<D: Digest> Parent<D> {
+impl<V: Variant, D: Digest> Parent<V, D> {
     /// Create a new parent with the given digest, epoch, and signature.
     ///
     /// The parent links a chunk to its predecessor in the chain and provides
     /// the threshold signature that proves the predecessor was reliably broadcast.
-    pub fn new(digest: D, epoch: Epoch, signature: Signature) -> Self {
+    pub fn new(digest: D, epoch: Epoch, signature: V::Signature) -> Self {
         Self {
             digest,
             epoch,
@@ -275,7 +276,7 @@ impl<D: Digest> Parent<D> {
     }
 }
 
-impl<D: Digest> Write for Parent<D> {
+impl<V: Variant, D: Digest> Write for Parent<V, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.digest.write(writer);
         UInt(self.epoch).write(writer);
@@ -283,13 +284,13 @@ impl<D: Digest> Write for Parent<D> {
     }
 }
 
-impl<D: Digest> Read for Parent<D> {
+impl<V: Variant, D: Digest> Read for Parent<V, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let digest = D::read(reader)?;
         let epoch = UInt::read(reader)?.into();
-        let signature = Signature::read(reader)?;
+        let signature = V::Signature::read(reader)?;
         Ok(Self {
             digest,
             epoch,
@@ -298,7 +299,7 @@ impl<D: Digest> Read for Parent<D> {
     }
 }
 
-impl<D: Digest> EncodeSize for Parent<D> {
+impl<V: Variant, D: Digest> EncodeSize for Parent<V, D> {
     fn encode_size(&self) -> usize {
         self.digest.encode_size() + UInt(self.epoch).encode_size() + self.signature.encode_size()
     }
@@ -314,7 +315,7 @@ impl<D: Digest> EncodeSize for Parent<D> {
 /// Nodes form a linked chain from each sequencer, ensuring that new chunks can only be added
 /// after their predecessors have been properly acknowledged by the validator set.
 #[derive(Clone, Debug)]
-pub struct Node<C: Verifier, D: Digest> {
+pub struct Node<C: Verifier, V: Variant, D: Digest> {
     /// Chunk of the node.
     pub chunk: Chunk<C::PublicKey, D>,
 
@@ -328,10 +329,10 @@ pub struct Node<C: Verifier, D: Digest> {
     /// proves a quorum of validators acknowledged the parent.
     ///
     /// For genesis nodes (height = 0), this is None.
-    pub parent: Option<Parent<D>>,
+    pub parent: Option<Parent<V, D>>,
 }
 
-impl<C: Verifier, D: Digest> Node<C, D> {
+impl<C: Verifier, V: Variant, D: Digest> Node<C, V, D> {
     /// Create a new node with the given chunk, signature, and parent.
     ///
     /// For genesis nodes (height = 0), parent should be None.
@@ -339,7 +340,7 @@ impl<C: Verifier, D: Digest> Node<C, D> {
     pub fn new(
         chunk: Chunk<C::PublicKey, D>,
         signature: C::Signature,
-        parent: Option<Parent<D>>,
+        parent: Option<Parent<V, D>>,
     ) -> Self {
         Self {
             chunk,
@@ -362,7 +363,7 @@ impl<C: Verifier, D: Digest> Node<C, D> {
     pub fn verify(
         &self,
         namespace: &[u8],
-        public: Option<&Public>,
+        public: Option<&V::Public>,
     ) -> Result<Option<Chunk<C::PublicKey, D>>, Error> {
         // Verify chunk
         let chunk_namespace = chunk_namespace(namespace);
@@ -396,9 +397,9 @@ impl<C: Verifier, D: Digest> Node<C, D> {
         );
 
         // Verify signature
-        let message = Ack::payload(&parent_chunk, &parent.epoch);
+        let message = Ack::<_, V, _>::payload(&parent_chunk, &parent.epoch);
         let ack_namespace = ack_namespace(namespace);
-        if ops::verify_message(
+        if ops::verify_message::<V>(
             public,
             Some(ack_namespace.as_ref()),
             &message,
@@ -420,7 +421,7 @@ impl<C: Verifier, D: Digest> Node<C, D> {
         scheme: &mut S,
         height: u64,
         payload: D,
-        parent: Option<Parent<D>>,
+        parent: Option<Parent<V, D>>,
     ) -> Self {
         let chunk_namespace = chunk_namespace(namespace);
         let chunk = Chunk::new(scheme.public_key(), height, payload);
@@ -429,7 +430,7 @@ impl<C: Verifier, D: Digest> Node<C, D> {
     }
 }
 
-impl<C: Verifier, D: Digest> Write for Node<C, D> {
+impl<C: Verifier, V: Variant, D: Digest> Write for Node<C, V, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.chunk.write(writer);
         self.signature.write(writer);
@@ -437,13 +438,13 @@ impl<C: Verifier, D: Digest> Write for Node<C, D> {
     }
 }
 
-impl<C: Verifier, D: Digest> Read for Node<C, D> {
+impl<C: Verifier, V: Variant, D: Digest> Read for Node<C, V, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let chunk = Chunk::read(reader)?;
         let signature = C::Signature::read(reader)?;
-        let parent = <Option<Parent<D>>>::read(reader)?;
+        let parent = <Option<Parent<V, D>>>::read(reader)?;
         if chunk.height == 0 && parent.is_some() {
             return Err(CodecError::Wrapped(
                 "consensus::ordered_broadcast::Node",
@@ -463,13 +464,13 @@ impl<C: Verifier, D: Digest> Read for Node<C, D> {
     }
 }
 
-impl<C: Verifier, D: Digest> EncodeSize for Node<C, D> {
+impl<C: Verifier, V: Variant, D: Digest> EncodeSize for Node<C, V, D> {
     fn encode_size(&self) -> usize {
         self.chunk.encode_size() + self.signature.encode_size() + self.parent.encode_size()
     }
 }
 
-impl<C: Verifier, D: Digest> Hash for Node<C, D> {
+impl<C: Verifier, V: Variant, D: Digest> Hash for Node<C, V, D> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.chunk.hash(state);
         self.signature.hash(state);
@@ -477,7 +478,7 @@ impl<C: Verifier, D: Digest> Hash for Node<C, D> {
     }
 }
 
-impl<C: Verifier, D: Digest> PartialEq for Node<C, D> {
+impl<C: Verifier, V: Variant, D: Digest> PartialEq for Node<C, V, D> {
     fn eq(&self, other: &Self) -> bool {
         self.chunk == other.chunk
             && self.signature == other.signature
@@ -485,7 +486,7 @@ impl<C: Verifier, D: Digest> PartialEq for Node<C, D> {
     }
 }
 
-impl<C: Verifier, D: Digest> Eq for Node<C, D> {}
+impl<C: Verifier, V: Variant, D: Digest> Eq for Node<C, V, D> {}
 
 /// Ack is a message sent by a validator to acknowledge the receipt of a Chunk.
 ///
@@ -498,7 +499,7 @@ impl<C: Verifier, D: Digest> Eq for Node<C, D> {}
 /// once enough validators (a quorum) have acknowledged the chunk. This threshold signature
 /// serves as proof that the chunk was reliably broadcast.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Ack<P: Array, D: Digest> {
+pub struct Ack<P: Array, V: Variant, D: Digest> {
     /// Chunk that is being acknowledged.
     pub chunk: Chunk<P, D>,
 
@@ -508,12 +509,12 @@ pub struct Ack<P: Array, D: Digest> {
     /// Partial signature over the chunk.
     /// This is a cryptographic signature that can be combined with other partial
     /// signatures to form a threshold signature once a quorum is reached.
-    pub signature: PartialSignature,
+    pub signature: PartialSignature<V>,
 }
 
-impl<P: Array, D: Digest> Ack<P, D> {
+impl<P: Array, V: Variant, D: Digest> Ack<P, V, D> {
     /// Create a new ack with the given chunk, epoch, and signature.
-    pub fn new(chunk: Chunk<P, D>, epoch: Epoch, signature: PartialSignature) -> Self {
+    pub fn new(chunk: Chunk<P, D>, epoch: Epoch, signature: PartialSignature<V>) -> Self {
         Self {
             chunk,
             epoch,
@@ -540,13 +541,13 @@ impl<P: Array, D: Digest> Ack<P, D> {
     /// using the provided identity (which contains the BLS public polynomial).
     ///
     /// Returns true if the signature is valid, false otherwise.
-    pub fn verify(&self, namespace: &[u8], identity: &poly::Public) -> bool {
+    pub fn verify(&self, namespace: &[u8], identity: &poly::Public<V>) -> bool {
         // Construct signing payload
         let ack_namespace = ack_namespace(namespace);
         let message = Self::payload(&self.chunk, &self.epoch);
 
         // Verify signature
-        ops::partial_verify_message(
+        ops::partial_verify_message::<V>(
             identity,
             Some(ack_namespace.as_ref()),
             &message,
@@ -565,12 +566,13 @@ impl<P: Array, D: Digest> Ack<P, D> {
         let message = Self::payload(&chunk, &epoch);
 
         // Sign message
-        let signature = ops::partial_sign_message(share, Some(ack_namespace.as_ref()), &message);
+        let signature =
+            ops::partial_sign_message::<V>(share, Some(ack_namespace.as_ref()), &message);
         Self::new(chunk, epoch, signature)
     }
 }
 
-impl<P: Array, D: Digest> Write for Ack<P, D> {
+impl<P: Array, V: Variant, D: Digest> Write for Ack<P, V, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.chunk.write(writer);
         UInt(self.epoch).write(writer);
@@ -578,13 +580,13 @@ impl<P: Array, D: Digest> Write for Ack<P, D> {
     }
 }
 
-impl<P: Array, D: Digest> Read for Ack<P, D> {
+impl<P: Array, V: Variant, D: Digest> Read for Ack<P, V, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let chunk = Chunk::read(reader)?;
         let epoch = UInt::read(reader)?.into();
-        let signature = PartialSignature::read(reader)?;
+        let signature = PartialSignature::<V>::read(reader)?;
         Ok(Self {
             chunk,
             epoch,
@@ -593,7 +595,7 @@ impl<P: Array, D: Digest> Read for Ack<P, D> {
     }
 }
 
-impl<P: Array, D: Digest> EncodeSize for Ack<P, D> {
+impl<P: Array, V: Variant, D: Digest> EncodeSize for Ack<P, V, D> {
     fn encode_size(&self) -> usize {
         self.chunk.encode_size() + UInt(self.epoch).encode_size() + self.signature.encode_size()
     }
@@ -609,16 +611,16 @@ impl<P: Array, D: Digest> EncodeSize for Ack<P, D> {
 /// and provide the appropriate information to other components.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
-pub enum Activity<C: Verifier, D: Digest> {
+pub enum Activity<C: Verifier, V: Variant, D: Digest> {
     /// A new tip for a sequencer
     ///
     /// This activity is only emitted when the application has verified some peer proposal.
     Tip(Proposal<C, D>),
     /// A threshold signature for a chunk, indicating it has been acknowledged by a quorum
-    Lock(Lock<C::PublicKey, D>),
+    Lock(Lock<C::PublicKey, V, D>),
 }
 
-impl<C: Verifier, D: Digest> Write for Activity<C, D> {
+impl<C: Verifier, V: Variant, D: Digest> Write for Activity<C, V, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Activity::Tip(proposal) => {
@@ -633,7 +635,7 @@ impl<C: Verifier, D: Digest> Write for Activity<C, D> {
     }
 }
 
-impl<C: Verifier, D: Digest> Read for Activity<C, D> {
+impl<C: Verifier, V: Variant, D: Digest> Read for Activity<C, V, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -648,7 +650,7 @@ impl<C: Verifier, D: Digest> Read for Activity<C, D> {
     }
 }
 
-impl<C: Verifier, D: Digest> EncodeSize for Activity<C, D> {
+impl<C: Verifier, V: Variant, D: Digest> EncodeSize for Activity<C, V, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Activity::Tip(proposal) => proposal.encode_size(),
@@ -746,7 +748,7 @@ impl<C: Verifier, D: Digest> Eq for Proposal<C, D> {}
 /// 2. Allowing sequencers to build chains of chunks
 /// 3. Preventing sequencers from creating forks in their chains
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Lock<P: Array, D: Digest> {
+pub struct Lock<P: Array, V: Variant, D: Digest> {
     /// Chunk that is being locked.
     pub chunk: Chunk<P, D>,
 
@@ -756,12 +758,12 @@ pub struct Lock<P: Array, D: Digest> {
     /// Threshold signature over the chunk.
     /// This is a cryptographic signature that proves a quorum of validators
     /// have acknowledged the chunk.
-    pub signature: Signature,
+    pub signature: V::Signature,
 }
 
-impl<P: Array, D: Digest> Lock<P, D> {
+impl<P: Array, V: Variant, D: Digest> Lock<P, V, D> {
     /// Create a new Lock with the given chunk, epoch, and signature.
-    pub fn new(chunk: Chunk<P, D>, epoch: Epoch, signature: Signature) -> Self {
+    pub fn new(chunk: Chunk<P, D>, epoch: Epoch, signature: V::Signature) -> Self {
         Self {
             chunk,
             epoch,
@@ -775,10 +777,10 @@ impl<P: Array, D: Digest> Lock<P, D> {
     /// using the provided public key of the validator set.
     ///
     /// Returns true if the signature is valid, false otherwise.
-    pub fn verify(&self, namespace: &[u8], public_key: &Public) -> bool {
-        let message = Ack::payload(&self.chunk, &self.epoch);
+    pub fn verify(&self, namespace: &[u8], public_key: &V::Public) -> bool {
+        let message = Ack::<_, V, _>::payload(&self.chunk, &self.epoch);
         let ack_namespace = ack_namespace(namespace);
-        ops::verify_message(
+        ops::verify_message::<V>(
             public_key,
             Some(ack_namespace.as_ref()),
             &message,
@@ -788,7 +790,7 @@ impl<P: Array, D: Digest> Lock<P, D> {
     }
 }
 
-impl<P: Array, D: Digest> Write for Lock<P, D> {
+impl<P: Array, V: Variant, D: Digest> Write for Lock<P, V, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.chunk.write(writer);
         UInt(self.epoch).write(writer);
@@ -796,13 +798,13 @@ impl<P: Array, D: Digest> Write for Lock<P, D> {
     }
 }
 
-impl<P: Array, D: Digest> Read for Lock<P, D> {
+impl<P: Array, V: Variant, D: Digest> Read for Lock<P, V, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let chunk = Chunk::read(reader)?;
         let epoch = UInt::read(reader)?.into();
-        let signature = Signature::read(reader)?;
+        let signature = V::Signature::read(reader)?;
         Ok(Self {
             chunk,
             epoch,
@@ -811,7 +813,7 @@ impl<P: Array, D: Digest> Read for Lock<P, D> {
     }
 }
 
-impl<P: Array, D: Digest> EncodeSize for Lock<P, D> {
+impl<P: Array, V: Variant, D: Digest> EncodeSize for Lock<P, V, D> {
     fn encode_size(&self) -> usize {
         self.chunk.encode_size() + UInt(self.epoch).encode_size() + self.signature.encode_size()
     }
@@ -828,6 +830,7 @@ mod tests {
                 group::{Element, Share, G1},
                 ops::{partial_sign_message, threshold_signature_recover},
                 poly,
+                variant::{MinPk, MinSig},
             },
         },
         ed25519::PublicKey,
@@ -850,9 +853,13 @@ mod tests {
     }
 
     // Helper function to generate BLS shares and polynomial
-    fn generate_test_data(n: usize, t: u32, seed: u64) -> (poly::Public, Vec<Share>) {
+    fn generate_test_data<V: Variant>(
+        n: usize,
+        t: u32,
+        seed: u64,
+    ) -> (poly::Public<V>, Vec<Share>) {
         let mut rng = StdRng::seed_from_u64(seed);
-        ops::generate_shares(&mut rng, None, n as u32, t)
+        ops::generate_shares::<_, V>(&mut rng, None, n as u32, t)
     }
 
     #[test]
@@ -864,12 +871,11 @@ mod tests {
         assert_eq!(chunk, decoded);
     }
 
-    #[test]
-    fn test_parent_encode_decode() {
+    fn parent_encode_decode<V: Variant>() {
         // Generate proper BLS shares and keys
         let n = 4;
         let t = quorum(n as u32);
-        let (identity, shares) = generate_test_data(n, t, 0);
+        let (identity, shares) = generate_test_data::<V>(n, t, 0);
 
         // Create a chunk that would be signed
         let public_key = sample_scheme(0).public_key();
@@ -877,27 +883,33 @@ mod tests {
         let epoch = 5;
 
         // Generate partial signatures for the chunk
-        let message = Ack::payload(&chunk, &epoch);
+        let message = Ack::<_, V, _>::payload(&chunk, &epoch);
         let ack_namespace = ack_namespace(NAMESPACE);
         let partials: Vec<_> = shares
             .iter()
             .take(t as usize)
-            .map(|s| partial_sign_message(s, Some(ack_namespace.as_ref()), &message))
+            .map(|s| partial_sign_message::<V>(s, Some(ack_namespace.as_ref()), &message))
             .collect();
 
         // Recover threshold signature
-        let signature = threshold_signature_recover(t, &partials).unwrap();
+        let signature = threshold_signature_recover::<V, _>(t, &partials).unwrap();
 
         // Create and test parent
         let parent = Parent::new(sample_digest(1), epoch, signature);
         let encoded = parent.encode();
-        let decoded = Parent::<Sha256Digest>::decode(encoded).unwrap();
+        let decoded = Parent::<V, Sha256Digest>::decode(encoded).unwrap();
         assert_eq!(parent, decoded);
 
         // Verify the signature is valid
-        let public = poly::public(&identity);
-        let lock = Lock::new(chunk, epoch, signature);
+        let public = poly::public::<V>(&identity);
+        let lock = Lock::<_, V, _>::new(chunk, epoch, signature);
         assert!(lock.verify(NAMESPACE, public));
+    }
+
+    #[test]
+    fn test_parent_encode_decode() {
+        parent_encode_decode::<MinPk>();
+        parent_encode_decode::<MinSig>();
     }
 
     #[test]
