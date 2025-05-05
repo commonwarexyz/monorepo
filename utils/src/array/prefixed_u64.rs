@@ -48,6 +48,8 @@ impl Write for U64 {
 }
 
 impl Read for U64 {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         <[u8; Self::SIZE]>::read(buf).map(Self)
     }

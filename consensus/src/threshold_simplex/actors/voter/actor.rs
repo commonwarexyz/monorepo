@@ -14,7 +14,7 @@ use crate::{
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
-        ops::threshold_signature_recover,
+        ops::{threshold_signature_recover, threshold_signature_recover_pair},
         poly,
     },
     Digest, Scheme,
@@ -365,12 +365,14 @@ impl<
                 .filter_map(|x| self.notarizes[*x as usize].as_ref());
 
             // Recover threshold signature
-            let proposals = notarizes.clone().map(|x| &x.proposal_signature);
-            let proposal_signature = threshold_signature_recover(threshold, proposals)
-                .expect("failed to recover threshold signature");
-            let seeds = notarizes.map(|x| &x.seed_signature);
-            let seed_signature = threshold_signature_recover(threshold, seeds)
-                .expect("failed to recover threshold signature");
+            let proposals = notarizes
+                .clone()
+                .map(|x| &x.proposal_signature)
+                .collect::<Vec<_>>();
+            let seeds = notarizes.map(|x| &x.seed_signature).collect::<Vec<_>>();
+            let (proposal_signature, seed_signature) =
+                threshold_signature_recover_pair(threshold, proposals, seeds)
+                    .expect("failed to recover threshold signature");
 
             // Construct notarization
             let notarization =
@@ -401,12 +403,14 @@ impl<
 
         // Recover threshold signature
         let nullifies = self.nullifies.values();
-        let views = nullifies.clone().map(|x| &x.view_signature);
-        let view_signature = threshold_signature_recover(threshold, views)
-            .expect("failed to recover threshold signature");
-        let seeds = nullifies.map(|x| &x.seed_signature);
-        let seed_signature = threshold_signature_recover(threshold, seeds)
-            .expect("failed to recover threshold signature");
+        let views = nullifies
+            .clone()
+            .map(|x| &x.view_signature)
+            .collect::<Vec<_>>();
+        let seeds = nullifies.map(|x| &x.seed_signature).collect::<Vec<_>>();
+        let (view_signature, seed_signature) =
+            threshold_signature_recover_pair(threshold, views, seeds)
+                .expect("failed to recover threshold signature");
 
         // Construct nullification
         let nullification = Nullification::new(self.view, view_signature, seed_signature);
@@ -514,7 +518,8 @@ pub struct Actor<
     partition: String,
     compression: Option<u8>,
     replay_concurrency: usize,
-    journal: Option<Journal<E, (), Voter<D>>>,
+    replay_buffer: usize,
+    journal: Option<Journal<E, Voter<D>>>,
 
     genesis: Option<D>,
 
@@ -610,6 +615,7 @@ impl<
                 partition: cfg.partition,
                 compression: cfg.compression,
                 replay_concurrency: cfg.replay_concurrency,
+                replay_buffer: cfg.replay_buffer,
                 journal: None,
 
                 genesis: None,
@@ -801,7 +807,7 @@ impl<
         null_retry
     }
 
-    async fn timeout<Sr: Sender>(&mut self, sender: &mut WrappedSender<Sr, (), Voter<D>>) {
+    async fn timeout<Sr: Sender>(&mut self, sender: &mut WrappedSender<Sr, Voter<D>>) {
         // Set timeout fired
         let round = self.views.get_mut(&self.view).unwrap();
         let mut retry = false;
@@ -1563,7 +1569,7 @@ impl<
     async fn notify<Sr: Sender>(
         &mut self,
         backfiller: &mut resolver::Mailbox<D>,
-        sender: &mut WrappedSender<Sr, (), Voter<D>>,
+        sender: &mut WrappedSender<Sr, Voter<D>>,
         view: u64,
     ) {
         // Get public key index
@@ -1799,7 +1805,7 @@ impl<
         self.enter_view(1, group::Signature::zero());
 
         // Initialize journal
-        let mut journal = Journal::<_, _, Voter<D>>::init(
+        let journal = Journal::<_, Voter<D>>::init(
             self.context.with_label("journal"),
             JConfig {
                 partition: self.partition.clone(),
@@ -1813,7 +1819,7 @@ impl<
         // Rebuild from journal
         {
             let stream = journal
-                .replay(self.replay_concurrency)
+                .replay(self.replay_concurrency, self.replay_buffer)
                 .await
                 .expect("unable to replay journal");
             pin_mut!(stream);

@@ -189,6 +189,10 @@ impl crate::Listener for Listener {
             },
         ))
     }
+
+    fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {
+        self.inner.local_addr()
+    }
 }
 
 pub(crate) struct Sink {

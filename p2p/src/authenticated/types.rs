@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
-    varint::UInt, Encode, EncodeSize, Error, RangeConfig, Read, ReadExt, ReadRangeExt, Write,
+    varint::UInt, Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, ReadRangeExt, Write,
 };
 use commonware_cryptography::Verifier;
 use commonware_utils::BitVec as UtilsBitVec;
@@ -70,8 +70,10 @@ impl<C: Verifier> Write for Payload<C> {
     }
 }
 
-impl<C: Verifier> Read<Config> for Payload<C> {
-    fn read_cfg(buf: &mut impl Buf, cfg: &Config) -> Result<Self, Error> {
+impl<C: Verifier> Read for Payload<C> {
+    type Cfg = Config;
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let payload_type = <u8>::read(buf)?;
         match payload_type {
             0 => {
@@ -85,7 +87,7 @@ impl<C: Verifier> Read<Config> for Payload<C> {
             2 => {
                 // Don't limit the size of the data to be read.
                 // The max message size should already be limited by the p2p layer.
-                let data = Data::read_cfg(buf, &(..))?;
+                let data = Data::read_cfg(buf, &(..).into())?;
                 Ok(Payload::Data(data))
             }
             _ => Err(Error::Invalid(
@@ -121,10 +123,12 @@ impl Write for BitVec {
     }
 }
 
-impl Read<usize> for BitVec {
+impl Read for BitVec {
+    type Cfg = usize;
+
     fn read_cfg(buf: &mut impl Buf, max_bits: &usize) -> Result<Self, Error> {
         let index = UInt::read(buf)?.into();
-        let bits = UtilsBitVec::read_cfg(buf, &..=*max_bits)?;
+        let bits = UtilsBitVec::read_cfg(buf, &(..=*max_bits).into())?;
         Ok(Self { index, bits })
     }
 }
@@ -179,6 +183,8 @@ impl<C: Verifier> Write for PeerInfo<C> {
 }
 
 impl<C: Verifier> Read for PeerInfo<C> {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let socket = SocketAddr::read(buf)?;
         let timestamp = UInt::read(buf)?.into();
@@ -218,8 +224,10 @@ impl Write for Data {
     }
 }
 
-impl<R: RangeConfig> Read<R> for Data {
-    fn read_cfg(buf: &mut impl Buf, range: &R) -> Result<Self, Error> {
+impl Read for Data {
+    type Cfg = RangeCfg;
+
+    fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
         let channel = UInt::read(buf)?.into();
         let message = Bytes::read_cfg(buf, range)?;
         Ok(Data { channel, message })
@@ -283,13 +291,13 @@ mod tests {
             message: Bytes::from("Hello, world!"),
         };
         let encoded = original.encode();
-        let decoded = Data::decode_cfg(encoded, &(13..=13)).unwrap();
+        let decoded = Data::decode_cfg(encoded, &(13..=13).into()).unwrap();
         assert_eq!(original, decoded);
 
-        let too_short = Data::decode_cfg(original.encode(), &(0..13));
+        let too_short = Data::decode_cfg(original.encode(), &(0..13).into());
         assert!(matches!(too_short, Err(Error::InvalidLength(13))));
 
-        let too_long = Data::decode_cfg(original.encode(), &(14..));
+        let too_long = Data::decode_cfg(original.encode(), &(14..).into());
         assert!(matches!(too_long, Err(Error::InvalidLength(13))));
     }
 

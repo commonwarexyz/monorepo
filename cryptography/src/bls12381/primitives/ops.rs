@@ -9,14 +9,15 @@
 
 use super::{
     group::{self, equal, Element, Point, Share, DST, MESSAGE, PROOF_OF_POSSESSION},
-    poly::{self, Eval, PartialSignature},
+    poly::{self, Eval, PartialSignature, Weight},
     Error,
 };
+use crate::bls12381::primitives::poly::{compute_weights, prepare_evaluations};
 use commonware_codec::Encode;
 use commonware_utils::union_unique;
 use rand::RngCore;
 use rayon::{prelude::*, ThreadPoolBuilder};
-use std::borrow::Cow;
+use std::{borrow::Cow, collections::BTreeMap};
 
 /// Returns a new keypair derived from the provided randomness.
 pub fn keypair<R: RngCore>(rng: &mut R) -> (group::Private, group::Public) {
@@ -236,6 +237,53 @@ where
     Ok(())
 }
 
+/// Interpolate the value of some [Point] with precomputed Barycentric Weights
+/// and multi-scalar multiplication (MSM).
+pub fn msm_interpolate<'a, P, I>(weights: &BTreeMap<u32, Weight>, evals: I) -> Result<P, Error>
+where
+    P: Point + 'a,
+    I: IntoIterator<Item = &'a Eval<P>>,
+{
+    // Populate points and scalars
+    let mut points = Vec::with_capacity(weights.len());
+    let mut scalars = Vec::with_capacity(weights.len());
+    for e in evals {
+        points.push(e.value.clone());
+        scalars.push(
+            weights
+                .get(&e.index)
+                .ok_or(Error::InvalidIndex)?
+                .as_scalar()
+                .clone(),
+        );
+    }
+
+    // Perform multi-scalar multiplication
+    Ok(P::msm(&points, &scalars))
+}
+
+/// Recovers a signature from `threshold` partial signatures.
+///
+/// # Determinism
+///
+/// Signatures recovered by this function are deterministic and are safe
+/// to use in a consensus-critical context.
+///
+/// # Warning
+///
+/// This function assumes that each partial signature is unique and that
+/// that there exists exactly one partial signature for each index in
+/// the `weights` map.
+pub fn threshold_signature_recover_with_weights<'a, I>(
+    weights: &BTreeMap<u32, Weight>,
+    partials: I,
+) -> Result<group::Signature, Error>
+where
+    I: IntoIterator<Item = &'a PartialSignature>,
+{
+    msm_interpolate(weights, partials)
+}
+
 /// Recovers a signature from at least `threshold` partial signatures.
 ///
 /// # Determinism
@@ -253,7 +301,87 @@ pub fn threshold_signature_recover<'a, I>(
 where
     I: IntoIterator<Item = &'a PartialSignature>,
 {
-    poly::Signature::recover(threshold, partials)
+    // Prepare evaluations
+    let evals = prepare_evaluations(threshold, partials)?;
+
+    // Compute weights
+    let indices = evals.iter().map(|e| e.index).collect::<Vec<_>>();
+    let weights = compute_weights(indices)?;
+
+    // Perform interpolation with the precomputed weights.
+    //
+    // We call this function instead of `poly::recover_with_weights` because
+    // it will use multi-scalar multiplication (MSM) to recover the signature.
+    threshold_signature_recover_with_weights(&weights, evals)
+}
+
+/// Recovers multiple signatures from multiple sets of at least `threshold`
+/// partial signatures.
+///
+/// # Determinism
+///
+/// Signatures recovered by this function are deterministic and are safe
+/// to use in a consensus-critical context.
+///
+/// # Warning
+///
+/// This function assumes that each partial signature is unique and that
+/// each set of partial signatures has the same indices.
+pub fn threshold_signature_recover_multiple<'a, I>(
+    threshold: u32,
+    mut many_evals: Vec<I>,
+) -> Result<Vec<group::Signature>, Error>
+where
+    I: IntoIterator<Item = &'a PartialSignature>,
+{
+    // Process first set of evaluations
+    let evals = many_evals.swap_remove(0).into_iter().collect::<Vec<_>>();
+    let evals = prepare_evaluations(threshold, evals)?;
+    let mut prepared_evals = vec![evals];
+
+    // Prepare other evaluations and ensure they have the same indices
+    for evals in many_evals {
+        let evals = evals.into_iter().collect::<Vec<_>>();
+        let evals = prepare_evaluations(threshold, evals)?;
+        for (i, e) in prepared_evals[0].iter().enumerate() {
+            if e.index != evals[i].index {
+                return Err(Error::InvalidIndex);
+            }
+        }
+        prepared_evals.push(evals);
+    }
+
+    // Compute weights
+    let indices = prepared_evals[0]
+        .iter()
+        .map(|e| e.index)
+        .collect::<Vec<_>>();
+    let weights = compute_weights(indices)?;
+
+    // Recover signatures
+    let mut signatures = Vec::with_capacity(prepared_evals.len());
+    for evals in prepared_evals {
+        let signature = threshold_signature_recover_with_weights(&weights, evals)?;
+        signatures.push(signature);
+    }
+    Ok(signatures)
+}
+
+/// Recovers a pair of signatures from two sets of at least `threshold` partial signatures.
+///
+/// This is just a wrapper around `threshold_signature_recover_multiple`.
+pub fn threshold_signature_recover_pair<'a, I>(
+    threshold: u32,
+    first: I,
+    second: I,
+) -> Result<(group::Signature, group::Signature), Error>
+where
+    I: IntoIterator<Item = &'a PartialSignature>,
+{
+    let mut sigs = threshold_signature_recover_multiple(threshold, vec![first, second])?;
+    let second_sig = sigs.pop().unwrap();
+    let first_sig = sigs.pop().unwrap();
+    Ok((first_sig, second_sig))
 }
 
 /// Aggregates multiple public keys.
@@ -396,7 +524,8 @@ mod tests {
     use blst::BLST_ERROR;
     use commonware_codec::DecodeExt;
     use commonware_utils::quorum;
-    use group::{G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION};
+    use group::{G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2};
+    use poly::Poly;
     use rand::prelude::*;
 
     #[test]
@@ -912,5 +1041,144 @@ mod tests {
             ),
             Err(Error::InvalidSignature)
         ));
+    }
+
+    #[test]
+    fn test_threshold_signature_recover_with_weights() {
+        let mut rng = StdRng::seed_from_u64(3333);
+        let (n, t) = (6, quorum(6));
+        let (group_poly, shares) = crate::bls12381::dkg::ops::generate_shares(&mut rng, None, n, t);
+
+        // Produce partial signatures for the first `t` shares.
+        let partials: Vec<_> = shares
+            .iter()
+            .take(t as usize)
+            .map(|s| partial_sign_message(s, None, b"payload"))
+            .collect();
+
+        // Compute barycentric weights once.
+        let indices = partials.iter().map(|e| e.index).collect::<Vec<_>>();
+        let weights = compute_weights(indices).unwrap();
+
+        // Path-1: generic recover
+        let sig1 = threshold_signature_recover(t, &partials).unwrap();
+
+        // Path-2: recover with *pre-computed* weights
+        let sig2 = threshold_signature_recover_with_weights(&weights, &partials).unwrap();
+
+        assert_eq!(sig1, sig2);
+
+        // Verify with the aggregated public key.
+        let pk = poly::public(&group_poly);
+        verify_message(pk, None, b"payload", &sig1).unwrap();
+    }
+
+    #[test]
+    fn test_threshold_signature_recover_multiple() {
+        let mut rng = StdRng::seed_from_u64(3333);
+        let (n, t) = (6, quorum(6));
+        let (group_poly, shares) = crate::bls12381::dkg::ops::generate_shares(&mut rng, None, n, t);
+
+        // Produce partial signatures for the first `t` shares.
+        let partials_1: Vec<_> = shares
+            .iter()
+            .take(t as usize)
+            .map(|s| partial_sign_message(s, None, b"payload1"))
+            .collect();
+        let partials_2: Vec<_> = shares
+            .iter()
+            .take(t as usize)
+            .map(|s| partial_sign_message(s, None, b"payload2"))
+            .collect();
+
+        // Recover signatures
+        let (sig_1, sig_2) = threshold_signature_recover_pair(t, &partials_1, &partials_2).unwrap();
+
+        // Verify with the aggregated public key.
+        let pk = poly::public(&group_poly);
+        verify_message(pk, None, b"payload1", &sig_1).unwrap();
+        verify_message(pk, None, b"payload2", &sig_2).unwrap();
+    }
+
+    #[test]
+    fn test_msm_interpolate_vs_poly_recover() {
+        let mut rng = StdRng::seed_from_u64(4242);
+        let degree = 5;
+        let threshold = degree + 1;
+        let poly_scalar = poly::new_from(degree, &mut rng);
+
+        // Commit to G2 (Signature group)
+        let poly_g2 = Poly::<G2>::commit(poly_scalar);
+
+        // Generate evaluations (enough to meet threshold)
+        let evals: Vec<_> = (0..threshold).map(|i| poly_g2.evaluate(i)).collect();
+        let eval_refs: Vec<_> = evals.iter().collect(); // Get references
+
+        // Compute weights
+        let indices: Vec<u32> = eval_refs.iter().map(|e| e.index).collect();
+        let weights = poly::compute_weights(indices).expect("Failed to compute weights");
+
+        // Calculate using original polynomial recovery (naive interpolation)
+        let expected_result = poly::Signature::recover_with_weights(&weights, eval_refs.clone())
+            .expect("poly::recover_with_weights failed");
+
+        // Calculate using MSM interpolation
+        let msm_result = msm_interpolate(&weights, eval_refs).expect("msm_interpolate failed");
+
+        // Compare results
+        assert_eq!(
+            expected_result, msm_result,
+            "MSM interpolation result differs from polynomial recovery"
+        );
+
+        // Also check against the known constant term
+        assert_eq!(
+            expected_result,
+            *poly_g2.constant(),
+            "Recovered value does not match original constant term"
+        );
+    }
+
+    #[test]
+    fn test_msm_interpolate_invalid_index() {
+        let mut rng = StdRng::seed_from_u64(5555);
+        let degree = 2;
+        let threshold = degree + 1;
+        let poly_scalar = poly::new_from(degree, &mut rng);
+        let poly_g2 = Poly::<G2>::commit(poly_scalar);
+
+        // Generate threshold evaluations
+        let evals: Vec<_> = (0..threshold).map(|i| poly_g2.evaluate(i)).collect();
+        let eval_refs: Vec<_> = evals.iter().collect();
+
+        // Compute weights for *different* indices
+        let wrong_indices: Vec<u32> = (threshold..threshold * 2).collect();
+        let weights = poly::compute_weights(wrong_indices).expect("Failed to compute weights");
+
+        // Try to interpolate with mismatched weights/evals
+        let result = msm_interpolate::<G2, _>(&weights, eval_refs);
+
+        // Expect InvalidIndex error
+        assert!(
+            matches!(result, Err(Error::InvalidIndex)),
+            "Expected InvalidIndex error for mismatched weights"
+        );
+    }
+
+    #[test]
+    fn test_msm_interpolate_empty() {
+        let weights: BTreeMap<u32, Weight> = BTreeMap::new();
+        let evals: Vec<Eval<G2>> = Vec::new();
+        let eval_refs: Vec<&Eval<G2>> = evals.iter().collect();
+
+        // Interpolate with empty inputs
+        let result = msm_interpolate(&weights, eval_refs).expect("msm_interpolate failed on empty");
+
+        // Expect identity element
+        assert_eq!(
+            result,
+            G2::zero(),
+            "Expected G2 identity for empty interpolation"
+        );
     }
 }

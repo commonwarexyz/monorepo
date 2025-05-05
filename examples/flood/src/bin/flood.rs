@@ -8,7 +8,7 @@ use commonware_deployer::ec2::{Hosts, METRICS_PORT};
 use commonware_flood::Config;
 use commonware_p2p::{authenticated, Receiver, Recipients, Sender};
 use commonware_runtime::{tokio, Metrics, Runner, Spawner};
-use commonware_utils::{from_hex_formatted, union};
+use commonware_utils::{from_hex_formatted, union, NZU32};
 use futures::future::try_join_all;
 use governor::Quota;
 use prometheus_client::metrics::counter::Counter;
@@ -16,7 +16,6 @@ use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    num::NonZeroU32,
     str::FromStr,
     sync::atomic::AtomicU64,
 };
@@ -67,7 +66,10 @@ fn main() {
         // Configure telemetry
         tokio::telemetry::init(
             context.with_label("telemetry"),
-            Level::DEBUG,
+            tokio::telemetry::Logging {
+                level: Level::DEBUG,
+                json: true,
+            },
             Some(SocketAddr::new(
                 IpAddr::V4(Ipv4Addr::UNSPECIFIED),
                 METRICS_PORT,
@@ -123,7 +125,7 @@ fn main() {
         // Register flood channel
         let (mut flood_sender, mut flood_receiver) = network.register(
             0,
-            Quota::per_second(NonZeroU32::new(u32::MAX).unwrap()),
+            Quota::per_second(NZU32!(u32::MAX)),
             config.message_backlog,
             None,
         );

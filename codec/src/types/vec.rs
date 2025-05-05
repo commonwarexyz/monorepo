@@ -3,7 +3,7 @@
 //! For portability and consistency between architectures,
 //! the length of the vector must fit within a [`u32`].
 
-use crate::{Config, EncodeSize, Error, RangeConfig, Read, Write};
+use crate::{EncodeSize, Error, RangeCfg, Read, Write};
 use bytes::{Buf, BufMut};
 
 impl<T: Write> Write for Vec<T> {
@@ -23,9 +23,11 @@ impl<T: EncodeSize> EncodeSize for Vec<T> {
     }
 }
 
-impl<R: RangeConfig, Cfg: Config, T: Read<Cfg>> Read<(R, Cfg)> for Vec<T> {
+impl<T: Read> Read for Vec<T> {
+    type Cfg = (RangeCfg, T::Cfg);
+
     #[inline]
-    fn read_cfg(buf: &mut impl Buf, (range, cfg): &(R, Cfg)) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, (range, cfg): &Self::Cfg) -> Result<Self, Error> {
         let len = usize::read_cfg(buf, range)?;
         let mut vec = Vec::with_capacity(len);
         for _ in 0..len {

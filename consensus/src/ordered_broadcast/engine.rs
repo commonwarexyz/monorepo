@@ -140,6 +140,9 @@ pub struct Engine<
     // The number of concurrent operations when replaying journals.
     journal_replay_concurrency: usize,
 
+    // The number of bytes to buffer when replaying a journal.
+    journal_replay_buffer: usize,
+
     // A prefix for the journal names.
     // The rest of the name is the hex-encoded public keys of the relevant sequencer.
     journal_name_prefix: String,
@@ -148,7 +151,7 @@ pub struct Engine<
     journal_compression: Option<u8>,
 
     // A map of sequencer public keys to their journals.
-    journals: BTreeMap<C::PublicKey, Journal<E, (), Node<C, D>>>,
+    journals: BTreeMap<C::PublicKey, Journal<E, Node<C, D>>>,
 
     ////////////////////////////////////////
     // State
@@ -231,6 +234,7 @@ impl<
             pending_verifies: FuturesPool::default(),
             journal_heights_per_section: cfg.journal_heights_per_section,
             journal_replay_concurrency: cfg.journal_replay_concurrency,
+            journal_replay_buffer: cfg.journal_replay_buffer,
             journal_name_prefix: cfg.journal_name_prefix,
             journal_compression: cfg.journal_compression,
             journals: BTreeMap::new(),
@@ -471,7 +475,7 @@ impl<
         &mut self,
         context: &Context<C::PublicKey>,
         payload: &D,
-        ack_sender: &mut WrappedSender<NetS, (), Ack<C::PublicKey, D>>,
+        ack_sender: &mut WrappedSender<NetS, Ack<C::PublicKey, D>>,
     ) -> Result<(), Error> {
         // Get the tip
         let Some(tip) = self.tip_manager.get(&context.sequencer) else {
@@ -667,7 +671,7 @@ impl<
         &mut self,
         context: Context<C::PublicKey>,
         payload: D,
-        node_sender: &mut WrappedSender<NetS, (), Node<C, D>>,
+        node_sender: &mut WrappedSender<NetS, Node<C, D>>,
     ) -> Result<(), Error> {
         let mut guard = self.metrics.propose.guard(Status::Dropped);
         let me = self.crypto.public_key();
@@ -734,7 +738,7 @@ impl<
     /// - this instance has not yet collected the threshold signature for the chunk.
     async fn rebroadcast(
         &mut self,
-        node_sender: &mut WrappedSender<NetS, (), Node<C, D>>,
+        node_sender: &mut WrappedSender<NetS, Node<C, D>>,
     ) -> Result<(), Error> {
         let mut guard = self.metrics.rebroadcast.guard(Status::Dropped);
 
@@ -772,7 +776,7 @@ impl<
     async fn broadcast(
         &mut self,
         node: Node<C, D>,
-        node_sender: &mut WrappedSender<NetS, (), Node<C, D>>,
+        node_sender: &mut WrappedSender<NetS, Node<C, D>>,
         epoch: Epoch,
     ) -> Result<(), Error> {
         // Get the validators for the epoch
@@ -960,10 +964,9 @@ impl<
             compression: self.journal_compression,
             codec_config: (),
         };
-        let mut journal =
-            Journal::<_, _, Node<C, D>>::init(self.context.with_label("journal"), cfg)
-                .await
-                .expect("unable to init journal");
+        let journal = Journal::<_, Node<C, D>>::init(self.context.with_label("journal"), cfg)
+            .await
+            .expect("unable to init journal");
 
         // Replay journal
         {
@@ -971,7 +974,7 @@ impl<
 
             // Prepare the stream
             let stream = journal
-                .replay(self.journal_replay_concurrency)
+                .replay(self.journal_replay_concurrency, self.journal_replay_buffer)
                 .await
                 .expect("unable to replay journal");
             pin_mut!(stream);

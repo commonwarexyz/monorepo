@@ -46,7 +46,7 @@ pub enum Error {
     /// A length prefix (e.g., for `Vec<T>`, `Bytes`, `HashMap<K, V>`) was decoded,
     /// but its value fell outside the permitted range.
     ///
-    /// This range is typically configured via a [`RangeConfig`](crate::RangeConfig)
+    /// This range is typically configured via a [`RangeCfg`](crate::RangeCfg)
     /// passed within the `Cfg` parameter to [`Read::read_cfg`](crate::Read::read_cfg).
     /// The contained `usize` is the invalid length that was decoded.
     #[error("Invalid Length: Decoded length {0} is outside the allowed range")]

@@ -93,6 +93,36 @@ pub fn modulo(bytes: &[u8], n: u64) -> u64 {
     result
 }
 
+/// A macro to create a `NonZeroUsize` from a value, panicking if the value is zero.
+#[macro_export]
+macro_rules! NZUsize {
+    ($val:expr) => {
+        // This will panic at runtime if $val is zero.
+        // For literals, the compiler *might* optimize, but the check is still conceptually there.
+        std::num::NonZeroUsize::new($val).expect("value must be non-zero")
+    };
+}
+
+/// A macro to create a `NonZeroU32` from a value, panicking if the value is zero.
+#[macro_export]
+macro_rules! NZU32 {
+    ($val:expr) => {
+        // This will panic at runtime if $val is zero.
+        // For literals, the compiler *might* optimize, but the check is still conceptually there.
+        std::num::NonZeroU32::new($val).expect("value must be non-zero")
+    };
+}
+
+/// A macro to create a `NonZeroU64` from a value, panicking if the value is zero.
+#[macro_export]
+macro_rules! NZU64 {
+    ($val:expr) => {
+        // This will panic at runtime if $val is zero.
+        // For literals, the compiler *might* optimize, but the check is still conceptually there.
+        std::num::NonZeroU64::new($val).expect("value must be non-zero")
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,5 +328,18 @@ mod tests {
             let utils_modulo = modulo(&bytes, n);
             assert_eq!(big_modulo, BigUint::from(utils_modulo));
         }
+    }
+
+    #[test]
+    fn test_non_zero_macros() {
+        // Test case 0: zero value
+        assert!(std::panic::catch_unwind(|| NZUsize!(0)).is_err());
+        assert!(std::panic::catch_unwind(|| NZU32!(0)).is_err());
+        assert!(std::panic::catch_unwind(|| NZU64!(0)).is_err());
+
+        // Test case 1: non-zero value
+        assert_eq!(NZUsize!(1).get(), 1);
+        assert_eq!(NZU32!(2).get(), 2);
+        assert_eq!(NZU64!(3).get(), 3);
     }
 }
