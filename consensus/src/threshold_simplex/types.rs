@@ -1665,7 +1665,7 @@ mod tests {
         assert_eq!(notarization, decoded);
 
         // Verify the notarization
-        let public_key = poly::public::<MinSig, _>(&commitment);
+        let public_key = poly::public::<MinSig>(&commitment);
         assert!(decoded.verify(NAMESPACE, public_key));
 
         // Create seed
