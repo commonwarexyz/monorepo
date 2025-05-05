@@ -1628,7 +1628,7 @@ mod tests {
         let (commitment, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
-        let notarize = Notarize::sign(NAMESPACE, &shares[0], proposal);
+        let notarize = Notarize::<_, MinSig>::sign(NAMESPACE, &shares[0], proposal);
 
         let encoded = notarize.encode();
         let decoded = Notarize::<Sha256, MinSig>::decode(encoded).unwrap();
@@ -1671,7 +1671,7 @@ mod tests {
         // Create seed
         let seed = notarization.seed();
         let encoded = seed.encode();
-        let decoded = Seed::decode(encoded).unwrap();
+        let decoded = Seed::<MinSig>::decode(encoded).unwrap();
         assert_eq!(seed, decoded);
 
         // Verify the seed
@@ -1687,7 +1687,7 @@ mod tests {
         let nullify = Nullify::<MinSig>::sign(NAMESPACE, &shares[0], 10);
 
         let encoded = nullify.encode();
-        let decoded = Nullify::decode(encoded).unwrap();
+        let decoded = Nullify::<MinSig>::decode(encoded).unwrap();
 
         assert_eq!(nullify, decoded);
         assert!(decoded.verify(NAMESPACE, &commitment));
@@ -1712,9 +1712,9 @@ mod tests {
         let seed_signature = threshold_signature_recover::<MinSig, _>(t, seed_partials).unwrap();
 
         // Create nullification
-        let nullification = Nullification::<MinSig>::new(10, view_signature, seed_signature);
+        let nullification = Nullification::new(10, view_signature, seed_signature);
         let encoded = nullification.encode();
-        let decoded = Nullification::decode(encoded).unwrap();
+        let decoded = Nullification::<MinSig>::decode(encoded).unwrap();
         assert_eq!(nullification, decoded);
 
         // Verify the nullification
@@ -1724,7 +1724,7 @@ mod tests {
         // Create seed
         let seed = nullification.seed();
         let encoded = seed.encode();
-        let decoded = Seed::decode(encoded).unwrap();
+        let decoded = Seed::<MinSig>::decode(encoded).unwrap();
         assert_eq!(seed, decoded);
 
         // Verify the seed
@@ -1738,7 +1738,7 @@ mod tests {
         let (commitment, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
-        let finalize = Finalize::sign(NAMESPACE, &shares[0], proposal);
+        let finalize = Finalize::<_, MinSig>::sign(NAMESPACE, &shares[0], proposal);
 
         let encoded = finalize.encode();
         let decoded = Finalize::<Sha256, MinSig>::decode(encoded).unwrap();
@@ -1758,18 +1758,19 @@ mod tests {
         // Create finalizes
         let notarizes: Vec<_> = shares
             .iter()
-            .map(|s| Notarize::<MinSig, _>::sign(NAMESPACE, s, proposal.clone()))
+            .map(|s| Notarize::<_, MinSig>::sign(NAMESPACE, s, proposal.clone()))
             .collect();
         let finalizes: Vec<_> = shares
             .iter()
-            .map(|s| Finalize::sign(NAMESPACE, s, proposal.clone()))
+            .map(|s| Finalize::<_, MinSig>::sign(NAMESPACE, s, proposal.clone()))
             .collect();
 
         // Recover threshold signatures
         let proposal_partials = finalizes.iter().map(|f| &f.proposal_signature);
-        let proposal_signature = threshold_signature_recover(t, proposal_partials).unwrap();
+        let proposal_signature =
+            threshold_signature_recover::<MinSig, _>(t, proposal_partials).unwrap();
         let seed_partials = notarizes.iter().map(|n| &n.seed_signature);
-        let seed_signature = threshold_signature_recover(t, seed_partials).unwrap();
+        let seed_signature = threshold_signature_recover::<MinSig, _>(t, seed_partials).unwrap();
 
         // Create finalization
         let finalization = Finalization::new(proposal, proposal_signature, seed_signature);
@@ -1778,13 +1779,13 @@ mod tests {
         assert_eq!(finalization, decoded);
 
         // Verify the finalization
-        let public_key = poly::public(&commitment);
+        let public_key = poly::public::<MinSig>(&commitment);
         assert!(decoded.verify(NAMESPACE, public_key));
 
         // Create seed
         let seed = finalization.seed();
         let encoded = seed.encode();
-        let decoded = Seed::decode(encoded).unwrap();
+        let decoded = Seed::<MinSig>::decode(encoded).unwrap();
         assert_eq!(seed, decoded);
 
         // Verify the seed
@@ -1795,9 +1796,9 @@ mod tests {
     fn test_backfiller_encode_decode() {
         // Test Request
         let request = Request::new(1, vec![10, 11], vec![12, 13]);
-        let backfiller = Backfiller::Request::<Sha256>(request.clone());
+        let backfiller = Backfiller::<Sha256, MinSig>::Request(request.clone());
         let encoded = backfiller.encode();
-        let decoded = Backfiller::<Sha256>::decode_cfg(encoded, &usize::MAX).unwrap();
+        let decoded = Backfiller::<Sha256, MinSig>::decode_cfg(encoded, &usize::MAX).unwrap();
         assert!(matches!(decoded, Backfiller::Request(r) if r == request));
 
         // Test Response
@@ -1809,34 +1810,35 @@ mod tests {
         let proposal = Proposal::new(10, 5, sample_digest(1));
         let notarizes: Vec<_> = shares
             .iter()
-            .map(|s| Notarize::sign(NAMESPACE, s, proposal.clone()))
+            .map(|s| Notarize::<_, MinSig>::sign(NAMESPACE, s, proposal.clone()))
             .collect();
 
         let proposal_partials = notarizes.iter().map(|n| &n.proposal_signature);
-        let proposal_signature = threshold_signature_recover(t, proposal_partials).unwrap();
+        let proposal_signature =
+            threshold_signature_recover::<MinSig, _>(t, proposal_partials).unwrap();
         let seed_partials = notarizes.iter().map(|n| &n.seed_signature);
-        let seed_signature = threshold_signature_recover(t, seed_partials).unwrap();
+        let seed_signature = threshold_signature_recover::<MinSig, _>(t, seed_partials).unwrap();
 
         let notarization = Notarization::new(proposal, proposal_signature, seed_signature);
 
         // Create a nullification
         let nullifies: Vec<_> = shares
             .iter()
-            .map(|s| Nullify::sign(NAMESPACE, s, 11))
+            .map(|s| Nullify::<MinSig>::sign(NAMESPACE, s, 11))
             .collect();
 
         let view_partials = nullifies.iter().map(|n| &n.view_signature);
-        let view_signature = threshold_signature_recover(t, view_partials).unwrap();
+        let view_signature = threshold_signature_recover::<MinSig, _>(t, view_partials).unwrap();
         let seed_partials = nullifies.iter().map(|n| &n.seed_signature);
-        let seed_signature = threshold_signature_recover(t, seed_partials).unwrap();
+        let seed_signature = threshold_signature_recover::<MinSig, _>(t, seed_partials).unwrap();
 
         let nullification = Nullification::new(11, view_signature, seed_signature);
 
         // Create a response
         let response = Response::new(1, vec![notarization], vec![nullification]);
-        let backfiller = Backfiller::Response::<Sha256>(response.clone());
+        let backfiller = Backfiller::<Sha256, MinSig>::Response(response.clone());
         let encoded = backfiller.encode();
-        let decoded = Backfiller::<Sha256>::decode_cfg(encoded, &usize::MAX).unwrap();
+        let decoded = Backfiller::<Sha256, MinSig>::decode_cfg(encoded, &usize::MAX).unwrap();
         assert!(matches!(decoded, Backfiller::Response(r) if r.id == response.id));
     }
 
@@ -1858,33 +1860,34 @@ mod tests {
         let proposal = Proposal::new(10, 5, sample_digest(1));
         let notarizes: Vec<_> = shares
             .iter()
-            .map(|s| Notarize::sign(NAMESPACE, s, proposal.clone()))
+            .map(|s| Notarize::<_, MinSig>::sign(NAMESPACE, s, proposal.clone()))
             .collect();
 
         let proposal_partials = notarizes.iter().map(|n| &n.proposal_signature);
-        let proposal_signature = threshold_signature_recover(t, proposal_partials).unwrap();
+        let proposal_signature =
+            threshold_signature_recover::<MinSig, _>(t, proposal_partials).unwrap();
         let seed_partials = notarizes.iter().map(|n| &n.seed_signature);
-        let seed_signature = threshold_signature_recover(t, seed_partials).unwrap();
+        let seed_signature = threshold_signature_recover::<MinSig, _>(t, seed_partials).unwrap();
 
         let notarization = Notarization::new(proposal, proposal_signature, seed_signature);
 
         // Create a nullification
         let nullifies: Vec<_> = shares
             .iter()
-            .map(|s| Nullify::sign(NAMESPACE, s, 11))
+            .map(|s| Nullify::<MinSig>::sign(NAMESPACE, s, 11))
             .collect();
 
         let view_partials = nullifies.iter().map(|n| &n.view_signature);
-        let view_signature = threshold_signature_recover(t, view_partials).unwrap();
+        let view_signature = threshold_signature_recover::<MinSig, _>(t, view_partials).unwrap();
         let seed_partials = nullifies.iter().map(|n| &n.seed_signature);
-        let seed_signature = threshold_signature_recover(t, seed_partials).unwrap();
+        let seed_signature = threshold_signature_recover::<MinSig, _>(t, seed_partials).unwrap();
 
         let nullification = Nullification::new(11, view_signature, seed_signature);
 
         // Create a response
-        let response = Response::new(1, vec![notarization], vec![nullification]);
+        let response = Response::<Sha256, MinSig>::new(1, vec![notarization], vec![nullification]);
         let encoded = response.encode();
-        let decoded = Response::<Sha256>::decode_cfg(encoded, &usize::MAX).unwrap();
+        let decoded = Response::<Sha256, MinSig>::decode_cfg(encoded, &usize::MAX).unwrap();
         assert_eq!(response.id, decoded.id);
         assert_eq!(response.notarizations.len(), decoded.notarizations.len());
         assert_eq!(response.nullifications.len(), decoded.nullifications.len());
@@ -1898,12 +1901,12 @@ mod tests {
 
         let proposal1 = Proposal::new(10, 5, sample_digest(1));
         let proposal2 = Proposal::new(10, 5, sample_digest(2));
-        let notarize1 = Notarize::sign(NAMESPACE, &shares[0], proposal1);
-        let notarize2 = Notarize::sign(NAMESPACE, &shares[0], proposal2);
+        let notarize1 = Notarize::<_, MinSig>::sign(NAMESPACE, &shares[0], proposal1);
+        let notarize2 = Notarize::<_, MinSig>::sign(NAMESPACE, &shares[0], proposal2);
         let conflicting_notarize = ConflictingNotarize::new(notarize1, notarize2);
 
         let encoded = conflicting_notarize.encode();
-        let decoded = ConflictingNotarize::<Sha256>::decode(encoded).unwrap();
+        let decoded = ConflictingNotarize::<Sha256, MinSig>::decode(encoded).unwrap();
 
         assert_eq!(conflicting_notarize, decoded);
         assert!(decoded.verify(NAMESPACE, &commitment));
@@ -1917,12 +1920,12 @@ mod tests {
 
         let proposal1 = Proposal::new(10, 5, sample_digest(1));
         let proposal2 = Proposal::new(10, 5, sample_digest(2));
-        let finalize1 = Finalize::sign(NAMESPACE, &shares[0], proposal1);
-        let finalize2 = Finalize::sign(NAMESPACE, &shares[0], proposal2);
+        let finalize1 = Finalize::<_, MinSig>::sign(NAMESPACE, &shares[0], proposal1);
+        let finalize2 = Finalize::<_, MinSig>::sign(NAMESPACE, &shares[0], proposal2);
         let conflicting_finalize = ConflictingFinalize::new(finalize1, finalize2);
 
         let encoded = conflicting_finalize.encode();
-        let decoded = ConflictingFinalize::<Sha256>::decode(encoded).unwrap();
+        let decoded = ConflictingFinalize::<Sha256, MinSig>::decode(encoded).unwrap();
 
         assert_eq!(conflicting_finalize, decoded);
         assert!(decoded.verify(NAMESPACE, &commitment));
@@ -1935,12 +1938,12 @@ mod tests {
         let (commitment, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
-        let nullify = Nullify::sign(NAMESPACE, &shares[0], 10);
-        let finalize = Finalize::sign(NAMESPACE, &shares[0], proposal);
+        let nullify = Nullify::<MinSig>::sign(NAMESPACE, &shares[0], 10);
+        let finalize = Finalize::<_, MinSig>::sign(NAMESPACE, &shares[0], proposal);
         let nullify_finalize = NullifyFinalize::new(nullify, finalize);
 
         let encoded = nullify_finalize.encode();
-        let decoded = NullifyFinalize::<Sha256>::decode(encoded).unwrap();
+        let decoded = NullifyFinalize::<Sha256, MinSig>::decode(encoded).unwrap();
 
         assert_eq!(nullify_finalize, decoded);
         assert!(decoded.verify(NAMESPACE, &commitment));
@@ -1953,7 +1956,7 @@ mod tests {
         let (commitment, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
-        let notarize = Notarize::sign(NAMESPACE, &shares[0], proposal);
+        let notarize = Notarize::<_, MinSig>::sign(NAMESPACE, &shares[0], proposal);
 
         // Verify with correct namespace and identity - should pass
         assert!(notarize.verify(NAMESPACE, &commitment));
@@ -1972,7 +1975,7 @@ mod tests {
         let (commitment2, _) = generate_test_data(n, t, 1);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
-        let notarize = Notarize::sign(NAMESPACE, &shares1[0], proposal);
+        let notarize = Notarize::<_, MinSig>::sign(NAMESPACE, &shares1[0], proposal);
 
         // Verify with correct identity - should pass
         assert!(notarize.verify(NAMESPACE, &commitment1));
@@ -1992,25 +1995,27 @@ mod tests {
         // Create notarizes
         let notarizes: Vec<_> = shares
             .iter()
-            .map(|s| Notarize::sign(NAMESPACE, s, proposal.clone()))
+            .map(|s| Notarize::<_, MinSig>::sign(NAMESPACE, s, proposal.clone()))
             .collect();
 
         // Recover threshold signature
         let proposal_partials = notarizes.iter().map(|n| &n.proposal_signature);
-        let proposal_signature = threshold_signature_recover(t, proposal_partials).unwrap();
+        let proposal_signature =
+            threshold_signature_recover::<MinSig, _>(t, proposal_partials).unwrap();
         let seed_partials = notarizes.iter().map(|n| &n.seed_signature);
-        let seed_signature = threshold_signature_recover(t, seed_partials).unwrap();
+        let seed_signature = threshold_signature_recover::<MinSig, _>(t, seed_partials).unwrap();
 
         // Create notarization
-        let notarization = Notarization::new(proposal, proposal_signature, seed_signature);
+        let notarization =
+            Notarization::<_, MinSig>::new(proposal, proposal_signature, seed_signature);
 
         // Verify with correct public key - should pass
-        let public_key = poly::public(&commitment);
+        let public_key = poly::public::<MinSig>(&commitment);
         assert!(notarization.verify(NAMESPACE, public_key));
 
         // Generate a different set of BLS keys/shares
         let (wrong_commitment, _) = generate_test_data(n, t, 1);
-        let wrong_public_key = poly::public(&wrong_commitment);
+        let wrong_public_key = poly::public::<MinSig>(&wrong_commitment);
 
         // Verify with wrong public key - should fail
         assert!(!notarization.verify(NAMESPACE, wrong_public_key));
@@ -2027,20 +2032,22 @@ mod tests {
         // Create notarizes
         let notarizes: Vec<_> = shares
             .iter()
-            .map(|s| Notarize::sign(NAMESPACE, s, proposal.clone()))
+            .map(|s| Notarize::<_, MinSig>::sign(NAMESPACE, s, proposal.clone()))
             .collect();
 
         // Recover threshold signature
         let proposal_partials = notarizes.iter().map(|n| &n.proposal_signature);
-        let proposal_signature = threshold_signature_recover(t, proposal_partials).unwrap();
+        let proposal_signature =
+            threshold_signature_recover::<MinSig, _>(t, proposal_partials).unwrap();
         let seed_partials = notarizes.iter().map(|n| &n.seed_signature);
-        let seed_signature = threshold_signature_recover(t, seed_partials).unwrap();
+        let seed_signature = threshold_signature_recover::<MinSig, _>(t, seed_partials).unwrap();
 
         // Create notarization
-        let notarization = Notarization::new(proposal, proposal_signature, seed_signature);
+        let notarization =
+            Notarization::<_, MinSig>::new(proposal, proposal_signature, seed_signature);
 
         // Verify with correct namespace - should pass
-        let public_key = poly::public(&commitment);
+        let public_key = poly::public::<MinSig>(&commitment);
         assert!(notarization.verify(NAMESPACE, public_key));
 
         // Verify with wrong namespace - should fail
@@ -2059,12 +2066,12 @@ mod tests {
         let notarizes: Vec<_> = shares
             .iter()
             .take((t as usize) - 1) // One less than the threshold
-            .map(|s| Notarize::sign(NAMESPACE, s, proposal.clone()))
+            .map(|s| Notarize::<_, MinSig>::sign(NAMESPACE, s, proposal.clone()))
             .collect();
 
         // Try to recover threshold signature with insufficient partials - should fail
         let proposal_partials = notarizes.iter().map(|n| &n.proposal_signature);
-        let result = threshold_signature_recover(t, proposal_partials);
+        let result = threshold_signature_recover::<MinSig, _>(t, proposal_partials);
 
         // Should not be able to recover the threshold signature
         assert!(result.is_err());
@@ -2081,8 +2088,8 @@ mod tests {
         let proposal2 = Proposal::new(10, 5, sample_digest(2)); // Same view, different payload
 
         // Create notarizes for both proposals from the same validator
-        let notarize1 = Notarize::sign(NAMESPACE, &shares[0], proposal1.clone());
-        let notarize2 = Notarize::sign(NAMESPACE, &shares[0], proposal2);
+        let notarize1 = Notarize::<_, MinSig>::sign(NAMESPACE, &shares[0], proposal1.clone());
+        let notarize2 = Notarize::<_, MinSig>::sign(NAMESPACE, &shares[0], proposal2);
 
         // Create conflict evidence
         let conflict = ConflictingNotarize::new(notarize1, notarize2.clone());
@@ -2091,17 +2098,17 @@ mod tests {
         assert!(conflict.verify(NAMESPACE, &commitment));
 
         // Now create invalid evidence using different validator keys
-        let notarize3 = Notarize::sign(NAMESPACE, &shares[1], proposal1.clone());
+        let notarize3 = Notarize::<_, MinSig>::sign(NAMESPACE, &shares[1], proposal1.clone());
 
         // This should compile but verification should fail because the signatures
         // are from different validators
-        let invalid_conflict = ConflictingNotarize {
+        let invalid_conflict: ConflictingNotarize<Sha256, MinSig> = ConflictingNotarize {
             view: conflict.view,
             parent_1: conflict.parent_1,
-            payload_1: conflict.payload_1,
-            signature_1: conflict.signature_1,
+            payload_1: conflict.payload_1.clone(),
+            signature_1: conflict.signature_1.clone(),
             parent_2: notarize3.proposal.parent,
-            payload_2: notarize3.proposal.payload,
+            payload_2: notarize3.proposal.payload.clone(),
             signature_2: notarize3.proposal_signature,
         };
 
@@ -2122,7 +2129,7 @@ mod tests {
 
         // Create a finalize for the same view
         let proposal = Proposal::new(view, 5, sample_digest(1));
-        let finalize = Finalize::sign(NAMESPACE, &shares[0], proposal);
+        let finalize = Finalize::<_, MinSig>::sign(NAMESPACE, &shares[0], proposal);
 
         // Create nullify+finalize evidence
         let conflict = NullifyFinalize::new(nullify, finalize.clone());
@@ -2134,12 +2141,12 @@ mod tests {
         assert!(!conflict.verify(b"wrong_namespace", &commitment));
 
         // Now create invalid evidence with different validators
-        let nullify2 = Nullify::sign(NAMESPACE, &shares[1], view);
+        let nullify2 = Nullify::<MinSig>::sign(NAMESPACE, &shares[1], view);
 
         // Compile but verification should fail because signatures are from different validators
-        let invalid_conflict = NullifyFinalize {
-            proposal: finalize.proposal,
-            view_signature: conflict.view_signature,
+        let invalid_conflict: NullifyFinalize<Sha256, MinSig> = NullifyFinalize {
+            proposal: finalize.proposal.clone(),
+            view_signature: conflict.view_signature.clone(),
             finalize_signature: nullify2.view_signature,
         };
 
@@ -2180,11 +2187,11 @@ mod tests {
             Finalization::<_, MinSig>::new(proposal, proposal_signature, seed_signature);
 
         // Verify with correct public key - should pass
-        let public_key = poly::public(&commitment);
+        let public_key = poly::public::<MinSig>(&commitment);
         assert!(finalization.verify(NAMESPACE, public_key));
 
         // Verify with wrong public key - should fail
-        let wrong_public_key = poly::public(&wrong_commitment);
+        let wrong_public_key = poly::public::<MinSig>(&wrong_commitment);
         assert!(!finalization.verify(NAMESPACE, wrong_public_key));
     }
 }
