@@ -1072,8 +1072,8 @@ mod tests {
 
     #[test]
     fn test_activity_encode_decode() {
-        ack_encode_decode::<MinPk>();
-        ack_encode_decode::<MinSig>();
+        activity_encode_decode::<MinPk>();
+        activity_encode_decode::<MinSig>();
     }
 
     #[test]
