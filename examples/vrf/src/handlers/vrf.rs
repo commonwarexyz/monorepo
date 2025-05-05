@@ -4,7 +4,7 @@ use commonware_cryptography::bls12381::{
     dkg::player::Output,
     primitives::{
         ops,
-        variant::{MinSig, MinSigSignature},
+        variant::{MinSig, Variant},
     },
 };
 use commonware_macros::select;
@@ -59,7 +59,7 @@ impl<E: Clock + Spawner, P: Array> Vrf<E, P> {
         round: u64,
         sender: &mut impl Sender<PublicKey = P>,
         receiver: &mut impl Receiver<PublicKey = P>,
-    ) -> Option<MinSigSignature> {
+    ) -> Option<<MinSig as Variant>::Signature> {
         // Construct payload
         let payload = round.to_be_bytes();
         let signature =

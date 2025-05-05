@@ -9,14 +9,6 @@ use super::Error;
 use blst::{Pairing as blst_pairing, BLS12_381_NEG_G1, BLS12_381_NEG_G2};
 use commonware_codec::FixedSize;
 
-pub type MinPkPublic = G1;
-
-pub type MinPkSignature = G2;
-
-pub type MinSigPublic = G2;
-
-pub type MinSigSignature = G1;
-
 pub trait Variant: Clone + 'static + Send + Sync + Hash + Eq + Debug {
     type Public: Point + FixedSize + Debug + Hash + Copy;
     type Signature: Point + FixedSize + Debug + Hash + Copy;

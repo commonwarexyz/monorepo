@@ -8,7 +8,7 @@ use commonware_cryptography::{
     bls12381::primitives::{
         group,
         poly::{Poly, Public},
-        variant::{MinSig, MinSigPublic},
+        variant::{MinSig, Variant},
     },
     Ed25519, Sha256, Signer,
 };
@@ -134,8 +134,8 @@ fn main() {
         .get_one::<String>("other-public")
         .expect("Please provide other public");
     let other_public = from_hex(other_public).expect("Other identity not well-formed");
-    let other_public =
-        MinSigPublic::decode(other_public.as_ref()).expect("Other identity not well-formed");
+    let other_public = <MinSig as Variant>::Public::decode(other_public.as_ref())
+        .expect("Other identity not well-formed");
 
     // Initialize context
     let runtime_cfg = tokio::Config::new().with_storage_directory(storage_directory);

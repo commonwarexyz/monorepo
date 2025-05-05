@@ -3,7 +3,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_consensus::threshold_simplex::types::Finalization;
 use commonware_cryptography::{
-    bls12381::primitives::variant::{MinSig, MinSigPublic},
+    bls12381::primitives::variant::{MinSig, Variant},
     Digest,
 };
 
@@ -88,7 +88,7 @@ impl<D: Digest> EncodeSize for Inbound<D> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PutBlock<D: Digest> {
     /// The network identifier for which the block belongs.
-    pub network: MinSigPublic,
+    pub network: <MinSig as Variant>::Public,
     /// The block to be stored.
     pub block: BlockFormat<D>,
 }
@@ -104,7 +104,7 @@ impl<D: Digest> Read for PutBlock<D> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let network = MinSigPublic::read(buf)?;
+        let network = <MinSig as Variant>::Public::read(buf)?;
         let block = BlockFormat::<D>::read(buf)?;
         Ok(PutBlock { network, block })
     }
@@ -112,7 +112,7 @@ impl<D: Digest> Read for PutBlock<D> {
 
 impl<D: Digest> EncodeSize for PutBlock<D> {
     fn encode_size(&self) -> usize {
-        MinSigPublic::SIZE + self.block.encode_size()
+        <MinSig as Variant>::Public::SIZE + self.block.encode_size()
     }
 }
 
@@ -120,7 +120,7 @@ impl<D: Digest> EncodeSize for PutBlock<D> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GetBlock<D: Digest> {
     /// The network identifier for which the block belongs.
-    pub network: MinSigPublic,
+    pub network: <MinSig as Variant>::Public,
     /// The digest of the block to retrieve.
     pub digest: D,
 }
@@ -136,21 +136,21 @@ impl<D: Digest> Read for GetBlock<D> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let network = MinSigPublic::read(buf)?;
+        let network = <MinSig as Variant>::Public::read(buf)?;
         let digest = D::read(buf)?;
         Ok(GetBlock { network, digest })
     }
 }
 
 impl<D: Digest> FixedSize for GetBlock<D> {
-    const SIZE: usize = MinSigPublic::SIZE + D::SIZE;
+    const SIZE: usize = <MinSig as Variant>::Public::SIZE + D::SIZE;
 }
 
 /// Message to store a finality certificate in the indexer's storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PutFinalization<D: Digest> {
     /// The network identifier for which the finality certificate belongs.
-    pub network: MinSigPublic,
+    pub network: <MinSig as Variant>::Public,
     /// The finality certificate
     pub finalization: Finalization<MinSig, D>,
 }
@@ -166,7 +166,7 @@ impl<D: Digest> Read for PutFinalization<D> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let network = MinSigPublic::read(buf)?;
+        let network = <MinSig as Variant>::Public::read(buf)?;
         let finalization = Finalization::read(buf)?;
         Ok(PutFinalization {
             network,
@@ -185,7 +185,7 @@ impl<D: Digest> EncodeSize for PutFinalization<D> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GetFinalization {
     /// The network identifier for which to retrieve the finality certificate.
-    pub network: MinSigPublic,
+    pub network: <MinSig as Variant>::Public,
 }
 
 impl Write for GetFinalization {
@@ -198,14 +198,14 @@ impl Read for GetFinalization {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let network = MinSigPublic::read(buf)?;
+        let network = <MinSig as Variant>::Public::read(buf)?;
         Ok(GetFinalization { network })
     }
 }
 
 impl EncodeSize for GetFinalization {
     fn encode_size(&self) -> usize {
-        MinSigPublic::SIZE
+        <MinSig as Variant>::Public::SIZE
     }
 }
 
@@ -217,7 +217,7 @@ mod tests {
     use commonware_cryptography::{
         bls12381::primitives::{
             group::{self, Element, G1},
-            variant::{MinSig, MinSigPublic},
+            variant::MinSig,
         },
         sha256::Digest as Sha256Digest,
     };
@@ -231,8 +231,8 @@ mod tests {
         Sha256Digest::decode(&[123u8; Sha256Digest::SIZE][..]).unwrap()
     }
 
-    fn new_group_public() -> MinSigPublic {
-        let mut result = MinSigPublic::one();
+    fn new_group_public() -> <MinSig as Variant>::Public {
+        let mut result = <MinSig as Variant>::Public::one();
         let scalar = group::Scalar::rand(&mut thread_rng());
         result.mul(&scalar);
         result

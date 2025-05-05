@@ -13,7 +13,7 @@ use commonware_consensus::threshold_simplex::types::{Activity, Viewable};
 use commonware_cryptography::{
     bls12381::primitives::{
         poly,
-        variant::{MinSig, MinSigPublic},
+        variant::{MinSig, Variant},
     },
     Hasher,
 };
@@ -32,8 +32,8 @@ pub struct Application<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> {
     context: R,
     indexer: Connection<Si, St>,
     namespace: Vec<u8>,
-    public: MinSigPublic,
-    other_public: MinSigPublic,
+    public: <MinSig as Variant>::Public,
+    other_public: <MinSig as Variant>::Public,
     hasher: H,
     mailbox: mpsc::Receiver<Message<H::Digest>>,
 }

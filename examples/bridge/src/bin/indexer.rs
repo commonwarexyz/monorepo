@@ -12,7 +12,7 @@ use commonware_consensus::threshold_simplex::types::{Finalization, Viewable};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::G2,
-        variant::{MinSig, MinSigPublic},
+        variant::{MinSig, Variant},
     },
     sha256::Digest as Sha256Digest,
     Digest, Ed25519, Hasher, Sha256, Signer,
@@ -127,7 +127,8 @@ fn main() {
     }
     for network in networks {
         let network = from_hex(network).expect("Network not well-formed");
-        let public = MinSigPublic::decode(network.as_ref()).expect("Network not well-formed");
+        let public =
+            <MinSig as Variant>::Public::decode(network.as_ref()).expect("Network not well-formed");
         let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
         namespaces.insert(public, (public, namespace));
         blocks.insert(public, HashMap::new());

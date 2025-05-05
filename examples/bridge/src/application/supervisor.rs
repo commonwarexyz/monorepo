@@ -5,7 +5,7 @@ use commonware_consensus::{
 use commonware_cryptography::bls12381::primitives::{
     group,
     poly::Public,
-    variant::{MinSig, MinSigSignature},
+    variant::{MinSig, Variant},
 };
 use commonware_utils::{modulo, Array};
 use std::collections::HashMap;
@@ -57,7 +57,7 @@ impl<P: Array> Su for Supervisor<P> {
 }
 
 impl<P: Array> TSu for Supervisor<P> {
-    type Seed = MinSigSignature;
+    type Seed = <MinSig as Variant>::Signature;
     type Identity = Public<MinSig>;
     type Share = group::Share;
 

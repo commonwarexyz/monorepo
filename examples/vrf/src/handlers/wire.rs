@@ -3,7 +3,7 @@ use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRange
 use commonware_cryptography::bls12381::primitives::{
     group,
     poly::{self, Eval},
-    variant::{MinSig, MinSigSignature},
+    variant::{MinSig, Variant},
 };
 use commonware_utils::{quorum, Array};
 use std::collections::HashMap;
@@ -232,7 +232,7 @@ pub struct Vrf {
     /// The round number associated with this VRF output.
     pub round: u64,
     /// The VRF signature/proof, represented as an evaluation of a threshold signature.
-    pub signature: Eval<MinSigSignature>,
+    pub signature: Eval<<MinSig as Variant>::Signature>,
 }
 
 impl Write for Vrf {
@@ -247,7 +247,7 @@ impl Read for Vrf {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let round = UInt::read(buf)?.into();
-        let signature = Eval::<MinSigSignature>::read(buf)?;
+        let signature = Eval::<<MinSig as Variant>::Signature>::read(buf)?;
         Ok(Self { round, signature })
     }
 }
@@ -266,7 +266,7 @@ mod tests {
         bls12381::primitives::{
             group::{self, Element},
             poly,
-            variant::MinSigPublic,
+            variant::Variant,
         },
         ed25519::Signature,
     };
@@ -287,8 +287,8 @@ mod tests {
         }
     }
 
-    fn new_eval(v: u32) -> Eval<MinSigSignature> {
-        let mut signature = MinSigSignature::one();
+    fn new_eval(v: u32) -> Eval<<MinSig as Variant>::Signature> {
+        let mut signature = <MinSig as Variant>::Signature::one();
         let scalar = group::Scalar::rand(&mut thread_rng());
         signature.mul(&scalar);
         Eval {
@@ -298,7 +298,7 @@ mod tests {
     }
 
     fn new_poly() -> poly::Public<MinSig> {
-        let mut public = MinSigPublic::one();
+        let mut public = <MinSig as Variant>::Public::one();
         let scalar = group::Scalar::rand(&mut thread_rng());
         public.mul(&scalar);
         poly::Public::<MinSig>::from(vec![public; T])

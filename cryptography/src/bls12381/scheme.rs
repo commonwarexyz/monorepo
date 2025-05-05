@@ -22,7 +22,7 @@
 use super::primitives::{
     group::{self, Element, Scalar},
     ops,
-    variant::{self, MinPkPublic, MinPkSignature},
+    variant::{MinPk, Variant},
 };
 use crate::{Array, Signer, Specification, Verifier};
 use bytes::{Buf, BufMut};
@@ -49,7 +49,7 @@ const CURVE_NAME: &str = "bls12381";
 #[derive(Clone)]
 pub struct Bls12381 {
     private: group::Private,
-    public: variant::MinPkPublic,
+    public: <MinPk as Variant>::Public,
 }
 
 impl Specification for Bls12381 {
@@ -64,13 +64,8 @@ impl Verifier for Bls12381 {
         public_key: &PublicKey,
         signature: &Signature,
     ) -> bool {
-        ops::verify_message::<variant::MinPk>(
-            &public_key.key,
-            namespace,
-            message,
-            &signature.signature,
-        )
-        .is_ok()
+        ops::verify_message::<MinPk>(&public_key.key, namespace, message, &signature.signature)
+            .is_ok()
     }
 }
 
@@ -78,13 +73,13 @@ impl Signer for Bls12381 {
     type PrivateKey = PrivateKey;
 
     fn new<R: CryptoRng + Rng>(r: &mut R) -> Self {
-        let (private, public) = ops::keypair::<_, variant::MinPk>(r);
+        let (private, public) = ops::keypair::<_, MinPk>(r);
         Self { private, public }
     }
 
     fn from(private_key: PrivateKey) -> Option<Self> {
         let private = private_key.key.clone();
-        let mut public = variant::MinPkPublic::one();
+        let mut public = <MinPk as Variant>::Public::one();
         public.mul(&private);
         Some(Self { private, public })
     }
@@ -98,7 +93,7 @@ impl Signer for Bls12381 {
     }
 
     fn sign(&mut self, namespace: Option<&[u8]>, message: &[u8]) -> Signature {
-        let signature = ops::sign_message::<variant::MinPk>(&self.private, namespace, message);
+        let signature = ops::sign_message::<MinPk>(&self.private, namespace, message);
         Signature::from(signature)
     }
 }
@@ -186,12 +181,12 @@ impl Display for PrivateKey {
 /// BLS12-381 public key.
 #[derive(Clone, Eq, PartialEq)]
 pub struct PublicKey {
-    raw: [u8; MinPkPublic::SIZE],
-    key: variant::MinPkPublic,
+    raw: [u8; <MinPk as Variant>::Public::SIZE],
+    key: <MinPk as Variant>::Public,
 }
 
-impl AsRef<variant::MinPkPublic> for PublicKey {
-    fn as_ref(&self) -> &variant::MinPkPublic {
+impl AsRef<<MinPk as Variant>::Public> for PublicKey {
+    fn as_ref(&self) -> &<MinPk as Variant>::Public {
         &self.key
     }
 }
@@ -207,14 +202,14 @@ impl Read for PublicKey {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let key = variant::MinPkPublic::decode(raw.as_ref())
+        let key = <MinPk as Variant>::Public::decode(raw.as_ref())
             .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
         Ok(Self { raw, key })
     }
 }
 
 impl FixedSize for PublicKey {
-    const SIZE: usize = MinPkPublic::SIZE;
+    const SIZE: usize = <MinPk as Variant>::Public::SIZE;
 }
 
 impl Array for PublicKey {}
@@ -250,8 +245,8 @@ impl Deref for PublicKey {
     }
 }
 
-impl From<variant::MinPkPublic> for PublicKey {
-    fn from(key: variant::MinPkPublic) -> Self {
+impl From<<MinPk as Variant>::Public> for PublicKey {
+    fn from(key: <MinPk as Variant>::Public) -> Self {
         let raw = key.encode_fixed();
         Self { raw, key }
     }
@@ -272,12 +267,12 @@ impl Display for PublicKey {
 /// BLS12-381 signature.
 #[derive(Clone, Eq, PartialEq)]
 pub struct Signature {
-    raw: [u8; MinPkSignature::SIZE],
-    signature: variant::MinPkSignature,
+    raw: [u8; <MinPk as Variant>::Signature::SIZE],
+    signature: <MinPk as Variant>::Signature,
 }
 
-impl AsRef<variant::MinPkSignature> for Signature {
-    fn as_ref(&self) -> &variant::MinPkSignature {
+impl AsRef<<MinPk as Variant>::Signature> for Signature {
+    fn as_ref(&self) -> &<MinPk as Variant>::Signature {
         &self.signature
     }
 }
@@ -293,14 +288,14 @@ impl Read for Signature {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let signature = variant::MinPkSignature::decode(raw.as_ref())
+        let signature = <MinPk as Variant>::Signature::decode(raw.as_ref())
             .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
         Ok(Self { raw, signature })
     }
 }
 
 impl FixedSize for Signature {
-    const SIZE: usize = MinPkSignature::SIZE;
+    const SIZE: usize = <MinPk as Variant>::Signature::SIZE;
 }
 
 impl Array for Signature {}
@@ -336,8 +331,8 @@ impl Deref for Signature {
     }
 }
 
-impl From<variant::MinPkSignature> for Signature {
-    fn from(signature: variant::MinPkSignature) -> Self {
+impl From<<MinPk as Variant>::Signature> for Signature {
+    fn from(signature: <MinPk as Variant>::Signature) -> Self {
         let raw = signature.encode_fixed();
         Self { raw, signature }
     }
