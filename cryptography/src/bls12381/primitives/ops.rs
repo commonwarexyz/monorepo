@@ -518,7 +518,7 @@ mod tests {
     use blst::BLST_ERROR;
     use commonware_codec::DecodeExt;
     use commonware_utils::quorum;
-    use group::{G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE};
+    use group::{G1, G1_MESSAGE, G2, G2_MESSAGE};
     use poly::Poly;
     use rand::prelude::*;
 
@@ -538,11 +538,25 @@ mod tests {
         assert_eq!(public, public_decoded);
 
         // Ensure blst compatibility
-        blst::min_sig::SecretKey::from_bytes(&private_bytes).unwrap();
-        let blst_public_decoded = blst::min_sig::PublicKey::from_bytes(&public_bytes).unwrap();
-        blst_public_decoded.validate().unwrap();
-        let blst_public_encoded = blst_public_decoded.compress().to_vec();
-        assert_eq!(public_bytes, blst_public_encoded.as_slice());
+        match V::MESSAGE {
+            G1_MESSAGE => {
+                blst::min_sig::SecretKey::from_bytes(&private_bytes).unwrap();
+                let blst_public_decoded =
+                    blst::min_sig::PublicKey::from_bytes(&public_bytes).unwrap();
+                blst_public_decoded.validate().unwrap();
+                let blst_public_encoded = blst_public_decoded.compress().to_vec();
+                assert_eq!(public_bytes, blst_public_encoded.as_slice());
+            }
+            G2_MESSAGE => {
+                blst::min_pk::SecretKey::from_bytes(&private_bytes).unwrap();
+                let blst_public_decoded =
+                    blst::min_pk::PublicKey::from_bytes(&public_bytes).unwrap();
+                blst_public_decoded.validate().unwrap();
+                let blst_public_encoded = blst_public_decoded.compress().to_vec();
+                assert_eq!(public_bytes, blst_public_encoded.as_slice());
+            }
+            _ => panic!("Unsupported Variant"),
+        }
     }
 
     #[test]
