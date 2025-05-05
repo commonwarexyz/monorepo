@@ -473,7 +473,7 @@ impl<V: Variant, D: Digest> EncodeSize for Notarization<V, D> {
 
 impl<V: Variant, D: Digest> Seedable<V> for Notarization<V, D> {
     fn seed(&self) -> Seed<V> {
-        Seed::new(self.view(), self.seed_signature.clone())
+        Seed::new(self.view(), self.seed_signature)
     }
 }
 
@@ -621,10 +621,7 @@ impl<V: Variant> Nullification<V> {
         let nullify_message = (Some(nullify_namespace.as_ref()), view_message.as_ref());
         let seed_namespace = seed_namespace(namespace);
         let seed_message = (Some(seed_namespace.as_ref()), view_message.as_ref());
-        let signature = aggregate_signatures::<V, _>(&[
-            self.view_signature.clone(),
-            self.seed_signature.clone(),
-        ]);
+        let signature = aggregate_signatures::<V, _>(&[self.view_signature, self.seed_signature]);
         aggregate_verify_multiple_messages::<V, _>(
             public_key,
             &[nullify_message, seed_message],
@@ -674,7 +671,7 @@ impl<V: Variant> EncodeSize for Nullification<V> {
 
 impl<V: Variant> Seedable<V> for Nullification<V> {
     fn seed(&self) -> Seed<V> {
-        Seed::new(self.view(), self.seed_signature.clone())
+        Seed::new(self.view(), self.seed_signature)
     }
 }
 
@@ -800,10 +797,8 @@ impl<V: Variant, D: Digest> Finalization<V, D> {
         let seed_namespace = seed_namespace(namespace);
         let seed_message = view_message(self.proposal.view);
         let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
-        let signature = aggregate_signatures::<V, _>(&[
-            self.proposal_signature.clone(),
-            self.seed_signature.clone(),
-        ]);
+        let signature =
+            aggregate_signatures::<V, _>(&[self.proposal_signature, self.seed_signature]);
         aggregate_verify_multiple_messages::<V, _>(
             public_key,
             &[finalize_message, seed_message],
@@ -853,7 +848,7 @@ impl<V: Variant, D: Digest> EncodeSize for Finalization<V, D> {
 
 impl<V: Variant, D: Digest> Seedable<V> for Finalization<V, D> {
     fn seed(&self) -> Seed<V> {
-        Seed::new(self.view(), self.seed_signature.clone())
+        Seed::new(self.view(), self.seed_signature)
     }
 }
 
@@ -2105,10 +2100,10 @@ mod tests {
         let invalid_conflict: ConflictingNotarize<MinSig, Sha256> = ConflictingNotarize {
             view: conflict.view,
             parent_1: conflict.parent_1,
-            payload_1: conflict.payload_1.clone(),
+            payload_1: conflict.payload_1,
             signature_1: conflict.signature_1.clone(),
             parent_2: notarize3.proposal.parent,
-            payload_2: notarize3.proposal.payload.clone(),
+            payload_2: notarize3.proposal.payload,
             signature_2: notarize3.proposal_signature,
         };
 
