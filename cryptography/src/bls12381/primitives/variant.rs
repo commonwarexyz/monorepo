@@ -56,8 +56,8 @@ impl Variant for MinPk {
     type Public = G1;
     type Signature = G2;
 
-    const PROOF_OF_POSSESSION: DST = G1_PROOF_OF_POSSESSION;
-    const MESSAGE: DST = G1_MESSAGE;
+    const PROOF_OF_POSSESSION: DST = G2_PROOF_OF_POSSESSION;
+    const MESSAGE: DST = G2_MESSAGE;
 
     fn sign(private: &Scalar, dst: DST, message: &[u8]) -> Self::Signature {
         let mut s = Self::Signature::zero();
@@ -122,8 +122,8 @@ impl Variant for MinSig {
     type Public = G2;
     type Signature = G1;
 
-    const PROOF_OF_POSSESSION: DST = G2_PROOF_OF_POSSESSION;
-    const MESSAGE: DST = G2_MESSAGE;
+    const PROOF_OF_POSSESSION: DST = G1_PROOF_OF_POSSESSION;
+    const MESSAGE: DST = G1_MESSAGE;
 
     fn sign(private: &Scalar, dst: DST, message: &[u8]) -> Self::Signature {
         let mut s = Self::Signature::zero();
