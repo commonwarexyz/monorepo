@@ -1,6 +1,6 @@
 use super::types::{Ack, Epoch};
 use commonware_cryptography::{
-    bls12381::primitives::{group, ops, poly::PartialSignature},
+    bls12381::primitives::{ops, poly::PartialSignature, variant::Variant},
     Digest,
 };
 use commonware_utils::Array;
@@ -8,23 +8,23 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// A struct representing a set of partial signatures for a payload digest.
 #[derive(Default)]
-struct Partials<D: Digest> {
+struct Partials<V: Variant, D: Digest> {
     // The set of share indices that have signed the payload.
     pub shares: HashSet<u32>,
 
     // A map from payload digest to partial signatures.
     // Each share should only sign once for each sequencer/height/epoch.
-    pub sigs: HashMap<D, Vec<PartialSignature>>,
+    pub sigs: HashMap<D, Vec<PartialSignature<V>>>,
 }
 
 /// Evidence for a chunk.
 /// This is either a set of partial signatures or a threshold signature.
-enum Evidence<D: Digest> {
-    Partials(Partials<D>),
-    Threshold(group::Signature),
+enum Evidence<V: Variant, D: Digest> {
+    Partials(Partials<V, D>),
+    Threshold(V::Signature),
 }
 
-impl<D: Digest> Default for Evidence<D> {
+impl<V: Variant, D: Digest> Default for Evidence<V, D> {
     fn default() -> Self {
         Self::Partials(Partials {
             shares: HashSet::new(),
@@ -35,7 +35,7 @@ impl<D: Digest> Default for Evidence<D> {
 
 /// Manages acknowledgements for chunks.
 #[derive(Default)]
-pub struct AckManager<P: Array, D: Digest> {
+pub struct AckManager<P: Array, V: Variant, D: Digest> {
     // Acknowledgements for digests.
     //
     // Map from Sequencer => Height => Epoch => Evidence
@@ -45,10 +45,10 @@ pub struct AckManager<P: Array, D: Digest> {
     // The BTreeMaps are sorted by key, so we can prune old entries. In particular, we can prune
     // entries where the height is less than the height of the highest chunk for the sequencer.
     // We can often prune entries for old epochs as well.
-    acks: HashMap<P, BTreeMap<u64, BTreeMap<Epoch, Evidence<D>>>>,
+    acks: HashMap<P, BTreeMap<u64, BTreeMap<Epoch, Evidence<V, D>>>>,
 }
 
-impl<P: Array, D: Digest> AckManager<P, D> {
+impl<P: Array, V: Variant, D: Digest> AckManager<P, V, D> {
     /// Creates a new `AckManager`.
     pub fn new() -> Self {
         Self {
@@ -59,7 +59,7 @@ impl<P: Array, D: Digest> AckManager<P, D> {
     /// Adds a partial signature to the evidence.
     ///
     /// If-and-only-if the quorum is newly-reached, the threshold signature is returned.
-    pub fn add_ack(&mut self, ack: &Ack<P, D>, quorum: u32) -> Option<group::Signature> {
+    pub fn add_ack(&mut self, ack: &Ack<P, V, D>, quorum: u32) -> Option<V::Signature> {
         let evidence = self
             .acks
             .entry(ack.chunk.sequencer.clone())
@@ -90,7 +90,8 @@ impl<P: Array, D: Digest> AckManager<P, D> {
                 let partials = p.sigs.remove(&ack.chunk.payload).unwrap();
 
                 // Construct the threshold signature
-                let threshold = ops::threshold_signature_recover(quorum, &partials).unwrap();
+                let threshold =
+                    ops::threshold_signature_recover::<V, _>(quorum, &partials).unwrap();
                 Some(threshold)
             }
         }
@@ -99,7 +100,7 @@ impl<P: Array, D: Digest> AckManager<P, D> {
     /// Returns a tuple of (Epoch, Threshold), if it exists, for the given sequencer and height.
     ///
     /// If multiple epochs have thresholds, the highest epoch is returned.
-    pub fn get_threshold(&self, sequencer: &P, height: u64) -> Option<(Epoch, group::Signature)> {
+    pub fn get_threshold(&self, sequencer: &P, height: u64) -> Option<(Epoch, V::Signature)> {
         self.acks
             .get(sequencer)
             .and_then(|m| m.get(&height))
@@ -119,7 +120,7 @@ impl<P: Array, D: Digest> AckManager<P, D> {
         sequencer: &P,
         height: u64,
         epoch: Epoch,
-        threshold: group::Signature,
+        threshold: V::Signature,
     ) -> bool {
         // Set the threshold.
         // If the threshold already existed, return false
@@ -152,7 +153,13 @@ impl<P: Array, D: Digest> AckManager<P, D> {
 mod tests {
     use super::*;
     use crate::ordered_broadcast::types::Chunk;
-    use commonware_cryptography::{bls12381::dkg::ops::generate_shares, ed25519, sha256};
+    use commonware_cryptography::{
+        bls12381::{
+            dkg::ops::generate_shares,
+            primitives::variant::{MinPk, MinSig},
+        },
+        ed25519, sha256,
+    };
 
     /// Aggregated helper functions to reduce duplication in tests.
     mod helpers {
@@ -165,9 +172,10 @@ mod tests {
         const NAMESPACE: &[u8] = b"1234";
 
         /// Generate shares using a seeded RNG.
-        pub fn setup_shares(num_validators: u32, quorum: u32) -> Vec<Share> {
+        pub fn setup_shares<V: Variant>(num_validators: u32, quorum: u32) -> Vec<Share> {
             let mut rng = StdRng::seed_from_u64(0);
-            let (_identity, shares) = generate_shares(&mut rng, None, num_validators, quorum);
+            let (_identity, shares) =
+                generate_shares::<_, V>(&mut rng, None, num_validators, quorum);
             shares
         }
 
@@ -177,44 +185,44 @@ mod tests {
         }
 
         /// Create an Ack by signing a partial with the provided share.
-        pub fn create_ack(
+        pub fn create_ack<V: Variant>(
             share: &Share,
             chunk: Chunk<ed25519::PublicKey, sha256::Digest>,
             epoch: Epoch,
-        ) -> Ack<ed25519::PublicKey, sha256::Digest> {
+        ) -> Ack<ed25519::PublicKey, V, sha256::Digest> {
             Ack::sign(NAMESPACE, share, chunk, epoch)
         }
 
         /// Recover a threshold signature from a set of partials.
-        pub fn recover_threshold(
+        pub fn recover_threshold<V: Variant>(
             quorum: u32,
-            partials: Vec<commonware_cryptography::bls12381::primitives::poly::PartialSignature>,
-        ) -> commonware_cryptography::bls12381::primitives::group::Signature {
-            ops::threshold_signature_recover(quorum, &partials).unwrap()
+            partials: Vec<PartialSignature<V>>,
+        ) -> V::Signature {
+            ops::threshold_signature_recover::<V, _>(quorum, &partials).unwrap()
         }
 
         /// Generate a threshold signature directly from the shares specified by `indices`.
-        pub fn generate_threshold_from_indices(
+        pub fn generate_threshold_from_indices<V: Variant>(
             shares: &[Share],
             chunk: &Chunk<ed25519::PublicKey, sha256::Digest>,
             epoch: &Epoch,
             quorum: u32,
             indices: &[usize],
-        ) -> commonware_cryptography::bls12381::primitives::group::Signature {
+        ) -> V::Signature {
             let partials: Vec<_> = indices
                 .iter()
-                .map(|&i| create_ack(&shares[i], chunk.clone(), *epoch).signature)
+                .map(|&i| create_ack::<V>(&shares[i], chunk.clone(), *epoch).signature)
                 .collect();
-            recover_threshold(quorum, partials)
+            recover_threshold::<V>(quorum, partials)
         }
 
         /// Create a vector of acks for the given share indices.
-        pub fn create_acks_for_indices(
+        pub fn create_acks_for_indices<V: Variant>(
             shares: &[Share],
             chunk: Chunk<ed25519::PublicKey, sha256::Digest>,
             epoch: Epoch,
             indices: &[usize],
-        ) -> Vec<Ack<ed25519::PublicKey, sha256::Digest>> {
+        ) -> Vec<Ack<ed25519::PublicKey, V, sha256::Digest>> {
             indices
                 .iter()
                 .map(|&i| create_ack(&shares[i], chunk.clone(), epoch))
@@ -223,14 +231,14 @@ mod tests {
 
         /// Add acks (generated from the provided share indices) to the manager.
         /// Returns the threshold signature if produced.
-        pub fn add_acks_for_indices(
-            manager: &mut AckManager<ed25519::PublicKey, sha256::Digest>,
+        pub fn add_acks_for_indices<V: Variant>(
+            manager: &mut AckManager<ed25519::PublicKey, V, sha256::Digest>,
             shares: &[Share],
             chunk: Chunk<ed25519::PublicKey, sha256::Digest>,
             epoch: Epoch,
             quorum: u32,
             indices: &[usize],
-        ) -> Option<commonware_cryptography::bls12381::primitives::group::Signature> {
+        ) -> Option<V::Signature> {
             let acks = create_acks_for_indices(shares, chunk, epoch, indices);
             let mut threshold = None;
             for ack in acks {
@@ -243,12 +251,11 @@ mod tests {
     } // end helpers
 
     /// Different payloads for the same chunk produce distinct thresholds.
-    #[test]
-    fn test_chunk_different_payloads() {
+    fn chunk_different_payloads<V: Variant>() {
         let num_validators = 6;
         let quorum = 3;
-        let shares = helpers::setup_shares(num_validators, quorum);
-        let mut acks = AckManager::<ed25519::PublicKey, sha256::Digest>::new();
+        let shares = helpers::setup_shares::<V>(num_validators, quorum);
+        let mut acks = AckManager::<ed25519::PublicKey, V, sha256::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let height = 10;
         let epoch = 5;
@@ -266,21 +273,31 @@ mod tests {
         assert_ne!(t1, t2);
     }
 
-    /// Adding thresholds for different heights prunes older entries.
     #[test]
-    fn test_sequencer_different_heights() {
+    fn test_chunk_different_payloads() {
+        chunk_different_payloads::<MinPk>();
+        chunk_different_payloads::<MinSig>();
+    }
+
+    /// Adding thresholds for different heights prunes older entries.
+    fn sequencer_different_heights<V: Variant>() {
         let num_validators = 4;
         let quorum = 3;
-        let shares = helpers::setup_shares(num_validators, quorum);
-        let mut acks = AckManager::<ed25519::PublicKey, sha256::Digest>::new();
+        let shares = helpers::setup_shares::<V>(num_validators, quorum);
+        let mut acks = AckManager::<ed25519::PublicKey, V, sha256::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let epoch = 10;
         let height1 = 10;
         let height2 = 20;
 
         let chunk1 = Chunk::new(sequencer.clone(), height1, sha256::hash(b"chunk1"));
-        let threshold1 =
-            helpers::generate_threshold_from_indices(&shares, &chunk1, &epoch, quorum, &[0, 1, 2]);
+        let threshold1 = helpers::generate_threshold_from_indices::<V>(
+            &shares,
+            &chunk1,
+            &epoch,
+            quorum,
+            &[0, 1, 2],
+        );
         assert!(acks.add_threshold(&sequencer, height1, epoch, threshold1));
         assert_eq!(
             acks.get_threshold(&sequencer, height1),
@@ -288,8 +305,13 @@ mod tests {
         );
 
         let chunk2 = Chunk::new(sequencer.clone(), height2, sha256::hash(b"chunk2"));
-        let threshold2 =
-            helpers::generate_threshold_from_indices(&shares, &chunk2, &epoch, quorum, &[0, 1, 2]);
+        let threshold2 = helpers::generate_threshold_from_indices::<V>(
+            &shares,
+            &chunk2,
+            &epoch,
+            quorum,
+            &[0, 1, 2],
+        );
         assert!(acks.add_threshold(&sequencer, height2, epoch, threshold2));
 
         assert_eq!(acks.get_threshold(&sequencer, height1), None);
@@ -299,19 +321,29 @@ mod tests {
         );
     }
 
-    /// Adding thresholds for contiguous heights prunes entries older than the immediate parent.
     #[test]
-    fn test_sequencer_contiguous_heights() {
+    fn test_sequencer_different_heights() {
+        sequencer_different_heights::<MinPk>();
+        sequencer_different_heights::<MinSig>();
+    }
+
+    /// Adding thresholds for contiguous heights prunes entries older than the immediate parent.
+    fn sequencer_contiguous_heights<V: Variant>() {
         let num_validators = 4;
         let quorum = 3;
-        let shares = helpers::setup_shares(num_validators, quorum);
-        let mut acks = AckManager::<ed25519::PublicKey, sha256::Digest>::new();
+        let shares = helpers::setup_shares::<V>(num_validators, quorum);
+        let mut acks = AckManager::<ed25519::PublicKey, V, sha256::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let epoch = 10;
 
         let chunk1 = Chunk::new(sequencer.clone(), 10, sha256::hash(b"chunk1"));
-        let threshold1 =
-            helpers::generate_threshold_from_indices(&shares, &chunk1, &epoch, quorum, &[0, 1, 2]);
+        let threshold1 = helpers::generate_threshold_from_indices::<V>(
+            &shares,
+            &chunk1,
+            &epoch,
+            quorum,
+            &[0, 1, 2],
+        );
         assert!(acks.add_threshold(&sequencer, 10, epoch, threshold1));
         assert_eq!(
             acks.get_threshold(&sequencer, 10),
@@ -319,8 +351,13 @@ mod tests {
         );
 
         let chunk2 = Chunk::new(sequencer.clone(), 11, sha256::hash(b"chunk2"));
-        let threshold2 =
-            helpers::generate_threshold_from_indices(&shares, &chunk2, &epoch, quorum, &[0, 1, 2]);
+        let threshold2 = helpers::generate_threshold_from_indices::<V>(
+            &shares,
+            &chunk2,
+            &epoch,
+            quorum,
+            &[0, 1, 2],
+        );
         assert!(acks.add_threshold(&sequencer, 11, epoch, threshold2));
 
         assert_eq!(
@@ -333,8 +370,13 @@ mod tests {
         );
 
         let chunk3 = Chunk::new(sequencer.clone(), 12, sha256::hash(b"chunk3"));
-        let threshold3 =
-            helpers::generate_threshold_from_indices(&shares, &chunk3, &epoch, quorum, &[0, 1, 2]);
+        let threshold3 = helpers::generate_threshold_from_indices::<V>(
+            &shares,
+            &chunk3,
+            &epoch,
+            quorum,
+            &[0, 1, 2],
+        );
         assert!(acks.add_threshold(&sequencer, 12, epoch, threshold3));
 
         assert_eq!(acks.get_threshold(&sequencer, 10), None);
@@ -348,13 +390,18 @@ mod tests {
         );
     }
 
-    /// For the same sequencer and height, the highest epoch's threshold is returned.
     #[test]
-    fn test_chunk_different_epochs() {
+    fn test_sequencer_contiguous_heights() {
+        sequencer_contiguous_heights::<MinPk>();
+        sequencer_contiguous_heights::<MinSig>();
+    }
+
+    /// For the same sequencer and height, the highest epoch's threshold is returned.
+    fn chunk_different_epochs<V: Variant>() {
         let num_validators = 4;
         let quorum = 3;
-        let shares = helpers::setup_shares(num_validators, quorum);
-        let mut acks = AckManager::<ed25519::PublicKey, sha256::Digest>::new();
+        let shares = helpers::setup_shares::<V>(num_validators, quorum);
+        let mut acks = AckManager::<ed25519::PublicKey, V, sha256::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let height = 30;
         let epoch1 = 1;
@@ -362,12 +409,22 @@ mod tests {
 
         let chunk = Chunk::new(sequencer.clone(), height, sha256::hash(b"chunk"));
 
-        let threshold1 =
-            helpers::generate_threshold_from_indices(&shares, &chunk, &epoch1, quorum, &[0, 1, 2]);
+        let threshold1 = helpers::generate_threshold_from_indices::<V>(
+            &shares,
+            &chunk,
+            &epoch1,
+            quorum,
+            &[0, 1, 2],
+        );
         assert!(acks.add_threshold(&sequencer, height, epoch1, threshold1));
 
-        let threshold2 =
-            helpers::generate_threshold_from_indices(&shares, &chunk, &epoch2, quorum, &[0, 1, 2]);
+        let threshold2 = helpers::generate_threshold_from_indices::<V>(
+            &shares,
+            &chunk,
+            &epoch2,
+            quorum,
+            &[0, 1, 2],
+        );
         assert!(acks.add_threshold(&sequencer, height, epoch2, threshold2));
 
         assert_eq!(
@@ -376,20 +433,30 @@ mod tests {
         );
     }
 
-    /// Adding the same threshold twice returns false.
     #[test]
-    fn test_add_threshold() {
+    fn test_chunk_different_epochs() {
+        chunk_different_epochs::<MinPk>();
+        chunk_different_epochs::<MinSig>();
+    }
+
+    /// Adding the same threshold twice returns false.
+    fn add_threshold<V: Variant>() {
         let num_validators = 4;
         let quorum = 3;
-        let shares = helpers::setup_shares(num_validators, quorum);
-        let mut acks = AckManager::<ed25519::PublicKey, sha256::Digest>::new();
+        let shares = helpers::setup_shares::<V>(num_validators, quorum);
+        let mut acks = AckManager::<ed25519::PublicKey, V, sha256::Digest>::new();
         let epoch = 99;
         let sequencer = helpers::gen_public_key(1);
         let height = 42;
         let chunk = Chunk::new(sequencer.clone(), height, sha256::hash(&sequencer));
 
-        let threshold =
-            helpers::generate_threshold_from_indices(&shares, &chunk, &epoch, quorum, &[0, 1, 2]);
+        let threshold = helpers::generate_threshold_from_indices::<V>(
+            &shares,
+            &chunk,
+            &epoch,
+            quorum,
+            &[0, 1, 2],
+        );
 
         assert_eq!(acks.get_threshold(&sequencer, height), None);
         assert!(acks.add_threshold(&sequencer, height, epoch, threshold));
@@ -404,13 +471,18 @@ mod tests {
         );
     }
 
-    /// Duplicate partial submissions are ignored.
     #[test]
-    fn test_duplicate_partial_submission() {
+    fn test_add_threshold() {
+        add_threshold::<MinPk>();
+        add_threshold::<MinSig>();
+    }
+
+    /// Duplicate partial submissions are ignored.
+    fn duplicate_partial_submission<V: Variant>() {
         let num_validators = 4;
         let quorum = 3;
-        let shares = helpers::setup_shares(num_validators, quorum);
-        let mut acks = AckManager::<ed25519::PublicKey, sha256::Digest>::new();
+        let shares = helpers::setup_shares::<V>(num_validators, quorum);
+        let mut acks = AckManager::<ed25519::PublicKey, V, sha256::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let epoch = 1;
         let height = 10;
@@ -421,13 +493,18 @@ mod tests {
         assert!(acks.add_ack(&ack, quorum).is_none());
     }
 
-    /// Once a threshold is reached, further acks are ignored.
     #[test]
-    fn test_subsequent_acks_after_threshold_reached() {
+    fn test_duplicate_partial_submission() {
+        duplicate_partial_submission::<MinPk>();
+        duplicate_partial_submission::<MinSig>();
+    }
+
+    /// Once a threshold is reached, further acks are ignored.
+    fn subsequent_acks_after_threshold_reached<V: Variant>() {
         let num_validators = 4;
         let quorum = 3;
-        let shares = helpers::setup_shares(num_validators, quorum);
-        let mut acks = AckManager::<ed25519::PublicKey, sha256::Digest>::new();
+        let shares = helpers::setup_shares::<V>(num_validators, quorum);
+        let mut acks = AckManager::<ed25519::PublicKey, V, sha256::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let epoch = 1;
         let height = 10;
@@ -446,13 +523,18 @@ mod tests {
         assert!(acks.add_ack(&ack, quorum).is_none());
     }
 
-    /// Acks for different sequencers are managed separately.
     #[test]
-    fn test_multiple_sequencers() {
+    fn test_subsequent_acks_after_threshold_reached() {
+        subsequent_acks_after_threshold_reached::<MinPk>();
+        subsequent_acks_after_threshold_reached::<MinSig>();
+    }
+
+    /// Acks for different sequencers are managed separately.
+    fn multiple_sequencers<V: Variant>() {
         let num_validators = 4;
         let quorum = 3;
-        let shares = helpers::setup_shares(num_validators, quorum);
-        let mut acks = AckManager::<ed25519::PublicKey, sha256::Digest>::new();
+        let shares = helpers::setup_shares::<V>(num_validators, quorum);
+        let mut acks = AckManager::<ed25519::PublicKey, V, sha256::Digest>::new();
 
         let sequencer1 = helpers::gen_public_key(1);
         let sequencer2 = helpers::gen_public_key(3);
@@ -474,13 +556,18 @@ mod tests {
         assert!(acks.add_threshold(&sequencer2, height, epoch, threshold2));
     }
 
-    /// If quorum is never reached, no threshold is produced.
     #[test]
-    fn test_partial_quorum_never_reached() {
+    fn test_multiple_sequencers() {
+        multiple_sequencers::<MinPk>();
+        multiple_sequencers::<MinSig>();
+    }
+
+    /// If quorum is never reached, no threshold is produced.
+    fn partial_quorum_never_reached<V: Variant>() {
         let num_validators = 4;
         let quorum = 3;
-        let shares = helpers::setup_shares(num_validators, quorum);
-        let mut acks = AckManager::<ed25519::PublicKey, sha256::Digest>::new();
+        let shares = helpers::setup_shares::<V>(num_validators, quorum);
+        let mut acks = AckManager::<ed25519::PublicKey, V, sha256::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let epoch = 1;
         let height = 10;
@@ -493,13 +580,18 @@ mod tests {
         assert_eq!(acks.get_threshold(&sequencer, height), None);
     }
 
-    /// Interleaved acks for different payloads are aggregated separately.
     #[test]
-    fn test_interleaved_payloads() {
+    fn test_partial_quorum_never_reached() {
+        partial_quorum_never_reached::<MinPk>();
+        partial_quorum_never_reached::<MinSig>();
+    }
+
+    /// Interleaved acks for different payloads are aggregated separately.
+    fn interleaved_payloads<V: Variant>() {
         let num_validators = 6;
         let quorum = 3;
-        let shares = helpers::setup_shares(num_validators, quorum);
-        let mut acks = AckManager::<ed25519::PublicKey, sha256::Digest>::new();
+        let shares = helpers::setup_shares::<V>(num_validators, quorum);
+        let mut acks = AckManager::<ed25519::PublicKey, V, sha256::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let epoch = 1;
         let height = 10;
@@ -529,5 +621,11 @@ mod tests {
         for (p, _) in thresholds {
             assert!(p == payload1 || p == payload2);
         }
+    }
+
+    #[test]
+    fn test_interleaved_payloads() {
+        interleaved_payloads::<MinPk>();
+        interleaved_payloads::<MinSig>();
     }
 }
