@@ -4,7 +4,8 @@
 
 use commonware_cryptography::{
     bls12381::primitives::{
-        group, poly,
+        group,
+        poly::Public,
         variant::{MinSig, Variant},
     },
     Hasher,
@@ -26,7 +27,7 @@ pub struct Config<H: Hasher, Si: Sink, St: Stream, P: Array> {
     pub hasher: H,
 
     pub namespace: Vec<u8>,
-    pub identity: poly::Public<MinSig>,
+    pub identity: Public<MinSig>,
     pub other_public: <MinSig as Variant>::Public,
 
     /// Participants active in consensus.
