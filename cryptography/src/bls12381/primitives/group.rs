@@ -61,7 +61,7 @@ pub trait Element:
     fn mul(&mut self, rhs: &Scalar);
 }
 
-/// An element of a group that supports message hashing.
+/// A point on a a curve.
 pub trait Point: Element {
     /// Maps the provided data to a group element.
     fn map(&mut self, dst: DST, message: &[u8]);

@@ -1,5 +1,4 @@
-use std::fmt::Debug;
-use std::hash::Hash;
+//! Different variants of the BLS signature scheme.
 
 use super::group::{
     Element, Point, Scalar, DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE,
@@ -8,17 +7,27 @@ use super::group::{
 use super::Error;
 use blst::{Pairing as blst_pairing, BLS12_381_NEG_G1, BLS12_381_NEG_G2};
 use commonware_codec::FixedSize;
+use std::fmt::Debug;
+use std::hash::Hash;
 
-pub trait Variant: Clone + 'static + Send + Sync + Hash + Eq + Debug {
+/// A specific instance of a signature scheme.
+pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
+    /// The public key type.
     type Public: Point + FixedSize + Debug + Hash + Copy;
+
+    /// The signature type.
     type Signature: Point + FixedSize + Debug + Hash + Copy;
 
+    /// The domain separator tag (DST) for a proof of possession.
     const PROOF_OF_POSSESSION: DST;
+
+    /// The domain separator tag (DST) for a message.
     const MESSAGE: DST;
 
     /// Sign the provided payload with the private key.
     fn sign(private: &Scalar, dst: DST, payload: &[u8]) -> Self::Signature;
 
+    /// Verify the signature from the provided public key and pre-hashed message.
     fn verify_prehashed(
         public: &Self::Public,
         hm: &Self::Signature,
@@ -34,6 +43,7 @@ pub trait Variant: Clone + 'static + Send + Sync + Hash + Eq + Debug {
     ) -> Result<(), Error>;
 }
 
+/// A [Variant] with a public key of type [G1] and a signature of type [G2].
 #[derive(Clone, Hash, PartialEq, Eq)]
 pub struct MinPk {}
 
@@ -61,7 +71,7 @@ impl Variant for MinPk {
         // We only handle pre-hashed messages, so we leave the domain separator tag (`DST`) empty.
         let mut pairing = blst_pairing::new(false, &[]);
 
-        // Convert `sig` into affine and aggregate `e(-G1::one(), sig)`
+        // Convert `sig` into affine and aggregate `e(sig,-G1::one())`
         let q = signature.as_blst_p2_affine();
         unsafe {
             pairing.raw_aggregate(&q, &BLS12_381_NEG_G1);
@@ -71,13 +81,13 @@ impl Variant for MinPk {
         let p = public.as_blst_p1_affine();
         let q = hm.as_blst_p2_affine();
 
-        // Aggregate `e(pk, hm)`
+        // Aggregate `e(hm,pk)`
         pairing.raw_aggregate(&q, &p);
 
         // Finalize the pairing accumulation and verify the result
         //
-        // If `finalverify()` returns `true`, it means `e(pk,hm) * e(-G1::one(),sig) == 1`. This
-        // is equivalent to `e(pk,hm) == e(G1::one(),sig)`.
+        // If `finalverify()` returns `true`, it means `e(hm,pk) * e(sig,-G1::one()) == 1`. This
+        // is equivalent to `e(hm,pk) == e(sig,G1::one())`.
         pairing.commit();
         if !pairing.finalverify(None) {
             return Err(Error::InvalidSignature);
@@ -106,6 +116,7 @@ impl Debug for MinPk {
     }
 }
 
+/// A [Variant] with a public key of type [G2] and a signature of type [G1].
 #[derive(Clone, Hash, PartialEq, Eq)]
 pub struct MinSig {}
 
@@ -143,7 +154,7 @@ impl Variant for MinSig {
         let p = public.as_blst_p2_affine();
         let q = hm.as_blst_p1_affine();
 
-        // Aggregate `e(pk, hm)`
+        // Aggregate `e(pk,hm)`
         pairing.raw_aggregate(&p, &q);
 
         // Finalize the pairing accumulation and verify the result
