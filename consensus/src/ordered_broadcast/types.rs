@@ -827,7 +827,7 @@ mod tests {
         bls12381::{
             dkg::ops,
             primitives::{
-                group::{Element, Share, G1},
+                group::{Element, Share},
                 ops::{partial_sign_message, threshold_signature_recover},
                 poly,
                 variant::{MinPk, MinSig},
@@ -1394,15 +1394,14 @@ mod tests {
         node_verify_invalid_signature::<MinSig>();
     }
 
-    #[test]
-    fn test_node_verify_invalid_parent_signature() {
+    fn node_verify_invalid_parent_signature<V: Variant>() {
         let mut scheme = sample_scheme(0);
         let public_key = scheme.public_key();
 
         // Generate BLS keys for threshold signature verification
         let n = 4;
         let t = quorum(n as u32);
-        let (commitment, shares) = generate_test_data(n, t, 0);
+        let (commitment, shares) = generate_test_data::<V>(n, t, 0);
 
         // Create parent and child chunks
         let parent_chunk = Chunk::new(public_key.clone(), 0, sample_digest(0));
@@ -1410,14 +1409,14 @@ mod tests {
         let epoch = 5;
 
         // Generate a valid threshold signature for the parent
-        let message = Ack::payload(&parent_chunk, &epoch);
+        let message = Ack::<_, V, _>::payload(&parent_chunk, &epoch);
         let ack_namespace = ack_namespace(NAMESPACE);
         let partials: Vec<_> = shares
             .iter()
             .take(t as usize)
-            .map(|s| partial_sign_message(s, Some(ack_namespace.as_ref()), &message))
+            .map(|s| partial_sign_message::<V>(s, Some(ack_namespace.as_ref()), &message))
             .collect();
-        let signature = threshold_signature_recover(t, &partials).unwrap();
+        let signature = threshold_signature_recover::<V, _>(t, &partials).unwrap();
 
         // Create parent with valid threshold signature
         let parent = Parent::new(parent_chunk.payload, epoch, signature);
@@ -1426,42 +1425,48 @@ mod tests {
         let chunk_namespace = chunk_namespace(NAMESPACE);
         let message = child_chunk.encode();
         let node_signature = scheme.sign(Some(chunk_namespace.as_ref()), &message);
-        let node = Node::<Ed25519, Sha256Digest>::new(
+        let node = Node::<Ed25519, V, Sha256Digest>::new(
             child_chunk.clone(),
             node_signature.clone(),
             Some(parent),
         );
 
         // Get the BLS public key from the commitment
-        let public = poly::public(&commitment);
+        let public = poly::public::<V>(&commitment);
 
         // Verification should succeed
         assert!(node.verify(NAMESPACE, Some(public)).is_ok());
 
         // Now create a parent with invalid threshold signature
         // Generate a different set of BLS keys/shares
-        let (_, wrong_shares) = generate_test_data(n, t, 1);
+        let (_, wrong_shares) = generate_test_data::<V>(n, t, 1);
 
         // Generate threshold signature with the wrong keys
         let partials: Vec<_> = wrong_shares
             .iter()
             .take(t as usize)
-            .map(|s| partial_sign_message(s, Some(ack_namespace.as_ref()), &message))
+            .map(|s| partial_sign_message::<V>(s, Some(ack_namespace.as_ref()), &message))
             .collect();
-        let wrong_signature = threshold_signature_recover(t, &partials).unwrap();
+        let wrong_signature = threshold_signature_recover::<V, _>(t, &partials).unwrap();
 
         // Create parent with wrong threshold signature
         let wrong_parent = Parent::new(parent_chunk.payload, epoch, wrong_signature);
 
         // Create child node with wrong parent
         let node =
-            Node::<Ed25519, Sha256Digest>::new(child_chunk, node_signature, Some(wrong_parent));
+            Node::<Ed25519, V, Sha256Digest>::new(child_chunk, node_signature, Some(wrong_parent));
 
         // Verification should fail because the parent signature doesn't verify with the correct public key
         assert!(matches!(
             node.verify(NAMESPACE, Some(public)),
             Err(Error::InvalidThresholdSignature)
         ));
+    }
+
+    #[test]
+    fn test_node_verify_invalid_parent_signature() {
+        node_verify_invalid_parent_signature::<MinPk>();
+        node_verify_invalid_parent_signature::<MinSig>();
     }
 
     fn ack_verify_invalid_signature<V: Variant>() {
