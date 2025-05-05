@@ -1342,7 +1342,7 @@ mod tests {
 
         let encoded =
             Node::<Ed25519, MinSig, Sha256Digest>::new(chunk, signature, Some(parent)).encode();
-        let _decoded = Node::<Ed25519, MinSig, Sha256Digest>::decode(encoded).unwrap();
+        Node::<Ed25519, MinSig, Sha256Digest>::decode(encoded).unwrap();
     }
 
     #[test]
@@ -1356,7 +1356,7 @@ mod tests {
         let signature = sample_scheme(0).sign(Some(chunk_namespace.as_ref()), &message);
 
         let encoded = Node::<Ed25519, MinSig, Sha256Digest>::new(chunk, signature, None).encode();
-        let _decoded = Node::<Ed25519, MinSig, Sha256Digest>::decode(encoded).unwrap();
+        Node::<Ed25519, MinSig, Sha256Digest>::decode(encoded).unwrap();
     }
 
     fn node_verify_invalid_signature<V: Variant>() {
