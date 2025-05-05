@@ -16,6 +16,12 @@ pub trait Variant {
     /// Sign the provided payload with the private key.
     fn sign(private: &Scalar, dst: DST, payload: &[u8]) -> Self::Signature;
 
+    fn verify_prehashed(
+        public: &Self::Public,
+        hm: &Self::Signature,
+        signature: &Self::Signature,
+    ) -> Result<(), Error>;
+
     /// Verify the signature from the provided public key.
     fn verify(
         public: &Self::Public,
@@ -41,16 +47,11 @@ impl Variant for MinPk {
         s
     }
 
-    fn verify(
+    fn verify_prehashed(
         public: &Self::Public,
-        dst: DST,
-        message: &[u8],
+        hm: &Self::Signature,
         signature: &Self::Signature,
     ) -> Result<(), Error> {
-        // Create hashed message `hm`
-        let mut hm = Self::Signature::zero();
-        hm.map(dst, message);
-
         // Create a pairing context
         //
         // We only handle pre-hashed messages, so we leave the domain separator tag (`DST`) empty.
@@ -79,6 +80,20 @@ impl Variant for MinPk {
         }
         Ok(())
     }
+
+    fn verify(
+        public: &Self::Public,
+        dst: DST,
+        message: &[u8],
+        signature: &Self::Signature,
+    ) -> Result<(), Error> {
+        // Create hashed message `hm`
+        let mut hm = Self::Signature::zero();
+        hm.map(dst, message);
+
+        // Verify the signature
+        Self::verify_prehashed(public, &hm, signature)
+    }
 }
 
 pub struct MinSig {}
@@ -97,16 +112,11 @@ impl Variant for MinSig {
         s
     }
 
-    fn verify(
+    fn verify_prehashed(
         public: &Self::Public,
-        dst: DST,
-        message: &[u8],
+        hm: &Self::Signature,
         signature: &Self::Signature,
     ) -> Result<(), Error> {
-        // Create hashed message `hm`
-        let mut hm = Self::Signature::zero();
-        hm.map(dst, message);
-
         // Create a pairing context
         //
         // We only handle pre-hashed messages, so we leave the domain separator tag (`DST`) empty.
@@ -133,7 +143,20 @@ impl Variant for MinSig {
         if !pairing.finalverify(None) {
             return Err(Error::InvalidSignature);
         }
-
         Ok(())
+    }
+
+    fn verify(
+        public: &Self::Public,
+        dst: DST,
+        message: &[u8],
+        signature: &Self::Signature,
+    ) -> Result<(), Error> {
+        // Create hashed message `hm`
+        let mut hm = Self::Signature::zero();
+        hm.map(dst, message);
+
+        // Verify the signature
+        Self::verify_prehashed(public, &hm, signature)
     }
 }

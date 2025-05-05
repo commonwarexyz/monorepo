@@ -84,17 +84,17 @@ pub fn verify_message<V: Variant>(
 }
 
 /// Generates a proof of possession for the private key share.
-pub fn partial_sign_proof_of_possession(
-    public: &poly::Public,
+pub fn partial_sign_proof_of_possession<V: Variant>(
+    public: &poly::Public<V>,
     private: &Share,
-) -> PartialSignature {
+) -> PartialSignature<V> {
     // Get public key
-    let threshold_public = poly::public(public);
+    let threshold_public = poly::public::<V>(public);
 
     // Sign the public key
-    let sig = sign(
+    let sig = V::sign(
         &private.private,
-        PROOF_OF_POSSESSION,
+        V::PROOF_OF_POSSESSION,
         &threshold_public.encode(),
     );
     Eval {
@@ -108,27 +108,27 @@ pub fn partial_sign_proof_of_possession(
 /// # Warning
 ///
 /// This function assumes a group check was already performed on `signature`.
-pub fn partial_verify_proof_of_possession(
-    public: &poly::Public,
-    partial: &PartialSignature,
+pub fn partial_verify_proof_of_possession<V: Variant>(
+    public: &poly::Public<V>,
+    partial: &PartialSignature<V>,
 ) -> Result<(), Error> {
-    let threshold_public = poly::public(public);
+    let threshold_public = poly::public::<V>(public);
     let public = public.evaluate(partial.index);
-    verify(
+    V::verify(
         &public.value,
-        PROOF_OF_POSSESSION,
+        V::PROOF_OF_POSSESSION,
         &threshold_public.encode(),
         &partial.value,
     )
 }
 
 /// Signs the provided message with the key share.
-pub fn partial_sign_message(
+pub fn partial_sign_message<V: Variant>(
     private: &Share,
     namespace: Option<&[u8]>,
     message: &[u8],
-) -> PartialSignature {
-    let sig = sign_message(&private.private, namespace, message);
+) -> PartialSignature<V> {
+    let sig = sign_message::<V>(&private.private, namespace, message);
     Eval {
         value: sig,
         index: private.index,
@@ -140,14 +140,14 @@ pub fn partial_sign_message(
 /// # Warning
 ///
 /// This function assumes a group check was already performed on `signature`.
-pub fn partial_verify_message(
-    public: &poly::Public,
+pub fn partial_verify_message<V: Variant>(
+    public: &poly::Public<V>,
     namespace: Option<&[u8]>,
     message: &[u8],
-    partial: &PartialSignature,
+    partial: &PartialSignature<V>,
 ) -> Result<(), Error> {
     let public = public.evaluate(partial.index);
-    verify_message(&public.value, namespace, message, &partial.value)
+    verify_message::<V>(&public.value, namespace, message, &partial.value)
 }
 
 /// Aggregates multiple partial signatures into a single signature.
@@ -157,13 +157,15 @@ pub fn partial_verify_message(
 /// This function assumes a group check was already performed on each `signature` and
 /// that each `signature` is unique. If any of these assumptions are violated, an attacker can
 /// exploit this function to verify an incorrect aggregate signature.
-pub fn partial_aggregate_signatures<'a, I>(partials: I) -> Option<(u32, group::Signature)>
+pub fn partial_aggregate_signatures<'a, V, I>(partials: I) -> Option<(u32, V::Signature)>
 where
-    I: IntoIterator<Item = &'a PartialSignature>,
+    V: Variant,
+    I: IntoIterator<Item = &'a PartialSignature<V>>,
+    V::Signature: 'a,
 {
     let mut iter = partials.into_iter().peekable();
     let index = iter.peek()?.index;
-    let mut s = group::Signature::zero();
+    let mut s = V::Signature::zero();
     for partial in iter {
         if partial.index != index {
             return None;
@@ -179,40 +181,39 @@ where
 /// # Warning
 ///
 /// This function assumes a group check was already performed on each `signature`.
-pub fn partial_verify_multiple_messages<'a, I, J>(
-    public: &poly::Public,
+pub fn partial_verify_multiple_messages<'a, V, I, J>(
+    public: &poly::Public<V>,
     partial_signer: u32,
     messages: I,
     signatures: J,
 ) -> Result<(), Error>
 where
+    V: Variant,
     I: IntoIterator<Item = &'a (Option<&'a [u8]>, &'a [u8])>,
-    J: IntoIterator<Item = &'a PartialSignature>,
+    J: IntoIterator<Item = &'a PartialSignature<V>>,
+    V::Signature: 'a,
 {
     // Aggregate the partial signatures
     let (index, signature) =
-        partial_aggregate_signatures(signatures).ok_or(Error::InvalidSignature)?;
+        partial_aggregate_signatures::<V, _>(signatures).ok_or(Error::InvalidSignature)?;
     if partial_signer != index {
         return Err(Error::InvalidSignature);
     }
     let public = public.evaluate(index).value;
 
     // Sum the hashed messages
-    let mut hm_sum = group::Signature::zero();
+    let mut hm_sum = V::Signature::zero();
     for (namespace, msg) in messages {
-        let mut hm = group::Signature::zero();
+        let mut hm = V::Signature::zero();
         match namespace {
-            Some(namespace) => hm.map(MESSAGE, &union_unique(namespace, msg)),
-            None => hm.map(MESSAGE, msg),
+            Some(namespace) => hm.map(V::MESSAGE, &union_unique(namespace, msg)),
+            None => hm.map(V::MESSAGE, msg),
         };
         hm_sum.add(&hm);
     }
 
     // Verify the signature
-    if !equal(&public, &signature, &hm_sum) {
-        return Err(Error::InvalidSignature);
-    }
-    Ok(())
+    V::verify_prehashed(&public, &hm_sum, &signature)
 }
 
 /// Interpolate the value of some [Point] with precomputed Barycentric Weights
@@ -252,12 +253,14 @@ where
 /// This function assumes that each partial signature is unique and that
 /// that there exists exactly one partial signature for each index in
 /// the `weights` map.
-pub fn threshold_signature_recover_with_weights<'a, I>(
+pub fn threshold_signature_recover_with_weights<'a, V, I>(
     weights: &BTreeMap<u32, Weight>,
     partials: I,
-) -> Result<group::Signature, Error>
+) -> Result<V::Signature, Error>
 where
-    I: IntoIterator<Item = &'a PartialSignature>,
+    V: Variant,
+    I: IntoIterator<Item = &'a PartialSignature<V>>,
+    V::Signature: 'a,
 {
     msm_interpolate(weights, partials)
 }
@@ -272,12 +275,14 @@ where
 /// # Warning
 ///
 /// This function assumes that each partial signature is unique.
-pub fn threshold_signature_recover<'a, I>(
+pub fn threshold_signature_recover<'a, V, I>(
     threshold: u32,
     partials: I,
-) -> Result<group::Signature, Error>
+) -> Result<V::Signature, Error>
 where
-    I: IntoIterator<Item = &'a PartialSignature>,
+    V: Variant,
+    I: IntoIterator<Item = &'a PartialSignature<V>>,
+    V::Signature: 'a,
 {
     // Prepare evaluations
     let evals = prepare_evaluations(threshold, partials)?;
@@ -290,7 +295,7 @@ where
     //
     // We call this function instead of `poly::recover_with_weights` because
     // it will use multi-scalar multiplication (MSM) to recover the signature.
-    threshold_signature_recover_with_weights(&weights, evals)
+    threshold_signature_recover_with_weights::<V, _>(&weights, evals)
 }
 
 /// Recovers multiple signatures from multiple sets of at least `threshold`
@@ -305,12 +310,14 @@ where
 ///
 /// This function assumes that each partial signature is unique and that
 /// each set of partial signatures has the same indices.
-pub fn threshold_signature_recover_multiple<'a, I>(
+pub fn threshold_signature_recover_multiple<'a, V, I>(
     threshold: u32,
     mut many_evals: Vec<I>,
-) -> Result<Vec<group::Signature>, Error>
+) -> Result<Vec<V::Signature>, Error>
 where
-    I: IntoIterator<Item = &'a PartialSignature>,
+    V: Variant,
+    I: IntoIterator<Item = &'a PartialSignature<V>>,
+    V::Signature: 'a,
 {
     // Process first set of evaluations
     let evals = many_evals.swap_remove(0).into_iter().collect::<Vec<_>>();
@@ -339,7 +346,7 @@ where
     // Recover signatures
     let mut signatures = Vec::with_capacity(prepared_evals.len());
     for evals in prepared_evals {
-        let signature = threshold_signature_recover_with_weights(&weights, evals)?;
+        let signature = threshold_signature_recover_with_weights::<V, _>(&weights, evals)?;
         signatures.push(signature);
     }
     Ok(signatures)
@@ -348,15 +355,17 @@ where
 /// Recovers a pair of signatures from two sets of at least `threshold` partial signatures.
 ///
 /// This is just a wrapper around `threshold_signature_recover_multiple`.
-pub fn threshold_signature_recover_pair<'a, I>(
+pub fn threshold_signature_recover_pair<'a, V, I>(
     threshold: u32,
     first: I,
     second: I,
-) -> Result<(group::Signature, group::Signature), Error>
+) -> Result<(V::Signature, V::Signature), Error>
 where
-    I: IntoIterator<Item = &'a PartialSignature>,
+    V: Variant,
+    I: IntoIterator<Item = &'a PartialSignature<V>>,
+    V::Signature: 'a,
 {
-    let mut sigs = threshold_signature_recover_multiple(threshold, vec![first, second])?;
+    let mut sigs = threshold_signature_recover_multiple::<V, _>(threshold, vec![first, second])?;
     let second_sig = sigs.pop().unwrap();
     let first_sig = sigs.pop().unwrap();
     Ok((first_sig, second_sig))
@@ -370,11 +379,13 @@ where
 /// that each `public_key` is unique, and that the caller has a Proof-of-Possession (PoP)
 /// for each `public_key`. If any of these assumptions are violated, an attacker can
 /// exploit this function to verify an incorrect aggregate signature.
-pub fn aggregate_public_keys<'a, I>(public_keys: I) -> group::Public
+pub fn aggregate_public_keys<'a, V, I>(public_keys: I) -> V::Public
 where
-    I: IntoIterator<Item = &'a group::Public>,
+    V: Variant,
+    I: IntoIterator<Item = &'a V::Public>,
+    V::Public: 'a,
 {
-    let mut p = group::Public::zero();
+    let mut p = V::Public::zero();
     for pk in public_keys {
         p.add(pk);
     }
@@ -388,11 +399,13 @@ where
 /// This function assumes a group check was already performed on each `signature` and
 /// that each `signature` is unique. If any of these assumptions are violated, an attacker can
 /// exploit this function to verify an incorrect aggregate signature.
-pub fn aggregate_signatures<'a, I>(signatures: I) -> group::Signature
+pub fn aggregate_signatures<'a, V, I>(signatures: I) -> V::Signature
 where
-    I: IntoIterator<Item = &'a group::Signature>,
+    V: Variant,
+    I: IntoIterator<Item = &'a V::Signature>,
+    V::Signature: 'a,
 {
-    let mut s = group::Signature::zero();
+    let mut s = V::Signature::zero();
     for sig in signatures {
         s.add(sig);
     }
@@ -406,23 +419,25 @@ where
 /// This function assumes the caller has performed a group check and collected a proof-of-possession
 /// for all provided `public`. This function assumes a group check was already performed on the
 /// `signature`. It is not safe to provide duplicate public keys.
-pub fn aggregate_verify_multiple_public_keys<'a, I>(
+pub fn aggregate_verify_multiple_public_keys<'a, V, I>(
     public: I,
     namespace: Option<&[u8]>,
     message: &[u8],
-    signature: &group::Signature,
+    signature: &V::Signature,
 ) -> Result<(), Error>
 where
-    I: IntoIterator<Item = &'a group::Public>,
+    V: Variant,
+    I: IntoIterator<Item = &'a V::Public>,
+    V::Public: 'a,
 {
     // Aggregate public keys
     //
     // We can take advantage of the bilinearity property of pairings to aggregate public keys
     // that have all signed the same message (as long as all public keys are unique).
-    let agg_public = aggregate_public_keys(public);
+    let agg_public = aggregate_public_keys::<V, _>(public);
 
     // Verify the signature
-    verify_message(&agg_public, namespace, message, signature)
+    verify_message::<V>(&agg_public, namespace, message, signature)
 }
 
 /// Verifies the aggregate signature over multiple unique messages from a single public key.
@@ -438,13 +453,14 @@ where
 /// and sum hashed messages together before performing a single pairing operation (instead of summing `len(messages)` pairings of
 /// hashed message and public key). If the public key itself is an aggregate of multiple public keys, an attacker can exploit
 /// this optimization to cause this function to return that an aggregate signature is valid when it really isn't.
-pub fn aggregate_verify_multiple_messages<'a, I>(
-    public: &group::Public,
+pub fn aggregate_verify_multiple_messages<'a, V, I>(
+    public: &V::Public,
     messages: I,
-    signature: &group::Signature,
+    signature: &V::Signature,
     concurrency: usize,
 ) -> Result<(), Error>
 where
+    V: Variant,
     I: IntoIterator<Item = &'a (Option<&'a [u8]>, &'a [u8])>
         + IntoParallelIterator<Item = &'a (Option<&'a [u8]>, &'a [u8])>
         + Send
@@ -452,12 +468,12 @@ where
 {
     let hm_sum = if concurrency == 1 {
         // Avoid pool overhead when concurrency is 1
-        let mut hm_sum = group::Signature::zero();
+        let mut hm_sum = V::Signature::zero();
         for (namespace, msg) in messages {
-            let mut hm = group::Signature::zero();
+            let mut hm = V::Signature::zero();
             match namespace {
-                Some(namespace) => hm.map(MESSAGE, &union_unique(namespace, msg)),
-                None => hm.map(MESSAGE, msg),
+                Some(namespace) => hm.map(V::MESSAGE, &union_unique(namespace, msg)),
+                None => hm.map(V::MESSAGE, msg),
             };
             hm_sum.add(&hm);
         }
@@ -474,14 +490,14 @@ where
             messages
                 .into_par_iter()
                 .map(|(namespace, msg)| {
-                    let mut hm = group::Signature::zero();
+                    let mut hm = V::Signature::zero();
                     match namespace {
-                        Some(namespace) => hm.map(MESSAGE, &union_unique(namespace, msg)),
-                        None => hm.map(MESSAGE, msg),
+                        Some(namespace) => hm.map(V::MESSAGE, &union_unique(namespace, msg)),
+                        None => hm.map(V::MESSAGE, msg),
                     };
                     hm
                 })
-                .reduce(group::Signature::zero, |mut sum, hm| {
+                .reduce(V::Signature::zero, |mut sum, hm| {
                     sum.add(&hm);
                     sum
                 })
@@ -489,10 +505,7 @@ where
     };
 
     // Verify the signature
-    if !equal(public, signature, &hm_sum) {
-        return Err(Error::InvalidSignature);
-    }
-    Ok(())
+    V::verify_prehashed(public, &hm_sum, signature)
 }
 
 #[cfg(test)]
