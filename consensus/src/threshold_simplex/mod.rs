@@ -166,7 +166,13 @@ pub mod mocks;
 mod tests {
     use super::*;
     use crate::Monitor;
-    use commonware_cryptography::{bls12381::dkg::ops, Ed25519, Sha256, Signer};
+    use commonware_cryptography::{
+        bls12381::{
+            dkg::ops,
+            primitives::variant::{MinPk, MinSig, Variant},
+        },
+        Ed25519, Sha256, Signer,
+    };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
@@ -180,7 +186,7 @@ mod tests {
         sync::{Arc, Mutex},
         time::Duration,
     };
-    use tracing::{debug, warn};
+    use tracing::{debug, warn, Value};
     use types::Activity;
 
     /// Registers all validators using the oracle.
@@ -259,8 +265,7 @@ mod tests {
         }
     }
 
-    #[test_traced]
-    fn test_all_online() {
+    fn all_online<V: Variant>() {
         // Create context
         let n = 5;
         let threshold = quorum(n);
@@ -304,7 +309,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
+            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -318,7 +323,7 @@ mod tests {
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
                 participants.insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
-                let supervisor_config = mocks::supervisor::Config {
+                let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
                     participants,
                 };
@@ -508,7 +513,12 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_unclean_shutdown() {
+    fn test_all_online() {
+        all_online::<MinPk>();
+        all_online::<MinSig>();
+    }
+
+    fn unclean_shutdown<V: Variant>() {
         // Create context
         let n = 5;
         let threshold = quorum(n);
@@ -519,7 +529,7 @@ mod tests {
 
         // Derive threshold
         let mut rng = StdRng::seed_from_u64(0);
-        let (public, shares) = ops::generate_shares(&mut rng, None, n, threshold);
+        let (public, shares) = ops::generate_shares::<_, V>(&mut rng, None, n, threshold);
 
         // Random restarts every x seconds
         let shutdowns: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
@@ -581,7 +591,7 @@ mod tests {
                     let mut participants = BTreeMap::new();
                     participants
                         .insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
-                    let supervisor_config = mocks::supervisor::Config {
+                    let supervisor_config = mocks::supervisor::Config::<_, V> {
                         namespace: namespace.clone(),
                         participants,
                     };
@@ -683,6 +693,12 @@ mod tests {
 
             prev_ctx = Some(context.recover());
         }
+    }
+
+    #[test_traced]
+    fn test_unclean_shutdown() {
+        unclean_shutdown::<MinPk>();
+        unclean_shutdown::<MinSig>();
     }
 
     #[test_traced]
