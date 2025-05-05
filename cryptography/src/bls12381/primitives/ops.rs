@@ -518,7 +518,7 @@ mod tests {
     use blst::BLST_ERROR;
     use commonware_codec::DecodeExt;
     use commonware_utils::quorum;
-    use group::{G1, G1_MESSAGE, G2, G2_MESSAGE};
+    use group::{G1_MESSAGE, G2_MESSAGE};
     use poly::Poly;
     use rand::prelude::*;
 
