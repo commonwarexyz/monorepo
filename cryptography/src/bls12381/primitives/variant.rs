@@ -25,9 +25,9 @@ pub type MinSigSignature = G1;
 
 pub const MIN_SIG_SIGNATURE_LENGTH: usize = G1_ELEMENT_BYTE_LENGTH;
 
-pub trait Variant: Clone + 'static + Send + Sync + Hash + Eq {
-    type Public: Point + FixedSize + Debug + Hash;
-    type Signature: Point + FixedSize + Debug + Hash;
+pub trait Variant: Clone + 'static + Send + Sync + Hash + Eq + Debug {
+    type Public: Point + FixedSize + Debug + Hash + Copy;
+    type Signature: Point + FixedSize + Debug + Hash + Copy;
 
     const PROOF_OF_POSSESSION: DST;
     const MESSAGE: DST;
@@ -116,6 +116,12 @@ impl Variant for MinPk {
     }
 }
 
+impl Debug for MinPk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MinPk").finish()
+    }
+}
+
 #[derive(Clone, Hash, PartialEq, Eq)]
 pub struct MinSig {}
 
@@ -179,5 +185,11 @@ impl Variant for MinSig {
 
         // Verify the signature
         Self::verify_prehashed(public, &hm, signature)
+    }
+}
+
+impl Debug for MinSig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MinSig").finish()
     }
 }

@@ -54,9 +54,9 @@ pub trait Attributable {
 }
 
 /// Seedable is a trait that provides access to the seed associated with a message.
-pub trait Seedable {
+pub trait Seedable<V: Variant> {
     /// Returns the seed associated with this object.
-    fn seed(&self) -> Seed;
+    fn seed(&self) -> Seed<V>;
 }
 
 // Constants for domain separation in signature verification
@@ -111,11 +111,11 @@ pub enum Voter<D: Digest, V: Variant> {
     /// A single validator nullify to skip the current view (usually when leader is unresponsive)
     Nullify(Nullify<V>),
     /// A recovered threshold signature for a nullification
-    Nullification(Nullification),
+    Nullification(Nullification<V>),
     /// A single validator finalize over a proposal
-    Finalize(Finalize<D>),
+    Finalize(Finalize<D, V>),
     /// A recovered threshold signature for a finalization
-    Finalization(Finalization<D>),
+    Finalization(Finalization<D, V>),
 }
 
 impl<D: Digest, V: Variant> Write for Voter<D, V> {
@@ -471,9 +471,9 @@ impl<D: Digest, V: Variant> EncodeSize for Notarization<D, V> {
     }
 }
 
-impl<D: Digest, V: Variant> Seedable for Notarization<D, V> {
-    fn seed(&self) -> Seed {
-        Seed::new(self.view(), self.seed_signature)
+impl<D: Digest, V: Variant> Seedable<V> for Notarization<D, V> {
+    fn seed(&self) -> Seed<V> {
+        Seed::new(self.view(), self.seed_signature.clone())
     }
 }
 
@@ -563,8 +563,8 @@ impl<V: Variant> Read for Nullify<V> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let view = UInt::read(reader)?.into();
-        let view_signature = PartialSignature::read(reader)?;
-        let seed_signature = PartialSignature::read(reader)?;
+        let view_signature = PartialSignature::<V>::read(reader)?;
+        let seed_signature = PartialSignature::<V>::read(reader)?;
         if view_signature.index != seed_signature.index {
             return Err(Error::Invalid(
                 "consensus::threshold_simplex::Nullify",
@@ -591,18 +591,18 @@ impl<V: Variant> EncodeSize for Nullify<V> {
 /// When a view is nullified, the consensus moves to the next view without finalizing a block.
 /// The threshold signatures provide compact verification compared to collecting individual signatures.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
-pub struct Nullification {
+pub struct Nullification<V: Variant> {
     /// The view that has been nullified
     pub view: View,
     /// The recovered threshold signature on the view
-    pub view_signature: Signature,
+    pub view_signature: V::Signature,
     /// The recovered threshold signature on the seed (for leader election/randomness)
-    pub seed_signature: Signature,
+    pub seed_signature: V::Signature,
 }
 
-impl Nullification {
+impl<V: Variant> Nullification<V> {
     /// Creates a new nullification with the given view and aggregated signatures.
-    pub fn new(view: View, view_signature: Signature, seed_signature: Signature) -> Self {
+    pub fn new(view: View, view_signature: V::Signature, seed_signature: V::Signature) -> Self {
         Nullification {
             view,
             view_signature,
@@ -615,14 +615,17 @@ impl Nullification {
     /// This ensures that:
     /// 1. The view signature is a valid threshold signature for the view
     /// 2. The seed signature is a valid threshold signature for the view
-    pub fn verify(&self, namespace: &[u8], public_key: &Public) -> bool {
+    pub fn verify(&self, namespace: &[u8], public_key: &V::Public) -> bool {
         let nullify_namespace = nullify_namespace(namespace);
         let view_message = view_message(self.view);
         let nullify_message = (Some(nullify_namespace.as_ref()), view_message.as_ref());
         let seed_namespace = seed_namespace(namespace);
         let seed_message = (Some(seed_namespace.as_ref()), view_message.as_ref());
-        let signature = aggregate_signatures(&[self.view_signature, self.seed_signature]);
-        aggregate_verify_multiple_messages(
+        let signature = aggregate_signatures::<V, _>(&[
+            self.view_signature.clone(),
+            self.seed_signature.clone(),
+        ]);
+        aggregate_verify_multiple_messages::<V, _>(
             public_key,
             &[nullify_message, seed_message],
             &signature,
@@ -632,13 +635,13 @@ impl Nullification {
     }
 }
 
-impl Viewable for Nullification {
+impl<V: Variant> Viewable for Nullification<V> {
     fn view(&self) -> View {
         self.view
     }
 }
 
-impl Write for Nullification {
+impl<V: Variant> Write for Nullification<V> {
     fn write(&self, writer: &mut impl BufMut) {
         UInt(self.view).write(writer);
         self.view_signature.write(writer);
@@ -646,13 +649,13 @@ impl Write for Nullification {
     }
 }
 
-impl Read for Nullification {
+impl<V: Variant> Read for Nullification<V> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let view = UInt::read(reader)?.into();
-        let view_signature = Signature::read(reader)?;
-        let seed_signature = Signature::read(reader)?;
+        let view_signature = V::Signature::read(reader)?;
+        let seed_signature = V::Signature::read(reader)?;
         Ok(Nullification {
             view,
             view_signature,
@@ -661,7 +664,7 @@ impl Read for Nullification {
     }
 }
 
-impl EncodeSize for Nullification {
+impl<V: Variant> EncodeSize for Nullification<V> {
     fn encode_size(&self) -> usize {
         UInt(self.view).encode_size()
             + self.view_signature.encode_size()
@@ -669,9 +672,9 @@ impl EncodeSize for Nullification {
     }
 }
 
-impl Seedable for Nullification {
-    fn seed(&self) -> Seed {
-        Seed::new(self.view(), self.seed_signature)
+impl<V: Variant> Seedable<V> for Nullification<V> {
+    fn seed(&self) -> Seed<V> {
+        Seed::new(self.view(), self.seed_signature.clone())
     }
 }
 
@@ -679,16 +682,16 @@ impl Seedable for Nullification {
 /// This happens after a proposal has been notarized, confirming it as the canonical block for this view.
 /// It contains a partial signature on the proposal.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
-pub struct Finalize<D: Digest> {
+pub struct Finalize<D: Digest, V: Variant> {
     /// The proposal to be finalized
     pub proposal: Proposal<D>,
     /// The validator's partial signature on the proposal
-    pub proposal_signature: PartialSignature<MinSig>,
+    pub proposal_signature: PartialSignature<V>,
 }
 
-impl<D: Digest> Finalize<D> {
+impl<D: Digest, V: Variant> Finalize<D, V> {
     /// Creates a new finalize with the given proposal and signature.
-    pub fn new(proposal: Proposal<D>, proposal_signature: PartialSignature) -> Self {
+    pub fn new(proposal: Proposal<D>, proposal_signature: PartialSignature<V>) -> Self {
         Finalize {
             proposal,
             proposal_signature,
@@ -698,10 +701,10 @@ impl<D: Digest> Finalize<D> {
     /// Verifies the signature on this finalize using BLS threshold verification.
     ///
     /// This ensures that the signature is valid for the given proposal.
-    pub fn verify(&self, namespace: &[u8], identity: &Poly<Public>) -> bool {
+    pub fn verify(&self, namespace: &[u8], identity: &Poly<V::Public>) -> bool {
         let finalize_namespace = finalize_namespace(namespace);
         let message = self.proposal.encode();
-        partial_verify_message(
+        partial_verify_message::<V>(
             identity,
             Some(finalize_namespace.as_ref()),
             &message,
@@ -715,36 +718,36 @@ impl<D: Digest> Finalize<D> {
         let finalize_namespace = finalize_namespace(namespace);
         let message = proposal.encode();
         let proposal_signature =
-            partial_sign_message(share, Some(finalize_namespace.as_ref()), &message);
+            partial_sign_message::<V>(share, Some(finalize_namespace.as_ref()), &message);
         Finalize::new(proposal, proposal_signature)
     }
 }
 
-impl<D: Digest> Attributable for Finalize<D> {
+impl<D: Digest, V: Variant> Attributable for Finalize<D, V> {
     fn signer(&self) -> u32 {
         self.proposal_signature.index
     }
 }
 
-impl<D: Digest> Viewable for Finalize<D> {
+impl<D: Digest, V: Variant> Viewable for Finalize<D, V> {
     fn view(&self) -> View {
         self.proposal.view()
     }
 }
 
-impl<D: Digest> Write for Finalize<D> {
+impl<D: Digest, V: Variant> Write for Finalize<D, V> {
     fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
         self.proposal_signature.write(writer);
     }
 }
 
-impl<D: Digest> Read for Finalize<D> {
+impl<D: Digest, V: Variant> Read for Finalize<D, V> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
-        let proposal_signature = PartialSignature::read(reader)?;
+        let proposal_signature = PartialSignature::<V>::read(reader)?;
         Ok(Finalize {
             proposal,
             proposal_signature,
@@ -752,7 +755,7 @@ impl<D: Digest> Read for Finalize<D> {
     }
 }
 
-impl<D: Digest> EncodeSize for Finalize<D> {
+impl<D: Digest, V: Variant> EncodeSize for Finalize<D, V> {
     fn encode_size(&self) -> usize {
         self.proposal.encode_size() + self.proposal_signature.encode_size()
     }
@@ -762,21 +765,21 @@ impl<D: Digest> EncodeSize for Finalize<D> {
 /// When a proposal is finalized, it becomes the canonical block for its view.
 /// The threshold signatures provide compact verification compared to collecting individual signatures.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
-pub struct Finalization<D: Digest> {
+pub struct Finalization<D: Digest, V: Variant> {
     /// The proposal that has been finalized
     pub proposal: Proposal<D>,
     /// The recovered threshold signature on the proposal
-    pub proposal_signature: Signature,
+    pub proposal_signature: V::Signature,
     /// The recovered threshold signature on the seed (for leader election/randomness)
-    pub seed_signature: Signature,
+    pub seed_signature: V::Signature,
 }
 
-impl<D: Digest> Finalization<D> {
+impl<D: Digest, V: Variant> Finalization<D, V> {
     /// Creates a new finalization with the given proposal and aggregated signatures.
     pub fn new(
         proposal: Proposal<D>,
-        proposal_signature: Signature,
-        seed_signature: Signature,
+        proposal_signature: V::Signature,
+        seed_signature: V::Signature,
     ) -> Self {
         Finalization {
             proposal,
@@ -790,15 +793,18 @@ impl<D: Digest> Finalization<D> {
     /// This ensures that:
     /// 1. The proposal signature is a valid threshold signature for the proposal
     /// 2. The seed signature is a valid threshold signature for the view
-    pub fn verify(&self, namespace: &[u8], public_key: &Public) -> bool {
+    pub fn verify(&self, namespace: &[u8], public_key: &V::Public) -> bool {
         let finalize_namespace = finalize_namespace(namespace);
         let finalize_message = self.proposal.encode();
         let finalize_message = (Some(finalize_namespace.as_ref()), finalize_message.as_ref());
         let seed_namespace = seed_namespace(namespace);
         let seed_message = view_message(self.proposal.view);
         let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
-        let signature = aggregate_signatures(&[self.proposal_signature, self.seed_signature]);
-        aggregate_verify_multiple_messages(
+        let signature = aggregate_signatures::<V, _>(&[
+            self.proposal_signature.clone(),
+            self.seed_signature.clone(),
+        ]);
+        aggregate_verify_multiple_messages::<V, _>(
             public_key,
             &[finalize_message, seed_message],
             &signature,
@@ -808,13 +814,13 @@ impl<D: Digest> Finalization<D> {
     }
 }
 
-impl<D: Digest> Viewable for Finalization<D> {
+impl<D: Digest, V: Variant> Viewable for Finalization<D, V> {
     fn view(&self) -> View {
         self.proposal.view()
     }
 }
 
-impl<D: Digest> Write for Finalization<D> {
+impl<D: Digest, V: Variant> Write for Finalization<D, V> {
     fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
         self.proposal_signature.write(writer);
@@ -822,13 +828,13 @@ impl<D: Digest> Write for Finalization<D> {
     }
 }
 
-impl<D: Digest> Read for Finalization<D> {
+impl<D: Digest, V: Variant> Read for Finalization<D, V> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
-        let proposal_signature = Signature::read(reader)?;
-        let seed_signature = Signature::read(reader)?;
+        let proposal_signature = V::Signature::read(reader)?;
+        let seed_signature = V::Signature::read(reader)?;
         Ok(Finalization {
             proposal,
             proposal_signature,
@@ -837,7 +843,7 @@ impl<D: Digest> Read for Finalization<D> {
     }
 }
 
-impl<D: Digest> EncodeSize for Finalization<D> {
+impl<D: Digest, V: Variant> EncodeSize for Finalization<D, V> {
     fn encode_size(&self) -> usize {
         self.proposal.encode_size()
             + self.proposal_signature.encode_size()
@@ -845,23 +851,23 @@ impl<D: Digest> EncodeSize for Finalization<D> {
     }
 }
 
-impl<D: Digest> Seedable for Finalization<D> {
-    fn seed(&self) -> Seed {
-        Seed::new(self.view(), self.seed_signature)
+impl<D: Digest, V: Variant> Seedable<V> for Finalization<D, V> {
+    fn seed(&self) -> Seed<V> {
+        Seed::new(self.view(), self.seed_signature.clone())
     }
 }
 
 /// Backfiller is a message type for requesting and receiving missing consensus artifacts.
 /// This is used to synchronize validators that have fallen behind or just joined the network.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Backfiller<D: Digest> {
+pub enum Backfiller<D: Digest, V: Variant> {
     /// Request for missing notarizations and nullifications
     Request(Request),
     /// Response containing requested notarizations and nullifications
-    Response(Response<D>),
+    Response(Response<D, V>),
 }
 
-impl<D: Digest> Write for Backfiller<D> {
+impl<D: Digest, V: Variant> Write for Backfiller<D, V> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Backfiller::Request(v) => {
@@ -876,7 +882,7 @@ impl<D: Digest> Write for Backfiller<D> {
     }
 }
 
-impl<D: Digest> EncodeSize for Backfiller<D> {
+impl<D: Digest, V: Variant> EncodeSize for Backfiller<D, V> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Backfiller::Request(v) => v.encode_size(),
@@ -885,7 +891,7 @@ impl<D: Digest> EncodeSize for Backfiller<D> {
     }
 }
 
-impl<D: Digest> Read for Backfiller<D> {
+impl<D: Digest, V: Variant> Read for Backfiller<D, V> {
     type Cfg = usize;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &usize) -> Result<Self, Error> {
@@ -896,7 +902,7 @@ impl<D: Digest> Read for Backfiller<D> {
                 Ok(Backfiller::Request(v))
             }
             1 => {
-                let v = Response::<D>::read_cfg(reader, cfg)?;
+                let v = Response::<D, V>::read_cfg(reader, cfg)?;
                 Ok(Backfiller::Response(v))
             }
             _ => Err(Error::Invalid(
@@ -965,21 +971,21 @@ impl Read for Request {
 /// Response is a message containing the requested notarizations and nullifications.
 /// This is sent in response to a Request message.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Response<D: Digest> {
+pub struct Response<D: Digest, V: Variant> {
     /// Identifier matching the original request
     pub id: u64,
     /// Notarizations for the requested views
-    pub notarizations: Vec<Notarization<D>>,
+    pub notarizations: Vec<Notarization<D, V>>,
     /// Nullifications for the requested views
-    pub nullifications: Vec<Nullification>,
+    pub nullifications: Vec<Nullification<V>>,
 }
 
-impl<D: Digest> Response<D> {
+impl<D: Digest, V: Variant> Response<D, V> {
     /// Creates a new response with the given id, notarizations, and nullifications.
     pub fn new(
         id: u64,
-        notarizations: Vec<Notarization<D>>,
-        nullifications: Vec<Nullification>,
+        notarizations: Vec<Notarization<D, V>>,
+        nullifications: Vec<Nullification<V>>,
     ) -> Self {
         Response {
             id,
@@ -989,7 +995,7 @@ impl<D: Digest> Response<D> {
     }
 }
 
-impl<D: Digest> Write for Response<D> {
+impl<D: Digest, V: Variant> Write for Response<D, V> {
     fn write(&self, writer: &mut impl BufMut) {
         UInt(self.id).write(writer);
         self.notarizations.write(writer);
@@ -997,7 +1003,7 @@ impl<D: Digest> Write for Response<D> {
     }
 }
 
-impl<D: Digest> EncodeSize for Response<D> {
+impl<D: Digest, V: Variant> EncodeSize for Response<D, V> {
     fn encode_size(&self) -> usize {
         UInt(self.id).encode_size()
             + self.notarizations.encode_size()
@@ -1005,14 +1011,14 @@ impl<D: Digest> EncodeSize for Response<D> {
     }
 }
 
-impl<D: Digest> Read for Response<D> {
+impl<D: Digest, V: Variant> Read for Response<D, V> {
     type Cfg = usize;
 
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let id = UInt::read(reader)?.into();
-        let notarizations = Vec::<Notarization<D>>::read_range(reader, ..=*max_len)?;
+        let notarizations = Vec::<Notarization<D, V>>::read_range(reader, ..=*max_len)?;
         let remaining = max_len - notarizations.len();
-        let nullifications = Vec::<Nullification>::read_range(reader, ..=remaining)?;
+        let nullifications = Vec::<Nullification<V>>::read_range(reader, ..=remaining)?;
         Ok(Response {
             id,
             notarizations,
@@ -1024,28 +1030,28 @@ impl<D: Digest> Read for Response<D> {
 /// Activity represents all possible activities that can occur in the consensus protocol.
 /// This includes both regular consensus messages and fault evidence.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
-pub enum Activity<D: Digest> {
+pub enum Activity<D: Digest, V: Variant> {
     /// A single validator notarize over a proposal
-    Notarize(Notarize<D>),
+    Notarize(Notarize<D, V>),
     /// A threshold signature for a notarization
-    Notarization(Notarization<D>),
+    Notarization(Notarization<D, V>),
     /// A single validator nullify to skip the current view
-    Nullify(Nullify),
+    Nullify(Nullify<V>),
     /// A threshold signature for a nullification
-    Nullification(Nullification),
+    Nullification(Nullification<V>),
     /// A single validator finalize over a proposal
-    Finalize(Finalize<D>),
+    Finalize(Finalize<D, V>),
     /// A threshold signature for a finalization
-    Finalization(Finalization<D>),
+    Finalization(Finalization<D, V>),
     /// Evidence of a validator sending conflicting notarizes (Byzantine behavior)
-    ConflictingNotarize(ConflictingNotarize<D>),
+    ConflictingNotarize(ConflictingNotarize<D, V>),
     /// Evidence of a validator sending conflicting finalizes (Byzantine behavior)
-    ConflictingFinalize(ConflictingFinalize<D>),
+    ConflictingFinalize(ConflictingFinalize<D, V>),
     /// Evidence of a validator sending both nullify and finalize for the same view (Byzantine behavior)
-    NullifyFinalize(NullifyFinalize<D>),
+    NullifyFinalize(NullifyFinalize<D, V>),
 }
 
-impl<D: Digest> Write for Activity<D> {
+impl<D: Digest, V: Variant> Write for Activity<D, V> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Activity::Notarize(v) => {
@@ -1088,7 +1094,7 @@ impl<D: Digest> Write for Activity<D> {
     }
 }
 
-impl<D: Digest> EncodeSize for Activity<D> {
+impl<D: Digest, V: Variant> EncodeSize for Activity<D, V> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Activity::Notarize(v) => v.encode_size(),
@@ -1104,46 +1110,46 @@ impl<D: Digest> EncodeSize for Activity<D> {
     }
 }
 
-impl<D: Digest> Read for Activity<D> {
+impl<D: Digest, V: Variant> Read for Activity<D, V> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let tag = <u8>::read(reader)?;
         match tag {
             0 => {
-                let v = Notarize::read(reader)?;
+                let v = Notarize::<D, V>::read(reader)?;
                 Ok(Activity::Notarize(v))
             }
             1 => {
-                let v = Notarization::read(reader)?;
+                let v = Notarization::<D, V>::read(reader)?;
                 Ok(Activity::Notarization(v))
             }
             2 => {
-                let v = Nullify::read(reader)?;
+                let v = Nullify::<V>::read(reader)?;
                 Ok(Activity::Nullify(v))
             }
             3 => {
-                let v = Nullification::read(reader)?;
+                let v = Nullification::<V>::read(reader)?;
                 Ok(Activity::Nullification(v))
             }
             4 => {
-                let v = Finalize::read(reader)?;
+                let v = Finalize::<D, V>::read(reader)?;
                 Ok(Activity::Finalize(v))
             }
             5 => {
-                let v = Finalization::read(reader)?;
+                let v = Finalization::<D, V>::read(reader)?;
                 Ok(Activity::Finalization(v))
             }
             6 => {
-                let v = ConflictingNotarize::read(reader)?;
+                let v = ConflictingNotarize::<D, V>::read(reader)?;
                 Ok(Activity::ConflictingNotarize(v))
             }
             7 => {
-                let v = ConflictingFinalize::read(reader)?;
+                let v = ConflictingFinalize::<D, V>::read(reader)?;
                 Ok(Activity::ConflictingFinalize(v))
             }
             8 => {
-                let v = NullifyFinalize::read(reader)?;
+                let v = NullifyFinalize::<D, V>::read(reader)?;
                 Ok(Activity::NullifyFinalize(v))
             }
             _ => Err(Error::Invalid(
@@ -1154,7 +1160,7 @@ impl<D: Digest> Read for Activity<D> {
     }
 }
 
-impl<D: Digest> Viewable for Activity<D> {
+impl<D: Digest, V: Variant> Viewable for Activity<D, V> {
     fn view(&self) -> View {
         match self {
             Activity::Notarize(v) => v.view(),
@@ -1172,51 +1178,51 @@ impl<D: Digest> Viewable for Activity<D> {
 
 /// Seed represents a threshold signature over the current view.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
-pub struct Seed {
+pub struct Seed<V: Variant> {
     /// The view for which this seed is generated
     pub view: View,
     /// The partial signature on the seed
-    pub signature: Signature,
+    pub signature: V::Signature,
 }
 
-impl Seed {
+impl<V: Variant> Seed<V> {
     /// Creates a new seed with the given view and signature.
-    pub fn new(view: View, signature: Signature) -> Self {
+    pub fn new(view: View, signature: V::Signature) -> Self {
         Seed { view, signature }
     }
 
     /// Verifies the threshold signature on this seed.
-    pub fn verify(&self, namespace: &[u8], public_key: &Public) -> bool {
+    pub fn verify(&self, namespace: &[u8], public_key: &V::Public) -> bool {
         let seed_namespace = seed_namespace(namespace);
         let message = view_message(self.view);
-        verify_message(public_key, Some(&seed_namespace), &message, &self.signature).is_ok()
+        verify_message::<V>(public_key, Some(&seed_namespace), &message, &self.signature).is_ok()
     }
 }
 
-impl Viewable for Seed {
+impl<V: Variant> Viewable for Seed<V> {
     fn view(&self) -> View {
         self.view
     }
 }
 
-impl Write for Seed {
+impl<V: Variant> Write for Seed<V> {
     fn write(&self, writer: &mut impl BufMut) {
         UInt(self.view).write(writer);
         self.signature.write(writer);
     }
 }
 
-impl Read for Seed {
+impl<V: Variant> Read for Seed<V> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let view = UInt::read(reader)?.into();
-        let signature = Signature::read(reader)?;
+        let signature = V::Signature::read(reader)?;
         Ok(Seed { view, signature })
     }
 }
 
-impl EncodeSize for Seed {
+impl<V: Variant> EncodeSize for Seed<V> {
     fn encode_size(&self) -> usize {
         UInt(self.view).encode_size() + self.signature.encode_size()
     }
@@ -1225,7 +1231,7 @@ impl EncodeSize for Seed {
 /// ConflictingNotarize represents evidence of a Byzantine validator sending conflicting notarizes.
 /// This is used to prove that a validator has equivocated (voted for different proposals in the same view).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct ConflictingNotarize<D: Digest> {
+pub struct ConflictingNotarize<D: Digest, V: Variant> {
     /// The view in which the conflict occurred
     pub view: View,
     /// The parent view of the first conflicting proposal
@@ -1233,18 +1239,18 @@ pub struct ConflictingNotarize<D: Digest> {
     /// The payload of the first conflicting proposal
     pub payload_1: D,
     /// The signature on the first conflicting proposal
-    pub signature_1: PartialSignature<MinSig>,
+    pub signature_1: PartialSignature<V>,
     /// The parent view of the second conflicting proposal
     pub parent_2: View,
     /// The payload of the second conflicting proposal
     pub payload_2: D,
     /// The signature on the second conflicting proposal
-    pub signature_2: PartialSignature<MinSig>,
+    pub signature_2: PartialSignature<V>,
 }
 
-impl<D: Digest> ConflictingNotarize<D> {
+impl<D: Digest, V: Variant> ConflictingNotarize<D, V> {
     /// Creates a new conflicting notarize evidence from two conflicting notarizes.
-    pub fn new(notarize_1: Notarize<D>, notarize_2: Notarize<D>) -> Self {
+    pub fn new(notarize_1: Notarize<D, V>, notarize_2: Notarize<D, V>) -> Self {
         assert_eq!(notarize_1.view(), notarize_2.view());
         assert_eq!(notarize_1.signer(), notarize_2.signer());
         ConflictingNotarize {
@@ -1267,7 +1273,7 @@ impl<D: Digest> ConflictingNotarize<D> {
     }
 
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
-    pub fn verify(&self, namespace: &[u8], identity: &Poly<Public>) -> bool {
+    pub fn verify(&self, namespace: &[u8], identity: &Poly<V::Public>) -> bool {
         let (proposal_1, proposal_2) = self.proposals();
         let notarize_namespace = notarize_namespace(namespace);
         let notarize_message_1 = proposal_1.encode();
@@ -1280,7 +1286,7 @@ impl<D: Digest> ConflictingNotarize<D> {
             Some(notarize_namespace.as_ref()),
             notarize_message_2.as_ref(),
         );
-        partial_verify_multiple_messages(
+        partial_verify_multiple_messages::<V, _, _>(
             identity,
             self.signer(),
             &[notarize_message_1, notarize_message_2],
@@ -1290,19 +1296,19 @@ impl<D: Digest> ConflictingNotarize<D> {
     }
 }
 
-impl<D: Digest> Attributable for ConflictingNotarize<D> {
+impl<D: Digest, V: Variant> Attributable for ConflictingNotarize<D, V> {
     fn signer(&self) -> u32 {
         self.signature_1.index
     }
 }
 
-impl<D: Digest> Viewable for ConflictingNotarize<D> {
+impl<D: Digest, V: Variant> Viewable for ConflictingNotarize<D, V> {
     fn view(&self) -> View {
         self.view
     }
 }
 
-impl<D: Digest> Write for ConflictingNotarize<D> {
+impl<D: Digest, V: Variant> Write for ConflictingNotarize<D, V> {
     fn write(&self, writer: &mut impl BufMut) {
         UInt(self.view).write(writer);
         UInt(self.parent_1).write(writer);
@@ -1314,17 +1320,17 @@ impl<D: Digest> Write for ConflictingNotarize<D> {
     }
 }
 
-impl<D: Digest> Read for ConflictingNotarize<D> {
+impl<D: Digest, V: Variant> Read for ConflictingNotarize<D, V> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let view = UInt::read(reader)?.into();
         let parent_1 = UInt::read(reader)?.into();
         let payload_1 = D::read(reader)?;
-        let signature_1 = PartialSignature::read(reader)?;
+        let signature_1 = PartialSignature::<V>::read(reader)?;
         let parent_2 = UInt::read(reader)?.into();
         let payload_2 = D::read(reader)?;
-        let signature_2 = PartialSignature::read(reader)?;
+        let signature_2 = PartialSignature::<V>::read(reader)?;
         if signature_1.index != signature_2.index {
             return Err(Error::Invalid(
                 "consensus::threshold_simplex::ConflictingNotarize",
@@ -1343,7 +1349,7 @@ impl<D: Digest> Read for ConflictingNotarize<D> {
     }
 }
 
-impl<D: Digest> EncodeSize for ConflictingNotarize<D> {
+impl<D: Digest, V: Variant> EncodeSize for ConflictingNotarize<D, V> {
     fn encode_size(&self) -> usize {
         UInt(self.view).encode_size()
             + UInt(self.parent_1).encode_size()
@@ -1358,7 +1364,7 @@ impl<D: Digest> EncodeSize for ConflictingNotarize<D> {
 /// ConflictingFinalize represents evidence of a Byzantine validator sending conflicting finalizes.
 /// Similar to ConflictingNotarize, but for finalizes.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct ConflictingFinalize<D: Digest> {
+pub struct ConflictingFinalize<D: Digest, V: Variant> {
     /// The view in which the conflict occurred
     pub view: View,
     /// The parent view of the first conflicting proposal
@@ -1366,18 +1372,18 @@ pub struct ConflictingFinalize<D: Digest> {
     /// The payload of the first conflicting proposal
     pub payload_1: D,
     /// The signature on the first conflicting proposal
-    pub signature_1: PartialSignature<MinSig>,
+    pub signature_1: PartialSignature<V>,
     /// The parent view of the second conflicting proposal
     pub parent_2: View,
     /// The payload of the second conflicting proposal
     pub payload_2: D,
     /// The signature on the second conflicting proposal
-    pub signature_2: PartialSignature<MinSig>,
+    pub signature_2: PartialSignature<V>,
 }
 
-impl<D: Digest> ConflictingFinalize<D> {
+impl<D: Digest, V: Variant> ConflictingFinalize<D, V> {
     /// Creates a new conflicting finalize evidence from two conflicting finalizes.
-    pub fn new(finalize_1: Finalize<D>, finalize_2: Finalize<D>) -> Self {
+    pub fn new(finalize_1: Finalize<D, V>, finalize_2: Finalize<D, V>) -> Self {
         assert_eq!(finalize_1.view(), finalize_2.view());
         assert_eq!(finalize_1.signer(), finalize_2.signer());
         ConflictingFinalize {
@@ -1400,7 +1406,7 @@ impl<D: Digest> ConflictingFinalize<D> {
     }
 
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
-    pub fn verify(&self, namespace: &[u8], identity: &Poly<Public>) -> bool {
+    pub fn verify(&self, namespace: &[u8], identity: &Poly<V::Public>) -> bool {
         let (proposal_1, proposal_2) = self.proposals();
         let finalize_namespace = finalize_namespace(namespace);
         let finalize_message_1 = proposal_1.encode();
@@ -1413,7 +1419,7 @@ impl<D: Digest> ConflictingFinalize<D> {
             Some(finalize_namespace.as_ref()),
             finalize_message_2.as_ref(),
         );
-        partial_verify_multiple_messages(
+        partial_verify_multiple_messages::<V, _, _>(
             identity,
             self.signer(),
             &[finalize_message_1, finalize_message_2],
@@ -1423,19 +1429,19 @@ impl<D: Digest> ConflictingFinalize<D> {
     }
 }
 
-impl<D: Digest> Attributable for ConflictingFinalize<D> {
+impl<D: Digest, V: Variant> Attributable for ConflictingFinalize<D, V> {
     fn signer(&self) -> u32 {
         self.signature_1.index
     }
 }
 
-impl<D: Digest> Viewable for ConflictingFinalize<D> {
+impl<D: Digest, V: Variant> Viewable for ConflictingFinalize<D, V> {
     fn view(&self) -> View {
         self.view
     }
 }
 
-impl<D: Digest> Write for ConflictingFinalize<D> {
+impl<D: Digest, V: Variant> Write for ConflictingFinalize<D, V> {
     fn write(&self, writer: &mut impl BufMut) {
         UInt(self.view).write(writer);
         UInt(self.parent_1).write(writer);
@@ -1447,17 +1453,17 @@ impl<D: Digest> Write for ConflictingFinalize<D> {
     }
 }
 
-impl<D: Digest> Read for ConflictingFinalize<D> {
+impl<D: Digest, V: Variant> Read for ConflictingFinalize<D, V> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let view = UInt::read(reader)?.into();
         let parent_1 = UInt::read(reader)?.into();
         let payload_1 = D::read(reader)?;
-        let signature_1 = PartialSignature::read(reader)?;
+        let signature_1 = PartialSignature::<V>::read(reader)?;
         let parent_2 = UInt::read(reader)?.into();
         let payload_2 = D::read(reader)?;
-        let signature_2 = PartialSignature::read(reader)?;
+        let signature_2 = PartialSignature::<V>::read(reader)?;
         if signature_1.index != signature_2.index {
             return Err(Error::Invalid(
                 "consensus::threshold_simplex::ConflictingFinalize",
@@ -1476,7 +1482,7 @@ impl<D: Digest> Read for ConflictingFinalize<D> {
     }
 }
 
-impl<D: Digest> EncodeSize for ConflictingFinalize<D> {
+impl<D: Digest, V: Variant> EncodeSize for ConflictingFinalize<D, V> {
     fn encode_size(&self) -> usize {
         UInt(self.view).encode_size()
             + UInt(self.parent_1).encode_size()
@@ -1492,18 +1498,18 @@ impl<D: Digest> EncodeSize for ConflictingFinalize<D> {
 /// for the same view, which is contradictory behavior (a validator should either try to skip a view OR
 /// finalize a proposal, not both).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct NullifyFinalize<D: Digest> {
+pub struct NullifyFinalize<D: Digest, V: Variant> {
     /// The proposal that the validator tried to finalize
     pub proposal: Proposal<D>,
     /// The signature on the nullify
-    pub view_signature: PartialSignature<MinSig>,
+    pub view_signature: PartialSignature<V>,
     /// The signature on the finalize
-    pub finalize_signature: PartialSignature<MinSig>,
+    pub finalize_signature: PartialSignature<V>,
 }
 
-impl<D: Digest> NullifyFinalize<D> {
+impl<D: Digest, V: Variant> NullifyFinalize<D, V> {
     /// Creates a new nullify-finalize evidence from a nullify and a finalize.
-    pub fn new(nullify: Nullify, finalize: Finalize<D>) -> Self {
+    pub fn new(nullify: Nullify<V>, finalize: Finalize<D, V>) -> Self {
         assert_eq!(nullify.view(), finalize.view());
         assert_eq!(nullify.signer(), finalize.signer());
         NullifyFinalize {
@@ -1514,14 +1520,14 @@ impl<D: Digest> NullifyFinalize<D> {
     }
 
     /// Verifies that both the nullify and finalize signatures are valid, proving Byzantine behavior.
-    pub fn verify(&self, namespace: &[u8], identity: &Poly<Public>) -> bool {
+    pub fn verify(&self, namespace: &[u8], identity: &Poly<V::Public>) -> bool {
         let nullify_namespace = nullify_namespace(namespace);
         let nullify_message = view_message(self.proposal.view);
         let nullify_message = (Some(nullify_namespace.as_ref()), nullify_message.as_ref());
         let finalize_namespace = finalize_namespace(namespace);
         let finalize_message = self.proposal.encode();
         let finalize_message = (Some(finalize_namespace.as_ref()), finalize_message.as_ref());
-        partial_verify_multiple_messages(
+        partial_verify_multiple_messages::<V, _, _>(
             identity,
             self.signer(),
             &[nullify_message, finalize_message],
@@ -1531,19 +1537,19 @@ impl<D: Digest> NullifyFinalize<D> {
     }
 }
 
-impl<D: Digest> Attributable for NullifyFinalize<D> {
+impl<D: Digest, V: Variant> Attributable for NullifyFinalize<D, V> {
     fn signer(&self) -> u32 {
         self.view_signature.index
     }
 }
 
-impl<D: Digest> Viewable for NullifyFinalize<D> {
+impl<D: Digest, V: Variant> Viewable for NullifyFinalize<D, V> {
     fn view(&self) -> View {
         self.proposal.view()
     }
 }
 
-impl<D: Digest> Write for NullifyFinalize<D> {
+impl<D: Digest, V: Variant> Write for NullifyFinalize<D, V> {
     fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
         self.view_signature.write(writer);
@@ -1551,13 +1557,13 @@ impl<D: Digest> Write for NullifyFinalize<D> {
     }
 }
 
-impl<D: Digest> Read for NullifyFinalize<D> {
+impl<D: Digest, V: Variant> Read for NullifyFinalize<D, V> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
-        let view_signature = PartialSignature::read(reader)?;
-        let finalize_signature = PartialSignature::read(reader)?;
+        let view_signature = PartialSignature::<V>::read(reader)?;
+        let finalize_signature = PartialSignature::<V>::read(reader)?;
         if view_signature.index != finalize_signature.index {
             return Err(Error::Invalid(
                 "consensus::threshold_simplex::NullifyFinalize",
@@ -1572,7 +1578,7 @@ impl<D: Digest> Read for NullifyFinalize<D> {
     }
 }
 
-impl<D: Digest> EncodeSize for NullifyFinalize<D> {
+impl<D: Digest, V: Variant> EncodeSize for NullifyFinalize<D, V> {
     fn encode_size(&self) -> usize {
         self.proposal.encode_size()
             + self.view_signature.encode_size()
@@ -1587,7 +1593,7 @@ mod tests {
     use commonware_cryptography::{
         bls12381::{
             dkg::ops,
-            primitives::{group::Share, ops::threshold_signature_recover, poly},
+            primitives::{group::Share, ops::threshold_signature_recover, poly, variant::MinSig},
         },
         sha256::Digest as Sha256,
     };
@@ -1602,9 +1608,9 @@ mod tests {
     }
 
     // Helper function to generate BLS shares and polynomial
-    fn generate_test_data(n: usize, t: u32, seed: u64) -> (poly::Public, Vec<Share>) {
+    fn generate_test_data(n: usize, t: u32, seed: u64) -> (poly::Public<MinSig>, Vec<Share>) {
         let mut rng = StdRng::seed_from_u64(seed);
-        ops::generate_shares(&mut rng, None, n as u32, t)
+        ops::generate_shares::<_, MinSig>(&mut rng, None, n as u32, t)
     }
 
     #[test]
@@ -1625,7 +1631,7 @@ mod tests {
         let notarize = Notarize::sign(NAMESPACE, &shares[0], proposal);
 
         let encoded = notarize.encode();
-        let decoded = Notarize::<Sha256>::decode(encoded).unwrap();
+        let decoded = Notarize::<Sha256, MinSig>::decode(encoded).unwrap();
 
         assert_eq!(notarize, decoded);
         assert!(decoded.verify(NAMESPACE, &commitment));
@@ -1642,23 +1648,24 @@ mod tests {
         // Create notarizes
         let notarizes: Vec<_> = shares
             .iter()
-            .map(|s| Notarize::sign(NAMESPACE, s, proposal.clone()))
+            .map(|s| Notarize::<_, MinSig>::sign(NAMESPACE, s, proposal.clone()))
             .collect();
 
         // Recover threshold signature
         let proposal_partials = notarizes.iter().map(|n| &n.proposal_signature);
-        let proposal_signature = threshold_signature_recover(t, proposal_partials).unwrap();
+        let proposal_signature =
+            threshold_signature_recover::<MinSig, _>(t, proposal_partials).unwrap();
         let seed_partials = notarizes.iter().map(|n| &n.seed_signature);
-        let seed_signature = threshold_signature_recover(t, seed_partials).unwrap();
+        let seed_signature = threshold_signature_recover::<MinSig, _>(t, seed_partials).unwrap();
 
         // Create notarization
         let notarization = Notarization::new(proposal, proposal_signature, seed_signature);
         let encoded = notarization.encode();
-        let decoded = Notarization::<Sha256>::decode(encoded).unwrap();
+        let decoded = Notarization::<Sha256, MinSig>::decode(encoded).unwrap();
         assert_eq!(notarization, decoded);
 
         // Verify the notarization
-        let public_key = poly::public(&commitment);
+        let public_key = poly::public::<MinSig, _>(&commitment);
         assert!(decoded.verify(NAMESPACE, public_key));
 
         // Create seed
@@ -1677,7 +1684,7 @@ mod tests {
         let t = quorum(n as u32);
         let (commitment, shares) = generate_test_data(n, t, 0);
 
-        let nullify = Nullify::sign(NAMESPACE, &shares[0], 10);
+        let nullify = Nullify::<MinSig>::sign(NAMESPACE, &shares[0], 10);
 
         let encoded = nullify.encode();
         let decoded = Nullify::decode(encoded).unwrap();
@@ -1695,7 +1702,7 @@ mod tests {
         // Create nullifies
         let nullifies: Vec<_> = shares
             .iter()
-            .map(|s| Nullify::sign(NAMESPACE, s, 10))
+            .map(|s| Nullify::<MinSig>::sign(NAMESPACE, s, 10))
             .collect();
 
         // Recover threshold signature
@@ -1734,7 +1741,7 @@ mod tests {
         let finalize = Finalize::sign(NAMESPACE, &shares[0], proposal);
 
         let encoded = finalize.encode();
-        let decoded = Finalize::<Sha256>::decode(encoded).unwrap();
+        let decoded = Finalize::<Sha256, MinSig>::decode(encoded).unwrap();
 
         assert_eq!(finalize, decoded);
         assert!(decoded.verify(NAMESPACE, &commitment));
@@ -1767,7 +1774,7 @@ mod tests {
         // Create finalization
         let finalization = Finalization::new(proposal, proposal_signature, seed_signature);
         let encoded = finalization.encode();
-        let decoded = Finalization::<Sha256>::decode(encoded).unwrap();
+        let decoded = Finalization::<Sha256, MinSig>::decode(encoded).unwrap();
         assert_eq!(finalization, decoded);
 
         // Verify the finalization
