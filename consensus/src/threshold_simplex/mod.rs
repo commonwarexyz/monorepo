@@ -701,8 +701,7 @@ mod tests {
         unclean_shutdown::<MinSig>();
     }
 
-    #[test_traced]
-    fn test_backfill() {
+    fn backfill<V: Variant>() {
         // Create context
         let n = 4;
         let threshold = quorum(n);
@@ -751,7 +750,7 @@ mod tests {
             .await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
+            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -895,7 +894,7 @@ mod tests {
             // Configure engine
             let mut participants = BTreeMap::new();
             participants.insert(0, (public.clone(), validators.clone(), shares[0].clone()));
-            let supervisor_config = mocks::supervisor::Config {
+            let supervisor_config = mocks::supervisor::Config::<_, V> {
                 namespace: namespace.clone(),
                 participants,
             };
@@ -949,6 +948,12 @@ mod tests {
                 latest = monitor.next().await.expect("event missing");
             }
         });
+    }
+
+    #[test_traced]
+    fn test_backfill() {
+        backfill::<MinPk>();
+        backfill::<MinSig>();
     }
 
     #[test_traced]
