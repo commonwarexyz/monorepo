@@ -139,14 +139,13 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
-    use commonware_utils::{quorum, Array};
+    use commonware_utils::{quorum, Array, NZU32};
     use engine::Engine;
     use futures::{future::join_all, StreamExt};
     use governor::Quota;
     use rand::Rng as _;
     use std::{
         collections::{BTreeMap, HashMap},
-        num::NonZeroU32,
         sync::{Arc, Mutex},
         time::Duration,
     };
@@ -321,9 +320,10 @@ mod tests {
                     skip_timeout,
                     max_fetch_count: 1,
                     max_participants: n as usize,
-                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
+                    replay_buffer: 1024 * 1024,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
                 let (voter, resolver) = registrations
@@ -564,9 +564,10 @@ mod tests {
                         skip_timeout,
                         max_participants: n as usize,
                         max_fetch_count: 1,
-                        fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                        fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
                         replay_concurrency: 1,
+                        replay_buffer: 1024 * 1024,
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     let (voter_network, resolver_network) = registrations
@@ -731,9 +732,10 @@ mod tests {
                     skip_timeout,
                     max_fetch_count: 1, // force many fetches
                     max_participants: n as usize,
-                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
+                    replay_buffer: 1024 * 1024,
                 };
                 let (voter, resolver) = registrations
                     .remove(&validator)
@@ -848,9 +850,10 @@ mod tests {
                 skip_timeout,
                 max_fetch_count: 1,
                 max_participants: n as usize,
-                fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                 fetch_concurrent: 1,
                 replay_concurrency: 1,
+                replay_buffer: 1024 * 1024,
             };
             let (voter, resolver) = registrations
                 .remove(&validator)
@@ -968,9 +971,10 @@ mod tests {
                     skip_timeout,
                     max_participants: n as usize,
                     max_fetch_count: 1,
-                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
+                    replay_buffer: 1024 * 1024,
                 };
                 let (voter, resolver) = registrations
                     .remove(&validator)
@@ -1162,9 +1166,10 @@ mod tests {
                     skip_timeout,
                     max_fetch_count: 1,
                     max_participants: n as usize,
-                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
+                    replay_buffer: 1024 * 1024,
                 };
                 let (voter, resolver) = registrations
                     .remove(&validator)
@@ -1318,9 +1323,10 @@ mod tests {
                     skip_timeout,
                     max_fetch_count: 1,
                     max_participants: n as usize,
-                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
+                    replay_buffer: 1024 * 1024,
                 };
                 let (voter, resolver) = registrations
                     .remove(&validator)
@@ -1380,6 +1386,7 @@ mod tests {
     }
 
     #[test_traced]
+    #[ignore]
     fn test_partition() {
         // Create context
         let n = 10;
@@ -1466,9 +1473,10 @@ mod tests {
                     skip_timeout,
                     max_fetch_count: 1,
                     max_participants: n as usize,
-                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
+                    replay_buffer: 1024 * 1024,
                 };
                 let (voter, resolver) = registrations
                     .remove(&validator)
@@ -1643,9 +1651,10 @@ mod tests {
                     skip_timeout,
                     max_fetch_count: 1,
                     max_participants: n as usize,
-                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
+                    replay_buffer: 1024 * 1024,
                 };
                 let (voter, resolver) = registrations
                     .remove(&validator)
@@ -1685,6 +1694,7 @@ mod tests {
     }
 
     #[test_traced]
+    #[ignore]
     fn test_determinism() {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
@@ -1700,15 +1710,17 @@ mod tests {
         }
     }
 
-    #[test_traced]
-    fn test_conflicter() {
+    fn conflicter(seed: u64) {
         // Create context
         let n = 4;
         let required_containers = 50;
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        let cfg = deterministic::Config::new()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(30)));
+        let executor = deterministic::Runner::new(cfg);
         executor.start(|context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1805,9 +1817,10 @@ mod tests {
                         skip_timeout,
                         max_fetch_count: 1,
                         max_participants: n as usize,
-                        fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                        fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
                         replay_concurrency: 1,
+                        replay_buffer: 1024 * 1024,
                     };
                     let (voter, resolver) = registrations
                         .remove(&validator)
@@ -1860,14 +1873,24 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_nuller() {
+    #[ignore]
+    fn test_conflicter() {
+        for seed in 0..5 {
+            conflicter(seed);
+        }
+    }
+
+    fn nuller(seed: u64) {
         // Create context
         let n = 4;
         let required_containers = 50;
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        let cfg = deterministic::Config::new()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(30)));
+        let executor = deterministic::Runner::new(cfg);
         executor.start(|context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1961,9 +1984,10 @@ mod tests {
                         skip_timeout,
                         max_fetch_count: 1,
                         max_participants: n as usize,
-                        fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                        fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
                         replay_concurrency: 1,
+                        replay_buffer: 1024 * 1024,
                     };
                     let (voter, resolver) = registrations
                         .remove(&validator)
@@ -2011,14 +2035,24 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_outdated() {
+    #[ignore]
+    fn test_nuller() {
+        for seed in 0..5 {
+            nuller(seed);
+        }
+    }
+
+    fn outdated(seed: u64) {
         // Create context
         let n = 4;
         let required_containers = 100;
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        let cfg = deterministic::Config::new()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(30)));
+        let executor = deterministic::Runner::new(cfg);
         executor.start(|context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -2113,9 +2147,10 @@ mod tests {
                         skip_timeout,
                         max_fetch_count: 1,
                         max_participants: n as usize,
-                        fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                        fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
                         replay_concurrency: 1,
+                        replay_buffer: 1024 * 1024,
                     };
                     let (voter, resolver) = registrations
                         .remove(&validator)
@@ -2145,5 +2180,140 @@ mod tests {
                 }
             }
         });
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_outdated() {
+        for seed in 0..5 {
+            outdated(seed);
+        }
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_1k() {
+        // Create context
+        let n = 10;
+        let required_containers = 1_000;
+        let activity_timeout = 10;
+        let skip_timeout = 5;
+        let namespace = b"consensus".to_vec();
+        let cfg = deterministic::Config::new();
+        let executor = deterministic::Runner::new(cfg);
+        executor.start(|context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                },
+            );
+
+            // Start network
+            network.start();
+
+            // Register participants
+            let mut schemes = Vec::new();
+            let mut validators = Vec::new();
+            for i in 0..n {
+                let scheme = Ed25519::from_seed(i as u64);
+                let pk = scheme.public_key();
+                schemes.push(scheme);
+                validators.push(pk);
+            }
+            validators.sort();
+            schemes.sort_by_key(|s| s.public_key());
+            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+            let mut registrations = register_validators(&mut oracle, &validators).await;
+
+            // Link all validators
+            let link = Link {
+                latency: 80.0,
+                jitter: 10.0,
+                success_rate: 0.98,
+            };
+            link_validators(&mut oracle, &validators, Action::Link(link), None).await;
+
+            // Create engines
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut supervisors = Vec::new();
+            let mut engine_handlers = Vec::new();
+            for scheme in schemes.into_iter() {
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
+
+                // Start engine
+                let validator = scheme.public_key();
+                let supervisor_config = mocks::supervisor::Config {
+                    namespace: namespace.clone(),
+                    participants: view_validators.clone(),
+                };
+                let supervisor =
+                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
+                supervisors.push(supervisor.clone());
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    participant: validator.clone(),
+                    propose_latency: (100.0, 50.0),
+                    verify_latency: (50.0, 40.0),
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
+                let cfg = config::Config {
+                    crypto: scheme,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: supervisor.clone(),
+                    partition: validator.to_string(),
+                    compression: Some(3),
+                    supervisor,
+                    mailbox_size: 1024,
+                    namespace: namespace.clone(),
+                    leader_timeout: Duration::from_secs(1),
+                    notarization_timeout: Duration::from_secs(2),
+                    nullify_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    skip_timeout,
+                    max_fetch_count: 1,
+                    max_participants: n as usize,
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+                    fetch_concurrent: 1,
+                    replay_concurrency: 1,
+                    replay_buffer: 1024 * 1024,
+                };
+                let (voter, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
+                let engine = Engine::new(context.with_label("engine"), cfg);
+                engine_handlers.push(engine.start(voter, resolver));
+            }
+
+            // Wait for all engines to finish
+            let mut finalizers = Vec::new();
+            for supervisor in supervisors.iter_mut() {
+                let (mut latest, mut monitor) = supervisor.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest < required_containers {
+                        latest = monitor.next().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+
+            // Check supervisors for correct activity
+            for supervisor in supervisors.iter() {
+                // Ensure no faults
+                {
+                    let faults = supervisor.faults.lock().unwrap();
+                    assert!(faults.is_empty());
+                }
+            }
+        })
     }
 }

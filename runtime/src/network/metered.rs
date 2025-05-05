@@ -101,6 +101,10 @@ impl<L: crate::Listener> crate::Listener for Listener<L> {
             },
         ))
     }
+
+    fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {
+        self.inner.local_addr()
+    }
 }
 
 /// A metered network implementation which wraps another

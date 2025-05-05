@@ -38,9 +38,7 @@ mod network;
 mod storage;
 pub mod telemetry;
 mod utils;
-pub use utils::{
-    create_pool, reschedule, Handle, RwLock, RwLockReadGuard, RwLockWriteGuard, Signal, Signaler,
-};
+pub use utils::*;
 
 /// Prefix for runtime metrics.
 const METRICS_PREFIX: &str = "runtime";
@@ -227,6 +225,9 @@ pub type SinkOf<N> = <<N as Network>::Listener as Listener>::Sink;
 /// Syntactic sugar for the type of [Stream] used by a given [Network] N.
 pub type StreamOf<N> = <<N as Network>::Listener as Listener>::Stream;
 
+/// Syntactic sugar for the type of [Listener] used by a given [Network] N.
+pub type ListenerOf<N> = <N as crate::Network>::Listener;
+
 /// Interface that any runtime must implement to create
 /// network connections.
 pub trait Network: Clone + Send + Sync + 'static {
@@ -262,6 +263,9 @@ pub trait Listener: Sync + Send + 'static {
     fn accept(
         &mut self,
     ) -> impl Future<Output = Result<(SocketAddr, Self::Sink, Self::Stream), Error>> + Send;
+
+    /// Returns the local address of the listener.
+    fn local_addr(&self) -> Result<SocketAddr, std::io::Error>;
 }
 
 /// Interface that any runtime must implement to send

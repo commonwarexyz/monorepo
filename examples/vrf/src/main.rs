@@ -82,12 +82,9 @@ use clap::{value_parser, Arg, Command};
 use commonware_cryptography::{Ed25519, Signer};
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{tokio, Metrics, Runner};
-use commonware_utils::quorum;
+use commonware_utils::{quorum, NZU32};
 use governor::Quota;
-use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-    num::NonZeroU32,
-};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::{str::FromStr, time::Duration};
 use tracing::info;
 
@@ -257,7 +254,7 @@ fn main() {
             let forger = matches.get_flag("forger");
             let (contributor_sender, contributor_receiver) = network.register(
                 handlers::DKG_CHANNEL,
-                Quota::per_second(NonZeroU32::new(10).unwrap()),
+                Quota::per_second(NZU32!(10)),
                 DEFAULT_MESSAGE_BACKLOG,
                 COMPRESSION_LEVEL,
             );
@@ -277,7 +274,7 @@ fn main() {
             // Create vrf
             let (vrf_sender, vrf_receiver) = network.register(
                 handlers::VRF_CHANNEL,
-                Quota::per_second(NonZeroU32::new(10).unwrap()),
+                Quota::per_second(NZU32!(10)),
                 DEFAULT_MESSAGE_BACKLOG,
                 None,
             );
@@ -292,7 +289,7 @@ fn main() {
         } else {
             let (arbiter_sender, arbiter_receiver) = network.register(
                 handlers::DKG_CHANNEL,
-                Quota::per_second(NonZeroU32::new(10).unwrap()),
+                Quota::per_second(NZU32!(10)),
                 DEFAULT_MESSAGE_BACKLOG,
                 COMPRESSION_LEVEL,
             );

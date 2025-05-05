@@ -85,6 +85,7 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+    use commonware_utils::NZU32;
     use futures::{SinkExt, StreamExt};
     use std::time::Duration;
 
@@ -170,9 +171,7 @@ mod tests {
                 mailbox_size: MAILBOX_SIZE,
                 requester_config: commonware_p2p::utils::requester::Config {
                     public_key: scheme.public_key(),
-                    rate_limit: governor::Quota::per_second(
-                        std::num::NonZeroU32::new(RATE_LIMIT).unwrap(),
-                    ),
+                    rate_limit: governor::Quota::per_second(NZU32!(RATE_LIMIT)),
                     initial: INITIAL_DURATION,
                     timeout: TIMEOUT,
                 },

@@ -15,10 +15,12 @@ use blst::{
     blst_fr_from_uint64, blst_fr_inverse, blst_fr_mul, blst_fr_sub, blst_hash_to_g1,
     blst_hash_to_g2, blst_keygen, blst_p1, blst_p1_add_or_double, blst_p1_affine, blst_p1_compress,
     blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult, blst_p1_to_affine,
-    blst_p1_uncompress, blst_p2, blst_p2_add_or_double, blst_p2_affine, blst_p2_compress,
-    blst_p2_from_affine, blst_p2_in_g2, blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine,
-    blst_p2_uncompress, blst_scalar, blst_scalar_from_bendian, blst_scalar_from_fr, blst_sk_check,
-    Pairing, BLS12_381_G1, BLS12_381_G2, BLS12_381_NEG_G1, BLST_ERROR,
+    blst_p1_uncompress, blst_p1s_mult_pippenger, blst_p1s_mult_pippenger_scratch_sizeof, blst_p2,
+    blst_p2_add_or_double, blst_p2_affine, blst_p2_compress, blst_p2_from_affine, blst_p2_in_g2,
+    blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
+    blst_p2s_mult_pippenger_scratch_sizeof, blst_scalar, blst_scalar_from_bendian,
+    blst_scalar_from_fr, blst_sk_check, Pairing, BLS12_381_G1, BLS12_381_G2, BLS12_381_NEG_G1,
+    BLST_ERROR,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -32,6 +34,7 @@ use rand::RngCore;
 use std::{
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
+    mem::MaybeUninit,
     ptr,
 };
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -62,6 +65,9 @@ pub trait Element:
 pub trait Point: Element {
     /// Maps the provided data to a group element.
     fn map(&mut self, dst: DST, message: &[u8]);
+
+    /// Performs a multi‑scalar multiplication of the provided points and scalars.
+    fn msm(points: &[Self], scalars: &[Scalar]) -> Self;
 }
 
 /// Wrapper around [`blst_fr`] that represents an element of the BLS12‑381
@@ -236,6 +242,13 @@ impl Scalar {
         }
         slice
     }
+
+    /// Converts the scalar to the raw `blst_scalar` type.
+    pub(crate) fn as_blst_scalar(&self) -> blst_scalar {
+        let mut scalar = blst_scalar::default();
+        unsafe { blst_scalar_from_fr(&mut scalar, &self.0) };
+        scalar
+    }
 }
 
 impl Element for Scalar {
@@ -395,6 +408,18 @@ impl G1 {
         }
         slice
     }
+
+    /// Converts the G1 point to its affine representation.
+    pub(crate) fn as_blst_p1_affine(&self) -> blst_p1_affine {
+        let mut affine = blst_p1_affine::default();
+        unsafe { blst_p1_to_affine(&mut affine, &self.0) };
+        affine
+    }
+
+    /// Creates a G1 point from a raw `blst_p1`.
+    pub(crate) fn from_blst_p1(p: blst_p1) -> Self {
+        Self(p)
+    }
 }
 
 impl Element for G1 {
@@ -493,6 +518,64 @@ impl Point for G1 {
             );
         }
     }
+
+    /// Performs multi-scalar multiplication (MSM) on G1 points using Pippenger's algorithm.
+    /// Computes `sum(scalars[i] * points[i])`.
+    ///
+    /// Filters out pairs where the point is the identity element (infinity).
+    /// Returns an error if the lengths of the input slices mismatch.
+    fn msm(points: &[Self], scalars: &[Scalar]) -> Self {
+        // Assert input validity
+        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
+
+        // Prepare points (affine) and scalars (raw blst_scalar)
+        let mut points_filtered = Vec::with_capacity(points.len());
+        let mut scalars_filtered = Vec::with_capacity(scalars.len());
+        for (point, scalar) in points.iter().zip(scalars.iter()) {
+            // `blst` does not filter out infinity, so we must ensure it is impossible.
+            //
+            // Sources:
+            // * https://github.com/supranational/blst/blob/cbc7e166a10d7286b91a3a7bea341e708962db13/src/multi_scalar.c#L10-L12
+            // * https://github.com/MystenLabs/fastcrypto/blob/0acf0ff1a163c60e0dec1e16e4fbad4a4cf853bd/fastcrypto/src/groups/bls12381.rs#L160-L194
+            if *point == G1::zero() || scalar == &Scalar::zero() {
+                continue;
+            }
+
+            // Add to filtered vectors
+            points_filtered.push(point.as_blst_p1_affine());
+            scalars_filtered.push(scalar.as_blst_scalar());
+        }
+
+        // If all points were filtered, return zero.
+        if points_filtered.is_empty() {
+            return G1::zero();
+        }
+
+        // Create vectors of pointers for the blst API.
+        // These vectors hold pointers *to* the elements in the filtered vectors above.
+        let points: Vec<*const blst_p1_affine> =
+            points_filtered.iter().map(|p| p as *const _).collect();
+        let scalars: Vec<*const u8> = scalars_filtered.iter().map(|s| s.b.as_ptr()).collect();
+
+        // Allocate scratch space for Pippenger's algorithm.
+        let scratch_size = unsafe { blst_p1s_mult_pippenger_scratch_sizeof(points.len()) };
+        let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8];
+
+        // Perform multi-scalar multiplication
+        let mut msm_result = blst_p1::default();
+        unsafe {
+            blst_p1s_mult_pippenger(
+                &mut msm_result,
+                points.as_ptr(),
+                points.len(),
+                scalars.as_ptr(),
+                SCALAR_BITS, // Using SCALAR_BITS (255) ensures full scalar range
+                scratch.as_mut_ptr() as *mut _,
+            );
+        }
+
+        G1::from_blst_p1(msm_result)
+    }
 }
 
 impl Debug for G1 {
@@ -515,6 +598,18 @@ impl G2 {
             blst_p2_compress(slice.as_mut_ptr(), &self.0);
         }
         slice
+    }
+
+    /// Converts the G2 point to its affine representation.
+    pub(crate) fn as_blst_p2_affine(&self) -> blst_p2_affine {
+        let mut affine = blst_p2_affine::default();
+        unsafe { blst_p2_to_affine(&mut affine, &self.0) };
+        affine
+    }
+
+    /// Creates a G2 point from a raw `blst_p2`.
+    pub(crate) fn from_blst_p2(p: blst_p2) -> Self {
+        Self(p)
     }
 }
 
@@ -613,6 +708,61 @@ impl Point for G2 {
                 0,
             );
         }
+    }
+
+    /// Performs multi-scalar multiplication (MSM) on G2 points using Pippenger's algorithm.
+    /// Computes `sum(scalars[i] * points[i])`.
+    ///
+    /// Filters out pairs where the point is the identity element (infinity).
+    /// Returns an error if the lengths of the input slices mismatch.
+    fn msm(points: &[Self], scalars: &[Scalar]) -> Self {
+        // Assert input validity
+        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
+
+        // Prepare points (affine) and scalars (raw blst_scalar), filtering identity points
+        let mut points_filtered = Vec::with_capacity(points.len());
+        let mut scalars_filtered = Vec::with_capacity(scalars.len());
+        for (point, scalar) in points.iter().zip(scalars.iter()) {
+            // `blst` does not filter out infinity, so we must ensure it is impossible.
+            //
+            // Sources:
+            // * https://github.com/supranational/blst/blob/cbc7e166a10d7286b91a3a7bea341e708962db13/src/multi_scalar.c#L10-L12
+            // * https://github.com/MystenLabs/fastcrypto/blob/0acf0ff1a163c60e0dec1e16e4fbad4a4cf853bd/fastcrypto/src/groups/bls12381.rs#L160-L194
+            if *point == G2::zero() || scalar == &Scalar::zero() {
+                continue;
+            }
+            points_filtered.push(point.as_blst_p2_affine());
+            scalars_filtered.push(scalar.as_blst_scalar());
+        }
+
+        // If all points were filtered, return zero.
+        if points_filtered.is_empty() {
+            return G2::zero();
+        }
+
+        // Create vectors of pointers for the blst API
+        let points: Vec<*const blst_p2_affine> =
+            points_filtered.iter().map(|p| p as *const _).collect();
+        let scalars: Vec<*const u8> = scalars_filtered.iter().map(|s| s.b.as_ptr()).collect();
+
+        // Allocate scratch space for Pippenger algorithm
+        let scratch_size = unsafe { blst_p2s_mult_pippenger_scratch_sizeof(points.len()) };
+        let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8];
+
+        // Perform multi-scalar multiplication
+        let mut msm_result = blst_p2::default();
+        unsafe {
+            blst_p2s_mult_pippenger(
+                &mut msm_result,
+                points.as_ptr(),
+                points.len(),
+                scalars.as_ptr(),
+                SCALAR_BITS, // Using SCALAR_BITS (255) ensures full scalar range
+                scratch.as_mut_ptr() as *mut _,
+            );
+        }
+
+        G2::from_blst_p2(msm_result)
     }
 }
 
@@ -718,5 +868,221 @@ mod tests {
         assert_eq!(encoded.len(), G2::SIZE);
         let decoded = G2::decode(&mut encoded).unwrap();
         assert_eq!(original, decoded);
+    }
+
+    /// Naive calculation of Multi-Scalar Multiplication: sum(scalar * point)
+    fn naive_msm<P: Point>(points: &[P], scalars: &[Scalar]) -> P {
+        assert_eq!(points.len(), scalars.len());
+        let mut total = P::zero();
+        for (point, scalar) in points.iter().zip(scalars.iter()) {
+            // Skip identity points or zero scalars, similar to the optimized MSM
+            if *point == P::zero() || *scalar == Scalar::zero() {
+                continue;
+            }
+            let mut term = point.clone();
+            term.mul(scalar);
+            total.add(&term);
+        }
+        total
+    }
+
+    #[test]
+    fn test_g1_msm() {
+        let mut rng = thread_rng();
+        let n = 10; // Number of points/scalars
+
+        // Case 1: Random points and scalars
+        let points_g1: Vec<G1> = (0..n)
+            .map(|_| {
+                let mut point = G1::one();
+                point.mul(&Scalar::rand(&mut rng));
+                point
+            })
+            .collect();
+        let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::rand(&mut rng)).collect();
+        let expected_g1 = naive_msm(&points_g1, &scalars);
+        let result_g1 = G1::msm(&points_g1, &scalars);
+        assert_eq!(expected_g1, result_g1, "G1 MSM basic case failed");
+
+        // Case 2: Include identity point
+        let mut points_with_zero_g1 = points_g1.clone();
+        points_with_zero_g1[n / 2] = G1::zero();
+        let expected_zero_pt_g1 = naive_msm(&points_with_zero_g1, &scalars);
+        let result_zero_pt_g1 = G1::msm(&points_with_zero_g1, &scalars);
+        assert_eq!(
+            expected_zero_pt_g1, result_zero_pt_g1,
+            "G1 MSM with identity point failed"
+        );
+
+        // Case 3: Include zero scalar
+        let mut scalars_with_zero = scalars.clone();
+        scalars_with_zero[n / 2] = Scalar::zero();
+        let expected_zero_sc_g1 = naive_msm(&points_g1, &scalars_with_zero);
+        let result_zero_sc_g1 = G1::msm(&points_g1, &scalars_with_zero);
+        assert_eq!(
+            expected_zero_sc_g1, result_zero_sc_g1,
+            "G1 MSM with zero scalar failed"
+        );
+
+        // Case 4: All points identity
+        let zero_points_g1 = vec![G1::zero(); n];
+        let expected_all_zero_pt_g1 = naive_msm(&zero_points_g1, &scalars);
+        let result_all_zero_pt_g1 = G1::msm(&zero_points_g1, &scalars);
+        assert_eq!(
+            expected_all_zero_pt_g1,
+            G1::zero(),
+            "G1 MSM all identity points (naive) failed"
+        );
+        assert_eq!(
+            result_all_zero_pt_g1,
+            G1::zero(),
+            "G1 MSM all identity points failed"
+        );
+
+        // Case 5: All scalars zero
+        let zero_scalars = vec![Scalar::zero(); n];
+        let expected_all_zero_sc_g1 = naive_msm(&points_g1, &zero_scalars);
+        let result_all_zero_sc_g1 = G1::msm(&points_g1, &zero_scalars);
+        assert_eq!(
+            expected_all_zero_sc_g1,
+            G1::zero(),
+            "G1 MSM all zero scalars (naive) failed"
+        );
+        assert_eq!(
+            result_all_zero_sc_g1,
+            G1::zero(),
+            "G1 MSM all zero scalars failed"
+        );
+
+        // Case 6: Single element
+        let single_point_g1 = [points_g1[0]];
+        let single_scalar = [scalars[0].clone()];
+        let expected_single_g1 = naive_msm(&single_point_g1, &single_scalar);
+        let result_single_g1 = G1::msm(&single_point_g1, &single_scalar);
+        assert_eq!(
+            expected_single_g1, result_single_g1,
+            "G1 MSM single element failed"
+        );
+
+        // Case 7: Empty input
+        let empty_points_g1: [G1; 0] = [];
+        let empty_scalars: [Scalar; 0] = [];
+        let expected_empty_g1 = naive_msm(&empty_points_g1, &empty_scalars);
+        let result_empty_g1 = G1::msm(&empty_points_g1, &empty_scalars);
+        assert_eq!(expected_empty_g1, G1::zero(), "G1 MSM empty (naive) failed");
+        assert_eq!(result_empty_g1, G1::zero(), "G1 MSM empty failed");
+
+        // Case 8: Random points and scalars (big)
+        let points_g1: Vec<G1> = (0..50_000)
+            .map(|_| {
+                let mut point = G1::one();
+                point.mul(&Scalar::rand(&mut rng));
+                point
+            })
+            .collect();
+        let scalars: Vec<Scalar> = (0..50_000).map(|_| Scalar::rand(&mut rng)).collect();
+        let expected_g1 = naive_msm(&points_g1, &scalars);
+        let result_g1 = G1::msm(&points_g1, &scalars);
+        assert_eq!(expected_g1, result_g1, "G1 MSM basic case failed");
+    }
+
+    #[test]
+    fn test_g2_msm() {
+        let mut rng = thread_rng();
+        let n = 10; // Number of points/scalars
+
+        // Case 1: Random points and scalars
+        let points_g2: Vec<G2> = (0..n)
+            .map(|_| {
+                let mut point = G2::one();
+                point.mul(&Scalar::rand(&mut rng));
+                point
+            })
+            .collect();
+        let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::rand(&mut rng)).collect();
+        let expected_g2 = naive_msm(&points_g2, &scalars);
+        let result_g2 = G2::msm(&points_g2, &scalars);
+        assert_eq!(expected_g2, result_g2, "G2 MSM basic case failed");
+
+        // Case 2: Include identity point
+        let mut points_with_zero_g2 = points_g2.clone();
+        points_with_zero_g2[n / 2] = G2::zero();
+        let expected_zero_pt_g2 = naive_msm(&points_with_zero_g2, &scalars);
+        let result_zero_pt_g2 = G2::msm(&points_with_zero_g2, &scalars);
+        assert_eq!(
+            expected_zero_pt_g2, result_zero_pt_g2,
+            "G2 MSM with identity point failed"
+        );
+
+        // Case 3: Include zero scalar
+        let mut scalars_with_zero = scalars.clone();
+        scalars_with_zero[n / 2] = Scalar::zero();
+        let expected_zero_sc_g2 = naive_msm(&points_g2, &scalars_with_zero);
+        let result_zero_sc_g2 = G2::msm(&points_g2, &scalars_with_zero);
+        assert_eq!(
+            expected_zero_sc_g2, result_zero_sc_g2,
+            "G2 MSM with zero scalar failed"
+        );
+
+        // Case 4: All points identity
+        let zero_points_g2 = vec![G2::zero(); n];
+        let expected_all_zero_pt_g2 = naive_msm(&zero_points_g2, &scalars);
+        let result_all_zero_pt_g2 = G2::msm(&zero_points_g2, &scalars);
+        assert_eq!(
+            expected_all_zero_pt_g2,
+            G2::zero(),
+            "G2 MSM all identity points (naive) failed"
+        );
+        assert_eq!(
+            result_all_zero_pt_g2,
+            G2::zero(),
+            "G2 MSM all identity points failed"
+        );
+
+        // Case 5: All scalars zero
+        let zero_scalars = vec![Scalar::zero(); n];
+        let expected_all_zero_sc_g2 = naive_msm(&points_g2, &zero_scalars);
+        let result_all_zero_sc_g2 = G2::msm(&points_g2, &zero_scalars);
+        assert_eq!(
+            expected_all_zero_sc_g2,
+            G2::zero(),
+            "G2 MSM all zero scalars (naive) failed"
+        );
+        assert_eq!(
+            result_all_zero_sc_g2,
+            G2::zero(),
+            "G2 MSM all zero scalars failed"
+        );
+
+        // Case 6: Single element
+        let single_point_g2 = [points_g2[0]];
+        let single_scalar = [scalars[0].clone()];
+        let expected_single_g2 = naive_msm(&single_point_g2, &single_scalar);
+        let result_single_g2 = G2::msm(&single_point_g2, &single_scalar);
+        assert_eq!(
+            expected_single_g2, result_single_g2,
+            "G2 MSM single element failed"
+        );
+
+        // Case 7: Empty input
+        let empty_points_g2: [G2; 0] = [];
+        let empty_scalars: [Scalar; 0] = [];
+        let expected_empty_g2 = naive_msm(&empty_points_g2, &empty_scalars);
+        let result_empty_g2 = G2::msm(&empty_points_g2, &empty_scalars);
+        assert_eq!(expected_empty_g2, G2::zero(), "G2 MSM empty (naive) failed");
+        assert_eq!(result_empty_g2, G2::zero(), "G2 MSM empty failed");
+
+        // Case 8: Random points and scalars (big)
+        let points_g2: Vec<G2> = (0..50_000)
+            .map(|_| {
+                let mut point = G2::one();
+                point.mul(&Scalar::rand(&mut rng));
+                point
+            })
+            .collect();
+        let scalars: Vec<Scalar> = (0..50_000).map(|_| Scalar::rand(&mut rng)).collect();
+        let expected_g2 = naive_msm(&points_g2, &scalars);
+        let result_g2 = G2::msm(&points_g2, &scalars);
+        assert_eq!(expected_g2, result_g2, "G2 MSM basic case failed");
     }
 }

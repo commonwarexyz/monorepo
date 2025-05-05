@@ -1,7 +1,8 @@
 use super::{append_random_data, get_journal};
 use commonware_runtime::{
     benchmarks::{context, tokio},
-    tokio::Context,
+    tokio::{Config, Context, Runner},
+    Runner as _,
 };
 use commonware_storage::journal::fixed::Journal;
 use commonware_utils::array::FixedBytes;
@@ -19,10 +20,14 @@ const ITEMS_PER_BLOB: u64 = 100_000;
 const ITEM_SIZE: usize = 32;
 
 /// Replay all items in the given `journal`.
-async fn bench_run(journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>, items_to_read: u64) {
+async fn bench_run(
+    journal: &Journal<Context, FixedBytes<ITEM_SIZE>>,
+    buffer: usize,
+    items_to_read: u64,
+) {
     let concurrency = std::cmp::max(1, (items_to_read / ITEMS_PER_BLOB) as usize);
     let stream = journal
-        .replay(concurrency)
+        .replay(concurrency, buffer)
         .await
         .expect("failed to replay journal");
     pin_mut!(stream);
@@ -39,34 +44,54 @@ async fn bench_run(journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>, items_
 /// Benchmark the replaying of items from a journal containing exactly that
 /// number of items.
 fn bench_fixed_replay(c: &mut Criterion) {
-    let runner = tokio::Runner::default();
     for items in [1_000, 10_000, 100_000, 500_000] {
-        c.bench_function(
-            &format!("{}/items={} size={}", module_path!(), items, ITEM_SIZE),
-            |b| {
-                b.to_async(&runner).iter_custom(|iters| async move {
-                    // Append random data to the journal
-                    let ctx = context::get::<commonware_runtime::tokio::Context>();
-                    let mut j = get_journal::<ITEM_SIZE>(ctx, PARTITION, ITEMS_PER_BLOB).await;
-                    append_random_data::<ITEM_SIZE>(&mut j, items).await;
-                    let sz = j.size().await.unwrap();
-                    assert_eq!(sz, items);
+        // Create a config we can use across all benchmarks (with a fixed `storage_directory`), allowing the
+        // same test file to be re-used.
+        let cfg = Config::default();
 
-                    // Run the benchmark
-                    let mut duration = Duration::ZERO;
-                    for _ in 0..iters {
-                        let start = Instant::now();
-                        bench_run(&mut j, items).await;
-                        duration += start.elapsed();
-                    }
+        // Generate a large temp journal with random data.
+        let runner = Runner::new(cfg.clone());
+        runner.start(|ctx| async move {
+            // Create a large temp journal with random data.
+            let mut j = get_journal(ctx, PARTITION, ITEMS_PER_BLOB).await;
+            append_random_data::<ITEM_SIZE>(&mut j, items).await;
+            j.close().await.unwrap();
+        });
 
-                    // Destroy the journal after appending to avoid polluting the next iteration
-                    j.destroy().await.unwrap();
+        // Run the benchmarks
+        let runner = tokio::Runner::new(cfg.clone());
+        for buffer in [128, 16_384, 65_536, 1_048_576] {
+            c.bench_function(
+                &format!(
+                    "{}/items={} buffer={} size={}",
+                    module_path!(),
+                    items,
+                    buffer,
+                    ITEM_SIZE
+                ),
+                |b| {
+                    b.to_async(&runner).iter_custom(|iters| async move {
+                        let ctx = context::get::<commonware_runtime::tokio::Context>();
+                        let j = get_journal(ctx.clone(), PARTITION, ITEMS_PER_BLOB).await;
+                        let mut duration = Duration::ZERO;
+                        for _ in 0..iters {
+                            let start = Instant::now();
+                            bench_run(&j, buffer, items).await;
+                            duration += start.elapsed();
+                        }
 
-                    duration
-                });
-            },
-        );
+                        duration
+                    });
+                },
+            );
+        }
+
+        // Clean up the temp journal
+        let runner = Runner::new(cfg);
+        runner.start(|context| async move {
+            let j = get_journal::<ITEM_SIZE>(context, PARTITION, ITEMS_PER_BLOB).await;
+            j.destroy().await.unwrap();
+        });
     }
 }
 

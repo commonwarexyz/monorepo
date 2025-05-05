@@ -1,23 +1,37 @@
 name: 'Setup'
-inputs:
-  rust-version:
-    description: 'The version of Rust to use in cache keys'
-    required: true
 runs:
   using: 'composite'
   steps:
+    - name: Run sccache-cache
+      uses: mozilla-actions/sccache-action@v0.0.9
+    - name: Configure sccache
+      shell: bash
+      run: |
+        echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+        echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+        echo "SCCACHE_CACHE_SIZE=6G" >> "$GITHUB_ENV"
     - name: Cache cargo registry
       uses: actions/cache@v4
       with:
         path: ~/.cargo/registry
-        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}-${{ inputs.rust-version }}
-    - name: Cache cargo index
+        key: ${{ runner.os }}-cargo-registry
+    - name: Cache cargo git
       uses: actions/cache@v4
       with:
         path: ~/.cargo/git
-        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}-${{ inputs.rust-version }}
-    - name: Cache cargo target
+        key: ${{ runner.os }}-cargo-git
+    - name: Get Rust version
+      id: rust-version
+      shell: bash
+      run: echo "rust_version=$(rustc --version)" >> "$GITHUB_OUTPUT"
+    - name: Cache cargo-cache
+      id: cargo-cache-cache
       uses: actions/cache@v4
       with:
-        path: target
-        key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}-${{ inputs.rust-version }}
+        path: ~/.cargo/bin/cargo-cache
+        key: ${{ runner.os }}-cargo-cache-${{ steps.rust-version.outputs.rust_version }}
+    - name: Maintain cargo cache
+      shell: bash
+      run: |
+        cargo install cargo-cache || true
+        cargo cache --autoclean

@@ -17,6 +17,12 @@ const PENDING_WRITES: usize = 1_000;
 /// Section-mask that yields reasonably small blobs for local testing.
 const SECTION_MASK: u64 = 0xffff_ffff_ffff_ff00u64;
 
+/// Number of blobs to read concurrently during replay.
+const REPLAY_CONCURRENCY: usize = 1;
+
+/// Number of bytes to buffer when replaying.
+const REPLAY_BUFFER: usize = 1024 * 1024; // 1MB
+
 /// Fixed-length key and value types.
 pub type Key = FixedBytes<64>;
 pub type Val = FixedBytes<32>;
@@ -35,7 +41,8 @@ pub async fn get_archive(ctx: Context, compression: Option<u8>) -> ArchiveType {
         codec_config: (),
         section_mask: SECTION_MASK,
         pending_writes: PENDING_WRITES,
-        replay_concurrency: 1,
+        replay_concurrency: REPLAY_CONCURRENCY,
+        replay_buffer: REPLAY_BUFFER,
     };
     Archive::init(ctx, cfg).await.unwrap()
 }

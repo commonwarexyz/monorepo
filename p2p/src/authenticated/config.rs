@@ -1,6 +1,7 @@
 use commonware_cryptography::Scheme;
+use commonware_utils::NZU32;
 use governor::Quota;
-use std::{net::SocketAddr, num::NonZeroU32, time::Duration};
+use std::{net::SocketAddr, time::Duration};
 
 /// Known peer and its accompanying address that will be dialed on startup.
 pub type Bootstrapper<P> = (P, SocketAddr);
@@ -126,16 +127,16 @@ impl<C: Scheme> Config<C> {
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
-            allowed_connection_rate_per_peer: Quota::per_minute(NonZeroU32::new(1).unwrap()),
-            allowed_incoming_connection_rate: Quota::per_second(NonZeroU32::new(256).unwrap()),
+            allowed_connection_rate_per_peer: Quota::per_minute(NZU32!(1)),
+            allowed_incoming_connection_rate: Quota::per_second(NZU32!(256)),
             dial_frequency: Duration::from_secs(60),
-            dial_rate: Quota::per_minute(NonZeroU32::new(30).unwrap()),
+            dial_rate: Quota::per_minute(NZU32!(30)),
             tracked_peer_sets: 4,
             max_peer_set_size: 1 << 16, // 2^16
             gossip_bit_vec_frequency: Duration::from_secs(50),
-            allowed_bit_vec_rate: Quota::per_second(NonZeroU32::new(2).unwrap()),
+            allowed_bit_vec_rate: Quota::per_second(NZU32!(2)),
             peer_gossip_max_count: 32,
-            allowed_peers_rate: Quota::per_second(NonZeroU32::new(2).unwrap()),
+            allowed_peers_rate: Quota::per_second(NZU32!(2)),
         }
     }
 
@@ -165,16 +166,16 @@ impl<C: Scheme> Config<C> {
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
-            allowed_connection_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
-            allowed_incoming_connection_rate: Quota::per_second(NonZeroU32::new(256).unwrap()),
+            allowed_connection_rate_per_peer: Quota::per_second(NZU32!(1)),
+            allowed_incoming_connection_rate: Quota::per_second(NZU32!(256)),
             dial_frequency: Duration::from_secs(5),
-            dial_rate: Quota::per_second(NonZeroU32::new(30).unwrap()),
+            dial_rate: Quota::per_second(NZU32!(30)),
             tracked_peer_sets: 4,
             max_peer_set_size: 1 << 16, // 2^16
             gossip_bit_vec_frequency: Duration::from_secs(5),
-            allowed_bit_vec_rate: Quota::per_second(NonZeroU32::new(5).unwrap()),
+            allowed_bit_vec_rate: Quota::per_second(NZU32!(5)),
             peer_gossip_max_count: 32,
-            allowed_peers_rate: Quota::per_second(NonZeroU32::new(5).unwrap()),
+            allowed_peers_rate: Quota::per_second(NZU32!(5)),
         }
     }
 
@@ -198,16 +199,16 @@ impl<C: Scheme> Config<C> {
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
-            allowed_connection_rate_per_peer: Quota::per_second(NonZeroU32::new(1_024).unwrap()),
-            allowed_incoming_connection_rate: Quota::per_second(NonZeroU32::new(1_024).unwrap()),
+            allowed_connection_rate_per_peer: Quota::per_second(NZU32!(1_024)),
+            allowed_incoming_connection_rate: Quota::per_second(NZU32!(1_024)),
             dial_frequency: Duration::from_secs(1),
-            dial_rate: Quota::per_second(NonZeroU32::new(1_024).unwrap()),
+            dial_rate: Quota::per_second(NZU32!(1_024)),
             tracked_peer_sets: 4,
             max_peer_set_size: 1 << 8, // 2^8
             gossip_bit_vec_frequency: Duration::from_secs(1),
-            allowed_bit_vec_rate: Quota::per_second(NonZeroU32::new(5).unwrap()),
+            allowed_bit_vec_rate: Quota::per_second(NZU32!(5)),
             peer_gossip_max_count: 32,
-            allowed_peers_rate: Quota::per_second(NonZeroU32::new(5).unwrap()),
+            allowed_peers_rate: Quota::per_second(NZU32!(5)),
         }
     }
 }

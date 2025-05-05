@@ -61,9 +61,9 @@ use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::tokio;
 use commonware_runtime::Metrics;
 use commonware_runtime::Runner as _;
+use commonware_utils::NZU32;
 use governor::Quota;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::num::NonZeroU32;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use tracing::info;
@@ -176,7 +176,7 @@ fn main() {
         const COMPRESSION_LEVEL: Option<i32> = Some(3);
         let (chat_sender, chat_receiver) = network.register(
             handler::CHANNEL,
-            Quota::per_second(NonZeroU32::new(128).unwrap()),
+            Quota::per_second(NZU32!(128)),
             MAX_MESSAGE_BACKLOG,
             COMPRESSION_LEVEL,
         );
