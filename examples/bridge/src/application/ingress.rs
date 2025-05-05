@@ -2,7 +2,7 @@ use commonware_consensus::{
     threshold_simplex::types::{Activity, Context, View},
     Automaton as Au, Relay as Re, Reporter,
 };
-use commonware_cryptography::Digest;
+use commonware_cryptography::{bls12381::primitives::variant::MinSig, Digest};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -22,7 +22,7 @@ pub enum Message<D: Digest> {
         response: oneshot::Sender<bool>,
     },
     Report {
-        activity: Activity<D>,
+        activity: Activity<MinSig, D>,
     },
 }
 
@@ -93,7 +93,7 @@ impl<D: Digest> Re for Mailbox<D> {
 }
 
 impl<D: Digest> Reporter for Mailbox<D> {
-    type Activity = Activity<D>;
+    type Activity = Activity<MinSig, D>;
 
     async fn report(&mut self, activity: Self::Activity) {
         self.sender

@@ -12,8 +12,8 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::threshold_simplex::types::{Activity, Viewable};
 use commonware_cryptography::{
     bls12381::primitives::{
-        group, poly,
-        variant::{MinSigPublic, MinSigSignature},
+        poly,
+        variant::{MinSig, MinSigPublic},
     },
     Hasher,
 };
@@ -50,7 +50,7 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                 context,
                 indexer: config.indexer,
                 namespace: config.namespace,
-                public: *poly::public(&config.identity),
+                public: *poly::public::<MinSig>(&config.identity),
                 other_public: config.other_public,
                 hasher: config.hasher,
                 mailbox,
