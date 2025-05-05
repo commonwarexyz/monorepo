@@ -61,6 +61,8 @@ impl Variant for MinPk {
         s
     }
 
+    /// Verifies that `e(hm,pk)` is equal to `e(sig,G1::one())` using a single product check with
+    /// a negated G1 generator (`e(hm,pk) * e(sig,-G1::one()) == 1`).
     fn verify_prehashed(
         public: &Self::Public,
         hm: &Self::Signature,
@@ -134,6 +136,8 @@ impl Variant for MinSig {
         s
     }
 
+    /// Verifies that `e(pk,hm)` is equal to `e(G2::one(),sig)` using a single product check with
+    /// a negated G2 generator (`e(pk,hm) * e(-G2::one(),sig) == 1`).
     fn verify_prehashed(
         public: &Self::Public,
         hm: &Self::Signature,
