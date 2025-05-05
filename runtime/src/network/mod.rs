@@ -129,6 +129,9 @@ mod tests {
 
     // Test large data transfer
     async fn test_network_large_data<N: crate::Network>(network: N) {
+        const NUM_CHUNKS: usize = 1_000;
+        const CHUNK_SIZE: usize = 8 * 1024; // 8 KB
+
         // Start a server
         let mut listener = network
             .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
@@ -141,19 +144,14 @@ mod tests {
             let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
 
             // Receive and echo large data in chunks
-            let mut total_received = 0;
-            let mut buffer = vec![0u8; 8192];
-
-            while total_received < 1_000_000 {
+            let mut buffer = vec![0u8; CHUNK_SIZE];
+            for _ in 0..NUM_CHUNKS {
                 stream
                     .recv(&mut buffer)
                     .await
                     .expect("Failed to receive chunk");
                 sink.send(&buffer).await.expect("Failed to send chunk");
-                total_received += buffer.len();
             }
-
-            total_received
         });
 
         // Client task
@@ -165,35 +163,23 @@ mod tests {
                 .expect("Failed to dial server");
 
             // Create a pattern of data
-            let pattern = (0..8192).map(|i| (i % 256) as u8).collect::<Vec<_>>();
-            let mut total_sent = 0;
-            let mut total_received = 0;
-            let mut receive_buffer = vec![0u8; 8192];
+            let pattern = (0..CHUNK_SIZE).map(|i| (i % 256) as u8).collect::<Vec<_>>();
+            let mut receive_buffer = vec![0u8; CHUNK_SIZE];
 
             // Send and verify data in chunks
-            while total_sent < 1_000_000 {
+            for _ in 0..NUM_CHUNKS {
                 sink.send(&pattern).await.expect("Failed to send chunk");
-                total_sent += pattern.len();
-
                 stream
                     .recv(&mut receive_buffer)
                     .await
                     .expect("Failed to receive chunk");
                 assert_eq!(&receive_buffer, &pattern);
-                total_received += receive_buffer.len();
             }
-
-            (total_sent, total_received)
         });
 
         // Wait for both tasks to complete
-        let (server_result, client_result) = join!(server, client);
-        let server_total = server_result.expect("Server task failed");
-        let (client_sent, client_received) = client_result.expect("Client task failed");
-
-        assert_eq!(server_total, 123 * 8192);
-        assert_eq!(client_sent, 123 * 8192);
-        assert_eq!(client_received, 123 * 8192);
+        server.await.expect("Server task failed");
+        client.await.expect("Client task failed");
     }
 
     // Tests dialing and binding errors
