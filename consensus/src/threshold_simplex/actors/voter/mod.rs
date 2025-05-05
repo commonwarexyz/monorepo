@@ -18,7 +18,7 @@ pub struct Config<
     A: Automaton<Context = Context<D>>,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<V, D>>,
-    S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
+    S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
 > {
     pub crypto: C,
     pub automaton: A,
