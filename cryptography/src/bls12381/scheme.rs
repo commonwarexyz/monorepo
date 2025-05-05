@@ -369,8 +369,8 @@ mod tests {
 
     #[test]
     fn test_codec_public_key() {
-        let original = parse_public_key(
-            "0xa491d1b0ecd9bb917989f0e74f0dea0422eac4a873e5e2644f368dffb9a6e20fd6e10c1b77654d067c0618f6e5a7f79a")
+        let original =
+            parse_public_key("0xa491d1b0ecd9bb917989f0e74f0dea0422eac4a873e5e2644f368dffb9a6e20fd6e10c1b77654d067c0618f6e5a7f79a")
             .unwrap();
         let encoded = original.encode();
         assert_eq!(encoded.len(), PublicKey::SIZE);
@@ -382,8 +382,7 @@ mod tests {
     fn test_codec_signature() {
         let original =
             parse_signature("0x882730e5d03f6b42c3abc26d3372625034e1d871b65a8a6b900a56dae22da98abbe1b68f85e49fe7652a55ec3d0591c20767677e33e5cbb1207315c41a9ac03be39c2e7668edc043d6cb1d9fd93033caa8a1c5b0e84bedaeb6c64972503a43eb")
-
-                .unwrap();
+            .unwrap();
         let encoded = original.encode();
         assert_eq!(encoded.len(), Signature::SIZE);
         let decoded = Signature::decode(encoded).unwrap();
