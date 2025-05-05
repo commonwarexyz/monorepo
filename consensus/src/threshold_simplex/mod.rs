@@ -1855,19 +1855,11 @@ mod tests {
     #[test_traced]
     #[ignore]
     fn test_determinism() {
-        // We use slow and lossy links as the deterministic test
-        // because it is the most complex test.
         for seed in 1..6 {
-            // Run test with seed
             let state_1 = slow_and_lossy_links::<MinPk>(seed);
-
-            // Run test again with same seed
             let state_2 = slow_and_lossy_links::<MinPk>(seed);
-
-            // Ensure states are equal
             assert_eq!(state_1, state_2);
 
-            // Repeat for MinSig
             let state_1 = slow_and_lossy_links::<MinSig>(seed);
             let state_2 = slow_and_lossy_links::<MinSig>(seed);
             assert_eq!(state_1, state_2);
