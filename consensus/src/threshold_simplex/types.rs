@@ -1707,18 +1707,18 @@ mod tests {
 
         // Recover threshold signature
         let view_partials = nullifies.iter().map(|n| &n.view_signature);
-        let view_signature = threshold_signature_recover(t, view_partials).unwrap();
+        let view_signature = threshold_signature_recover::<MinSig, _>(t, view_partials).unwrap();
         let seed_partials = nullifies.iter().map(|n| &n.seed_signature);
-        let seed_signature = threshold_signature_recover(t, seed_partials).unwrap();
+        let seed_signature = threshold_signature_recover::<MinSig, _>(t, seed_partials).unwrap();
 
         // Create nullification
-        let nullification = Nullification::new(10, view_signature, seed_signature);
+        let nullification = Nullification::<MinSig>::new(10, view_signature, seed_signature);
         let encoded = nullification.encode();
         let decoded = Nullification::decode(encoded).unwrap();
         assert_eq!(nullification, decoded);
 
         // Verify the nullification
-        let public_key = poly::public(&commitment);
+        let public_key = poly::public::<MinSig>(&commitment);
         assert!(decoded.verify(NAMESPACE, public_key));
 
         // Create seed
@@ -1758,7 +1758,7 @@ mod tests {
         // Create finalizes
         let notarizes: Vec<_> = shares
             .iter()
-            .map(|s| Notarize::sign(NAMESPACE, s, proposal.clone()))
+            .map(|s| Notarize::<MinSig, _>::sign(NAMESPACE, s, proposal.clone()))
             .collect();
         let finalizes: Vec<_> = shares
             .iter()
@@ -2118,7 +2118,7 @@ mod tests {
         let view = 10;
 
         // Create a nullify for view 10
-        let nullify = Nullify::sign(NAMESPACE, &shares[0], view);
+        let nullify = Nullify::<MinSig>::sign(NAMESPACE, &shares[0], view);
 
         // Create a finalize for the same view
         let proposal = Proposal::new(view, 5, sample_digest(1));
@@ -2161,21 +2161,23 @@ mod tests {
         // Create finalizes and notarizes for threshold signatures
         let finalizes: Vec<_> = shares
             .iter()
-            .map(|s| Finalize::sign(NAMESPACE, s, proposal.clone()))
+            .map(|s| Finalize::<_, MinSig>::sign(NAMESPACE, s, proposal.clone()))
             .collect();
         let notarizes: Vec<_> = shares
             .iter()
-            .map(|s| Notarize::sign(NAMESPACE, s, proposal.clone()))
+            .map(|s| Notarize::<_, MinSig>::sign(NAMESPACE, s, proposal.clone()))
             .collect();
 
         // Recover threshold signatures
         let proposal_partials = finalizes.iter().map(|f| &f.proposal_signature);
-        let proposal_signature = threshold_signature_recover(t, proposal_partials).unwrap();
+        let proposal_signature =
+            threshold_signature_recover::<MinSig, _>(t, proposal_partials).unwrap();
         let seed_partials = notarizes.iter().map(|n| &n.seed_signature);
-        let seed_signature = threshold_signature_recover(t, seed_partials).unwrap();
+        let seed_signature = threshold_signature_recover::<MinSig, _>(t, seed_partials).unwrap();
 
         // Create finalization
-        let finalization = Finalization::new(proposal, proposal_signature, seed_signature);
+        let finalization =
+            Finalization::<_, MinSig>::new(proposal, proposal_signature, seed_signature);
 
         // Verify with correct public key - should pass
         let public_key = poly::public(&commitment);
