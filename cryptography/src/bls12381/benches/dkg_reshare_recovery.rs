@@ -1,5 +1,8 @@
 use commonware_cryptography::{
-    bls12381::dkg::{Dealer, Player},
+    bls12381::{
+        dkg::{Dealer, Player},
+        primitives::variant::MinSig,
+    },
     Ed25519, Signer,
 };
 use commonware_utils::quorum;
@@ -25,7 +28,7 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
         // Create players
         let mut players = Vec::with_capacity(n);
         for con in &contributors {
-            let player = Player::new(
+            let player = Player::<_, MinSig>::new(
                 con.clone(),
                 None,
                 contributors.clone(),
@@ -39,7 +42,8 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
         let t = quorum(n as u32);
         let mut commitments = HashMap::new();
         for (dealer_idx, dealer) in contributors.iter().take(t as usize).enumerate() {
-            let (_, commitment, shares) = Dealer::new(&mut rng, None, contributors.clone());
+            let (_, commitment, shares) =
+                Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
             for (player_idx, player) in players.iter_mut().enumerate() {
                 player
                     .share(
@@ -70,7 +74,7 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
                         || {
                             // Create player
                             let me = contributors[0].clone();
-                            let mut player = Player::new(
+                            let mut player = Player::<_, MinSig>::new(
                                 me,
                                 Some(outputs[0].public.clone()),
                                 contributors.clone(),
@@ -81,7 +85,7 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
                             // Create commitments and send shares to player
                             let mut commitments = HashMap::new();
                             for (idx, dealer) in contributors.iter().take(t as usize).enumerate() {
-                                let (_, commitment, shares) = Dealer::new(
+                                let (_, commitment, shares) = Dealer::<_, MinSig>::new(
                                     &mut rng,
                                     Some(outputs[idx].share.clone()),
                                     contributors.clone(),
