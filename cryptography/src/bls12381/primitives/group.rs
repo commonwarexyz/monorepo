@@ -19,8 +19,7 @@ use blst::{
     blst_p2_add_or_double, blst_p2_affine, blst_p2_compress, blst_p2_from_affine, blst_p2_in_g2,
     blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
     blst_p2s_mult_pippenger_scratch_sizeof, blst_scalar, blst_scalar_from_bendian,
-    blst_scalar_from_fr, blst_sk_check, Pairing as blst_pairing, BLS12_381_G1, BLS12_381_G2,
-    BLS12_381_NEG_G1, BLS12_381_NEG_G2, BLST_ERROR,
+    blst_scalar_from_fr, blst_sk_check, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -38,6 +37,8 @@ use std::{
     ptr,
 };
 use zeroize::{Zeroize, ZeroizeOnDrop};
+
+use super::variant::Variant;
 
 /// Domain separation tag used when hashing a message to a curve (G1 or G2).
 ///
@@ -339,8 +340,8 @@ impl Share {
     /// Returns the public key corresponding to the share.
     ///
     /// This can be verified against the public polynomial.
-    pub fn public(&self) -> Public {
-        let mut public = <Public as Element>::one();
+    pub fn public<V: Variant>(&self) -> V::Public {
+        let mut public = V::Public::one();
         public.mul(&self.private);
         public
     }
@@ -557,38 +558,6 @@ impl Point for G1 {
         }
 
         G1::from_blst_p1(msm_result)
-    }
-}
-
-impl Verifier for G1 {
-    type Signature = G2;
-    type Message = G2;
-
-    fn equal(&self, sig: &G2, hm: &G2) -> bool {
-        // Create a pairing context
-        //
-        // We only handle pre-hashed messages, so we leave the domain separator tag (`DST`) empty.
-        let mut pairing = blst_pairing::new(false, &[]);
-
-        // Convert `sig` into affine and aggregate `e(-G1::one(), sig)`
-        let q = sig.as_blst_p2_affine();
-        unsafe {
-            pairing.raw_aggregate(&q, &BLS12_381_NEG_G1);
-        }
-
-        // Convert `pk` and `hm` into affine
-        let p = self.as_blst_p1_affine();
-        let q = hm.as_blst_p2_affine();
-
-        // Aggregate `e(pk, hm)`
-        pairing.raw_aggregate(&q, &p);
-
-        // Finalize the pairing accumulation and verify the result
-        //
-        // If `finalverify()` returns `true`, it means `e(pk,hm) * e(-G1::one(),sig) == 1`. This
-        // is equivalent to `e(pk,hm) == e(G1::one(),sig)`.
-        pairing.commit();
-        pairing.finalverify(None)
     }
 }
 
