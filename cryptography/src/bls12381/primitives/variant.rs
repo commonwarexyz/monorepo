@@ -8,19 +8,19 @@ use super::Error;
 use blst::{Pairing as blst_pairing, BLS12_381_NEG_G1, BLS12_381_NEG_G2};
 use commonware_codec::FixedSize;
 
-pub type MIN_PK_PUBLIC = G1;
+pub type MinPkPublic = G1;
 
 pub const MIN_PK_PUBLIC_LENGTH: usize = G1_ELEMENT_BYTE_LENGTH;
 
-pub type MIN_PK_SIGNATURE = G2;
+pub type MinPkSignature = G2;
 
 pub const MIN_PK_SIGNATURE_LENGTH: usize = G2_ELEMENT_BYTE_LENGTH;
 
-pub type MIN_SIG_PUBLIC = G2;
+pub type MinSigPublic = G2;
 
 pub const MIN_SIG_PUBLIC_LENGTH: usize = G2_ELEMENT_BYTE_LENGTH;
 
-pub type MIN_SIG_SIGNATURE = G1;
+pub type MinSigSignature = G1;
 
 pub const MIN_SIG_SIGNATURE_LENGTH: usize = G1_ELEMENT_BYTE_LENGTH;
 

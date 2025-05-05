@@ -6,6 +6,7 @@
 //! security of the threshold schemes. Ensure that the scalar field operations
 //! are performed over the correct field and that all elements are valid.
 
+use super::variant::Variant;
 use crate::bls12381::primitives::{
     group::{self, Element, Scalar},
     Error,
@@ -15,20 +16,18 @@ use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, Read
 use rand::{rngs::OsRng, RngCore};
 use std::{collections::BTreeMap, hash::Hash};
 
-use super::variant::Variant;
-
 /// Private polynomials are used to generate secret shares.
 pub type Private = Poly<group::Private>;
 
 /// Public polynomials represent commitments to secrets on a private polynomial.
-pub type Public<V: Variant> = Poly<V::Public>;
+pub type Public<V> = Poly<<V as Variant>::Public>;
 
 /// Signature polynomials are used in threshold signing (where a signature
 /// is interpolated using at least `threshold` evaluations).
-pub type Signature<V: Variant> = Poly<V::Signature>;
+pub type Signature<V> = Poly<<V as Variant>::Signature>;
 
 /// The partial signature type.
-pub type PartialSignature<V: Variant> = Eval<V::Signature>;
+pub type PartialSignature<V> = Eval<<V as Variant>::Signature>;
 
 /// A polynomial evaluation at a specific index.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

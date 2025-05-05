@@ -69,6 +69,7 @@ pub struct Arbiter<P: Array, V: Variant> {
     dealers: HashMap<P, u32>,
     players: Vec<P>,
 
+    #[allow(clippy::type_complexity)]
     commitments: BTreeMap<u32, (poly::Public<V>, Vec<u32>, Vec<Share>)>,
     disqualified: HashSet<P>,
 }
