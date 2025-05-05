@@ -149,6 +149,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_trait() {
-        tests::test_network_trait(|| DeterministicNetwork::Network::default()).await;
+        tests::test_network_trait(DeterministicNetwork::Network::default).await;
     }
 }
