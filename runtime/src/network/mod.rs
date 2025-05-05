@@ -1,3 +1,5 @@
+pub(crate) mod audited;
+pub(crate) mod deterministic;
 pub(crate) mod metered;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod tokio;
@@ -8,12 +10,10 @@ mod tests {
     use futures::join;
     use std::net::SocketAddr;
 
-    // TODO danlaine: remove
-    const PORT_NUMBER: u16 = 5000;
     const CLIENT_SEND_DATA: &str = "client_send_data";
     const SERVER_SEND_DATA: &str = "server_send_data";
 
-    pub(super) async fn run_network_tests<N, F>(new_network: F)
+    pub(super) async fn test_network_trait<N, F>(new_network: F)
     where
         F: Fn() -> N,
         N: crate::Network,
@@ -26,10 +26,14 @@ mod tests {
 
     // Basic network connectivity test
     async fn test_network_bind_and_dial<N: crate::Network>(network: N) {
-        let listener_addr = SocketAddr::from(([127, 0, 0, 1], PORT_NUMBER));
-
         // Start a server
-        let mut listener = network.bind(listener_addr).await.expect("Failed to bind");
+        let mut listener = network
+            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .expect("Failed to bind");
+
+        // Get the local address of the listener
+        let listener_addr = listener.local_addr().expect("Failed to get local address");
 
         let runtime = tokio::runtime::Handle::current();
 
@@ -40,7 +44,9 @@ mod tests {
             let mut buf = [0u8; CLIENT_SEND_DATA.len()];
             stream.recv(&mut buf).await.expect("Failed to receive");
             assert_eq!(&buf, CLIENT_SEND_DATA.as_bytes());
-            sink.send(&buf).await.expect("Failed to send");
+            sink.send(SERVER_SEND_DATA.as_bytes())
+                .await
+                .expect("Failed to send");
         });
 
         // Spawn client, connect to server, send and receive data over connection
@@ -57,7 +63,7 @@ mod tests {
 
             let mut buf = [0u8; SERVER_SEND_DATA.len()];
             stream.recv(&mut buf).await.expect("Failed to receive data");
-            assert_eq!(&buf, CLIENT_SEND_DATA.as_bytes());
+            assert_eq!(&buf, SERVER_SEND_DATA.as_bytes());
         });
 
         // Wait for both tasks to complete
@@ -68,12 +74,14 @@ mod tests {
 
     // Test handling multiple clients
     async fn test_network_multiple_clients<N: crate::Network>(network: N) {
-        let listener_addr = SocketAddr::from(([127, 0, 0, 1], PORT_NUMBER));
-
         let runtime = tokio::runtime::Handle::current();
 
         // Start a server
-        let mut listener = network.bind(listener_addr).await.expect("Failed to bind");
+        let mut listener = network
+            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .expect("Failed to bind");
+        let listener_addr = listener.local_addr().expect("Failed to get local address");
 
         // Server task
         let server = runtime.spawn(async move {
@@ -128,10 +136,13 @@ mod tests {
 
     // Test large data transfer
     async fn test_network_large_data<N: crate::Network>(network: N) {
-        let listener_addr = SocketAddr::from(([127, 0, 0, 1], PORT_NUMBER));
-
         // Start a server
-        let mut listener = network.bind(listener_addr).await.expect("Failed to bind");
+        let mut listener = network
+            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .expect("Failed to bind");
+        let listener_addr = listener.local_addr().expect("Failed to get local address");
+
         let runtime = tokio::runtime::Handle::current();
         let server = runtime.spawn(async move {
             let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
@@ -200,8 +211,11 @@ mod tests {
         assert!(matches!(result, Err(crate::Error::ConnectionFailed)));
 
         // Test binding to an already bound address
-        let listener_addr = SocketAddr::from(([127, 0, 0, 1], PORT_NUMBER));
-        let _listener = network.bind(listener_addr).await.expect("Failed to bind");
+        let listener = network
+            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .expect("Failed to bind");
+        let listener_addr = listener.local_addr().expect("Failed to get local address");
 
         // Try to bind to the same address
         let result = network.bind(listener_addr).await;

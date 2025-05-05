@@ -101,6 +101,10 @@ impl<L: crate::Listener> crate::Listener for Listener<L> {
             },
         ))
     }
+
+    fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {
+        self.inner.local_addr()
+    }
 }
 
 /// A metered network implementation which wraps another
@@ -154,5 +158,23 @@ impl<N: crate::Network> crate::Network for Network<N> {
                 metrics: self.metrics.clone(),
             },
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::network::deterministic::Network as DeterministicNetwork;
+    use crate::network::metered::Network as MeteredNetwork;
+    use crate::network::tests;
+
+    #[tokio::test]
+    async fn test_trait() {
+        tests::test_network_trait(|| {
+            MeteredNetwork::new(
+                DeterministicNetwork::default(),
+                &mut prometheus_client::registry::Registry::default(),
+            )
+        })
+        .await;
     }
 }

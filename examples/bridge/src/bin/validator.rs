@@ -11,12 +11,9 @@ use commonware_cryptography::{
 use commonware_p2p::authenticated;
 use commonware_runtime::{tokio, Metrics, Network, Runner};
 use commonware_stream::public_key::{self, Connection};
-use commonware_utils::{from_hex, quorum, union};
+use commonware_utils::{from_hex, quorum, union, NZU32};
 use governor::Quota;
-use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-    num::NonZeroU32,
-};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::{str::FromStr, time::Duration};
 
 fn main() {
@@ -188,13 +185,13 @@ fn main() {
         // for this channel.
         let (voter_sender, voter_receiver) = network.register(
             0,
-            Quota::per_second(NonZeroU32::new(10).unwrap()),
+            Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
             Some(3),
         );
         let (resolver_sender, resolver_receiver) = network.register(
             1,
-            Quota::per_second(NonZeroU32::new(10).unwrap()),
+            Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
             Some(3),
         );
@@ -229,6 +226,7 @@ fn main() {
                 namespace: consensus_namespace,
                 mailbox_size: 1024,
                 replay_concurrency: 1,
+                replay_buffer: 1024 * 1024,
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(10),
@@ -237,7 +235,7 @@ fn main() {
                 skip_timeout: 5,
                 max_fetch_count: 32,
                 fetch_concurrent: 2,
-                fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
             },
         );
 

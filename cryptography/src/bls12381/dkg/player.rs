@@ -174,6 +174,7 @@ impl<P: Array> Player<P> {
         if self.dealings.len() != dealer_threshold {
             return Err(Error::MissingShare);
         }
+        assert_eq!(self.dealings.len(), commitments.len());
 
         // Construct secret
         let mut public = poly::Public::zero();
@@ -187,6 +188,11 @@ impl<P: Array> Player<P> {
                 }
             }
             Some(previous) => {
+                // Compute weights
+                let indices = commitments.keys().copied().collect::<Vec<_>>();
+                let weights = poly::compute_weights(indices)
+                    .map_err(|_| Error::PublicKeyInterpolationFailed)?;
+
                 // Recover public via interpolation
                 //
                 // While it is tempting to remove this work (given we only need the secret
@@ -197,9 +203,10 @@ impl<P: Array> Player<P> {
                     .iter()
                     .map(|(dealer, (commitment, _))| (*dealer, commitment.clone()))
                     .collect();
-                public = ops::recover_public(
+                public = ops::recover_public_with_weights(
                     &previous,
                     commitments,
+                    &weights,
                     self.player_threshold,
                     self.concurrency,
                 )?;
@@ -213,7 +220,7 @@ impl<P: Array> Player<P> {
                         value: share.private,
                     })
                     .collect::<Vec<_>>();
-                secret = match poly::Private::recover(self.dealer_threshold, &dealings) {
+                secret = match poly::Private::recover_with_weights(&weights, &dealings) {
                     Ok(share) => share,
                     Err(_) => return Err(Error::ShareInterpolationFailed),
                 };

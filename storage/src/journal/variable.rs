@@ -99,7 +99,7 @@
 use super::Error;
 use bytes::BufMut;
 use commonware_codec::Codec;
-use commonware_runtime::{Blob, Error as RError, Metrics, Storage};
+use commonware_runtime::{Blob, Buffer, Error as RError, Metrics, Storage};
 use commonware_utils::hex;
 use futures::stream::{self, Stream, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -260,6 +260,67 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         Ok((aligned_offset, size, item))
     }
 
+    /// Helper function to read an item from a [Buffer].
+    async fn read_buffered(
+        reader: &mut Buffer<E::Blob>,
+        offset: u32,
+        cfg: &V::Cfg,
+        compressed: bool,
+    ) -> Result<(u32, u32, V), Error> {
+        // Calculate absolute file offset from the item offset
+        let file_offset = offset as u64 * ITEM_ALIGNMENT;
+
+        // If we're not at the right position, seek to it
+        if reader.position() != file_offset {
+            reader.seek_to(file_offset).map_err(Error::Runtime)?;
+            // Refill the buffer at the new position
+            reader.refill().await.map_err(Error::Runtime)?;
+        }
+
+        // Read item size (4 bytes)
+        let mut size_buf = [0u8; 4];
+        reader
+            .read_exact(&mut size_buf, 4)
+            .await
+            .map_err(Error::Runtime)?;
+        let size = u32::from_be_bytes(size_buf);
+
+        // Read item
+        let mut item = vec![0u8; size as usize];
+        reader
+            .read_exact(&mut item, size as usize)
+            .await
+            .map_err(Error::Runtime)?;
+
+        // Read checksum
+        let mut checksum_buf = [0u8; 4];
+        reader
+            .read_exact(&mut checksum_buf, 4)
+            .await
+            .map_err(Error::Runtime)?;
+        let stored_checksum = u32::from_be_bytes(checksum_buf);
+        let checksum = crc32fast::hash(&item);
+        if checksum != stored_checksum {
+            return Err(Error::ChecksumMismatch(stored_checksum, checksum));
+        }
+
+        // Calculate next offset
+        let current_pos = reader.position();
+        let aligned_offset = compute_next_offset(current_pos)?;
+
+        // If compression is enabled, decompress the item
+        let item = if compressed {
+            zstd::bulk::decompress(&item, u32::MAX as usize)
+                .map_err(|_| Error::DecompressionFailed)?
+        } else {
+            item
+        };
+
+        // Return item
+        let item = V::decode_cfg(item.as_ref(), cfg).map_err(Error::Codec)?;
+        Ok((aligned_offset, size, item))
+    }
+
     /// Reads an item from the blob at the given offset and of a given size.
     async fn read_exact(
         compressed: bool,
@@ -316,19 +377,21 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// speed up the replay process if the underlying storage supports concurrent reads across different
     /// blobs.
     pub async fn replay(
-        &mut self,
+        &self,
         concurrency: usize,
+        buffer: usize,
     ) -> Result<impl Stream<Item = Result<(u64, u32, u32, V), Error>> + '_, Error> {
         // Collect all blobs to replay
         let codec_config = self.cfg.codec_config.clone();
         let compressed = self.cfg.compression.is_some();
         let mut blobs = Vec::with_capacity(self.blobs.len());
-        for (section, (blob, len)) in self.blobs.iter() {
-            let aligned_len = compute_next_offset(*len)?;
+        for (section, (blob, size)) in self.blobs.iter() {
+            let aligned_len = compute_next_offset(*size)?;
             blobs.push((
                 *section,
-                blob,
+                blob.clone(),
                 aligned_len,
+                *size,
                 codec_config.clone(),
                 compressed,
             ));
@@ -338,33 +401,38 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         // occupying too much memory with buffered data)
         Ok(stream::iter(blobs)
             .map(
-                move |(section, blob, len, codec_config, compressed)| async move {
+                move |(section, blob, aligned_len, size, codec_config, compressed)| async move {
+                    // Created buffered reader
+                    let reader = Buffer::new(blob, size, buffer);
+
+                    // Read over the blob
                     stream::unfold(
-                        (section, blob, 0u32, codec_config, compressed),
-                        move |(section, blob, offset, codec_config, compressed)| async move {
+                        (section, reader, 0u32, codec_config, compressed),
+                        move |(section, mut reader, offset, codec_config, compressed)| async move {
                             // Check if we are at the end of the blob
-                            if offset == len {
+                            if offset >= aligned_len {
                                 return None;
                             }
 
-                            // Get next item
-                            let mut read =
-                                Self::read(compressed, &codec_config, blob, offset).await;
-
-                            // Ensure a full read wouldn't put us past the end of the blob
-                            if let Ok((next_offset, _, _)) = read {
-                                if next_offset > len {
-                                    read = Err(Error::Runtime(RError::BlobInsufficientLength));
-                                }
-                            };
-
-                            // Handle read result
-                            match read {
+                            // Read an item from the buffer
+                            match Self::read_buffered(
+                                &mut reader,
+                                offset,
+                                &codec_config,
+                                compressed,
+                            )
+                            .await
+                            {
                                 Ok((next_offset, size, item)) => {
-                                    trace!(blob = section, cursor = offset, len, "replayed item");
+                                    trace!(
+                                        blob = section,
+                                        cursor = offset,
+                                        len = aligned_len,
+                                        "replayed item"
+                                    );
                                     Some((
                                         Ok((section, offset, size, item)),
-                                        (section, blob, next_offset, codec_config, compressed),
+                                        (section, reader, next_offset, codec_config, compressed),
                                     ))
                                 }
                                 Err(Error::ChecksumMismatch(expected, found)) => {
@@ -378,7 +446,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                     );
                                     Some((
                                         Err(Error::ChecksumMismatch(expected, found)),
-                                        (section, blob, len, codec_config, compressed),
+                                        (section, reader, aligned_len, codec_config, compressed),
                                     ))
                                 }
                                 Err(Error::Runtime(RError::BlobInsufficientLength)) => {
@@ -388,16 +456,16 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                     warn!(
                                         blob = section,
                                         new_size = offset,
-                                        old_size = len,
+                                        old_size = aligned_len,
                                         "trailing bytes detected: truncating"
                                     );
-                                    blob.truncate(offset as u64 * ITEM_ALIGNMENT).await.ok()?;
-                                    blob.sync().await.ok()?;
+                                    reader.truncate(offset as u64 * ITEM_ALIGNMENT).await.ok()?;
                                     None
                                 }
-                                Err(err) => {
-                                    Some((Err(err), (section, blob, len, codec_config, compressed)))
-                                }
+                                Err(err) => Some((
+                                    Err(err),
+                                    (section, reader, aligned_len, codec_config, compressed),
+                                )),
                             }
                         },
                     )
@@ -623,13 +691,16 @@ mod tests {
                 compression: None,
                 codec_config: (),
             };
-            let mut journal = Journal::<_, i32>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, i32>::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
             // Replay the journal and collect items
             let mut items = Vec::new();
-            let stream = journal.replay(1).await.expect("unable to setup replay");
+            let stream = journal
+                .replay(1, 1024)
+                .await
+                .expect("unable to setup replay");
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 match result {
@@ -687,14 +758,17 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::init(context, cfg)
+            let journal = Journal::init(context, cfg)
                 .await
                 .expect("Failed to re-initialize journal");
 
             // Replay the journal and collect items
             let mut items = Vec::<(u64, u32)>::new();
             {
-                let stream = journal.replay(2).await.expect("unable to setup replay");
+                let stream = journal
+                    .replay(2, 1024)
+                    .await
+                    .expect("unable to setup replay");
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
@@ -777,7 +851,10 @@ mod tests {
             // Replay the journal and collect items
             let mut items = Vec::<(u64, u64)>::new();
             {
-                let stream = journal.replay(1).await.expect("unable to setup replay");
+                let stream = journal
+                    .replay(1, 1024)
+                    .await
+                    .expect("unable to setup replay");
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
@@ -872,12 +949,15 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Initialize the journal
-            let mut journal = Journal::init(context, cfg)
+            let journal = Journal::init(context, cfg)
                 .await
                 .expect("Failed to initialize journal");
 
             // Attempt to replay the journal
-            let stream = journal.replay(1).await.expect("unable to setup replay");
+            let stream = journal
+                .replay(1, 1024)
+                .await
+                .expect("unable to setup replay");
             pin_mut!(stream);
             let mut items = Vec::<(u64, u64)>::new();
             while let Some(result) = stream.next().await {
@@ -924,12 +1004,15 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Initialize the journal
-            let mut journal = Journal::init(context, cfg)
+            let journal = Journal::init(context, cfg)
                 .await
                 .expect("Failed to initialize journal");
 
             // Attempt to replay the journal
-            let stream = journal.replay(1).await.expect("unable to setup replay");
+            let stream = journal
+                .replay(1, 1024)
+                .await
+                .expect("unable to setup replay");
             pin_mut!(stream);
             let mut items = Vec::<(u64, u64)>::new();
             while let Some(result) = stream.next().await {
@@ -984,14 +1067,17 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Initialize the journal
-            let mut journal = Journal::init(context, cfg)
+            let journal = Journal::init(context, cfg)
                 .await
                 .expect("Failed to initialize journal");
 
             // Attempt to replay the journal
             //
             // This will truncate the leftover bytes from our manual write.
-            let stream = journal.replay(1).await.expect("unable to setup replay");
+            let stream = journal
+                .replay(1, 1024)
+                .await
+                .expect("unable to setup replay");
             pin_mut!(stream);
             let mut items = Vec::<(u64, u64)>::new();
             while let Some(result) = stream.next().await {
@@ -1052,12 +1138,15 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Initialize the journal
-            let mut journal = Journal::init(context, cfg)
+            let journal = Journal::init(context, cfg)
                 .await
                 .expect("Failed to initialize journal");
 
             // Attempt to replay the journal
-            let stream = journal.replay(1).await.expect("unable to setup replay");
+            let stream = journal
+                .replay(1, 1024)
+                .await
+                .expect("unable to setup replay");
             pin_mut!(stream);
             let mut items = Vec::<(u64, u64)>::new();
             let mut got_checksum_error = false;
@@ -1122,13 +1211,16 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::init(context, cfg)
+            let journal = Journal::init(context, cfg)
                 .await
                 .expect("Failed to re-initialize journal");
 
             // Attempt to replay the journal
             let mut items = Vec::<(u64, u64)>::new();
-            let stream = journal.replay(1).await.expect("unable to setup replay");
+            let stream = journal
+                .replay(1, 1024)
+                .await
+                .expect("unable to setup replay");
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 match result {

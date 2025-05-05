@@ -526,9 +526,9 @@ mod tests {
     use crate::authenticated::{actors::peer, config::Bootstrapper};
     use commonware_cryptography::{Ed25519, Signer};
     use commonware_runtime::{deterministic, Clock, Runner};
+    use commonware_utils::NZU32;
     use governor::Quota;
     use std::net::{IpAddr, Ipv4Addr};
-    use std::num::NonZeroU32;
     use std::time::Duration;
 
     fn test_config<C: Scheme>(
@@ -544,7 +544,7 @@ mod tests {
             mailbox_size: 32,
             synchrony_bound: Duration::from_secs(10),
             tracked_peer_sets: 2,
-            allowed_connection_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+            allowed_connection_rate_per_peer: Quota::per_second(NZU32!(1)),
             peer_gossip_max_count: 32,
             max_peer_set_size: 1 << 16, // 2^16
         }

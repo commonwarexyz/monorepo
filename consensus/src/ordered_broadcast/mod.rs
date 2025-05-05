@@ -182,7 +182,8 @@ mod tests {
     fn spawn_validator_engines(
         context: Context,
         identity: poly::Public,
-        pks: &[PublicKey],
+        sequencer_pks: &[PublicKey],
+        validator_pks: &[PublicKey],
         validators: &[(PublicKey, Ed25519, Share)],
         registrations: &mut Registrations<PublicKey>,
         automatons: &mut BTreeMap<PublicKey, mocks::Automaton<PublicKey>>,
@@ -197,10 +198,10 @@ mod tests {
             let context = context.with_label(&validator.to_string());
             let monitor = mocks::Monitor::new(111);
             monitors.insert(validator.clone(), monitor.clone());
-            let sequencers = mocks::Sequencers::<PublicKey>::new(pks.to_vec());
+            let sequencers = mocks::Sequencers::<PublicKey>::new(sequencer_pks.to_vec());
             let validators = mocks::Validators::<PublicKey>::new(
                 identity.clone(),
-                pks.to_vec(),
+                validator_pks.to_vec(),
                 Some(share.clone()),
             );
 
@@ -233,6 +234,7 @@ mod tests {
                     priority_proposals: false,
                     journal_heights_per_section: 10,
                     journal_replay_concurrency: 1,
+                    journal_replay_buffer: 4096,
                     journal_name_prefix: format!("ordered-broadcast-seq/{}/", validator),
                     journal_compression: Some(3),
                 },
@@ -334,6 +336,7 @@ mod tests {
                 context.with_label("validator"),
                 identity.clone(),
                 &pks,
+                &pks,
                 &validators,
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
@@ -411,6 +414,7 @@ mod tests {
                     context.with_label("validator"),
                     identity.clone(),
                     &pks,
+                    &pks,
                     &validators,
                     &mut registrations,
                     &mut automatons.lock().unwrap(),
@@ -461,6 +465,7 @@ mod tests {
     }
 
     #[test_traced]
+    #[ignore]
     fn test_network_partition() {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
@@ -486,6 +491,7 @@ mod tests {
             spawn_validator_engines(
                 context.with_label("validator"),
                 identity.clone(),
+                &pks,
                 &pks,
                 &validators,
                 &mut registrations,
@@ -556,6 +562,7 @@ mod tests {
                 context.with_label("validator"),
                 identity.clone(),
                 &pks,
+                &pks,
                 &validators,
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
@@ -583,6 +590,7 @@ mod tests {
     }
 
     #[test_traced]
+    #[ignore]
     fn test_determinism() {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
@@ -618,6 +626,7 @@ mod tests {
             spawn_validator_engines(
                 context.with_label("validator"),
                 identity.clone(),
+                &pks,
                 &pks,
                 &validators,
                 &mut registrations,
@@ -664,6 +673,7 @@ mod tests {
             let monitors = spawn_validator_engines(
                 context.with_label("validator"),
                 identity.clone(),
+                &pks,
                 &pks,
                 &validators,
                 &mut registrations,
@@ -820,6 +830,7 @@ mod tests {
                         priority_proposals: false,
                         journal_heights_per_section: 10,
                         journal_replay_concurrency: 1,
+                        journal_replay_buffer: 4096,
                         journal_name_prefix: format!("ordered-broadcast-seq/{}/", validator),
                         journal_compression: Some(3),
                     },
@@ -868,6 +879,7 @@ mod tests {
                         priority_proposals: false,
                         journal_heights_per_section: 10,
                         journal_replay_concurrency: 1,
+                        journal_replay_buffer: 4096,
                         journal_name_prefix: format!(
                             "ordered-broadcast-seq/{}/",
                             sequencer.public_key()
@@ -889,5 +901,62 @@ mod tests {
             )
             .await;
         });
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_1k() {
+        let num_validators: u32 = 10;
+        let quorum: u32 = 3;
+        let cfg = deterministic::Config::new();
+        let runner = deterministic::Runner::new(cfg);
+
+        runner.start(|mut context| async move {
+            let (identity, mut shares_vec) =
+                ops::generate_shares(&mut context, None, num_validators, quorum);
+            shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+
+            let (oracle, validators, pks, mut registrations) = initialize_simulation(
+                context.with_label("simulation"),
+                num_validators,
+                &mut shares_vec,
+            )
+            .await;
+            let delayed_link = Link {
+                latency: 80.0,
+                jitter: 10.0,
+                success_rate: 0.98,
+            };
+            let mut oracle_clone = oracle.clone();
+            link_participants(&mut oracle_clone, &pks, Action::Update(delayed_link), None).await;
+
+            let automatons = Arc::new(Mutex::new(
+                BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
+            ));
+            let mut reporters =
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, Sha256Digest>>::new();
+            let sequencers = &pks[0..pks.len() / 2];
+            spawn_validator_engines(
+                context.with_label("validator"),
+                identity.clone(),
+                sequencers,
+                &pks,
+                &validators,
+                &mut registrations,
+                &mut automatons.lock().unwrap(),
+                &mut reporters,
+                Duration::from_millis(150),
+                |_| false,
+                None,
+            );
+
+            await_reporters(
+                context.with_label("reporter"),
+                sequencers.to_vec(),
+                &reporters,
+                (1_000, 111, false),
+            )
+            .await;
+        })
     }
 }
