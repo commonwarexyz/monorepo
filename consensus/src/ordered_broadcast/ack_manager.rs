@@ -175,8 +175,7 @@ mod tests {
         /// Generate shares using a seeded RNG.
         pub fn setup_shares<V: Variant>(num_validators: u32, quorum: u32) -> Vec<Share> {
             let mut rng = StdRng::seed_from_u64(0);
-            let (_identity, shares) =
-                generate_shares::<_, V>(&mut rng, None, num_validators, quorum);
+            let (_, shares) = generate_shares::<_, V>(&mut rng, None, num_validators, quorum);
             shares
         }
 
