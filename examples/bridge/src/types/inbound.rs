@@ -3,10 +3,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_consensus::threshold_simplex::types::Finalization;
 use commonware_cryptography::{
-    bls12381::primitives::{
-        group,
-        variant::{MinSig, MinSigPublic},
-    },
+    bls12381::primitives::variant::{MinSig, MinSigPublic},
     Digest,
 };
 
@@ -21,7 +18,7 @@ pub enum Inbound<D: Digest> {
     /// Request to retrieve a block from the indexer's storage.
     GetBlock(GetBlock<D>),
     /// Request to store a finality certificate in the indexer's storage.
-    PutFinalization(PutFinalization<MinSig, D>),
+    PutFinalization(PutFinalization<D>),
     /// Request to retrieve the latest finality certificate from the indexer's storage.
     GetFinalization(GetFinalization),
 }
@@ -123,7 +120,7 @@ impl<D: Digest> EncodeSize for PutBlock<D> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GetBlock<D: Digest> {
     /// The network identifier for which the block belongs.
-    pub network: group::Public,
+    pub network: MinSigPublic,
     /// The digest of the block to retrieve.
     pub digest: D,
 }
@@ -139,23 +136,23 @@ impl<D: Digest> Read for GetBlock<D> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let network = group::Public::read(buf)?;
+        let network = MinSigPublic::read(buf)?;
         let digest = D::read(buf)?;
         Ok(GetBlock { network, digest })
     }
 }
 
 impl<D: Digest> FixedSize for GetBlock<D> {
-    const SIZE: usize = group::Public::SIZE + D::SIZE;
+    const SIZE: usize = MinSigPublic::SIZE + D::SIZE;
 }
 
 /// Message to store a finality certificate in the indexer's storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PutFinalization<D: Digest> {
     /// The network identifier for which the finality certificate belongs.
-    pub network: group::Public,
+    pub network: MinSigPublic,
     /// The finality certificate
-    pub finalization: Finalization<D>,
+    pub finalization: Finalization<MinSig, D>,
 }
 
 impl<D: Digest> Write for PutFinalization<D> {
@@ -169,7 +166,7 @@ impl<D: Digest> Read for PutFinalization<D> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let network = group::Public::read(buf)?;
+        let network = MinSigPublic::read(buf)?;
         let finalization = Finalization::read(buf)?;
         Ok(PutFinalization {
             network,
@@ -188,7 +185,7 @@ impl<D: Digest> EncodeSize for PutFinalization<D> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GetFinalization {
     /// The network identifier for which to retrieve the finality certificate.
-    pub network: group::Public,
+    pub network: MinSigPublic,
 }
 
 impl Write for GetFinalization {
@@ -201,14 +198,14 @@ impl Read for GetFinalization {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let network = group::Public::read(buf)?;
+        let network = MinSigPublic::read(buf)?;
         Ok(GetFinalization { network })
     }
 }
 
 impl EncodeSize for GetFinalization {
     fn encode_size(&self) -> usize {
-        group::Public::SIZE
+        MinSigPublic::SIZE
     }
 }
 
