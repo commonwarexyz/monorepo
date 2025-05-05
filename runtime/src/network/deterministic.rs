@@ -141,3 +141,14 @@ impl crate::Network for Network {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::network::deterministic as DeterministicNetwork;
+    use crate::network::tests;
+
+    #[tokio::test]
+    async fn test_trait() {
+        tests::test_network_trait(DeterministicNetwork::Network::default).await;
+    }
+}
