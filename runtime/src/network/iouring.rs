@@ -224,13 +224,15 @@ impl Sink {
 impl crate::Sink for Sink {
     async fn send(&mut self, msg: &[u8]) -> Result<(), crate::Error> {
         let mut bytes_sent = 0;
-
         while bytes_sent < msg.len() {
             let remaining = &msg[bytes_sent..];
 
-            let op =
-                io_uring::opcode::Send::new(self.as_raw_fd(), remaining.as_ptr(), msg.len() as u32)
-                    .build();
+            let op = io_uring::opcode::Send::new(
+                self.as_raw_fd(),
+                remaining.as_ptr(),
+                remaining.len() as u32,
+            )
+            .build();
 
             let (tx, rx) = oneshot::channel();
 
@@ -262,14 +264,13 @@ impl Stream {
 impl crate::Stream for Stream {
     async fn recv(&mut self, buf: &mut [u8]) -> Result<(), crate::Error> {
         let mut bytes_received = 0;
-
         while bytes_received < buf.len() {
             let remaining = &mut buf[bytes_received..];
 
             let op = io_uring::opcode::Recv::new(
                 self.as_raw_fd(),
                 remaining.as_mut_ptr(),
-                buf.len() as u32,
+                remaining.len() as u32,
             )
             .build();
 
