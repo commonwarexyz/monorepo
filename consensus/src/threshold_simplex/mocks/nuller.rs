@@ -5,23 +5,30 @@ use crate::{
     ThresholdSupervisor,
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{bls12381::primitives::group, Hasher};
+use commonware_cryptography::{
+    bls12381::primitives::{group, variant::Variant},
+    Hasher,
+};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Handle, Spawner};
 use std::marker::PhantomData;
 use tracing::debug;
 
 pub struct Config<
-    S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
+    V: Variant,
+    S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
 > {
     pub supervisor: S,
     pub namespace: Vec<u8>,
+
+    _phantom: PhantomData<V>,
 }
 
 pub struct Nuller<
     E: Spawner,
+    V: Variant,
     H: Hasher,
-    S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
+    S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
 > {
     context: E,
     supervisor: S,
@@ -29,15 +36,17 @@ pub struct Nuller<
     namespace: Vec<u8>,
 
     _hasher: PhantomData<H>,
+    _variant: PhantomData<V>,
 }
 
 impl<
         E: Spawner,
+        V: Variant,
         H: Hasher,
-        S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
-    > Nuller<E, H, S>
+        S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
+    > Nuller<E, V, H, S>
 {
-    pub fn new(context: E, cfg: Config<S>) -> Self {
+    pub fn new(context: E, cfg: Config<V, S>) -> Self {
         Self {
             context,
             supervisor: cfg.supervisor,
@@ -45,6 +54,7 @@ impl<
             namespace: cfg.namespace,
 
             _hasher: PhantomData,
+            _variant: PhantomData,
         }
     }
 
@@ -56,7 +66,7 @@ impl<
         let (mut sender, mut receiver) = voter_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message
-            let msg = match Voter::<H::Digest>::decode(msg) {
+            let msg = match Voter::<V, H::Digest>::decode(msg) {
                 Ok(msg) => msg,
                 Err(err) => {
                     debug!(?err, sender = ?s, "failed to decode message");
@@ -71,12 +81,12 @@ impl<
                     let view = notarize.view();
                     let share = self.supervisor.share(view).unwrap();
                     let n = Nullify::sign(&self.namespace, share, view);
-                    let msg = Voter::<H::Digest>::Nullify(n).encode().into();
+                    let msg = Voter::<V, H::Digest>::Nullify(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Finalize digest
                     let proposal = notarize.proposal;
-                    let f = Finalize::sign(&self.namespace, share, proposal);
+                    let f = Finalize::<V, _>::sign(&self.namespace, share, proposal);
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }

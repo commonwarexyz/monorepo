@@ -5,7 +5,10 @@ use crate::{
     ThresholdSupervisor,
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{bls12381::primitives::group, Hasher};
+use commonware_cryptography::{
+    bls12381::primitives::{group, variant::Variant},
+    Hasher,
+};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
 use rand::{CryptoRng, Rng};
@@ -13,16 +16,20 @@ use std::marker::PhantomData;
 use tracing::debug;
 
 pub struct Config<
-    S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
+    V: Variant,
+    S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
 > {
     pub supervisor: S,
     pub namespace: Vec<u8>,
+
+    _phantom: PhantomData<V>,
 }
 
 pub struct Conflicter<
     E: Clock + Rng + CryptoRng + Spawner,
+    V: Variant,
     H: Hasher,
-    S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
+    S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
 > {
     context: E,
     supervisor: S,
@@ -30,15 +37,17 @@ pub struct Conflicter<
     namespace: Vec<u8>,
 
     _hasher: PhantomData<H>,
+    _variant: PhantomData<V>,
 }
 
 impl<
         E: Clock + Rng + CryptoRng + Spawner,
+        V: Variant,
         H: Hasher,
-        S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
-    > Conflicter<E, H, S>
+        S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
+    > Conflicter<E, V, H, S>
 {
-    pub fn new(context: E, cfg: Config<S>) -> Self {
+    pub fn new(context: E, cfg: Config<V, S>) -> Self {
         Self {
             context,
             supervisor: cfg.supervisor,
@@ -46,6 +55,7 @@ impl<
             namespace: cfg.namespace,
 
             _hasher: PhantomData,
+            _variant: PhantomData,
         }
     }
 
@@ -57,7 +67,7 @@ impl<
         let (mut sender, mut receiver) = voter_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message
-            let msg = match Voter::<H::Digest>::decode(msg) {
+            let msg = match Voter::<V, H::Digest>::decode(msg) {
                 Ok(msg) => msg,
                 Err(err) => {
                     debug!(?err, sender = ?s, "failed to decode message");
@@ -73,12 +83,12 @@ impl<
                     let share = self.supervisor.share(view).unwrap();
                     let payload = H::random(&mut self.context);
                     let proposal = Proposal::new(view, notarize.proposal.parent, payload);
-                    let n = Notarize::sign(&self.namespace, share, proposal);
+                    let n = Notarize::<V, _>::sign(&self.namespace, share, proposal);
                     let msg = Voter::Notarize(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Notarize received digest
-                    let n = Notarize::sign(&self.namespace, share, notarize.proposal);
+                    let n = Notarize::<V, _>::sign(&self.namespace, share, notarize.proposal);
                     let msg = Voter::Notarize(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
@@ -88,12 +98,12 @@ impl<
                     let share = self.supervisor.share(view).unwrap();
                     let payload = H::random(&mut self.context);
                     let proposal = Proposal::new(view, finalize.proposal.parent, payload);
-                    let f = Finalize::sign(&self.namespace, share, proposal);
+                    let f = Finalize::<V, _>::sign(&self.namespace, share, proposal);
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Finalize provided digest
-                    let f = Finalize::sign(&self.namespace, share, finalize.proposal);
+                    let f = Finalize::<V, _>::sign(&self.namespace, share, finalize.proposal);
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
