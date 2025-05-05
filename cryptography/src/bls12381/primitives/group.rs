@@ -10,6 +10,7 @@
 //! when handling deserialized points or points received from untrusted sources. This
 //! is already taken care of for you if you use the provided `deserialize` function.
 
+use super::variant::Variant;
 use blst::{
     blst_bendian_from_scalar, blst_fp12, blst_fr, blst_fr_add, blst_fr_from_scalar,
     blst_fr_from_uint64, blst_fr_inverse, blst_fr_mul, blst_fr_sub, blst_hash_to_g1,
@@ -37,8 +38,6 @@ use std::{
     ptr,
 };
 use zeroize::{Zeroize, ZeroizeOnDrop};
-
-use super::variant::Variant;
 
 /// Domain separation tag used when hashing a message to a curve (G1 or G2).
 ///
