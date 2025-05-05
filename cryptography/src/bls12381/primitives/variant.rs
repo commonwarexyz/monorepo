@@ -1,3 +1,5 @@
+use std::fmt::Debug;
+
 use super::group::{
     Element, Point, Scalar, DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE,
     G2_PROOF_OF_POSSESSION,
@@ -7,8 +9,8 @@ use blst::{Pairing as blst_pairing, BLS12_381_NEG_G1, BLS12_381_NEG_G2};
 use commonware_codec::FixedSize;
 
 pub trait Variant {
-    type Public: Point + FixedSize;
-    type Signature: Point + FixedSize;
+    type Public: Point + FixedSize + Debug;
+    type Signature: Point + FixedSize + Debug;
 
     const PROOF_OF_POSSESSION: DST;
     const MESSAGE: DST;
