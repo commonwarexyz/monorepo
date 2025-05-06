@@ -195,6 +195,9 @@ impl Debug for MinSig {
 
 #[cfg(test)]
 mod tests {
+    use commonware_codec::ReadExt;
+    use commonware_utils::from_hex_formatted;
+
     use super::*;
 
     // Source: https://github.com/paulmillr/noble-curves/blob/bee1ffe0000095f95b982a969d06baaa3dd8ce73/test/bls12-381/bls12-381-g1-test-vectors.txt
@@ -328,6 +331,27 @@ mod tests {
 55bdf02943f5a8130bcb537972f870043f5d7e3561df8717740e1a7a39bf73df:e288bfeeead0c3050ec6834694323af7bd77dcb52fee6cb54167a73181e487583ac75e63c95e71760cd9a1584b711842f602237f72afb268ef039a044d293d4091abc1807cbec9041ece11905b32ace59db1114047f60ae679c53b465afe03a8ba02ee89e85efebbb93226eaf1cd5c6ce1ef913fbf549934dfbda69dff:94c74729eaecf336b25d82a10798adc97e70cb345313413cf6550d622b0b92b9d4dcf606afb1b7e88db6b3ce106aba04
 49a477ecf8786a9f5a44a9da0a83da977b844198068f1cadce28c599d9ebddbd:9944eeed83dde7b21b72ff1491cad3d7a1ceae3f9c5c880be49024d9ec055c55189de80b521df30fd17d558f7bc6ff6d5c9dcacae3ec1242929fae1fd8bd7fedea51acd344a1fa0120f60b1a4679e5177588fc27d713173f4fd47cccc16feb8b44a2d670d7b04c8c14bf37527230f3daa6d7c3a6e958c78376c5940f1063:8045a0358069c43170b238e7dc98952bf84e1caa0925905922b5822ab28b498297e901614909376fa04ced4c852c39da
 6bbc2807b27b635285670a68a42d8fafb461fab581e4e2773c199b29088bc554:0c149764b95e6461e820206e5e2b7fa4acf62a3a132db955d5c4ff1cafbfef3b3816aab1bc9bbcf14af47a4e7753f0243842d9b53b3c3c26b9a2e244f2eb06461e2128949e9b437c96cddbddb52d9d6062d4692d05dc624f94fac39401ce51389576f0fd52e670841602645b4ed6a76cc845ec8454538782b3b179e44cd5ec:aaaa82c3fd810924f41b74bdf484460810f5f3274f8102520099f9ca384a5965e50202a36edfa5b0999c7b3c2548ae74";
+
+    #[test]
+    fn test_min_pk_tests() {
+        for line in MIN_PK_TESTS.lines() {
+            let parts: Vec<_> = line.split(':').collect();
+            assert_eq!(parts.len(), 3, "Invalid test vector format");
+            println!("Testing: {:?}", parts);
+            let private = from_hex_formatted(parts[0]).unwrap();
+            let private = Scalar::read(&mut private.as_ref()).unwrap();
+            let message = from_hex_formatted(parts[1]).unwrap();
+            let signature = from_hex_formatted(parts[2]).unwrap();
+            let signature = <MinPk as Variant>::Signature::read(&mut signature.as_ref()).unwrap();
+
+            let computed = <MinPk as Variant>::sign(
+                &private,
+                b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_",
+                &message,
+            );
+            assert_eq!(signature, computed, "Signature mismatch");
+        }
+    }
 
     /// Source: https://github.com/paulmillr/noble-curves/blob/bee1ffe0000095f95b982a969d06baaa3dd8ce73/test/bls12-381/bls12-381-g2-test-vectors.txt
     ///
