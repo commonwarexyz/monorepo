@@ -9,7 +9,7 @@ use commonware_cryptography::{
     Digest, Scheme,
 };
 use commonware_macros::select;
-use commonware_p2p::{Control, Receiver, Sender};
+use commonware_p2p::{Receiver, Sender};
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
@@ -21,7 +21,6 @@ pub struct Engine<
     C: Scheme,
     V: Variant,
     D: Digest,
-    PC: Control<PublicKey = C::PublicKey>,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<V, D>>,
@@ -35,9 +34,9 @@ pub struct Engine<
 > {
     context: E,
 
-    voter: voter::Actor<E, C, V, D, PC, A, R, F, S>,
+    voter: voter::Actor<E, C, V, D, A, R, F, S>,
     voter_mailbox: voter::Mailbox<V, D>,
-    resolver: resolver::Actor<E, C, V, D, PC, S>,
+    resolver: resolver::Actor<E, C, V, D, S>,
     resolver_mailbox: resolver::Mailbox<V, D>,
 }
 
@@ -46,7 +45,6 @@ impl<
         C: Scheme,
         V: Variant,
         D: Digest,
-        PC: Control<PublicKey = C::PublicKey>,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<V, D>>,
@@ -57,10 +55,10 @@ impl<
             Identity = poly::Public<V>,
             PublicKey = C::PublicKey,
         >,
-    > Engine<E, C, V, D, PC, A, R, F, S>
+    > Engine<E, C, V, D, A, R, F, S>
 {
     /// Create a new `threshold-simplex` consensus engine.
-    pub fn new(context: E, cfg: Config<C, V, D, PC, A, R, F, S>) -> Self {
+    pub fn new(context: E, cfg: Config<C, V, D, A, R, F, S>) -> Self {
         // Ensure configuration is valid
         cfg.assert();
 
@@ -69,7 +67,6 @@ impl<
             context.clone(),
             voter::Config {
                 crypto: cfg.crypto.clone(),
-                p2p_control: cfg.p2p_control.clone(),
                 automaton: cfg.automaton,
                 relay: cfg.relay,
                 reporter: cfg.reporter,
@@ -93,7 +90,6 @@ impl<
             context.clone(),
             resolver::Config {
                 crypto: cfg.crypto,
-                p2p_control: cfg.p2p_control,
                 supervisor: cfg.supervisor,
                 mailbox_size: cfg.mailbox_size,
                 namespace: cfg.namespace,

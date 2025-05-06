@@ -26,7 +26,6 @@ pub enum Message<P: Array> {
         receiver: P,
         result: oneshot::Sender<Result<(), Error>>,
     },
-
     Block {
         from: P,
         public_key: P,

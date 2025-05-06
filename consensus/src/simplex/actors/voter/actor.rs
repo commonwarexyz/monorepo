@@ -15,7 +15,7 @@ use commonware_cryptography::{Digest, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
-    Control, Receiver, Recipients, Sender,
+    Receiver, Recipients, Sender,
 };
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
@@ -312,7 +312,6 @@ pub struct Actor<
     E: Clock + Rng + Spawner + Storage + Metrics,
     C: Scheme,
     D: Digest,
-    PC: Control<PublicKey = C::PublicKey>,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<C::Signature, D>>,
@@ -320,7 +319,6 @@ pub struct Actor<
 > {
     context: E,
     crypto: C,
-    p2p_control: PC,
     automaton: A,
     relay: R,
     reporter: F,
@@ -362,14 +360,13 @@ impl<
         E: Clock + Rng + Spawner + Storage + Metrics,
         C: Scheme,
         D: Digest,
-        PC: Control<PublicKey = C::PublicKey>,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<C::Signature, D>>,
         S: Supervisor<Index = View, PublicKey = C::PublicKey>,
-    > Actor<E, C, D, PC, A, R, F, S>
+    > Actor<E, C, D, A, R, F, S>
 {
-    pub fn new(context: E, cfg: Config<C, D, PC, A, R, F, S>) -> (Self, Mailbox<C::Signature, D>) {
+    pub fn new(context: E, cfg: Config<C, D, A, R, F, S>) -> (Self, Mailbox<C::Signature, D>) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -414,7 +411,6 @@ impl<
             Self {
                 context,
                 crypto: cfg.crypto,
-                p2p_control: cfg.p2p_control,
                 automaton: cfg.automaton,
                 relay: cfg.relay,
                 reporter: cfg.reporter,

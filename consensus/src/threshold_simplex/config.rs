@@ -4,7 +4,6 @@ use commonware_cryptography::{
     bls12381::primitives::{group, variant::Variant},
     Digest, Scheme,
 };
-use commonware_p2p::Control;
 use governor::Quota;
 use std::time::Duration;
 
@@ -13,7 +12,6 @@ pub struct Config<
     C: Scheme,
     V: Variant,
     D: Digest,
-    PC: Control<PublicKey = C::PublicKey>,
     A: Automaton<Context = Context<D>>,
     R: Relay,
     F: Reporter<Activity = Activity<V, D>>,
@@ -21,9 +19,6 @@ pub struct Config<
 > {
     /// Cryptographic primitives.
     pub crypto: C,
-
-    /// Control interface for p2p communication.
-    pub p2p_control: PC,
 
     /// Automaton for the consensus engine.
     pub automaton: A,
@@ -98,12 +93,11 @@ impl<
         C: Scheme,
         V: Variant,
         D: Digest,
-        PC: Control<PublicKey = C::PublicKey>,
         A: Automaton<Context = Context<D>>,
         R: Relay,
         F: Reporter<Activity = Activity<V, D>>,
         S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
-    > Config<C, V, D, PC, A, R, F, S>
+    > Config<C, V, D, A, R, F, S>
 {
     /// Assert enforces that all configuration values are valid.
     pub fn assert(&self) {

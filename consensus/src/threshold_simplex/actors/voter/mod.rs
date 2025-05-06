@@ -10,7 +10,6 @@ use commonware_cryptography::{
     bls12381::primitives::{group, variant::Variant},
     Digest, Scheme,
 };
-use commonware_p2p::Control;
 pub use ingress::{Mailbox, Message};
 use std::time::Duration;
 
@@ -18,14 +17,12 @@ pub struct Config<
     C: Scheme,
     V: Variant,
     D: Digest,
-    PC: Control<PublicKey = C::PublicKey>,
     A: Automaton<Context = Context<D>>,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
 > {
     pub crypto: C,
-    pub p2p_control: PC,
     pub automaton: A,
     pub relay: R,
     pub reporter: F,
@@ -129,7 +126,6 @@ mod tests {
             actor.start();
             let cfg = Config {
                 crypto: scheme,
-                p2p_control: oracle.control(validator.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: supervisor.clone(),

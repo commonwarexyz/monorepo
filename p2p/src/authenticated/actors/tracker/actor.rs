@@ -193,6 +193,16 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         )
     }
 
+    /// Returns whether a peer is valid. The peer must be:
+    /// - In a peer set
+    /// - Not be us
+    /// - Not beblocked
+    fn valid_peer(&self, peer: &C::PublicKey) -> bool {
+        let invalid = *peer == self.crypto.public_key()
+            || self.peers.get(peer).is_none_or(|r| r.is_blocked());
+        !invalid
+    }
+
     /// Stores a new peer set and increments peer counters.
     fn store_peer_set(&mut self, index: u64, peers: Vec<C::PublicKey>) {
         // Check if peer set already exists
@@ -425,18 +435,13 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
     /// - The peer is already reserved.
     /// - The peer has been rate-limited.
     fn reserve(&mut self, peer: C::PublicKey) -> Option<Reservation<E, C>> {
-        // Cannot reserve self
-        if peer == self.crypto.public_key() {
-            return None;
-        }
-
         // Check if we are already reserved
         if self.reserved.contains(&peer) {
             return None;
         }
 
         // Check if peer is invalid or blocked
-        if self.peers.get(&peer).is_none_or(|r| r.is_blocked()) {
+        if !self.valid_peer(&peer) {
             return None;
         }
 
@@ -473,7 +478,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
                     mut peer,
                 } => {
                     // Kill if peer is not authorized
-                    if self.peers.get(&public_key).is_none_or(|r| r.is_blocked()) {
+                    if !self.valid_peer(&public_key) {
                         peer.kill().await;
                         continue;
                     }
@@ -546,20 +551,17 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
                     reservation,
                 } => {
                     // Block reservations for self, missing, or blocked peers
-                    if public_key == self.crypto.public_key()
-                        || self.peers.get(&public_key).is_none_or(|r| r.is_blocked())
-                    {
+                    if !self.valid_peer(&public_key) {
                         debug!(?public_key, "peer not authorized to connect");
                         let _ = reservation.send(None);
-                        return;
+                    } else {
+                        // Because dropping the reservation will release the connection,
+                        // we don't need to worry about the case that this fails.
+                        let _ = reservation.send(self.reserve(public_key));
                     }
-
-                    // Because dropping the reservation will release the connection,
-                    // we don't need to worry about the case that this fails.
-                    let _ = reservation.send(self.reserve(public_key));
                 }
                 Message::Release { public_key } => {
-                    assert!(self.reserved.remove(&public_key));
+                    self.reserved.remove(&public_key);
                     self.reserved_connections.dec();
                     self.active.remove(&public_key);
                 }
@@ -717,6 +719,7 @@ mod tests {
                     assert!(!bit);
                 }
             }
+            mailbox.release(peer1.clone()).await;
 
             // Provide peer address
             let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
@@ -745,6 +748,7 @@ mod tests {
                     assert!(!bit);
                 }
             }
+            mailbox.release(peer1.clone()).await;
 
             // Register new peers
             oracle.register(1, vec![peer2.clone(), peer3]).await;
@@ -778,6 +782,7 @@ mod tests {
                     }
                     _ => panic!("unexpected index"),
                 };
+                mailbox.release(peer1.clone()).await;
             }
 
             // Register some peers
@@ -813,6 +818,7 @@ mod tests {
                     }
                     _ => panic!("unexpected index"),
                 };
+                mailbox.release(peer2.clone()).await;
             }
         });
     }

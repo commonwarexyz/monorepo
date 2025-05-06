@@ -324,10 +324,12 @@ mod tests {
         let mut record_unknown = Record::<Secp256r1>::unknown();
         assert_eq!(record_unknown.num_sets, 0);
         record_unknown.increment();
-        assert_eq!(record_unknown.num_sets, 1);
+        record_unknown.increment();
+        assert_eq!(record_unknown.num_sets, 2);
         assert!(!record_unknown.decrement());
-        assert_eq!(record_unknown.num_sets, 0);
+        assert_eq!(record_unknown.num_sets, 1);
         assert!(record_unknown.decrement());
+        assert_eq!(record_unknown.num_sets, 0);
 
         // Test Discovered state -> removable
         let peer_info: PeerInfo<Secp256r1> = create_peer_info(7, socket, 1000);
@@ -335,10 +337,12 @@ mod tests {
         record_disc.set_discovered(peer_info.clone());
         assert_eq!(record_disc.num_sets, 0);
         record_disc.increment();
-        assert_eq!(record_disc.num_sets, 1);
+        record_disc.increment();
+        assert_eq!(record_disc.num_sets, 2);
         assert!(!record_disc.decrement());
-        assert_eq!(record_disc.num_sets, 0);
+        assert_eq!(record_disc.num_sets, 1);
         assert!(record_disc.decrement());
+        assert_eq!(record_disc.num_sets, 0);
     }
 
     #[test]
@@ -349,10 +353,12 @@ mod tests {
         let mut record_boot = Record::<Secp256r1>::bootstrapped(socket);
         assert_eq!(record_boot.num_sets, 0);
         record_boot.increment();
+        record_boot.increment();
+        assert_eq!(record_boot.num_sets, 2);
+        assert!(!record_boot.decrement());
         assert_eq!(record_boot.num_sets, 1);
         assert!(!record_boot.decrement());
         assert_eq!(record_boot.num_sets, 0);
-        assert!(!record_boot.decrement());
 
         // Test Persistent state -> not removable
         let peer_info: PeerInfo<Secp256r1> = create_peer_info(7, socket, 1000);
@@ -360,10 +366,12 @@ mod tests {
         record_pers.set_discovered(peer_info);
         assert_eq!(record_pers.num_sets, 0);
         record_pers.increment();
+        record_pers.increment();
+        assert_eq!(record_pers.num_sets, 2);
+        assert!(!record_pers.decrement());
         assert_eq!(record_pers.num_sets, 1);
         assert!(!record_pers.decrement());
         assert_eq!(record_pers.num_sets, 0);
-        assert!(!record_pers.decrement());
     }
 
     #[test]

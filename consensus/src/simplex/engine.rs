@@ -6,7 +6,7 @@ use super::{
 use crate::{Automaton, Relay, Reporter, Supervisor};
 use commonware_cryptography::{Digest, Scheme};
 use commonware_macros::select;
-use commonware_p2p::{Control, Receiver, Sender};
+use commonware_p2p::{Receiver, Sender};
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
@@ -17,7 +17,6 @@ pub struct Engine<
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
     C: Scheme,
     D: Digest,
-    PC: Control<PublicKey = C::PublicKey>,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<C::Signature, D>>,
@@ -25,9 +24,9 @@ pub struct Engine<
 > {
     context: E,
 
-    voter: voter::Actor<E, C, D, PC, A, R, F, S>,
+    voter: voter::Actor<E, C, D, A, R, F, S>,
     voter_mailbox: voter::Mailbox<C::Signature, D>,
-    resolver: resolver::Actor<E, C, D, PC, S>,
+    resolver: resolver::Actor<E, C, D, S>,
     resolver_mailbox: resolver::Mailbox<C::Signature, D>,
 }
 
@@ -35,15 +34,14 @@ impl<
         E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
         C: Scheme,
         D: Digest,
-        PC: Control<PublicKey = C::PublicKey>,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<C::Signature, D>>,
         S: Supervisor<Index = View, PublicKey = C::PublicKey>,
-    > Engine<E, C, D, PC, A, R, F, S>
+    > Engine<E, C, D, A, R, F, S>
 {
     /// Create a new `simplex` consensus engine.
-    pub fn new(context: E, cfg: Config<C, D, PC, A, R, F, S>) -> Self {
+    pub fn new(context: E, cfg: Config<C, D, A, R, F, S>) -> Self {
         // Ensure configuration is valid
         cfg.assert();
 
@@ -52,7 +50,6 @@ impl<
             context.with_label("voter"),
             voter::Config {
                 crypto: cfg.crypto.clone(),
-                p2p_control: cfg.p2p_control.clone(),
                 automaton: cfg.automaton,
                 relay: cfg.relay,
                 reporter: cfg.reporter,
@@ -77,7 +74,6 @@ impl<
             context.with_label("resolver"),
             resolver::Config {
                 crypto: cfg.crypto,
-                p2p_control: cfg.p2p_control,
                 supervisor: cfg.supervisor,
                 mailbox_size: cfg.mailbox_size,
                 namespace: cfg.namespace,

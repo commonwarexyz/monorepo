@@ -190,9 +190,8 @@ fn main() {
         );
 
         // Initialize consensus
-        let cfg = simplex::Config::<_, _, _, _, _, _, _> {
+        let cfg = simplex::Config::<_, _, _, _, _, _> {
             crypto: signer.clone(),
-            p2p_control: oracle.clone(),
             automaton: mailbox.clone(),
             relay: mailbox.clone(),
             reporter: supervisor.clone(),
