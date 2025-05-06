@@ -27,7 +27,7 @@ use commonware_p2p::{
 };
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
-use commonware_utils::quorum;
+use commonware_utils::{quorum, BitVec};
 use futures::{
     channel::{mpsc, oneshot},
     future::Either,
@@ -45,6 +45,13 @@ use std::{
 use tracing::{debug, trace, warn};
 
 const GENESIS_VIEW: View = 0;
+
+#[derive(Clone)]
+enum Status<O> {
+    None,
+    Pending(O),
+    Verified(O),
+}
 
 struct Round<
     C: Scheme,
@@ -76,21 +83,21 @@ struct Round<
     verified_proposal: bool,
 
     // Track notarizes for all proposals (ensuring any participant only has one recorded notarize)
-    notarized_proposals: HashMap<Proposal<D>, Vec<u32>>,
-    notarizes: Vec<Option<Notarize<V, D>>>,
+    notarized_proposals: HashMap<Proposal<D>, BitVec>,
+    notarizes: Vec<Status<Notarize<V, D>>>,
     notarization: Option<Notarization<V, D>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
 
     // Track nullifies (ensuring any participant only has one recorded nullify)
-    nullifies: HashMap<u32, Nullify<V>>,
+    nullifies: HashMap<u32, Status<Nullify<V>>>,
     nullification: Option<Nullification<V>>,
     broadcast_nullify: bool,
     broadcast_nullification: bool,
 
     // Track finalizes for all proposals (ensuring any participant only has one recorded finalize)
-    finalized_proposals: HashMap<Proposal<D>, Vec<u32>>,
-    finalizes: Vec<Option<Finalize<V, D>>>,
+    finalized_proposals: HashMap<Proposal<D>, BitVec>,
+    finalizes: Vec<Status<Finalize<V, D>>>,
     finalization: Option<Finalization<V, D>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
@@ -129,7 +136,7 @@ impl<
             verified_proposal: false,
 
             notarized_proposals: HashMap::new(),
-            notarizes: vec![None; participants],
+            notarizes: vec![Status::None; participants],
             notarization: None,
             broadcast_notarize: false,
             broadcast_notarization: false,
@@ -140,7 +147,7 @@ impl<
             broadcast_nullification: false,
 
             finalized_proposals: HashMap::new(),
-            finalizes: vec![None; participants],
+            finalizes: vec![Status::None; participants],
             finalization: None,
             broadcast_finalize: false,
             broadcast_finalization: false,
@@ -173,7 +180,7 @@ impl<
         notarize: Notarize<V, D>,
     ) -> bool {
         // Check if already notarized
-        if let Some(previous) = self.notarizes[public_key_index as usize].as_ref() {
+        if let Status::Verified(ref previous) = self.notarizes[public_key_index as usize] {
             if previous == &notarize {
                 trace!(?notarize, ?previous, "already notarized");
                 return false;
@@ -194,12 +201,14 @@ impl<
 
         // Store the notarize
         if let Some(vec) = self.notarized_proposals.get_mut(&notarize.proposal) {
-            vec.push(public_key_index);
+            vec.set(public_key_index as usize);
         } else {
+            let mut vec = BitVec::zeroes(self.participants);
+            vec.set(public_key_index as usize);
             self.notarized_proposals
-                .insert(notarize.proposal.clone(), vec![public_key_index]);
+                .insert(notarize.proposal.clone(), vec);
         }
-        self.notarizes[public_key_index as usize] = Some(notarize.clone());
+        self.notarizes[public_key_index as usize] = Status::Verified(notarize.clone());
         self.reporter.report(Activity::Notarize(notarize)).await;
         true
     }
