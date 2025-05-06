@@ -14,7 +14,7 @@ mod record;
 mod set;
 
 pub use actor::Actor;
-pub use ingress::{Mailbox, Oracle, Reservation};
+pub use ingress::{Control, Mailbox, Oracle, Reservation};
 
 pub struct Config<C: Scheme> {
     pub crypto: C,

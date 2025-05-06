@@ -6,8 +6,11 @@ use crate::{
     Automaton, Relay, Reporter, ThresholdSupervisor,
 };
 pub use actor::Actor;
-use commonware_cryptography::{bls12381::primitives::group, Digest};
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Scheme};
+use commonware_cryptography::{
+    bls12381::primitives::{group, variant::Variant},
+    Digest, Scheme,
+};
+use commonware_p2p::Control;
 pub use ingress::{Mailbox, Message};
 use std::time::Duration;
 
@@ -15,12 +18,14 @@ pub struct Config<
     C: Scheme,
     V: Variant,
     D: Digest,
+    PC: Control,
     A: Automaton<Context = Context<D>>,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
 > {
     pub crypto: C,
+    pub p2p_control: PC,
     pub automaton: A,
     pub relay: R,
     pub reporter: F,

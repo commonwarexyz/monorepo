@@ -3,46 +3,74 @@ use commonware_cryptography::Verifier;
 use std::net::SocketAddr;
 
 /// Represents information known about a peer's address.
-#[derive(Clone)]
-pub enum Record<C: Verifier> {
+#[derive(Clone, Debug, PartialEq)]
+pub enum Address<C: Verifier> {
     /// Peer address is not yet known.
     /// Can be upgraded to `Discovered`.
-    /// Tracks the number of peer sets this peer is part of.
-    Unknown(usize),
+    Unknown,
 
     /// Provided during initialization.
     /// Can be upgraded to `Persistent`.
     Bootstrapper(SocketAddr),
 
     /// Discovered this peer's address from other peers.
-    /// Tracks the number of peer sets this peer is part of.
-    Discovered(usize, PeerInfo<C>),
+    Discovered(PeerInfo<C>),
 
     /// Discovered this peer's address from other peers after it was bootstrapped.
     /// Will continuously be tracked.
     Persistent(PeerInfo<C>),
 }
 
+/// Represents a record of a peer's address and associated information.
+pub struct Record<C: Verifier> {
+    /// Address state of the peer.
+    address: Address<C>,
+
+    /// Number of peer sets this peer is part of.
+    num_sets: usize,
+
+    /// Whether the peer is blocked.
+    blocked: bool,
+}
+
 impl<C: Verifier> Record<C> {
+    /// Create a new record with an unknown address.
+    pub fn unknown() -> Self {
+        Record {
+            address: Address::Unknown,
+            num_sets: 0,
+            blocked: false,
+        }
+    }
+
+    /// Create a new record with a bootstrapper address.
+    pub fn bootstrapped(socket: SocketAddr) -> Self {
+        Record {
+            address: Address::Bootstrapper(socket),
+            num_sets: 0,
+            blocked: false,
+        }
+    }
+
     /// Get the address of the peer.
     ///
     /// Returns None if the address is unknown.
     pub fn get_address(&self) -> Option<SocketAddr> {
-        match &self {
-            Self::Unknown(_) => None,
-            Self::Bootstrapper(socket) => Some(*socket),
-            Self::Discovered(_, peer_info) => Some(peer_info.socket),
-            Self::Persistent(peer_info) => Some(peer_info.socket),
+        match &self.address {
+            Address::Unknown => None,
+            Address::Bootstrapper(socket) => Some(*socket),
+            Address::Discovered(peer_info) => Some(peer_info.socket),
+            Address::Persistent(peer_info) => Some(peer_info.socket),
         }
     }
 
     /// Get the peer information if available.
     pub fn get_peer_info(&self) -> Option<&PeerInfo<C>> {
-        match &self {
-            Self::Unknown(_) => None,
-            Self::Bootstrapper(_) => None,
-            Self::Discovered(_, peer_info) => Some(peer_info),
-            Self::Persistent(peer_info) => Some(peer_info),
+        match &self.address {
+            Address::Unknown => None,
+            Address::Bootstrapper(_) => None,
+            Address::Discovered(peer_info) => Some(peer_info),
+            Address::Persistent(peer_info) => Some(peer_info),
         }
     }
 
@@ -50,31 +78,31 @@ impl<C: Verifier> Record<C> {
     ///
     /// Returns true if the update was successful.
     pub fn set_discovered(&mut self, peer_info: PeerInfo<C>) -> bool {
-        match self {
-            Self::Unknown(count) => {
+        match &self.address {
+            Address::Unknown => {
                 // Upgrade to Discovered.
-                *self = Self::Discovered(*count, peer_info);
+                self.address = Address::Discovered(peer_info);
                 true
             }
-            Self::Bootstrapper(_) => {
+            Address::Bootstrapper(_) => {
                 // Upgrade to Persistent.
-                *self = Self::Persistent(peer_info);
+                self.address = Address::Persistent(peer_info);
                 true
             }
-            Self::Discovered(count, past_info) => {
+            Address::Discovered(past_info) => {
                 // Ensure the new info is more recent.
                 if past_info.timestamp >= peer_info.timestamp {
                     return false;
                 }
-                *self = Self::Discovered(*count, peer_info);
+                self.address = Address::Discovered(peer_info);
                 true
             }
-            Self::Persistent(past_info) => {
+            Address::Persistent(past_info) => {
                 // Ensure the new info is more recent.
                 if past_info.timestamp >= peer_info.timestamp {
                     return false;
                 }
-                *self = Self::Persistent(peer_info);
+                self.address = Address::Persistent(peer_info);
                 true
             }
         }
@@ -82,29 +110,40 @@ impl<C: Verifier> Record<C> {
 
     /// Check if the address is a discovered address.
     pub fn is_discovered(&self) -> bool {
-        matches!(self, Self::Discovered(_, _) | Self::Persistent(_))
+        matches!(
+            self.address,
+            Address::Discovered(_) | Address::Persistent(_)
+        )
     }
 
-    /// Increase the num
+    /// Check if the peer is blocked.
+    pub fn is_blocked(&self) -> bool {
+        self.blocked
+    }
+
+    /// Mark the peer as blocked.
+    pub fn block(&mut self) {
+        self.blocked = true;
+    }
+
+    /// Increase the count of peer sets this peer is part of.
     pub fn increment(&mut self) {
-        match self {
-            Self::Unknown(count) | Self::Discovered(count, _) => {
-                *count = count.checked_add(1).unwrap();
-            }
-            // Bootstrapper and Persistent are not incremented.
-            _ => {}
-        }
+        self.num_sets = self.num_sets.checked_add(1).unwrap();
     }
 
-    /// Decreases the count and returns true if the count is 0.
+    /// Decreases the count of peer sets this peer is part of.
+    ///
+    /// Returns true if the count reaches zero and the record is neither bootstrapper nor persistent.
     pub fn decrement(&mut self) -> bool {
-        match self {
-            Self::Unknown(count) | Self::Discovered(count, _) => {
-                *count = count.checked_sub(1).unwrap();
-                *count == 0
-            }
-            // Bootstrapper and Persistent are not decremented.
-            _ => false,
+        self.num_sets = self.num_sets.checked_sub(1).unwrap();
+        if self.num_sets > 0 {
+            return false;
+        }
+        match self.address {
+            Address::Unknown => true,
+            Address::Discovered(_) => true,
+            Address::Bootstrapper(_) => false,
+            Address::Persistent(_) => false,
         }
     }
 }
@@ -112,116 +151,303 @@ impl<C: Verifier> Record<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::authenticated::types::PeerInfo;
     use commonware_codec::Encode;
-    use commonware_cryptography::{Secp256r1, Signer};
+    use commonware_cryptography::{Secp256r1, Signer, Verifier};
     use std::net::SocketAddr;
 
     // Helper function to create signed peer info
-    fn create_signed_peer_info(timestamp: u64) -> PeerInfo<Secp256r1> {
-        let mut rng = rand::thread_rng();
-        let mut c = Secp256r1::new(&mut rng);
-        let socket = SocketAddr::from(([127, 0, 0, 1], 8080));
-        let signature = c.sign(None, &(socket, timestamp).encode());
+    fn create_peer_info<C: Signer + Verifier>(
+        signer_seed: u64,
+        socket: SocketAddr,
+        timestamp: u64,
+    ) -> PeerInfo<C> {
+        let mut signer = C::from_seed(signer_seed);
+        let signature = signer.sign(None, &(socket, timestamp).encode());
         PeerInfo {
             socket,
             timestamp,
-            public_key: c.public_key(),
+            public_key: signer.public_key(),
             signature,
         }
     }
 
+    // Common test values
+    fn test_socket() -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], 8080))
+    }
+
+    // Helper function to assert equality of PeerInfo
+    fn assert_peer_info_eq<C: Verifier>(info1: Option<&PeerInfo<C>>, info2: Option<&PeerInfo<C>>) {
+        let (Some(info1), Some(info2)) = (info1, info2) else {
+            assert!(info1.is_none() && info2.is_none());
+            return;
+        };
+        assert_eq!(info1.socket, info2.socket);
+        assert_eq!(info1.timestamp, info2.timestamp);
+        assert_eq!(info1.public_key, info2.public_key);
+        assert_eq!(info1.signature, info2.signature);
+    }
+
+    #[test]
+    fn test_unknown_initial_state() {
+        let record = Record::<Secp256r1>::unknown();
+        assert!(matches!(record.address, Address::Unknown));
+        assert_eq!(record.num_sets, 0);
+        assert!(!record.blocked);
+        assert_eq!(record.get_address(), None);
+        assert_peer_info_eq(record.get_peer_info(), None);
+        assert!(!record.is_discovered());
+        assert!(!record.is_blocked());
+    }
+
+    #[test]
+    fn test_bootstrapped_initial_state() {
+        let socket = test_socket();
+        let record = Record::<Secp256r1>::bootstrapped(socket);
+        assert!(matches!(record.address, Address::Bootstrapper(s) if s == socket));
+        assert_eq!(record.num_sets, 0);
+        assert!(!record.blocked);
+        assert_eq!(record.get_address(), Some(socket));
+        assert_peer_info_eq(record.get_peer_info(), None);
+        assert!(!record.is_discovered());
+        assert!(!record.is_blocked());
+    }
+
     #[test]
     fn test_unknown_to_discovered() {
-        let mut record = Record::<Secp256r1>::Unknown(1);
-        let peer_info = create_signed_peer_info(1000);
+        let socket = test_socket();
+        let mut record = Record::<Secp256r1>::unknown();
+        let peer_info: PeerInfo<Secp256r1> = create_peer_info(1, socket, 1000);
+
         assert!(record.set_discovered(peer_info.clone()));
-        match record {
-            Record::Discovered(count, info) => {
-                assert_eq!(count, 1);
-                assert_eq!(info.timestamp, 1000);
-                assert_eq!(info.socket, peer_info.socket);
-            }
-            _ => panic!("Expected Discovered state"),
-        }
+        assert_eq!(record.get_address(), Some(socket));
+        assert!(record.is_discovered());
+        assert!(matches!(&record.address, Address::Discovered(_)));
+        assert_peer_info_eq(record.get_peer_info(), Some(&peer_info));
     }
 
     #[test]
     fn test_bootstrapper_to_persistent() {
-        let socket = SocketAddr::from(([127, 0, 0, 1], 8080));
-        let mut record = Record::<Secp256r1>::Bootstrapper(socket);
-        let peer_info = create_signed_peer_info(1000);
+        let socket = test_socket();
+        let mut record = Record::<Secp256r1>::bootstrapped(socket);
+        let peer_info: PeerInfo<Secp256r1> = create_peer_info(2, socket, 1000);
+
         assert!(record.set_discovered(peer_info.clone()));
-        match record {
-            Record::Persistent(info) => {
-                assert_eq!(info.timestamp, 1000);
-                assert_eq!(info.socket, socket);
-            }
-            _ => panic!("Expected Persistent state"),
-        }
+        assert_eq!(record.get_address(), Some(socket));
+        assert!(record.is_discovered());
+        assert!(matches!(&record.address, Address::Persistent(_)));
+        assert_peer_info_eq(record.get_peer_info(), Some(&peer_info));
     }
 
     #[test]
     fn test_discovered_update_newer_timestamp() {
-        let peer_info_old = create_signed_peer_info(1000);
-        let mut record = Record::<Secp256r1>::Discovered(1, peer_info_old);
-        let peer_info_new = create_signed_peer_info(2000);
-        assert!(record.set_discovered(peer_info_new.clone()));
-        match record {
-            Record::Discovered(count, info) => {
-                assert_eq!(count, 1);
-                assert_eq!(info.timestamp, 2000);
-            }
-            _ => panic!("Expected Discovered state"),
-        }
-    }
+        let socket = test_socket();
+        let mut record = Record::<Secp256r1>::unknown();
+        let peer_info_old: PeerInfo<Secp256r1> = create_peer_info(3, socket, 1000);
+        let peer_info_new: PeerInfo<Secp256r1> = create_peer_info(3, socket, 2000);
 
-    #[test]
-    fn test_discovered_no_update_older_timestamp() {
-        let peer_info_old = create_signed_peer_info(1000);
-        let mut record = Record::<Secp256r1>::Discovered(1, peer_info_old.clone());
-        let peer_info_older = create_signed_peer_info(500);
-        assert!(!record.set_discovered(peer_info_older));
-        match record {
-            Record::Discovered(count, info) => {
-                assert_eq!(count, 1);
-                assert_eq!(info.timestamp, 1000);
-            }
-            _ => panic!("Expected Discovered state"),
-        }
-    }
+        assert!(record.set_discovered(peer_info_old.clone())); // Unknown -> Discovered
+        assert!(record.set_discovered(peer_info_new.clone())); // Discovered -> Discovered (update)
 
-    #[test]
-    fn test_increment_decrement() {
-        // Test Unknown state
-        let mut record = Record::<Secp256r1>::Unknown(0);
-        record.increment();
-        assert!(matches!(record, Record::Unknown(1)));
-        assert!(record.decrement());
-        assert!(matches!(record, Record::Unknown(0)));
-
-        // Test Discovered state
-        let peer_info = create_signed_peer_info(1000);
-        let mut record = Record::<Secp256r1>::Discovered(1, peer_info);
-        record.increment();
-        assert!(matches!(record, Record::Discovered(2, _)));
-        assert!(!record.decrement());
-        assert!(matches!(record, Record::Discovered(1, _)));
-        assert!(record.decrement());
-        assert!(matches!(record, Record::Discovered(0, _)));
-    }
-
-    #[test]
-    fn test_get_address() {
-        let socket = SocketAddr::from(([127, 0, 0, 1], 8080));
-
-        let record = Record::<Secp256r1>::Bootstrapper(socket);
         assert_eq!(record.get_address(), Some(socket));
+        assert!(record.is_discovered());
+        assert!(matches!(&record.address, Address::Discovered(_)));
+        assert_peer_info_eq(record.get_peer_info(), Some(&peer_info_new));
+    }
 
-        let peer_info = create_signed_peer_info(1000);
-        let record = Record::<Secp256r1>::Discovered(1, peer_info.clone());
-        assert_eq!(record.get_address(), Some(peer_info.socket));
+    #[test]
+    fn test_persistent_update_newer_timestamp() {
+        let socket = test_socket();
+        let mut record = Record::<Secp256r1>::bootstrapped(socket);
+        let peer_info_old: PeerInfo<Secp256r1> = create_peer_info(4, socket, 1000);
+        let peer_info_new: PeerInfo<Secp256r1> = create_peer_info(4, socket, 2000);
 
-        let record = Record::<Secp256r1>::Unknown(1);
-        assert_eq!(record.get_address(), None);
+        assert!(record.set_discovered(peer_info_old.clone())); // Bootstrapper -> Persistent
+        assert!(record.set_discovered(peer_info_new.clone())); // Persistent -> Persistent (update)
+
+        assert_eq!(record.get_address(), Some(socket));
+        assert!(record.is_discovered());
+        assert!(matches!(&record.address, Address::Persistent(_)));
+        assert_peer_info_eq(record.get_peer_info(), Some(&peer_info_new));
+    }
+
+    #[test]
+    fn test_discovered_no_update_older_or_equal_timestamp() {
+        let socket = test_socket();
+        let mut record = Record::<Secp256r1>::unknown();
+        let peer_info_old: PeerInfo<Secp256r1> = create_peer_info(5, socket, 1000);
+        let peer_info_older: PeerInfo<Secp256r1> = create_peer_info(5, socket, 500);
+        let peer_info_equal: PeerInfo<Secp256r1> = create_peer_info(5, socket, 1000);
+
+        assert!(record.set_discovered(peer_info_old.clone())); // Unknown -> Discovered
+
+        // Attempt update with older timestamp
+        assert!(!record.set_discovered(peer_info_older));
+        assert_peer_info_eq(record.get_peer_info(), Some(&peer_info_old)); // Verify state hasn't changed
+
+        // Attempt update with equal timestamp
+        assert!(!record.set_discovered(peer_info_equal));
+        assert_peer_info_eq(record.get_peer_info(), Some(&peer_info_old)); // Verify state still hasn't changed
+
+        // Final state check
+        assert!(matches!(&record.address, Address::Discovered(_)));
+    }
+
+    #[test]
+    fn test_persistent_no_update_older_or_equal_timestamp() {
+        let socket = test_socket();
+        let mut record = Record::<Secp256r1>::bootstrapped(socket);
+        let peer_info_old: PeerInfo<Secp256r1> = create_peer_info(6, socket, 1000);
+        let peer_info_older: PeerInfo<Secp256r1> = create_peer_info(6, socket, 500);
+        let peer_info_equal: PeerInfo<Secp256r1> = create_peer_info(6, socket, 1000);
+
+        assert!(record.set_discovered(peer_info_old.clone())); // Bootstrapper -> Persistent
+
+        // Attempt update with older timestamp
+        assert!(!record.set_discovered(peer_info_older));
+        assert_peer_info_eq(record.get_peer_info(), Some(&peer_info_old)); // Verify state hasn't changed
+
+        // Attempt update with equal timestamp
+        assert!(!record.set_discovered(peer_info_equal));
+        assert_peer_info_eq(record.get_peer_info(), Some(&peer_info_old)); // Verify state still hasn't changed
+
+        // Final state check
+        assert!(matches!(&record.address, Address::Persistent(_)));
+    }
+
+    #[test]
+    fn test_increment_decrement_removable() {
+        let socket = test_socket();
+
+        // Test Unknown state -> removable
+        let mut record_unknown = Record::<Secp256r1>::unknown();
+        assert_eq!(record_unknown.num_sets, 0);
+        record_unknown.increment();
+        assert_eq!(record_unknown.num_sets, 1);
+        assert!(!record_unknown.decrement());
+        assert_eq!(record_unknown.num_sets, 0);
+        assert!(record_unknown.decrement());
+
+        // Test Discovered state -> removable
+        let peer_info: PeerInfo<Secp256r1> = create_peer_info(7, socket, 1000);
+        let mut record_disc = Record::<Secp256r1>::unknown();
+        record_disc.set_discovered(peer_info.clone());
+        assert_eq!(record_disc.num_sets, 0);
+        record_disc.increment();
+        assert_eq!(record_disc.num_sets, 1);
+        assert!(!record_disc.decrement());
+        assert_eq!(record_disc.num_sets, 0);
+        assert!(record_disc.decrement());
+    }
+
+    #[test]
+    fn test_increment_decrement_not_removable() {
+        let socket = test_socket();
+
+        // Test Bootstrapper state -> not removable
+        let mut record_boot = Record::<Secp256r1>::bootstrapped(socket);
+        assert_eq!(record_boot.num_sets, 0);
+        record_boot.increment();
+        assert_eq!(record_boot.num_sets, 1);
+        assert!(!record_boot.decrement());
+        assert_eq!(record_boot.num_sets, 0);
+        assert!(!record_boot.decrement());
+
+        // Test Persistent state -> not removable
+        let peer_info: PeerInfo<Secp256r1> = create_peer_info(7, socket, 1000);
+        let mut record_pers = Record::<Secp256r1>::bootstrapped(socket);
+        record_pers.set_discovered(peer_info);
+        assert_eq!(record_pers.num_sets, 0);
+        record_pers.increment();
+        assert_eq!(record_pers.num_sets, 1);
+        assert!(!record_pers.decrement());
+        assert_eq!(record_pers.num_sets, 0);
+        assert!(!record_pers.decrement());
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_decrement_panics_at_zero() {
+        let mut record = Record::<Secp256r1>::unknown();
+        assert_eq!(record.num_sets, 0);
+        // This call should decrement from 0, causing a panic due to checked_sub
+        record.decrement();
+    }
+
+    #[test]
+    fn test_get_address_all_states() {
+        let socket = test_socket();
+        let peer_info: PeerInfo<Secp256r1> = create_peer_info(8, socket, 1000);
+
+        let record_unknown = Record::<Secp256r1>::unknown();
+        assert_eq!(record_unknown.get_address(), None);
+
+        let record_boot = Record::<Secp256r1>::bootstrapped(socket);
+        assert_eq!(record_boot.get_address(), Some(socket));
+
+        let mut record_disc = Record::<Secp256r1>::unknown();
+        record_disc.set_discovered(peer_info.clone());
+        assert_eq!(record_disc.get_address(), Some(socket));
+
+        let mut record_pers = Record::<Secp256r1>::bootstrapped(socket);
+        record_pers.set_discovered(peer_info);
+        assert_eq!(record_pers.get_address(), Some(socket));
+    }
+
+    #[test]
+    fn test_get_peer_info_all_states() {
+        let socket = test_socket();
+        let peer_info: PeerInfo<Secp256r1> = create_peer_info(9, socket, 1000);
+
+        let record_unknown = Record::<Secp256r1>::unknown();
+        assert_peer_info_eq(record_unknown.get_peer_info(), None);
+
+        let record_boot = Record::<Secp256r1>::bootstrapped(socket);
+        assert_peer_info_eq(record_boot.get_peer_info(), None);
+
+        let mut record_disc = Record::<Secp256r1>::unknown();
+        record_disc.set_discovered(peer_info.clone());
+        assert_peer_info_eq(record_disc.get_peer_info(), Some(&peer_info));
+
+        let mut record_pers = Record::<Secp256r1>::bootstrapped(socket);
+        record_pers.set_discovered(peer_info.clone());
+        assert_peer_info_eq(record_pers.get_peer_info(), Some(&peer_info));
+    }
+
+    #[test]
+    fn test_is_discovered_all_states() {
+        let socket = test_socket();
+        let peer_info: PeerInfo<Secp256r1> = create_peer_info(10, socket, 1000);
+
+        let record_unknown = Record::<Secp256r1>::unknown();
+        assert!(!record_unknown.is_discovered());
+
+        let record_boot = Record::<Secp256r1>::bootstrapped(socket);
+        assert!(!record_boot.is_discovered());
+
+        let mut record_disc = Record::<Secp256r1>::unknown();
+        record_disc.set_discovered(peer_info.clone());
+        assert!(record_disc.is_discovered());
+
+        let mut record_pers = Record::<Secp256r1>::bootstrapped(socket);
+        record_pers.set_discovered(peer_info);
+        assert!(record_pers.is_discovered());
+    }
+
+    #[test]
+    fn test_block() {
+        let mut record = Record::<Secp256r1>::unknown();
+        assert!(!record.is_blocked());
+        record.block();
+        assert!(record.is_blocked());
+
+        // Block should persist even if state changes
+        let socket = test_socket();
+        let peer_info: PeerInfo<Secp256r1> = create_peer_info(11, socket, 1000);
+        assert!(record.set_discovered(peer_info));
+        assert!(record.is_blocked());
+
+        // Note: There is no unblock method in the current code.
     }
 }

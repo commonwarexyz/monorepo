@@ -14,6 +14,11 @@ pub enum Message<E: Spawner + Metrics, C: Verifier> {
         peers: Vec<C::PublicKey>,
     },
 
+    // Used by control
+    Block {
+        public_key: C::PublicKey,
+    },
+
     // Used by peer
     Construct {
         public_key: C::PublicKey,
@@ -36,13 +41,13 @@ pub enum Message<E: Spawner + Metrics, C: Verifier> {
 
     // Used by listener
     Reserve {
-        peer: C::PublicKey,
+        public_key: C::PublicKey,
         reservation: oneshot::Sender<Option<Reservation<E, C>>>,
     },
 
     // Used by peer
     Release {
-        peer: C::PublicKey,
+        public_key: C::PublicKey,
     },
 }
 
@@ -86,11 +91,11 @@ impl<E: Spawner + Metrics, C: Verifier> Mailbox<E, C> {
         receiver.await.unwrap()
     }
 
-    pub async fn reserve(&mut self, peer: C::PublicKey) -> Option<Reservation<E, C>> {
+    pub async fn reserve(&mut self, public_key: C::PublicKey) -> Option<Reservation<E, C>> {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(Message::Reserve {
-                peer,
+                public_key,
                 reservation: tx,
             })
             .await
@@ -98,8 +103,8 @@ impl<E: Spawner + Metrics, C: Verifier> Mailbox<E, C> {
         rx.await.unwrap()
     }
 
-    pub fn try_release(&mut self, peer: C::PublicKey) -> bool {
-        let Err(e) = self.sender.try_send(Message::Release { peer }) else {
+    pub fn try_release(&mut self, public_key: C::PublicKey) -> bool {
+        let Err(e) = self.sender.try_send(Message::Release { public_key }) else {
             return true;
         };
         if e.is_full() {
@@ -113,8 +118,11 @@ impl<E: Spawner + Metrics, C: Verifier> Mailbox<E, C> {
         );
     }
 
-    pub async fn release(&mut self, peer: C::PublicKey) {
-        self.sender.send(Message::Release { peer }).await.unwrap();
+    pub async fn release(&mut self, public_key: C::PublicKey) {
+        self.sender
+            .send(Message::Release { public_key })
+            .await
+            .unwrap();
     }
 }
 
@@ -145,6 +153,29 @@ impl<E: Spawner + Metrics, C: Verifier> Oracle<E, C> {
     /// * `peers` - Vector of authorized peers at an `index` (does not need to be sorted).
     pub async fn register(&mut self, index: u64, peers: Vec<C::PublicKey>) {
         let _ = self.sender.send(Message::Register { index, peers }).await;
+    }
+}
+
+/// Mechanism to block peers in the network.
+#[derive(Clone)]
+pub struct Control<E: Spawner + Metrics, C: Verifier> {
+    sender: mpsc::Sender<Message<E, C>>,
+}
+
+impl<E: Spawner + Metrics, C: Verifier> Control<E, C> {
+    /// Create a new instance of a control.
+    pub(super) fn new(sender: mpsc::Sender<Message<E, C>>) -> Self {
+        Self { sender }
+    }
+}
+
+impl<E: Spawner + Metrics, C: Verifier> crate::Control for Control<E, C> {
+    type PublicKey = C::PublicKey;
+
+    /// Block a peer, disconnecting them if currently connected and preventing future connections
+    /// for as long as the peer remains in at least one active peer set.
+    async fn block(&mut self, public_key: Self::PublicKey) {
+        let _ = self.sender.send(Message::Block { public_key }).await;
     }
 }
 

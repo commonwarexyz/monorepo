@@ -174,7 +174,7 @@ fn main() {
                 .expect("Failed to upgrade connection with indexer");
 
         // Setup p2p
-        let (mut network, mut oracle) =
+        let (mut network, mut oracle, p2p_control) =
             authenticated::Network::new(context.with_label("network"), p2p_cfg);
 
         // Provide authorized peers
@@ -221,6 +221,7 @@ fn main() {
             context.with_label("engine"),
             threshold_simplex::Config {
                 crypto: signer.clone(),
+                p2p_control,
                 automaton: mailbox.clone(),
                 relay: mailbox.clone(),
                 reporter: mailbox.clone(),

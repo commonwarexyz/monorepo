@@ -1,3 +1,4 @@
+use super::ingress::Control;
 pub use super::{
     ingress::{Mailbox, Message, Oracle, Reservation},
     record::Record,
@@ -5,6 +6,7 @@ pub use super::{
     Config, Error,
 };
 use crate::authenticated::{
+    actors::peer,
     ip, metrics,
     types::{self, PeerInfo},
 };
@@ -29,14 +31,16 @@ use std::{
     collections::{BTreeMap, HashSet},
     net::SocketAddr,
 };
-use tracing::{debug, trace};
+use tracing::{debug, error, trace};
 
 // Bytes to add to the namespace to prevent replay attacks.
 const NAMESPACE_SUFFIX_IP: &[u8] = b"_IP";
 
+/// The tracker actor that manages peer discovery and connection reservations.
 pub struct Actor<E: Spawner + Rng + GClock + Metrics, C: Scheme> {
     context: E,
 
+    // ---------- Configuration ----------
     crypto: C,
     ip_namespace: Vec<u8>,
     allow_private_ips: bool,
@@ -45,26 +49,57 @@ pub struct Actor<E: Spawner + Rng + GClock + Metrics, C: Scheme> {
     max_peer_set_size: usize,
     peer_gossip_max_count: usize,
 
+    // ---------- Cached Information ----------
+    /// The pre-signed [`types::PeerInfo`] for this actor.
+    /// Save on cryptographic operations by signing once at startup.
+    ip_signature: types::PeerInfo<C>,
+
+    // ---------- Message-Passing ----------
     sender: mpsc::Sender<Message<E, C>>,
     receiver: mpsc::Receiver<Message<E, C>>,
-    peers: BTreeMap<C::PublicKey, Record<C>>,
+
+    // ---------- State ----------
+    /// Tracks peer sets based on the index of the set.
     sets: BTreeMap<u64, Set<C::PublicKey>>,
+
+    /// Tracks peer information, including:
+    /// - How many peer sets they are part of
+    /// - Their known [`SocketAddr`]
+    /// - Whether they are blocked
+    ///
+    /// This map does not track whether we are connected to the peer or not.
+    peers: BTreeMap<C::PublicKey, Record<C>>,
+
+    /// Tracks currently reserved connections.
+    ///
+    /// Inserts upon the peer sending a `Reserve` message.
+    /// Removes upon the peer sending a `Release` message.
+    reserved: HashSet<C::PublicKey>,
+
+    /// Tracks currently active connections.
+    ///
+    /// Inserts upon the peer sending a `Construct` message.
+    /// Removes upon the peer sending a `Release` message.
+    active: BTreeMap<C::PublicKey, peer::Mailbox<C>>,
+
+    /// The rate-limiter used to limit the connection-attempt rate per peer.
     #[allow(clippy::type_complexity)]
     connections_rate_limiter:
         RateLimiter<C::PublicKey, HashMapStateStore<C::PublicKey>, E, NoOpMiddleware<E::Instant>>,
-    connections: HashSet<C::PublicKey>,
 
+    // ---------- Metrics ----------
     tracked_peers: Gauge,
     reserved_connections: Gauge,
     rate_limited_connections: Family<metrics::Peer, Counter>,
     updated_peers: Family<metrics::Peer, Counter>,
-
-    ip_signature: types::PeerInfo<C>,
 }
 
 impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
     #[allow(clippy::type_complexity)]
-    pub fn new(context: E, mut cfg: Config<C>) -> (Self, Mailbox<E, C>, Oracle<E, C>) {
+    pub fn new(
+        context: E,
+        mut cfg: Config<C>,
+    ) -> (Self, Mailbox<E, C>, Oracle<E, C>, Control<E, C>) {
         // Construct IP signature
         let socket = cfg.address;
         let timestamp = context.current().epoch_millis();
@@ -85,7 +120,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
             if peer == cfg.crypto.public_key() {
                 continue;
             }
-            peers.insert(peer, Record::Bootstrapper(address));
+            peers.insert(peer, Record::bootstrapped(address));
         }
 
         // Configure peer set
@@ -127,45 +162,40 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         (
             Self {
                 context,
+
+                // Configuration
                 crypto: cfg.crypto,
                 ip_namespace,
                 allow_private_ips: cfg.allow_private_ips,
                 synchrony_bound: cfg.synchrony_bound,
                 tracked_peer_sets,
-                peer_gossip_max_count: cfg.peer_gossip_max_count,
                 max_peer_set_size: cfg.max_peer_set_size,
+                peer_gossip_max_count: cfg.peer_gossip_max_count,
 
+                // Cached Information
                 ip_signature,
 
+                // Message-Passing
                 sender: sender.clone(),
                 receiver,
+
+                // State
                 peers,
                 sets,
-
                 connections_rate_limiter,
-                connections: HashSet::new(),
+                reserved: HashSet::new(),
+                active: BTreeMap::new(),
 
+                // Metrics
                 tracked_peers,
                 reserved_connections,
                 rate_limited_connections,
                 updated_peers,
             },
             Mailbox::new(sender.clone()),
-            Oracle::new(sender),
+            Oracle::new(sender.clone()),
+            Control::new(sender),
         )
-    }
-
-    /// Returns whether a peer is not us and in one of the known peer sets.
-    fn allowed(&self, peer: &C::PublicKey) -> bool {
-        if *peer == self.crypto.public_key() {
-            return false;
-        }
-        for set in self.sets.values() {
-            if set.order.contains_key(peer) {
-                return true;
-            }
-        }
-        false
     }
 
     /// Stores a new peer set and increments peer counters.
@@ -204,7 +234,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         // Update stored counters
         let set = self.sets.get_mut(&index).unwrap();
         for peer in peers.iter() {
-            let address = self.peers.entry(peer.clone()).or_insert(Record::Unknown(0));
+            let address = self.peers.entry(peer.clone()).or_insert(Record::unknown());
             address.increment();
             if address.is_discovered() {
                 set.found(peer.clone());
@@ -230,45 +260,39 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         }
     }
 
+    /// Returns a list of peers that we have a known address for and were able to successfully reserve.
     #[allow(clippy::type_complexity)]
     fn handle_dialable(&mut self) -> Vec<(C::PublicKey, SocketAddr, Reservation<E, C>)> {
-        // Collect unreserved peers
-        let available_peers: Vec<_> = self
+        // Collect peers with known addresses
+        let peers: Vec<(C::PublicKey, SocketAddr)> = self
             .peers
-            .keys()
-            .filter(|peer| !self.connections.contains(*peer))
-            .cloned()
+            .iter()
+            .filter_map(|(peer, record)| record.get_address().map(|addr| (peer.clone(), addr)))
             .collect();
 
-        // Iterate over available peers
-        let mut reserved = Vec::new();
-        for peer in available_peers {
-            // Reserve the connection
-            let reservation = match self.reserve(peer.clone()) {
-                Some(reservation) => reservation,
-                None => continue, // can happen if rate limited
-            };
-
-            // Grab address
-            if let Some(address) = self.peers.get(&peer).unwrap().get_address() {
-                reserved.push((peer, address, reservation));
-            };
-        }
-        reserved
+        // Return all peers that we got a reservation for
+        peers
+            .into_iter()
+            .filter_map(|(peer, addr)| self.reserve(peer.clone()).map(|res| (peer, addr, res)))
+            .collect()
     }
 
     fn handle_peer(&mut self, peer: &C::PublicKey, peer_info: PeerInfo<C>) -> bool {
-        // Check if peer is authorized
-        if !self.allowed(peer) {
+        // Ignore our own peer information
+        if peer == &self.crypto.public_key() {
             return false;
         }
+
+        // Get peer record (or return early if not found)
+        let Some(record) = self.peers.get_mut(peer) else {
+            return false;
+        };
 
         // Update peer address
         //
         // It is not safe to rate limit how many times this can happen
         // over some interval because a malicious peer may just replay
         // old IPs to prevent us from propagating a new one.
-        let record = self.peers.get_mut(peer).unwrap();
         let wire_time = peer_info.timestamp;
         if !record.set_discovered(peer_info) {
             trace!(?peer, wire_time, "stored peer newer");
@@ -398,9 +422,26 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         Ok(Some(peers))
     }
 
+    /// Reserve a connection to a peer, returning a [`Reservation`] if successful.
+    ///
+    /// Will return `None` in any of the following cases:
+    /// - The peer is us.
+    /// - The peer is blocked.
+    /// - The peer is already reserved.
+    /// - The peer has been rate-limited.
     fn reserve(&mut self, peer: C::PublicKey) -> Option<Reservation<E, C>> {
+        // Cannot reserve self
+        if peer == self.crypto.public_key() {
+            return None;
+        }
+
         // Check if we are already reserved
-        if self.connections.contains(&peer) {
+        if self.reserved.contains(&peer) {
+            return None;
+        }
+
+        // Check if peer is invalid or blocked
+        if self.peers.get(&peer).is_none_or(|r| r.is_blocked()) {
             return None;
         }
 
@@ -416,7 +457,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         }
 
         // Reserve the connection
-        self.connections.insert(peer.clone());
+        self.reserved.insert(peer.clone());
         self.reserved_connections.inc();
         Some(Reservation::new(
             self.context.with_label("reservation"),
@@ -437,10 +478,16 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
                     mut peer,
                 } => {
                     // Kill if peer is not authorized
-                    if !self.peers.contains_key(&public_key) {
+                    if self.peers.get(&public_key).is_none_or(|r| r.is_blocked()) {
                         peer.kill().await;
                         continue;
                     }
+
+                    // Peer is now active
+                    assert!(self
+                        .active
+                        .insert(public_key.clone(), peer.clone())
+                        .is_none());
 
                     // Select a random peer set (we want to learn about all peers in
                     // our tracked sets)
@@ -499,20 +546,45 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
                     self.store_peer_set(index, peers);
                     self.tracked_peers.set(self.peers.len() as i64);
                 }
-                Message::Reserve { peer, reservation } => {
-                    // Get latest peer set
-                    if self.allowed(&peer) {
-                        // Because dropping the reservation will release the connection,
-                        // we don't need to worry about the case that this fails.
-                        let _ = reservation.send(self.reserve(peer));
-                    } else {
-                        debug!(?peer, "peer not authorized to connect");
+                Message::Reserve {
+                    public_key,
+                    reservation,
+                } => {
+                    // Block reservations for self, missing, or blocked peers
+                    if public_key == self.crypto.public_key()
+                        || self.peers.get(&public_key).is_none_or(|r| r.is_blocked())
+                    {
+                        debug!(?public_key, "peer not authorized to connect");
                         let _ = reservation.send(None);
+                        return;
                     }
+
+                    // Because dropping the reservation will release the connection,
+                    // we don't need to worry about the case that this fails.
+                    let _ = reservation.send(self.reserve(public_key));
                 }
-                Message::Release { peer } => {
-                    self.connections.remove(&peer);
+                Message::Release { public_key } => {
+                    assert!(self.reserved.remove(&public_key));
                     self.reserved_connections.dec();
+                    self.active.remove(&public_key);
+                }
+                Message::Block { public_key } => {
+                    // Cannot block self
+                    if public_key == self.crypto.public_key() {
+                        error!(?public_key, "cannot block self");
+                        continue;
+                    }
+
+                    // Kill peer if it exists
+                    if let Some(mut peer) = self.active.remove(&public_key) {
+                        debug!(?public_key, "peer is connected, sending kill signal");
+                        peer.kill().await;
+                    }
+
+                    // Mark peer as blocked
+                    self.peers
+                        .entry(public_key.clone())
+                        .and_modify(|p| p.block());
                 }
             }
         }
@@ -558,7 +630,7 @@ mod tests {
         executor.start(|context| async move {
             // Run actor in background
             let actor_context = context.with_label("actor");
-            let (actor, mut mailbox, mut oracle) = Actor::new(actor_context.clone(), cfg);
+            let (actor, mut mailbox, mut oracle, _) = Actor::new(actor_context.clone(), cfg);
             actor_context.spawn(|_| actor.run());
 
             // Create peer
@@ -602,7 +674,7 @@ mod tests {
         executor.start(|context| async move {
             // Run actor in background
             let actor_context = context.with_label("actor");
-            let (actor, mut mailbox, mut oracle) = Actor::new(actor_context.clone(), cfg);
+            let (actor, mut mailbox, mut oracle, _) = Actor::new(actor_context.clone(), cfg);
             let ip_namespace = actor.ip_namespace.clone();
             actor_context.spawn(|_| actor.run());
 

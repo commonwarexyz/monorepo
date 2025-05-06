@@ -4,14 +4,16 @@ mod ingress;
 use crate::Supervisor;
 pub use actor::Actor;
 use commonware_cryptography::Scheme;
+use commonware_p2p::Control;
 use governor::Quota;
 pub use ingress::Mailbox;
 #[cfg(test)]
 pub use ingress::Message;
 use std::time::Duration;
 
-pub struct Config<C: Scheme, S: Supervisor> {
+pub struct Config<C: Scheme, PC: Control, S: Supervisor> {
     pub crypto: C,
+    pub p2p_control: PC,
     pub supervisor: S,
 
     pub namespace: Vec<u8>,

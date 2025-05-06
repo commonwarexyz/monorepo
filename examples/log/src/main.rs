@@ -153,7 +153,8 @@ fn main() {
     // Start context
     executor.start(async |context| {
         // Initialize network
-        let (mut network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
+        let (mut network, mut oracle, p2p_control) =
+            Network::new(context.with_label("network"), p2p_cfg);
 
         // Provide authorized peers
         //
@@ -190,8 +191,9 @@ fn main() {
         );
 
         // Initialize consensus
-        let cfg = simplex::Config::<_, _, _, _, _, _> {
+        let cfg = simplex::Config::<_, _, _, _, _, _, _> {
             crypto: signer.clone(),
+            p2p_control,
             automaton: mailbox.clone(),
             relay: mailbox.clone(),
             reporter: supervisor.clone(),

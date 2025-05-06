@@ -16,7 +16,7 @@ use commonware_p2p::{
         codec::{wrap, WrappedSender},
         requester,
     },
-    Receiver, Recipients, Sender,
+    Control, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{Clock, Handle, Metrics, Spawner};
 use futures::{channel::mpsc, future::Either, StreamExt};
@@ -101,10 +101,12 @@ pub struct Actor<
     E: Clock + GClock + Rng + Metrics + Spawner,
     C: Scheme,
     D: Digest,
+    PC: Control,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
     context: E,
     supervisor: S,
+    p2p_control: PC,
 
     namespace: Vec<u8>,
 
@@ -133,10 +135,11 @@ impl<
         E: Clock + GClock + Rng + Metrics + Spawner,
         C: Scheme,
         D: Digest,
+        PC: Control,
         S: Supervisor<Index = View, PublicKey = C::PublicKey>,
-    > Actor<E, C, D, S>
+    > Actor<E, C, D, PC, S>
 {
-    pub fn new(context: E, cfg: Config<C, S>) -> (Self, Mailbox<C::Signature, D>) {
+    pub fn new(context: E, cfg: Config<C, PC, S>) -> (Self, Mailbox<C::Signature, D>) {
         // Initialize requester
         let config = requester::Config {
             public_key: cfg.crypto.public_key(),
@@ -168,6 +171,7 @@ impl<
             Self {
                 context,
                 supervisor: cfg.supervisor,
+                p2p_control: cfg.p2p_control,
 
                 namespace: cfg.namespace,
 

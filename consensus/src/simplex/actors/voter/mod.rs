@@ -6,18 +6,21 @@ use crate::{Automaton, Supervisor};
 use crate::{Relay, Reporter};
 pub use actor::Actor;
 use commonware_cryptography::{Digest, Scheme};
+use commonware_p2p::Control;
 pub use ingress::{Mailbox, Message};
 use std::time::Duration;
 
 pub struct Config<
     C: Scheme,
     D: Digest,
+    PC: Control,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<C::Signature, D>>,
     S: Supervisor<Index = View>,
 > {
     pub crypto: C,
+    pub p2p_control: PC,
     pub automaton: A,
     pub relay: R,
     pub reporter: F,
