@@ -105,7 +105,7 @@ pub struct Actor<
     C: Scheme,
     V: Variant,
     D: Digest,
-    PC: Control,
+    PC: Control<PublicKey = C::PublicKey>,
     S: ThresholdSupervisor<Index = View, Identity = poly::Public<V>, PublicKey = C::PublicKey>,
 > {
     context: E,
@@ -139,7 +139,7 @@ impl<
         C: Scheme,
         V: Variant,
         D: Digest,
-        PC: Control,
+        PC: Control<PublicKey = C::PublicKey>,
         S: ThresholdSupervisor<Index = View, Identity = poly::Public<V>, PublicKey = C::PublicKey>,
     > Actor<E, C, V, D, PC, S>
 {

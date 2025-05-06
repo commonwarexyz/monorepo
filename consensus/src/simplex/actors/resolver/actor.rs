@@ -101,7 +101,7 @@ pub struct Actor<
     E: Clock + GClock + Rng + Metrics + Spawner,
     C: Scheme,
     D: Digest,
-    PC: Control,
+    PC: Control<PublicKey = C::PublicKey>,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
     context: E,
@@ -135,7 +135,7 @@ impl<
         E: Clock + GClock + Rng + Metrics + Spawner,
         C: Scheme,
         D: Digest,
-        PC: Control,
+        PC: Control<PublicKey = C::PublicKey>,
         S: Supervisor<Index = View, PublicKey = C::PublicKey>,
     > Actor<E, C, D, PC, S>
 {

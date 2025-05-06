@@ -343,6 +343,7 @@ mod tests {
                 actor.start();
                 let cfg = config::Config {
                     crypto: scheme,
+                    p2p_control: oracle.control(validator.clone()),
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),
@@ -611,6 +612,7 @@ mod tests {
                     actor.start();
                     let cfg = config::Config {
                         crypto: scheme,
+                        p2p_control: oracle.control(validator.clone()),
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: supervisor.clone(),
@@ -796,6 +798,7 @@ mod tests {
                 actor.start();
                 let cfg = config::Config {
                     crypto: scheme.clone(),
+                    p2p_control: oracle.control(validator.clone()),
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),
@@ -914,6 +917,7 @@ mod tests {
             actor.start();
             let cfg = config::Config {
                 crypto: scheme,
+                p2p_control: oracle.control(validator.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: supervisor.clone(),
@@ -1052,6 +1056,7 @@ mod tests {
                 actor.start();
                 let cfg = config::Config {
                     crypto: scheme,
+                    p2p_control: oracle.control(validator.clone()),
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),
@@ -1274,6 +1279,7 @@ mod tests {
                 actor.start();
                 let cfg = config::Config {
                     crypto: scheme,
+                    p2p_control: oracle.control(validator.clone()),
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),
@@ -1441,6 +1447,7 @@ mod tests {
                 actor.start();
                 let cfg = config::Config {
                     crypto: scheme.clone(),
+                    p2p_control: oracle.control(validator.clone()),
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),
@@ -1603,6 +1610,7 @@ mod tests {
                 actor.start();
                 let cfg = config::Config {
                     crypto: scheme.clone(),
+                    p2p_control: oracle.control(validator.clone()),
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),
@@ -1793,6 +1801,7 @@ mod tests {
                 actor.start();
                 let cfg = config::Config {
                     crypto: scheme,
+                    p2p_control: oracle.control(validator.clone()),
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),
@@ -1973,6 +1982,7 @@ mod tests {
                     actor.start();
                     let cfg = config::Config {
                         crypto: scheme,
+                        p2p_control: oracle.control(validator.clone()),
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: supervisor.clone(),
@@ -2147,6 +2157,7 @@ mod tests {
                     actor.start();
                     let cfg = config::Config {
                         crypto: scheme,
+                        p2p_control: oracle.control(validator.clone()),
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: supervisor.clone(),
@@ -2317,6 +2328,7 @@ mod tests {
                     actor.start();
                     let cfg = config::Config {
                         crypto: scheme,
+                        p2p_control: oracle.control(validator.clone()),
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: supervisor.clone(),
@@ -2451,6 +2463,7 @@ mod tests {
                 actor.start();
                 let cfg = config::Config {
                     crypto: scheme,
+                    p2p_control: oracle.control(validator.clone()),
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),

@@ -9,7 +9,7 @@ use std::time::Duration;
 pub struct Config<
     C: Scheme,
     D: Digest,
-    PC: Control,
+    PC: Control<PublicKey = C::PublicKey>,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<C::Signature, D>>,
@@ -100,7 +100,7 @@ pub struct Config<
 impl<
         C: Scheme,
         D: Digest,
-        PC: Control,
+        PC: Control<PublicKey = C::PublicKey>,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<C::Signature, D>>,

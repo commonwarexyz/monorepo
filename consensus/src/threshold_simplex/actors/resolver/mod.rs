@@ -11,7 +11,7 @@ pub use ingress::Mailbox;
 pub use ingress::Message;
 use std::time::Duration;
 
-pub struct Config<C: Scheme, PC: Control, S: Supervisor> {
+pub struct Config<C: Scheme, PC: Control<PublicKey = C::PublicKey>, S: Supervisor> {
     pub crypto: C,
     pub p2p_control: PC,
     pub supervisor: S,

@@ -18,7 +18,7 @@ pub struct Config<
     C: Scheme,
     V: Variant,
     D: Digest,
-    PC: Control,
+    PC: Control<PublicKey = C::PublicKey>,
     A: Automaton<Context = Context<D>>,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<V, D>>,
@@ -129,6 +129,7 @@ mod tests {
             actor.start();
             let cfg = Config {
                 crypto: scheme,
+                p2p_control: oracle.control(validator.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: supervisor.clone(),
