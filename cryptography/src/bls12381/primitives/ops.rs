@@ -299,7 +299,7 @@ where
     V: Variant,
     I: IntoIterator<Item = &'a PartialSignature<V>>,
 {
-    // Evaluate public polynomial to compute signer public keys.
+    // Evaluate public polynomial to compute signer public keys
     let mut reclaimed = Vec::new();
     let mut public_keys = Vec::new();
     for partial in partials {
