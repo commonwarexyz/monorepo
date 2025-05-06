@@ -235,8 +235,9 @@ where
     let aggregate_public_key = aggregate_public_keys::<V, _>(public_keys);
 
     // Compute aggregate signature
+    let partials = partials.into_iter();
     let mut aggregate_signature = V::Signature::zero();
-    let mut reclaimed = Vec::new();
+    let mut reclaimed = Vec::with_capacity(partials.size_hint().0);
     for partial in partials {
         aggregate_signature.add(&partial.value);
         reclaimed.push(partial);
@@ -303,15 +304,16 @@ where
     I: IntoIterator<Item = &'a PartialSignature<V>>,
 {
     // Evaluate public polynomial to compute signer public keys
-    let mut public_keys = Vec::new();
-    let mut reclaimed = Vec::new();
-    for partial in partials {
-        public_keys.push(public.evaluate(partial.index).value);
-        reclaimed.push(partial);
-    }
+    let (public_keys, partials): (Vec<V::Public>, Vec<&'a PartialSignature<V>>) = partials
+        .into_iter()
+        .map(|partial| {
+            let public_key = public.evaluate(partial.index).value;
+            (public_key, partial)
+        })
+        .unzip();
 
     // Recursively verify and find invalid signatures
-    partial_verify_multiple_public_keys_inner::<V, _>(&public_keys, namespace, message, reclaimed)
+    partial_verify_multiple_public_keys_inner::<V, _>(&public_keys, namespace, message, partials)
 }
 
 /// Interpolate the value of some [Point] with precomputed Barycentric Weights
