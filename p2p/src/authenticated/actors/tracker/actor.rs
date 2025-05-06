@@ -193,11 +193,11 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         )
     }
 
-    /// Returns whether a peer is valid. The peer must be:
+    /// Returns whether a peer is all of the following:
     /// - In a peer set
-    /// - Not be us
-    /// - Not beblocked
-    fn valid_peer(&self, peer: &C::PublicKey) -> bool {
+    /// - Not blocked
+    /// - Not us
+    fn allowed(&self, peer: &C::PublicKey) -> bool {
         let invalid = *peer == self.crypto.public_key()
             || self.peers.get(peer).is_none_or(|r| r.is_blocked());
         !invalid
@@ -441,7 +441,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         }
 
         // Check if peer is invalid or blocked
-        if !self.valid_peer(&peer) {
+        if !self.allowed(&peer) {
             return None;
         }
 
@@ -478,7 +478,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
                     mut peer,
                 } => {
                     // Kill if peer is not authorized
-                    if !self.valid_peer(&public_key) {
+                    if !self.allowed(&public_key) {
                         peer.kill().await;
                         continue;
                     }
@@ -556,7 +556,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
                     reservation,
                 } => {
                     // Block reservations for self, missing, or blocked peers
-                    if !self.valid_peer(&public_key) {
+                    if !self.allowed(&public_key) {
                         debug!(?public_key, "peer not authorized to connect");
                         let _ = reservation.send(None);
                     } else {
@@ -577,16 +577,16 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
                         continue;
                     }
 
+                    // Mark peer as blocked
+                    self.peers
+                        .entry(public_key.clone())
+                        .and_modify(|p| p.block());
+
                     // Kill peer if it exists
                     if let Some(mut peer) = self.active.remove(&public_key) {
                         debug!(?public_key, "peer is connected, sending kill signal");
                         peer.kill().await;
                     }
-
-                    // Mark peer as blocked
-                    self.peers
-                        .entry(public_key.clone())
-                        .and_modify(|p| p.block());
                 }
             }
         }

@@ -27,8 +27,10 @@ pub enum Message<P: Array> {
         result: oneshot::Sender<Result<(), Error>>,
     },
     Block {
+        /// The public key of the peer sending the block request.
         from: P,
-        public_key: P,
+        /// The public key of the peer to block.
+        to: P,
     },
 }
 
@@ -168,7 +170,7 @@ impl<P: Array> crate::Blocker for Control<P> {
             .sender
             .send(Message::Block {
                 from: self.me.clone(),
-                public_key,
+                to: public_key,
             })
             .await;
     }

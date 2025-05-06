@@ -63,6 +63,7 @@ pub trait Receiver: Debug + Send + 'static {
     ) -> impl Future<Output = Result<Message<Self::PublicKey>, Self::Error>> + Send;
 }
 
+/// Interface for blocking other peers.
 pub trait Blocker: Clone + Send + 'static {
     /// Public key type used to identify peers.
     type PublicKey: Array;

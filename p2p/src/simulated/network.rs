@@ -229,8 +229,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: Array> Network<E, P> {
                 }
                 send_result(result, Ok(()))
             }
-            ingress::Message::Block { from, public_key } => {
-                self.blocks.insert((from, public_key));
+            ingress::Message::Block { from, to } => {
+                self.blocks.insert((from, to));
             }
         }
     }

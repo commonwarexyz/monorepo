@@ -27,7 +27,7 @@ pub struct Record<C: Verifier> {
     address: Address<C>,
 
     /// Number of peer sets this peer is part of.
-    num_sets: usize,
+    sets: usize,
 
     /// Whether the peer is blocked.
     blocked: bool,
@@ -38,7 +38,7 @@ impl<C: Verifier> Record<C> {
     pub fn unknown() -> Self {
         Record {
             address: Address::Unknown,
-            num_sets: 0,
+            sets: 0,
             blocked: false,
         }
     }
@@ -47,7 +47,7 @@ impl<C: Verifier> Record<C> {
     pub fn bootstrapped(socket: SocketAddr) -> Self {
         Record {
             address: Address::Bootstrapper(socket),
-            num_sets: 0,
+            sets: 0,
             blocked: false,
         }
     }
@@ -128,15 +128,15 @@ impl<C: Verifier> Record<C> {
 
     /// Increase the count of peer sets this peer is part of.
     pub fn increment(&mut self) {
-        self.num_sets = self.num_sets.checked_add(1).unwrap();
+        self.sets = self.sets.checked_add(1).unwrap();
     }
 
     /// Decreases the count of peer sets this peer is part of.
     ///
     /// Returns true if the count reaches zero and the record is neither bootstrapper nor persistent.
     pub fn decrement(&mut self) -> bool {
-        self.num_sets = self.num_sets.checked_sub(1).unwrap();
-        if self.num_sets > 0 {
+        self.sets = self.sets.checked_sub(1).unwrap();
+        if self.sets > 0 {
             return false;
         }
         match self.address {
@@ -193,7 +193,7 @@ mod tests {
     fn test_unknown_initial_state() {
         let record = Record::<Secp256r1>::unknown();
         assert!(matches!(record.address, Address::Unknown));
-        assert_eq!(record.num_sets, 0);
+        assert_eq!(record.sets, 0);
         assert!(!record.blocked);
         assert_eq!(record.get_address(), None);
         assert_peer_info_eq(record.get_peer_info(), None);
@@ -206,7 +206,7 @@ mod tests {
         let socket = test_socket();
         let record = Record::<Secp256r1>::bootstrapped(socket);
         assert!(matches!(record.address, Address::Bootstrapper(s) if s == socket));
-        assert_eq!(record.num_sets, 0);
+        assert_eq!(record.sets, 0);
         assert!(!record.blocked);
         assert_eq!(record.get_address(), Some(socket));
         assert_peer_info_eq(record.get_peer_info(), None);
@@ -322,27 +322,27 @@ mod tests {
 
         // Test Unknown state -> removable
         let mut record_unknown = Record::<Secp256r1>::unknown();
-        assert_eq!(record_unknown.num_sets, 0);
+        assert_eq!(record_unknown.sets, 0);
         record_unknown.increment();
         record_unknown.increment();
-        assert_eq!(record_unknown.num_sets, 2);
+        assert_eq!(record_unknown.sets, 2);
         assert!(!record_unknown.decrement());
-        assert_eq!(record_unknown.num_sets, 1);
+        assert_eq!(record_unknown.sets, 1);
         assert!(record_unknown.decrement());
-        assert_eq!(record_unknown.num_sets, 0);
+        assert_eq!(record_unknown.sets, 0);
 
         // Test Discovered state -> removable
         let peer_info: PeerInfo<Secp256r1> = create_peer_info(7, socket, 1000);
         let mut record_disc = Record::<Secp256r1>::unknown();
         record_disc.set_discovered(peer_info.clone());
-        assert_eq!(record_disc.num_sets, 0);
+        assert_eq!(record_disc.sets, 0);
         record_disc.increment();
         record_disc.increment();
-        assert_eq!(record_disc.num_sets, 2);
+        assert_eq!(record_disc.sets, 2);
         assert!(!record_disc.decrement());
-        assert_eq!(record_disc.num_sets, 1);
+        assert_eq!(record_disc.sets, 1);
         assert!(record_disc.decrement());
-        assert_eq!(record_disc.num_sets, 0);
+        assert_eq!(record_disc.sets, 0);
     }
 
     #[test]
@@ -351,34 +351,34 @@ mod tests {
 
         // Test Bootstrapper state -> not removable
         let mut record_boot = Record::<Secp256r1>::bootstrapped(socket);
-        assert_eq!(record_boot.num_sets, 0);
+        assert_eq!(record_boot.sets, 0);
         record_boot.increment();
         record_boot.increment();
-        assert_eq!(record_boot.num_sets, 2);
+        assert_eq!(record_boot.sets, 2);
         assert!(!record_boot.decrement());
-        assert_eq!(record_boot.num_sets, 1);
+        assert_eq!(record_boot.sets, 1);
         assert!(!record_boot.decrement());
-        assert_eq!(record_boot.num_sets, 0);
+        assert_eq!(record_boot.sets, 0);
 
         // Test Persistent state -> not removable
         let peer_info: PeerInfo<Secp256r1> = create_peer_info(7, socket, 1000);
         let mut record_pers = Record::<Secp256r1>::bootstrapped(socket);
         record_pers.set_discovered(peer_info);
-        assert_eq!(record_pers.num_sets, 0);
+        assert_eq!(record_pers.sets, 0);
         record_pers.increment();
         record_pers.increment();
-        assert_eq!(record_pers.num_sets, 2);
+        assert_eq!(record_pers.sets, 2);
         assert!(!record_pers.decrement());
-        assert_eq!(record_pers.num_sets, 1);
+        assert_eq!(record_pers.sets, 1);
         assert!(!record_pers.decrement());
-        assert_eq!(record_pers.num_sets, 0);
+        assert_eq!(record_pers.sets, 0);
     }
 
     #[test]
     #[should_panic]
     fn test_decrement_panics_at_zero() {
         let mut record = Record::<Secp256r1>::unknown();
-        assert_eq!(record.num_sets, 0);
+        assert_eq!(record.sets, 0);
         // This call should decrement from 0, causing a panic due to checked_sub
         record.decrement();
     }
