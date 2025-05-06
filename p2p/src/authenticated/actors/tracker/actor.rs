@@ -483,11 +483,16 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
                         continue;
                     }
 
+                    // Kill if peer is already active
+                    // This should not happen within the normal lifecycle of peer reservation
+                    if self.active.contains_key(&public_key) {
+                        error!(?public_key, "peer already connected");
+                        let _ = peer.kill().await;
+                        continue;
+                    }
+
                     // Peer is now active
-                    assert!(self
-                        .active
-                        .insert(public_key.clone(), peer.clone())
-                        .is_none());
+                    self.active.insert(public_key.clone(), peer.clone());
 
                     // Select a random peer set (we want to learn about all peers in
                     // our tracked sets)
