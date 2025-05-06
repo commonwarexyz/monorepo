@@ -116,7 +116,7 @@ fn main() {
         p2p_cfg.mailbox_size = config.mailbox_size;
 
         // Start p2p
-        let (mut network, mut oracle, _) =
+        let (mut network, mut oracle) =
             authenticated::Network::new(context.with_label("network"), p2p_cfg);
 
         // Provide authorized peers

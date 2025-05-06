@@ -86,7 +86,7 @@ impl<I: Ord + Hash + Clone, P: Ord + Copy> PrioritySet<I, P> {
     }
 
     /// Remove all previously inserted items not included in `keep`
-    /// and add any items not yet seen with a priority of `initial`.
+    /// and add any items not yet seen with a priority of `default`.
     pub fn reconcile(&mut self, keep: &[I], default: P) {
         // Remove items not in keep
         let mut retained: HashSet<_> = keep.iter().collect();

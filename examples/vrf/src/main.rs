@@ -215,7 +215,7 @@ fn main() {
 
     // Start context
     executor.start(|context| async move {
-        let (mut network, mut oracle, _) = Network::new(context.with_label("network"), p2p_cfg);
+        let (mut network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
 
         // Provide authorized peers
         //

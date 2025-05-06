@@ -50,11 +50,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
     ///
     /// * A tuple containing the network instance and the oracle that
     ///   can be used by a developer to configure which peers are authorized.
-    pub fn new(
-        context: E,
-        cfg: Config<C>,
-    ) -> (Self, tracker::Oracle<E, C>, tracker::Control<E, C>) {
-        let (tracker, tracker_mailbox, oracle, control) = tracker::Actor::new(
+    pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<E, C>) {
+        let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
             context.with_label("tracker"),
             tracker::Config {
                 crypto: cfg.crypto.clone(),
@@ -90,7 +87,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 router_mailbox,
             },
             oracle,
-            control,
         )
     }
 

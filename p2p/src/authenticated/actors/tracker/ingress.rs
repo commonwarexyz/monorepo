@@ -156,20 +156,7 @@ impl<E: Spawner + Metrics, C: Verifier> Oracle<E, C> {
     }
 }
 
-/// Mechanism to block peers in the network.
-#[derive(Clone)]
-pub struct Control<E: Spawner + Metrics, C: Verifier> {
-    sender: mpsc::Sender<Message<E, C>>,
-}
-
-impl<E: Spawner + Metrics, C: Verifier> Control<E, C> {
-    /// Create a new instance of a control.
-    pub(super) fn new(sender: mpsc::Sender<Message<E, C>>) -> Self {
-        Self { sender }
-    }
-}
-
-impl<E: Spawner + Metrics, C: Verifier> crate::Control for Control<E, C> {
+impl<E: Spawner + Metrics, C: Verifier> crate::Control for Oracle<E, C> {
     type PublicKey = C::PublicKey;
 
     /// Block a peer, disconnecting them if currently connected and preventing future connections

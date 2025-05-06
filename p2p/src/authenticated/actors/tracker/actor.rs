@@ -1,4 +1,3 @@
-use super::ingress::Control;
 pub use super::{
     ingress::{Mailbox, Message, Oracle, Reservation},
     record::Record,
@@ -96,10 +95,7 @@ pub struct Actor<E: Spawner + Rng + GClock + Metrics, C: Scheme> {
 
 impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
     #[allow(clippy::type_complexity)]
-    pub fn new(
-        context: E,
-        mut cfg: Config<C>,
-    ) -> (Self, Mailbox<E, C>, Oracle<E, C>, Control<E, C>) {
+    pub fn new(context: E, mut cfg: Config<C>) -> (Self, Mailbox<E, C>, Oracle<E, C>) {
         // Construct IP signature
         let socket = cfg.address;
         let timestamp = context.current().epoch_millis();
@@ -193,8 +189,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
                 updated_peers,
             },
             Mailbox::new(sender.clone()),
-            Oracle::new(sender.clone()),
-            Control::new(sender),
+            Oracle::new(sender),
         )
     }
 
@@ -630,7 +625,7 @@ mod tests {
         executor.start(|context| async move {
             // Run actor in background
             let actor_context = context.with_label("actor");
-            let (actor, mut mailbox, mut oracle, _) = Actor::new(actor_context.clone(), cfg);
+            let (actor, mut mailbox, mut oracle) = Actor::new(actor_context.clone(), cfg);
             actor_context.spawn(|_| actor.run());
 
             // Create peer
@@ -674,7 +669,7 @@ mod tests {
         executor.start(|context| async move {
             // Run actor in background
             let actor_context = context.with_label("actor");
-            let (actor, mut mailbox, mut oracle, _) = Actor::new(actor_context.clone(), cfg);
+            let (actor, mut mailbox, mut oracle) = Actor::new(actor_context.clone(), cfg);
             let ip_namespace = actor.ip_namespace.clone();
             actor_context.spawn(|_| actor.run());
 

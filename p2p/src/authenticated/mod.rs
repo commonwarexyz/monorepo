@@ -195,7 +195,7 @@ pub enum Error {
     NetworkClosed,
 }
 
-pub use actors::tracker::{Control, Oracle};
+pub use actors::tracker::Oracle;
 pub use channels::{Receiver, Sender};
 pub use config::{Bootstrapper, Config};
 pub use network::Network;
@@ -271,7 +271,7 @@ mod tests {
                 bootstrappers,
                 max_message_size,
             );
-            let (mut network, mut oracle, _) = Network::new(context.with_label("network"), config);
+            let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
 
             // Register peers
             oracle.register(0, addresses.clone()).await;
@@ -517,8 +517,7 @@ mod tests {
                     bootstrappers,
                     1_024 * 1_024, // 1MB
                 );
-                let (mut network, mut oracle, _) =
-                    Network::new(context.with_label("network"), config);
+                let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
 
                 // Register peers at separate indices
                 oracle.register(0, vec![addresses[0].clone()]).await;
@@ -602,7 +601,7 @@ mod tests {
                 Vec::new(),
                 1_024 * 1_024, // 1MB
             );
-            let (mut network, mut oracle, _) = Network::new(context.with_label("network"), config);
+            let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
 
             // Register peers
             oracle.register(0, addresses.clone()).await;
