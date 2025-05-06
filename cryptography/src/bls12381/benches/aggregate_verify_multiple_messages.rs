@@ -1,4 +1,4 @@
-use commonware_cryptography::bls12381::primitives::ops;
+use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
 
@@ -21,16 +21,17 @@ fn benchmark_aggregate_verify_multiple_messages(c: &mut Criterion) {
                 |b| {
                     b.iter_batched(
                         || {
-                            let (private, public) = ops::keypair(&mut thread_rng());
+                            let (private, public) = ops::keypair::<_, MinSig>(&mut thread_rng());
                             let mut signatures = Vec::with_capacity(n);
                             for (namespace, msg) in msgs.iter() {
-                                let signature = ops::sign_message(&private, *namespace, msg);
+                                let signature =
+                                    ops::sign_message::<MinSig>(&private, *namespace, msg);
                                 signatures.push(signature);
                             }
-                            (public, ops::aggregate_signatures(&signatures))
+                            (public, ops::aggregate_signatures::<MinSig, _>(&signatures))
                         },
                         |(public, signature)| {
-                            ops::aggregate_verify_multiple_messages(
+                            ops::aggregate_verify_multiple_messages::<MinSig, _>(
                                 &public,
                                 &msgs,
                                 &signature,

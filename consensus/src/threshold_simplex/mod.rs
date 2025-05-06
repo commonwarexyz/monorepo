@@ -166,7 +166,13 @@ pub mod mocks;
 mod tests {
     use super::*;
     use crate::Monitor;
-    use commonware_cryptography::{bls12381::dkg::ops, Ed25519, Sha256, Signer};
+    use commonware_cryptography::{
+        bls12381::{
+            dkg::ops,
+            primitives::variant::{MinPk, MinSig, Variant},
+        },
+        Ed25519, Sha256, Signer,
+    };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
@@ -259,8 +265,7 @@ mod tests {
         }
     }
 
-    #[test_traced]
-    fn test_all_online() {
+    fn all_online<V: Variant>() {
         // Create context
         let n = 5;
         let threshold = quorum(n);
@@ -304,7 +309,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
+            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -318,7 +323,7 @@ mod tests {
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
                 participants.insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
-                let supervisor_config = mocks::supervisor::Config {
+                let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
                     participants,
                 };
@@ -508,7 +513,12 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_unclean_shutdown() {
+    fn test_all_online() {
+        all_online::<MinPk>();
+        all_online::<MinSig>();
+    }
+
+    fn unclean_shutdown<V: Variant>() {
         // Create context
         let n = 5;
         let threshold = quorum(n);
@@ -519,7 +529,7 @@ mod tests {
 
         // Derive threshold
         let mut rng = StdRng::seed_from_u64(0);
-        let (public, shares) = ops::generate_shares(&mut rng, None, n, threshold);
+        let (public, shares) = ops::generate_shares::<_, V>(&mut rng, None, n, threshold);
 
         // Random restarts every x seconds
         let shutdowns: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
@@ -581,7 +591,7 @@ mod tests {
                     let mut participants = BTreeMap::new();
                     participants
                         .insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
-                    let supervisor_config = mocks::supervisor::Config {
+                    let supervisor_config = mocks::supervisor::Config::<_, V> {
                         namespace: namespace.clone(),
                         participants,
                     };
@@ -686,7 +696,12 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_backfill() {
+    fn test_unclean_shutdown() {
+        unclean_shutdown::<MinPk>();
+        unclean_shutdown::<MinSig>();
+    }
+
+    fn backfill<V: Variant>() {
         // Create context
         let n = 4;
         let threshold = quorum(n);
@@ -735,7 +750,7 @@ mod tests {
             .await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
+            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -879,7 +894,7 @@ mod tests {
             // Configure engine
             let mut participants = BTreeMap::new();
             participants.insert(0, (public.clone(), validators.clone(), shares[0].clone()));
-            let supervisor_config = mocks::supervisor::Config {
+            let supervisor_config = mocks::supervisor::Config::<_, V> {
                 namespace: namespace.clone(),
                 participants,
             };
@@ -936,7 +951,12 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_one_offline() {
+    fn test_backfill() {
+        backfill::<MinPk>();
+        backfill::<MinSig>();
+    }
+
+    fn one_offline<V: Variant>() {
         // Create context
         let n = 5;
         let threshold = quorum(n);
@@ -986,7 +1006,7 @@ mod tests {
             .await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
+            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -1012,7 +1032,7 @@ mod tests {
                         shares[idx_scheme].clone(),
                     ),
                 );
-                let supervisor_config = mocks::supervisor::Config {
+                let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
                     participants,
                 };
@@ -1155,7 +1175,12 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_slow_validator() {
+    fn test_one_offline() {
+        one_offline::<MinPk>();
+        one_offline::<MinSig>();
+    }
+
+    fn slow_validator<V: Variant>() {
         // Create context
         let n = 5;
         let threshold = quorum(n);
@@ -1198,7 +1223,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
+            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -1219,7 +1244,7 @@ mod tests {
                         shares[idx_scheme].clone(),
                     ),
                 );
-                let supervisor_config = mocks::supervisor::Config {
+                let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
                     participants,
                 };
@@ -1334,7 +1359,12 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_all_recovery() {
+    fn test_slow_validator() {
+        slow_validator::<MinPk>();
+        slow_validator::<MinSig>();
+    }
+
+    fn all_recovery<V: Variant>() {
         // Create context
         let n = 5;
         let threshold = quorum(n);
@@ -1377,7 +1407,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
+            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -1391,7 +1421,7 @@ mod tests {
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
                 participants.insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
-                let supervisor_config = mocks::supervisor::Config {
+                let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
                     participants,
                 };
@@ -1491,8 +1521,12 @@ mod tests {
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_partition() {
+    fn test_all_recovery() {
+        all_recovery::<MinPk>();
+        all_recovery::<MinSig>();
+    }
+
+    fn partition<V: Variant>() {
         // Create context
         let n = 10;
         let threshold = quorum(n);
@@ -1535,7 +1569,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link.clone()), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
+            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -1549,7 +1583,7 @@ mod tests {
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
                 participants.insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
-                let supervisor_config = mocks::supervisor::Config {
+                let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
                     participants,
                 };
@@ -1672,7 +1706,14 @@ mod tests {
         });
     }
 
-    fn slow_and_lossy_links(seed: u64) -> String {
+    #[test_traced]
+    #[ignore]
+    fn test_partition() {
+        partition::<MinPk>();
+        partition::<MinSig>();
+    }
+
+    fn slow_and_lossy_links<V: Variant>(seed: u64) -> String {
         // Create context
         let n = 5;
         let threshold = quorum(n);
@@ -1718,7 +1759,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(degraded_link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
+            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -1732,7 +1773,7 @@ mod tests {
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
                 participants.insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
-                let supervisor_config = mocks::supervisor::Config {
+                let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
                     participants,
                 };
@@ -1807,7 +1848,8 @@ mod tests {
 
     #[test_traced]
     fn test_slow_and_lossy_links() {
-        slow_and_lossy_links(0);
+        slow_and_lossy_links::<MinPk>(0);
+        slow_and_lossy_links::<MinSig>(0);
     }
 
     #[test_traced]
@@ -1816,18 +1858,20 @@ mod tests {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
         for seed in 1..6 {
-            // Run test with seed
-            let state_1 = slow_and_lossy_links(seed);
+            let pk_state_1 = slow_and_lossy_links::<MinPk>(seed);
+            let pk_state_2 = slow_and_lossy_links::<MinPk>(seed);
+            assert_eq!(pk_state_1, pk_state_2);
 
-            // Run test again with same seed
-            let state_2 = slow_and_lossy_links(seed);
+            let sig_state_1 = slow_and_lossy_links::<MinSig>(seed);
+            let sig_state_2 = slow_and_lossy_links::<MinSig>(seed);
+            assert_eq!(sig_state_1, sig_state_2);
 
-            // Ensure states are equal
-            assert_eq!(state_1, state_2);
+            // Sanity check that different types can't be identical
+            assert_ne!(pk_state_1, sig_state_1);
         }
     }
 
-    fn conflicter(seed: u64) {
+    fn conflicter<V: Variant>(seed: u64) {
         // Create context
         let n = 4;
         let threshold = quorum(n);
@@ -1873,7 +1917,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
+            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -1893,7 +1937,7 @@ mod tests {
                         shares[idx_scheme].clone(),
                     ),
                 );
-                let supervisor_config = mocks::supervisor::Config {
+                let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
                     participants,
                 };
@@ -1906,7 +1950,8 @@ mod tests {
                         supervisor,
                         namespace: namespace.clone(),
                     };
-                    let engine: mocks::conflicter::Conflicter<_, Sha256, _> =
+
+                    let engine: mocks::conflicter::Conflicter<_, V, Sha256, _> =
                         mocks::conflicter::Conflicter::new(
                             context.with_label("byzantine_engine"),
                             cfg,
@@ -1999,11 +2044,12 @@ mod tests {
     #[ignore]
     fn test_conflicter() {
         for seed in 0..5 {
-            conflicter(seed);
+            conflicter::<MinPk>(seed);
+            conflicter::<MinSig>(seed);
         }
     }
 
-    fn nuller(seed: u64) {
+    fn nuller<V: Variant>(seed: u64) {
         // Create context
         let n = 4;
         let threshold = quorum(n);
@@ -2049,7 +2095,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
+            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -2069,7 +2115,7 @@ mod tests {
                         shares[idx_scheme].clone(),
                     ),
                 );
-                let supervisor_config = mocks::supervisor::Config {
+                let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
                     participants,
                 };
@@ -2082,7 +2128,7 @@ mod tests {
                         supervisor,
                         namespace: namespace.clone(),
                     };
-                    let engine: mocks::nuller::Nuller<_, Sha256, _> =
+                    let engine: mocks::nuller::Nuller<_, V, Sha256, _> =
                         mocks::nuller::Nuller::new(context.with_label("byzantine_engine"), cfg);
                     engine.start(voter);
                 } else {
@@ -2167,11 +2213,12 @@ mod tests {
     #[ignore]
     fn test_nuller() {
         for seed in 0..5 {
-            nuller(seed);
+            nuller::<MinPk>(seed);
+            nuller::<MinSig>(seed);
         }
     }
 
-    fn outdated(seed: u64) {
+    fn outdated<V: Variant>(seed: u64) {
         // Create context
         let n = 4;
         let threshold = quorum(n);
@@ -2217,7 +2264,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
+            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -2237,7 +2284,7 @@ mod tests {
                         shares[idx_scheme].clone(),
                     ),
                 );
-                let supervisor_config = mocks::supervisor::Config {
+                let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
                     participants,
                 };
@@ -2251,7 +2298,7 @@ mod tests {
                         namespace: namespace.clone(),
                         view_delta: activity_timeout * 4,
                     };
-                    let engine: mocks::outdated::Outdated<_, Sha256, _> =
+                    let engine: mocks::outdated::Outdated<_, V, Sha256, _> =
                         mocks::outdated::Outdated::new(context.with_label("byzantine_engine"), cfg);
                     engine.start(voter);
                 } else {
@@ -2321,13 +2368,12 @@ mod tests {
     #[ignore]
     fn test_outdated() {
         for seed in 0..5 {
-            outdated(seed);
+            outdated::<MinPk>(seed);
+            outdated::<MinSig>(seed);
         }
     }
 
-    #[test_traced]
-    #[ignore]
-    fn test_1k() {
+    fn run_1k<V: Variant>() {
         // Create context
         let n = 10;
         let threshold = quorum(n);
@@ -2371,7 +2417,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
+            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -2385,7 +2431,7 @@ mod tests {
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
                 participants.insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
-                let supervisor_config = mocks::supervisor::Config {
+                let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
                     participants,
                 };
@@ -2455,5 +2501,12 @@ mod tests {
                 }
             }
         })
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_1k() {
+        run_1k::<MinPk>();
+        run_1k::<MinSig>();
     }
 }

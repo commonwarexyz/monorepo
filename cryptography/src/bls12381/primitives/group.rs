@@ -10,6 +10,7 @@
 //! when handling deserialized points or points received from untrusted sources. This
 //! is already taken care of for you if you use the provided `deserialize` function.
 
+use super::variant::Variant;
 use blst::{
     blst_bendian_from_scalar, blst_fp12, blst_fr, blst_fr_add, blst_fr_from_scalar,
     blst_fr_from_uint64, blst_fr_inverse, blst_fr_mul, blst_fr_sub, blst_hash_to_g1,
@@ -19,8 +20,7 @@ use blst::{
     blst_p2_add_or_double, blst_p2_affine, blst_p2_compress, blst_p2_from_affine, blst_p2_in_g2,
     blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
     blst_p2s_mult_pippenger_scratch_sizeof, blst_scalar, blst_scalar_from_bendian,
-    blst_scalar_from_fr, blst_sk_check, Pairing, BLS12_381_G1, BLS12_381_G2, BLS12_381_NEG_G1,
-    BLST_ERROR,
+    blst_scalar_from_fr, blst_sk_check, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -61,7 +61,7 @@ pub trait Element:
     fn mul(&mut self, rhs: &Scalar);
 }
 
-/// An element of a group that supports message hashing.
+/// A point on a a curve.
 pub trait Point: Element {
     /// Maps the provided data to a group element.
     fn map(&mut self, dst: DST, message: &[u8]);
@@ -168,24 +168,6 @@ pub type Private = Scalar;
 
 /// The private key length.
 pub const PRIVATE_KEY_LENGTH: usize = SCALAR_LENGTH;
-
-/// The default public key type (G1).
-pub type Public = G1;
-
-/// The default public key length (G1).
-pub const PUBLIC_KEY_LENGTH: usize = G1_ELEMENT_BYTE_LENGTH;
-
-/// The default signature type (G2).
-pub type Signature = G2;
-
-/// The default signature length (G2).
-pub const SIGNATURE_LENGTH: usize = G2_ELEMENT_BYTE_LENGTH;
-
-/// The DST for hashing a proof of possession to the default signature type (G2).
-pub const PROOF_OF_POSSESSION: DST = G2_PROOF_OF_POSSESSION;
-
-/// The DST for hashing a message to the default signature type (G2).
-pub const MESSAGE: DST = G2_MESSAGE;
 
 impl Scalar {
     /// Generates a random scalar using the provided RNG.
@@ -357,8 +339,8 @@ impl Share {
     /// Returns the public key corresponding to the share.
     ///
     /// This can be verified against the public polynomial.
-    pub fn public(&self) -> Public {
-        let mut public = <Public as Element>::one();
+    pub fn public<V: Variant>(&self) -> V::Public {
+        let mut public = V::Public::one();
         public.mul(&self.private);
         public
     }
@@ -776,40 +758,6 @@ impl Display for G2 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", hex(&self.as_slice()))
     }
-}
-
-/// Verifies that `e(pk,hm)` is equal to `e(G1::one(),sig)` using a single product check with
-/// a negated G1 generator (`e(pk,hm) * e(-G1::one(),sig) == 1`).
-pub(super) fn equal(pk: &G1, sig: &G2, hm: &G2) -> bool {
-    // Create a pairing context
-    //
-    // We only handle pre-hashed messages, so we leave the domain separator tag (`DST`) empty.
-    let mut pairing = Pairing::new(false, &[]);
-
-    // Convert `sig` into affine and aggregate `e(-G1::one(), sig)`
-    let mut q = blst_p2_affine::default();
-    unsafe {
-        blst_p2_to_affine(&mut q, &sig.0);
-        pairing.raw_aggregate(&q, &BLS12_381_NEG_G1);
-    }
-
-    // Convert `pk` and `hm` into affine
-    let mut p = blst_p1_affine::default();
-    let mut q = blst_p2_affine::default();
-    unsafe {
-        blst_p1_to_affine(&mut p, &pk.0);
-        blst_p2_to_affine(&mut q, &hm.0);
-    }
-
-    // Aggregate `e(pk, hm)`
-    pairing.raw_aggregate(&q, &p);
-
-    // Finalize the pairing accumulation and verify the result
-    //
-    // If `finalverify()` returns `true`, it means `e(pk,hm) * e(-G1::one(),sig) == 1`. This
-    // is equivalent to `e(pk,hm) == e(G1::one(),sig)`.
-    pairing.commit();
-    pairing.finalverify(None)
 }
 
 #[cfg(test)]
