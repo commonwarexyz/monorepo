@@ -216,26 +216,17 @@ where
     V::verify_prehashed(&public, &hm_sum, &signature)
 }
 
-/// Verifies an aggregate of partial signatures in a single shot. If it fails,
-/// performs bisection to identify invalid signatures.
-///
-/// Returns a tuple of:
-/// 1. A vector of valid partial signatures.
-/// 2. A vector of invalid partial signatures.
-///
-/// # Arguments
-/// * `public` - The public commitment/polynomial used to verify signatures.
-/// * `namespace` - Optional namespace for the message.
-/// * `message` - The message being signed.
-/// * `partials` - The partial signatures to verify.
+/// Verifies multiple [PartialSignature]s over the same message as a single
+/// aggregate signature (or returns any invalid signature found).
 ///
 /// # Warning
-/// This assumes all `partials` are for the same `message` and `namespace`.
+///
+/// This function assumes a group check was already performed on each `signature`.
 pub fn partial_verify_multiple_public_keys_or_identify<V: Variant>(
     public: &poly::Public<V>,
     namespace: Option<&[u8]>,
     message: &[u8],
-    partials: &[poly::PartialSignature<V>],
+    partials: &[PartialSignature<V>],
 ) -> Result<(), Vec<PartialSignature<V>>> {
     // Aggregate public keys
     let public_keys: Vec<V::Public> = partials
@@ -248,7 +239,7 @@ pub fn partial_verify_multiple_public_keys_or_identify<V: Variant>(
     let signatures: Vec<&V::Signature> = partials.iter().map(|p| &p.value).collect();
     let aggregate_signature = aggregate_signatures::<V, _>(signatures);
 
-    // Verify
+    // Verify message over computed aggregate representations
     if verify_message::<V>(
         &aggregate_public_key,
         namespace,
@@ -260,7 +251,7 @@ pub fn partial_verify_multiple_public_keys_or_identify<V: Variant>(
         return Ok(());
     }
 
-    // If it fails, do bisection
+    // If verify fails, find offending signatures via recursive bisection
     if partials.len() <= 1 {
         return Err(partials.to_vec());
     }
