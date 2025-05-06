@@ -216,6 +216,73 @@ where
     V::verify_prehashed(&public, &hm_sum, &signature)
 }
 
+/// Verifies an aggregate of partial signatures in a single shot. If it fails,
+/// performs bisection to identify invalid signatures.
+///
+/// Returns a tuple of:
+/// 1. A vector of valid partial signatures.
+/// 2. A vector of invalid partial signatures.
+///
+/// # Arguments
+/// * `public` - The public commitment/polynomial used to verify signatures.
+/// * `namespace` - Optional namespace for the message.
+/// * `message` - The message being signed.
+/// * `partials` - The partial signatures to verify.
+///
+/// # Warning
+/// This assumes all `partials` are for the same `message` and `namespace`.
+pub fn partial_verify_multiple_public_keys_or_identify<V: Variant>(
+    public: &poly::Public<V>,
+    namespace: Option<&[u8]>,
+    message: &[u8],
+    partials: &[poly::PartialSignature<V>],
+) -> Result<(), Vec<PartialSignature<V>>> {
+    // Aggregate public keys
+    let public_keys: Vec<V::Public> = partials
+        .iter()
+        .map(|p| public.evaluate(p.index).value)
+        .collect();
+    let aggregate_public_key = aggregate_public_keys::<V, _>(&public_keys);
+
+    // Aggregate signatures
+    let signatures: Vec<&V::Signature> = partials.iter().map(|p| &p.value).collect();
+    let aggregate_signature = aggregate_signatures::<V, _>(signatures);
+
+    // Verify
+    if verify_message::<V>(
+        &aggregate_public_key,
+        namespace,
+        message,
+        &aggregate_signature,
+    )
+    .is_ok()
+    {
+        return Ok(());
+    }
+
+    // If it fails, do bisection
+    if partials.len() <= 1 {
+        return Err(partials.to_vec());
+    }
+    let mid = partials.len() / 2;
+    let (left, right) = partials.split_at(mid);
+    let result_l =
+        partial_verify_multiple_public_keys_or_identify::<V>(public, namespace, message, left);
+    let result_r =
+        partial_verify_multiple_public_keys_or_identify::<V>(public, namespace, message, right);
+
+    // Combine results
+    match (result_l, result_r) {
+        (Ok(_), Ok(_)) => unreachable!(),
+        (Err(mut left), Err(right)) => {
+            left.extend_from_slice(&right);
+            Err(left)
+        }
+        (Err(left), Ok(_)) => Err(left),
+        (Ok(_), Err(right)) => Err(right),
+    }
+}
+
 /// Interpolate the value of some [Point] with precomputed Barycentric Weights
 /// and multi-scalar multiplication (MSM).
 pub fn msm_interpolate<'a, P, I>(weights: &BTreeMap<u32, Weight>, evals: I) -> Result<P, Error>
@@ -1471,5 +1538,103 @@ mod tests {
     fn test_partial_aggregate_signature_bad_share() {
         partial_aggregate_signature_bad_share::<MinPk>();
         partial_aggregate_signature_bad_share::<MinSig>();
+    }
+
+    #[test]
+    fn test_partial_verify_multiple_public_keys_or_identify() {
+        let mut rng = StdRng::seed_from_u64(0);
+        let (n, t) = (5, 4);
+        let (public, shares) = generate_shares::<_, MinSig>(&mut rng, None, n, t);
+        let namespace = Some(&b"test"[..]);
+        let msg = b"hello";
+        let partials: Vec<_> = shares
+            .iter()
+            .map(|s| partial_sign_message::<MinSig>(s, namespace, msg))
+            .collect();
+
+        // Verify all signatures
+        partial_verify_multiple_public_keys_or_identify::<MinSig>(
+            &public, namespace, msg, &partials,
+        )
+        .expect("all signatures should be valid");
+    }
+
+    #[test]
+    fn test_partial_verify_multiple_public_keys_or_identify_one_invalid() {
+        let mut rng = StdRng::seed_from_u64(0);
+        let (n, t) = (5, 4);
+        let (public, mut shares) = generate_shares::<_, MinSig>(&mut rng, None, n, t);
+        let namespace = Some(&b"test"[..]);
+        let msg = b"hello";
+
+        // Corrupt the second share's private key
+        let corrupted_index = 1;
+        shares[corrupted_index].private = Private::rand(&mut rng);
+
+        let partials: Vec<_> = shares
+            .iter()
+            .map(|s| partial_sign_message::<MinSig>(s, namespace, msg))
+            .collect();
+
+        // Attempt verification and expect failure with bisection identifying the invalid signature
+        let result = partial_verify_multiple_public_keys_or_identify::<MinSig>(
+            &public, namespace, msg, &partials,
+        );
+        match result {
+            Err(invalid_sigs) => {
+                assert_eq!(
+                    invalid_sigs.len(),
+                    1,
+                    "Exactly one signature should be invalid"
+                );
+                assert_eq!(
+                    invalid_sigs[0].index, corrupted_index as u32,
+                    "The invalid signature should match the corrupted share's index"
+                );
+            }
+            _ => panic!("Expected an error with invalid signatures"),
+        }
+    }
+
+    #[test]
+    fn test_partial_verify_multiple_public_keys_or_identify_many_invalid() {
+        let mut rng = StdRng::seed_from_u64(0);
+        let (n, t) = (6, 5);
+        let (public, mut shares) = generate_shares::<_, MinSig>(&mut rng, None, n, t);
+        let namespace = Some(&b"test"[..]);
+        let msg = b"hello";
+
+        // Corrupt shares at indices 1 and 3
+        let corrupted_indices = vec![1, 3];
+        for &idx in &corrupted_indices {
+            shares[idx].private = Private::rand(&mut rng);
+        }
+
+        let partials: Vec<_> = shares
+            .iter()
+            .map(|s| partial_sign_message::<MinSig>(s, namespace, msg))
+            .collect();
+
+        // Attempt verification and expect failure with bisection identifying invalid signatures
+        let result = partial_verify_multiple_public_keys_or_identify::<MinSig>(
+            &public, namespace, msg, &partials,
+        );
+        match result {
+            Err(invalid_sigs) => {
+                assert_eq!(
+                    invalid_sigs.len(),
+                    corrupted_indices.len(),
+                    "Number of invalid signatures should match number of corrupted shares"
+                );
+                let invalid_indices: Vec<u32> = invalid_sigs.iter().map(|sig| sig.index).collect();
+                let expected_indices: Vec<u32> =
+                    corrupted_indices.iter().map(|&i| i as u32).collect();
+                assert_eq!(
+                    invalid_indices, expected_indices,
+                    "Invalid signature indices should match corrupted share indices"
+                );
+            }
+            _ => panic!("Expected an error with invalid signatures"),
+        }
     }
 }
