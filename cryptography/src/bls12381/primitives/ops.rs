@@ -223,7 +223,7 @@ fn partial_verify_multiple_public_keys_inner<'a, V, I>(
     namespace: Option<&[u8]>,
     message: &[u8],
     partials: I,
-) -> Result<(), Vec<PartialSignature<V>>>
+) -> Result<(), Vec<&'a PartialSignature<V>>>
 where
     V: Variant,
     I: IntoIterator<Item = &'a PartialSignature<V>>,
@@ -253,7 +253,7 @@ where
 
     // If verify fails, find offending signatures via recursive bisection
     if reclaimed.len() <= 1 {
-        return Err(reclaimed.into_iter().cloned().collect());
+        return Err(reclaimed);
     }
     let mid = public_keys.len() / 2;
     let (left_public_keys, right_public_keys) = public_keys.split_at(mid);
@@ -294,7 +294,7 @@ pub fn partial_verify_multiple_public_keys<'a, V, I>(
     namespace: Option<&[u8]>,
     message: &[u8],
     partials: I,
-) -> Result<(), Vec<PartialSignature<V>>>
+) -> Result<(), Vec<&'a PartialSignature<V>>>
 where
     V: Variant,
     I: IntoIterator<Item = &'a PartialSignature<V>>,
