@@ -239,7 +239,7 @@ where
     for partial in partials {
         public_keys.push(public.evaluate(partial.index).value);
         signatures.push(partial.value);
-        collected.push(partial.clone());
+        collected.push(partial);
     }
 
     // Compute aggregate public key
@@ -262,12 +262,22 @@ where
 
     // If verify fails, find offending signatures via recursive bisection
     if collected.len() <= 1 {
-        return Err(collected);
+        return Err(collected.into_iter().cloned().collect());
     }
     let mid = collected.len() / 2;
     let (left, right) = collected.split_at(mid);
-    let result_l = partial_verify_multiple_public_keys::<V, _>(public, namespace, message, left);
-    let result_r = partial_verify_multiple_public_keys::<V, _>(public, namespace, message, right);
+    let result_l = partial_verify_multiple_public_keys::<V, _>(
+        public,
+        namespace,
+        message,
+        left.iter().copied(),
+    );
+    let result_r = partial_verify_multiple_public_keys::<V, _>(
+        public,
+        namespace,
+        message,
+        right.iter().copied(),
+    );
 
     // Combine results
     match (result_l, result_r) {
