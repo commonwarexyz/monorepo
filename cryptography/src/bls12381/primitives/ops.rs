@@ -218,6 +218,9 @@ where
 
 /// Attempts to verify multiple [PartialSignature]s over the same message as a single
 /// aggregate signature (or returns any invalid signature found).
+///
+/// We use an "inner" function for recursion to avoid re-evaluating the public polynomial
+/// for each recursive bisection.
 fn partial_verify_multiple_public_keys_inner<'a, V, I>(
     public_keys: &[V::Public],
     namespace: Option<&[u8]>,
