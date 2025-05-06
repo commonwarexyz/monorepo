@@ -156,7 +156,7 @@ impl<E: Spawner + Metrics, C: Verifier> Oracle<E, C> {
     }
 }
 
-impl<E: Spawner + Metrics, C: Verifier> crate::Control for Oracle<E, C> {
+impl<E: Spawner + Metrics, C: Verifier> crate::Blocker for Oracle<E, C> {
     type PublicKey = C::PublicKey;
 
     /// Block a peer, disconnecting them if currently connected and preventing future connections

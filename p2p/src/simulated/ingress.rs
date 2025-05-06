@@ -58,11 +58,12 @@ pub struct Oracle<P: Array> {
 }
 
 impl<P: Array> Oracle<P> {
+    /// Create a new instance of the oracle.
     pub(crate) fn new(sender: mpsc::UnboundedSender<Message<P>>) -> Self {
         Self { sender }
     }
 
-    /// Create a control interface for the given peer.
+    /// Spawn an individual control interface for a peer in the simulated network.
     pub fn control(&self, me: P) -> Control<P> {
         Control {
             me,
@@ -152,11 +153,14 @@ impl<P: Array> Oracle<P> {
 /// Individual control interface for a peer in the simulated network.
 #[derive(Clone)]
 pub struct Control<P: Array> {
+    /// The public key of the peer this control interface is for.
     me: P,
+
+    /// Sender for messages to the oracle.
     sender: mpsc::UnboundedSender<Message<P>>,
 }
 
-impl<P: Array> crate::Control for Control<P> {
+impl<P: Array> crate::Blocker for Control<P> {
     type PublicKey = P;
 
     async fn block(&mut self, public_key: P) {

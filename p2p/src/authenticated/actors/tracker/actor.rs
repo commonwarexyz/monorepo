@@ -239,9 +239,9 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         // Update stored counters
         let set = self.sets.get_mut(&index).unwrap();
         for peer in peers.iter() {
-            let address = self.peers.entry(peer.clone()).or_insert(Record::unknown());
-            address.increment();
-            if address.is_discovered() {
+            let record = self.peers.entry(peer.clone()).or_insert(Record::unknown());
+            record.increment();
+            if record.is_discovered() {
                 set.found(peer.clone());
             }
         }
@@ -256,8 +256,8 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
 
             // Iterate over peer set and decrement counts
             for peer in set.order.keys() {
-                if let Some(address) = self.peers.get_mut(peer) {
-                    if address.decrement() {
+                if let Some(record) = self.peers.get_mut(peer) {
+                    if record.decrement() {
                         self.peers.remove(peer);
                     }
                 }

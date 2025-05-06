@@ -262,7 +262,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: Array> Network<E, P> {
             let o_r = (origin.clone(), recipient.clone());
             let r_o = (recipient.clone(), origin.clone());
             if self.blocks.contains(&o_r) || self.blocks.contains(&r_o) {
-                trace!(?origin, ?recipient, reason = "blocked", "dropping message",);
+                trace!(?origin, ?recipient, reason = "blocked", "dropping message");
                 continue;
             }
 
