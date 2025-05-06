@@ -1578,6 +1578,8 @@ mod tests {
         let (public, shares) = generate_shares::<_, MinSig>(&mut rng, None, n, t);
         let namespace = Some(&b"test"[..]);
         let msg = b"hello";
+
+        // Generate partial signatures
         let partials: Vec<_> = shares
             .iter()
             .map(|s| partial_sign_message::<MinSig>(s, namespace, msg))
@@ -1600,6 +1602,7 @@ mod tests {
         let corrupted_index = 1;
         shares[corrupted_index].private = Private::rand(&mut rng);
 
+        // Generate partial signatures
         let partials: Vec<_> = shares
             .iter()
             .map(|s| partial_sign_message::<MinSig>(s, namespace, msg))
@@ -1638,6 +1641,7 @@ mod tests {
             shares[idx].private = Private::rand(&mut rng);
         }
 
+        // Generate partial signatures
         let partials: Vec<_> = shares
             .iter()
             .map(|s| partial_sign_message::<MinSig>(s, namespace, msg))
