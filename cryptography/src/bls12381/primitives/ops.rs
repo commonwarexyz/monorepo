@@ -183,7 +183,7 @@ where
 /// This function assumes a group check was already performed on each `signature`.
 pub fn partial_verify_multiple_messages<'a, V, I, J>(
     public: &poly::Public<V>,
-    public_key: u32,
+    index: u32,
     messages: I,
     signatures: J,
 ) -> Result<(), Error>
@@ -194,9 +194,9 @@ where
     V::Signature: 'a,
 {
     // Aggregate the partial signatures
-    let (index, signature) =
+    let (parsed_index, signature) =
         partial_aggregate_signatures::<V, _>(signatures).ok_or(Error::InvalidSignature)?;
-    if public_key != index {
+    if index != parsed_index {
         return Err(Error::InvalidSignature);
     }
     let public = public.evaluate(index).value;
