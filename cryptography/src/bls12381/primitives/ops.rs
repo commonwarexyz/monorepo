@@ -216,6 +216,72 @@ where
     V::verify_prehashed(&public, &hm_sum, &signature)
 }
 
+/// Attempts to verify multiple [PartialSignature]s over the same message as a single
+/// aggregate signature (or returns any invalid signature found).
+fn partial_verify_multiple_public_keys_inner<'a, V: Variant, I>(
+    public_keys: &[V::Public],
+    namespace: Option<&[u8]>,
+    message: &[u8],
+    partials: I,
+) -> Result<(), Vec<PartialSignature<V>>>
+where
+    I: IntoIterator<Item = &'a PartialSignature<V>>,
+{
+    // Compute aggregate public key
+    let aggregate_public_key = aggregate_public_keys::<V, _>(public_keys);
+
+    // Compute aggregate signature
+    let mut reclaimed = Vec::new();
+    let mut aggregate_signature = V::Signature::zero();
+    for partial in partials {
+        aggregate_signature.add(&partial.value);
+        reclaimed.push(partial);
+    }
+
+    // Verify message over computed aggregate representations
+    if verify_message::<V>(
+        &aggregate_public_key,
+        namespace,
+        message,
+        &aggregate_signature,
+    )
+    .is_ok()
+    {
+        return Ok(());
+    }
+
+    // If verify fails, find offending signatures via recursive bisection
+    if reclaimed.len() <= 1 {
+        return Err(reclaimed.into_iter().cloned().collect());
+    }
+    let mid = public_keys.len() / 2;
+    let (left_public_keys, right_public_keys) = public_keys.split_at(mid);
+    let (left_partials, right_partials) = reclaimed.split_at(mid);
+    let result_l = partial_verify_multiple_public_keys_inner::<V, _>(
+        left_public_keys,
+        namespace,
+        message,
+        left_partials.iter().copied(),
+    );
+    let result_r = partial_verify_multiple_public_keys_inner::<V, _>(
+        right_public_keys,
+        namespace,
+        message,
+        right_partials.iter().copied(),
+    );
+
+    // Combine results
+    match (result_l, result_r) {
+        (Ok(_), Ok(_)) => unreachable!("some result must have an invalid signature"),
+        (Err(mut left), Err(right)) => {
+            left.extend_from_slice(&right);
+            Err(left)
+        }
+        (Err(left), Ok(_)) => Err(left),
+        (Ok(_), Err(right)) => Err(right),
+    }
+}
+
 /// Verifies multiple [PartialSignature]s over the same message as a single
 /// aggregate signature (or returns any invalid signature found).
 ///
@@ -232,63 +298,16 @@ where
     V: Variant,
     I: IntoIterator<Item = &'a PartialSignature<V>>,
 {
-    // Collect public keys for partial signatures
+    // Evaluate public polynomial to compute signer public keys.
+    let mut reclaimed = Vec::new();
     let mut public_keys = Vec::new();
-    let mut signatures = Vec::new();
-    let mut collected = Vec::new();
     for partial in partials {
         public_keys.push(public.evaluate(partial.index).value);
-        signatures.push(partial.value);
-        collected.push(partial);
+        reclaimed.push(partial);
     }
 
-    // Compute aggregate public key
-    let aggregate_public_key = aggregate_public_keys::<V, _>(&public_keys);
-
-    // Compute aggregate signature
-    let aggregate_signature = aggregate_signatures::<V, _>(&signatures);
-
-    // Verify message over computed aggregate representations
-    if verify_message::<V>(
-        &aggregate_public_key,
-        namespace,
-        message,
-        &aggregate_signature,
-    )
-    .is_ok()
-    {
-        return Ok(());
-    }
-
-    // If verify fails, find offending signatures via recursive bisection
-    if collected.len() <= 1 {
-        return Err(collected.into_iter().cloned().collect());
-    }
-    let mid = collected.len() / 2;
-    let (left, right) = collected.split_at(mid);
-    let result_l = partial_verify_multiple_public_keys::<V, _>(
-        public,
-        namespace,
-        message,
-        left.iter().copied(),
-    );
-    let result_r = partial_verify_multiple_public_keys::<V, _>(
-        public,
-        namespace,
-        message,
-        right.iter().copied(),
-    );
-
-    // Combine results
-    match (result_l, result_r) {
-        (Ok(_), Ok(_)) => unreachable!("some result must have an invalid signature"),
-        (Err(mut left), Err(right)) => {
-            left.extend_from_slice(&right);
-            Err(left)
-        }
-        (Err(left), Ok(_)) => Err(left),
-        (Ok(_), Err(right)) => Err(right),
-    }
+    // Recursively verify and find invalid signatures
+    partial_verify_multiple_public_keys_inner::<V, _>(&public_keys, namespace, message, reclaimed)
 }
 
 /// Interpolate the value of some [Point] with precomputed Barycentric Weights
