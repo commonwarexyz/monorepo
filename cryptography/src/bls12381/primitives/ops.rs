@@ -222,22 +222,31 @@ where
 /// # Warning
 ///
 /// This function assumes a group check was already performed on each `signature`.
-pub fn partial_verify_multiple_public_keys_or_identify<V: Variant>(
+pub fn partial_verify_multiple_public_keys_or_identify<'a, V, I>(
     public: &poly::Public<V>,
     namespace: Option<&[u8]>,
     message: &[u8],
-    partials: &[PartialSignature<V>],
-) -> Result<(), Vec<PartialSignature<V>>> {
-    // Aggregate public keys
-    let public_keys: Vec<V::Public> = partials
-        .iter()
-        .map(|p| public.evaluate(p.index).value)
-        .collect();
+    partials: I,
+) -> Result<(), Vec<PartialSignature<V>>>
+where
+    V: Variant,
+    I: IntoIterator<Item = &'a PartialSignature<V>>,
+{
+    // Derive public key for each partial signature
+    let mut public_keys = Vec::new();
+    let mut signatures = Vec::new();
+    let mut collected = Vec::new();
+    for partial in partials {
+        public_keys.push(public.evaluate(partial.index).value);
+        signatures.push(partial.value);
+        collected.push(partial.clone());
+    }
+
+    // Compute aggregate public key
     let aggregate_public_key = aggregate_public_keys::<V, _>(&public_keys);
 
     // Aggregate signatures
-    let signatures: Vec<&V::Signature> = partials.iter().map(|p| &p.value).collect();
-    let aggregate_signature = aggregate_signatures::<V, _>(signatures);
+    let aggregate_signature = aggregate_signatures::<V, _>(&signatures);
 
     // Verify message over computed aggregate representations
     if verify_message::<V>(
@@ -252,15 +261,15 @@ pub fn partial_verify_multiple_public_keys_or_identify<V: Variant>(
     }
 
     // If verify fails, find offending signatures via recursive bisection
-    if partials.len() <= 1 {
-        return Err(partials.to_vec());
+    if collected.len() <= 1 {
+        return Err(collected);
     }
-    let mid = partials.len() / 2;
-    let (left, right) = partials.split_at(mid);
+    let mid = collected.len() / 2;
+    let (left, right) = collected.split_at(mid);
     let result_l =
-        partial_verify_multiple_public_keys_or_identify::<V>(public, namespace, message, left);
+        partial_verify_multiple_public_keys_or_identify::<V, _>(public, namespace, message, left);
     let result_r =
-        partial_verify_multiple_public_keys_or_identify::<V>(public, namespace, message, right);
+        partial_verify_multiple_public_keys_or_identify::<V, _>(public, namespace, message, right);
 
     // Combine results
     match (result_l, result_r) {
@@ -1544,7 +1553,7 @@ mod tests {
             .collect();
 
         // Verify all signatures
-        partial_verify_multiple_public_keys_or_identify::<MinSig>(
+        partial_verify_multiple_public_keys_or_identify::<MinSig, _>(
             &public, namespace, msg, &partials,
         )
         .expect("all signatures should be valid");
@@ -1568,7 +1577,7 @@ mod tests {
             .collect();
 
         // Attempt verification and expect failure with bisection identifying the invalid signature
-        let result = partial_verify_multiple_public_keys_or_identify::<MinSig>(
+        let result = partial_verify_multiple_public_keys_or_identify::<MinSig, _>(
             &public, namespace, msg, &partials,
         );
         match result {
@@ -1607,7 +1616,7 @@ mod tests {
             .collect();
 
         // Attempt verification and expect failure with bisection identifying invalid signatures
-        let result = partial_verify_multiple_public_keys_or_identify::<MinSig>(
+        let result = partial_verify_multiple_public_keys_or_identify::<MinSig, _>(
             &public, namespace, msg, &partials,
         );
         match result {
