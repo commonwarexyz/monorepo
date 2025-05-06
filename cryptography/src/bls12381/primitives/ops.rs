@@ -232,8 +232,8 @@ where
     let aggregate_public_key = aggregate_public_keys::<V, _>(public_keys);
 
     // Compute aggregate signature
-    let mut reclaimed = Vec::new();
     let mut aggregate_signature = V::Signature::zero();
+    let mut reclaimed = Vec::new();
     for partial in partials {
         aggregate_signature.add(&partial.value);
         reclaimed.push(partial);
@@ -300,8 +300,8 @@ where
     I: IntoIterator<Item = &'a PartialSignature<V>>,
 {
     // Evaluate public polynomial to compute signer public keys
-    let mut reclaimed = Vec::new();
     let mut public_keys = Vec::new();
+    let mut reclaimed = Vec::new();
     for partial in partials {
         public_keys.push(public.evaluate(partial.index).value);
         reclaimed.push(partial);
