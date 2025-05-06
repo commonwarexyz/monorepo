@@ -195,16 +195,13 @@ impl Debug for MinSig {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use commonware_codec::ReadExt;
     use commonware_utils::from_hex_formatted;
 
-    use crate::bls12381::primitives::poly::new;
-
-    use super::*;
-
     // Source: https://github.com/paulmillr/noble-curves/blob/bee1ffe0000095f95b982a969d06baaa3dd8ce73/test/bls12-381/bls12-381-g1-test-vectors.txt
     //
-    // Of the form `<private>:<message>:<signature>`.
+    // The test vectors are in the format: `<private>:<message>:<signature>`.
     const MIN_SIG_TESTS: &str = "25d8cef413ba263e8d5732d3fca51fd369db74712655a5fd7b0b3a58d8095be8::800134e27aacc74dc91153a6bd65f96a5f8c8365c722da2f1e12eb048e0aed6987fa4168a51241ce41434fd05fd4bdd9
 611810ebd8f5a7faad47b2249f9d13be0506131db987b6948f1ca3194fa6b643:68:94250c0cc62ae9041c6f6e5042202b3c327991ce4b2841a4145d270f6c8311bc95673c826ada72a6d69e92a833d649e6
 419bb1de76e11a476f8d5cc5d85a648ec04f24bf75f6cf1f3fae43e57bf9a491:c8d0:898f660c5b26e8c9461ab3f42eb394465d5a115702c05d2a2bc761a8873ac0f33d21f9ea9cf4c435cd31391f5c8c0a91
@@ -336,20 +333,32 @@ mod tests {
 
     #[test]
     fn test_min_sig() {
+        // Source: https://github.com/paulmillr/noble-curves/blob/bee1ffe0000095f95b982a969d06baaa3dd8ce73/src/bls12-381.ts#L358
+        const DST: &[u8] = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_";
+
+        // Parse lines
         for line in MIN_SIG_TESTS.lines() {
+            // Extract parts
             let parts: Vec<_> = line.split(':').collect();
-            assert_eq!(parts.len(), 3, "Invalid test vector format");
             let private = from_hex_formatted(parts[0]).unwrap();
             let private = Scalar::read(&mut private.as_ref()).unwrap();
             let message = from_hex_formatted(parts[1]).unwrap();
             let signature = from_hex_formatted(parts[2]).unwrap();
-            let signature = <MinSig as Variant>::Signature::read(&mut signature.as_ref()).unwrap();
-            let computed = <MinSig as Variant>::sign(
-                &private,
-                b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_",
-                &message,
-            );
-            assert_eq!(signature, computed, "Signature mismatch");
+            let mut signature =
+                <MinSig as Variant>::Signature::read(&mut signature.as_ref()).unwrap();
+
+            // Sign message
+            let computed = <MinSig as Variant>::sign(&private, DST, &message);
+            assert_eq!(signature, computed);
+
+            // Verify signature
+            let mut public = <MinSig as Variant>::Public::one();
+            public.mul(&private);
+            <MinSig as Variant>::verify(&public, DST, &message, &signature).unwrap();
+
+            // Fail verification with a manipulated signature
+            signature.add(&<MinSig as Variant>::Signature::one());
+            assert!(<MinSig as Variant>::verify(&public, DST, &message, &signature).is_err(),);
         }
     }
 
@@ -623,20 +632,32 @@ mod tests {
 
     #[test]
     fn test_min_pk() {
+        // Source: https://github.com/paulmillr/noble-curves/blob/bee1ffe0000095f95b982a969d06baaa3dd8ce73/src/bls12-381.ts#L358
+        const DST: &[u8] = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_";
+
+        // Parse lines
         for line in MIN_PK_TESTS.lines() {
+            // Extract parts
             let parts: Vec<_> = line.split(':').collect();
-            assert_eq!(parts.len(), 3, "Invalid test vector format");
             let private = from_hex_formatted(parts[0]).unwrap();
             let private = Scalar::read(&mut private.as_ref()).unwrap();
             let message = from_hex_formatted(parts[1]).unwrap();
             let signature = from_hex_formatted(parts[2]).unwrap();
-            let signature = <MinPk as Variant>::Signature::read(&mut signature.as_ref()).unwrap();
-            let computed = <MinPk as Variant>::sign(
-                &private,
-                b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_",
-                &message,
-            );
-            assert_eq!(signature, computed, "Signature mismatch");
+            let mut signature =
+                <MinPk as Variant>::Signature::read(&mut signature.as_ref()).unwrap();
+
+            // Sign message
+            let computed = <MinPk as Variant>::sign(&private, DST, &message);
+            assert_eq!(signature, computed);
+
+            // Verify signature
+            let mut public = <MinPk as Variant>::Public::one();
+            public.mul(&private);
+            <MinPk as Variant>::verify(&public, DST, &message, &signature).unwrap();
+
+            // Fail verification with a manipulated signature
+            signature.add(&<MinPk as Variant>::Signature::one());
+            assert!(<MinPk as Variant>::verify(&public, DST, &message, &signature).is_err());
         }
     }
 }
