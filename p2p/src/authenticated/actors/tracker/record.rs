@@ -11,13 +11,14 @@ pub enum Address<C: Verifier> {
 
     /// Provided during initialization.
     /// Can be upgraded to `Persistent`.
+    /// Will be tracked even if the peer is not part of any peer sets.
     Bootstrapper(SocketAddr),
 
     /// Discovered this peer's address from other peers.
     Discovered(PeerInfo<C>),
 
-    /// Discovered this peer's address from other peers after it was bootstrapped.
-    /// Will continuously be tracked.
+    /// Discovered this peer's address from other peers after it was originally a bootstrapper.
+    /// Will be tracked even if the peer is not part of any peer sets.
     Persistent(PeerInfo<C>),
 
     /// Peer is blocked.
@@ -45,7 +46,7 @@ impl<C: Verifier> Record<C> {
     }
 
     /// Create a new record with a bootstrapper address.
-    pub fn bootstrapped(socket: SocketAddr) -> Self {
+    pub fn bootstrapper(socket: SocketAddr) -> Self {
         Record {
             address: Address::Bootstrapper(socket),
             sets: 0,
@@ -203,9 +204,9 @@ mod tests {
     }
 
     #[test]
-    fn test_bootstrapped_initial_state() {
+    fn test_bootstrapper_initial_state() {
         let socket = test_socket();
-        let record = Record::<Secp256r1>::bootstrapped(socket);
+        let record = Record::<Secp256r1>::bootstrapper(socket);
         assert!(matches!(record.address, Address::Bootstrapper(s) if s == socket));
         assert_eq!(record.sets, 0);
         assert_eq!(record.get_address(), Some(socket));
@@ -230,7 +231,7 @@ mod tests {
     #[test]
     fn test_bootstrapper_to_persistent() {
         let socket = test_socket();
-        let mut record = Record::<Secp256r1>::bootstrapped(socket);
+        let mut record = Record::<Secp256r1>::bootstrapper(socket);
         let peer_info: PeerInfo<Secp256r1> = create_peer_info(2, socket, 1000);
 
         assert!(record.set_discovered(peer_info.clone()));
@@ -259,7 +260,7 @@ mod tests {
     #[test]
     fn test_persistent_update_newer_timestamp() {
         let socket = test_socket();
-        let mut record = Record::<Secp256r1>::bootstrapped(socket);
+        let mut record = Record::<Secp256r1>::bootstrapper(socket);
         let peer_info_old: PeerInfo<Secp256r1> = create_peer_info(4, socket, 1000);
         let peer_info_new: PeerInfo<Secp256r1> = create_peer_info(4, socket, 2000);
 
@@ -297,7 +298,7 @@ mod tests {
     #[test]
     fn test_persistent_no_update_older_or_equal_timestamp() {
         let socket = test_socket();
-        let mut record = Record::<Secp256r1>::bootstrapped(socket);
+        let mut record = Record::<Secp256r1>::bootstrapper(socket);
         let peer_info_old: PeerInfo<Secp256r1> = create_peer_info(6, socket, 1000);
         let peer_info_older: PeerInfo<Secp256r1> = create_peer_info(6, socket, 500);
         let peer_info_equal: PeerInfo<Secp256r1> = create_peer_info(6, socket, 1000);
@@ -350,7 +351,7 @@ mod tests {
         let socket = test_socket();
 
         // Test Bootstrapper state -> not removable
-        let mut record_boot = Record::<Secp256r1>::bootstrapped(socket);
+        let mut record_boot = Record::<Secp256r1>::bootstrapper(socket);
         assert_eq!(record_boot.sets, 0);
         record_boot.increment();
         record_boot.increment();
@@ -362,7 +363,7 @@ mod tests {
 
         // Test Persistent state -> not removable
         let peer_info: PeerInfo<Secp256r1> = create_peer_info(7, socket, 1000);
-        let mut record_pers = Record::<Secp256r1>::bootstrapped(socket);
+        let mut record_pers = Record::<Secp256r1>::bootstrapper(socket);
         record_pers.set_discovered(peer_info);
         assert_eq!(record_pers.sets, 0);
         record_pers.increment();
@@ -391,14 +392,14 @@ mod tests {
         let record_unknown = Record::<Secp256r1>::unknown();
         assert_eq!(record_unknown.get_address(), None);
 
-        let record_boot = Record::<Secp256r1>::bootstrapped(socket);
+        let record_boot = Record::<Secp256r1>::bootstrapper(socket);
         assert_eq!(record_boot.get_address(), Some(socket));
 
         let mut record_disc = Record::<Secp256r1>::unknown();
         record_disc.set_discovered(peer_info.clone());
         assert_eq!(record_disc.get_address(), Some(socket));
 
-        let mut record_pers = Record::<Secp256r1>::bootstrapped(socket);
+        let mut record_pers = Record::<Secp256r1>::bootstrapper(socket);
         record_pers.set_discovered(peer_info);
         assert_eq!(record_pers.get_address(), Some(socket));
 
@@ -415,14 +416,14 @@ mod tests {
         let record_unknown = Record::<Secp256r1>::unknown();
         assert_peer_info_eq(record_unknown.get_peer_info(), None);
 
-        let record_boot = Record::<Secp256r1>::bootstrapped(socket);
+        let record_boot = Record::<Secp256r1>::bootstrapper(socket);
         assert_peer_info_eq(record_boot.get_peer_info(), None);
 
         let mut record_disc = Record::<Secp256r1>::unknown();
         record_disc.set_discovered(peer_info.clone());
         assert_peer_info_eq(record_disc.get_peer_info(), Some(&peer_info));
 
-        let mut record_pers = Record::<Secp256r1>::bootstrapped(socket);
+        let mut record_pers = Record::<Secp256r1>::bootstrapper(socket);
         record_pers.set_discovered(peer_info.clone());
         assert_peer_info_eq(record_pers.get_peer_info(), Some(&peer_info));
 
@@ -439,14 +440,14 @@ mod tests {
         let record_unknown = Record::<Secp256r1>::unknown();
         assert!(record_unknown.want_info());
 
-        let record_boot = Record::<Secp256r1>::bootstrapped(socket);
+        let record_boot = Record::<Secp256r1>::bootstrapper(socket);
         assert!(record_boot.want_info());
 
         let mut record_disc = Record::<Secp256r1>::unknown();
         record_disc.set_discovered(peer_info.clone());
         assert!(!record_disc.want_info());
 
-        let mut record_pers = Record::<Secp256r1>::bootstrapped(socket);
+        let mut record_pers = Record::<Secp256r1>::bootstrapper(socket);
         record_pers.set_discovered(peer_info);
         assert!(!record_pers.want_info());
 

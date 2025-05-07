@@ -27,7 +27,7 @@ use std::{
     collections::{BTreeMap, HashSet},
     net::SocketAddr,
 };
-use tracing::{debug, error, trace};
+use tracing::{debug, trace};
 
 // Bytes to add to the namespace to prevent replay attacks.
 const NAMESPACE_SUFFIX_IP: &[u8] = b"_IP";
@@ -104,7 +104,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
             if peer == cfg.crypto.public_key() {
                 continue;
             }
-            peers.insert(peer, Record::bootstrapped(address));
+            peers.insert(peer, Record::bootstrapper(address));
         }
 
         // Configure peer set
@@ -392,13 +392,12 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
         Ok(Some(peers))
     }
 
-    /// Reserve a connection to a peer, returning a [`Reservation`] if successful.
+    /// Attempt to reserve a connection to a peer, returning a [`Reservation`] if successful.
     ///
     /// Will return `None` in any of the following cases:
-    /// - The peer is us.
-    /// - The peer is blocked.
     /// - The peer is already reserved.
-    /// - The peer has been rate-limited.
+    /// - The peer is not [`Self::allowed`].
+    /// - The peer has been rate-limited for connection attempts.
     fn reserve(&mut self, peer: C::PublicKey) -> Option<Reservation<E, C>> {
         // Check if we are already reserved
         if self.reserved.contains(&peer) {
@@ -509,14 +508,13 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
                     public_key,
                     reservation,
                 } => {
-                    // Block reservations for self, missing, or blocked peers
-                    if !self.allowed(&public_key) {
-                        debug!(?public_key, "peer not authorized to connect");
-                        let _ = reservation.send(None);
-                    } else {
+                    if self.allowed(&public_key) {
                         // Because dropping the reservation will release the connection,
                         // we don't need to worry about the case that this fails.
                         let _ = reservation.send(self.reserve(public_key));
+                    } else {
+                        debug!(?public_key, "peer not authorized to connect");
+                        let _ = reservation.send(None);
                     }
                 }
                 Message::Release { public_key } => {
@@ -524,9 +522,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
                     self.metrics.reserved.set(self.reserved.len() as i64);
                 }
                 Message::Block { public_key } => {
-                    // Cannot block self
-                    if public_key == self.crypto.public_key() {
-                        error!(?public_key, "cannot block self");
+                    // Ignore peers that cannot be blocked (e.g., self, already-blocked, unknown)
+                    if !self.allowed(&public_key) {
                         continue;
                     }
 
@@ -539,8 +536,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
                     let blocked_count = self.peers.values().filter(|r| r.is_blocked()).count();
                     self.metrics.blocked.set(blocked_count as i64);
 
-                    // The peer will be sent a `Kill` message the next time they send the
-                    // `Construct` message.
+                    // We don't have to kill the peer now. It will be sent a `Kill` message the next
+                    // time it sends the `Construct` message to the tracker.
                 }
             }
         }
