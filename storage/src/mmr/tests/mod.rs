@@ -4,11 +4,17 @@ use commonware_utils::hex;
 
 /// Build the MMR corresponding to the stability test `ROOTS` and confirm the
 /// roots match that from the builder's root computation.
-pub async fn build_test_roots_mmr<B: Builder<Sha256>>(hasher: &mut Sha256, mmr: &mut B) {
+pub async fn build_test_roots_mmr<B: Builder<Sha256>>(
+    hasher: &mut Sha256,
+    mmr: &mut B,
+    check_hashes: bool,
+) {
     for i in 0u64..199 {
         let root = mmr.root(hasher);
         let expected_root = ROOTS[i as usize];
-        assert_eq!(hex(&root), expected_root, "at: {}", i);
+        if check_hashes {
+            assert_eq!(hex(&root), expected_root, "at: {}", i);
+        }
         hasher.update(&i.to_be_bytes());
         let element = hasher.finalize();
         mmr.add(hasher, &element).await.unwrap();

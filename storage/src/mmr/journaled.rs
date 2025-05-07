@@ -509,7 +509,7 @@ mod tests {
                 .await
                 .unwrap();
             let mut hasher = Sha256::new();
-            build_test_roots_mmr(&mut hasher, &mut mmr).await;
+            build_test_roots_mmr(&mut hasher, &mut mmr, true).await;
         });
     }
 

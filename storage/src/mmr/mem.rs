@@ -20,10 +20,20 @@ use commonware_cryptography::{Digest, Hasher as CHasher};
 use std::collections::{HashMap, VecDeque};
 use std::marker::PhantomData;
 
-/// A configuration struct indicating we wish this MMR to be "grafted" on to another tree. Grafting
+/// A configuration struct indicating we wish this tree to be "grafted" on to another MMR. Grafting
 /// implies nodes in this tree with height "from_height" will effectively have a third child coming
 /// from the other tree for the purpose of computing its digest, allowing information in the other
 /// tree to flow up to the root of this tree.
+///
+/// # Terminology
+///
+/// The tree whose nodes we are grafting onto is referred to as the _base tree_, and the tree being
+/// grafted the _canopy_.
+///
+/// # Warning
+///
+/// The base tree must be a true MMR; for example a mem::MMR that is used as a BMT (via update_leaf)
+/// would result in undefined behavior if used as the base. The canopy has no such restriction.
 pub struct GraftingConfig<'a, D: Digest, S: Storage<D>> {
     /// The height of the nodes from this MMR being grafted on to another tree.
     from_height: u32,
@@ -32,8 +42,8 @@ pub struct GraftingConfig<'a, D: Digest, S: Storage<D>> {
     /// This height must be >= `from_height`.
     to_height: u32,
 
-    /// The other tree onto which this MMR is being grafted.
-    tree: &'a S,
+    /// The base MMR onto which this MMR is being grafted.
+    base_mmr: &'a S,
 
     // marker to keep D in scope
     _marker: PhantomData<D>,
@@ -115,6 +125,16 @@ impl<H: CHasher, S: Storage<H::Digest>> Mmr<'_, H, S> {
             pruned_to_pos: 0,
             pinned_nodes: HashMap::new(),
             grafting_cfg: None,
+        }
+    }
+
+    /// Return a new empty `Mmr` that will be grafted according to the `grafting_cfg`.
+    pub fn new_grafted(grafting_cfg: GraftingConfig<'_, H::Digest, S>) -> Mmr<'_, H, S> {
+        Mmr {
+            nodes: VecDeque::new(),
+            pruned_to_pos: 0,
+            pinned_nodes: HashMap::new(),
+            grafting_cfg: Some(grafting_cfg),
         }
     }
 
@@ -253,7 +273,7 @@ impl<H: CHasher, S: Storage<H::Digest>> Mmr<'_, H, S> {
         node_pos: u64,
     ) -> Result<H::Digest, Error> {
         let grafting_pos = node_pos << (cfg.to_height - cfg.from_height);
-        let grafting_digest = cfg.tree.get_node(grafting_pos).await?.unwrap();
+        let grafting_digest = cfg.base_mmr.get_node(grafting_pos).await?.unwrap();
         let digest =
             hasher.grafted_node_hash(node_pos, left_digest, right_digest, &grafting_digest);
 
@@ -283,13 +303,14 @@ impl<H: CHasher, S: Storage<H::Digest>> Mmr<'_, H, S> {
         Ok(self.size())
     }
 
-    /// Change the digest of any retained leaf. Panics if `pos` does not correspond to a leaf.
+    /// Change the digest of any retained leaf. Panics if `pos` does not correspond to a leaf.  This
+    /// is useful if you want to use the MMR implementation as an updatable binary Merkle tree, and
+    /// otherwise should be avoided.
     ///
     /// # Warning
     ///
-    /// This method will change the root hash and invalidate any previous inclusion proofs! This is
-    /// useful if you want to use the MMR implementation as an updatable binary Merkle tree, and
-    /// otherwise should be avoided.
+    /// This method will change the root hash and invalidate any previous inclusion proofs, and also
+    /// prevent using this tree as a base tree for grafting.
     pub fn update_leaf(&mut self, hasher: &mut H, pos: u64, element: &[u8]) -> Result<(), Error> {
         if pos < self.pruned_to_pos {
             return Err(ElementPruned(pos));
@@ -647,7 +668,7 @@ mod tests {
         executor.start(|_| async move {
             let mut hasher = Sha256::new();
             let mut mmr = Mmr::<Sha256>::new();
-            build_test_roots_mmr(&mut hasher, &mut mmr).await;
+            build_test_roots_mmr(&mut hasher, &mut mmr, true).await;
         });
     }
 
@@ -778,6 +799,52 @@ mod tests {
             let not_a_leaf_pos = 2;
 
             let _ = mmr.update_leaf(&mut hasher, not_a_leaf_pos, &element);
+        });
+    }
+
+    #[test]
+    fn test_grafting() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher = Sha256::new();
+            {
+                // Graft an MMR onto another MMR at the exact same height.
+                let mut base_mmr = Mmr::<Sha256>::new();
+                build_test_roots_mmr(&mut hasher, &mut base_mmr, true).await;
+                let grafting_cfg = GraftingConfig {
+                    from_height: 0,
+                    to_height: 0,
+                    base_mmr: &base_mmr,
+                    _marker: PhantomData,
+                };
+                let mut canopy = Mmr::<Sha256, _>::new_grafted(grafting_cfg);
+                build_test_roots_mmr(&mut hasher, &mut canopy, false).await;
+
+                // The base mmr's state should not be affected by grafting.
+                assert_eq!(hex(&base_mmr.root(&mut hasher)), ROOTS[199]);
+                // The canopy MMR will have its state affected, since the leaves the base MMR are hashed into it.
+                assert!(base_mmr.root(&mut hasher) != canopy.root(&mut hasher));
+            }
+            {
+                // Graft the MMRs at different, non-zero heights.
+                let mut base_mmr = Mmr::<Sha256>::new();
+                build_test_roots_mmr(&mut hasher, &mut base_mmr, true).await;
+                // Since we're grafting at a height difference of 1, the base MMR needs to have
+                // double the elements of the canopy MMR, so add in the same nodes twice.
+                build_test_roots_mmr(&mut hasher, &mut base_mmr, false).await;
+
+                let grafting_cfg = GraftingConfig {
+                    from_height: 1,
+                    to_height: 2,
+                    base_mmr: &base_mmr,
+                    _marker: PhantomData,
+                };
+                let mut canopy = Mmr::<Sha256, _>::new_grafted(grafting_cfg);
+                build_test_roots_mmr(&mut hasher, &mut canopy, false).await;
+
+                // The canopy MMR will have its state affected, since the leaves the base MMR are hashed into it.
+                assert!(base_mmr.root(&mut hasher) != canopy.root(&mut hasher));
+            }
         });
     }
 }
