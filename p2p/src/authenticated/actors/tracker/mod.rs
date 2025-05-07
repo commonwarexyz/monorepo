@@ -10,6 +10,7 @@ use thiserror::Error;
 
 mod actor;
 mod ingress;
+mod metrics;
 mod record;
 mod set;
 
