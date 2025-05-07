@@ -129,7 +129,7 @@ impl<
             for _ in pruned_bits..mmr_pruned_leaves {
                 status.append(hasher, false).await?;
             }
-            if mmr_pruned_leaves > Bitmap::<'static, H, N>::CHUNK_SIZE_BITS
+            if mmr_pruned_leaves > Bitmap::<'_, H, N>::CHUNK_SIZE_BITS
                 && pruned_bits < mmr_pruned_leaves - Bitmap::<H, N>::CHUNK_SIZE_BITS
             {
                 // This is unusual but can happen if we fail to write the bitmap after pruning
@@ -158,8 +158,7 @@ impl<
             &mut snapshot,
             Some(&mut status),
         )
-        .await
-        .unwrap();
+        .await?;
 
         let any = Any {
             ops: mmr,
@@ -207,7 +206,7 @@ impl<
             UpdateResult::NoOp => return Ok(update_result),
             UpdateResult::Inserted(_) => (),
             UpdateResult::Updated(old_loc, _) => {
-                self.status.set_bit(hasher, old_loc, false);
+                self.status.set_bit(hasher, old_loc, false).await?;
             }
         }
         self.status.append(hasher, true).await?;
@@ -224,7 +223,7 @@ impl<
         };
 
         self.status.append(hasher, false).await?;
-        self.status.set_bit(hasher, old_loc, false);
+        self.status.set_bit(hasher, old_loc, false).await?;
 
         Ok(())
     }

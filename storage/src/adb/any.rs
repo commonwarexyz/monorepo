@@ -62,7 +62,7 @@ pub struct Any<
 > {
     /// An MMR over digests of the operations applied to the db. The number of leaves in this MMR
     /// always equals the number of operations in the unpruned `log`.
-    pub(super) ops: Mmr<'static, E, H>,
+    pub(super) ops: Mmr<E, H>,
 
     /// A (pruned) log of all operations applied to the db in order of occurrence. The position
     /// of each operation in the log is called its _location_, which is a stable identifier. Pruning
@@ -96,7 +96,7 @@ pub enum UpdateResult {
     Updated(u64, u64),
 }
 
-impl<'a, E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translator>
+impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translator>
     Any<E, K, V, H, T>
 {
     /// Returns any `Any` adb initialized from `cfg`. Any uncommitted log operations will be
@@ -138,7 +138,7 @@ impl<'a, E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Trans
         context: E,
         hasher: &mut H,
         cfg: Config,
-    ) -> Result<(Mmr<'static, E, H>, Journal<E, Operation<K, V>>), Error> {
+    ) -> Result<(Mmr<E, H>, Journal<E, Operation<K, V>>), Error> {
         let mut mmr = Mmr::init(
             context.with_label("mmr"),
             MmrConfig {
@@ -216,7 +216,7 @@ impl<'a, E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Trans
         start_leaf_num: u64,
         log: &Journal<E, Operation<K, V>>,
         snapshot: &mut Index<T, u64>,
-        mut bitmap: Option<&mut Bitmap<'a, H, N>>,
+        mut bitmap: Option<&mut Bitmap<'_, H, N>>,
     ) -> Result<u64, Error> {
         let mut inactivity_floor_loc = start_leaf_num;
         let log_size = log.size().await?;
@@ -246,7 +246,7 @@ impl<'a, E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Trans
 
                             // The mapped key is the same; delete it from the snapshot.
                             if let Some(ref mut bitmap_ref) = bitmap {
-                                bitmap_ref.set_bit(hasher, *loc, false);
+                                bitmap_ref.set_bit(hasher, *loc, false).await?;
                             }
                             cursor.delete();
                             break;
@@ -263,7 +263,7 @@ impl<'a, E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Trans
                                 bitmap_ref.append(hasher, true).await?;
                             }
                             UpdateResult::Updated(old_loc, _) => {
-                                bitmap_ref.set_bit(hasher, old_loc, false);
+                                bitmap_ref.set_bit(hasher, old_loc, false).await?;
                                 bitmap_ref.append(hasher, true).await?;
                             }
                         }
@@ -608,7 +608,7 @@ impl<'a, E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Trans
         &mut self,
         hasher: &mut H,
         max_steps: u64,
-        mut bitmap: Option<&mut Bitmap<'a, H, N>>,
+        mut bitmap: Option<&mut Bitmap<'_, H, N>>,
     ) -> Result<(), Error> {
         for _ in 0..max_steps {
             if self.inactivity_floor_loc == self.op_count() {
@@ -620,7 +620,7 @@ impl<'a, E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Trans
                 .await?;
             if let Some(bitmap_ref) = &mut bitmap {
                 if let Some(old_loc) = old_loc {
-                    bitmap_ref.set_bit(hasher, old_loc, false);
+                    bitmap_ref.set_bit(hasher, old_loc, false).await?;
                     bitmap_ref.append(hasher, true).await?;
                 }
             }
@@ -741,7 +741,7 @@ mod test {
             assert!(matches!(db.prune_inactive().await, Ok(())));
             assert_eq!(
                 db.root(&mut hasher),
-                MemMmr::<'static, Sha256>::default().root(&mut hasher)
+                MemMmr::<'_, Sha256>::default().root(&mut hasher)
             );
 
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.

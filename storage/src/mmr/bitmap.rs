@@ -12,7 +12,12 @@
 
 use crate::{
     metadata::{Config as MConfig, Metadata},
-    mmr::{iterator::leaf_num_to_pos, mem::Mmr, verification::Proof, Error, Storage},
+    mmr::{
+        iterator::leaf_num_to_pos,
+        mem::{DummyStorage, GraftingConfig, Mmr},
+        verification::Proof,
+        Error, Storage,
+    },
 };
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Hasher as CHasher;
@@ -22,15 +27,17 @@ use std::collections::VecDeque;
 use tracing::{error, warn};
 
 /// Implements the [Storage] trait for generating inclusion proofs over the bitmap.
-struct BitmapStorage<'a, H: CHasher> {
+struct BitmapStorage<'a, H: CHasher, S: Storage<H::Digest>> {
     /// The Merkle tree over all bitmap bits other than the last chunk.
-    mmr: &'a Mmr<'a, H>,
+    mmr: &'a Mmr<'a, H, S>,
 
     /// A pruned Merkle tree over all bits of the bitmap including the last chunk.
-    last_chunk_mmr: &'a Mmr<'a, H>,
+    last_chunk_mmr: &'a Mmr<'a, H, S>,
 }
 
-impl<H: CHasher + Send + Sync> Storage<H::Digest> for BitmapStorage<'_, H> {
+impl<H: CHasher + Send + Sync, S: Storage<<H as CHasher>::Digest>> Storage<<H as CHasher>::Digest>
+    for BitmapStorage<'_, H, S>
+{
     async fn get_node(&self, pos: u64) -> Result<Option<H::Digest>, Error> {
         if pos < self.mmr.size() {
             Ok(self.mmr.get_node(pos))
@@ -51,7 +58,12 @@ impl<H: CHasher + Send + Sync> Storage<H::Digest> for BitmapStorage<'_, H> {
 ///
 /// Warning: Even though we use u64 identifiers for bits, on 32-bit machines, the maximum
 /// addressable bit is limited to (u32::MAX * N * 8).
-pub struct Bitmap<'a, H: CHasher, const N: usize> {
+pub struct Bitmap<
+    'a,
+    H: CHasher,
+    const N: usize,
+    S: Storage<H::Digest> = DummyStorage<<H as CHasher>::Digest>,
+> {
     /// The bitmap itself, in chunks of size N bytes. The number of valid bits in the last chunk is
     /// given by `self.next_bit`. Within each byte, lowest order bits are treated as coming before
     /// higher order bits in the bit ordering.
@@ -71,7 +83,7 @@ pub struct Bitmap<'a, H: CHasher, const N: usize> {
     /// an MMR structure, is not an MMR but a Merkle tree. The MMR structure results in reduced
     /// update overhead for elements being appended or updated near the tip compared to a more
     /// typical balanced Merkle tree.
-    mmr: Mmr<'a, H>,
+    mmr: Mmr<'a, H, S>,
 
     /// The number of bitmap chunks that have been pruned.
     pruned_chunks: usize,
@@ -89,7 +101,7 @@ const NODE_PREFIX: u8 = 0;
 /// Prefix used for the metadata key identifying the pruned_chunks value.
 const PRUNED_CHUNKS_PREFIX: u8 = 1;
 
-impl<H: CHasher, const N: usize> Bitmap<'_, H, N> {
+impl<'a, H: CHasher, S: Storage<H::Digest>, const N: usize> Bitmap<'a, H, N, S> {
     /// The size of a chunk in bytes.
     pub const CHUNK_SIZE: usize = N;
 
@@ -104,6 +116,18 @@ impl<H: CHasher, const N: usize> Bitmap<'_, H, N> {
             bitmap,
             next_bit: 0,
             mmr: Mmr::new(),
+            pruned_chunks: 0,
+        }
+    }
+
+    /// Return a new empty bitmap that will be grafted according to the `grafting_cfg`.
+    pub fn new_grafted(grafting_cfg: GraftingConfig<'a, H::Digest, S>) -> Self {
+        let bitmap = VecDeque::from([[0u8; N]]);
+
+        Bitmap {
+            bitmap,
+            next_bit: 0,
+            mmr: Mmr::new_grafted(grafting_cfg),
             pruned_chunks: 0,
         }
     }
@@ -159,7 +183,7 @@ impl<H: CHasher, const N: usize> Bitmap<'_, H, N> {
 
         metadata.close().await?;
 
-        let mmr = Mmr::<H>::init(Vec::new(), mmr_size, pinned_nodes);
+        let mmr = Mmr::<H, S>::init(Vec::new(), mmr_size, pinned_nodes);
 
         Ok(Self {
             bitmap: VecDeque::from([[0u8; N]]),
@@ -288,7 +312,7 @@ impl<H: CHasher, const N: usize> Bitmap<'_, H, N> {
         assert!(self.next_bit <= Self::CHUNK_SIZE_BITS);
 
         if self.next_bit == Self::CHUNK_SIZE_BITS {
-            self.commit_last_chunk(hasher).await.unwrap();
+            self.commit_last_chunk(hasher).await?;
         }
         Ok(())
     }
@@ -362,7 +386,12 @@ impl<H: CHasher, const N: usize> Bitmap<'_, H, N> {
     }
 
     /// Set the value of the referenced bit. Panics if the bit doesn't exist or has been pruned.
-    pub fn set_bit(&mut self, hasher: &mut H, bit_offset: u64, bit: bool) {
+    pub async fn set_bit(
+        &mut self,
+        hasher: &mut H,
+        bit_offset: u64,
+        bit: bool,
+    ) -> Result<(), Error> {
         let chunk_index = self.chunk_index(bit_offset);
         let is_last = chunk_index == self.bitmap.len() - 1;
         let chunk = &mut self.bitmap[chunk_index];
@@ -378,11 +407,11 @@ impl<H: CHasher, const N: usize> Bitmap<'_, H, N> {
         if is_last {
             // No need to update the Merkle tree since this bit is within the last (yet to be
             // committed) chunk.
-            return;
+            return Ok(());
         }
 
         let leaf_pos = Self::leaf_pos(bit_offset);
-        self.mmr.update_leaf(hasher, leaf_pos, chunk).unwrap();
+        self.mmr.update_leaf(hasher, leaf_pos, chunk).await
     }
 
     /// Return the root hash of the Merkle tree over the bitmap.
@@ -506,7 +535,7 @@ mod tests {
             // Chunk should be provable.
             let (proof, chunk) = bitmap.proof(&mut hasher, 0).await.unwrap();
             assert!(
-                Bitmap::verify_bit_inclusion(&mut hasher, &proof, &chunk, 255, &root),
+                Bitmap::<Sha256, 32>::verify_bit_inclusion(&mut hasher, &proof, &chunk, 255, &root),
                 "failed to prove bit in only chunk"
             );
 
@@ -732,10 +761,10 @@ mod tests {
             // safely restored.
             for bit_pos in (0..bitmap.bit_count()).rev() {
                 let bit = bitmap.get_bit(bit_pos);
-                bitmap.set_bit(&mut hasher, bit_pos, !bit);
+                bitmap.set_bit(&mut hasher, bit_pos, !bit).await.unwrap();
                 let new_root = bitmap.root(&mut hasher).await.unwrap();
                 assert!(root != new_root, "failed at bit {}", bit_pos);
-                bitmap.set_bit(&mut hasher, bit_pos, bit);
+                bitmap.set_bit(&mut hasher, bit_pos, bit).await.unwrap();
                 // flip it back
                 let new_root = bitmap.root(&mut hasher).await.unwrap();
                 assert_eq!(root, new_root);
@@ -795,7 +824,13 @@ mod tests {
 
                     // Proof should verify for the original chunk containing the bit.
                     assert!(
-                        Bitmap::verify_bit_inclusion(&mut hasher, &proof, &chunk, i, &root),
+                        Bitmap::<Sha256, N>::verify_bit_inclusion(
+                            &mut hasher,
+                            &proof,
+                            &chunk,
+                            i,
+                            &root
+                        ),
                         "failed to prove bit {}",
                         i
                     );
@@ -803,7 +838,13 @@ mod tests {
                     // Flip the bit in the chunk and make sure the proof fails.
                     let corrupted = flip_bit(i, &chunk);
                     assert!(
-                        !Bitmap::verify_bit_inclusion(&mut hasher, &proof, &corrupted, i, &root),
+                        !Bitmap::<Sha256, N>::verify_bit_inclusion(
+                            &mut hasher,
+                            &proof,
+                            &corrupted,
+                            i,
+                            &root
+                        ),
                         "proving bit {} after flipping should have failed",
                         i
                     );

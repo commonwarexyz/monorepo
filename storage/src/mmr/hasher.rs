@@ -19,6 +19,20 @@ impl<'a, H: CHasher> Hasher<'a, H> {
         self.finalize_reset()
     }
 
+    /// Computes the hash for a leaf when grafting is active. This incorporates
+    /// the hash of the node from the base tree onto which this leaf is grafted.
+    pub(crate) fn grafted_leaf_hash(
+        &mut self,
+        pos: u64,
+        element: &[u8],
+        grafted_node_hash: &H::Digest,
+    ) -> H::Digest {
+        self.update_with_pos(pos);
+        self.update_with_element(element);
+        self.update_with_hash(grafted_node_hash);
+        self.finalize_reset()
+    }
+
     /// Computes the hash for a node given its position and the hashes of its children.
     pub(crate) fn node_hash(
         &mut self,
@@ -29,21 +43,6 @@ impl<'a, H: CHasher> Hasher<'a, H> {
         self.update_with_pos(pos);
         self.update_with_hash(left_hash);
         self.update_with_hash(right_hash);
-        self.finalize_reset()
-    }
-
-    /// Computes the hash for a node that has been grafted onto another tree.
-    pub(crate) fn grafted_node_hash(
-        &mut self,
-        pos: u64,
-        left_hash: &H::Digest,
-        right_hash: &H::Digest,
-        grafted_hash: &H::Digest,
-    ) -> H::Digest {
-        self.update_with_pos(pos);
-        self.update_with_hash(left_hash);
-        self.update_with_hash(right_hash);
-        self.update_with_hash(grafted_hash);
         self.finalize_reset()
     }
 
