@@ -5,7 +5,6 @@ pub use super::{
     Config, Error,
 };
 use crate::authenticated::{
-    actors::peer,
     ip, metrics,
     types::{self, PeerInfo},
 };
@@ -74,12 +73,6 @@ pub struct Actor<E: Spawner + Rng + GClock + Metrics, C: Scheme> {
     /// Inserts upon the peer sending a `Reserve` message.
     /// Removes upon the peer sending a `Release` message.
     reserved: HashSet<C::PublicKey>,
-
-    /// Tracks currently active connections.
-    ///
-    /// Inserts upon the peer sending a `Construct` message.
-    /// Removes upon the peer sending a `Release` message.
-    active: BTreeMap<C::PublicKey, peer::Mailbox<C>>,
 
     /// The rate-limiter used to limit the connection-attempt rate per peer.
     #[allow(clippy::type_complexity)]
@@ -180,7 +173,6 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
                 sets,
                 connections_rate_limiter,
                 reserved: HashSet::new(),
-                active: BTreeMap::new(),
 
                 // Metrics
                 tracked_peers,
@@ -241,7 +233,7 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
         for peer in peers.iter() {
             let record = self.peers.entry(peer.clone()).or_insert(Record::unknown());
             record.increment();
-            if record.is_discovered() {
+            if !record.want_info() {
                 set.found(peer.clone());
             }
         }
@@ -283,24 +275,20 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
     }
 
     fn handle_peer(&mut self, peer: &C::PublicKey, peer_info: PeerInfo<C>) -> bool {
-        // Ignore our own peer information
-        if peer == &self.crypto.public_key() {
+        // Ignore invalid peers.
+        if !self.allowed(peer) {
             return false;
         }
-
-        // Get peer record (or return early if not found)
-        let Some(record) = self.peers.get_mut(peer) else {
-            return false;
-        };
 
         // Update peer address
         //
         // It is not safe to rate limit how many times this can happen
         // over some interval because a malicious peer may just replay
         // old IPs to prevent us from propagating a new one.
+        let record = self.peers.get_mut(peer).unwrap();
         let wire_time = peer_info.timestamp;
         if !record.set_discovered(peer_info) {
-            trace!(?peer, wire_time, "stored peer newer");
+            trace!(?peer, wire_time, "did not update peer record");
             return false;
         }
         self.updated_peers
@@ -483,17 +471,6 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
                         continue;
                     }
 
-                    // Kill if peer is already active
-                    // This should not happen within the normal lifecycle of peer reservation
-                    if self.active.contains_key(&public_key) {
-                        error!(?public_key, "peer already connected");
-                        let _ = peer.kill().await;
-                        continue;
-                    }
-
-                    // Peer is now active
-                    self.active.insert(public_key.clone(), peer.clone());
-
                     // Select a random peer set (we want to learn about all peers in
                     // our tracked sets)
                     let set = match self.sets.values().choose(&mut self.context) {
@@ -568,7 +545,6 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
                 Message::Release { public_key } => {
                     self.reserved.remove(&public_key);
                     self.reserved_connections.dec();
-                    self.active.remove(&public_key);
                 }
                 Message::Block { public_key } => {
                     // Cannot block self
@@ -582,11 +558,8 @@ impl<E: Spawner + Rng + Clock + GClock + Metrics, C: Scheme> Actor<E, C> {
                         .entry(public_key.clone())
                         .and_modify(|p| p.block());
 
-                    // Kill peer if it exists
-                    if let Some(mut peer) = self.active.remove(&public_key) {
-                        debug!(?public_key, "peer is connected, sending kill signal");
-                        peer.kill().await;
-                    }
+                    // The peer will be sent a `Kill` message the next time they send the
+                    // `Construct` message.
                 }
             }
         }
@@ -724,7 +697,6 @@ mod tests {
                     assert!(!bit);
                 }
             }
-            mailbox.release(peer1.clone()).await;
 
             // Provide peer address
             let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
@@ -753,7 +725,6 @@ mod tests {
                     assert!(!bit);
                 }
             }
-            mailbox.release(peer1.clone()).await;
 
             // Register new peers
             oracle.register(1, vec![peer2.clone(), peer3]).await;
@@ -787,7 +758,6 @@ mod tests {
                     }
                     _ => panic!("unexpected index"),
                 };
-                mailbox.release(peer1.clone()).await;
             }
 
             // Register some peers
@@ -823,7 +793,6 @@ mod tests {
                     }
                     _ => panic!("unexpected index"),
                 };
-                mailbox.release(peer2.clone()).await;
             }
         });
     }

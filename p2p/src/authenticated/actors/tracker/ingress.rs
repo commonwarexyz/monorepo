@@ -7,47 +7,79 @@ use futures::{
 };
 use std::net::SocketAddr;
 
+/// Messages that can be sent to the tracker actor.
 pub enum Message<E: Spawner + Metrics, C: Verifier> {
-    // Used by oracle
+    // ---------- Used by oracle ----------
+    /// Register a peer set at a given index.
+    ///
+    /// The vector of peers must be sorted in ascending order by public key.
     Register {
         index: u64,
         peers: Vec<C::PublicKey>,
     },
 
-    // Used by control
-    Block {
-        public_key: C::PublicKey,
-    },
+    // ---------- Used by blocker ----------
+    /// Block a peer, disconnecting them if currently connected and preventing future connections
+    /// for as long as the peer remains in at least one active peer set.
+    Block { public_key: C::PublicKey },
 
-    // Used by peer
+    // ---------- Used by peer ----------
+    /// Ready to send a [`types::Payload::BitVec`] message to a peer. This message doubles as a
+    /// keep-alive signal to the peer.
+    ///
+    /// This request is formed upon connection establishment and also on a recurring interval.
     Construct {
+        /// The public key of the peer.
         public_key: C::PublicKey,
-        peer: peer::Mailbox<C>,
-    },
-    BitVec {
-        bit_vec: types::BitVec,
-        peer: peer::Mailbox<C>,
-    },
-    Peers {
-        peers: Vec<types::PeerInfo<C>>,
+
+        /// The mailbox of the peer actor.
         peer: peer::Mailbox<C>,
     },
 
-    // Used by dialer
+    /// Notify the tracker that a [`types::Payload::BitVec`] message has been received from a peer.
+    ///
+    /// The tracker will construct a [`types::Payload::Peers`] message in response.
+    BitVec {
+        /// The bit vector received.
+        bit_vec: types::BitVec,
+
+        /// The mailbox of the peer actor.
+        peer: peer::Mailbox<C>,
+    },
+
+    /// Notify the tracker that a [`types::Payload::Peers`] message has been received from a peer.
+    Peers {
+        /// The list of peers received.
+        peers: Vec<types::PeerInfo<C>>,
+
+        /// The mailbox of the peer actor.
+        peer: peer::Mailbox<C>,
+    },
+
+    // ---------- Used by reservation ----------
+    /// Release a reservation for a particular peer.
+    Release { public_key: C::PublicKey },
+
+    // ---------- Used by dialer ----------
+    /// Request a list of dialable peers.
+    ///
+    /// The tracker will respond with a list of tuples containing the public key, socket address,
+    /// and reservation for each dialable peer. This list won't include peers that are already
+    /// connected, blocked, or already have an active reservation.
     Dialable {
         #[allow(clippy::type_complexity)]
         peers: oneshot::Sender<Vec<(C::PublicKey, SocketAddr, Reservation<E, C>)>>,
     },
 
-    // Used by listener
+    // ---------- Used by listener ----------
+    /// Request a reservation for a particular peer.
+    ///
+    /// The tracker will respond with an [`Option<Reservation<E, C>>`], which will be `None` if  the
+    /// reservation cannot be granted (e.g., if the peer is already connected, blocked or already
+    /// has an active reservation).
     Reserve {
         public_key: C::PublicKey,
         reservation: oneshot::Sender<Option<Reservation<E, C>>>,
-    },
-
-    // Used by peer
-    Release {
-        public_key: C::PublicKey,
     },
 }
 
