@@ -229,9 +229,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
         // for duplicates (no need to create an additional set to check this)
         for info in infos {
             // Check if IP is allowed
-            let ip = info.socket.ip();
-            if !ip::is_global(ip) && !self.allow_private_ips {
-                return Err(Error::PrivateIPsNotAllowed(ip));
+            if !self.allow_private_ips && !ip::is_global(info.socket.ip()) {
+                return Err(Error::PrivateIPsNotAllowed(info.socket.ip()));
             }
 
             // Check if peer is us
