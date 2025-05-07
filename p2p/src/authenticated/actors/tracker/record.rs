@@ -26,6 +26,7 @@ pub enum Address<C: Verifier> {
 }
 
 /// Represents a record of a peer's address and associated information.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Record<C: Verifier> {
     /// Address state of the peer.
     address: Address<C>,
