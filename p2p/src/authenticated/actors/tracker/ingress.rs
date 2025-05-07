@@ -191,8 +191,6 @@ impl<E: Spawner + Metrics, C: Verifier> Oracle<E, C> {
 impl<E: Spawner + Metrics, C: Verifier> crate::Blocker for Oracle<E, C> {
     type PublicKey = C::PublicKey;
 
-    /// Block a peer, disconnecting them if currently connected and preventing future connections
-    /// for as long as the peer remains in at least one active peer set.
     async fn block(&mut self, public_key: Self::PublicKey) {
         let _ = self.sender.send(Message::Block { public_key }).await;
     }
