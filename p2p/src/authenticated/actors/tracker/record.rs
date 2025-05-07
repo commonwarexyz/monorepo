@@ -9,6 +9,9 @@ pub enum Address<C: Verifier> {
     /// Can be upgraded to `Discovered`.
     Unknown,
 
+    /// Peer is the local node.
+    Myself(PeerInfo<C>),
+
     /// Provided during initialization.
     /// Can be upgraded to `Persistent`.
     /// Will be tracked even if the peer is not part of any peer sets.
@@ -45,6 +48,14 @@ impl<C: Verifier> Record<C> {
         }
     }
 
+    /// Create a new record with the local node's information.
+    pub fn myself(peer_info: PeerInfo<C>) -> Self {
+        Record {
+            address: Address::Myself(peer_info),
+            sets: 0,
+        }
+    }
+
     /// Create a new record with a bootstrapper address.
     pub fn bootstrapper(socket: SocketAddr) -> Self {
         Record {
@@ -57,14 +68,18 @@ impl<C: Verifier> Record<C> {
     pub fn want_info(&self) -> bool {
         match self.address {
             Address::Unknown | Address::Bootstrapper(_) => true,
-            Address::Blocked | Address::Discovered(_) | Address::Persistent(_) => false,
+            Address::Myself(_)
+            | Address::Blocked
+            | Address::Discovered(_)
+            | Address::Persistent(_) => false,
         }
     }
 
     /// Get the address of the peer if known.
-    pub fn get_address(&self) -> Option<SocketAddr> {
+    pub fn address(&self) -> Option<SocketAddr> {
         match &self.address {
             Address::Unknown => None,
+            Address::Myself(peer_info) => Some(peer_info.socket),
             Address::Bootstrapper(socket) => Some(*socket),
             Address::Discovered(peer_info) => Some(peer_info.socket),
             Address::Persistent(peer_info) => Some(peer_info.socket),
@@ -73,9 +88,10 @@ impl<C: Verifier> Record<C> {
     }
 
     /// Get the peer information if known.
-    pub fn get_peer_info(&self) -> Option<&PeerInfo<C>> {
+    pub fn peer_info(&self) -> Option<&PeerInfo<C>> {
         match &self.address {
             Address::Unknown => None,
+            Address::Myself(peer_info) => Some(peer_info),
             Address::Bootstrapper(_) => None,
             Address::Discovered(peer_info) => Some(peer_info),
             Address::Persistent(peer_info) => Some(peer_info),
@@ -92,6 +108,10 @@ impl<C: Verifier> Record<C> {
                 // Upgrade to Discovered.
                 self.address = Address::Discovered(peer_info);
                 true
+            }
+            Address::Myself(_) => {
+                // Do not update, we already have our own information.
+                false
             }
             Address::Bootstrapper(_) => {
                 // Upgrade to Persistent.
@@ -126,9 +146,18 @@ impl<C: Verifier> Record<C> {
         matches!(self.address, Address::Blocked)
     }
 
-    /// Mark the peer as blocked.
-    pub fn block(&mut self) {
-        self.address = Address::Blocked;
+    /// Attempt to mark the peer as blocked.
+    ///
+    /// Returns true if the peer was newly blocked.
+    /// Returns false if the peer was already blocked or is the local node (unblockable).
+    pub fn block(&mut self) -> bool {
+        match self.address {
+            Address::Blocked | Address::Myself(_) => false,
+            _ => {
+                self.address = Address::Blocked;
+                true
+            }
+        }
     }
 
     /// Increase the count of peer sets this peer is part of.
@@ -146,7 +175,7 @@ impl<C: Verifier> Record<C> {
         }
         match self.address {
             Address::Blocked | Address::Unknown | Address::Discovered(_) => true,
-            Address::Bootstrapper(_) | Address::Persistent(_) => false,
+            Address::Myself(_) | Address::Bootstrapper(_) | Address::Persistent(_) => false,
         }
     }
 }
@@ -197,8 +226,8 @@ mod tests {
         let record = Record::<Secp256r1>::unknown();
         assert!(matches!(record.address, Address::Unknown));
         assert_eq!(record.sets, 0);
-        assert_eq!(record.get_address(), None);
-        assert_peer_info_eq(record.get_peer_info(), None);
+        assert_eq!(record.address(), None);
+        assert_peer_info_eq(record.peer_info(), None);
         assert!(record.want_info());
         assert!(!record.is_blocked());
     }
@@ -209,8 +238,8 @@ mod tests {
         let record = Record::<Secp256r1>::bootstrapper(socket);
         assert!(matches!(record.address, Address::Bootstrapper(s) if s == socket));
         assert_eq!(record.sets, 0);
-        assert_eq!(record.get_address(), Some(socket));
-        assert_peer_info_eq(record.get_peer_info(), None);
+        assert_eq!(record.address(), Some(socket));
+        assert_peer_info_eq(record.peer_info(), None);
         assert!(record.want_info());
         assert!(!record.is_blocked());
     }
@@ -222,10 +251,10 @@ mod tests {
         let peer_info: PeerInfo<Secp256r1> = create_peer_info(1, socket, 1000);
 
         assert!(record.set_discovered(peer_info.clone()));
-        assert_eq!(record.get_address(), Some(socket));
+        assert_eq!(record.address(), Some(socket));
         assert!(!record.want_info());
         assert!(matches!(&record.address, Address::Discovered(_)));
-        assert_peer_info_eq(record.get_peer_info(), Some(&peer_info));
+        assert_peer_info_eq(record.peer_info(), Some(&peer_info));
     }
 
     #[test]
@@ -235,10 +264,10 @@ mod tests {
         let peer_info: PeerInfo<Secp256r1> = create_peer_info(2, socket, 1000);
 
         assert!(record.set_discovered(peer_info.clone()));
-        assert_eq!(record.get_address(), Some(socket));
+        assert_eq!(record.address(), Some(socket));
         assert!(!record.want_info());
         assert!(matches!(&record.address, Address::Persistent(_)));
-        assert_peer_info_eq(record.get_peer_info(), Some(&peer_info));
+        assert_peer_info_eq(record.peer_info(), Some(&peer_info));
     }
 
     #[test]
@@ -251,10 +280,10 @@ mod tests {
         assert!(record.set_discovered(peer_info_old.clone())); // Unknown -> Discovered
         assert!(record.set_discovered(peer_info_new.clone())); // Discovered -> Discovered (update)
 
-        assert_eq!(record.get_address(), Some(socket));
+        assert_eq!(record.address(), Some(socket));
         assert!(!record.want_info());
         assert!(matches!(&record.address, Address::Discovered(_)));
-        assert_peer_info_eq(record.get_peer_info(), Some(&peer_info_new));
+        assert_peer_info_eq(record.peer_info(), Some(&peer_info_new));
     }
 
     #[test]
@@ -267,10 +296,10 @@ mod tests {
         assert!(record.set_discovered(peer_info_old.clone())); // Bootstrapper -> Persistent
         assert!(record.set_discovered(peer_info_new.clone())); // Persistent -> Persistent (update)
 
-        assert_eq!(record.get_address(), Some(socket));
+        assert_eq!(record.address(), Some(socket));
         assert!(!record.want_info());
         assert!(matches!(&record.address, Address::Persistent(_)));
-        assert_peer_info_eq(record.get_peer_info(), Some(&peer_info_new));
+        assert_peer_info_eq(record.peer_info(), Some(&peer_info_new));
     }
 
     #[test]
@@ -285,11 +314,11 @@ mod tests {
 
         // Attempt update with older timestamp
         assert!(!record.set_discovered(peer_info_older));
-        assert_peer_info_eq(record.get_peer_info(), Some(&peer_info_old)); // Verify state hasn't changed
+        assert_peer_info_eq(record.peer_info(), Some(&peer_info_old)); // Verify state hasn't changed
 
         // Attempt update with equal timestamp
         assert!(!record.set_discovered(peer_info_equal));
-        assert_peer_info_eq(record.get_peer_info(), Some(&peer_info_old)); // Verify state still hasn't changed
+        assert_peer_info_eq(record.peer_info(), Some(&peer_info_old)); // Verify state still hasn't changed
 
         // Final state check
         assert!(matches!(&record.address, Address::Discovered(_)));
@@ -307,11 +336,11 @@ mod tests {
 
         // Attempt update with older timestamp
         assert!(!record.set_discovered(peer_info_older));
-        assert_peer_info_eq(record.get_peer_info(), Some(&peer_info_old)); // Verify state hasn't changed
+        assert_peer_info_eq(record.peer_info(), Some(&peer_info_old)); // Verify state hasn't changed
 
         // Attempt update with equal timestamp
         assert!(!record.set_discovered(peer_info_equal));
-        assert_peer_info_eq(record.get_peer_info(), Some(&peer_info_old)); // Verify state still hasn't changed
+        assert_peer_info_eq(record.peer_info(), Some(&peer_info_old)); // Verify state still hasn't changed
 
         // Final state check
         assert!(matches!(&record.address, Address::Persistent(_)));
@@ -385,51 +414,51 @@ mod tests {
     }
 
     #[test]
-    fn test_get_address_all_states() {
+    fn test_address_all_states() {
         let socket = test_socket();
         let peer_info: PeerInfo<Secp256r1> = create_peer_info(8, socket, 1000);
 
         let record_unknown = Record::<Secp256r1>::unknown();
-        assert_eq!(record_unknown.get_address(), None);
+        assert_eq!(record_unknown.address(), None);
 
         let record_boot = Record::<Secp256r1>::bootstrapper(socket);
-        assert_eq!(record_boot.get_address(), Some(socket));
+        assert_eq!(record_boot.address(), Some(socket));
 
         let mut record_disc = Record::<Secp256r1>::unknown();
         record_disc.set_discovered(peer_info.clone());
-        assert_eq!(record_disc.get_address(), Some(socket));
+        assert_eq!(record_disc.address(), Some(socket));
 
         let mut record_pers = Record::<Secp256r1>::bootstrapper(socket);
         record_pers.set_discovered(peer_info);
-        assert_eq!(record_pers.get_address(), Some(socket));
+        assert_eq!(record_pers.address(), Some(socket));
 
         let mut record_blocked = Record::<Secp256r1>::unknown();
         record_blocked.block();
-        assert_eq!(record_blocked.get_address(), None);
+        assert_eq!(record_blocked.address(), None);
     }
 
     #[test]
-    fn test_get_peer_info_all_states() {
+    fn test_peer_info_all_states() {
         let socket = test_socket();
         let peer_info: PeerInfo<Secp256r1> = create_peer_info(9, socket, 1000);
 
         let record_unknown = Record::<Secp256r1>::unknown();
-        assert_peer_info_eq(record_unknown.get_peer_info(), None);
+        assert_peer_info_eq(record_unknown.peer_info(), None);
 
         let record_boot = Record::<Secp256r1>::bootstrapper(socket);
-        assert_peer_info_eq(record_boot.get_peer_info(), None);
+        assert_peer_info_eq(record_boot.peer_info(), None);
 
         let mut record_disc = Record::<Secp256r1>::unknown();
         record_disc.set_discovered(peer_info.clone());
-        assert_peer_info_eq(record_disc.get_peer_info(), Some(&peer_info));
+        assert_peer_info_eq(record_disc.peer_info(), Some(&peer_info));
 
         let mut record_pers = Record::<Secp256r1>::bootstrapper(socket);
         record_pers.set_discovered(peer_info.clone());
-        assert_peer_info_eq(record_pers.get_peer_info(), Some(&peer_info));
+        assert_peer_info_eq(record_pers.peer_info(), Some(&peer_info));
 
         let mut record_blocked = Record::<Secp256r1>::unknown();
         record_blocked.block();
-        assert_peer_info_eq(record_blocked.get_peer_info(), None);
+        assert_peer_info_eq(record_blocked.peer_info(), None);
     }
 
     #[test]
@@ -469,6 +498,6 @@ mod tests {
         let peer_info: PeerInfo<Secp256r1> = create_peer_info(11, socket, 1000);
         assert!(!record.set_discovered(peer_info));
         assert!(record.is_blocked()); // Still blocked
-        assert_peer_info_eq(record.get_peer_info(), None); // Info should not be set
+        assert_peer_info_eq(record.peer_info(), None); // Info should not be set
     }
 }
