@@ -28,7 +28,9 @@ use futures::{
 };
 use tracing::{debug, warn};
 
-const UNUSED_N: usize = 0; // Indicator that the generic parameter N is unused by the call.
+/// Indicator that the generic parameter N is unused by the call. N is only
+/// needed if the caller is providing the optional bitmap.
+const UNUSED_N: usize = 0;
 
 /// Configuration for an `Any` authenticated db.
 #[derive(Clone)]
@@ -598,7 +600,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
     /// Raise the inactivity floor by exactly `max_steps` steps, followed by applying a commit
     /// operation. Each step either advances over an inactive operation, or re-applies an active
-    /// operation to the tip and then advances over it. If the bitmap is non-None, then an active
+    /// operation to the tip and then advances over it. If the bitmap is populated, then an active
     /// bit will be added for any moved operation, with its old location flipped to false.
     ///
     /// This method does not change the state of the db's snapshot, but it always changes the root

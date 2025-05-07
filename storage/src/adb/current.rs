@@ -44,6 +44,10 @@ pub struct Config {
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of whether
 /// a key ever had a specific value, and whether the key currently has that value.
+///
+/// Note: The generic parameter N is not really generic, and must be manually set to double the size
+/// of the hash digest being produced by the hasher. A compile-time assertion is used to prevent any
+/// other setting.
 pub struct Current<
     E: RStorage + Clock + Metrics,
     K: Array,
@@ -58,7 +62,7 @@ pub struct Current<
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Any] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
-    pub is_active: Bitmap<H, N>,
+    pub status: Bitmap<H, N>,
 
     context: E,
 
@@ -97,8 +101,8 @@ impl<
             log_items_per_blob: config.log_items_per_blob,
         };
 
-        let context = context.with_label("adb::any");
-        let mut is_active = Bitmap::<H, N>::restore_pruned(
+        let context = context.with_label("adb::current");
+        let mut status = Bitmap::<H, N>::restore_pruned(
             context.with_label("bitmap"),
             &config.bitmap_metadata_partition,
         )
@@ -110,7 +114,7 @@ impl<
 
         // Ensure consistency between the bitmap and the db's MMR.
         let start_leaf_num = leaf_pos_to_num(mmr.pruned_to_pos()).unwrap();
-        let pruned_bits = is_active.pruned_bits();
+        let pruned_bits = status.pruned_bits();
         let bitmap_pruned_pos = leaf_num_to_pos(pruned_bits);
         let mmr_pruned_pos = mmr.pruned_to_pos();
         let mmr_pruned_leaves = leaf_pos_to_num(mmr_pruned_pos).unwrap();
@@ -119,9 +123,10 @@ impl<
             "bitmap is pruned beyond where bits should be retained"
         );
         if bitmap_pruned_pos < mmr.pruned_to_pos() {
-            // Append the missing (inactive) bits to the bitmap.
+            // Prepend the missing (inactive) bits needed to align the bitmap, which can only be
+            // pruned to a chunk boundary, with the MMR's pruning boundary.
             for _ in pruned_bits..mmr_pruned_leaves {
-                is_active.append(hasher, false);
+                status.append(hasher, false);
             }
             if mmr_pruned_leaves > Bitmap::<H, N>::CHUNK_SIZE_BITS
                 && pruned_bits < mmr_pruned_leaves - Bitmap::<H, N>::CHUNK_SIZE_BITS
@@ -133,8 +138,8 @@ impl<
                     mmr_pruned_leaves,
                     "bitmap pruned position precedes MMR pruned position by more than 1 chunk"
                 );
-                is_active.prune_to_bit(start_leaf_num);
-                is_active
+                status.prune_to_bit(start_leaf_num);
+                status
                     .write_pruned(
                         context.with_label("bitmap"),
                         &config.bitmap_metadata_partition,
@@ -150,7 +155,7 @@ impl<
             start_leaf_num,
             &log,
             &mut snapshot,
-            Some(&mut is_active),
+            Some(&mut status),
         )
         .await
         .unwrap();
@@ -165,7 +170,7 @@ impl<
 
         Ok(Self {
             any,
-            is_active,
+            status,
             context,
             bitmap_metadata_partition: config.bitmap_metadata_partition,
         })
@@ -201,10 +206,10 @@ impl<
             UpdateResult::NoOp => return Ok(update_result),
             UpdateResult::Inserted(_) => (),
             UpdateResult::Updated(old_loc, _) => {
-                self.is_active.set_bit(hasher, old_loc, false);
+                self.status.set_bit(hasher, old_loc, false);
             }
         }
-        self.is_active.append(hasher, true);
+        self.status.append(hasher, true);
 
         Ok(update_result)
     }
@@ -217,8 +222,8 @@ impl<
             return Ok(());
         };
 
-        self.is_active.append(hasher, false);
-        self.is_active.set_bit(hasher, old_loc, false);
+        self.status.append(hasher, false);
+        self.status.set_bit(hasher, old_loc, false);
 
         Ok(())
     }
@@ -228,11 +233,7 @@ impl<
         // Raise the inactivity floor by the # of uncommitted operations, plus 1 to account for the
         // commit op that will be appended.
         self.any
-            .raise_inactivity_floor(
-                hasher,
-                self.any.uncommitted_ops + 1,
-                Some(&mut self.is_active),
-            )
+            .raise_inactivity_floor(hasher, self.any.uncommitted_ops + 1, Some(&mut self.status))
             .await?;
         self.any.uncommitted_ops = 0;
         self.any.sync().await
@@ -248,8 +249,8 @@ impl<
 
         // Failure recovery code relies on the bitmap getting written & pruned *after* ops have been
         // committed & the adb::any pruned.
-        self.is_active.prune_to_bit(self.any.inactivity_floor_loc);
-        self.is_active
+        self.status.prune_to_bit(self.any.inactivity_floor_loc);
+        self.status
             .write_pruned(
                 self.context.with_label("bitmap"),
                 &self.bitmap_metadata_partition,
@@ -264,7 +265,7 @@ impl<
     /// Current implementation just hashes the roots of the [Any] and [Bitmap] databases together.
     pub fn root(&self, hasher: &mut H) -> H::Digest {
         let any_root = self.any.root(hasher);
-        let bitmap_root = self.is_active.root(hasher);
+        let bitmap_root = self.status.root(hasher);
         hasher.update(any_root.as_ref());
         hasher.update(bitmap_root.as_ref());
 
@@ -306,10 +307,7 @@ pub mod test {
     use commonware_cryptography::{hash, sha256::Digest, Hasher as CHasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};
-    use rand::{
-        rngs::{OsRng, StdRng},
-        RngCore, SeedableRng,
-    };
+    use rand::{rngs::StdRng, RngCore, SeedableRng};
 
     fn current_db_config(partition_prefix: &str) -> Config {
         Config {
@@ -385,7 +383,7 @@ pub mod test {
 
             // Confirm all activity bits are false
             for i in 0..db.op_count() {
-                assert!(!db.is_active.get_bit(i));
+                assert!(!db.status.get_bit(i));
             }
         });
     }
@@ -439,11 +437,10 @@ pub mod test {
         const ELEMENTS: u64 = 1000;
 
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|mut context| async move {
             let mut hasher = Sha256::new();
             let partition = "build_random";
-            // Use a non-deterministic rng seed to ensure each run is different.
-            let rng_seed = OsRng.next_u64();
+            let rng_seed = context.next_u64();
             let mut db = open_db(context.clone(), &mut hasher, partition).await;
             apply_random_ops(&mut hasher, ELEMENTS, true, rng_seed, &mut db)
                 .await
@@ -467,11 +464,10 @@ pub mod test {
         const ELEMENTS: u64 = 1000;
 
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|mut context| async move {
             let mut hasher = Sha256::new();
             let partition = "build_random_fail_commit";
-            // Use a non-deterministic rng seed to ensure each run is different.
-            let rng_seed = OsRng.next_u64();
+            let rng_seed = context.next_u64();
             let mut db = open_db(context.clone(), &mut hasher, partition).await;
             apply_random_ops(&mut hasher, ELEMENTS, true, rng_seed, &mut db)
                 .await
