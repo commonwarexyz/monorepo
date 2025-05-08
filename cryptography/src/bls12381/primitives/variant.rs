@@ -109,15 +109,11 @@ impl Variant for MinPk {
     /// Using the bilinearity of pairings, this can be rewritten (by moving `r_i` inside the pairings):
     /// `prod_i(e(hm_i,r_i * pk_i) * e(r_i * sig_i,-G1::one())) == 1`
     ///
+    /// Finally, we aggregate all pairings `e(hm_i,r_i * pk_i)` and `e(r_i * sig_i,-G1::one())`
+    /// into a single product in the target group `G_T`. If the result is the identity element in `G_T`,
+    /// the batch verification succeeds.
     ///
-    ///
-    /// This product is what the `blst_pairing_finalverify` function effectively checks.
-    /// The expression can be further grouped due to the common `-G1::one()` term:
-    /// `( prod_i e(hm_i, r_i * pk_i) ) * e( sum_i (r_i * sig_i), -G1::one() ) == 1`
-    /// The underlying BLST library aggregates all <span class="math-inline">2n</span> terms `e(hm_i, r_i * pk_i)` and `e(r_i * sig_i, -G1::one())`
-    /// and then computes their product in <span class="math-inline">G\_T</span> and checks if it is the identity.
-    ///
-    /// Source (for general BLS batching principles): https://ethresear.ch/t/security-of-bls-batch-verification/10748
+    /// Source: https://ethresear.ch/t/security-of-bls-batch-verification/10748
     fn batch_verify<R: RngCore + CryptoRng>(
         rng: &mut R,
         publics: &[Self::Public],
