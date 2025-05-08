@@ -36,6 +36,7 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
         signature: &Self::Signature,
     ) -> Result<(), Error>;
 
+    /// Verify a batch of signatures from the provided public keys and pre-hashed messages.
     fn batch_verify<R: RngCore + CryptoRng>(
         rng: &mut R,
         publics: &[Self::Public],
@@ -91,6 +92,32 @@ impl Variant for MinPk {
         Ok(())
     }
 
+    /// Verifies a set of signatures against their respective public keys and pre-hashed messages.
+    ///
+    /// This method is outperforms individual signature verification by verifying a random linear
+    /// combination of the signatures and public keys in a single pairing check.
+    ///
+    /// The verification equation for each signature `i` is:
+    /// `e(hm_i,pk_i) == e(sig_i,G1::one())`,
+    /// which is equivalent to checking if `e(hm_i,pk_i) * e(sig_i,-G1::one()) == 1`.
+    ///
+    /// To batch verify `n` such equations, we introduce random non-zero scalars `r_i` (for `i=1..n`).
+    /// The batch verification checks if the product of these individual equations, each raised to the power
+    /// of its respective `r_i`, equals one:
+    /// `prod_i((e(hm_i,pk_i) * e(sig_i,-G1::one()))^{r_i}) == 1`
+    ///
+    /// Using the bilinearity of pairings, this can be rewritten (by moving `r_i` inside the pairings):
+    /// `prod_i(e(hm_i,r_i * pk_i) * e(r_i * sig_i,-G1::one())) == 1`
+    ///
+    ///
+    ///
+    /// This product is what the `blst_pairing_finalverify` function effectively checks.
+    /// The expression can be further grouped due to the common `-G1::one()` term:
+    /// `( prod_i e(hm_i, r_i * pk_i) ) * e( sum_i (r_i * sig_i), -G1::one() ) == 1`
+    /// The underlying BLST library aggregates all <span class="math-inline">2n</span> terms `e(hm_i, r_i * pk_i)` and `e(r_i * sig_i, -G1::one())`
+    /// and then computes their product in <span class="math-inline">G\_T</span> and checks if it is the identity.
+    ///
+    /// Source (for general BLS batching principles): https://ethresear.ch/t/security-of-bls-batch-verification/10748
     fn batch_verify<R: RngCore + CryptoRng>(
         rng: &mut R,
         publics: &[Self::Public],
