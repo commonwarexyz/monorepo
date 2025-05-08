@@ -20,6 +20,12 @@ use rand::RngCore;
 use rayon::{prelude::*, ThreadPoolBuilder};
 use std::{borrow::Cow, collections::BTreeMap};
 
+pub fn hm<V: Variant>(dst: DST, message: &[u8]) -> V::Signature {
+    let mut hm = V::Signature::zero();
+    hm.map(dst, message);
+    hm
+}
+
 /// Computes the public key from the private key.
 pub fn public<V: Variant>(private: &Scalar) -> V::Public {
     let mut public = V::Public::one();
@@ -45,8 +51,7 @@ pub fn sign<V: Variant>(private: &Scalar, dst: DST, message: &[u8]) -> V::Signat
 /// Generates a proof of possession for the private key.
 pub fn sign_proof_of_possession<V: Variant>(private: &group::Private) -> V::Signature {
     // Get public key
-    let mut public = V::Public::one();
-    public.mul(private);
+    let public = public::<V>(private);
 
     // Sign the public key
     sign::<V>(private, V::PROOF_OF_POSSESSION, &public.encode())
@@ -60,8 +65,7 @@ pub fn verify<V: Variant>(
     signature: &V::Signature,
 ) -> Result<(), Error> {
     // Create hashed message `hm`
-    let mut hm = V::Signature::zero();
-    hm.map(dst, message);
+    let hm = hm::<V>(dst, message);
 
     // Verify the signature
     V::verify(public, &hm, signature)
@@ -649,7 +653,7 @@ mod tests {
     use commonware_utils::{from_hex_formatted, quorum};
     use group::{Private, G1_MESSAGE, G2_MESSAGE};
     use poly::Poly;
-    use rand::prelude::*;
+    use rand::{prelude::*, rngs::OsRng};
 
     fn codec<V: Variant>() {
         // Encode private/public key
@@ -2136,6 +2140,9 @@ mod tests {
         const DST: &[u8] = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_";
 
         // Parse lines
+        let mut publics = Vec::new();
+        let mut hms = Vec::new();
+        let mut signatures = Vec::new();
         for line in MIN_PK_TESTS.lines() {
             // Extract parts
             let parts: Vec<_> = line.split(':').collect();
@@ -2154,9 +2161,17 @@ mod tests {
             let public = public::<MinPk>(&private);
             verify::<MinPk>(&public, DST, &message, &signature).unwrap();
 
+            // Add to batch
+            publics.push(public);
+            hms.push(hm::<MinPk>(DST, &message));
+            signatures.push(signature);
+
             // Fail verification with a manipulated signature
             signature.add(&<MinPk as Variant>::Signature::one());
             assert!(verify::<MinPk>(&public, DST, &message, &signature).is_err());
         }
+
+        // Batch verification
+        assert!(MinPk::batch_verify(&mut OsRng, &publics, &hms, &signatures).is_ok());
     }
 }
