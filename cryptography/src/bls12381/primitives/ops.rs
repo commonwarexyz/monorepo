@@ -1875,6 +1875,10 @@ mod tests {
 
         // Batch verification
         assert!(MinSig::batch_verify(&mut OsRng, &publics, &hms, &signatures).is_ok());
+
+        // Fail batch verification with a manipulated signature
+        signatures[0].add(&<MinSig as Variant>::Signature::one());
+        assert!(MinSig::batch_verify(&mut OsRng, &publics, &hms, &signatures).is_err());
     }
 
     /// Source: https://github.com/paulmillr/noble-curves/blob/bee1ffe0000095f95b982a969d06baaa3dd8ce73/test/bls12-381/bls12-381-g2-test-vectors.txt
@@ -2184,5 +2188,9 @@ mod tests {
 
         // Batch verification
         assert!(MinPk::batch_verify(&mut OsRng, &publics, &hms, &signatures).is_ok());
+
+        // Fail batch verification with a manipulated signature
+        signatures[0].add(&<MinPk as Variant>::Signature::one());
+        assert!(MinPk::batch_verify(&mut OsRng, &publics, &hms, &signatures).is_err());
     }
 }
