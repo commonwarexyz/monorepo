@@ -120,17 +120,23 @@ impl Variant for MinPk {
         hms: &[Self::Signature],
         signatures: &[Self::Signature],
     ) -> Result<(), Error> {
-        // Ensure arguments are populated correctly
+        // Ensure there is an equal number of public keys, messages, and signatures
         assert_eq!(publics.len(), hms.len());
         assert_eq!(publics.len(), signatures.len());
         if publics.is_empty() {
             return Ok(());
         }
 
-        // Populate pairing context
+        // Create a pairing context
+        //
+        // We only handle pre-hashed messages, so we leave the domain separator tag (`DST`) empty.
         let mut pairing = blst_pairing::new(false, &[]);
         for i in 0..publics.len() {
-            // Generate a non-zero random scalar
+            // Generate a non-zero random scalar `r_i`.
+            //
+            // This scalar is essential for the security of batch verification. It ensures that
+            // multiple invalid signatures are extremely unlikely to combine in a way that
+            // makes the overall batch check pass (i.e., they don't accidentally "cancel out").
             let scalar = loop {
                 let scalar = Scalar::rand(rng);
                 if scalar != Scalar::zero() {
@@ -138,23 +144,37 @@ impl Variant for MinPk {
                 }
             };
 
-            // Add item to context
+            // Prepare the pairing term e(r_i * sig_i,-G1::one()).
+            //
+            // This corresponds to one part of the i-th term in the product: e(sig_i,-G1::one())^{r_i}.
             let mut scaled_sig = signatures[i];
             scaled_sig.mul(&scalar);
             let sig_affine = scaled_sig.as_blst_p2_affine();
+
+            // Aggregate the term e(r_i * sig_i,-G1::one()) into the pairing context.
             unsafe {
                 pairing.raw_aggregate(&sig_affine, &BLS12_381_NEG_G1);
             }
 
+            // Prepare the pairing term e(hm_i, r_i * pk_i).
+            //
+            // This corresponds to the other part of the i-th term in the product: e(hm_i, pk_i)^{r_i}.
             let mut scaled_pk = publics[i];
             scaled_pk.mul(&scalar);
             let pk_affine = scaled_pk.as_blst_p1_affine();
             let hm_affine = hms[i].as_blst_p2_affine();
+
+            // Aggregate the term e(hm_i,r_i * pk_i) into the pairing context.
             pairing.raw_aggregate(&hm_affine, &pk_affine);
         }
-        pairing.commit();
 
-        // Check validity
+        // Perform the final verification.
+        //
+        // `finalverify` computes the product of all (2n) aggregated pairing terms:
+        // prod_i(e(hm_i, r_i * pk_i) * e(r_i * sig_i,-G1::one()))
+        //
+        // It then checks if this resulting product in G_T is equal to the identity element.
+        pairing.commit();
         if !pairing.finalverify(None) {
             return Err(Error::InvalidSignature);
         }
