@@ -36,8 +36,8 @@ impl<P: Array> Set<P> {
         }
     }
 
-    pub fn found(&mut self, peer: P) -> bool {
-        if let Some(idx) = self.order.get(&peer) {
+    pub fn found(&mut self, peer: &P) -> bool {
+        if let Some(idx) = self.order.get(peer) {
             self.knowledge.set(*idx);
             return true;
         }
@@ -65,9 +65,9 @@ mod tests {
     fn test_found() {
         let peers = vec![U64::new(1), U64::new(2), U64::new(3)];
         let mut set = Set::new(0, peers);
-        assert!(set.found(U64::new(2)));
+        assert!(set.found(&U64::new(2)));
         assert_eq!(set.knowledge, BitVec::from(vec![false, true, false]));
-        assert!(!set.found(U64::new(4))); // Peer not in set
+        assert!(!set.found(&U64::new(4))); // Peer not in set
         assert_eq!(set.knowledge, BitVec::from(vec![false, true, false]));
     }
 }
