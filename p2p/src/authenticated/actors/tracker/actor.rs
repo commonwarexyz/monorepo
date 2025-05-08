@@ -23,7 +23,7 @@ use std::{
     collections::{BTreeMap, HashSet},
     net::SocketAddr,
 };
-use tracing::{debug, trace};
+use tracing::debug;
 
 // Bytes to add to the namespace to prevent replay attacks.
 const NAMESPACE_SUFFIX_IP: &[u8] = b"_IP";
