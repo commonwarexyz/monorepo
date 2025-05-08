@@ -1,6 +1,7 @@
 //! Different variants of the BLS signature scheme.
 
 use crate::bls12381::primitives::group::{Element, Scalar, SCALAR_BITS};
+use crate::bls12381::primitives::ops::hm;
 
 use super::group::{
     Point, DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE, G2_PROOF_OF_POSSESSION,
@@ -104,9 +105,6 @@ impl Variant for MinPk {
         }
 
         // Populate pairing context
-        let mut neg_generator = blst_p1::default();
-        unsafe { blst_p1_from_affine(&mut neg_generator, &BLS12_381_NEG_G1) }
-        let neg_generator = G1::from_blst_p1(neg_generator);
         let mut pairing = blst_pairing::new(false, &[]);
         for i in 0..publics.len() {
             // Generate a non-zero random scalar
@@ -118,15 +116,18 @@ impl Variant for MinPk {
             };
 
             // Add item to context
-            let mut neg_generator = neg_generator.clone();
-            neg_generator.mul(&scalar);
-            let sig_affine = signatures[i].as_blst_p2_affine();
-            pairing.raw_aggregate(&sig_affine, &neg_generator.as_blst_p1_affine());
+            let mut scaled_sig = signatures[i];
+            scaled_sig.mul(&scalar);
+            let sig_affine = scaled_sig.as_blst_p2_affine();
+            unsafe {
+                pairing.raw_aggregate(&sig_affine, &BLS12_381_NEG_G1);
+            }
 
-            let pk_affine = publics[i].as_blst_p1_affine();
-            let mut hm = hms[i].clone();
-            hm.mul(&scalar);
-            pairing.raw_aggregate(&hm.as_blst_p2_affine(), &pk_affine);
+            let mut scaled_pk = publics[i];
+            scaled_pk.mul(&scalar);
+            let pk_affine = scaled_pk.as_blst_p1_affine();
+            let hm_affine = hms[i].as_blst_p2_affine();
+            pairing.raw_aggregate(&hm_affine, &pk_affine);
         }
         pairing.commit();
 
