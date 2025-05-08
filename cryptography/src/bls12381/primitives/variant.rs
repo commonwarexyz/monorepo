@@ -1,11 +1,14 @@
 //! Different variants of the BLS signature scheme.
 
+use crate::bls12381::primitives::group::{Element, Scalar, SCALAR_BITS};
+
 use super::group::{
     Point, DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE, G2_PROOF_OF_POSSESSION,
 };
 use super::Error;
 use blst::{Pairing as blst_pairing, BLS12_381_NEG_G1, BLS12_381_NEG_G2};
 use commonware_codec::FixedSize;
+use rand::{CryptoRng, RngCore};
 use std::fmt::Debug;
 use std::hash::Hash;
 
@@ -28,6 +31,13 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
         public: &Self::Public,
         hm: &Self::Signature,
         signature: &Self::Signature,
+    ) -> Result<(), Error>;
+
+    fn batch_verify<R: RngCore + CryptoRng>(
+        rng: &mut R,
+        publics: &[Self::Public],
+        hms: &[Self::Signature],
+        signatures: &[Self::Signature],
     ) -> Result<(), Error>;
 }
 
@@ -73,6 +83,67 @@ impl Variant for MinPk {
         // is equivalent to `e(hm,pk) == e(sig,G1::one())`.
         pairing.commit();
         if !pairing.finalverify(None) {
+            return Err(Error::InvalidSignature);
+        }
+        Ok(())
+    }
+
+    fn batch_verify<R: RngCore + CryptoRng>(
+        rng: &mut R,
+        publics: &[Self::Public],
+        hms: &[Self::Signature],
+        signatures: &[Self::Signature],
+    ) -> Result<(), Error> {
+        // Ensure arguments are populated correctly
+        assert_eq!(publics.len(), hms.len());
+        assert_eq!(publics.len(), signatures.len());
+        if publics.is_empty() {
+            return Ok(());
+        }
+
+        // Populate pairing context
+        let mut ctx = blst_pairing::new(false, &[]);
+        for i in 0..publics.len() {
+            // Generate a non-zero random scalar
+            let scalar = loop {
+                let scalar = Scalar::rand(rng);
+                if scalar != Scalar::zero() {
+                    break scalar;
+                }
+            };
+
+            // Add item to context
+            let pk_affine = publics[i].as_blst_p1_affine();
+            let hm_affine = hms[i].as_blst_p2_affine();
+            let scalar_bytes = scalar.as_blst_scalar().b;
+            ctx.mul_n_aggregate(
+                &pk_affine,
+                false,
+                &hm_affine,
+                false,
+                &scalar_bytes,
+                SCALAR_BITS,
+                &[],
+                &[],
+            );
+            let sig_affine = signatures[i].as_blst_p2_affine();
+            unsafe {
+                ctx.mul_n_aggregate(
+                    &BLS12_381_NEG_G1,
+                    false,
+                    &sig_affine,
+                    false,
+                    &scalar_bytes,
+                    SCALAR_BITS,
+                    &[],
+                    &[],
+                );
+            }
+        }
+        ctx.commit();
+
+        // Check validity
+        if !ctx.finalverify(None) {
             return Err(Error::InvalidSignature);
         }
         Ok(())
@@ -130,6 +201,15 @@ impl Variant for MinSig {
             return Err(Error::InvalidSignature);
         }
         Ok(())
+    }
+
+    fn batch_verify<R: RngCore + CryptoRng>(
+        rng: &mut R,
+        publics: &[Self::Public],
+        hms: &[Self::Signature],
+        signatures: &[Self::Signature],
+    ) -> Result<(), Error> {
+        unimplemented!()
     }
 }
 

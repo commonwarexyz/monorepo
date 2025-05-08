@@ -95,7 +95,7 @@ const SCALAR_LENGTH: usize = 32;
 ///
 /// Useful for constant‑time exponentiation loops and for validating that a
 /// decoded integer lies in the range `0 ≤ x < r`.
-const SCALAR_BITS: usize = 255;
+pub const SCALAR_BITS: usize = 255;
 
 /// This constant serves as the multiplicative identity (i.e., "one") in the
 /// BLS12-381 finite field, ensuring that arithmetic is carried out within the
