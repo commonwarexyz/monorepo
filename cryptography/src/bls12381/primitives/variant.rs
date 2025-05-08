@@ -1,15 +1,11 @@
 //! Different variants of the BLS signature scheme.
 
-use crate::bls12381::primitives::group::{Element, Scalar, SCALAR_BITS};
-use crate::bls12381::primitives::ops::hm;
-
 use super::group::{
     Point, DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE, G2_PROOF_OF_POSSESSION,
 };
 use super::Error;
-use blst::{
-    blst_p1, blst_p1_from_affine, Pairing as blst_pairing, BLS12_381_NEG_G1, BLS12_381_NEG_G2,
-};
+use crate::bls12381::primitives::group::{Element, Scalar, SCALAR_BITS};
+use blst::{Pairing as blst_pairing, BLS12_381_NEG_G1, BLS12_381_NEG_G2};
 use commonware_codec::FixedSize;
 use rand::{CryptoRng, RngCore};
 use std::fmt::Debug;
@@ -95,7 +91,7 @@ impl Variant for MinPk {
     /// Verifies a set of signatures against their respective public keys and pre-hashed messages.
     ///
     /// This method is outperforms individual signature verification by verifying a random linear
-    /// combination of the signatures and public keys in a single pairing check.
+    /// combination of the public keys and signatures.
     ///
     /// The verification equation for each signature `i` is:
     /// `e(hm_i,pk_i) == e(sig_i,G1::one())`,
@@ -137,7 +133,7 @@ impl Variant for MinPk {
             // This scalar is essential for the security of batch verification. It ensures that
             // multiple invalid signatures are extremely unlikely to combine in a way that
             // makes the overall batch check pass (i.e., they don't accidentally "cancel out").
-            let scalar = loop {
+            let r_i = loop {
                 let scalar = Scalar::rand(rng);
                 if scalar != Scalar::zero() {
                     break scalar;
@@ -148,7 +144,7 @@ impl Variant for MinPk {
             //
             // This corresponds to one part of the i-th term in the product: e(sig_i,-G1::one())^{r_i}.
             let mut scaled_sig = signatures[i];
-            scaled_sig.mul(&scalar);
+            scaled_sig.mul(&r_i);
             let sig_affine = scaled_sig.as_blst_p2_affine();
 
             // Aggregate the term e(r_i * sig_i,-G1::one()) into the pairing context.
@@ -160,7 +156,7 @@ impl Variant for MinPk {
             //
             // This corresponds to the other part of the i-th term in the product: e(hm_i, pk_i)^{r_i}.
             let mut scaled_pk = publics[i];
-            scaled_pk.mul(&scalar);
+            scaled_pk.mul(&r_i);
             let pk_affine = scaled_pk.as_blst_p1_affine();
             let hm_affine = hms[i].as_blst_p2_affine();
 
@@ -235,13 +231,94 @@ impl Variant for MinSig {
         Ok(())
     }
 
+    /// Verifies a set of signatures against their respective public keys and pre-hashed messages.
+    ///
+    /// This method outperforms individual signature verification by verifying a random linear
+    /// combination of the public keys and signatures.
+    ///
+    /// The verification equation for `MinSig` for each signature `i` is:
+    /// `e(pk_i,hm_i) == e(G2::one(),sig_i)`,
+    /// which is equivalent to checking if `e(pk_i,hm_i) * e(-G2::one(),sig_i) == 1`.
+    ///
+    /// To batch verify `n` such equations, we introduce random non-zero scalars `r_i` (for `i=1..n`).
+    /// The batch verification checks if the product of these individual equations, each effectively
+    /// raised to the power of its respective `r_i`, equals one:
+    /// `prod_i((e(pk_i,hm_i) * e(-G2::one(),sig_i))^{r_i}) == 1`
+    ///
+    /// Using the bilinearity of pairings, this can be rewritten (by moving `r_i` inside the pairings):
+    /// `prod_i(e(r_i * pk_i,hm_i) * e(-G2::one(),r_i * sig_i)) == 1`
+    ///
+    /// Finally, we aggregate all pairings `e(r_i * pk_i,hm_i)` and `e(-G2::one(),r_i * sig_i)`
+    /// into a single product in the target group `G_T`. If the result is the identity element in `G_T`,
+    /// the batch verification succeeds.
+    ///
+    /// Source: https://ethresear.ch/t/security-of-bls-batch-verification/10748
     fn batch_verify<R: RngCore + CryptoRng>(
         rng: &mut R,
         publics: &[Self::Public],
         hms: &[Self::Signature],
         signatures: &[Self::Signature],
     ) -> Result<(), Error> {
-        unimplemented!()
+        // Ensure there is an equal number of public keys, messages, and signatures
+        assert_eq!(publics.len(), hms.len());
+        assert_eq!(publics.len(), signatures.len());
+        if publics.is_empty() {
+            return Ok(());
+        }
+
+        // Create a pairing context
+        //
+        // We only handle pre-hashed messages, so we leave the domain separator tag (`DST`) empty.
+        let mut pairing = blst_pairing::new(false, &[]);
+        for i in 0..publics.len() {
+            // Generate a non-zero random scalar `r_i`.
+            //
+            // This scalar is essential for the security of batch verification. It ensures that
+            // multiple invalid signatures are extremely unlikely to combine in a way that
+            // makes the overall batch check pass (i.e., they don't accidentally "cancel out").
+            let r_i = loop {
+                let scalar = Scalar::rand(rng);
+                if scalar != Scalar::zero() {
+                    break scalar;
+                }
+            };
+
+            // Prepare the pairing term e(-G2::one(),r_i * sig_i).
+            //
+            // This corresponds to one part of the i-th term in the product: e(-G2::one(),sig_i)^{r_i}.
+            let mut scaled_sig = signatures[i];
+            scaled_sig.mul(&r_i);
+            let sig_p1_affine = scaled_sig.as_blst_p1_affine(); // Convert to G1 affine.
+
+            // Aggregate the term e(-G2::one(),r_i * sig_i) into the pairing context.
+            unsafe {
+                pairing.raw_aggregate(&BLS12_381_NEG_G2, &sig_p1_affine);
+            }
+
+            // Prepare the pairing term e(r_i * pk_i,hm_i).
+            //
+            // This corresponds to the other part of the i-th term in the product: e(pk_i,hm_i)^{r_i}.
+            let mut scaled_pk = publics[i];
+            scaled_pk.mul(&r_i);
+            let pk_p2_affine = scaled_pk.as_blst_p2_affine();
+            let hm_p1_affine = hms[i].as_blst_p1_affine();
+
+            // Aggregate the term e(r_i * pk_i,hm_i) into the pairing context.
+            pairing.raw_aggregate(&pk_p2_affine, &hm_p1_affine);
+        }
+
+        // Perform the final verification.
+        //
+        // `finalverify` computes the product of all (2n) aggregated pairing terms:
+        // prod_i(e(r_i * pk_i,hm_i) * e(-G2::one(),r_i * sig_i))
+        //
+        // It then checks if this resulting product in G_T is equal to the identity element.
+        pairing.commit();
+        if !pairing.finalverify(None) {
+            return Err(Error::InvalidSignature);
+        }
+
+        Ok(())
     }
 }
 
