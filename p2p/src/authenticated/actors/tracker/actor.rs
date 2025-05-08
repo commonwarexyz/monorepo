@@ -143,15 +143,15 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
         }
 
         // Ensure that peer set is monotonically increasing
-        match self.sets.keys().last() {
-            Some(last) if index <= *last => {
+        if let Some((last, _)) = self.sets.last_key_value() {
+            if index <= *last {
                 debug!(
-                    index,
-                    last, "peer set index must be monotonically increasing"
+                    ?index,
+                    ?last,
+                    "peer set index must be monotonically increasing"
                 );
                 return;
             }
-            _ => {}
         }
 
         // Ensure that peer set is not too large.
@@ -164,11 +164,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
         );
 
         // Create and store new peer set
-        let set = Set::new(index, peers.clone());
-        self.sets.insert(index, set);
-
-        // Update stored counters
-        let set = self.sets.get_mut(&index).unwrap();
+        let mut set = Set::new(peers.clone());
         for peer in peers.iter() {
             let record = self.peers.entry(peer.clone()).or_insert(Record::unknown());
             record.increment();
@@ -176,6 +172,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
                 set.found(peer);
             }
         }
+        self.sets.insert(index, set);
 
         // Remove oldest entries if necessary
         while self.sets.len() > self.tracked_peer_sets {
@@ -209,10 +206,14 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
             .collect();
 
         // Return all peers that we got a reservation for
-        peers
+        let mut peers: Vec<_> = peers
             .into_iter()
             .filter_map(|(peer, addr)| self.reserve(peer.clone()).map(|res| (peer, addr, res)))
-            .collect()
+            .collect();
+
+        // Shuffle to prevent starvation
+        peers.shuffle(&mut self.context);
+        peers
     }
 
     /// Handle an incoming list of peer information.
@@ -366,6 +367,21 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
     async fn run(mut self) {
         while let Some(msg) = self.receiver.next().await {
             match msg {
+                Message::Initialize {
+                    public_key,
+                    mut peer,
+                } => {
+                    // Kill if peer is not authorized
+                    if !self.allowed(&public_key) {
+                        peer.kill().await;
+                        continue;
+                    }
+
+                    // Proactively send our own info to the peer
+                    let record = self.peers.get(&self.crypto.public_key()).unwrap();
+                    let peer_info = record.peer_info().unwrap();
+                    let _ = peer.peers(vec![peer_info.clone()]).await;
+                }
                 Message::Construct {
                     public_key,
                     mut peer,
@@ -378,20 +394,26 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
 
                     // Select a random peer set (we want to learn about all peers in
                     // our tracked sets)
-                    let set = match self.sets.values().choose(&mut self.context) {
-                        Some(set) => set,
-                        None => {
-                            debug!("no peer sets available");
-                            continue;
-                        }
+                    let Some((&index, set)) = self.sets.iter().choose(&mut self.context) else {
+                        debug!("no peer sets available");
+                        continue;
                     };
+                    let mut bits = set.knowledge.clone();
 
-                    // Send bit vector if stored
-                    let bitvec = types::BitVec {
-                        index: set.index,
-                        bits: set.knowledge.clone(),
-                    };
-                    let _ = peer.bit_vec(bitvec).await;
+                    // Unset bits for peers that are "refreshable" but not connected. This helps get
+                    // the most up-to-date information if the peer has changed IPs.
+                    // We know unreserved peers are definitely not connected.
+                    set.sorted.iter().enumerate().for_each(|(i, peer)| {
+                        if bits[i]
+                            && !self.reserved.contains(peer)
+                            && self.peers.get(peer).unwrap().refreshable()
+                        {
+                            bits.clear(i);
+                        }
+                    });
+
+                    // Send bit vector
+                    let _ = peer.bit_vec(types::BitVec { index, bits }).await;
                 }
                 Message::BitVec { bit_vec, mut peer } => match self.handle_bit_vec(bit_vec) {
                     Err(e) => {
@@ -417,15 +439,9 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
                     // We will never add/remove tracked peers here, so we
                     // don't need to update the gauge.
                 }
-                Message::Dialable { peers } => {
-                    // Fetch dialable peers
-                    let mut dialable = self.handle_dialable();
-
-                    // Shuffle to prevent starvation
-                    dialable.shuffle(&mut self.context);
-
+                Message::Dialable { responder } => {
                     // Inform dialer of dialable peers
-                    let _ = peers.send(dialable);
+                    let _ = responder.send(self.handle_dialable());
 
                     // Shrink to fit rate limiter
                     self.connections_rate_limiter.shrink_to_fit();

@@ -159,7 +159,7 @@ impl<C: Verifier> Record<C> {
         matches!(self.address, Address::Blocked)
     }
 
-    /// Returns true if we don't need additional [`PeerInfo`] about this peer.
+    /// Returns `true` if we don't need additional [`PeerInfo`] about this peer.
     ///
     /// Similar to `peer_info().is_some()`, but also include the `Blocked` case since we don't
     /// want to track blocked peers despite not recording their information.
@@ -168,6 +168,20 @@ impl<C: Verifier> Record<C> {
             Address::Unknown | Address::Bootstrapper(_) => false,
             Address::Myself(_)
             | Address::Blocked
+            | Address::Discovered(_)
+            | Address::Persistent(_) => true,
+        }
+    }
+
+    /// Returns `true` if we want to attempt to refresh the peer information if not connected to
+    /// this peer.
+    ///
+    /// `false` only for `Myself` and `Blocked` peers.
+    pub fn refreshable(&self) -> bool {
+        match self.address {
+            Address::Myself(_) | Address::Blocked => false,
+            Address::Unknown
+            | Address::Bootstrapper(_)
             | Address::Discovered(_)
             | Address::Persistent(_) => true,
         }

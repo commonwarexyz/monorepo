@@ -24,10 +24,21 @@ pub enum Message<E: Spawner + Metrics, C: Verifier> {
     Block { public_key: C::PublicKey },
 
     // ---------- Used by peer ----------
+    /// Notify the tracker that a peer has been successfully connected, and that a
+    /// [`types::Payload::Peers`] message (containing solely the local node's information) should be
+    /// sent to the peer.
+    Initialize {
+        /// The public key of the peer.
+        public_key: C::PublicKey,
+
+        /// The mailbox of the peer actor.
+        peer: peer::Mailbox<C>,
+    },
+
     /// Ready to send a [`types::Payload::BitVec`] message to a peer. This message doubles as a
     /// keep-alive signal to the peer.
     ///
-    /// This request is formed upon connection establishment and also on a recurring interval.
+    /// This request is formed on a recurring interval.
     Construct {
         /// The public key of the peer.
         public_key: C::PublicKey,
@@ -67,8 +78,9 @@ pub enum Message<E: Spawner + Metrics, C: Verifier> {
     /// and reservation for each dialable peer. This list won't include peers that are already
     /// connected, blocked, or already have an active reservation.
     Dialable {
+        /// One-shot channel to send the list of dialable peers.
         #[allow(clippy::type_complexity)]
-        peers: oneshot::Sender<Vec<(C::PublicKey, SocketAddr, Reservation<E, C>)>>,
+        responder: oneshot::Sender<Vec<(C::PublicKey, SocketAddr, Reservation<E, C>)>>,
     },
 
     // ---------- Used by listener ----------
@@ -83,16 +95,27 @@ pub enum Message<E: Spawner + Metrics, C: Verifier> {
     },
 }
 
+/// Mailbox for sending messages to the tracker actor.
 #[derive(Clone)]
 pub struct Mailbox<E: Spawner + Metrics, C: Verifier> {
     sender: mpsc::Sender<Message<E, C>>,
 }
 
 impl<E: Spawner + Metrics, C: Verifier> Mailbox<E, C> {
+    /// Create a new mailbox for the tracker.
     pub(super) fn new(sender: mpsc::Sender<Message<E, C>>) -> Self {
         Self { sender }
     }
 
+    /// Send an `Initialize` message to the tracker.
+    pub async fn initialize(&mut self, public_key: C::PublicKey, peer: peer::Mailbox<C>) {
+        self.sender
+            .send(Message::Initialize { public_key, peer })
+            .await
+            .unwrap();
+    }
+
+    /// Send a `Construct` message to the tracker.
     pub async fn construct(&mut self, public_key: C::PublicKey, peer: peer::Mailbox<C>) {
         self.sender
             .send(Message::Construct { public_key, peer })
@@ -100,6 +123,7 @@ impl<E: Spawner + Metrics, C: Verifier> Mailbox<E, C> {
             .unwrap();
     }
 
+    /// Send a `BitVec` message to the tracker.
     pub async fn bit_vec(&mut self, bit_vec: types::BitVec, peer: peer::Mailbox<C>) {
         self.sender
             .send(Message::BitVec { bit_vec, peer })
@@ -107,6 +131,7 @@ impl<E: Spawner + Metrics, C: Verifier> Mailbox<E, C> {
             .unwrap();
     }
 
+    /// Send a `Peers` message to the tracker.
     pub async fn peers(&mut self, peers: Vec<types::PeerInfo<C>>, peer: peer::Mailbox<C>) {
         self.sender
             .send(Message::Peers { peers, peer })
@@ -114,15 +139,17 @@ impl<E: Spawner + Metrics, C: Verifier> Mailbox<E, C> {
             .unwrap();
     }
 
+    /// Send a `Block` message to the tracker.
     pub async fn dialable(&mut self) -> Vec<(C::PublicKey, SocketAddr, Reservation<E, C>)> {
-        let (response, receiver) = oneshot::channel();
+        let (sender, receiver) = oneshot::channel();
         self.sender
-            .send(Message::Dialable { peers: response })
+            .send(Message::Dialable { responder: sender })
             .await
             .unwrap();
         receiver.await.unwrap()
     }
 
+    /// Send a `Reserve` message to the tracker.
     pub async fn reserve(&mut self, public_key: C::PublicKey) -> Option<Reservation<E, C>> {
         let (tx, rx) = oneshot::channel();
         self.sender
@@ -135,6 +162,9 @@ impl<E: Spawner + Metrics, C: Verifier> Mailbox<E, C> {
         rx.await.unwrap()
     }
 
+    /// Try to send a `Release` message to the tracker without blocking.
+    ///
+    /// Returns `true` if the message was sent successfully, and `false` if the mailbox is full.
     pub fn try_release(&mut self, public_key: C::PublicKey) -> bool {
         let Err(e) = self.sender.try_send(Message::Release { public_key }) else {
             return true;
@@ -150,6 +180,7 @@ impl<E: Spawner + Metrics, C: Verifier> Mailbox<E, C> {
         );
     }
 
+    /// Send a `Release` message to the tracker.
     pub async fn release(&mut self, public_key: C::PublicKey) {
         self.sender
             .send(Message::Release { public_key })
