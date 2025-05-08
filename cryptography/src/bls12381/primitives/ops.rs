@@ -1842,6 +1842,9 @@ mod tests {
         const DST: &[u8] = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_";
 
         // Parse lines
+        let mut publics = Vec::new();
+        let mut hms = Vec::new();
+        let mut signatures = Vec::new();
         for line in MIN_SIG_TESTS.lines() {
             // Extract parts
             let parts: Vec<_> = line.split(':').collect();
@@ -1860,10 +1863,18 @@ mod tests {
             let public = public::<MinSig>(&private);
             verify::<MinSig>(&public, DST, &message, &signature).unwrap();
 
+            // Add to batch
+            publics.push(public);
+            hms.push(hm::<MinSig>(DST, &message));
+            signatures.push(signature);
+
             // Fail verification with a manipulated signature
             signature.add(&<MinSig as Variant>::Signature::one());
             assert!(verify::<MinSig>(&public, DST, &message, &signature).is_err());
         }
+
+        // Batch verification
+        assert!(MinSig::batch_verify(&mut OsRng, &publics, &hms, &signatures).is_ok());
     }
 
     /// Source: https://github.com/paulmillr/noble-curves/blob/bee1ffe0000095f95b982a969d06baaa3dd8ce73/test/bls12-381/bls12-381-g2-test-vectors.txt
