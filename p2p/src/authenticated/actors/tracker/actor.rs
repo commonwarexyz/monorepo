@@ -92,8 +92,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
         let socket = cfg.address;
         let timestamp = context.current().epoch_millis();
         let ip_namespace = union(&cfg.namespace, NAMESPACE_SUFFIX_IP);
-        let my_info = types::PeerInfo::sign(&mut cfg.crypto, &ip_namespace, socket, timestamp);
-        peers.insert(cfg.crypto.public_key(), Record::myself(my_info));
+        let local_info = types::PeerInfo::sign(&mut cfg.crypto, &ip_namespace, socket, timestamp);
+        peers.insert(cfg.crypto.public_key(), Record::local_node(local_info));
 
         (
             Self {
@@ -129,8 +129,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
     /// - Not blocked
     /// - Not us
     fn allowed(&self, peer: &C::PublicKey) -> bool {
-        let invalid = *peer == self.crypto.public_key()
-            || self.peers.get(peer).is_none_or(|r| r.is_blocked());
+        let invalid =
+            *peer == self.crypto.public_key() || self.peers.get(peer).is_none_or(|r| r.blocked());
         !invalid
     }
 
@@ -172,7 +172,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
         for peer in peers.iter() {
             let record = self.peers.entry(peer.clone()).or_insert(Record::unknown());
             record.increment();
-            if !record.want_info() {
+            if record.discovered() {
                 set.found(peer);
             }
         }
@@ -194,7 +194,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
 
         // Update metrics
         self.metrics.tracked.set(self.peers.len() as i64);
-        let blocked = self.peers.values().filter(|r| r.is_blocked()).count();
+        let blocked = self.peers.values().filter(|r| r.blocked()).count();
         self.metrics.blocked.set(blocked as i64);
     }
 
@@ -262,8 +262,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
             // old IPs to prevent us from propagating a new one.
             let record = self.peers.get_mut(&info.public_key).unwrap();
             let public_key = info.public_key.clone();
-            if !record.set_discovered(info) {
-                trace!(peer = ?public_key, "peer not updated");
+            if !record.discover(info) {
                 continue;
             }
             self.metrics
@@ -303,7 +302,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
             .bits
             .iter()
             .enumerate()
-            .filter(|(_, bit)| !bit) // Only consider peers that are not known to the requester
+            .filter(|(_, bit)| !bit) // Only consider peers that the requester has not discovered
             .filter_map(|(i, _)| {
                 let peer = set.sorted.get(i).expect("invalid index"); // len checked above
                 self.peers.get(peer).and_then(|r| r.peer_info().cloned())
@@ -400,10 +399,11 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
                         peer.kill().await;
                         continue;
                     }
-                    Ok(peers) if !peers.is_empty() => {
-                        peer.peers(peers).await;
+                    Ok(peers) => {
+                        if !peers.is_empty() {
+                            peer.peers(peers).await;
+                        }
                     }
-                    _ => {}
                 },
                 Message::Peers { peers, mut peer } => {
                     // Consider new peer signatures
@@ -451,7 +451,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
 
                     // Update metrics
                     if updated {
-                        let blocked = self.peers.values().filter(|r| r.is_blocked()).count();
+                        let blocked = self.peers.values().filter(|r| r.blocked()).count();
                         self.metrics.blocked.set(blocked as i64);
                     }
 
