@@ -246,7 +246,7 @@ mod tests {
         assert_eq!(record.sets, 0);
         assert_eq!(record.address(), None);
         assert_peer_info_eq(record.peer_info(), None);
-        assert!(record.discovered());
+        assert!(!record.discovered());
         assert!(!record.blocked());
     }
 
@@ -258,7 +258,7 @@ mod tests {
         assert_eq!(record.sets, 0);
         assert_eq!(record.address(), Some(socket));
         assert_peer_info_eq(record.peer_info(), None);
-        assert!(record.discovered());
+        assert!(!record.discovered());
         assert!(!record.blocked());
     }
 
@@ -270,7 +270,7 @@ mod tests {
 
         assert!(record.discover(peer_info.clone()));
         assert_eq!(record.address(), Some(socket));
-        assert!(!record.discovered());
+        assert!(record.discovered());
         assert!(matches!(&record.address, Address::Discovered(_)));
         assert_peer_info_eq(record.peer_info(), Some(&peer_info));
     }
@@ -283,7 +283,7 @@ mod tests {
 
         assert!(record.discover(peer_info.clone()));
         assert_eq!(record.address(), Some(socket));
-        assert!(!record.discovered());
+        assert!(record.discovered());
         assert!(matches!(&record.address, Address::Persistent(_)));
         assert_peer_info_eq(record.peer_info(), Some(&peer_info));
     }
@@ -299,7 +299,7 @@ mod tests {
         assert!(record.discover(peer_info_new.clone())); // Discovered -> Discovered (update)
 
         assert_eq!(record.address(), Some(socket));
-        assert!(!record.discovered());
+        assert!(record.discovered());
         assert!(matches!(&record.address, Address::Discovered(_)));
         assert_peer_info_eq(record.peer_info(), Some(&peer_info_new));
     }
@@ -315,7 +315,7 @@ mod tests {
         assert!(record.discover(peer_info_new.clone())); // Persistent -> Persistent (update)
 
         assert_eq!(record.address(), Some(socket));
-        assert!(!record.discovered());
+        assert!(record.discovered());
         assert!(matches!(&record.address, Address::Persistent(_)));
         assert_peer_info_eq(record.peer_info(), Some(&peer_info_new));
     }
@@ -485,22 +485,22 @@ mod tests {
         let peer_info: PeerInfo<Secp256r1> = create_peer_info(10, socket, 1000);
 
         let record_unknown = Record::<Secp256r1>::unknown();
-        assert!(record_unknown.discovered());
+        assert!(!record_unknown.discovered());
 
         let record_boot = Record::<Secp256r1>::bootstrapper(socket);
-        assert!(record_boot.discovered());
+        assert!(!record_boot.discovered());
 
         let mut record_disc = Record::<Secp256r1>::unknown();
         record_disc.discover(peer_info.clone());
-        assert!(!record_disc.discovered());
+        assert!(record_disc.discovered());
 
         let mut record_pers = Record::<Secp256r1>::bootstrapper(socket);
         record_pers.discover(peer_info);
-        assert!(!record_pers.discovered());
+        assert!(record_pers.discovered());
 
         let mut record_blocked = Record::<Secp256r1>::unknown();
         record_blocked.block();
-        assert!(!record_blocked.discovered());
+        assert!(record_blocked.discovered());
     }
 
     #[test]
