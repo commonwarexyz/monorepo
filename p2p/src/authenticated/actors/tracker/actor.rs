@@ -93,7 +93,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
         let timestamp = context.current().epoch_millis();
         let ip_namespace = union(&cfg.namespace, NAMESPACE_SUFFIX_IP);
         let local_info = types::PeerInfo::sign(&mut cfg.crypto, &ip_namespace, socket, timestamp);
-        peers.insert(cfg.crypto.public_key(), Record::local_node(local_info));
+        peers.insert(cfg.crypto.public_key(), Record::myself(local_info));
 
         (
             Self {

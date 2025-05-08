@@ -11,7 +11,7 @@ pub enum Address<C: Verifier> {
     Unknown,
 
     /// Peer is the local node.
-    LocalNode(PeerInfo<C>),
+    Myself(PeerInfo<C>),
 
     /// Provided during initialization.
     /// Can be upgraded to `Persistent`.
@@ -52,9 +52,9 @@ impl<C: Verifier> Record<C> {
     }
 
     /// Create a new record with the local node's information.
-    pub fn local_node(peer_info: PeerInfo<C>) -> Self {
+    pub fn myself(peer_info: PeerInfo<C>) -> Self {
         Record {
-            address: Address::LocalNode(peer_info),
+            address: Address::Myself(peer_info),
             sets: 0,
         }
     }
@@ -79,7 +79,7 @@ impl<C: Verifier> Record<C> {
                 self.address = Address::Discovered(peer_info);
                 true
             }
-            Address::LocalNode(_) => {
+            Address::Myself(_) => {
                 // Do not update, we already have our own information.
                 false
             }
@@ -123,7 +123,7 @@ impl<C: Verifier> Record<C> {
     /// Returns false if the peer was already blocked or is the local node (unblockable).
     pub fn block(&mut self) -> bool {
         match self.address {
-            Address::Blocked | Address::LocalNode(_) => false,
+            Address::Blocked | Address::Myself(_) => false,
             _ => {
                 self.address = Address::Blocked;
                 true
@@ -148,7 +148,7 @@ impl<C: Verifier> Record<C> {
         }
         match self.address {
             Address::Blocked | Address::Unknown | Address::Discovered(_) => true,
-            Address::LocalNode(_) | Address::Bootstrapper(_) | Address::Persistent(_) => false,
+            Address::Myself(_) | Address::Bootstrapper(_) | Address::Persistent(_) => false,
         }
     }
 
@@ -166,7 +166,7 @@ impl<C: Verifier> Record<C> {
     pub fn discovered(&self) -> bool {
         match self.address {
             Address::Unknown | Address::Bootstrapper(_) => false,
-            Address::LocalNode(_)
+            Address::Myself(_)
             | Address::Blocked
             | Address::Discovered(_)
             | Address::Persistent(_) => true,
@@ -177,7 +177,7 @@ impl<C: Verifier> Record<C> {
     pub fn address(&self) -> Option<SocketAddr> {
         match &self.address {
             Address::Unknown => None,
-            Address::LocalNode(peer_info) => Some(peer_info.socket),
+            Address::Myself(peer_info) => Some(peer_info.socket),
             Address::Bootstrapper(socket) => Some(*socket),
             Address::Discovered(peer_info) => Some(peer_info.socket),
             Address::Persistent(peer_info) => Some(peer_info.socket),
@@ -189,7 +189,7 @@ impl<C: Verifier> Record<C> {
     pub fn peer_info(&self) -> Option<&PeerInfo<C>> {
         match &self.address {
             Address::Unknown => None,
-            Address::LocalNode(peer_info) => Some(peer_info),
+            Address::Myself(peer_info) => Some(peer_info),
             Address::Bootstrapper(_) => None,
             Address::Discovered(peer_info) => Some(peer_info),
             Address::Persistent(peer_info) => Some(peer_info),
