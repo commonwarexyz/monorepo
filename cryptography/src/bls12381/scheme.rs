@@ -20,7 +20,7 @@
 //! ```
 
 use super::primitives::{
-    group::{self, Element, Scalar},
+    group::{self, Scalar},
     ops,
     variant::{MinPk, Variant},
 };
@@ -79,8 +79,7 @@ impl Signer for Bls12381 {
 
     fn from(private_key: PrivateKey) -> Option<Self> {
         let private = private_key.key.clone();
-        let mut public = <MinPk as Variant>::Public::one();
-        public.mul(&private);
+        let public = ops::public::<MinPk>(&private);
         Some(Self { private, public })
     }
 
