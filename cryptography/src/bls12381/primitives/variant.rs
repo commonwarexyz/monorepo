@@ -6,7 +6,9 @@ use super::group::{
     Point, DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE, G2_PROOF_OF_POSSESSION,
 };
 use super::Error;
-use blst::{Pairing as blst_pairing, BLS12_381_NEG_G1, BLS12_381_NEG_G2};
+use blst::{
+    blst_p1, blst_p1_from_affine, Pairing as blst_pairing, BLS12_381_NEG_G1, BLS12_381_NEG_G2,
+};
 use commonware_codec::FixedSize;
 use rand::{CryptoRng, RngCore};
 use std::fmt::Debug;
@@ -102,7 +104,10 @@ impl Variant for MinPk {
         }
 
         // Populate pairing context
-        let mut ctx = blst_pairing::new(false, &[]);
+        let mut neg_generator = blst_p1::default();
+        unsafe { blst_p1_from_affine(&mut neg_generator, &BLS12_381_NEG_G1) }
+        let neg_generator = G1::from_blst_p1(neg_generator);
+        let mut pairing = blst_pairing::new(false, &[]);
         for i in 0..publics.len() {
             // Generate a non-zero random scalar
             let scalar = loop {
@@ -113,37 +118,20 @@ impl Variant for MinPk {
             };
 
             // Add item to context
-            let pk_affine = publics[i].as_blst_p1_affine();
-            let hm_affine = hms[i].as_blst_p2_affine();
-            let scalar_bytes = scalar.as_blst_scalar().b;
-            ctx.mul_n_aggregate(
-                &pk_affine,
-                false,
-                &hm_affine,
-                false,
-                &scalar_bytes,
-                SCALAR_BITS,
-                &[],
-                &[],
-            );
+            let mut neg_generator = neg_generator.clone();
+            neg_generator.mul(&scalar);
             let sig_affine = signatures[i].as_blst_p2_affine();
-            unsafe {
-                ctx.mul_n_aggregate(
-                    &BLS12_381_NEG_G1,
-                    false,
-                    &sig_affine,
-                    false,
-                    &scalar_bytes,
-                    SCALAR_BITS,
-                    &[],
-                    &[],
-                );
-            }
+            pairing.raw_aggregate(&sig_affine, &neg_generator.as_blst_p1_affine());
+
+            let pk_affine = publics[i].as_blst_p1_affine();
+            let mut hm = hms[i].clone();
+            hm.mul(&scalar);
+            pairing.raw_aggregate(&hm.as_blst_p2_affine(), &pk_affine);
         }
-        ctx.commit();
+        pairing.commit();
 
         // Check validity
-        if !ctx.finalverify(None) {
+        if !pairing.finalverify(None) {
             return Err(Error::InvalidSignature);
         }
         Ok(())
