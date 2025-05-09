@@ -18,7 +18,7 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
     - name: Lint
-      run: cargo clippy --all-targets --all-features -- -D warnings
+      run: cargo clippy --all-targets --all-features -- -D warnings -D missing_docs
     - name: Fmt
       run: cargo fmt --all -- --check
     - name: Check docs
