@@ -4,6 +4,7 @@ mod aggregate_public_keys;
 mod aggregate_signatures;
 mod aggregate_verify_multiple_messages;
 mod aggregate_verify_multiple_public_keys;
+mod batch_verify_multiple_messages;
 mod dkg_recovery;
 mod dkg_reshare_recovery;
 mod signature_generation;
@@ -20,4 +21,5 @@ criterion_main!(
     signature_verification::benches,
     aggregate_verify_multiple_messages::benches,
     aggregate_verify_multiple_public_keys::benches,
+    batch_verify_multiple_messages::benches,
 );
