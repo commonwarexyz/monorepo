@@ -20,14 +20,8 @@ use rand::RngCore;
 use rayon::{prelude::*, ThreadPoolBuilder};
 use std::{borrow::Cow, collections::BTreeMap};
 
-pub fn hm<V: Variant>(dst: DST, message: &[u8]) -> V::Signature {
-    let mut hm = V::Signature::zero();
-    hm.map(dst, message);
-    hm
-}
-
 /// Computes the public key from the private key.
-pub fn public<V: Variant>(private: &Scalar) -> V::Public {
+pub fn compute_public<V: Variant>(private: &Scalar) -> V::Public {
     let mut public = V::Public::one();
     public.mul(private);
     public
@@ -36,22 +30,29 @@ pub fn public<V: Variant>(private: &Scalar) -> V::Public {
 /// Returns a new keypair derived from the provided randomness.
 pub fn keypair<R: RngCore, V: Variant>(rng: &mut R) -> (group::Private, V::Public) {
     let private = group::Private::rand(rng);
-    let public = public::<V>(&private);
+    let public = compute_public::<V>(&private);
     (private, public)
+}
+
+/// Hashes the provided message with the domain separation tag (DST) to
+/// the curve.
+pub fn hash_message<V: Variant>(dst: DST, message: &[u8]) -> V::Signature {
+    let mut hm = V::Signature::zero();
+    hm.map(dst, message);
+    hm
 }
 
 /// Signs the provided message with the private key.
 pub fn sign<V: Variant>(private: &Scalar, dst: DST, message: &[u8]) -> V::Signature {
-    let mut s = V::Signature::zero();
-    s.map(dst, message);
-    s.mul(private);
-    s
+    let mut hm = hash_message::<V>(dst, message);
+    hm.mul(private);
+    hm
 }
 
 /// Generates a proof of possession for the private key.
 pub fn sign_proof_of_possession<V: Variant>(private: &group::Private) -> V::Signature {
     // Get public key
-    let public = public::<V>(private);
+    let public = compute_public::<V>(private);
 
     // Sign the public key
     sign::<V>(private, V::PROOF_OF_POSSESSION, &public.encode())
@@ -65,7 +66,7 @@ pub fn verify<V: Variant>(
     signature: &V::Signature,
 ) -> Result<(), Error> {
     // Create hashed message `hm`
-    let hm = hm::<V>(dst, message);
+    let hm = hash_message::<V>(dst, message);
 
     // Verify the signature
     V::verify(public, &hm, signature)
@@ -1860,12 +1861,12 @@ mod tests {
             assert_eq!(signature, computed);
 
             // Verify signature
-            let public = public::<MinSig>(&private);
+            let public = compute_public::<MinSig>(&private);
             verify::<MinSig>(&public, DST, &message, &signature).unwrap();
 
             // Add to batch
             publics.push(public);
-            hms.push(hm::<MinSig>(DST, &message));
+            hms.push(hash_message::<MinSig>(DST, &message));
             signatures.push(signature);
 
             // Fail verification with a manipulated signature
@@ -2173,12 +2174,12 @@ mod tests {
             assert_eq!(signature, computed);
 
             // Verify signature
-            let public = public::<MinPk>(&private);
+            let public = compute_public::<MinPk>(&private);
             verify::<MinPk>(&public, DST, &message, &signature).unwrap();
 
             // Add to batch
             publics.push(public);
-            hms.push(hm::<MinPk>(DST, &message));
+            hms.push(hash_message::<MinPk>(DST, &message));
             signatures.push(signature);
 
             // Fail verification with a manipulated signature

@@ -80,7 +80,7 @@ impl Signer for Bls12381 {
 
     fn from(private_key: PrivateKey) -> Option<Self> {
         let private = private_key.key.clone();
-        let public = ops::public::<MinPk>(&private);
+        let public = ops::compute_public::<MinPk>(&private);
         Some(Self { private, public })
     }
 
@@ -350,6 +350,7 @@ impl Display for Signature {
     }
 }
 
+/// BLS12-381 batch verifier.
 pub struct Bls12381Batch {
     publics: Vec<<MinPk as Variant>::Public>,
     hms: Vec<<MinPk as Variant>::Signature>,
@@ -381,7 +382,7 @@ impl BatchScheme for Bls12381Batch {
             Some(namespace) => Cow::Owned(union_unique(namespace, message)),
             None => Cow::Borrowed(message),
         };
-        let hm = ops::hm::<MinPk>(MinPk::MESSAGE, &payload);
+        let hm = ops::hash_message::<MinPk>(MinPk::MESSAGE, &payload);
         self.publics.push(public_key.key);
         self.hms.push(hm);
         self.signatures.push(signature.signature);
