@@ -141,7 +141,8 @@ cfg_if::cfg_if! {
             /// Return the leader at a given index over the provided seed.
             fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<Self::PublicKey>;
 
-            /// TODO: require public to remain constant over views.
+            /// TODO: require public to remain constant over views (necessary for efficient aggregation
+            /// of notarization/nullification/finalization?).
             fn public(&self) -> &Self::Public;
 
             /// Returns the identity (typically a group polynomial with a fixed constant factor)
