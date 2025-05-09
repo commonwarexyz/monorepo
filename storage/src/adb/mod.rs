@@ -14,6 +14,7 @@ use commonware_utils::array::prefixed_u64::U64;
 use thiserror::Error;
 
 pub mod any;
+pub mod current;
 pub mod operation;
 
 /// Errors that can occur when interacting with an authenticated database.
