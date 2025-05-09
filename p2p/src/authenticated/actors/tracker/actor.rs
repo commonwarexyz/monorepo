@@ -1,7 +1,7 @@
 use super::{
     ingress::{Mailbox, Message, Oracle, Reservation},
     metrics::Metrics,
-    record::Record,
+    record::{Record, Records},
     set::Set,
     Config, Error,
 };
@@ -18,11 +18,7 @@ use rand::{
     prelude::{IteratorRandom, SliceRandom},
     Rng,
 };
-use std::{cmp::max, time::Duration};
-use std::{
-    collections::{BTreeMap, HashSet},
-    net::SocketAddr,
-};
+use std::{cmp::max, collections::BTreeMap, net::SocketAddr, time::Duration};
 use tracing::debug;
 
 // Bytes to add to the namespace to prevent replay attacks.
@@ -50,26 +46,12 @@ pub struct Actor<E: Spawner + Rng + GClock + RuntimeMetrics, C: Scheme> {
     sets: BTreeMap<u64, Set<C::PublicKey>>,
 
     /// Tracks peer information, including:
+    /// - The type of peer (e.g., bootstrapper, myself, etc.)
     /// - How many peer sets they are part of
     /// - Their known [`SocketAddr`]
     /// - Whether they are blocked
-    ///
-    /// This map does not track whether we are connected to the peer or not.
-    peers: BTreeMap<C::PublicKey, Record<C>>,
-
-    /// Tracks currently reserved connections.
-    ///
-    /// Inserts upon the peer sending a `Reserve` message.
-    /// Removes upon the peer sending a `Release` message.
-    reserved: HashSet<C::PublicKey>,
-
-    /// The rate-limiter used to limit the connection-attempt rate per peer.
-    #[allow(clippy::type_complexity)]
-    connections_rate_limiter:
-        RateLimiter<C::PublicKey, HashMapStateStore<C::PublicKey>, E, NoOpMiddleware<E::Instant>>,
-
-    /// Metrics for this actor.
-    metrics: Metrics,
+    /// - Whether they are reserved/connected
+    records: Records<E, C>,
 }
 
 impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> {
@@ -78,22 +60,20 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
     pub fn new(context: E, mut cfg: Config<C>) -> (Self, Mailbox<E, C>, Oracle<E, C>) {
         // Initialization
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
-        let connections_rate_limiter =
-            RateLimiter::hashmap_with_clock(cfg.allowed_connection_rate_per_peer, &context);
-        let metrics = Metrics::init(context.clone());
 
-        // Register bootstrappers
-        let mut peers = BTreeMap::new();
-        for (peer, address) in cfg.bootstrappers.into_iter() {
-            peers.insert(peer, Record::bootstrapper(address));
-        }
-
-        // Register self; overwrites the entry if I am listed as a bootstrapper
+        // Sign my own information
         let socket = cfg.address;
         let timestamp = context.current().epoch_millis();
         let ip_namespace = union(&cfg.namespace, NAMESPACE_SUFFIX_IP);
-        let local_info = types::PeerInfo::sign(&mut cfg.crypto, &ip_namespace, socket, timestamp);
-        peers.insert(cfg.crypto.public_key(), Record::myself(local_info));
+        let myself = types::PeerInfo::sign(&mut cfg.crypto, &ip_namespace, socket, timestamp);
+
+        let records = Records::init(
+            context.clone(),
+            Mailbox::new(sender.clone()),
+            cfg.bootstrappers,
+            myself,
+            cfg.allowed_connection_rate_per_peer,
+        );
 
         (
             Self {
@@ -113,25 +93,13 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
                 receiver,
 
                 // State
-                peers,
+                records,
                 sets: BTreeMap::new(),
                 connections_rate_limiter,
-                reserved: HashSet::new(),
-                metrics,
             },
             Mailbox::new(sender.clone()),
             Oracle::new(sender),
         )
-    }
-
-    /// Returns whether a peer is all of the following:
-    /// - In a peer set
-    /// - Not blocked
-    /// - Not us
-    fn allowed(&self, peer: &C::PublicKey) -> bool {
-        let invalid =
-            *peer == self.crypto.public_key() || self.peers.get(peer).is_none_or(|r| r.blocked());
-        !invalid
     }
 
     /// Stores a new peer set and increments peer counters.
@@ -190,9 +158,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
         }
 
         // Update metrics
-        self.metrics.tracked.set(self.peers.len() as i64);
         let blocked = self.peers.values().filter(|r| r.blocked()).count();
-        self.metrics.blocked.set(blocked as i64);
     }
 
     /// Returns a list of peers that we have a known address for and were able to successfully reserve.
@@ -247,7 +213,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
             }
 
             // Ignore irrelevant peers
-            if !self.allowed(&info.public_key) {
+            if !self.records.allowed(&info.public_key) {
                 continue;
             }
 
@@ -328,12 +294,12 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
     /// - The peer has been rate-limited for connection attempts.
     fn reserve(&mut self, peer: C::PublicKey) -> Option<Reservation<E, C>> {
         // Check if we are already reserved
-        if self.reserved.contains(&peer) {
+        if self.records.reserved(&peer) {
             return None;
         }
 
         // Check if peer is invalid or blocked
-        if !self.allowed(&peer) {
+        if !self.records.allowed(&peer) {
             return None;
         }
 
@@ -341,22 +307,9 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
         //
         // This could happen if we open a connection and then it is immediately closed by
         // the peer. We don't want to keep trying to connect to the peer in this case.
-        if self.connections_rate_limiter.check_key(&peer).is_err() {
-            self.metrics
-                .limits
-                .get_or_create(&metrics::Peer::new(&peer))
-                .inc();
-            return None;
-        }
 
         // Reserve the connection
         self.reserved.insert(peer.clone());
-        self.metrics.reserved.set(self.reserved.len() as i64);
-        Some(Reservation::new(
-            self.context.with_label("reservation"),
-            peer,
-            Mailbox::new(self.sender.clone()),
-        ))
     }
 
     /// Start the actor and run it in the background.
@@ -372,7 +325,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
                     mut peer,
                 } => {
                     // Kill if peer is not authorized
-                    if !self.allowed(&public_key) {
+                    if !self.records.allowed(&public_key) {
                         peer.kill().await;
                         continue;
                     }
@@ -387,7 +340,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
                     mut peer,
                 } => {
                     // Kill if peer is not authorized
-                    if !self.allowed(&public_key) {
+                    if !self.records.allowed(&public_key) {
                         peer.kill().await;
                         continue;
                     }
@@ -458,21 +411,14 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
                     let _ = reservation.send(self.reserve(public_key));
                 }
                 Message::Release { public_key } => {
-                    self.reserved.remove(&public_key);
-                    self.metrics.reserved.set(self.reserved.len() as i64);
+                    self.records.release(&public_key);
                 }
                 Message::Block { public_key } => {
                     // Block the peer
-                    let updated = self.peers.get_mut(&public_key).is_some_and(|r| r.block());
-
-                    // Update metrics
-                    if updated {
-                        let blocked = self.peers.values().filter(|r| r.blocked()).count();
-                        self.metrics.blocked.set(blocked as i64);
-                    }
+                    self.records.block(&public_key);
 
                     // We don't have to kill the peer now. It will be sent a `Kill` message the next
-                    // time it sends the `Construct` message to the tracker.
+                    // time it sends the `Initialize` or `Construct` message to the tracker.
                 }
             }
         }
