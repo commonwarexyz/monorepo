@@ -123,53 +123,43 @@ impl Variant for MinPk {
             return Ok(());
         }
 
-        // Create a pairing context
-        //
-        // We only handle pre-hashed messages, so we leave the domain separator tag (`DST`) empty.
-        let mut pairing = blst_pairing::new(false, &[]);
-        for i in 0..publics.len() {
-            // Generate a non-zero random scalar `r_i`.
-            //
-            // This scalar is essential for the security of batch verification. It ensures that
-            // multiple invalid signatures are extremely unlikely to combine in a way that
-            // makes the overall batch check pass (i.e., they don't accidentally "cancel out").
-            let r_i = loop {
+        // Generate random non-zero scalars
+        let scalars: Vec<Scalar> = (0..publics.len())
+            .map(|_| loop {
                 let scalar = Scalar::rand(rng);
                 if scalar != Scalar::zero() {
-                    break scalar;
+                    return scalar;
                 }
-            };
+            })
+            .collect();
 
-            // Prepare the pairing term e(r_i * sig_i,-G1::one()).
-            //
-            // This corresponds to one part of the i-th term in the product: e(sig_i,-G1::one())^{r_i}.
-            let mut scaled_sig = signatures[i];
-            scaled_sig.mul(&r_i);
-            let sig_affine = scaled_sig.as_blst_p2_affine();
+        // Compute MSM for signatures: S = sum(r_i * sig_i) in G2
+        let s_agg = G2::msm(signatures, &scalars);
 
-            // Aggregate the term e(r_i * sig_i,-G1::one()) into the pairing context.
-            unsafe {
-                pairing.raw_aggregate(&sig_affine, &BLS12_381_NEG_G1);
-            }
+        // Initialize pairing context
+        let mut pairing = blst_pairing::new(false, &[]);
 
-            // Prepare the pairing term e(hm_i, r_i * pk_i).
-            //
-            // This corresponds to the other part of the i-th term in the product: e(hm_i, pk_i)^{r_i}.
-            let mut scaled_pk = publics[i];
-            scaled_pk.mul(&r_i);
+        // Aggregate the single term e(-G1,S_agg)
+        let s_agg_affine = s_agg.as_blst_p2_affine();
+        unsafe {
+            pairing.raw_aggregate(&s_agg_affine, &BLS12_381_NEG_G1);
+        }
+
+        // 2. Aggregate the n terms e(r_i * pk_i, hm_i)
+        // This part can still benefit from batch affine conversion for
+        // scaled_pk and hms if implemented separately as discussed before.
+        // For simplicity here, we show individual conversion.
+        for i in 0..publics.len() {
+            let mut scaled_pk = publics[i]; // G1
+            scaled_pk.mul(&scalars[i]);
             let pk_affine = scaled_pk.as_blst_p1_affine();
-            let hm_affine = hms[i].as_blst_p2_affine();
+            let hm_affine = hms[i].as_blst_p2_affine(); // G2
 
-            // Aggregate the term e(hm_i,r_i * pk_i) into the pairing context.
+            // Note: raw_aggregate takes (G2, G1)
             pairing.raw_aggregate(&hm_affine, &pk_affine);
         }
 
-        // Perform the final verification.
-        //
-        // `finalverify` computes the product of all (2n) aggregated pairing terms:
-        // prod_i(e(hm_i, r_i * pk_i) * e(r_i * sig_i,-G1::one()))
-        //
-        // It then checks if this resulting product in G_T is equal to the identity element.
+        // Final verification
         pairing.commit();
         if !pairing.finalverify(None) {
             return Err(Error::InvalidSignature);
@@ -266,58 +256,47 @@ impl Variant for MinSig {
             return Ok(());
         }
 
-        // Create a pairing context
-        //
-        // We only handle pre-hashed messages, so we leave the domain separator tag (`DST`) empty.
-        let mut pairing = blst_pairing::new(false, &[]);
-        for i in 0..publics.len() {
-            // Generate a non-zero random scalar `r_i`.
-            //
-            // This scalar is essential for the security of batch verification. It ensures that
-            // multiple invalid signatures are extremely unlikely to combine in a way that
-            // makes the overall batch check pass (i.e., they don't accidentally "cancel out").
-            let r_i = loop {
+        // Generate random non-zero scalars
+        let scalars: Vec<Scalar> = (0..publics.len())
+            .map(|_| loop {
                 let scalar = Scalar::rand(rng);
                 if scalar != Scalar::zero() {
-                    break scalar;
+                    return scalar;
                 }
-            };
+            })
+            .collect();
 
-            // Prepare the pairing term e(-G2::one(),r_i * sig_i).
-            //
-            // This corresponds to one part of the i-th term in the product: e(-G2::one(),sig_i)^{r_i}.
-            let mut scaled_sig = signatures[i];
-            scaled_sig.mul(&r_i);
-            let sig_p1_affine = scaled_sig.as_blst_p1_affine(); // Convert to G1 affine.
+        // Compute MSM for signatures: S = sum(r_i * sig_i) in G2
+        let s_agg = G1::msm(signatures, &scalars);
 
-            // Aggregate the term e(-G2::one(),r_i * sig_i) into the pairing context.
-            unsafe {
-                pairing.raw_aggregate(&BLS12_381_NEG_G2, &sig_p1_affine);
-            }
+        // Initialize pairing context
+        let mut pairing = blst_pairing::new(false, &[]);
 
-            // Prepare the pairing term e(r_i * pk_i,hm_i).
-            //
-            // This corresponds to the other part of the i-th term in the product: e(pk_i,hm_i)^{r_i}.
-            let mut scaled_pk = publics[i];
-            scaled_pk.mul(&r_i);
-            let pk_p2_affine = scaled_pk.as_blst_p2_affine();
-            let hm_p1_affine = hms[i].as_blst_p1_affine();
-
-            // Aggregate the term e(r_i * pk_i,hm_i) into the pairing context.
-            pairing.raw_aggregate(&pk_p2_affine, &hm_p1_affine);
+        // Aggregate the single term e(-G1,S_agg)
+        let s_agg_affine = s_agg.as_blst_p1_affine();
+        unsafe {
+            pairing.raw_aggregate(&BLS12_381_NEG_G2, &s_agg_affine);
         }
 
-        // Perform the final verification.
-        //
-        // `finalverify` computes the product of all (2n) aggregated pairing terms:
-        // prod_i(e(r_i * pk_i,hm_i) * e(-G2::one(),r_i * sig_i))
-        //
-        // It then checks if this resulting product in G_T is equal to the identity element.
+        // 2. Aggregate the n terms e(r_i * pk_i, hm_i)
+        // This part can still benefit from batch affine conversion for
+        // scaled_pk and hms if implemented separately as discussed before.
+        // For simplicity here, we show individual conversion.
+        for i in 0..publics.len() {
+            let mut scaled_pk = publics[i]; // G1
+            scaled_pk.mul(&scalars[i]);
+            let pk_affine = scaled_pk.as_blst_p2_affine();
+            let hm_affine = hms[i].as_blst_p1_affine(); // G2
+
+            // Note: raw_aggregate takes (G2, G1)
+            pairing.raw_aggregate(&pk_affine, &hm_affine);
+        }
+
+        // Final verification
         pairing.commit();
         if !pairing.finalverify(None) {
             return Err(Error::InvalidSignature);
         }
-
         Ok(())
     }
 }
