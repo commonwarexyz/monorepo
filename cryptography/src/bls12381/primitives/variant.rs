@@ -90,8 +90,9 @@ impl Variant for MinPk {
 
     /// Verifies a set of signatures against their respective public keys and pre-hashed messages.
     ///
-    /// This method is outperforms individual signature verification by verifying a random linear
-    /// combination of the public keys and signatures.
+    /// This method is outperforms individual signature verification (`2` pairings per signature) by
+    /// verifying a random linear combination of the public keys and signatures (`n+1` pairings and
+    /// `2n` multiplications for `n` signatures).
     ///
     /// The verification equation for each signature `i` is:
     /// `e(hm_i,pk_i) == e(sig_i,G1::one())`,
@@ -105,7 +106,10 @@ impl Variant for MinPk {
     /// Using the bilinearity of pairings, this can be rewritten (by moving `r_i` inside the pairings):
     /// `prod_i(e(hm_i,r_i * pk_i) * e(r_i * sig_i,-G1::one())) == 1`
     ///
-    /// Finally, we aggregate all pairings `e(hm_i,r_i * pk_i)` and `e(r_i * sig_i,-G1::one())`
+    /// The second term `e(r_i * sig_i,-G1::one())` can be computed efficiently with Multi-Scalar Multiplication:
+    /// `e(sum_i(r_i * sig_i),-G1::one())`
+    ///
+    /// Finally, we aggregate all pairings `e(hm_i,r_i * pk_i)` (`n`) and `e(sum_i(r_i * sig_i),-G1::one())` (`1`)
     /// into a single product in the target group `G_T`. If the result is the identity element in `G_T`,
     /// the batch verification succeeds.
     ///
@@ -223,10 +227,11 @@ impl Variant for MinSig {
 
     /// Verifies a set of signatures against their respective public keys and pre-hashed messages.
     ///
-    /// This method outperforms individual signature verification by verifying a random linear
-    /// combination of the public keys and signatures.
+    /// This method outperforms individual signature verification (`2` pairings per signature) by
+    /// verifying a random linear combination of the public keys and signatures (`n+1` pairings and
+    /// `2n` multiplications for `n` signatures).
     ///
-    /// The verification equation for `MinSig` for each signature `i` is:
+    /// The verification equation for each signature `i` is:
     /// `e(pk_i,hm_i) == e(G2::one(),sig_i)`,
     /// which is equivalent to checking if `e(pk_i,hm_i) * e(-G2::one(),sig_i) == 1`.
     ///
@@ -238,7 +243,10 @@ impl Variant for MinSig {
     /// Using the bilinearity of pairings, this can be rewritten (by moving `r_i` inside the pairings):
     /// `prod_i(e(r_i * pk_i,hm_i) * e(-G2::one(),r_i * sig_i)) == 1`
     ///
-    /// Finally, we aggregate all pairings `e(r_i * pk_i,hm_i)` and `e(-G2::one(),r_i * sig_i)`
+    /// The second term `e(-G2::one(),r_i * sig_i)` can be computed efficiently with Multi-Scalar Multiplication:
+    /// `e(-G2::one(), sum_i(r_i * sig_i))`
+    ///
+    /// Finally, we aggregate all pairings `e(r_i * pk_i,hm_i)` (`n`) and `e(-G2::one(),sum_i(r_i * sig_i))` (`1`)
     /// into a single product in the target group `G_T`. If the result is the identity element in `G_T`,
     /// the batch verification succeeds.
     ///
