@@ -120,14 +120,14 @@ impl Variant for MinPk {
         hms: &[Self::Signature],
         signatures: &[Self::Signature],
     ) -> Result<(), Error> {
-        // Ensure there is an equal number of public keys, messages, and signatures
+        // Ensure there is an equal number of public keys, messages, and signatures.
         assert_eq!(publics.len(), hms.len());
         assert_eq!(publics.len(), signatures.len());
         if publics.is_empty() {
             return Ok(());
         }
 
-        // Generate random non-zero scalars
+        // Generate random non-zero scalars.
         let scalars: Vec<Scalar> = (0..publics.len())
             .map(|_| loop {
                 let scalar = Scalar::rand(rng);
@@ -137,33 +137,28 @@ impl Variant for MinPk {
             })
             .collect();
 
-        // Compute MSM for signatures: S = sum(r_i * sig_i) in G2
+        // Compute S_agg = sum(r_i * sig_i) using Multi-Scalar Multiplication (MSM).
         let s_agg = G2::msm(signatures, &scalars);
 
-        // Initialize pairing context
+        // Initialize pairing context. DST is empty as we use pre-hashed messages.
         let mut pairing = blst_pairing::new(false, &[]);
 
-        // Aggregate the single term e(-G1,S_agg)
+        // Aggregate the single term corresponding to signatures: e(-G1::one(),S_agg)
         let s_agg_affine = s_agg.as_blst_p2_affine();
         unsafe {
             pairing.raw_aggregate(&s_agg_affine, &BLS12_381_NEG_G1);
         }
 
-        // 2. Aggregate the n terms e(r_i * pk_i, hm_i)
-        // This part can still benefit from batch affine conversion for
-        // scaled_pk and hms if implemented separately as discussed before.
-        // For simplicity here, we show individual conversion.
+        // Aggregate the `n` terms corresponding to public keys and messages: e(r_i * pk_i,hm_i)
         for i in 0..publics.len() {
-            let mut scaled_pk = publics[i]; // G1
+            let mut scaled_pk = publics[i];
             scaled_pk.mul(&scalars[i]);
             let pk_affine = scaled_pk.as_blst_p1_affine();
-            let hm_affine = hms[i].as_blst_p2_affine(); // G2
-
-            // Note: raw_aggregate takes (G2, G1)
+            let hm_affine = hms[i].as_blst_p2_affine();
             pairing.raw_aggregate(&hm_affine, &pk_affine);
         }
 
-        // Final verification
+        // Perform the final verification on the product of (n+1) pairing terms.
         pairing.commit();
         if !pairing.finalverify(None) {
             return Err(Error::InvalidSignature);
@@ -244,7 +239,7 @@ impl Variant for MinSig {
     /// `prod_i(e(r_i * pk_i,hm_i) * e(-G2::one(),r_i * sig_i)) == 1`
     ///
     /// The second term `e(-G2::one(),r_i * sig_i)` can be computed efficiently with Multi-Scalar Multiplication:
-    /// `e(-G2::one(), sum_i(r_i * sig_i))`
+    /// `e(-G2::one(),sum_i(r_i * sig_i))`
     ///
     /// Finally, we aggregate all pairings `e(r_i * pk_i,hm_i)` (`n`) and `e(-G2::one(),sum_i(r_i * sig_i))` (`1`)
     /// into a single product in the target group `G_T`. If the result is the identity element in `G_T`,
@@ -257,14 +252,14 @@ impl Variant for MinSig {
         hms: &[Self::Signature],
         signatures: &[Self::Signature],
     ) -> Result<(), Error> {
-        // Ensure there is an equal number of public keys, messages, and signatures
+        // Ensure there is an equal number of public keys, messages, and signatures.
         assert_eq!(publics.len(), hms.len());
         assert_eq!(publics.len(), signatures.len());
         if publics.is_empty() {
             return Ok(());
         }
 
-        // Generate random non-zero scalars
+        // Generate random non-zero scalars.
         let scalars: Vec<Scalar> = (0..publics.len())
             .map(|_| loop {
                 let scalar = Scalar::rand(rng);
@@ -274,33 +269,28 @@ impl Variant for MinSig {
             })
             .collect();
 
-        // Compute MSM for signatures: S = sum(r_i * sig_i) in G2
+        // Compute S_agg = sum(r_i * sig_i) using Multi-Scalar Multiplication (MSM).
         let s_agg = G1::msm(signatures, &scalars);
 
-        // Initialize pairing context
+        // Initialize pairing context. DST is empty as we use pre-hashed messages.
         let mut pairing = blst_pairing::new(false, &[]);
 
-        // Aggregate the single term e(-G1,S_agg)
+        // Aggregate the single term corresponding to signatures: e(S_agg,-G2::one())
         let s_agg_affine = s_agg.as_blst_p1_affine();
         unsafe {
             pairing.raw_aggregate(&BLS12_381_NEG_G2, &s_agg_affine);
         }
 
-        // 2. Aggregate the n terms e(r_i * pk_i, hm_i)
-        // This part can still benefit from batch affine conversion for
-        // scaled_pk and hms if implemented separately as discussed before.
-        // For simplicity here, we show individual conversion.
+        // Aggregate the `n` terms corresponding to public keys and messages: e(hm_i, r_i * pk_i)
         for i in 0..publics.len() {
-            let mut scaled_pk = publics[i]; // G1
+            let mut scaled_pk = publics[i];
             scaled_pk.mul(&scalars[i]);
             let pk_affine = scaled_pk.as_blst_p2_affine();
-            let hm_affine = hms[i].as_blst_p1_affine(); // G2
-
-            // Note: raw_aggregate takes (G2, G1)
+            let hm_affine = hms[i].as_blst_p1_affine();
             pairing.raw_aggregate(&pk_affine, &hm_affine);
         }
 
-        // Final verification
+        // Perform the final verification on the product of (n+1) pairing terms.
         pairing.commit();
         if !pairing.finalverify(None) {
             return Err(Error::InvalidSignature);
