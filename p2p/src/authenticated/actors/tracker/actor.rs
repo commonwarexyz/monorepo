@@ -1,57 +1,52 @@
 use super::{
-    ingress::{Mailbox, Message, Oracle, Reservation},
-    metrics::Metrics,
-    record::{Record, Records},
-    set::Set,
+    ingress::{Mailbox, Message, Oracle},
+    registry::Registry,
     Config, Error,
 };
-use crate::authenticated::{ip, metrics, types};
+use crate::authenticated::{ip, types};
 use commonware_cryptography::Scheme;
 use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::{union, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
-use governor::{
-    clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,
-    RateLimiter,
-};
-use rand::{
-    prelude::{IteratorRandom, SliceRandom},
-    Rng,
-};
-use std::{cmp::max, collections::BTreeMap, net::SocketAddr, time::Duration};
+use governor::clock::Clock as GClock;
+use rand::Rng;
+use std::time::Duration;
 use tracing::debug;
 
 // Bytes to add to the namespace to prevent replay attacks.
 const NAMESPACE_SUFFIX_IP: &[u8] = b"_IP";
 
 /// The tracker actor that manages peer discovery and connection reservations.
-pub struct Actor<E: Spawner + Rng + GClock + RuntimeMetrics, C: Scheme> {
+pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> {
     context: E,
 
     // ---------- Configuration ----------
+    /// For signing and verifying messages.
     crypto: C,
+
+    /// The namespace used to sign and verify [`types::PeerInfo`] messages.
     ip_namespace: Vec<u8>,
+
+    /// Whether to allow private IPs.
     allow_private_ips: bool,
+
+    /// The time bound for synchrony. Messages with timestamps greater than this far into the
+    /// future will be considered malformed.
     synchrony_bound: Duration,
-    tracked_peer_sets: usize,
+
+    /// The maximum number of peers in a set.
     max_peer_set_size: usize,
+
+    /// The maximum number of [`types::PeerInfo`] allowable in a single message.
     peer_gossip_max_count: usize,
 
     // ---------- Message-Passing ----------
-    sender: mpsc::Sender<Message<E, C>>,
+    /// The mailbox for the actor.
     receiver: mpsc::Receiver<Message<E, C>>,
 
     // ---------- State ----------
-    /// Tracks peer sets based on the index of the set.
-    sets: BTreeMap<u64, Set<C::PublicKey>>,
-
-    /// Tracks peer information, including:
-    /// - The type of peer (e.g., bootstrapper, myself, etc.)
-    /// - How many peer sets they are part of
-    /// - Their known [`SocketAddr`]
-    /// - Whether they are blocked
-    /// - Whether they are reserved/connected
-    records: Records<E, C>,
+    /// Tracks peer sets and peer connectivity information.
+    registry: Registry<E, C>,
 }
 
 impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> {
@@ -67,125 +62,36 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
         let ip_namespace = union(&cfg.namespace, NAMESPACE_SUFFIX_IP);
         let myself = types::PeerInfo::sign(&mut cfg.crypto, &ip_namespace, socket, timestamp);
 
-        let records = Records::init(
+        let registry = Registry::init(
             context.clone(),
-            Mailbox::new(sender.clone()),
             cfg.bootstrappers,
             myself,
             cfg.allowed_connection_rate_per_peer,
+            cfg.mailbox_size,
+            cfg.tracked_peer_sets,
         );
 
         (
             Self {
                 context,
-
-                // Configuration
                 crypto: cfg.crypto,
                 ip_namespace,
                 allow_private_ips: cfg.allow_private_ips,
                 synchrony_bound: cfg.synchrony_bound,
-                tracked_peer_sets: max(1, cfg.tracked_peer_sets),
                 max_peer_set_size: cfg.max_peer_set_size,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
-
-                // Message-Passing
-                sender: sender.clone(),
                 receiver,
-
-                // State
-                records,
-                sets: BTreeMap::new(),
-                connections_rate_limiter,
+                registry,
             },
             Mailbox::new(sender.clone()),
             Oracle::new(sender),
         )
     }
 
-    /// Stores a new peer set and increments peer counters.
-    fn store_peer_set(&mut self, index: u64, peers: Vec<C::PublicKey>) {
-        // Check if peer set already exists
-        if self.sets.contains_key(&index) {
-            debug!(index, "peer set already exists");
-            return;
-        }
-
-        // Ensure that peer set is monotonically increasing
-        if let Some((last, _)) = self.sets.last_key_value() {
-            if index <= *last {
-                debug!(
-                    ?index,
-                    ?last,
-                    "peer set index must be monotonically increasing"
-                );
-                return;
-            }
-        }
-
-        // Ensure that peer set is not too large.
-        // Panic since there is no way to recover from this.
-        assert!(
-            peers.len() <= self.max_peer_set_size,
-            "peer set is too large: {} > {}",
-            peers.len(),
-            self.max_peer_set_size
-        );
-
-        // Create and store new peer set
-        let mut set = Set::new(peers.clone());
-        for peer in peers.iter() {
-            let record = self.peers.entry(peer.clone()).or_insert(Record::unknown());
-            record.increment();
-            if record.discovered() {
-                set.found(peer);
-            }
-        }
-        self.sets.insert(index, set);
-
-        // Remove oldest entries if necessary
-        while self.sets.len() > self.tracked_peer_sets {
-            let (index, set) = self.sets.pop_first().unwrap();
-            debug!(index, "removed oldest peer set");
-
-            // Iterate over peer set and decrement counts
-            for peer in set.order.keys() {
-                if let Some(record) = self.peers.get_mut(peer) {
-                    if record.decrement() {
-                        self.peers.remove(peer);
-                    }
-                }
-            }
-        }
-
-        // Update metrics
-        let blocked = self.peers.values().filter(|r| r.blocked()).count();
-    }
-
-    /// Returns a list of peers that we have a known address for and were able to successfully reserve.
-    #[allow(clippy::type_complexity)]
-    fn handle_dialable(&mut self) -> Vec<(C::PublicKey, SocketAddr, Reservation<E, C>)> {
-        // Collect peers with known addresses
-        let peers: Vec<(C::PublicKey, SocketAddr)> = self
-            .peers
-            .iter()
-            .filter_map(|(peer, record)| record.address().map(|addr| (peer.clone(), addr)))
-            .collect();
-
-        // Return all peers that we got a reservation for
-        let mut peers: Vec<_> = peers
-            .into_iter()
-            .filter_map(|(peer, addr)| self.reserve(peer.clone()).map(|res| (peer, addr, res)))
-            .collect();
-
-        // Shuffle to prevent starvation
-        peers.shuffle(&mut self.context);
-        peers
-    }
-
     /// Handle an incoming list of peer information.
     ///
     /// Returns an error if the list itself or any entries can be considered malformed.
-    fn handle_peers(&mut self, infos: Vec<types::PeerInfo<C>>) -> Result<(), Error> {
+    fn validate_peers(&mut self, infos: &Vec<types::PeerInfo<C>>) -> Result<(), Error> {
         // Ensure there aren't too many peers sent
         if infos.len() > self.peer_gossip_max_count {
             return Err(Error::TooManyPeers(infos.len()));
@@ -212,104 +118,13 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
                 return Err(Error::SynchronyBound);
             }
 
-            // Ignore irrelevant peers
-            if !self.records.allowed(&info.public_key) {
-                continue;
-            }
-
             // If any signature is invalid, disconnect from the peer
             if !info.verify(&self.ip_namespace) {
                 return Err(Error::InvalidSignature);
             }
-
-            // Update peer address
-            //
-            // It is not safe to rate limit how many times this can happen
-            // over some interval because a malicious peer may just replay
-            // old IPs to prevent us from propagating a new one.
-            let record = self.peers.get_mut(&info.public_key).unwrap();
-            let public_key = info.public_key.clone();
-            if !record.discover(info) {
-                continue;
-            }
-            self.metrics
-                .updates
-                .get_or_create(&metrics::Peer::new(&public_key))
-                .inc();
-
-            // Update peer set knowledge
-            for set in self.sets.values_mut() {
-                set.found(&public_key);
-            }
-            debug!(peer = ?public_key, "updated peer record");
         }
 
         Ok(())
-    }
-
-    /// Handle an incoming bit vector from a peer.
-    fn handle_bit_vec(&mut self, bit_vec: types::BitVec) -> Result<Vec<types::PeerInfo<C>>, Error> {
-        // Ensure we have the peerset requested
-        let Some(set) = self.sets.get(&bit_vec.index) else {
-            // Don't consider unknown indices as errors, just ignore them.
-            debug!(index = bit_vec.index, "requested peer set not found");
-            return Ok(vec![]);
-        };
-
-        // Ensure that the bit vector is the same size as the peer set
-        if bit_vec.bits.len() != set.sorted.len() {
-            return Err(Error::BitVecLengthMismatch(
-                set.sorted.len(),
-                bit_vec.bits.len(),
-            ));
-        }
-
-        // Compile peers to send
-        let mut peers: Vec<_> = bit_vec
-            .bits
-            .iter()
-            .enumerate()
-            .filter(|(_, bit)| !bit) // Only consider peers that the requester has not discovered
-            .filter_map(|(i, _)| {
-                let peer = set.sorted.get(i).expect("invalid index"); // len checked above
-                self.peers.get(peer).and_then(|r| r.peer_info().cloned())
-            })
-            .collect();
-
-        // If we have collected more peers than we can send, randomly
-        // select a subset to send (this increases the likelihood that
-        // the recipient will hear about different peers from different sources)
-        if peers.len() > self.peer_gossip_max_count {
-            peers.shuffle(&mut self.context);
-            peers.truncate(self.peer_gossip_max_count);
-        }
-        Ok(peers)
-    }
-
-    /// Attempt to reserve a connection to a peer, returning a [`Reservation`] if successful.
-    ///
-    /// Will return `None` in any of the following cases:
-    /// - The peer is already reserved.
-    /// - The peer is not [`Self::allowed`].
-    /// - The peer has been rate-limited for connection attempts.
-    fn reserve(&mut self, peer: C::PublicKey) -> Option<Reservation<E, C>> {
-        // Check if we are already reserved
-        if self.records.reserved(&peer) {
-            return None;
-        }
-
-        // Check if peer is invalid or blocked
-        if !self.records.allowed(&peer) {
-            return None;
-        }
-
-        // Determine if we've tried to connect to this peer too many times
-        //
-        // This could happen if we open a connection and then it is immediately closed by
-        // the peer. We don't want to keep trying to connect to the peer in this case.
-
-        // Reserve the connection
-        self.reserved.insert(peer.clone());
     }
 
     /// Start the actor and run it in the background.
@@ -319,103 +134,79 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
 
     async fn run(mut self) {
         while let Some(msg) = self.receiver.next().await {
+            self.registry.flush();
             match msg {
                 Message::Initialize {
                     public_key,
                     mut peer,
                 } => {
                     // Kill if peer is not authorized
-                    if !self.records.allowed(&public_key) {
+                    if !self.registry.allowed(&public_key) {
                         peer.kill().await;
                         continue;
                     }
 
+                    // Mark the record as connected
+                    self.registry.connect(&public_key);
+
                     // Proactively send our own info to the peer
-                    let record = self.peers.get(&self.crypto.public_key()).unwrap();
-                    let peer_info = record.peer_info().unwrap();
-                    let _ = peer.peers(vec![peer_info.clone()]).await;
+                    let info = self.registry.info(&public_key).unwrap();
+                    let _ = peer.peers(vec![info]).await;
                 }
                 Message::Construct {
                     public_key,
                     mut peer,
                 } => {
                     // Kill if peer is not authorized
-                    if !self.records.allowed(&public_key) {
+                    if !self.registry.allowed(&public_key) {
                         peer.kill().await;
                         continue;
                     }
 
-                    // Select a random peer set (we want to learn about all peers in
-                    // our tracked sets)
-                    let Some((&index, set)) = self.sets.iter().choose(&mut self.context) else {
+                    let Some(bit_vec) = self.registry.get_random_bit_vec() else {
                         debug!("no peer sets available");
                         continue;
                     };
-                    let mut bits = set.knowledge.clone();
-
-                    // Unset bits for peers that are "refreshable" but not connected. This helps get
-                    // the most up-to-date information if the peer has changed IPs.
-                    // We know unreserved peers are definitely not connected.
-                    set.sorted.iter().enumerate().for_each(|(i, peer)| {
-                        if bits[i]
-                            && !self.reserved.contains(peer)
-                            && self.peers.get(peer).unwrap().refreshable()
-                        {
-                            bits.clear(i);
-                        }
-                    });
-
-                    // Send bit vector
-                    let _ = peer.bit_vec(types::BitVec { index, bits }).await;
+                    let _ = peer.bit_vec(bit_vec).await;
                 }
-                Message::BitVec { bit_vec, mut peer } => match self.handle_bit_vec(bit_vec) {
-                    Err(e) => {
-                        debug!(error = ?e, "failed to handle bit vector");
+                Message::BitVec { bit_vec, mut peer } => {
+                    let Some(peers) = self.registry.infos(bit_vec) else {
                         peer.kill().await;
                         continue;
+                    };
+                    if !peers.is_empty() {
+                        peer.peers(peers).await;
                     }
-                    Ok(peers) => {
-                        if !peers.is_empty() {
-                            peer.peers(peers).await;
-                        }
-                    }
-                },
+                }
                 Message::Peers { peers, mut peer } => {
-                    // Consider new peer signatures
-                    let result = self.handle_peers(peers);
-                    if let Err(e) = result {
+                    if let Err(e) = self.validate_peers(&peers) {
                         debug!(error = ?e, "failed to handle peers");
                         peer.kill().await;
                         continue;
                     }
-
-                    // We will never add/remove tracked peers here, so we
-                    // don't need to update the gauge.
+                    self.registry.update_peers(peers);
                 }
                 Message::Dialable { responder } => {
-                    // Inform dialer of dialable peers
-                    let _ = responder.send(self.handle_dialable());
-
-                    // Shrink to fit rate limiter
-                    self.connections_rate_limiter.shrink_to_fit();
+                    let _ = responder.send(self.registry.reserve_dialable());
                 }
                 Message::Register { index, peers } => {
-                    self.store_peer_set(index, peers);
+                    // Ensure that peer set is not too large.
+                    // Panic since there is no way to recover from this.
+                    let len = peers.len();
+                    let max = self.max_peer_set_size;
+                    assert!(len <= max, "peer set too large: {} > {}", len, max);
+
+                    self.registry.add_set(index, peers);
                 }
                 Message::Reserve {
                     public_key,
                     reservation,
                 } => {
-                    // Because dropping the reservation will release the connection,
-                    // we don't need to worry about the case that this fails.
-                    let _ = reservation.send(self.reserve(public_key));
-                }
-                Message::Release { public_key } => {
-                    self.records.release(&public_key);
+                    let _ = reservation.send(self.registry.reserve(&public_key));
                 }
                 Message::Block { public_key } => {
                     // Block the peer
-                    self.records.block(&public_key);
+                    self.registry.block(&public_key);
 
                     // We don't have to kill the peer now. It will be sent a `Kill` message the next
                     // time it sends the `Initialize` or `Construct` message to the tracker.
@@ -441,7 +232,7 @@ mod tests {
     use commonware_runtime::{deterministic, Clock, Runner};
     use commonware_utils::{BitVec as UtilsBitVec, NZU32};
     use governor::Quota;
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::time::Duration;
     use types::PeerInfo;
 
@@ -681,8 +472,8 @@ mod tests {
             mailbox.bit_vec(invalid_bit_vec, peer_mailbox_s1.clone()).await;
 
             match peer_receiver_s1.next().await {
-                Some(peer::Message::Kill) => { /* Expected: peer sending bitvec with mismatched length is killed */ }
-                _ => panic!("Expected peer to be killed due to bitvec length mismatch"),
+                Some(peer::Message::Kill) => { /* Expected: peer sending bit_vec with mismatched length is killed */ }
+                _ => panic!("Expected peer to be killed due to bit_vec length mismatch"),
             }
         });
     }
@@ -710,7 +501,7 @@ mod tests {
             match result {
                 futures::future::Either::Left((Some(msg), _)) => {
                     if matches!(msg, peer::Message::Kill) {
-                        panic!("Peer was killed for an unknown bitvec index; expected graceful ignore.");
+                        panic!("Peer was killed for an unknown bit_vec index; expected graceful ignore.");
                     }
                      // If it sends Peers(empty_vec) that's acceptable.
                     if let peer::Message::Peers(p) = msg {
@@ -758,7 +549,9 @@ mod tests {
             // For simplicity, we focus on the `Construct` behavior which implies `allowed()` is false.
             let dialable_peers = mailbox.dialable().await;
             assert!(
-                !dialable_peers.iter().any(|(p, _, _)| p == &pk1),
+                !dialable_peers
+                    .iter()
+                    .any(|(_, res)| res.public_key() == &pk1),
                 "Blocked peer should not be dialable"
             );
         });

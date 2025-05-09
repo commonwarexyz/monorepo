@@ -58,9 +58,9 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Schem
     async fn dial_peers(
         &self,
         tracker: &mut tracker::Mailbox<E, C>,
-        supervisor: &mut spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C>,
+        supervisor: &mut spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
     ) {
-        for (peer, address, reservation) in tracker.dialable().await {
+        for (address, res) in tracker.dialable().await {
             // Check if we have hit rate limit for dialing and if so, skip (we don't
             // want to block the loop)
             if self.dial_limiter.check().is_err() {
@@ -68,7 +68,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Schem
                 break;
             }
             self.dial_attempts
-                .get_or_create(&metrics::Peer::new(&peer))
+                .get_or_create(&metrics::Peer::new(res.public_key()))
                 .inc();
 
             // Spawn dialer to connect to peer
@@ -77,6 +77,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Schem
                 let mut supervisor = supervisor.clone();
                 move |context| async move {
                     // Create span
+                    let peer = res.public_key();
                     let span = debug_span!("dialer", ?peer, ?address);
                     let guard = span.enter();
 
@@ -115,7 +116,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Schem
                     drop(guard);
 
                     // Start peer to handle messages
-                    supervisor.spawn(peer, instance, reservation).await;
+                    supervisor.spawn(instance, res).await;
                 }
             });
         }
@@ -124,7 +125,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Schem
     pub fn start(
         self,
         tracker: tracker::Mailbox<E, C>,
-        supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C>,
+        supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
     ) -> Handle<()> {
         self.context
             .clone()
@@ -134,7 +135,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Schem
     async fn run(
         mut self,
         mut tracker: tracker::Mailbox<E, C>,
-        mut supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C>,
+        mut supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
     ) {
         loop {
             // Attempt to dial peers we know about

@@ -8,6 +8,9 @@ pub struct Metrics {
     /// The total number of unique peers in all peer sets being tracked.
     pub tracked: Gauge,
 
+    /// The total number of connected peers.
+    pub connected: Gauge,
+
     /// The total number of blocked peers.
     pub blocked: Gauge,
 
@@ -29,6 +32,11 @@ impl Metrics {
             "tracked",
             "Total number of unique peers in all peer sets being tracked",
             metrics.tracked.clone(),
+        );
+        context.register(
+            "connected",
+            "Total number of connected peers",
+            metrics.connected.clone(),
         );
         context.register(
             "blocked",

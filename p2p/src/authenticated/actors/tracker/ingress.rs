@@ -1,3 +1,4 @@
+use super::Reservation;
 use crate::authenticated::{actors::peer, types};
 use commonware_cryptography::Verifier;
 use commonware_runtime::{Metrics, Spawner};
@@ -67,10 +68,6 @@ pub enum Message<E: Spawner + Metrics, C: Verifier> {
         peer: peer::Mailbox<C>,
     },
 
-    // ---------- Used by reservation ----------
-    /// Release a reservation for a particular peer.
-    Release { public_key: C::PublicKey },
-
     // ---------- Used by dialer ----------
     /// Request a list of dialable peers.
     ///
@@ -80,7 +77,7 @@ pub enum Message<E: Spawner + Metrics, C: Verifier> {
     Dialable {
         /// One-shot channel to send the list of dialable peers.
         #[allow(clippy::type_complexity)]
-        responder: oneshot::Sender<Vec<(C::PublicKey, SocketAddr, Reservation<E, C>)>>,
+        responder: oneshot::Sender<Vec<(SocketAddr, Reservation<E, C::PublicKey>)>>,
     },
 
     // ---------- Used by listener ----------
@@ -91,7 +88,7 @@ pub enum Message<E: Spawner + Metrics, C: Verifier> {
     /// has an active reservation).
     Reserve {
         public_key: C::PublicKey,
-        reservation: oneshot::Sender<Option<Reservation<E, C>>>,
+        reservation: oneshot::Sender<Option<Reservation<E, C::PublicKey>>>,
     },
 }
 
@@ -140,7 +137,7 @@ impl<E: Spawner + Metrics, C: Verifier> Mailbox<E, C> {
     }
 
     /// Send a `Block` message to the tracker.
-    pub async fn dialable(&mut self) -> Vec<(C::PublicKey, SocketAddr, Reservation<E, C>)> {
+    pub async fn dialable(&mut self) -> Vec<(SocketAddr, Reservation<E, C::PublicKey>)> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::Dialable { responder: sender })
@@ -150,7 +147,10 @@ impl<E: Spawner + Metrics, C: Verifier> Mailbox<E, C> {
     }
 
     /// Send a `Reserve` message to the tracker.
-    pub async fn reserve(&mut self, public_key: C::PublicKey) -> Option<Reservation<E, C>> {
+    pub async fn reserve(
+        &mut self,
+        public_key: C::PublicKey,
+    ) -> Option<Reservation<E, C::PublicKey>> {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(Message::Reserve {
@@ -160,32 +160,6 @@ impl<E: Spawner + Metrics, C: Verifier> Mailbox<E, C> {
             .await
             .unwrap();
         rx.await.unwrap()
-    }
-
-    /// Try to send a `Release` message to the tracker without blocking.
-    ///
-    /// Returns `true` if the message was sent successfully, and `false` if the mailbox is full.
-    pub fn try_release(&mut self, public_key: C::PublicKey) -> bool {
-        let Err(e) = self.sender.try_send(Message::Release { public_key }) else {
-            return true;
-        };
-        if e.is_full() {
-            return false;
-        }
-
-        // If any other error occurs, we should panic!
-        panic!(
-            "unexpected error while trying to release reservation: {:?}",
-            e
-        );
-    }
-
-    /// Send a `Release` message to the tracker.
-    pub async fn release(&mut self, public_key: C::PublicKey) {
-        self.sender
-            .send(Message::Release { public_key })
-            .await
-            .unwrap();
     }
 }
 
@@ -224,36 +198,5 @@ impl<E: Spawner + Metrics, C: Verifier> crate::Blocker for Oracle<E, C> {
 
     async fn block(&mut self, public_key: Self::PublicKey) {
         let _ = self.sender.send(Message::Block { public_key }).await;
-    }
-}
-
-pub struct Reservation<E: Spawner + Metrics, C: Verifier> {
-    context: E,
-    closer: Option<(C::PublicKey, Mailbox<E, C>)>,
-}
-
-impl<E: Spawner + Metrics, C: Verifier> Reservation<E, C> {
-    pub fn new(context: E, peer: C::PublicKey, mailbox: Mailbox<E, C>) -> Self {
-        Self {
-            context,
-            closer: Some((peer, mailbox)),
-        }
-    }
-}
-
-impl<E: Spawner + Metrics, C: Verifier> Drop for Reservation<E, C> {
-    fn drop(&mut self) {
-        let (peer, mut mailbox) = self.closer.take().unwrap();
-
-        // If the mailbox is not full, we can release the reservation immediately without spawning a task.
-        if mailbox.try_release(peer.clone()) {
-            return;
-        }
-
-        // If the mailbox is full, we need to spawn a task to handle the release. If we used `block_on` here,
-        // it could cause a deadlock.
-        self.context.spawn_ref()(async move {
-            mailbox.release(peer).await;
-        });
     }
 }

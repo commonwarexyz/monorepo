@@ -12,10 +12,13 @@ mod actor;
 mod ingress;
 mod metrics;
 mod record;
+mod registry;
+mod reservation;
 mod set;
 
 pub use actor::Actor;
-pub use ingress::{Mailbox, Oracle, Reservation};
+pub use ingress::{Mailbox, Oracle};
+pub use reservation::Reservation;
 
 pub struct Config<C: Scheme> {
     pub crypto: C,
@@ -43,6 +46,4 @@ pub enum Error {
     InvalidSignature,
     #[error("synchrony bound violated")]
     SynchronyBound,
-    #[error("peervec length mismatch: expected {0} bytes, got {1}")]
-    BitVecLengthMismatch(usize, usize),
 }
