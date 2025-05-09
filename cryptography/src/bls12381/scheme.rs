@@ -378,12 +378,12 @@ impl BatchScheme for Bls12381Batch {
         public_key: &Self::PublicKey,
         signature: &Self::Signature,
     ) -> bool {
+        self.publics.push(public_key.key);
         let payload = match namespace {
             Some(namespace) => Cow::Owned(union_unique(namespace, message)),
             None => Cow::Borrowed(message),
         };
         let hm = ops::hash_message::<MinPk>(MinPk::MESSAGE, &payload);
-        self.publics.push(public_key.key);
         self.hms.push(hm);
         self.signatures.push(signature.signature);
         true
