@@ -90,8 +90,9 @@ impl Variant for MinPk {
 
     /// Verifies a set of signatures against their respective public keys and pre-hashed messages.
     ///
-    /// This method is outperforms individual signature verification by verifying a random linear
-    /// combination of the public keys and signatures.
+    /// This method is outperforms individual signature verification (`2` pairings per signature) by
+    /// verifying a random linear combination of the public keys and signatures (`n+1` pairings and
+    /// `2n` multiplications for `n` signatures).
     ///
     /// The verification equation for each signature `i` is:
     /// `e(hm_i,pk_i) == e(sig_i,G1::one())`,
@@ -105,7 +106,10 @@ impl Variant for MinPk {
     /// Using the bilinearity of pairings, this can be rewritten (by moving `r_i` inside the pairings):
     /// `prod_i(e(hm_i,r_i * pk_i) * e(r_i * sig_i,-G1::one())) == 1`
     ///
-    /// Finally, we aggregate all pairings `e(hm_i,r_i * pk_i)` and `e(r_i * sig_i,-G1::one())`
+    /// The second term `e(r_i * sig_i,-G1::one())` can be computed efficiently with Multi-Scalar Multiplication:
+    /// `e(sum_i(r_i * sig_i),-G1::one())`
+    ///
+    /// Finally, we aggregate all pairings `e(hm_i,r_i * pk_i)` (`n`) and `e(sum_i(r_i * sig_i),-G1::one())` (`1`)
     /// into a single product in the target group `G_T`. If the result is the identity element in `G_T`,
     /// the batch verification succeeds.
     ///
@@ -116,60 +120,45 @@ impl Variant for MinPk {
         hms: &[Self::Signature],
         signatures: &[Self::Signature],
     ) -> Result<(), Error> {
-        // Ensure there is an equal number of public keys, messages, and signatures
+        // Ensure there is an equal number of public keys, messages, and signatures.
         assert_eq!(publics.len(), hms.len());
         assert_eq!(publics.len(), signatures.len());
         if publics.is_empty() {
             return Ok(());
         }
 
-        // Create a pairing context
-        //
-        // We only handle pre-hashed messages, so we leave the domain separator tag (`DST`) empty.
-        let mut pairing = blst_pairing::new(false, &[]);
-        for i in 0..publics.len() {
-            // Generate a non-zero random scalar `r_i`.
-            //
-            // This scalar is essential for the security of batch verification. It ensures that
-            // multiple invalid signatures are extremely unlikely to combine in a way that
-            // makes the overall batch check pass (i.e., they don't accidentally "cancel out").
-            let r_i = loop {
+        // Generate random non-zero scalars.
+        let scalars: Vec<Scalar> = (0..publics.len())
+            .map(|_| loop {
                 let scalar = Scalar::rand(rng);
                 if scalar != Scalar::zero() {
-                    break scalar;
+                    return scalar;
                 }
-            };
+            })
+            .collect();
 
-            // Prepare the pairing term e(r_i * sig_i,-G1::one()).
-            //
-            // This corresponds to one part of the i-th term in the product: e(sig_i,-G1::one())^{r_i}.
-            let mut scaled_sig = signatures[i];
-            scaled_sig.mul(&r_i);
-            let sig_affine = scaled_sig.as_blst_p2_affine();
+        // Compute S_agg = sum(r_i * sig_i) using Multi-Scalar Multiplication (MSM).
+        let s_agg = G2::msm(signatures, &scalars);
 
-            // Aggregate the term e(r_i * sig_i,-G1::one()) into the pairing context.
-            unsafe {
-                pairing.raw_aggregate(&sig_affine, &BLS12_381_NEG_G1);
-            }
+        // Initialize pairing context. DST is empty as we use pre-hashed messages.
+        let mut pairing = blst_pairing::new(false, &[]);
 
-            // Prepare the pairing term e(hm_i, r_i * pk_i).
-            //
-            // This corresponds to the other part of the i-th term in the product: e(hm_i, pk_i)^{r_i}.
+        // Aggregate the single term corresponding to signatures: e(-G1::one(),S_agg)
+        let s_agg_affine = s_agg.as_blst_p2_affine();
+        unsafe {
+            pairing.raw_aggregate(&s_agg_affine, &BLS12_381_NEG_G1);
+        }
+
+        // Aggregate the `n` terms corresponding to public keys and messages: e(r_i * pk_i,hm_i)
+        for i in 0..publics.len() {
             let mut scaled_pk = publics[i];
-            scaled_pk.mul(&r_i);
+            scaled_pk.mul(&scalars[i]);
             let pk_affine = scaled_pk.as_blst_p1_affine();
             let hm_affine = hms[i].as_blst_p2_affine();
-
-            // Aggregate the term e(hm_i,r_i * pk_i) into the pairing context.
             pairing.raw_aggregate(&hm_affine, &pk_affine);
         }
 
-        // Perform the final verification.
-        //
-        // `finalverify` computes the product of all (2n) aggregated pairing terms:
-        // prod_i(e(hm_i, r_i * pk_i) * e(r_i * sig_i,-G1::one()))
-        //
-        // It then checks if this resulting product in G_T is equal to the identity element.
+        // Perform the final verification on the product of (n+1) pairing terms.
         pairing.commit();
         if !pairing.finalverify(None) {
             return Err(Error::InvalidSignature);
@@ -233,10 +222,11 @@ impl Variant for MinSig {
 
     /// Verifies a set of signatures against their respective public keys and pre-hashed messages.
     ///
-    /// This method outperforms individual signature verification by verifying a random linear
-    /// combination of the public keys and signatures.
+    /// This method outperforms individual signature verification (`2` pairings per signature) by
+    /// verifying a random linear combination of the public keys and signatures (`n+1` pairings and
+    /// `2n` multiplications for `n` signatures).
     ///
-    /// The verification equation for `MinSig` for each signature `i` is:
+    /// The verification equation for each signature `i` is:
     /// `e(pk_i,hm_i) == e(G2::one(),sig_i)`,
     /// which is equivalent to checking if `e(pk_i,hm_i) * e(-G2::one(),sig_i) == 1`.
     ///
@@ -248,7 +238,10 @@ impl Variant for MinSig {
     /// Using the bilinearity of pairings, this can be rewritten (by moving `r_i` inside the pairings):
     /// `prod_i(e(r_i * pk_i,hm_i) * e(-G2::one(),r_i * sig_i)) == 1`
     ///
-    /// Finally, we aggregate all pairings `e(r_i * pk_i,hm_i)` and `e(-G2::one(),r_i * sig_i)`
+    /// The second term `e(-G2::one(),r_i * sig_i)` can be computed efficiently with Multi-Scalar Multiplication:
+    /// `e(-G2::one(),sum_i(r_i * sig_i))`
+    ///
+    /// Finally, we aggregate all pairings `e(r_i * pk_i,hm_i)` (`n`) and `e(-G2::one(),sum_i(r_i * sig_i))` (`1`)
     /// into a single product in the target group `G_T`. If the result is the identity element in `G_T`,
     /// the batch verification succeeds.
     ///
@@ -259,65 +252,49 @@ impl Variant for MinSig {
         hms: &[Self::Signature],
         signatures: &[Self::Signature],
     ) -> Result<(), Error> {
-        // Ensure there is an equal number of public keys, messages, and signatures
+        // Ensure there is an equal number of public keys, messages, and signatures.
         assert_eq!(publics.len(), hms.len());
         assert_eq!(publics.len(), signatures.len());
         if publics.is_empty() {
             return Ok(());
         }
 
-        // Create a pairing context
-        //
-        // We only handle pre-hashed messages, so we leave the domain separator tag (`DST`) empty.
-        let mut pairing = blst_pairing::new(false, &[]);
-        for i in 0..publics.len() {
-            // Generate a non-zero random scalar `r_i`.
-            //
-            // This scalar is essential for the security of batch verification. It ensures that
-            // multiple invalid signatures are extremely unlikely to combine in a way that
-            // makes the overall batch check pass (i.e., they don't accidentally "cancel out").
-            let r_i = loop {
+        // Generate random non-zero scalars.
+        let scalars: Vec<Scalar> = (0..publics.len())
+            .map(|_| loop {
                 let scalar = Scalar::rand(rng);
                 if scalar != Scalar::zero() {
-                    break scalar;
+                    return scalar;
                 }
-            };
+            })
+            .collect();
 
-            // Prepare the pairing term e(-G2::one(),r_i * sig_i).
-            //
-            // This corresponds to one part of the i-th term in the product: e(-G2::one(),sig_i)^{r_i}.
-            let mut scaled_sig = signatures[i];
-            scaled_sig.mul(&r_i);
-            let sig_p1_affine = scaled_sig.as_blst_p1_affine(); // Convert to G1 affine.
+        // Compute S_agg = sum(r_i * sig_i) using Multi-Scalar Multiplication (MSM).
+        let s_agg = G1::msm(signatures, &scalars);
 
-            // Aggregate the term e(-G2::one(),r_i * sig_i) into the pairing context.
-            unsafe {
-                pairing.raw_aggregate(&BLS12_381_NEG_G2, &sig_p1_affine);
-            }
+        // Initialize pairing context. DST is empty as we use pre-hashed messages.
+        let mut pairing = blst_pairing::new(false, &[]);
 
-            // Prepare the pairing term e(r_i * pk_i,hm_i).
-            //
-            // This corresponds to the other part of the i-th term in the product: e(pk_i,hm_i)^{r_i}.
-            let mut scaled_pk = publics[i];
-            scaled_pk.mul(&r_i);
-            let pk_p2_affine = scaled_pk.as_blst_p2_affine();
-            let hm_p1_affine = hms[i].as_blst_p1_affine();
-
-            // Aggregate the term e(r_i * pk_i,hm_i) into the pairing context.
-            pairing.raw_aggregate(&pk_p2_affine, &hm_p1_affine);
+        // Aggregate the single term corresponding to signatures: e(S_agg,-G2::one())
+        let s_agg_affine = s_agg.as_blst_p1_affine();
+        unsafe {
+            pairing.raw_aggregate(&BLS12_381_NEG_G2, &s_agg_affine);
         }
 
-        // Perform the final verification.
-        //
-        // `finalverify` computes the product of all (2n) aggregated pairing terms:
-        // prod_i(e(r_i * pk_i,hm_i) * e(-G2::one(),r_i * sig_i))
-        //
-        // It then checks if this resulting product in G_T is equal to the identity element.
+        // Aggregate the `n` terms corresponding to public keys and messages: e(hm_i, r_i * pk_i)
+        for i in 0..publics.len() {
+            let mut scaled_pk = publics[i];
+            scaled_pk.mul(&scalars[i]);
+            let pk_affine = scaled_pk.as_blst_p2_affine();
+            let hm_affine = hms[i].as_blst_p1_affine();
+            pairing.raw_aggregate(&pk_affine, &hm_affine);
+        }
+
+        // Perform the final verification on the product of (n+1) pairing terms.
         pairing.commit();
         if !pairing.finalverify(None) {
             return Err(Error::InvalidSignature);
         }
-
         Ok(())
     }
 }
