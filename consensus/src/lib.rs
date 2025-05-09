@@ -129,6 +129,8 @@ cfg_if::cfg_if! {
             /// Seed is some random value used to bias the leader selection process.
             type Seed;
 
+            type Public;
+
             /// Identity is the type against which partial signatures are verified.
             type Identity;
 
@@ -138,6 +140,9 @@ cfg_if::cfg_if! {
 
             /// Return the leader at a given index over the provided seed.
             fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<Self::PublicKey>;
+
+            /// TODO: require public to remain constant over views.
+            fn public(&self) -> &Self::Public;
 
             /// Returns the identity (typically a group polynomial with a fixed constant factor)
             /// at the given index. This is used to verify partial signatures from participants
