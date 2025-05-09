@@ -113,7 +113,7 @@ impl Variant for MinPk {
     /// into a single product in the target group `G_T`. If the result is the identity element in `G_T`,
     /// the batch verification succeeds.
     ///
-    /// Source: https://ethresear.ch/t/security-of-bls-batch-verification/10748
+    /// Source: <https://ethresear.ch/t/security-of-bls-batch-verification/10748>
     fn batch_verify<R: RngCore + CryptoRng>(
         rng: &mut R,
         publics: &[Self::Public],
@@ -245,7 +245,7 @@ impl Variant for MinSig {
     /// into a single product in the target group `G_T`. If the result is the identity element in `G_T`,
     /// the batch verification succeeds.
     ///
-    /// Source: https://ethresear.ch/t/security-of-bls-batch-verification/10748
+    /// Source: <https://ethresear.ch/t/security-of-bls-batch-verification/10748>
     fn batch_verify<R: RngCore + CryptoRng>(
         rng: &mut R,
         publics: &[Self::Public],
