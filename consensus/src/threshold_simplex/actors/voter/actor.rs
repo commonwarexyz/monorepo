@@ -1956,6 +1956,9 @@ impl<
         let mut shutdown = self.context.stopped();
 
         // Spawn partial signature verifier
+        //
+        // We attempt to verify notarization/nullification/finalization messages right away (outside this loop)
+        // in case they help us avoid unnecessary work.
         let (mut verifier_sender, mut verifier_receiver) =
             mpsc::channel::<(C::PublicKey, Voter<V, D>)>(1024);
         self.context.with_label("verifier").spawn_blocking({
