@@ -2011,7 +2011,7 @@ impl<
                             // If any are invalid, we block
                             if let Err(invalid) = result {}
 
-                            // Notify the application
+                            // Notify the application (for any items in vec now out of items)
                         }
                     }
                 })
