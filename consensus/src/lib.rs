@@ -129,6 +129,7 @@ cfg_if::cfg_if! {
             /// Seed is some random value used to bias the leader selection process.
             type Seed;
 
+            /// Public is the type against which threshold signatures are verified.
             type Public;
 
             /// Identity is the type against which partial signatures are verified.
