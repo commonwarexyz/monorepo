@@ -1972,10 +1972,10 @@ impl<
                         // TODO: complexity is that there may be multiple partial signatures in a single voter (need
                         // to somehow put into multiple buckets?)
                         let mut messages = Vec::new();
-                        let mut work: HashMap<
+                        let mut work: BTreeMap<
                             (u64, Vec<u8>, Vec<u8>),
                             Vec<(usize, PartialSignature<V>)>,
-                        > = HashMap::new();
+                        > = BTreeMap::new();
                         loop {
                             match verifier_receiver.try_next() {
                                 Ok(Some((sender, msg))) => {
@@ -1998,8 +1998,8 @@ impl<
                             }
                         }
 
-                        // Verify messages or bisect
-                        for ((view, namespace, message), signatures) in work {
+                        // Verify messages or bisect (in order of most recent view to oldest)
+                        for ((view, namespace, message), signatures) in work.into_iter().rev() {
                             let identity = supervisor.identity(view).unwrap();
                             let result = partial_verify_multiple_public_keys::<V, _>(
                                 identity,
@@ -2007,6 +2007,11 @@ impl<
                                 &message,
                                 signatures.iter().map(|(_, signature)| signature),
                             );
+
+                            // If any are invalid, we block
+                            if let Err(invalid) = result {}
+
+                            // Notify the application
                         }
                     }
                 })
