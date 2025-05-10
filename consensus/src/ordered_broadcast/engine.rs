@@ -838,15 +838,8 @@ impl<
         // Validate chunk
         self.validate_chunk(&node.chunk, self.epoch)?;
 
-        // Get parent identity
-        let public = if let Some(parent) = &node.parent {
-            Some(self.validators.public())
-        } else {
-            None
-        };
-
         // Verify the signature
-        node.verify(&self.namespace, public)
+        node.verify(&self.namespace, self.validators.public())
             .map_err(|_| Error::InvalidNodeSignature)
     }
 

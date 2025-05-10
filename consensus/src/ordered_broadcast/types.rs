@@ -363,7 +363,7 @@ impl<C: Verifier, V: Variant, D: Digest> Node<C, V, D> {
     pub fn verify(
         &self,
         namespace: &[u8],
-        public: Option<&V::Public>,
+        public: &V::Public,
     ) -> Result<Option<Chunk<C::PublicKey, D>>, Error> {
         // Verify chunk
         let chunk_namespace = chunk_namespace(namespace);
@@ -381,12 +381,6 @@ impl<C: Verifier, V: Variant, D: Digest> Node<C, V, D> {
         };
 
         // Verify parent (if present)
-        let Some(public) = public else {
-            // We would otherwise require the public key to always be present,
-            // however, it is not clear what the caller should provide when there is
-            // no parent (e.g. genesis chunk).
-            return Err(Error::PublicKeyRequired);
-        };
         let parent_chunk = Chunk::new(
             self.chunk.sequencer.clone(),
             self.chunk
@@ -829,7 +823,7 @@ mod tests {
             primitives::{
                 group::{Element, Share},
                 ops::{partial_sign_message, threshold_signature_recover},
-                poly,
+                poly::{self, public},
                 variant::{MinPk, MinSig},
             },
         },
@@ -1143,6 +1137,10 @@ mod tests {
     fn node_sign_verify<V: Variant>() {
         let mut scheme = sample_scheme(0);
         let public_key = scheme.public_key();
+        let n = 4;
+        let t = quorum(n as u32);
+        let (identity, shares) = generate_test_data::<V>(n, t, 0);
+        let public = public::<V>(&identity);
 
         // Test genesis node (no parent)
         let node = Node::<Ed25519, V, Sha256Digest>::sign(
@@ -1152,15 +1150,11 @@ mod tests {
             sample_digest(1),
             None,
         );
-        let result = node.verify(NAMESPACE, None);
+        let result = node.verify(NAMESPACE, public);
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
 
         // Test node with parent
-        let n = 4;
-        let t = quorum(n as u32);
-        let (identity, shares) = generate_test_data::<V>(n, t, 0);
-
         let parent_chunk = Chunk::new(public_key.clone(), 0, sample_digest(1));
         let parent_epoch = 5;
 
@@ -1186,8 +1180,7 @@ mod tests {
             parent,
         );
 
-        let public = poly::public::<V>(&identity);
-        let result = node.verify(NAMESPACE, Some(public));
+        let result = node.verify(NAMESPACE, public);
         assert!(result.is_ok());
         assert!(result.unwrap().is_some());
     }
@@ -1260,6 +1253,7 @@ mod tests {
         let n = 4;
         let t = quorum(n as u32);
         let (identity, shares) = generate_test_data::<V>(n, t, 0);
+        let public = poly::public::<V>(&identity);
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
@@ -1279,7 +1273,6 @@ mod tests {
         let lock = Lock::<_, V, _>::new(chunk, epoch, threshold);
 
         // Verify lock
-        let public = poly::public::<V>(&identity);
         assert!(lock.verify(NAMESPACE, public));
 
         // Test that verification fails with wrong namespace
@@ -1362,6 +1355,10 @@ mod tests {
     fn node_verify_invalid_signature<V: Variant>() {
         let mut scheme = sample_scheme(0);
         let public_key = scheme.public_key();
+        let n = 4;
+        let t = quorum(n as u32);
+        let (identity, _) = generate_test_data::<V>(n, t, 0);
+        let public = poly::public::<V>(&identity);
 
         // Create a valid chunk
         let chunk = Chunk::new(public_key.clone(), 0, sample_digest(1));
@@ -1375,7 +1372,7 @@ mod tests {
         let node = Node::<Ed25519, V, Sha256Digest>::new(chunk.clone(), signature, None);
 
         // Verification should succeed
-        assert!(node.verify(NAMESPACE, None).is_ok());
+        assert!(node.verify(NAMESPACE, &public).is_ok());
 
         // Now create a node with invalid signature
         let tampered_signature = scheme.sign(Some(chunk_namespace.as_ref()), &node.encode());
@@ -1383,7 +1380,7 @@ mod tests {
 
         // Verification should fail
         assert!(matches!(
-            invalid_node.verify(NAMESPACE, None),
+            invalid_node.verify(NAMESPACE, &public),
             Err(Error::InvalidSequencerSignature)
         ));
     }
@@ -1435,7 +1432,7 @@ mod tests {
         let public = poly::public::<V>(&commitment);
 
         // Verification should succeed
-        assert!(node.verify(NAMESPACE, Some(public)).is_ok());
+        assert!(node.verify(NAMESPACE, &public).is_ok());
 
         // Now create a parent with invalid threshold signature
         // Generate a different set of BLS keys/shares
@@ -1458,7 +1455,7 @@ mod tests {
 
         // Verification should fail because the parent signature doesn't verify with the correct public key
         assert!(matches!(
-            node.verify(NAMESPACE, Some(public)),
+            node.verify(NAMESPACE, &public),
             Err(Error::InvalidThresholdSignature)
         ));
     }
