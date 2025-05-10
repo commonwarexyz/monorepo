@@ -34,11 +34,15 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: Verifier>
     rate_limited: Family<metrics::Message, Counter>,
 
     // When reservation goes out-of-scope, the tracker will be notified.
-    _reservation: tracker::Reservation<E, C>,
+    _reservation: tracker::Reservation<E, C::PublicKey>,
 }
 
 impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Verifier> Actor<E, C> {
-    pub fn new(context: E, cfg: Config, reservation: tracker::Reservation<E, C>) -> (Self, Relay) {
+    pub fn new(
+        context: E,
+        cfg: Config,
+        reservation: tracker::Reservation<E, C::PublicKey>,
+    ) -> (Self, Relay) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
@@ -51,7 +55,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Ver
                 allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
                 allowed_peers_rate: cfg.allowed_peers_rate,
                 codec_config: types::Config {
-                    max_bitvec: cfg.max_peer_set_size,
+                    max_bit_vec: cfg.max_peer_set_size,
                     max_peers: cfg.peer_gossip_max_count,
                 },
                 control: control_receiver,
