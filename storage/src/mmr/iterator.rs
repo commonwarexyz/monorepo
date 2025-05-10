@@ -264,7 +264,7 @@ impl Iterator for PathIterator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::mem::Mmr;
+    use crate::mmr::{hasher::Basic, mem::Mmr};
     use commonware_cryptography::{sha256::hash, Sha256};
     use commonware_runtime::{deterministic, Runner};
 
@@ -276,8 +276,8 @@ mod tests {
         executor.start(|_| async move {
             // Build MMR with 1000 leaves and make sure we can correctly convert each leaf position to
             // its number and back again.
-            let mut mmr = Mmr::<Sha256>::new();
-            let mut hasher = Sha256::default();
+            let mut mmr = Mmr::<_, Basic<Sha256>>::new();
+            let mut hasher = Basic::new(Sha256::default());
             let mut num_to_pos = Vec::new();
             for _ in 0u64..1000 {
                 num_to_pos.push(mmr.add(&mut hasher, &digest).await.unwrap());

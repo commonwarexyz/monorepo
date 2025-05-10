@@ -73,13 +73,36 @@ use std::future::Future;
 use thiserror::Error;
 
 pub mod bitmap;
-mod hasher;
+pub mod hasher;
 pub mod iterator;
 pub mod journaled;
 pub mod mem;
 #[cfg(test)]
 mod tests;
 pub mod verification;
+
+/// A trait required by various MMR methods for computing hash digests.
+pub trait Hasher<H: CHasher>: Send + Sync {
+    /// Computes the hash for a leaf given its position and the element it represents.
+    fn leaf_hash(
+        &mut self,
+        pos: u64,
+        element: &[u8],
+    ) -> impl Future<Output = Result<H::Digest, Error>> + Send;
+
+    /// Computes the hash for a node given its position and the hashes of its children.
+    fn node_hash(&mut self, pos: u64, left_hash: &H::Digest, right_hash: &H::Digest) -> H::Digest;
+
+    /// Computes the root hash for an MMR given its size and an iterator over the hashes of its
+    /// peaks. The iterator should yield the peak hashes in decreasing order of their height.
+    fn root_hash<'b>(
+        &mut self,
+        pos: u64,
+        peak_hashes: impl Iterator<Item = &'b H::Digest>,
+    ) -> H::Digest;
+
+    fn hash(&mut self, data: &[u8]) -> H::Digest;
+}
 
 /// A trait that allows generic access to MMR digests from its storage, for example in generating
 /// inclusion proofs.
@@ -92,12 +115,12 @@ pub trait Storage<D: Digest>: Send + Sync {
 }
 
 /// A trait for generic MMR building.
-pub trait Builder<H: CHasher>: Send + Sync {
+pub trait Builder<H: CHasher, M: Hasher<H>>: Send + Sync {
     /// Add an element to the MMR.
-    fn add(&mut self, hasher: &mut H, element: &[u8]) -> impl Future<Output = Result<u64, Error>>;
+    fn add(&mut self, hasher: &mut M, element: &[u8]) -> impl Future<Output = Result<u64, Error>>;
 
     /// Return the root hash of the MMR.
-    fn root(&self, hasher: &mut H) -> H::Digest;
+    fn root(&self, hasher: &mut M) -> H::Digest;
 }
 
 /// Errors that can occur when interacting with an MMR.

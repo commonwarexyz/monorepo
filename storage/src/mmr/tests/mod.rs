@@ -1,22 +1,23 @@
-use crate::mmr::Builder;
+use crate::mmr::{Builder, Hasher};
 use commonware_cryptography::{Hasher as CHasher, Sha256};
 use commonware_utils::hex;
 
 /// Build the MMR corresponding to the stability test `ROOTS` and confirm the
 /// roots match that from the builder's root computation.
-pub async fn build_test_roots_mmr<B: Builder<Sha256>>(
-    hasher: &mut Sha256,
+pub async fn build_test_roots_mmr<M: Hasher<Sha256>, B: Builder<Sha256, M>>(
+    hasher: &mut M,
     mmr: &mut B,
     check_hashes: bool,
 ) {
+    let mut c_hasher = Sha256::new();
     for i in 0u64..199 {
         let root = mmr.root(hasher);
         let expected_root = ROOTS[i as usize];
         if check_hashes {
             assert_eq!(hex(&root), expected_root, "at: {}", i);
         }
-        hasher.update(&i.to_be_bytes());
-        let element = hasher.finalize();
+        c_hasher.update(&i.to_be_bytes());
+        let element = c_hasher.finalize();
         mmr.add(hasher, &element).await.unwrap();
     }
 }
