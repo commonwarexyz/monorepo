@@ -1,9 +1,4 @@
-use super::{
-    metrics::Metrics,
-    record::{Record, Status},
-    set::Set,
-    Reservation,
-};
+use super::{metrics::Metrics, record::Record, set::Set, Reservation};
 use crate::authenticated::{
     metrics,
     types::{self, PeerInfo},
@@ -16,10 +11,7 @@ use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,
 };
-use rand::{
-    seq::{IteratorRandom, SliceRandom},
-    Rng,
-};
+use rand::{seq::IteratorRandom, Rng};
 use std::{
     collections::{BTreeMap, HashMap},
     net::SocketAddr,
@@ -90,28 +82,46 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Registry<E
     }
 
     /// Process all messages in the release queue.
-    pub fn flush(&mut self) {
+    pub fn process_releases(&mut self) {
         // For each message in the queue...
         while let Ok(Some(peer)) = self.receiver.try_next() {
-            // Release the reservation and remove the record if needed.
-            if let Some(record) = self.peers.get_mut(&peer) {
-                match record.release() {
-                    Status::Inert => 0,
-                    Status::Reserved => self.metrics.reserved.dec(),
-                    Status::Active => self.metrics.connected.dec(),
-                };
-                self.delete_if_needed(&peer);
+            let Some(record) = self.peers.get_mut(&peer) else {
+                continue;
             };
+            match record.release() {
+                true => self.metrics.connected.dec(),
+                false => self.metrics.reserved.dec(),
+            };
+
+            let want = record.want();
+            for set in self.sets.values_mut() {
+                set.set_to(&peer, !want);
+            }
+            self.delete_if_needed(&peer);
         }
     }
 
     // ---------- Setters ----------
 
+    /// Sets the status of a peer to `connected`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the peer is not tracked or if the peer is not in the reserved state.
     pub fn connect(&mut self, peer: &C::PublicKey) {
-        self.peers.get_mut(peer).unwrap().connect();
+        // Set the record as connected
+        let record = self.peers.get_mut(peer).unwrap();
+        record.connect();
         self.metrics.connected.inc();
+
+        // We may have to update the sets.
+        let want = record.want();
+        for set in self.sets.values_mut() {
+            set.set_to(peer, !want);
+        }
     }
 
+    /// Using a list of (already-validated) peer information, update the records.
     pub fn update_peers(&mut self, infos: Vec<types::PeerInfo<C>>) {
         for info in infos {
             // Update peer address
@@ -120,11 +130,10 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Registry<E
             // over some interval because a malicious peer may just replay
             // old IPs to prevent us from propagating a new one.
             let peer = info.public_key.clone();
-            if !self
-                .peers
-                .get_mut(&info.public_key)
-                .is_some_and(|r| r.discover(info))
-            {
+            let Some(record) = self.peers.get_mut(&peer) else {
+                continue;
+            };
+            if !record.update(info) {
                 continue;
             }
             self.metrics
@@ -132,7 +141,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Registry<E
                 .get_or_create(&metrics::Peer::new(&peer))
                 .inc();
 
-            // Update peer set knowledge
+            // We may have to update the sets.
             let want = self.peers.get(&peer).unwrap().want();
             for set in self.sets.values_mut() {
                 set.set_to(&peer, !want);
@@ -160,8 +169,10 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Registry<E
         // Create and store new peer set
         let mut set = Set::new(peers.clone());
         for peer in peers.iter() {
-            self.try_insert(peer, Record::unknown());
-            let record = self.peers.get_mut(peer).unwrap();
+            let record = self.peers.entry(peer.clone()).or_insert_with(|| {
+                self.metrics.tracked.inc();
+                Record::unknown()
+            });
             record.increment();
             set.set_to(peer, !record.want());
         }
@@ -178,7 +189,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Registry<E
         }
     }
 
-    /// Returns a shuffled list of peers that we have a known address for and were able to reserve.
+    /// Returns a list of peers that we have a known address for and were able to reserve.
     pub fn reserve_dialable(&mut self) -> Vec<(SocketAddr, Reservation<E, C::PublicKey>)> {
         // Collect peers with known addresses
         let result: Vec<_> = self
@@ -188,14 +199,10 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Registry<E
             .collect();
 
         // Attempt to reserve each peer
-        let mut result: Vec<_> = result
+        result
             .into_iter()
             .filter_map(|(peer, addr)| self.reserve(&peer).map(|res| (addr, res)))
-            .collect();
-
-        // Shuffle to prevent starvation
-        result.shuffle(&mut self.context);
-        result
+            .collect()
     }
 
     /// Returns a [`types::BitVec`] for a random peer set.
@@ -205,33 +212,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Registry<E
             index,
             bits: set.knowledge(),
         })
-    }
-
-    pub fn try_insert(&mut self, peer: &C::PublicKey, record: Record<C>) -> bool {
-        if self.peers.contains_key(peer) {
-            return false;
-        }
-        self.peers.insert(peer.clone(), record);
-        self.metrics.tracked.inc();
-        true
-    }
-
-    /// Attempt to delete a record.
-    ///
-    /// Returns `true` if the record was deleted, `false` otherwise.
-    pub fn delete_if_needed(&mut self, peer: &C::PublicKey) -> bool {
-        let Some(record) = self.peers.get(peer) else {
-            return false;
-        };
-        if !record.deletable() {
-            return false;
-        }
-        if record.blocked() {
-            self.metrics.blocked.dec();
-        }
-        self.peers.remove(peer);
-        self.metrics.tracked.dec();
-        true
     }
 
     /// Attempt to reserve a peer.
@@ -270,18 +250,11 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Registry<E
         None
     }
 
-    /// Attempt to block a peer.
-    ///
-    /// Returns `true` if the peer was newly blocked, `false` otherwise.
-    pub fn block(&mut self, peer: &C::PublicKey) -> bool {
-        let Some(record) = self.peers.get_mut(peer) else {
-            return false;
-        };
-        if record.block() {
+    /// Attempt to block a peer, updating the metrics accordingly.
+    pub fn block(&mut self, peer: &C::PublicKey) {
+        if self.peers.get_mut(peer).is_some_and(|r| r.block()) {
             self.metrics.blocked.inc();
-            return true;
         }
-        false
     }
 
     // ---------- Getters ----------
@@ -334,5 +307,25 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Registry<E
     /// Returns true if the peer is able to be connected to.
     pub fn allowed(&self, peer: &C::PublicKey) -> bool {
         self.peers.get(peer).is_some_and(|r| r.allowed())
+    }
+
+    // --------- Helpers ----------
+
+    /// Attempt to delete a record.
+    ///
+    /// Returns `true` if the record was deleted, `false` otherwise.
+    fn delete_if_needed(&mut self, peer: &C::PublicKey) -> bool {
+        let Some(record) = self.peers.get(peer) else {
+            return false;
+        };
+        if !record.deletable() {
+            return false;
+        }
+        if record.blocked() {
+            self.metrics.blocked.dec();
+        }
+        self.peers.remove(peer);
+        self.metrics.tracked.dec();
+        true
     }
 }

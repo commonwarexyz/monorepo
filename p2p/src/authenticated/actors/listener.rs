@@ -96,16 +96,13 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         //
         // Reserve also checks if the peer is authorized.
         let peer = incoming.peer();
-        let reservation = match tracker
+        let Some(reservation) = tracker
             .reserve(peer.clone())
             .instrument(debug_span!("reserve"))
             .await
-        {
-            Some(reservation) => reservation,
-            None => {
-                status::error(&span, "unable to reserve connection to peer", None);
-                return;
-            }
+        else {
+            status::error(&span, "unable to reserve connection to peer", None);
+            return;
         };
 
         // Perform handshake

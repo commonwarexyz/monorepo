@@ -134,7 +134,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
 
     async fn run(mut self) {
         while let Some(msg) = self.receiver.next().await {
-            self.registry.flush();
+            self.registry.process_releases();
             match msg {
                 Message::Initialize {
                     public_key,
@@ -163,11 +163,11 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
                         continue;
                     }
 
-                    let Some(bit_vec) = self.registry.get_random_bit_vec() else {
+                    if let Some(bit_vec) = self.registry.get_random_bit_vec() {
+                        let _ = peer.bit_vec(bit_vec).await;
+                    } else {
                         debug!("no peer sets available");
-                        continue;
                     };
-                    let _ = peer.bit_vec(bit_vec).await;
                 }
                 Message::BitVec { bit_vec, mut peer } => {
                     let Some(peers) = self.registry.infos(bit_vec) else {
