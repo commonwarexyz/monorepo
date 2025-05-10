@@ -2015,7 +2015,7 @@ impl<
 
                         // Verify messages or bisect (in order of most recent view to oldest)
                         for ((view, namespace, message), signatures) in work.iter().rev() {
-                            let identity = supervisor.identity(view).unwrap();
+                            let identity = supervisor.identity(*view).unwrap();
                             let result = partial_verify_multiple_public_keys::<V, _>(
                                 identity,
                                 Some(&namespace),
