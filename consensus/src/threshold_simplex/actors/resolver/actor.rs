@@ -19,7 +19,7 @@ use commonware_p2p::{
         codec::{wrap, WrappedSender},
         requester,
     },
-    Receiver, Recipients, Sender,
+    Blocker, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{Clock, Handle, Metrics, Spawner};
 use futures::{channel::mpsc, future::Either, StreamExt};
@@ -103,11 +103,18 @@ impl Inflight {
 pub struct Actor<
     E: Clock + GClock + Rng + Metrics + Spawner,
     C: Scheme,
+    B: Blocker,
     V: Variant,
     D: Digest,
-    S: ThresholdSupervisor<Index = View, Identity = poly::Public<V>, PublicKey = C::PublicKey>,
+    S: ThresholdSupervisor<
+        Index = View,
+        Identity = poly::Public<V>,
+        PublicKey = C::PublicKey,
+        Public = V::Public,
+    >,
 > {
     context: E,
+    blocker: B,
     supervisor: S,
 
     namespace: Vec<u8>,
@@ -135,12 +142,18 @@ pub struct Actor<
 impl<
         E: Clock + GClock + Rng + Metrics + Spawner,
         C: Scheme,
+        B: Blocker,
         V: Variant,
         D: Digest,
-        S: ThresholdSupervisor<Index = View, Identity = poly::Public<V>, PublicKey = C::PublicKey>,
-    > Actor<E, C, V, D, S>
+        S: ThresholdSupervisor<
+            Index = View,
+            Identity = poly::Public<V>,
+            PublicKey = C::PublicKey,
+            Public = V::Public,
+        >,
+    > Actor<E, C, B, V, D, S>
 {
-    pub fn new(context: E, cfg: Config<C, S>) -> (Self, Mailbox<V, D>) {
+    pub fn new(context: E, cfg: Config<C, B, S>) -> (Self, Mailbox<V, D>) {
         // Initialize requester
         let config = requester::Config {
             public_key: cfg.crypto.public_key(),
@@ -171,6 +184,7 @@ impl<
         (
             Self {
                 context,
+                blocker: cfg.blocker,
                 supervisor: cfg.supervisor,
 
                 namespace: cfg.namespace,
@@ -512,11 +526,7 @@ impl<
                                     debug!(view, sender = ?s, "unnecessary notarization");
                                     continue;
                                 }
-                                let Some(identity) = self.supervisor.identity(view) else {
-                                    warn!(view, sender = ?s, "missing identity");
-                                    continue;
-                                };
-                                let public_key = poly::public::<V>(identity);
+                                let public_key = self.supervisor.public();
                                 if !notarization.verify(&self.namespace, public_key) {
                                     warn!(view, sender = ?s, "invalid notarization");
                                     self.requester.block(s.clone());
@@ -536,11 +546,7 @@ impl<
                                     debug!(view, sender = ?s, "unnecessary nullification");
                                     continue;
                                 }
-                                let Some(identity) = self.supervisor.identity(view) else {
-                                    warn!(view, sender = ?s, "missing identity");
-                                    continue;
-                                };
-                                let public_key = poly::public::<V>(identity);
+                                let public_key = self.supervisor.public();
                                 if !nullification.verify(&self.namespace, public_key) {
                                     warn!(view, sender = ?s, "invalid nullification");
                                     self.requester.block(s.clone());

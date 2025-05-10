@@ -1,5 +1,9 @@
 use crate::{ordered_broadcast::types::Epoch, Supervisor, ThresholdSupervisor};
-use commonware_cryptography::bls12381::primitives::{group::Share, poly::Public, variant::Variant};
+use commonware_cryptography::bls12381::primitives::{
+    group::Share,
+    poly::{public, Public},
+    variant::Variant,
+};
 use commonware_utils::Array;
 use std::{collections::HashMap, marker::PhantomData};
 
@@ -52,11 +56,16 @@ impl<P: Array, V: Variant> Supervisor for Validators<P, V> {
 
 impl<P: Array, V: Variant> ThresholdSupervisor for Validators<P, V> {
     type Identity = Public<V>;
+    type Public = V::Public;
     type Share = Share;
     type Seed = V::Signature;
 
     fn leader(&self, _: Self::Index, _: Self::Seed) -> Option<Self::PublicKey> {
         unimplemented!()
+    }
+
+    fn public(&self) -> &Self::Public {
+        public::<V>(&self.identity)
     }
 
     fn identity(&self, _: Self::Index) -> Option<&Self::Identity> {

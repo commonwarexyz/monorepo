@@ -67,6 +67,7 @@ pub struct Engine<
         PublicKey = C::PublicKey,
         Share = group::Share,
         Identity = poly::Public<V>,
+        Public = V::Public,
     >,
     NetS: Sender<PublicKey = C::PublicKey>,
     NetR: Receiver<PublicKey = C::PublicKey>,
@@ -211,6 +212,7 @@ impl<
             PublicKey = C::PublicKey,
             Share = group::Share,
             Identity = poly::Public<V>,
+            Public = V::Public,
         >,
         NetS: Sender<PublicKey = C::PublicKey>,
         NetR: Receiver<PublicKey = C::PublicKey>,
@@ -836,18 +838,8 @@ impl<
         // Validate chunk
         self.validate_chunk(&node.chunk, self.epoch)?;
 
-        // Get parent identity
-        let public = if let Some(parent) = &node.parent {
-            let Some(identity) = self.validators.identity(parent.epoch) else {
-                return Err(Error::UnknownIdentity(parent.epoch));
-            };
-            Some(poly::public::<V>(identity))
-        } else {
-            None
-        };
-
         // Verify the signature
-        node.verify(&self.namespace, public)
+        node.verify(&self.namespace, self.validators.public())
             .map_err(|_| Error::InvalidNodeSignature)
     }
 

@@ -6,7 +6,7 @@ use crate::{
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Context,
             Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
-            NullifyFinalize, Proposal, View, Viewable, Voter,
+            NullifyFinalize, Proposal, Verifiable, View, Viewable, Voter,
         },
     },
     Automaton, Relay, Reporter, ThresholdSupervisor, LATENCY,
@@ -14,8 +14,11 @@ use crate::{
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
-        ops::{threshold_signature_recover, threshold_signature_recover_pair},
-        poly,
+        ops::{
+            partial_verify_multiple_public_keys, threshold_signature_recover,
+            threshold_signature_recover_pair,
+        },
+        poly::{self, PartialSignature},
         variant::Variant,
     },
     Digest, Scheme,
@@ -23,13 +26,14 @@ use commonware_cryptography::{
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
-    Receiver, Recipients, Sender,
+    Blocker, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
-use commonware_utils::quorum;
+use commonware_utils::{quorum, BitVec};
 use futures::{
     channel::{mpsc, oneshot},
+    executor::block_on,
     future::Either,
     pin_mut, StreamExt,
 };
@@ -37,7 +41,10 @@ use prometheus_client::metrics::{
     counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
 };
 use rand::Rng;
-use std::{collections::hash_map::Entry, sync::atomic::AtomicI64};
+use std::{
+    collections::{hash_map::Entry, HashSet},
+    sync::atomic::AtomicI64,
+};
 use std::{
     collections::{BTreeMap, HashMap},
     time::{Duration, SystemTime},
@@ -45,6 +52,13 @@ use std::{
 use tracing::{debug, trace, warn};
 
 const GENESIS_VIEW: View = 0;
+
+#[derive(Clone)]
+enum Status<O> {
+    None,
+    Pending(O),
+    Verified(O),
+}
 
 struct Round<
     C: Scheme,
@@ -56,6 +70,7 @@ struct Round<
         Index = View,
         Share = group::Share,
         PublicKey = C::PublicKey,
+        Public = V::Public,
     >,
 > {
     start: SystemTime,
@@ -76,21 +91,21 @@ struct Round<
     verified_proposal: bool,
 
     // Track notarizes for all proposals (ensuring any participant only has one recorded notarize)
-    notarized_proposals: HashMap<Proposal<D>, Vec<u32>>,
-    notarizes: Vec<Option<Notarize<V, D>>>,
+    notarized_proposals: HashMap<Proposal<D>, BitVec>,
+    notarizes: Vec<Status<Notarize<V, D>>>,
     notarization: Option<Notarization<V, D>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
 
     // Track nullifies (ensuring any participant only has one recorded nullify)
-    nullifies: HashMap<u32, Nullify<V>>,
+    nullifies: HashMap<u32, Status<Nullify<V>>>,
     nullification: Option<Nullification<V>>,
     broadcast_nullify: bool,
     broadcast_nullification: bool,
 
     // Track finalizes for all proposals (ensuring any participant only has one recorded finalize)
-    finalized_proposals: HashMap<Proposal<D>, Vec<u32>>,
-    finalizes: Vec<Option<Finalize<V, D>>>,
+    finalized_proposals: HashMap<Proposal<D>, BitVec>,
+    finalizes: Vec<Status<Finalize<V, D>>>,
     finalization: Option<Finalization<V, D>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
@@ -106,6 +121,7 @@ impl<
             Index = View,
             Share = group::Share,
             PublicKey = C::PublicKey,
+            Public = V::Public,
         >,
     > Round<C, V, D, R, S>
 {
@@ -129,7 +145,7 @@ impl<
             verified_proposal: false,
 
             notarized_proposals: HashMap::new(),
-            notarizes: vec![None; participants],
+            notarizes: vec![Status::None; participants],
             notarization: None,
             broadcast_notarize: false,
             broadcast_notarization: false,
@@ -140,7 +156,7 @@ impl<
             broadcast_nullification: false,
 
             finalized_proposals: HashMap::new(),
-            finalizes: vec![None; participants],
+            finalizes: vec![Status::None; participants],
             finalization: None,
             broadcast_finalize: false,
             broadcast_finalization: false,
@@ -173,7 +189,7 @@ impl<
         notarize: Notarize<V, D>,
     ) -> bool {
         // Check if already notarized
-        if let Some(previous) = self.notarizes[public_key_index as usize].as_ref() {
+        if let Status::Verified(ref previous) = self.notarizes[public_key_index as usize] {
             if previous == &notarize {
                 trace!(?notarize, ?previous, "already notarized");
                 return false;
@@ -194,12 +210,14 @@ impl<
 
         // Store the notarize
         if let Some(vec) = self.notarized_proposals.get_mut(&notarize.proposal) {
-            vec.push(public_key_index);
+            vec.set(public_key_index as usize);
         } else {
+            let mut vec = BitVec::zeroes(self.participants);
+            vec.set(public_key_index as usize);
             self.notarized_proposals
-                .insert(notarize.proposal.clone(), vec![public_key_index]);
+                .insert(notarize.proposal.clone(), vec);
         }
-        self.notarizes[public_key_index as usize] = Some(notarize.clone());
+        self.notarizes[public_key_index as usize] = Status::Verified(notarize.clone());
         self.reporter.report(Activity::Notarize(notarize)).await;
         true
     }
@@ -499,6 +517,7 @@ impl<
 pub struct Actor<
     E: Clock + Rng + Spawner + Storage + Metrics,
     C: Scheme,
+    B: Blocker,
     V: Variant,
     D: Digest,
     A: Automaton<Digest = D, Context = Context<D>>,
@@ -510,10 +529,13 @@ pub struct Actor<
         Index = View,
         Share = group::Share,
         PublicKey = C::PublicKey,
+        // TOD: Improve the naming here
+        Public = V::Public,
     >,
 > {
     context: E,
     crypto: C,
+    blocker: B,
     automaton: A,
     relay: R,
     reporter: F,
@@ -553,6 +575,7 @@ pub struct Actor<
 impl<
         E: Clock + Rng + Spawner + Storage + Metrics,
         C: Scheme,
+        B: Blocker,
         V: Variant,
         D: Digest,
         A: Automaton<Digest = D, Context = Context<D>>,
@@ -564,10 +587,11 @@ impl<
             Index = View,
             Share = group::Share,
             PublicKey = C::PublicKey,
+            Public = V::Public,
         >,
-    > Actor<E, C, V, D, A, R, F, S>
+    > Actor<E, C, B, V, D, A, R, F, S>
 {
-    pub fn new(context: E, cfg: Config<C, V, D, A, R, F, S>) -> (Self, Mailbox<V, D>) {
+    pub fn new(context: E, cfg: Config<C, B, V, D, A, R, F, S>) -> (Self, Mailbox<V, D>) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -612,6 +636,7 @@ impl<
             Self {
                 context,
                 crypto: cfg.crypto,
+                blocker: cfg.blocker,
                 automaton: cfg.automaton,
                 relay: cfg.relay,
                 reporter: cfg.reporter,
@@ -1231,6 +1256,11 @@ impl<
         if public_key_index != notarize.signer() {
             return false;
         }
+
+        // TODO: mark as pending
+
+        // TODO: pass to verify loop
+
         if !notarize.verify(&self.namespace, identity) {
             return false;
         }
@@ -1284,10 +1314,7 @@ impl<
         }
 
         // Verify notarization
-        let Some(identity) = self.supervisor.identity(view) else {
-            return false;
-        };
-        let public_key = poly::public::<V>(identity);
+        let public_key = self.supervisor.public();
         if !notarization.verify(&self.namespace, public_key) {
             return false;
         }
@@ -1340,10 +1367,7 @@ impl<
         }
 
         // Verify nullification
-        let Some(identity) = self.supervisor.identity(nullification.view) else {
-            return false;
-        };
-        let public_key = poly::public::<V>(identity);
+        let public_key = self.supervisor.public();
         if !nullification.verify(&self.namespace, public_key) {
             return false;
         }
@@ -1453,10 +1477,7 @@ impl<
         }
 
         // Verify finalization
-        let Some(identity) = self.supervisor.identity(view) else {
-            return false;
-        };
-        let public_key = poly::public::<V>(identity);
+        let public_key = self.supervisor.public();
         if !finalization.verify(&self.namespace, public_key) {
             return false;
         }
@@ -1933,6 +1954,84 @@ impl<
 
         // Create shutdown tracker
         let mut shutdown = self.context.stopped();
+
+        // Spawn partial signature verifier
+        //
+        // We attempt to verify notarization/nullification/finalization messages right away (outside this loop)
+        // in case they help us avoid unnecessary work.
+        let (mut verifier_sender, mut verifier_receiver) =
+            mpsc::channel::<(C::PublicKey, Voter<V, D>)>(1024);
+        self.context.with_label("verifier").spawn_blocking({
+            let namespace = self.namespace.clone();
+            let supervisor = self.supervisor.clone();
+            || {
+                block_on(async move {
+                    // Initialize view data structures
+                    let mut messages = Vec::new();
+                    let mut work: BTreeMap<
+                        (u64, Vec<u8>, Vec<u8>),
+                        Vec<(usize, PartialSignature<V>)>,
+                    > = BTreeMap::new();
+
+                    // Wait for first item
+                    while let Some((sender, msg)) = verifier_receiver.next().await {
+                        // Clear data structures
+                        messages.clear();
+                        work.clear();
+
+                        // Add first item
+                        let view = msg.view();
+                        let verifiable = msg.message(&namespace);
+                        let msg_idx = messages.len();
+                        messages.push((sender, msg, verifiable.len()));
+                        for (namespace, message, signature) in verifiable.into_iter() {
+                            work.entry((view, namespace, message))
+                                .or_insert_with(Vec::new)
+                                .push((msg_idx, signature));
+                        }
+
+                        // Pull as many messages as possible without waiting
+                        loop {
+                            match verifier_receiver.try_next() {
+                                Ok(Some((sender, msg))) => {
+                                    let view = msg.view();
+                                    let verifiable = msg.message(&namespace);
+                                    let msg_idx = messages.len();
+                                    messages.push((sender, msg, verifiable.len()));
+                                    for (namespace, message, signature) in verifiable.into_iter() {
+                                        work.entry((view, namespace, message))
+                                            .or_insert_with(Vec::new)
+                                            .push((msg_idx, signature));
+                                    }
+                                }
+                                Ok(None) => {
+                                    return;
+                                }
+                                Err(_) => {
+                                    break;
+                                }
+                            }
+                        }
+
+                        // Verify messages or bisect (in order of most recent view to oldest)
+                        for ((view, namespace, message), signatures) in work.iter().rev() {
+                            let identity = supervisor.identity(*view).unwrap();
+                            let result = partial_verify_multiple_public_keys::<V, _>(
+                                identity,
+                                Some(&namespace),
+                                &message,
+                                signatures.iter().map(|(_, signature)| signature),
+                            );
+
+                            // If any are invalid, we block
+                            if let Err(invalid) = result {}
+
+                            // Notify the application (for any items in vec now out of items)
+                        }
+                    }
+                })
+            }
+        });
 
         // Process messages
         let mut pending_set = None;

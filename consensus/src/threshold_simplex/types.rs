@@ -59,6 +59,11 @@ pub trait Seedable<V: Variant> {
     fn seed(&self) -> Seed<V>;
 }
 
+// TODO: better naming
+pub trait Verifiable<V: Variant> {
+    fn message(&self, namespace: &[u8]) -> Vec<(Vec<u8>, Vec<u8>, PartialSignature<V>)>;
+}
+
 // Constants for domain separation in signature verification
 // These are used to prevent cross-protocol attacks and message-type confusion
 const SEED_SUFFIX: &[u8] = b"_SEED";
@@ -116,6 +121,19 @@ pub enum Voter<V: Variant, D: Digest> {
     Finalize(Finalize<V, D>),
     /// A recovered threshold signature for a finalization
     Finalization(Finalization<V, D>),
+}
+
+impl<V: Variant, D: Digest> Verifiable<V> for Voter<V, D> {
+    fn message(&self, namespace: &[u8]) -> Vec<(Vec<u8>, Vec<u8>, PartialSignature<V>)> {
+        match self {
+            Voter::Notarize(v) => v.message(namespace),
+            Voter::Notarization(_) => unreachable!("not allowed"),
+            Voter::Nullify(_) => unimplemented!(),
+            Voter::Nullification(_) => unreachable!("not allowed"),
+            Voter::Finalize(_) => unimplemented!(),
+            Voter::Finalization(_) => unreachable!("not allowed"),
+        }
+    }
 }
 
 impl<V: Variant, D: Digest> Write for Voter<V, D> {
@@ -343,6 +361,27 @@ impl<V: Variant, D: Digest> Attributable for Notarize<V, D> {
 impl<V: Variant, D: Digest> Viewable for Notarize<V, D> {
     fn view(&self) -> View {
         self.proposal.view()
+    }
+}
+
+// TODO: incorporate into sign/verify
+impl<V: Variant, D: Digest> Verifiable<V> for Notarize<V, D> {
+    fn message(&self, namespace: &[u8]) -> Vec<(Vec<u8>, Vec<u8>, PartialSignature<V>)> {
+        let notarize_namespace = notarize_namespace(namespace);
+        let notarize_message = self.proposal.encode();
+        let notarize_batch = (
+            notarize_namespace,
+            notarize_message.to_vec(),
+            self.proposal_signature.clone(),
+        );
+        let seed_namespace = seed_namespace(namespace);
+        let seed_message = view_message(self.proposal.view);
+        let seed_batch = (
+            seed_namespace,
+            seed_message.to_vec(),
+            self.seed_signature.clone(),
+        );
+        vec![notarize_batch, seed_batch]
     }
 }
 
