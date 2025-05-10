@@ -6,7 +6,6 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
-use std::net::SocketAddr;
 
 /// Messages that can be sent to the tracker actor.
 pub enum Message<E: Spawner + Metrics, C: Verifier> {
@@ -77,7 +76,7 @@ pub enum Message<E: Spawner + Metrics, C: Verifier> {
     Dialable {
         /// One-shot channel to send the list of dialable peers.
         #[allow(clippy::type_complexity)]
-        responder: oneshot::Sender<Vec<(SocketAddr, Reservation<E, C::PublicKey>)>>,
+        responder: oneshot::Sender<Vec<Reservation<E, C::PublicKey>>>,
     },
 
     // ---------- Used by listener ----------
@@ -137,7 +136,7 @@ impl<E: Spawner + Metrics, C: Verifier> Mailbox<E, C> {
     }
 
     /// Send a `Block` message to the tracker.
-    pub async fn dialable(&mut self) -> Vec<(SocketAddr, Reservation<E, C::PublicKey>)> {
+    pub async fn dialable(&mut self) -> Vec<Reservation<E, C::PublicKey>> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::Dialable { responder: sender })

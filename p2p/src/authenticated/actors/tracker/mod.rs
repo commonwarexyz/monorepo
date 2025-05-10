@@ -18,7 +18,7 @@ mod set;
 
 pub use actor::Actor;
 pub use ingress::{Mailbox, Oracle};
-pub use reservation::Reservation;
+pub use reservation::{Metadata as ResMetadata, Reservation};
 
 pub struct Config<C: Scheme> {
     pub crypto: C,

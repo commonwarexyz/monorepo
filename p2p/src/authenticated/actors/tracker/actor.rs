@@ -202,7 +202,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
                     public_key,
                     reservation,
                 } => {
-                    let _ = reservation.send(self.registry.reserve(&public_key));
+                    let _ = reservation.send(self.registry.reserve_listener(&public_key));
                 }
                 Message::Block { public_key } => {
                     // Block the peer
@@ -472,8 +472,8 @@ mod tests {
             mailbox.bit_vec(invalid_bit_vec, peer_mailbox_s1.clone()).await;
 
             match peer_receiver_s1.next().await {
-                Some(peer::Message::Kill) => { /* Expected: peer sending bit_vec with mismatched length is killed */ }
-                _ => panic!("Expected peer to be killed due to bit_vec length mismatch"),
+                Some(peer::Message::Kill) => { /* Expected: peer sending bit vec with mismatched length is killed */ }
+                _ => panic!("Expected peer to be killed due to bit vec length mismatch"),
             }
         });
     }
@@ -501,7 +501,7 @@ mod tests {
             match result {
                 futures::future::Either::Left((Some(msg), _)) => {
                     if matches!(msg, peer::Message::Kill) {
-                        panic!("Peer was killed for an unknown bit_vec index; expected graceful ignore.");
+                        panic!("Peer was killed for an unknown bit vec index; expected graceful ignore.");
                     }
                      // If it sends Peers(empty_vec) that's acceptable.
                     if let peer::Message::Peers(p) = msg {
@@ -551,7 +551,7 @@ mod tests {
             assert!(
                 !dialable_peers
                     .iter()
-                    .any(|(_, res)| res.public_key() == &pk1),
+                    .any(|res| res.metadata().public_key() == &pk1),
                 "Blocked peer should not be dialable"
             );
         });

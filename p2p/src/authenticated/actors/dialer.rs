@@ -1,7 +1,10 @@
 //! Actor responsible for dialing peers and establishing connections.
 
 use crate::authenticated::{
-    actors::{spawner, tracker},
+    actors::{
+        spawner,
+        tracker::{self, ResMetadata},
+    },
     metrics,
 };
 use commonware_cryptography::Scheme;
@@ -64,7 +67,11 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Schem
         let mut reservations = tracker.dialable().await;
         reservations.shuffle(&mut self.context);
 
-        for (address, res) in reservations {
+        for res in reservations {
+            let ResMetadata::Dialer(peer, address, _) = res.metadata().clone() else {
+                panic!("unexpected reservation type");
+            };
+
             // Check if we have hit rate limit for dialing and if so, skip (we don't
             // want to block the loop)
             if self.dial_limiter.check().is_err() {
@@ -72,7 +79,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Schem
                 break;
             }
             self.dial_attempts
-                .get_or_create(&metrics::Peer::new(res.public_key()))
+                .get_or_create(&metrics::Peer::new(&peer))
                 .inc();
 
             // Spawn dialer to connect to peer
@@ -81,7 +88,6 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Schem
                 let mut supervisor = supervisor.clone();
                 move |context| async move {
                     // Create span
-                    let peer = res.public_key();
                     let span = debug_span!("dialer", ?peer, ?address);
                     let guard = span.enter();
 

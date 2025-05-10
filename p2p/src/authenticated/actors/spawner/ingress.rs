@@ -1,4 +1,4 @@
-use crate::authenticated::actors::tracker;
+use crate::authenticated::actors::tracker::Reservation;
 use commonware_runtime::{Clock, Metrics, Sink, Spawner, Stream};
 use commonware_stream::public_key::Connection;
 use commonware_utils::Array;
@@ -8,7 +8,7 @@ pub enum Message<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: Array> {
     Spawn {
         peer: P,
         connection: Connection<Si, St>,
-        reservation: tracker::Reservation<E, P>,
+        reservation: Reservation<E, P>,
     },
 }
 
@@ -21,14 +21,10 @@ impl<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: Array> Mailbox<E, Si
         Self { sender }
     }
 
-    pub async fn spawn(
-        &mut self,
-        connection: Connection<Si, St>,
-        reservation: tracker::Reservation<E, P>,
-    ) {
+    pub async fn spawn(&mut self, connection: Connection<Si, St>, reservation: Reservation<E, P>) {
         self.sender
             .send(Message::Spawn {
-                peer: reservation.public_key().clone(),
+                peer: reservation.metadata().public_key().clone(),
                 connection,
                 reservation,
             })
