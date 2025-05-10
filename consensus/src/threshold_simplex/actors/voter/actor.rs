@@ -1963,20 +1963,18 @@ impl<
                     // TODO: complexity is that there may be multiple partial signatures in a single voter (need
                     // to somehow put into multiple buckets?)
                     let mut messages = Vec::new();
-                    let mut work: HashMap<
-                        (Vec<u8>, Vec<u8>),
-                        Vec<(C::PublicKey, PartialSignature<V>, usize)>,
-                    > = HashMap::new();
+                    let mut work: HashMap<(Vec<u8>, Vec<u8>), Vec<(usize, PartialSignature<V>)>> =
+                        HashMap::new();
                     loop {
                         match verifier_receiver.try_next() {
                             Ok(Some((sender, msg))) => {
                                 let verifiable = msg.message(&self.namespace);
                                 let msg_idx = messages.len();
-                                messages.push((msg, 2));
+                                messages.push((sender, msg, verifiable.len()));
                                 for (namespace, message, signature) in verifiable.into_iter() {
                                     work.entry((namespace, message))
                                         .or_insert_with(Vec::new)
-                                        .push((sender.clone(), signature, msg_idx));
+                                        .push((msg_idx, signature));
                                 }
                             }
                             Ok(None) => {
@@ -1988,7 +1986,7 @@ impl<
                         }
                     }
 
-                    // Break into aggregate signatures
+                    // Verify messages or bisect
                 }
             })
         });
