@@ -61,7 +61,7 @@ pub trait Element:
     fn mul(&mut self, rhs: &Scalar);
 }
 
-/// A point on a a curve.
+/// A point on a curve.
 pub trait Point: Element {
     /// Maps the provided data to a group element.
     fn map(&mut self, dst: DST, message: &[u8]);
