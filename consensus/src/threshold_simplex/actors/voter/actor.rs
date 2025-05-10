@@ -6,7 +6,7 @@ use crate::{
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Context,
             Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
-            NullifyFinalize, Proposal, View, Viewable, Voter,
+            NullifyFinalize, Proposal, Verifiable, View, Viewable, Voter,
         },
     },
     Automaton, Relay, Reporter, ThresholdSupervisor, LATENCY,
@@ -15,7 +15,7 @@ use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
         ops::{threshold_signature_recover, threshold_signature_recover_pair},
-        poly,
+        poly::{self, PartialSignature},
         variant::Variant,
     },
     Digest, Scheme,
@@ -38,7 +38,10 @@ use prometheus_client::metrics::{
     counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
 };
 use rand::Rng;
-use std::{collections::hash_map::Entry, sync::atomic::AtomicI64};
+use std::{
+    collections::{hash_map::Entry, HashSet},
+    sync::atomic::AtomicI64,
+};
 use std::{
     collections::{BTreeMap, HashMap},
     time::{Duration, SystemTime},
@@ -1949,17 +1952,32 @@ impl<
         // Create shutdown tracker
         let mut shutdown = self.context.stopped();
 
-        // Spawn signature verifier
-        let (mut verifier_sender, mut verifier_receiver) = mpsc::channel::<Voter<V, D>>(1024);
+        // Spawn partial signature verifier
+        let (mut verifier_sender, mut verifier_receiver) =
+            mpsc::channel::<(C::PublicKey, Voter<V, D>)>(1024);
         self.context.with_label("verifier").spawn_blocking(|| {
             block_on(async move {
                 loop {
                     // Pull as many messages as possible without blocking
+                    //
+                    // TODO: complexity is that there may be multiple partial signatures in a single voter (need
+                    // to somehow put into multiple buckets?)
                     let mut messages = Vec::new();
+                    let mut work: HashMap<
+                        (Vec<u8>, Vec<u8>),
+                        Vec<(C::PublicKey, PartialSignature<V>, usize)>,
+                    > = HashMap::new();
                     loop {
                         match verifier_receiver.try_next() {
-                            Ok(Some(msg)) => {
-                                messages.push(msg);
+                            Ok(Some((sender, msg))) => {
+                                let verifiable = msg.message(&self.namespace);
+                                let msg_idx = messages.len();
+                                messages.push((msg, 2));
+                                for (namespace, message, signature) in verifiable.into_iter() {
+                                    work.entry((namespace, message))
+                                        .or_insert_with(Vec::new)
+                                        .push((sender.clone(), signature, msg_idx));
+                                }
                             }
                             Ok(None) => {
                                 return;
