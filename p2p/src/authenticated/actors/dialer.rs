@@ -1,7 +1,10 @@
 //! Actor responsible for dialing peers and establishing connections.
 
 use crate::authenticated::{
-    actors::{spawner, tracker},
+    actors::{
+        spawner,
+        tracker::{self, ResMetadata},
+    },
     metrics,
 };
 use commonware_cryptography::Scheme;
@@ -17,7 +20,7 @@ use governor::{
 };
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
-use rand::{CryptoRng, Rng};
+use rand::{seq::SliceRandom, CryptoRng, Rng};
 use std::time::Duration;
 use tracing::{debug, debug_span, Instrument};
 
@@ -56,11 +59,19 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Schem
     }
 
     async fn dial_peers(
-        &self,
+        &mut self,
         tracker: &mut tracker::Mailbox<E, C>,
-        supervisor: &mut spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C>,
+        supervisor: &mut spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
     ) {
-        for (peer, address, reservation) in tracker.dialable().await {
+        // Get the list of dialable peers and shuffle to prevent starvation
+        let mut reservations = tracker.dialable().await;
+        reservations.shuffle(&mut self.context);
+
+        for res in reservations {
+            let ResMetadata::Dialer(peer, address, _) = res.metadata().clone() else {
+                panic!("unexpected reservation type");
+            };
+
             // Check if we have hit rate limit for dialing and if so, skip (we don't
             // want to block the loop)
             if self.dial_limiter.check().is_err() {
@@ -115,7 +126,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Schem
                     drop(guard);
 
                     // Start peer to handle messages
-                    supervisor.spawn(peer, instance, reservation).await;
+                    supervisor.spawn(instance, res).await;
                 }
             });
         }
@@ -124,7 +135,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Schem
     pub fn start(
         self,
         tracker: tracker::Mailbox<E, C>,
-        supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C>,
+        supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
     ) -> Handle<()> {
         self.context
             .clone()
@@ -134,7 +145,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Schem
     async fn run(
         mut self,
         mut tracker: tracker::Mailbox<E, C>,
-        mut supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C>,
+        mut supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
     ) {
         loop {
             // Attempt to dial peers we know about

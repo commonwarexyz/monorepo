@@ -30,7 +30,7 @@ pub struct Actor<
     allowed_peers_rate: Quota,
     peer_gossip_max_count: usize,
 
-    receiver: mpsc::Receiver<Message<E, Si, St, C>>,
+    receiver: mpsc::Receiver<Message<E, Si, St, C::PublicKey>>,
 
     connections: Gauge,
     sent_messages: Family<metrics::Message, Counter>,
@@ -45,7 +45,7 @@ impl<
         C: Verifier,
     > Actor<E, Si, St, C>
 {
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<E, Si, St, C>) {
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<E, Si, St, C::PublicKey>) {
         let connections = Gauge::default();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
