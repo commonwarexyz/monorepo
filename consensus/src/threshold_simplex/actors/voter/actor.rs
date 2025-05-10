@@ -30,6 +30,7 @@ use commonware_storage::journal::variable::{Config as JConfig, Journal};
 use commonware_utils::{quorum, BitVec};
 use futures::{
     channel::{mpsc, oneshot},
+    executor::block_on,
     future::Either,
     pin_mut, StreamExt,
 };
@@ -1947,6 +1948,32 @@ impl<
 
         // Create shutdown tracker
         let mut shutdown = self.context.stopped();
+
+        // Spawn signature verifier
+        let (mut verifier_sender, mut verifier_receiver) = mpsc::channel::<Voter<V, D>>(1024);
+        self.context.with_label("verifier").spawn_blocking(|| {
+            block_on(async move {
+                loop {
+                    // Pull as many messages as possible without blocking
+                    let mut messages = Vec::new();
+                    loop {
+                        match verifier_receiver.try_next() {
+                            Ok(Some(msg)) => {
+                                messages.push(msg);
+                            }
+                            Ok(None) => {
+                                return;
+                            }
+                            Err(_) => {
+                                break;
+                            }
+                        }
+                    }
+
+                    // Break into aggregate signatures
+                }
+            })
+        });
 
         // Process messages
         let mut pending_set = None;
