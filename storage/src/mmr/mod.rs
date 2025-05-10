@@ -67,15 +67,39 @@
 //! )
 //! ```
 
+use crate::mmr::hasher::Hasher;
+use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_utils::array::prefixed_u64::U64;
+use std::future::Future;
 use thiserror::Error;
 
 pub mod bitmap;
-mod hasher;
+pub mod hasher;
 pub mod iterator;
 pub mod journaled;
 pub mod mem;
+#[cfg(test)]
+mod tests;
 pub mod verification;
+
+/// A trait that allows generic access to MMR digests from its storage, for example in generating
+/// inclusion proofs.
+pub trait Storage<D: Digest>: Send + Sync {
+    /// Return the number of elements in the MMR.
+    fn size(&self) -> u64;
+
+    /// Return the specified node of the MMR if it exists & hasn't been pruned.
+    fn get_node(&self, position: u64) -> impl Future<Output = Result<Option<D>, Error>> + Send;
+}
+
+/// A trait for generic MMR building.
+pub trait Builder<H: CHasher, M: Hasher<H>>: Send + Sync {
+    /// Add an element to the MMR.
+    fn add(&mut self, hasher: &mut M, element: &[u8]) -> impl Future<Output = Result<u64, Error>>;
+
+    /// Return the root hash of the MMR.
+    fn root(&self, hasher: &mut M) -> H::Digest;
+}
 
 /// Errors that can occur when interacting with an MMR.
 #[derive(Error, Debug)]
