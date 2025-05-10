@@ -14,7 +14,10 @@ use crate::{
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
-        ops::{threshold_signature_recover, threshold_signature_recover_pair},
+        ops::{
+            partial_verify_multiple_public_keys, threshold_signature_recover,
+            threshold_signature_recover_pair,
+        },
         poly::{self, PartialSignature},
         variant::Variant,
     },
@@ -1955,40 +1958,56 @@ impl<
         // Spawn partial signature verifier
         let (mut verifier_sender, mut verifier_receiver) =
             mpsc::channel::<(C::PublicKey, Voter<V, D>)>(1024);
-        self.context.with_label("verifier").spawn_blocking(|| {
-            block_on(async move {
-                loop {
-                    // Pull as many messages as possible without blocking
-                    //
-                    // TODO: complexity is that there may be multiple partial signatures in a single voter (need
-                    // to somehow put into multiple buckets?)
-                    let mut messages = Vec::new();
-                    let mut work: HashMap<(Vec<u8>, Vec<u8>), Vec<(usize, PartialSignature<V>)>> =
-                        HashMap::new();
+        self.context.with_label("verifier").spawn_blocking({
+            let namespace = self.namespace.clone();
+            let supervisor = self.supervisor.clone();
+            || {
+                block_on(async move {
                     loop {
-                        match verifier_receiver.try_next() {
-                            Ok(Some((sender, msg))) => {
-                                let verifiable = msg.message(&self.namespace);
-                                let msg_idx = messages.len();
-                                messages.push((sender, msg, verifiable.len()));
-                                for (namespace, message, signature) in verifiable.into_iter() {
-                                    work.entry((namespace, message))
-                                        .or_insert_with(Vec::new)
-                                        .push((msg_idx, signature));
+                        // Pull as many messages as possible without blocking
+                        //
+                        // TODO: complexity is that there may be multiple partial signatures in a single voter (need
+                        // to somehow put into multiple buckets?)
+                        let mut messages = Vec::new();
+                        let mut work: HashMap<
+                            (u64, Vec<u8>, Vec<u8>),
+                            Vec<(usize, PartialSignature<V>)>,
+                        > = HashMap::new();
+                        loop {
+                            match verifier_receiver.try_next() {
+                                Ok(Some((sender, msg))) => {
+                                    let view = msg.view();
+                                    let verifiable = msg.message(&namespace);
+                                    let msg_idx = messages.len();
+                                    messages.push((sender, msg, verifiable.len()));
+                                    for (namespace, message, signature) in verifiable.into_iter() {
+                                        work.entry((view, namespace, message))
+                                            .or_insert_with(Vec::new)
+                                            .push((msg_idx, signature));
+                                    }
+                                }
+                                Ok(None) => {
+                                    return;
+                                }
+                                Err(_) => {
+                                    break;
                                 }
                             }
-                            Ok(None) => {
-                                return;
-                            }
-                            Err(_) => {
-                                break;
-                            }
+                        }
+
+                        // Verify messages or bisect
+                        for ((view, namespace, message), signatures) in work {
+                            let identity = supervisor.identity(view).unwrap();
+                            let result = partial_verify_multiple_public_keys::<V, _>(
+                                identity,
+                                Some(&namespace),
+                                &message,
+                                signatures.iter().map(|(_, signature)| signature),
+                            );
                         }
                     }
-
-                    // Verify messages or bisect
-                }
-            })
+                })
+            }
         });
 
         // Process messages
