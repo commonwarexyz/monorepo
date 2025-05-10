@@ -3,9 +3,6 @@ use std::collections::HashMap;
 
 /// Represents a set of peers and their knowledge of each other.
 pub struct Set<P: Array> {
-    /// The index at which this peer set applies.
-    pub index: u64,
-
     /// The list of peers, sorted.
     pub sorted: Vec<P>,
 
@@ -17,7 +14,8 @@ pub struct Set<P: Array> {
 }
 
 impl<P: Array> Set<P> {
-    pub fn new(index: u64, mut peers: Vec<P>) -> Self {
+    /// Creates a new set for the given index.
+    pub fn new(mut peers: Vec<P>) -> Self {
         // Insert peers in sorted order
         peers.sort();
         let mut order = HashMap::new();
@@ -29,13 +27,15 @@ impl<P: Array> Set<P> {
         let knowledge = BitVec::zeroes(peers.len());
 
         Self {
-            index,
             sorted: peers,
             order,
             knowledge,
         }
     }
 
+    /// Marks a peer as found in the set.
+    ///
+    /// Returns `true` if the peer is in the set, `false` otherwise.
     pub fn found(&mut self, peer: &P) -> bool {
         if let Some(idx) = self.order.get(peer) {
             self.knowledge.set(*idx);
@@ -53,7 +53,7 @@ mod tests {
     #[test]
     fn test_set_initialization() {
         let peers = vec![U64::new(3), U64::new(1), U64::new(2)];
-        let set = Set::new(0, peers);
+        let set = Set::new(peers);
         assert_eq!(set.sorted, vec![U64::new(1), U64::new(2), U64::new(3)]);
         assert_eq!(set.order.get(&U64::new(1)), Some(&0));
         assert_eq!(set.order.get(&U64::new(2)), Some(&1));
@@ -64,7 +64,7 @@ mod tests {
     #[test]
     fn test_found() {
         let peers = vec![U64::new(1), U64::new(2), U64::new(3)];
-        let mut set = Set::new(0, peers);
+        let mut set = Set::new(peers);
         assert!(set.found(&U64::new(2)));
         assert_eq!(set.knowledge, BitVec::from(vec![false, true, false]));
         assert!(!set.found(&U64::new(4))); // Peer not in set

@@ -119,7 +119,13 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Ver
             let mailbox = self.mailbox.clone();
             let rate_limits = rate_limits.clone();
             move |context| async move {
-                let mut deadline = context.current() + self.gossip_bit_vec_frequency;
+                // Allow tracker to initialize the peer
+                tracker.initialize(peer.clone(), mailbox.clone()).await;
+
+                // Set the initial deadline to now to start gossiping immediately
+                let mut deadline = context.current();
+
+                // Enter into the main loop
                 loop {
                     select! {
                         _ = context.sleep_until(deadline) => {
