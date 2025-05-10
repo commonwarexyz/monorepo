@@ -1966,16 +1966,31 @@ impl<
             let supervisor = self.supervisor.clone();
             || {
                 block_on(async move {
-                    loop {
-                        // Pull as many messages as possible without blocking
-                        //
-                        // TODO: complexity is that there may be multiple partial signatures in a single voter (need
-                        // to somehow put into multiple buckets?)
-                        let mut messages = Vec::new();
-                        let mut work: BTreeMap<
-                            (u64, Vec<u8>, Vec<u8>),
-                            Vec<(usize, PartialSignature<V>)>,
-                        > = BTreeMap::new();
+                    // Initialize view data structures
+                    let mut messages = Vec::new();
+                    let mut work: BTreeMap<
+                        (u64, Vec<u8>, Vec<u8>),
+                        Vec<(usize, PartialSignature<V>)>,
+                    > = BTreeMap::new();
+
+                    // Wait for first item
+                    while let Some((sender, msg)) = verifier_receiver.next().await {
+                        // Clear data structures
+                        messages.clear();
+                        work.clear();
+
+                        // Add first item
+                        let view = msg.view();
+                        let verifiable = msg.message(&namespace);
+                        let msg_idx = messages.len();
+                        messages.push((sender, msg, verifiable.len()));
+                        for (namespace, message, signature) in verifiable.into_iter() {
+                            work.entry((view, namespace, message))
+                                .or_insert_with(Vec::new)
+                                .push((msg_idx, signature));
+                        }
+
+                        // Pull as many messages as possible without waiting
                         loop {
                             match verifier_receiver.try_next() {
                                 Ok(Some((sender, msg))) => {
@@ -1999,7 +2014,7 @@ impl<
                         }
 
                         // Verify messages or bisect (in order of most recent view to oldest)
-                        for ((view, namespace, message), signatures) in work.into_iter().rev() {
+                        for ((view, namespace, message), signatures) in work.iter().rev() {
                             let identity = supervisor.identity(view).unwrap();
                             let result = partial_verify_multiple_public_keys::<V, _>(
                                 identity,
