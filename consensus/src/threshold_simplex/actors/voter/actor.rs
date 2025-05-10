@@ -63,6 +63,7 @@ struct Round<
         Index = View,
         Share = group::Share,
         PublicKey = C::PublicKey,
+        Public = V::Public,
     >,
 > {
     start: SystemTime,
@@ -113,6 +114,7 @@ impl<
             Index = View,
             Share = group::Share,
             PublicKey = C::PublicKey,
+            Public = V::Public,
         >,
     > Round<C, V, D, R, S>
 {
@@ -520,6 +522,8 @@ pub struct Actor<
         Index = View,
         Share = group::Share,
         PublicKey = C::PublicKey,
+        // TOD: Improve the naming here
+        Public = V::Public,
     >,
 > {
     context: E,
@@ -576,6 +580,7 @@ impl<
             Index = View,
             Share = group::Share,
             PublicKey = C::PublicKey,
+            Public = V::Public,
         >,
     > Actor<E, C, B, V, D, A, R, F, S>
 {
@@ -1302,10 +1307,7 @@ impl<
         }
 
         // Verify notarization
-        let Some(identity) = self.supervisor.identity(view) else {
-            return false;
-        };
-        let public_key = poly::public::<V>(identity);
+        let public_key = self.supervisor.public();
         if !notarization.verify(&self.namespace, public_key) {
             return false;
         }
@@ -1358,10 +1360,7 @@ impl<
         }
 
         // Verify nullification
-        let Some(identity) = self.supervisor.identity(nullification.view) else {
-            return false;
-        };
-        let public_key = poly::public::<V>(identity);
+        let public_key = self.supervisor.public();
         if !nullification.verify(&self.namespace, public_key) {
             return false;
         }
@@ -1471,10 +1470,7 @@ impl<
         }
 
         // Verify finalization
-        let Some(identity) = self.supervisor.identity(view) else {
-            return false;
-        };
-        let public_key = poly::public::<V>(identity);
+        let public_key = self.supervisor.public();
         if !finalization.verify(&self.namespace, public_key) {
             return false;
         }

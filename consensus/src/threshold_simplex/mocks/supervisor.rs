@@ -200,18 +200,10 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     .insert(public_key);
             }
             Activity::Notarization(notarization) => {
-                let view = notarization.view();
-                let (identity, _) = match self.participants.range(..=view).next_back() {
-                    Some((_, (p, _, v, _))) => (p, v),
-                    None => {
-                        panic!("no participants in required range");
-                    }
-                };
-                let public = public::<V>(identity);
-
                 // Verify notarization
+                let view = notarization.view();
                 let seed = notarization.seed();
-                if !notarization.verify(&self.namespace, public) {
+                if !notarization.verify(&self.namespace, &self.public_key) {
                     panic!("signature verification failed");
                 }
                 let encoded = notarization.encode();
@@ -222,7 +214,7 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     .insert(view, notarization);
 
                 // Verify seed
-                if !seed.verify(&self.namespace, public) {
+                if !seed.verify(&self.namespace, &self.public_key) {
                     panic!("signature verification failed");
                 }
                 let encoded = seed.encode();
@@ -251,18 +243,10 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     .insert(public_key);
             }
             Activity::Nullification(nullification) => {
-                let view = nullification.view();
-                let (identity, _) = match self.participants.range(..=view).next_back() {
-                    Some((_, (p, _, v, _))) => (p, v),
-                    None => {
-                        panic!("no participants in required range");
-                    }
-                };
-                let public = public::<V>(identity);
-
                 // Verify nullification
+                let view = nullification.view();
                 let seed = nullification.seed();
-                if !nullification.verify(&self.namespace, public) {
+                if !nullification.verify(&self.namespace, &self.public_key) {
                     panic!("signature verification failed");
                 }
                 let encoded = nullification.encode();
@@ -273,7 +257,7 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     .insert(view, nullification);
 
                 // Verify seed
-                if !seed.verify(&self.namespace, public) {
+                if !seed.verify(&self.namespace, &self.public_key) {
                     panic!("signature verification failed");
                 }
                 let encoded = seed.encode();
@@ -304,18 +288,10 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     .insert(public_key);
             }
             Activity::Finalization(ref finalization) => {
-                let view = finalization.view();
-                let (identity, _) = match self.participants.range(..=view).next_back() {
-                    Some((_, (p, _, v, _))) => (p, v),
-                    None => {
-                        panic!("no participants in required range");
-                    }
-                };
-                let public = public::<V>(identity);
-
                 // Verify finalization
+                let view = finalization.view();
                 let seed = finalization.seed();
-                if !finalization.verify(&self.namespace, public) {
+                if !finalization.verify(&self.namespace, &self.public_key) {
                     panic!("signature verification failed");
                 }
                 let encoded = finalization.encode();
@@ -326,7 +302,7 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     .insert(view, finalization.clone());
 
                 // Verify seed
-                if !seed.verify(&self.namespace, public) {
+                if !seed.verify(&self.namespace, &self.public_key) {
                     panic!("signature verification failed");
                 }
                 let encoded = seed.encode();

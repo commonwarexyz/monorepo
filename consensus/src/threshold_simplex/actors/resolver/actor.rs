@@ -106,7 +106,12 @@ pub struct Actor<
     B: Blocker,
     V: Variant,
     D: Digest,
-    S: ThresholdSupervisor<Index = View, Identity = poly::Public<V>, PublicKey = C::PublicKey>,
+    S: ThresholdSupervisor<
+        Index = View,
+        Identity = poly::Public<V>,
+        PublicKey = C::PublicKey,
+        Public = V::Public,
+    >,
 > {
     context: E,
     blocker: B,
@@ -140,7 +145,12 @@ impl<
         B: Blocker,
         V: Variant,
         D: Digest,
-        S: ThresholdSupervisor<Index = View, Identity = poly::Public<V>, PublicKey = C::PublicKey>,
+        S: ThresholdSupervisor<
+            Index = View,
+            Identity = poly::Public<V>,
+            PublicKey = C::PublicKey,
+            Public = V::Public,
+        >,
     > Actor<E, C, B, V, D, S>
 {
     pub fn new(context: E, cfg: Config<C, B, S>) -> (Self, Mailbox<V, D>) {
@@ -516,11 +526,7 @@ impl<
                                     debug!(view, sender = ?s, "unnecessary notarization");
                                     continue;
                                 }
-                                let Some(identity) = self.supervisor.identity(view) else {
-                                    warn!(view, sender = ?s, "missing identity");
-                                    continue;
-                                };
-                                let public_key = poly::public::<V>(identity);
+                                let public_key = self.supervisor.public();
                                 if !notarization.verify(&self.namespace, public_key) {
                                     warn!(view, sender = ?s, "invalid notarization");
                                     self.requester.block(s.clone());
@@ -540,11 +546,7 @@ impl<
                                     debug!(view, sender = ?s, "unnecessary nullification");
                                     continue;
                                 }
-                                let Some(identity) = self.supervisor.identity(view) else {
-                                    warn!(view, sender = ?s, "missing identity");
-                                    continue;
-                                };
-                                let public_key = poly::public::<V>(identity);
+                                let public_key = self.supervisor.public();
                                 if !nullification.verify(&self.namespace, public_key) {
                                     warn!(view, sender = ?s, "invalid nullification");
                                     self.requester.block(s.clone());

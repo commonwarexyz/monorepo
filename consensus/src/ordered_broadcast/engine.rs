@@ -67,6 +67,7 @@ pub struct Engine<
         PublicKey = C::PublicKey,
         Share = group::Share,
         Identity = poly::Public<V>,
+        Public = V::Public,
     >,
     NetS: Sender<PublicKey = C::PublicKey>,
     NetR: Receiver<PublicKey = C::PublicKey>,
@@ -211,6 +212,7 @@ impl<
             PublicKey = C::PublicKey,
             Share = group::Share,
             Identity = poly::Public<V>,
+            Public = V::Public,
         >,
         NetS: Sender<PublicKey = C::PublicKey>,
         NetR: Receiver<PublicKey = C::PublicKey>,
@@ -838,10 +840,7 @@ impl<
 
         // Get parent identity
         let public = if let Some(parent) = &node.parent {
-            let Some(identity) = self.validators.identity(parent.epoch) else {
-                return Err(Error::UnknownIdentity(parent.epoch));
-            };
-            Some(poly::public::<V>(identity))
+            Some(self.validators.public())
         } else {
             None
         };
