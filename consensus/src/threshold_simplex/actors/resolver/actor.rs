@@ -19,7 +19,7 @@ use commonware_p2p::{
         codec::{wrap, WrappedSender},
         requester,
     },
-    Receiver, Recipients, Sender,
+    Blocker, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{Clock, Handle, Metrics, Spawner};
 use futures::{channel::mpsc, future::Either, StreamExt};
@@ -103,11 +103,13 @@ impl Inflight {
 pub struct Actor<
     E: Clock + GClock + Rng + Metrics + Spawner,
     C: Scheme,
+    B: Blocker,
     V: Variant,
     D: Digest,
     S: ThresholdSupervisor<Index = View, Identity = poly::Public<V>, PublicKey = C::PublicKey>,
 > {
     context: E,
+    blocker: B,
     supervisor: S,
 
     namespace: Vec<u8>,
@@ -135,12 +137,13 @@ pub struct Actor<
 impl<
         E: Clock + GClock + Rng + Metrics + Spawner,
         C: Scheme,
+        B: Blocker,
         V: Variant,
         D: Digest,
         S: ThresholdSupervisor<Index = View, Identity = poly::Public<V>, PublicKey = C::PublicKey>,
-    > Actor<E, C, V, D, S>
+    > Actor<E, C, B, V, D, S>
 {
-    pub fn new(context: E, cfg: Config<C, S>) -> (Self, Mailbox<V, D>) {
+    pub fn new(context: E, cfg: Config<C, B, S>) -> (Self, Mailbox<V, D>) {
         // Initialize requester
         let config = requester::Config {
             public_key: cfg.crypto.public_key(),
@@ -171,6 +174,7 @@ impl<
         (
             Self {
                 context,
+                blocker: cfg.blocker,
                 supervisor: cfg.supervisor,
 
                 namespace: cfg.namespace,

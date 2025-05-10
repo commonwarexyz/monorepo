@@ -37,9 +37,9 @@ pub struct Engine<
 > {
     context: E,
 
-    voter: voter::Actor<E, C, V, D, A, R, F, S>,
+    voter: voter::Actor<E, C, B, V, D, A, R, F, S>,
     voter_mailbox: voter::Mailbox<V, D>,
-    resolver: resolver::Actor<E, C, V, D, S>,
+    resolver: resolver::Actor<E, C, B, V, D, S>,
     resolver_mailbox: resolver::Mailbox<V, D>,
 
     _phantom: PhantomData<B>,
@@ -73,6 +73,7 @@ impl<
             context.clone(),
             voter::Config {
                 crypto: cfg.crypto.clone(),
+                blocker: cfg.blocker.clone(),
                 automaton: cfg.automaton,
                 relay: cfg.relay,
                 reporter: cfg.reporter,
@@ -96,6 +97,7 @@ impl<
             context.clone(),
             resolver::Config {
                 crypto: cfg.crypto,
+                blocker: cfg.blocker,
                 supervisor: cfg.supervisor,
                 mailbox_size: cfg.mailbox_size,
                 namespace: cfg.namespace,
