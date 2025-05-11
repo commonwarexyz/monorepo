@@ -11,8 +11,7 @@ pub enum Metadata<P: Array> {
     /// Contains:
     /// - The public key of the peer.
     /// - The socket address of the peer.
-    /// - The timestamp of the `PeerInfo` that contained the `SocketAddr`.
-    Dialer(P, SocketAddr, Option<u64>),
+    Dialer(P, SocketAddr),
 
     /// Listener reservation.
     ///
@@ -24,7 +23,7 @@ impl<P: Array> Metadata<P> {
     /// Get the public key of the peer associated with this metadata.
     pub fn public_key(&self) -> &P {
         match self {
-            Metadata::Dialer(public_key, _, _) => public_key,
+            Metadata::Dialer(public_key, _) => public_key,
             Metadata::Listener(public_key) => public_key,
         }
     }

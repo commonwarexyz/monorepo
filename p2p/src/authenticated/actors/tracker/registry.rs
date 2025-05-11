@@ -100,8 +100,10 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Registry<E
                 true => self.metrics.connected.dec(),
                 false => self.metrics.reserved.dec(),
             };
-            if let ResMetadata::Dialer(_, _, Some(ts)) = metadata {
-                record.dial_failure(ts);
+
+            // If the reservation was taken by the dialer, record the failure.
+            if let ResMetadata::Dialer(_, socket) = metadata {
+                record.dial_failure(socket);
             }
 
             let want = record.want();
@@ -209,8 +211,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Registry<E
             .peers
             .iter()
             .filter_map(|(peer, r)| {
-                r.dialable_info()
-                    .map(|(addr, ts)| ResMetadata::Dialer(peer.clone(), addr, ts))
+                r.socket()
+                    .map(|addr| ResMetadata::Dialer(peer.clone(), addr))
             })
             .collect();
 

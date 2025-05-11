@@ -68,7 +68,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Schem
         reservations.shuffle(&mut self.context);
 
         for res in reservations {
-            let ResMetadata::Dialer(peer, address, _) = res.metadata().clone() else {
+            let ResMetadata::Dialer(peer, address) = res.metadata().clone() else {
                 panic!("unexpected reservation type");
             };
 

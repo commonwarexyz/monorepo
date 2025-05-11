@@ -167,8 +167,12 @@ impl<C: Verifier> Record<C> {
     /// Marks the peer as connected. The peer must have the status [`Status::Reserved`].
     pub fn connect(&mut self) {
         assert!(matches!(self.status, Status::Reserved));
-        self.reset_failures();
         self.status = Status::Active;
+
+        // Reset the failure count
+        if let Address::Discovered(_, fails) = &mut self.address {
+            *fails = 0;
+        }
     }
 
     /// Releases any reservation on the peer.
@@ -184,21 +188,13 @@ impl<C: Verifier> Record<C> {
         was_connected
     }
 
-    /// Indicate that there was a dial failure for this peer. The `timestamp` is the timestamp of
-    /// the `PeerInfo` that was used to dial the peer. This is used to ensure that we match the
-    /// failure to the correct `PeerInfo`.
-    pub fn dial_failure(&mut self, timestamp: u64) {
+    /// Indicate that there was a dial failure for this peer using the given `socket`, which is
+    /// checked against the existing record to ensure that we correctly attribute the failure.
+    pub fn dial_failure(&mut self, socket: SocketAddr) {
         if let Address::Discovered(info, fails) = &mut self.address {
-            if info.timestamp == timestamp {
+            if info.socket == socket {
                 *fails += 1;
             }
-        }
-    }
-
-    /// Clear the failure count for this peer.
-    pub fn reset_failures(&mut self) {
-        if let Address::Discovered(_, fails) = &mut self.address {
-            *fails = 0;
         }
     }
 
@@ -209,16 +205,13 @@ impl<C: Verifier> Record<C> {
         matches!(self.address, Address::Blocked)
     }
 
-    /// Return the dialable information of the peer, which includes the address and the timestamp
-    /// of the `PeerInfo` (if available).
-    ///
-    /// Returns `None` if the peer address is unknown.
-    pub fn dialable_info(&self) -> Option<(SocketAddr, Option<u64>)> {
+    /// Return the socket of the peer, if known.
+    pub fn socket(&self) -> Option<SocketAddr> {
         match &self.address {
             Address::Unknown => None,
-            Address::Myself(info) => Some((info.socket, Some(info.timestamp))),
-            Address::Bootstrapper(socket) => Some((*socket, None)),
-            Address::Discovered(info, _) => Some((info.socket, Some(info.timestamp))),
+            Address::Myself(info) => Some(info.socket),
+            Address::Bootstrapper(socket) => Some(*socket),
+            Address::Discovered(info, _) => Some(info.socket),
             Address::Blocked => None,
         }
     }
@@ -343,7 +336,7 @@ mod tests {
         assert!(matches!(record.address, Address::Unknown));
         assert_eq!(record.status, Status::Inert);
         assert_eq!(record.sets, 0);
-        assert_eq!(record.dialable_info(), None);
+        assert_eq!(record.socket(), None);
         assert!(record.sharable_info().is_none());
         assert!(!record.blocked());
         assert!(!record.reserved());
@@ -361,10 +354,7 @@ mod tests {
         );
         assert_eq!(record.status, Status::Inert);
         assert_eq!(record.sets, 0);
-        assert_eq!(
-            record.dialable_info(),
-            Some((my_info.socket, Some(my_info.timestamp)))
-        );
+        assert_eq!(record.socket(), Some(my_info.socket),);
         assert!(compare_optional_peer_info(
             record.sharable_info().as_ref(),
             &my_info
@@ -383,7 +373,7 @@ mod tests {
         assert!(matches!(record.address, Address::Bootstrapper(s) if s == socket));
         assert_eq!(record.status, Status::Inert);
         assert_eq!(record.sets, 0);
-        assert_eq!(record.dialable_info(), Some((socket, None)));
+        assert_eq!(record.socket(), Some(socket));
         assert!(record.sharable_info().is_none());
         assert!(!record.blocked());
         assert!(!record.reserved());
@@ -399,7 +389,7 @@ mod tests {
         let peer_info = create_peer_info::<Secp256r1>(1, socket, 1000);
 
         assert!(record.update(peer_info.clone()));
-        assert_eq!(record.dialable_info(), Some((socket, Some(1000))));
+        assert_eq!(record.socket(), Some(socket));
         assert!(
             matches!(&record.address, Address::Discovered(info, 0) if peer_info_contents_are_equal(info, &peer_info))
         );
@@ -413,7 +403,7 @@ mod tests {
         let peer_info = create_peer_info::<Secp256r1>(2, socket, 1000);
 
         assert!(record.update(peer_info.clone()));
-        assert_eq!(record.dialable_info(), Some((socket, Some(1000))));
+        assert_eq!(record.socket(), Some(socket));
         assert!(
             matches!(&record.address, Address::Discovered(info, 0) if peer_info_contents_are_equal(info, &peer_info))
         );
@@ -430,7 +420,7 @@ mod tests {
         assert!(record.update(peer_info_old.clone()));
         assert!(record.update(peer_info_new.clone()));
 
-        assert_eq!(record.dialable_info(), Some((socket, Some(2000))));
+        assert_eq!(record.socket(), Some(socket));
         assert!(
             matches!(&record.address, Address::Discovered(info, 0) if peer_info_contents_are_equal(info, &peer_info_new))
         );
@@ -446,7 +436,7 @@ mod tests {
         assert!(record.update(peer_info_old.clone()));
         assert!(record.update(peer_info_new.clone()));
 
-        assert_eq!(record.dialable_info(), Some((socket, Some(2000))));
+        assert_eq!(record.socket(), Some(socket));
         assert!(
             matches!(&record.address, Address::Discovered(info, 0) if peer_info_contents_are_equal(info, &peer_info_new))
         );
@@ -597,7 +587,7 @@ mod tests {
         );
         assert!(!record_unknown.block());
         assert!(!record_unknown.update(sample_peer_info.clone()));
-        assert!(record_unknown.dialable_info().is_none());
+        assert!(record_unknown.socket().is_none());
         assert!(record_unknown.sharable_info().is_none());
 
         let mut record_reserved = Record::<Secp256r1>::unknown();
@@ -795,7 +785,7 @@ mod tests {
         assert!(!record_disc.want());
 
         // Failed dialing
-        record_disc.dial_failure(peer_info.timestamp);
+        record_disc.dial_failure(peer_info.socket);
         assert!(record_disc.want());
         assert!(record_disc.reserve());
         record_disc.connect();
@@ -806,7 +796,7 @@ mod tests {
         assert!(!record_disc.want());
 
         // Fail dialing
-        record_disc.dial_failure(peer_info.timestamp);
+        record_disc.dial_failure(peer_info.socket);
         assert!(record_disc.want());
 
         // Update information
