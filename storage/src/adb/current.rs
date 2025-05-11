@@ -12,7 +12,7 @@ use crate::{
     index::{Index, Translator},
     mmr::{
         bitmap::Bitmap,
-        hasher::{Basic, Grafting},
+        hasher::{self, Basic, Grafting},
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
         journaled::Mmr,
     },
@@ -200,7 +200,7 @@ impl<
     /// next successful `commit`.
     pub async fn update(&mut self, key: K, value: V) -> Result<UpdateResult, Error> {
         let update_result = self.any.update(key, value).await?;
-        let hasher = Grafting::new(Basic::new(H::new()), 10, self.any.ops);
+        let mut hasher = Grafting::new(Basic::new(H::new()), 10, &self.any.ops);
         match update_result {
             UpdateResult::NoOp => {
                 return Ok(update_result);
@@ -223,12 +223,9 @@ impl<
             return Ok(());
         };
 
-        self.hasher.graft(self.any.ops.take().unwrap());
-        self.status.append(&mut self.hasher, false).await?;
-        self.status
-            .set_bit(&mut self.hasher, old_loc, false)
-            .await?;
-        self.any.ops = self.hasher.take();
+        let mut hasher = Grafting::new(Basic::new(H::new()), 10, &self.any.ops);
+        self.status.append(&mut hasher, false).await?;
+        self.status.set_bit(&mut hasher, old_loc, false).await?;
 
         Ok(())
     }
@@ -254,12 +251,9 @@ impl<
                 .move_op_if_active(op, self.any.inactivity_floor_loc)
                 .await?;
             if let Some(old_loc) = old_loc {
-                self.hasher.graft(self.any.ops.take().unwrap());
-                self.status
-                    .set_bit(&mut self.hasher, old_loc, false)
-                    .await?;
-                self.status.append(&mut self.hasher, true).await?;
-                self.any.ops = self.hasher.take();
+                let mut hasher = Grafting::new(Basic::new(H::new()), 10, &self.any.ops);
+                self.status.set_bit(&mut hasher, old_loc, false).await?;
+                self.status.append(&mut hasher, true).await?;
             }
             self.any.inactivity_floor_loc += 1;
         }
@@ -267,7 +261,8 @@ impl<
         self.any
             .apply_op(Operation::Commit(self.any.inactivity_floor_loc))
             .await?;
-        self.status.append(&mut self.hasher, false).await?;
+        let mut hasher = Basic::new(H::new());
+        self.status.append(&mut hasher, false).await?;
 
         Ok(())
     }
@@ -297,11 +292,11 @@ impl<
     ///
     /// Current implementation just hashes the roots of the [Any] and [Bitmap] databases together.
     pub async fn root(&mut self) -> Result<H::Digest, Error> {
-        let any_root = self.any.root(self.hasher.basic());
+        let mut hasher = Basic::new(H::new());
+        let any_root = self.any.root(&mut hasher);
 
-        self.hasher.graft(self.any.ops.take().unwrap());
-        let bitmap_root = self.status.root(&mut self.hasher).await?;
-        self.any.ops = self.hasher.take();
+        let mut hasher = Grafting::new(Basic::new(H::new()), 10, &self.any.ops);
+        let bitmap_root = self.status.root(&mut hasher).await?;
 
         let mut hasher = H::new(); // TODO: fix
         hasher.update(any_root.as_ref());
