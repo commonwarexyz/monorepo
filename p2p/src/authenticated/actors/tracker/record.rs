@@ -157,6 +157,9 @@ impl<C: Verifier> Record<C> {
     ///
     /// Returns `true` if the reservation was successful, `false` otherwise.
     pub fn reserve(&mut self) -> bool {
+        if matches!(self.address, Address::Blocked | Address::Myself(_)) {
+            return false;
+        }
         if matches!(self.status, Status::Inert) {
             self.status = Status::Reserved;
             return true;
@@ -176,16 +179,9 @@ impl<C: Verifier> Record<C> {
     }
 
     /// Releases any reservation on the peer.
-    ///
-    /// Returns `true` if the peer was connected, `false` if it was reserved.
-    pub fn release(&mut self) -> bool {
-        let was_connected = match self.status {
-            Status::Inert => unreachable!("Cannot release an Inert peer"),
-            Status::Reserved => false,
-            Status::Active => true,
-        };
+    pub fn release(&mut self) {
+        assert!(self.status != Status::Inert, "Cannot release an Inert peer");
         self.status = Status::Inert;
-        was_connected
     }
 
     /// Indicate that there was a dial failure for this peer using the given `socket`, which is
@@ -674,7 +670,7 @@ mod tests {
 
         // Test release from Active state (assuming not failed)
         // release() returns true because prev was Active
-        assert!(record.release());
+        record.release();
         // After release from Active: Inert
         assert_eq!(record.status, Status::Inert);
         assert!(!record.reserved());
@@ -684,7 +680,7 @@ mod tests {
         assert!(record.reserve());
         assert_eq!(record.status, Status::Reserved);
         // release() returns false because prev was Reserved
-        assert!(!record.release());
+        record.release();
         // After release from Reserved (not failed): Inert
         assert_eq!(record.status, Status::Inert);
 
@@ -693,7 +689,7 @@ mod tests {
         assert!(record.reserve());
         assert_eq!(record.status, Status::Reserved);
         // release() returns false because prev was Reserved
-        assert!(!record.release());
+        record.release();
         // After release from Reserved (failed): Inert
         assert_eq!(record.status, Status::Inert);
     }
@@ -744,7 +740,7 @@ mod tests {
             record_disc.sharable_info().as_ref(),
             &peer_info_data
         ));
-        assert!(record_disc.release());
+        record_disc.release();
         assert!(record_disc.sharable_info().is_none());
 
         let mut record_pers = Record::<Secp256r1>::bootstrapper(socket);
@@ -756,7 +752,7 @@ mod tests {
             record_pers.sharable_info().as_ref(),
             &peer_info_data
         ));
-        assert!(record_pers.release());
+        record_pers.release();
         assert!(record_pers.sharable_info().is_none());
     }
 
@@ -768,7 +764,7 @@ mod tests {
         assert!(record.reserved());
         record.connect();
         assert!(record.reserved());
-        assert!(record.release());
+        record.release();
         assert!(!record.reserved());
     }
 
@@ -806,7 +802,7 @@ mod tests {
         assert!(!record_disc.want());
 
         // Release the connection, but still haven't failed dialing
-        assert!(record_disc.release());
+        record_disc.release();
         assert!(!record_disc.want());
 
         // Fail dialing
@@ -838,7 +834,7 @@ mod tests {
         assert!(record_unknown.deletable());
         assert!(record_unknown.reserve());
         assert!(!record_unknown.deletable());
-        assert!(!record_unknown.release());
+        record_unknown.release();
         assert!(record_unknown.deletable());
 
         let mut record_disc = Record::<Secp256r1>::unknown();
@@ -850,7 +846,7 @@ mod tests {
         assert!(record_disc.deletable());
         assert!(record_disc.reserve());
         assert!(!record_disc.deletable());
-        assert!(!record_disc.release());
+        record_disc.release();
         assert!(record_disc.deletable());
 
         let mut record_blocked_from_unknown = Record::<Secp256r1>::unknown();

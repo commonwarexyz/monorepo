@@ -30,7 +30,7 @@ impl<P: Array> Set<P> {
     }
 
     /// Marks the given peer as known or unknown.
-    pub fn set_to(&mut self, peer: &P, known: bool) -> bool {
+    pub fn update(&mut self, peer: &P, known: bool) -> bool {
         if let Some(idx) = self.order.get(peer) {
             self.knowledge.set_to(*idx, known);
             return true;
@@ -84,24 +84,24 @@ mod tests {
     }
 
     #[test]
-    fn test_set_to_known_and_unknown() {
+    fn test_update_known_and_unknown() {
         let peers = vec![U64::new(1), U64::new(2), U64::new(3)];
         let mut set = Set::new(peers);
 
         // Mark peer 2 as known
-        assert!(set.set_to(&U64::new(2), true));
+        assert!(set.update(&U64::new(2), true));
         assert_eq!(set.knowledge(), BitVec::from(vec![false, true, false]));
 
         // Mark peer 2 as unknown again
-        assert!(set.set_to(&U64::new(2), false));
+        assert!(set.update(&U64::new(2), false));
         assert_eq!(set.knowledge(), BitVec::from(vec![false, false, false]));
 
         // Mark peer 1 as known
-        assert!(set.set_to(&U64::new(1), true));
+        assert!(set.update(&U64::new(1), true));
         assert_eq!(set.knowledge(), BitVec::from(vec![true, false, false]));
 
         // Try to set a peer not in the set
-        assert!(!set.set_to(&U64::new(4), true));
+        assert!(!set.update(&U64::new(4), true));
         assert_eq!(set.knowledge(), BitVec::from(vec![true, false, false])); // Knowledge should remain unchanged
     }
 
@@ -120,11 +120,11 @@ mod tests {
     fn test_knowledge_cloning() {
         let peers = vec![U64::new(1), U64::new(2)];
         let mut set = Set::new(peers);
-        set.set_to(&U64::new(1), true);
+        set.update(&U64::new(1), true);
 
         let knowledge1 = set.knowledge();
         // Modify the original set's knowledge
-        set.set_to(&U64::new(2), true);
+        set.update(&U64::new(2), true);
         let knowledge2 = set.knowledge();
 
         assert_eq!(knowledge1, BitVec::from(vec![true, false]));
@@ -173,7 +173,7 @@ mod tests {
 
         assert_eq!(set.len(), 0);
         assert_eq!(set.knowledge(), BitVec::zeroes(0));
-        assert!(!set.set_to(&U64::new(1), true)); // Cannot set anything
+        assert!(!set.update(&U64::new(1), true)); // Cannot set anything
 
         let mut count = 0;
         for _ in &set {

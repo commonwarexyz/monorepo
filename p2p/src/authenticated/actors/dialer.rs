@@ -78,7 +78,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Schem
     ) {
         // Extract metadata from the reservation
         let ResMetadata::Dialer(peer, address) = reservation.metadata().clone() else {
-            panic!("unexpected reservation type");
+            unreachable!("unexpected reservation metadata");
         };
 
         // Increment metrics.

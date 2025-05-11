@@ -96,10 +96,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Registry<E
             let Some(record) = self.peers.get_mut(peer) else {
                 continue;
             };
-            match record.release() {
-                true => self.metrics.connected.dec(),
-                false => self.metrics.reserved.dec(),
-            };
+            record.release();
+            self.metrics.reserved.dec();
 
             // If the reservation was taken by the dialer, record the failure.
             if let ResMetadata::Dialer(_, socket) = metadata {
@@ -108,7 +106,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Registry<E
 
             let want = record.want();
             for set in self.sets.values_mut() {
-                set.set_to(peer, !want);
+                set.update(peer, !want);
             }
             self.delete_if_needed(peer);
         }
@@ -125,12 +123,11 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Registry<E
         // Set the record as connected
         let record = self.peers.get_mut(peer).unwrap();
         record.connect();
-        self.metrics.connected.inc();
 
         // We may have to update the sets.
         let want = record.want();
         for set in self.sets.values_mut() {
-            set.set_to(peer, !want);
+            set.update(peer, !want);
         }
     }
 
@@ -157,7 +154,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Registry<E
             // We may have to update the sets.
             let want = self.peers.get(&peer).unwrap().want();
             for set in self.sets.values_mut() {
-                set.set_to(&peer, !want);
+                set.update(&peer, !want);
             }
             debug!(?peer, "updated peer record");
         }
@@ -187,7 +184,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Registry<E
                 Record::unknown()
             });
             record.increment();
-            set.set_to(peer, !record.want());
+            set.update(peer, !record.want());
         }
         self.sets.insert(index, set);
 
