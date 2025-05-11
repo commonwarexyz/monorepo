@@ -276,7 +276,7 @@ mod tests {
         executor.start(|_| async move {
             // Build MMR with 1000 leaves and make sure we can correctly convert each leaf position to
             // its number and back again.
-            let mut mmr = Mmr::<_, Basic<Sha256>>::new();
+            let mut mmr = Mmr::<Sha256>::new();
             let mut hasher = Basic::new(Sha256::default());
             let mut num_to_pos = Vec::new();
             for _ in 0u64..1000 {

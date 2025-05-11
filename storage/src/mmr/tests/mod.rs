@@ -4,8 +4,8 @@ use commonware_utils::hex;
 
 /// Build the MMR corresponding to the stability test `ROOTS` and confirm the
 /// roots match that from the builder's root computation.
-pub async fn build_test_roots_mmr<M: Hasher<Sha256>, B: Builder<Sha256, M>>(
-    hasher: &mut M,
+pub async fn build_test_roots_mmr<B: Builder<Sha256>>(
+    hasher: &mut impl Hasher<Sha256>,
     mmr: &mut B,
     check_hashes: bool,
 ) {
