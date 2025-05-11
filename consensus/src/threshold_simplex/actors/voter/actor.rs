@@ -517,7 +517,7 @@ impl<
 pub struct Actor<
     E: Clock + Rng + Spawner + Storage + Metrics,
     C: Scheme,
-    B: Blocker,
+    B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     D: Digest,
     A: Automaton<Digest = D, Context = Context<D>>,
@@ -575,7 +575,7 @@ pub struct Actor<
 impl<
         E: Clock + Rng + Spawner + Storage + Metrics,
         C: Scheme,
-        B: Blocker,
+        B: Blocker<PublicKey = C::PublicKey>,
         V: Variant,
         D: Digest,
         A: Automaton<Digest = D, Context = Context<D>>,
@@ -1962,6 +1962,7 @@ impl<
         let (mut verifier_sender, mut verifier_receiver) =
             mpsc::channel::<(C::PublicKey, Voter<V, D>)>(1024);
         self.context.with_label("verifier").spawn_blocking({
+            let mut blocker = self.blocker.clone();
             let namespace = self.namespace.clone();
             let supervisor = self.supervisor.clone();
             || {
@@ -1970,7 +1971,7 @@ impl<
                     let mut messages = Vec::new();
                     let mut work: BTreeMap<
                         (u64, Vec<u8>, Vec<u8>),
-                        Vec<(usize, PartialSignature<V>)>,
+                        HashMap<PartialSignature<V>, usize>,
                     > = BTreeMap::new();
 
                     // Wait for first item
@@ -1986,8 +1987,8 @@ impl<
                         messages.push((sender, msg, verifiable.len()));
                         for (namespace, message, signature) in verifiable.into_iter() {
                             work.entry((view, namespace, message))
-                                .or_insert_with(Vec::new)
-                                .push((msg_idx, signature));
+                                .or_insert_with(HashMap::new)
+                                .insert(signature, msg_idx);
                         }
 
                         // Pull as many messages as possible without waiting
@@ -2000,8 +2001,8 @@ impl<
                                     messages.push((sender, msg, verifiable.len()));
                                     for (namespace, message, signature) in verifiable.into_iter() {
                                         work.entry((view, namespace, message))
-                                            .or_insert_with(Vec::new)
-                                            .push((msg_idx, signature));
+                                            .or_insert_with(HashMap::new)
+                                            .insert(signature, msg_idx);
                                     }
                                 }
                                 Ok(None) => {
@@ -2020,11 +2021,20 @@ impl<
                                 identity,
                                 Some(&namespace),
                                 &message,
-                                signatures.iter().map(|(_, signature)| signature),
+                                signatures.iter().map(|(signature, _)| signature),
                             );
 
                             // If any are invalid, we block
-                            if let Err(invalid) = result {}
+                            //
+                            // TODO: if invalid occur at different
+                            if let Err(invalid) = result {
+                                for signature in invalid {
+                                    let idx = signatures.get(&signature).unwrap();
+                                    let (sender, _, _) = &messages[*idx];
+                                    blocker.block(sender.clone()).await;
+                                    warn!(?sender, "blocked sender");
+                                }
+                            }
 
                             // Notify the application (for any items in vec now out of items)
                         }
