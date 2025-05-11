@@ -92,47 +92,33 @@ impl<H: CHasher> Hasher<H> for Basic<H> {
 /// another MMR.  If base_mmr is `None`, it behaves like a normal `Basic` hasher, and otherwise the
 /// leaf hash computation incorporates the hash of the node from the base tree onto which this leaf
 /// is grafted.
-pub struct Grafting<H: CHasher, S: Storage<H::Digest>> {
+pub struct Grafting<'a, H: CHasher, S: Storage<H::Digest>> {
     hasher: Basic<H>,
     height: u32,
-    base_mmr: Option<Box<S>>,
+    mmr: &'a S,
 }
 
-impl<H: CHasher, S: Storage<H::Digest>> Grafting<H, S> {
-    pub fn new(hasher: Basic<H>, height: u32) -> Self {
+impl<'a, H: CHasher, S: Storage<H::Digest>> Grafting<'a, H, S> {
+    pub fn new(hasher: Basic<H>, height: u32, mmr: &'a S) -> Self {
         Self {
             hasher,
             height,
-            base_mmr: None,
+            mmr,
         }
     }
 
     pub fn basic(&mut self) -> &mut Basic<H> {
         &mut self.hasher
     }
-
-    /// Turns on grafting mode, which allows the MMR to be grafted onto another MMR.
-    pub fn graft(&mut self, base_mmr: Box<S>) {
-        self.base_mmr = Some(base_mmr);
-    }
-
-    /// Turns off grafting mode, returning the owned base MMR if it was set.
-    pub fn take(&mut self) -> Option<Box<S>> {
-        self.base_mmr.take()
-    }
 }
 
-impl<H: CHasher, S: Storage<H::Digest>> Hasher<H> for Grafting<H, S> {
+impl<'a, H: CHasher, S: Storage<H::Digest>> Hasher<H> for Grafting<'a, H, S> {
     async fn leaf_hash(&mut self, pos: u64, element: &[u8]) -> Result<H::Digest, Error> {
-        let Some(base_mmr) = &mut self.base_mmr else {
-            return self.hasher.leaf_hash(pos, element).await;
-        };
-
         // TODO: Correctly implement the mapping from position to grafted node position. The
         // following isn't quite right:
         let base_node_pos = pos << self.height;
 
-        let base_node_hash = base_mmr.get_node(base_node_pos).await?.unwrap();
+        let base_node_hash = self.mmr.get_node(base_node_pos).await?.unwrap();
         self.hasher.update_with_pos(pos);
         self.hasher.update_with_element(element);
         self.hasher.update_with_hash(&base_node_hash);

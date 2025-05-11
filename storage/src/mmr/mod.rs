@@ -93,12 +93,16 @@ pub trait Storage<D: Digest>: Send + Sync {
 }
 
 /// A trait for generic MMR building.
-pub trait Builder<H: CHasher, M: Hasher<H>>: Send + Sync {
+pub trait Builder<H: CHasher>: Send + Sync {
     /// Add an element to the MMR.
-    fn add(&mut self, hasher: &mut M, element: &[u8]) -> impl Future<Output = Result<u64, Error>>;
+    fn add(
+        &mut self,
+        hasher: &mut impl Hasher<H>,
+        element: &[u8],
+    ) -> impl Future<Output = Result<u64, Error>>;
 
     /// Return the root hash of the MMR.
-    fn root(&self, hasher: &mut M) -> H::Digest;
+    fn root(&self, hasher: &mut impl Hasher<H>) -> H::Digest;
 }
 
 /// Errors that can occur when interacting with an MMR.

@@ -70,8 +70,6 @@ pub struct Current<
     /// order to further prove whether a key _currently_ has a specific value.
     pub status: GraftedBitmap<E, H, N>,
 
-    hasher: Grafting<H, BasicMmr<E, H>>,
-
     context: E,
 
     bitmap_metadata_partition: String,
@@ -129,7 +127,7 @@ impl<
         let mut snapshot = Index::init(context.with_label("snapshot"), translator);
         let mut g_hasher = Grafting::new(hasher, 9);
         if bitmap_pruned_pos < mmr.pruned_to_pos() {
-            g_hasher.graft(mmr);
+            g_hasher.graft(mmr.as_ref());
             // Prepend the missing (inactive) bits needed to align the bitmap, which can only be
             // pruned to a chunk boundary, with the MMR's pruning boundary.
             for _ in pruned_bits..mmr_pruned_leaves {
@@ -152,10 +150,9 @@ impl<
                     )
                     .await?;
             }
-            mmr = g_hasher.take().unwrap();
         }
 
-        g_hasher.graft(mmr);
+        g_hasher.graft(mmr.as_ref());
         // Replay the log to generate the snapshot & populate the retained portion of the bitmap.
         let inactivity_floor_loc = Any::build_snapshot_from_log(
             &mut g_hasher,
@@ -168,7 +165,7 @@ impl<
         .unwrap();
 
         let any = Any {
-            ops: g_hasher.take(),
+            ops: Some(mmr),
             log,
             snapshot,
             inactivity_floor_loc,
@@ -181,7 +178,6 @@ impl<
             status,
             context,
             bitmap_metadata_partition: config.bitmap_metadata_partition,
-            hasher: g_hasher,
         })
     }
 
@@ -206,21 +202,18 @@ impl<
     /// next successful `commit`.
     pub async fn update(&mut self, key: K, value: V) -> Result<UpdateResult, Error> {
         let update_result = self.any.update(key, value).await?;
-        self.hasher.graft(self.any.ops.take().unwrap());
+        let grafter = Grafting::new(Basic::new(H::new()), 10);
+        grafrer.graft(self.any.ops.as_ref().unwrap());
         match update_result {
             UpdateResult::NoOp => {
-                self.any.ops = self.hasher.take();
                 return Ok(update_result);
             }
             UpdateResult::Inserted(_) => (),
             UpdateResult::Updated(old_loc, _) => {
-                self.status
-                    .set_bit(&mut self.hasher, old_loc, false)
-                    .await?;
+                self.status.set_bit(&mut hasher, old_loc, false).await?;
             }
         }
-        self.status.append(&mut self.hasher, true).await?;
-        self.any.ops = self.hasher.take();
+        self.status.append(&mut hasher, true).await?;
 
         Ok(update_result)
     }

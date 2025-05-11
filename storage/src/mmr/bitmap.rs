@@ -22,17 +22,15 @@ use std::collections::VecDeque;
 use tracing::{error, warn};
 
 /// Implements the [Storage] trait for generating inclusion proofs over the bitmap.
-struct BitmapStorage<'a, H: CHasher, M: Hasher<H>> {
+struct BitmapStorage<'a, H: CHasher> {
     /// The Merkle tree over all bitmap bits other than the last chunk.
-    mmr: &'a Mmr<H, M>,
+    mmr: &'a Mmr<H>,
 
     /// A pruned Merkle tree over all bits of the bitmap including the last chunk.
-    last_chunk_mmr: &'a Mmr<H, M>,
+    last_chunk_mmr: &'a Mmr<H>,
 }
 
-impl<H: CHasher + Send + Sync, M: Hasher<H>> Storage<<H as CHasher>::Digest>
-    for BitmapStorage<'_, H, M>
-{
+impl<H: CHasher + Send + Sync> Storage<<H as CHasher>::Digest> for BitmapStorage<'_, H> {
     async fn get_node(&self, pos: u64) -> Result<Option<H::Digest>, Error> {
         if pos < self.mmr.size() {
             Ok(self.mmr.get_node(pos))
@@ -53,7 +51,7 @@ impl<H: CHasher + Send + Sync, M: Hasher<H>> Storage<<H as CHasher>::Digest>
 ///
 /// Warning: Even though we use u64 identifiers for bits, on 32-bit machines, the maximum
 /// addressable bit is limited to (u32::MAX * N * 8).
-pub struct Bitmap<H: CHasher, M: Hasher<H>, const N: usize> {
+pub struct Bitmap<H: CHasher, const N: usize> {
     /// The bitmap itself, in chunks of size N bytes. The number of valid bits in the last chunk is
     /// given by `self.next_bit`. Within each byte, lowest order bits are treated as coming before
     /// higher order bits in the bit ordering.
