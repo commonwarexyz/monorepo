@@ -37,9 +37,9 @@ pub struct Config {
 }
 
 /// A MMR backed by a fixed-item-length journal.
-pub struct Mmr<E: RStorage + Clock + Metrics, H: CHasher, M: Hasher<H>> {
+pub struct Mmr<E: RStorage + Clock + Metrics, H: CHasher> {
     /// A memory resident MMR used to build the MMR structure and cache updates.
-    mem_mmr: MemMmr<H, M>,
+    mem_mmr: MemMmr<H>,
 
     /// Stores all unpruned MMR nodes.
     journal: Journal<E, H::Digest>,
@@ -58,19 +58,19 @@ pub struct Mmr<E: RStorage + Clock + Metrics, H: CHasher, M: Hasher<H>> {
     pruned_to_pos: u64,
 }
 
-impl<E: RStorage + Clock + Metrics, H: CHasher, M: Hasher<H>> Builder<H, M> for Mmr<E, H, M> {
-    async fn add(&mut self, hasher: &mut M, element: &[u8]) -> Result<u64, Error> {
-        self.add(hasher, element).await
+impl<E: RStorage + Clock + Metrics, H: CHasher> Builder<H> for Mmr<E, H> {
+    async fn add(&mut self, hasher: &mut impl Hasher<H>, element: &[u8]) -> Result<u64, Error> {
+        self.mem_mmr.add(hasher, element).await
     }
 
-    fn root(&self, hasher: &mut M) -> H::Digest {
-        self.root(hasher)
+    fn root(&self, hasher: &mut impl Hasher<H>) -> H::Digest {
+        self.mem_mmr.root(hasher)
     }
 }
 
-impl<E: RStorage + Clock + Metrics, H: CHasher, M: Hasher<H>> Storage<H::Digest> for Mmr<E, H, M> {
+impl<E: RStorage + Clock + Metrics, H: CHasher> Storage<H::Digest> for Mmr<E, H> {
     fn size(&self) -> u64 {
-        self.size()
+        self.mem_mmr.size()
     }
 
     async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, Error> {
@@ -92,9 +92,9 @@ const NODE_PREFIX: u8 = 0;
 /// Prefix used for the key storing the prune_to_pos position in the metadata.
 const PRUNE_TO_POS_PREFIX: u8 = 1;
 
-impl<E: RStorage + Clock + Metrics, H: CHasher, M: Hasher<H>> Mmr<E, H, M> {
+impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     /// Initialize a new `Mmr` instance.
-    pub async fn init(context: E, hasher: &mut M, cfg: Config) -> Result<Self, Error> {
+    pub async fn init(context: E, hasher: &mut impl Hasher<H>, cfg: Config) -> Result<Self, Error> {
         let journal_cfg = JConfig {
             partition: cfg.journal_partition,
             items_per_blob: cfg.items_per_blob,
@@ -168,7 +168,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher, M: Hasher<H>> Mmr<E, H, M> {
         let mut pinned_nodes = Vec::new();
         for pos in Proof::<H>::nodes_to_pin(journal_size) {
             let digest =
-                Mmr::<E, H, M>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
+                Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             pinned_nodes.push(digest);
         }
         let mut mem_mmr = MemMmr::init(vec![], journal_size, pinned_nodes);
@@ -178,7 +178,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher, M: Hasher<H>> Mmr<E, H, M> {
         let mut pinned_nodes = HashMap::new();
         for pos in Proof::<H>::nodes_to_pin(metadata_prune_pos) {
             let digest =
-                Mmr::<E, H, M>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
+                Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             pinned_nodes.insert(pos, digest);
         }
         mem_mmr.add_pinned_nodes(pinned_nodes);
@@ -253,7 +253,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher, M: Hasher<H>> Mmr<E, H, M> {
 
     /// Add an element to the MMR and return its position in the MMR. Elements added to the MMR
     /// aren't persisted to disk until `sync` is called.
-    pub async fn add(&mut self, h: &mut M, element: &[u8]) -> Result<u64, Error> {
+    pub async fn add(&mut self, h: &mut impl Hasher<H>, element: &[u8]) -> Result<u64, Error> {
         self.mem_mmr.add(h, element).await
     }
 
@@ -299,7 +299,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher, M: Hasher<H>> Mmr<E, H, M> {
         let mut pinned_nodes = Vec::new();
         for pos in Proof::<H>::nodes_to_pin(new_size) {
             let digest =
-                Mmr::<E, H, M>::get_from_metadata_or_journal(&self.metadata, &self.journal, pos)
+                Mmr::<E, H>::get_from_metadata_or_journal(&self.metadata, &self.journal, pos)
                     .await?;
             pinned_nodes.push(digest);
         }
@@ -309,7 +309,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher, M: Hasher<H>> Mmr<E, H, M> {
     }
 
     /// Return the root hash of the MMR.
-    pub fn root(&self, h: &mut M) -> H::Digest {
+    pub fn root(&self, h: &mut impl Hasher<H>) -> H::Digest {
         self.mem_mmr.root(h)
     }
 
@@ -388,7 +388,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher, M: Hasher<H>> Mmr<E, H, M> {
         start_element_pos: u64,
         end_element_pos: u64,
     ) -> Result<Proof<H>, Error> {
-        Proof::<H>::range_proof::<Mmr<E, H, M>>(self, start_element_pos, end_element_pos).await
+        Proof::<H>::range_proof::<Mmr<E, H>>(self, start_element_pos, end_element_pos).await
     }
 
     /// Prune as many nodes as possible, leaving behind at most items_per_blob nodes in the current

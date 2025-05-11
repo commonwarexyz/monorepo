@@ -397,7 +397,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // create an 11 element MMR over which we'll test single-element inclusion proofs
-            let mut mmr = Mmr::<_, Basic<Sha256>>::new();
+            let mut mmr = Mmr::<Sha256>::new();
             let element = Digest::from(*b"01234567012345670123456701234567");
             let mut leaves: Vec<u64> = Vec::new();
             let mut hasher = Basic::new(Sha256::default());
@@ -520,7 +520,7 @@ mod tests {
 
         executor.start(|_| async move {
             // create a new MMR and add a non-trivial amount (49) of elements
-            let mut mmr: Mmr<_, Basic<Sha256>> = Mmr::default();
+            let mut mmr: Mmr<Sha256> = Mmr::default();
             let mut elements = Vec::new();
             let mut element_positions = Vec::<u64>::new();
             let mut hasher = Basic::new(Sha256::default());
@@ -720,7 +720,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // create a new MMR and add a non-trivial amount (49) of elements
-            let mut mmr: Mmr<_, Basic<Sha256>> = Mmr::default();
+            let mut mmr: Mmr<Sha256> = Mmr::default();
             let mut elements = Vec::<Digest>::new();
             let mut element_positions = Vec::<u64>::new();
             let mut hasher = Basic::new(Sha256::default());
@@ -761,7 +761,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // create a new MMR and add a non-trivial amount (49) of elements
-            let mut mmr: Mmr<_, Basic<Sha256>> = Mmr::default();
+            let mut mmr: Mmr<Sha256> = Mmr::default();
             let mut elements = Vec::<Digest>::new();
             let mut element_positions = Vec::<u64>::new();
             let mut hasher = Basic::new(Sha256::default());
@@ -844,7 +844,7 @@ mod tests {
                 "wrong max serialization size of a Sha256 proof"
             );
             // create a new MMR and add a non-trivial amount of elements
-            let mut mmr: Mmr<_, Basic<Sha256>> = Mmr::default();
+            let mut mmr: Mmr<Sha256> = Mmr::default();
             let mut elements = Vec::<Digest>::new();
             let mut element_positions = Vec::<u64>::new();
             let mut hasher = Basic::new(Sha256::default());
