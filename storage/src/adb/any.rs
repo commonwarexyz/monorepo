@@ -67,7 +67,7 @@ pub struct Any<
     ///
     /// We using an Option<Box<>> wrapper so that the structure can be temporarily taken by a
     /// Grafting hasher.
-    pub(super) ops: Option<Box<Mmr<E, H, Basic<H>>>>,
+    pub(super) ops: Mmr<E, H>,
 
     /// A (pruned) log of all operations applied to the db in order of occurrence. The position
     /// of each operation in the log is called its _location_, which is a stable identifier. Pruning
@@ -118,7 +118,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         let (mmr, log) = Self::init_mmr_and_log(context, &mut hasher, cfg).await?;
 
         let start_leaf_num = leaf_pos_to_num(mmr.pruned_to_pos()).unwrap();
-        let inactivity_floor_loc = Self::build_snapshot_from_log::<Basic<H>, UNUSED_N>(
+        let inactivity_floor_loc = Self::build_snapshot_from_log::<UNUSED_N>(
             &mut hasher,
             start_leaf_num,
             &log,
@@ -128,7 +128,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         .await?;
 
         let db = Any {
-            ops: Some(mmr),
+            ops: mmr,
             log,
             snapshot,
             inactivity_floor_loc,
@@ -146,19 +146,17 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         context: E,
         hasher: &mut Basic<H>,
         cfg: Config,
-    ) -> Result<(Box<Mmr<E, H, Basic<H>>>, Journal<E, Operation<K, V>>), Error> {
-        let mut mmr = Box::new(
-            Mmr::init(
-                context.with_label("mmr"),
-                hasher,
-                MmrConfig {
-                    journal_partition: cfg.mmr_journal_partition,
-                    metadata_partition: cfg.mmr_metadata_partition,
-                    items_per_blob: cfg.mmr_items_per_blob,
-                },
-            )
-            .await?,
-        );
+    ) -> Result<(Mmr<E, H>, Journal<E, Operation<K, V>>), Error> {
+        let mut mmr = Mmr::init(
+            context.with_label("mmr"),
+            hasher,
+            MmrConfig {
+                journal_partition: cfg.mmr_journal_partition,
+                metadata_partition: cfg.mmr_metadata_partition,
+                items_per_blob: cfg.mmr_items_per_blob,
+            },
+        )
+        .await?;
 
         let mut log = Journal::init(
             context.with_label("log"),
@@ -222,12 +220,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// reflecting its activity status. The bitmap is expected to already have a number of bits
     /// corresponding to the portion of the database below the inactivity floor, and this method
     /// will panic otherwise.
-    pub(super) async fn build_snapshot_from_log<M2: Hasher<H>, const N: usize>(
-        bitmap_hasher: &mut M2,
+    pub(super) async fn build_snapshot_from_log<const N: usize>(
+        bitmap_hasher: &mut impl Hasher<H>,
         start_leaf_num: u64,
         log: &Journal<E, Operation<K, V>>,
         snapshot: &mut Index<T, u64>,
-        mut bitmap: Option<&mut Bitmap<H, M2, N>>,
+        mut bitmap: Option<&mut Bitmap<H, N>>,
     ) -> Result<u64, Error> {
         let mut inactivity_floor_loc = start_leaf_num;
         let log_size = log.size().await?;
@@ -375,13 +373,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     }
 
     #[inline]
-    fn ops_ref(&self) -> &Mmr<E, H, Basic<H>> {
-        self.ops.as_ref().unwrap()
+    fn ops_ref(&self) -> &Mmr<E, H> {
+        &self.ops
     }
 
     #[inline]
-    fn ops_mut(&mut self) -> &mut Mmr<E, H, Basic<H>> {
-        self.ops.as_mut().unwrap()
+    fn ops_mut(&mut self) -> &mut Mmr<E, H> {
+        &mut self.ops
     }
 
     /// Return the oldest location that remains readable & provable.
@@ -468,11 +466,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     pub(super) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<u64, Error> {
         // Update the ops MMR.
         let digest = Self::op_digest(&mut self.hasher, &op);
-        self.ops
-            .as_mut()
-            .unwrap()
-            .add(&mut self.hasher, &digest)
-            .await?;
+        self.ops.add(&mut self.hasher, &digest).await?;
         self.uncommitted_ops += 1;
 
         // Append the operation to the log.
@@ -559,7 +553,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     pub(super) async fn sync(&mut self) -> Result<(), Error> {
         try_join!(
             self.log.sync().map_err(Error::JournalError),
-            self.ops.as_mut().unwrap().sync().map_err(Error::MmrError),
+            self.ops.sync().map_err(Error::MmrError),
         )?;
 
         Ok(())
@@ -575,7 +569,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         }
         try_join!(
             self.log.close().map_err(Error::JournalError),
-            self.ops.unwrap().close().map_err(Error::MmrError),
+            self.ops.close().map_err(Error::MmrError),
         )?;
 
         Ok(())
@@ -677,7 +671,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             .await?;
         let root = self.root(hasher);
         self.log.close().await?;
-        self.ops.unwrap().simulate_partial_sync(write_limit).await?;
+        self.ops.simulate_partial_sync(write_limit).await?;
 
         Ok(root)
     }
@@ -688,7 +682,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     pub async fn simulate_failed_commit_log(mut self) -> Result<(), Error> {
         self.apply_op(Operation::Commit(self.inactivity_floor_loc))
             .await?;
-        self.ops.unwrap().close().await?;
+        self.ops.close().await?;
         // Rewind the operation log over the commit op to force rollback to the previous commit.
         self.log.rewind(self.log.size().await? - 1).await?;
         self.log.close().await?;
@@ -1189,7 +1183,7 @@ mod test {
             let mut hasher = Basic::new(Sha256::new());
             let root = db.root(&mut hasher);
             // Create a bitmap based on the current db's pruned/inactive state.
-            let mut bitmap = Bitmap::<_, _, SHA256_SIZE>::new();
+            let mut bitmap = Bitmap::<Sha256, SHA256_SIZE>::new();
             for _ in 0..db.inactivity_floor_loc {
                 bitmap.append(&mut hasher, false).await.unwrap();
             }
@@ -1212,7 +1206,7 @@ mod test {
             let mut snapshot: Index<TwoCap, u64> =
                 Index::init(context.with_label("snapshot"), TwoCap);
             let inactivity_floor_loc =
-                Any::<_, _, _, Sha256, TwoCap>::build_snapshot_from_log::<_, SHA256_SIZE>(
+                Any::<_, _, _, Sha256, TwoCap>::build_snapshot_from_log::<SHA256_SIZE>(
                     &mut hasher,
                     start_leaf_num,
                     &log,
@@ -1224,7 +1218,7 @@ mod test {
 
             // Check the recovered state is correct.
             let db = Any::<_, _, _, _, TwoCap> {
-                ops: Some(mmr),
+                ops: mmr,
                 log,
                 snapshot,
                 inactivity_floor_loc,

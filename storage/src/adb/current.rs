@@ -45,8 +45,8 @@ pub struct Config {
     pub bitmap_metadata_partition: String,
 }
 
-type BasicMmr<E, H> = Mmr<E, H, Basic<H>>;
-type GraftedBitmap<E, H, const N: usize> = Bitmap<H, Grafting<H, BasicMmr<E, H>>, N>;
+type BasicMmr<E, H> = Mmr<E, H>;
+type GraftedBitmap<H, const N: usize> = Bitmap<H, N>;
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of whether
 /// a key ever had a specific value, and whether the key currently has that value.
@@ -68,7 +68,7 @@ pub struct Current<
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Any] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
-    pub status: GraftedBitmap<E, H, N>,
+    pub status: GraftedBitmap<H, N>,
 
     context: E,
 
@@ -103,7 +103,7 @@ impl<
         };
 
         let context = context.with_label("adb::current");
-        let mut status = GraftedBitmap::<E, H, N>::restore_pruned(
+        let mut status = GraftedBitmap::<H, N>::restore_pruned(
             context.with_label("bitmap"),
             &config.bitmap_metadata_partition,
         )
@@ -111,7 +111,7 @@ impl<
 
         // Initialize the db's mmr/log.
         let mut hasher = Basic::new(H::new());
-        let (mut mmr, log) =
+        let (mmr, log) =
             Any::<_, _, _, _, T>::init_mmr_and_log(context.clone(), &mut hasher, cfg).await?;
 
         // Ensure consistency between the bitmap and the db's MMR.
@@ -125,15 +125,14 @@ impl<
             "bitmap is pruned beyond where bits should be retained"
         );
         let mut snapshot = Index::init(context.with_label("snapshot"), translator);
-        let mut g_hasher = Grafting::new(hasher, 9);
+        let mut g_hasher = Grafting::new(hasher, 9, &mmr);
         if bitmap_pruned_pos < mmr.pruned_to_pos() {
-            g_hasher.graft(mmr.as_ref());
             // Prepend the missing (inactive) bits needed to align the bitmap, which can only be
             // pruned to a chunk boundary, with the MMR's pruning boundary.
             for _ in pruned_bits..mmr_pruned_leaves {
                 status.append(&mut g_hasher, false).await?;
             }
-            let chunk_bits = GraftedBitmap::<E, H, N>::CHUNK_SIZE_BITS;
+            let chunk_bits = GraftedBitmap::<H, N>::CHUNK_SIZE_BITS;
             if mmr_pruned_leaves > chunk_bits && pruned_bits < mmr_pruned_leaves - chunk_bits {
                 // This is unusual but can happen if we fail to write the bitmap after pruning
                 // inactive bits from the any db, so we warn about it.
@@ -152,7 +151,6 @@ impl<
             }
         }
 
-        g_hasher.graft(mmr.as_ref());
         // Replay the log to generate the snapshot & populate the retained portion of the bitmap.
         let inactivity_floor_loc = Any::build_snapshot_from_log(
             &mut g_hasher,
@@ -165,7 +163,7 @@ impl<
         .unwrap();
 
         let any = Any {
-            ops: Some(mmr),
+            ops: mmr,
             log,
             snapshot,
             inactivity_floor_loc,
@@ -202,8 +200,7 @@ impl<
     /// next successful `commit`.
     pub async fn update(&mut self, key: K, value: V) -> Result<UpdateResult, Error> {
         let update_result = self.any.update(key, value).await?;
-        let grafter = Grafting::new(Basic::new(H::new()), 10);
-        grafrer.graft(self.any.ops.as_ref().unwrap());
+        let hasher = Grafting::new(Basic::new(H::new()), 10, self.any.ops);
         match update_result {
             UpdateResult::NoOp => {
                 return Ok(update_result);
