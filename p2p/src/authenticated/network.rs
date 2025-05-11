@@ -172,7 +172,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
             dialer::Config {
                 stream_cfg,
                 dial_frequency: self.cfg.dial_frequency,
-                dial_rate: self.cfg.dial_rate,
+                query_frequency: self.cfg.query_frequency,
             },
         );
         let mut dialer_task = dialer.start(self.tracker_mailbox, spawner_mailbox);

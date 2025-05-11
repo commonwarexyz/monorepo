@@ -136,6 +136,15 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
         while let Some(msg) = self.receiver.next().await {
             self.registry.process_releases();
             match msg {
+                Message::Register { index, peers } => {
+                    // Ensure that peer set is not too large.
+                    // Panic since there is no way to recover from this.
+                    let len = peers.len();
+                    let max = self.max_peer_set_size;
+                    assert!(len <= max, "peer set too large: {} > {}", len, max);
+
+                    self.registry.add_set(index, peers);
+                }
                 Message::Initialize {
                     public_key,
                     mut peer,
@@ -187,22 +196,19 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
                     self.registry.update_peers(peers);
                 }
                 Message::Dialable { responder } => {
-                    let _ = responder.send(self.registry.reserve_dialable());
+                    let _ = responder.send(self.registry.dialable());
                 }
-                Message::Register { index, peers } => {
-                    // Ensure that peer set is not too large.
-                    // Panic since there is no way to recover from this.
-                    let len = peers.len();
-                    let max = self.max_peer_set_size;
-                    assert!(len <= max, "peer set too large: {} > {}", len, max);
-
-                    self.registry.add_set(index, peers);
-                }
-                Message::Reserve {
+                Message::Dial {
                     public_key,
                     reservation,
                 } => {
-                    let _ = reservation.send(self.registry.reserve_listener(&public_key));
+                    let _ = reservation.send(self.registry.dial(&public_key));
+                }
+                Message::Listen {
+                    public_key,
+                    reservation,
+                } => {
+                    let _ = reservation.send(self.registry.listen(&public_key));
                 }
                 Message::Block { public_key } => {
                     // Block the peer
@@ -549,9 +555,7 @@ mod tests {
             // For simplicity, we focus on the `Construct` behavior which implies `allowed()` is false.
             let dialable_peers = mailbox.dialable().await;
             assert!(
-                !dialable_peers
-                    .iter()
-                    .any(|res| res.metadata().public_key() == &pk1),
+                !dialable_peers.iter().any(|peer| peer == &pk1),
                 "Blocked peer should not be dialable"
             );
         });
@@ -788,7 +792,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reserve_peer() {
+    fn test_listen() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // context needs to be mut for sleep
@@ -802,18 +806,18 @@ mod tests {
             let (_peer_signer, peer_pk) = create_signer_and_pk(1);
 
             // Attempt to reserve an unknown peer
-            let reservation = mailbox.reserve(peer_pk.clone()).await;
+            let reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(reservation.is_none(), "Should not reserve unknown peer");
 
             // Register the peer
             oracle.register(0, vec![peer_pk.clone()]).await;
 
             // Attempt to reserve the now known peer
-            let reservation = mailbox.reserve(peer_pk.clone()).await;
+            let reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(reservation.is_some(), "Should reserve known peer");
 
             // Cannot reserve the same peer again
-            let failed_reservation = mailbox.reserve(peer_pk.clone()).await;
+            let failed_reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(failed_reservation.is_none(), "Should not re-reserve");
 
             // Release by dropping
@@ -822,7 +826,7 @@ mod tests {
             // Sleep to avoid rate-limiting
             context.sleep(Duration::from_millis(1_000)).await;
 
-            let reservation_after_release = mailbox.reserve(peer_pk.clone()).await;
+            let reservation_after_release = mailbox.listen(peer_pk.clone()).await;
             assert!(
                 reservation_after_release.is_some(),
                 "Failed to reserve peer again after release"

@@ -69,14 +69,23 @@ pub enum Message<E: Spawner + Metrics, C: Verifier> {
 
     // ---------- Used by dialer ----------
     /// Request a list of dialable peers.
-    ///
-    /// The tracker will respond with a list of tuples containing the public key, socket address,
-    /// and reservation for each dialable peer. This list won't include peers that are already
-    /// connected, blocked, or already have an active reservation.
     Dialable {
         /// One-shot channel to send the list of dialable peers.
         #[allow(clippy::type_complexity)]
-        responder: oneshot::Sender<Vec<Reservation<E, C::PublicKey>>>,
+        responder: oneshot::Sender<Vec<C::PublicKey>>,
+    },
+
+    /// Request a reservation for a particular peer to dial.
+    ///
+    /// The tracker will respond with an [`Option<Reservation<E, C>>`], which will be `None` if the
+    /// reservation cannot be granted (e.g., if the peer is already connected, blocked or already
+    /// has an active reservation).
+    Dial {
+        /// The public key of the peer to reserve.
+        public_key: C::PublicKey,
+
+        /// sender to respond with the reservation.
+        reservation: oneshot::Sender<Option<Reservation<E, C::PublicKey>>>,
     },
 
     // ---------- Used by listener ----------
@@ -85,8 +94,11 @@ pub enum Message<E: Spawner + Metrics, C: Verifier> {
     /// The tracker will respond with an [`Option<Reservation<E, C>>`], which will be `None` if  the
     /// reservation cannot be granted (e.g., if the peer is already connected, blocked or already
     /// has an active reservation).
-    Reserve {
+    Listen {
+        /// The public key of the peer to reserve.
         public_key: C::PublicKey,
+
+        /// The sender to respond with the reservation.
         reservation: oneshot::Sender<Option<Reservation<E, C::PublicKey>>>,
     },
 }
@@ -136,7 +148,7 @@ impl<E: Spawner + Metrics, C: Verifier> Mailbox<E, C> {
     }
 
     /// Send a `Block` message to the tracker.
-    pub async fn dialable(&mut self) -> Vec<Reservation<E, C::PublicKey>> {
+    pub async fn dialable(&mut self) -> Vec<C::PublicKey> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::Dialable { responder: sender })
@@ -145,14 +157,27 @@ impl<E: Spawner + Metrics, C: Verifier> Mailbox<E, C> {
         receiver.await.unwrap()
     }
 
-    /// Send a `Reserve` message to the tracker.
-    pub async fn reserve(
+    /// Send a `Dial` message to the tracker.
+    pub async fn dial(&mut self, public_key: C::PublicKey) -> Option<Reservation<E, C::PublicKey>> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(Message::Dial {
+                public_key,
+                reservation: tx,
+            })
+            .await
+            .unwrap();
+        rx.await.unwrap()
+    }
+
+    /// Send a `Listen` message to the tracker.
+    pub async fn listen(
         &mut self,
         public_key: C::PublicKey,
     ) -> Option<Reservation<E, C::PublicKey>> {
         let (tx, rx) = oneshot::channel();
         self.sender
-            .send(Message::Reserve {
+            .send(Message::Listen {
                 public_key,
                 reservation: tx,
             })

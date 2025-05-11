@@ -202,34 +202,28 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Registry<E
         }
     }
 
-    /// Reserves as many dialable peers as possible for the dialer.
-    ///
-    /// Returns a vector of tuples containing the socket address and the reservation.
-    pub fn reserve_dialable(&mut self) -> Vec<Reservation<E, C::PublicKey>> {
+    /// Returns a vector of dialable peers. That is, unconnected peers for which we have a socket.
+    pub fn dialable(&self) -> Vec<C::PublicKey> {
         // Collect peers with known addresses
-        let result: Vec<_> = self
-            .peers
+        self.peers
             .iter()
-            .filter_map(|(peer, r)| {
-                r.socket()
-                    .map(|addr| ResMetadata::Dialer(peer.clone(), addr))
-            })
-            .collect();
-
-        // Attempt to reserve each peer
-        result
-            .into_iter()
-            .filter_map(|metadata| self.reserve(metadata))
+            .filter(|&(_, r)| r.dialable())
+            .map(|(peer, _)| peer.clone())
             .collect()
+    }
+
+    /// Attempt to reserve a peer for the dialer.
+    ///
+    /// Returns `Some` on success, `None` otherwise.
+    pub fn dial(&mut self, peer: &C::PublicKey) -> Option<Reservation<E, C::PublicKey>> {
+        let socket = self.peers.get(peer)?.socket()?;
+        self.reserve(ResMetadata::Dialer(peer.clone(), socket))
     }
 
     /// Attempt to reserve a peer for the listener.
     ///
     /// Returns `Some` on success, `None` otherwise.
-    pub fn reserve_listener(
-        &mut self,
-        peer: &C::PublicKey,
-    ) -> Option<Reservation<E, C::PublicKey>> {
+    pub fn listen(&mut self, peer: &C::PublicKey) -> Option<Reservation<E, C::PublicKey>> {
         self.reserve(ResMetadata::Listener(peer.clone()))
     }
 

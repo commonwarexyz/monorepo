@@ -63,11 +63,11 @@ pub struct Config<C: Scheme> {
     /// Quota for incoming connections across all peers.
     pub allowed_incoming_connection_rate: Quota,
 
-    /// Frequency to attempt to dial known addresses.
+    /// Frequency at which we make a new dial attempt to a peer.
     pub dial_frequency: Duration,
 
-    /// Quota for peers to dial.
-    pub dial_rate: Quota,
+    /// Frequency at which we will fetch a new list of dialable peers.
+    pub query_frequency: Duration,
 
     /// Number of peer sets to track.
     ///
@@ -129,8 +129,8 @@ impl<C: Scheme> Config<C> {
             handshake_timeout: Duration::from_secs(5),
             allowed_connection_rate_per_peer: Quota::per_minute(NZU32!(1)),
             allowed_incoming_connection_rate: Quota::per_second(NZU32!(256)),
-            dial_frequency: Duration::from_secs(60),
-            dial_rate: Quota::per_minute(NZU32!(30)),
+            dial_frequency: Duration::from_secs(2),
+            query_frequency: Duration::from_secs(60),
             tracked_peer_sets: 4,
             max_peer_set_size: 1 << 16, // 2^16
             gossip_bit_vec_frequency: Duration::from_secs(50),
@@ -168,8 +168,8 @@ impl<C: Scheme> Config<C> {
             handshake_timeout: Duration::from_secs(5),
             allowed_connection_rate_per_peer: Quota::per_second(NZU32!(1)),
             allowed_incoming_connection_rate: Quota::per_second(NZU32!(256)),
-            dial_frequency: Duration::from_secs(5),
-            dial_rate: Quota::per_second(NZU32!(30)),
+            dial_frequency: Duration::from_secs(1),
+            query_frequency: Duration::from_secs(30),
             tracked_peer_sets: 4,
             max_peer_set_size: 1 << 16, // 2^16
             gossip_bit_vec_frequency: Duration::from_secs(5),
@@ -201,8 +201,8 @@ impl<C: Scheme> Config<C> {
             handshake_timeout: Duration::from_secs(5),
             allowed_connection_rate_per_peer: Quota::per_second(NZU32!(1_024)),
             allowed_incoming_connection_rate: Quota::per_second(NZU32!(1_024)),
-            dial_frequency: Duration::from_secs(1),
-            dial_rate: Quota::per_second(NZU32!(1_024)),
+            dial_frequency: Duration::from_millis(2),
+            query_frequency: Duration::from_millis(1_000),
             tracked_peer_sets: 4,
             max_peer_set_size: 1 << 8, // 2^8
             gossip_bit_vec_frequency: Duration::from_secs(1),

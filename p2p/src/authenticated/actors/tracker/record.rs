@@ -205,6 +205,20 @@ impl<C: Verifier> Record<C> {
         matches!(self.address, Address::Blocked)
     }
 
+    /// Returns `true` if the record is dialable.
+    ///
+    /// A record is dialable if:
+    /// - We have the socket address of the peer
+    /// - It is not ourselves
+    /// - We are not already connected
+    pub fn dialable(&self) -> bool {
+        matches!(self.status, Status::Inert | Status::Reserved)
+            && matches!(
+                self.address,
+                Address::Bootstrapper(_) | Address::Discovered(_, _)
+            )
+    }
+
     /// Return the socket of the peer, if known.
     pub fn socket(&self) -> Option<SocketAddr> {
         match &self.address {
