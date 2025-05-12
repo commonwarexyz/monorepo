@@ -34,7 +34,6 @@ use commonware_utils::{quorum, BitVec};
 use core::panic;
 use futures::{
     channel::{mpsc, oneshot},
-    executor::block_on,
     future::Either,
     pin_mut, SinkExt, StreamExt,
 };
