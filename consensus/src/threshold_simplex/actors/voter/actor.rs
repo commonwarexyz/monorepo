@@ -502,12 +502,17 @@ impl<
             );
 
             // Only select finalizes that are for this proposal
-            let finalizes = finalizes
-                .iter()
-                .filter_map(|x| self.finalizes[*x as usize].as_ref());
+            let proposals = finalizes.iter().enumerate().filter_map(|(idx, alive)| {
+                if !alive {
+                    return None;
+                }
+                let Status::Verified(ref finalize) = self.finalizes[idx] else {
+                    return None;
+                };
+                Some(&finalize.proposal_signature)
+            });
 
             // Recover threshold signature
-            let proposals = finalizes.map(|x| &x.proposal_signature);
             let proposal_signature = threshold_signature_recover::<V, _>(threshold, proposals)
                 .expect("failed to recover threshold signature");
 
