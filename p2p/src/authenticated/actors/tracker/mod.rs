@@ -19,6 +19,7 @@ mod set;
 pub use actor::Actor;
 pub use ingress::{Mailbox, Oracle};
 
+#[derive(Clone, Debug)]
 pub struct Config<C: Scheme> {
     pub crypto: C,
     pub namespace: Vec<u8>,

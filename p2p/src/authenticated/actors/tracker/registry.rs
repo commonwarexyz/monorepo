@@ -226,11 +226,14 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Registry<E
     /// Returns a vector of dialable peers. That is, unconnected peers for which we have a socket.
     pub fn dialable(&self) -> Vec<C::PublicKey> {
         // Collect peers with known addresses
-        self.peers
+        let mut result: Vec<_> = self
+            .peers
             .iter()
             .filter(|&(_, r)| r.dialable())
             .map(|(peer, _)| peer.clone())
-            .collect()
+            .collect();
+        result.sort();
+        result
     }
 
     /// Attempt to reserve a peer for the dialer.
