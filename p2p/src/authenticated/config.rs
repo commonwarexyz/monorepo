@@ -205,10 +205,10 @@ impl<C: Scheme> Config<C> {
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
-            allowed_connection_rate_per_peer: Quota::per_second(NZU32!(1_024)),
+            allowed_connection_rate_per_peer: Quota::per_second(NZU32!(4)),
             allowed_incoming_connection_rate: Quota::per_second(NZU32!(1_024)),
-            dial_frequency: Duration::from_millis(2),
-            query_frequency: Duration::from_millis(1_000),
+            dial_frequency: Duration::from_millis(200),
+            query_frequency: Duration::from_millis(5_000),
             dial_fail_limit: 1,
             tracked_peer_sets: 4,
             max_peer_set_size: 1 << 8, // 2^8
