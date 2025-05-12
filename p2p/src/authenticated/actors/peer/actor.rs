@@ -1,5 +1,9 @@
 use super::{Config, Error, Mailbox, Message, Relay};
-use crate::authenticated::{actors::tracker, channels::Channels, metrics, types};
+use crate::authenticated::{
+    actors::tracker::{self, reservation::Reservation},
+    channels::Channels,
+    metrics, types,
+};
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Verifier;
 use commonware_macros::select;
@@ -34,14 +38,14 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: Verifier>
     rate_limited: Family<metrics::Message, Counter>,
 
     // When reservation goes out-of-scope, the tracker will be notified.
-    _reservation: tracker::Reservation<E, C::PublicKey>,
+    _reservation: Reservation<E, C::PublicKey>,
 }
 
 impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Verifier> Actor<E, C> {
     pub fn new(
         context: E,
         cfg: Config,
-        reservation: tracker::Reservation<E, C::PublicKey>,
+        reservation: Reservation<E, C::PublicKey>,
     ) -> (Self, Relay) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);

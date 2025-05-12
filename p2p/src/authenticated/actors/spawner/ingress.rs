@@ -1,4 +1,4 @@
-use crate::authenticated::actors::tracker::Reservation;
+use crate::authenticated::actors::tracker::reservation::Reservation;
 use commonware_runtime::{Clock, Metrics, Sink, Spawner, Stream};
 use commonware_stream::public_key::Connection;
 use commonware_utils::Array;

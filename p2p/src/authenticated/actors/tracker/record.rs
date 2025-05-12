@@ -246,7 +246,12 @@ impl<C: Verifier> Record<C> {
     }
 
     /// Returns `true` if we want to ask for updated peer information for this peer.
-    pub fn want(&self) -> bool {
+    ///
+    /// - Returns `false` for `Myself` and `Blocked` addresses.
+    /// - Returns `true` for addresses for which we don't have peer info.
+    /// - Returns true for addresses for which we do have peer info if-and-only-if we have failed to
+    ///   dial at least `min_fails` times.
+    pub fn want(&self, min_fails: usize) -> bool {
         // Ignore how many sets the peer is part of.
         // If the peer is not in any sets, this function is not called anyway.
 
@@ -256,7 +261,7 @@ impl<C: Verifier> Record<C> {
         match self.address {
             Address::Myself(_) | Address::Blocked => false,
             Address::Unknown | Address::Bootstrapper(_) => true,
-            Address::Discovered(_, fails) => self.status != Status::Active && fails > 0,
+            Address::Discovered(_, fails) => self.status != Status::Active && fails >= min_fails,
         }
     }
 

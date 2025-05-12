@@ -13,12 +13,11 @@ mod ingress;
 mod metrics;
 mod record;
 mod registry;
-mod reservation;
+pub mod reservation;
 mod set;
 
 pub use actor::Actor;
 pub use ingress::{Mailbox, Oracle};
-pub use reservation::{Metadata as ResMetadata, Reservation};
 
 pub struct Config<C: Scheme> {
     pub crypto: C,
@@ -32,6 +31,7 @@ pub struct Config<C: Scheme> {
     pub max_peer_set_size: usize,
     pub allowed_connection_rate_per_peer: Quota,
     pub peer_gossip_max_count: usize,
+    pub dial_fail_limit: usize,
 }
 
 #[derive(Error, Debug)]

@@ -1,6 +1,6 @@
 use super::{
     ingress::{Mailbox, Message, Oracle},
-    registry::Registry,
+    registry::{self, Registry},
     Config, Error,
 };
 use crate::authenticated::{ip, types};
@@ -62,14 +62,13 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
         let ip_namespace = union(&cfg.namespace, NAMESPACE_SUFFIX_IP);
         let myself = types::PeerInfo::sign(&mut cfg.crypto, &ip_namespace, socket, timestamp);
 
-        let registry = Registry::init(
-            context.clone(),
-            cfg.bootstrappers,
-            myself,
-            cfg.allowed_connection_rate_per_peer,
-            cfg.mailbox_size,
-            cfg.tracked_peer_sets,
-        );
+        let registry_cfg = registry::Config {
+            mailbox_size: cfg.mailbox_size,
+            max_sets: cfg.tracked_peer_sets,
+            dial_fail_limit: cfg.dial_fail_limit,
+            rate_limit: cfg.allowed_connection_rate_per_peer,
+        };
+        let registry = Registry::init(context.clone(), cfg.bootstrappers, myself, registry_cfg);
 
         (
             Self {
@@ -258,6 +257,7 @@ mod tests {
             allowed_connection_rate_per_peer: Quota::per_second(NZU32!(1)),
             peer_gossip_max_count: 5,
             max_peer_set_size: 1 << 16,
+            dial_fail_limit: 1,
         }
     }
 

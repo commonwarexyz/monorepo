@@ -65,6 +65,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 allowed_connection_rate_per_peer: cfg.allowed_connection_rate_per_peer,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
                 max_peer_set_size: cfg.max_peer_set_size,
+                dial_fail_limit: cfg.dial_fail_limit,
             },
         );
         let (router, router_mailbox, messenger) = router::Actor::new(

@@ -1,4 +1,9 @@
-use super::{metrics::Metrics, record::Record, set::Set, ResMetadata, Reservation};
+use super::{
+    metrics::Metrics,
+    record::Record,
+    reservation::{Metadata, Reservation},
+    set::Set,
+};
 use crate::authenticated::{
     metrics,
     types::{self, PeerInfo},
@@ -18,6 +23,22 @@ use std::{
 };
 use tracing::debug;
 
+/// Configuration for the [`Registry`].
+pub struct Config {
+    /// The maximum number of peer sets to track.
+    pub mailbox_size: usize,
+
+    /// The maximum number of peer sets to track.
+    pub max_sets: usize,
+
+    /// The minimum number of times we should fail to dial a peer before attempting to ask other
+    /// peers for its peer info again.
+    pub dial_fail_limit: usize,
+
+    /// The rate limit for allowing reservations per-peer.
+    pub rate_limit: Quota,
+}
+
 /// Represents a collection of records for all peers.
 pub struct Registry<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> {
     context: E,
@@ -25,6 +46,10 @@ pub struct Registry<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verif
     // ---------- Configuration ----------
     /// The maximum number of peer sets to track.
     max_sets: usize,
+
+    /// The minimum number of times we should fail to dial a peer before attempting to ask other
+    /// peers for its peer info again.
+    dial_fail_limit: usize,
 
     // ---------- State ----------
     /// The records of all peers.
@@ -40,10 +65,10 @@ pub struct Registry<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verif
 
     // ---------- Released Reservations Queue ----------
     /// Sender for releasing reservations.
-    sender: mpsc::Sender<ResMetadata<C::PublicKey>>,
+    sender: mpsc::Sender<Metadata<C::PublicKey>>,
 
     /// Receiver for releasing reservations.
-    receiver: mpsc::Receiver<ResMetadata<C::PublicKey>>,
+    receiver: mpsc::Receiver<Metadata<C::PublicKey>>,
 
     // ---------- Metrics ----------
     /// The metrics for the records.
@@ -56,9 +81,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Registry<E
         context: E,
         bootstrappers: Vec<(C::PublicKey, SocketAddr)>,
         myself: PeerInfo<C>,
-        rate_limit: Quota,
-        mailbox_size: usize,
-        max_sets: usize,
+        cfg: Config,
     ) -> Self {
         // Create the list of peers and add the bootstrappers.
         let mut peers = HashMap::new();
@@ -69,16 +92,17 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Registry<E
         // Add myself to the list of peers.
         // Overwrites the entry if myself is also a bootstrapper.
         peers.insert(myself.public_key.clone(), Record::myself(myself));
-        let rate_limiter = RateLimiter::hashmap_with_clock(rate_limit, &context);
+        let rate_limiter = RateLimiter::hashmap_with_clock(cfg.rate_limit, &context);
 
         // Other initialization.
         let metrics = Metrics::init(context.clone());
         metrics.tracked.set(peers.len() as i64);
-        let (sender, receiver) = mpsc::channel(mailbox_size);
+        let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
 
         Self {
             context,
-            max_sets,
+            max_sets: cfg.max_sets,
+            dial_fail_limit: cfg.dial_fail_limit,
             peers,
             sets: BTreeMap::new(),
             rate_limiter,
@@ -100,11 +124,11 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Registry<E
             self.metrics.reserved.dec();
 
             // If the reservation was taken by the dialer, record the failure.
-            if let ResMetadata::Dialer(_, socket) = metadata {
+            if let Metadata::Dialer(_, socket) = metadata {
                 record.dial_failure(socket);
             }
 
-            let want = record.want();
+            let want = record.want(self.dial_fail_limit);
             for set in self.sets.values_mut() {
                 set.update(peer, !want);
             }
@@ -125,7 +149,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Registry<E
         record.connect();
 
         // We may have to update the sets.
-        let want = record.want();
+        let want = record.want(self.dial_fail_limit);
         for set in self.sets.values_mut() {
             set.update(peer, !want);
         }
@@ -152,7 +176,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Registry<E
                 .inc();
 
             // We may have to update the sets.
-            let want = self.peers.get(&peer).unwrap().want();
+            let want = self.peers.get(&peer).unwrap().want(self.dial_fail_limit);
             for set in self.sets.values_mut() {
                 set.update(&peer, !want);
             }
@@ -184,7 +208,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Registry<E
                 Record::unknown()
             });
             record.increment();
-            set.update(peer, !record.want());
+            set.update(peer, !record.want(self.dial_fail_limit));
         }
         self.sets.insert(index, set);
 
@@ -214,14 +238,14 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Registry<E
     /// Returns `Some` on success, `None` otherwise.
     pub fn dial(&mut self, peer: &C::PublicKey) -> Option<Reservation<E, C::PublicKey>> {
         let socket = self.peers.get(peer)?.socket()?;
-        self.reserve(ResMetadata::Dialer(peer.clone(), socket))
+        self.reserve(Metadata::Dialer(peer.clone(), socket))
     }
 
     /// Attempt to reserve a peer for the listener.
     ///
     /// Returns `Some` on success, `None` otherwise.
     pub fn listen(&mut self, peer: &C::PublicKey) -> Option<Reservation<E, C::PublicKey>> {
-        self.reserve(ResMetadata::Listener(peer.clone()))
+        self.reserve(Metadata::Listener(peer.clone()))
     }
 
     /// Returns a [`types::BitVec`] for a random peer set.
@@ -299,7 +323,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Registry<E
     /// Returns `Some(Reservation)` if the peer was successfully reserved, `None` otherwise.
     fn reserve(
         &mut self,
-        metadata: ResMetadata<C::PublicKey>,
+        metadata: Metadata<C::PublicKey>,
     ) -> Option<Reservation<E, C::PublicKey>> {
         let peer = metadata.public_key();
 

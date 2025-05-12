@@ -3,7 +3,10 @@
 use crate::authenticated::{
     actors::{
         spawner,
-        tracker::{self, ResMetadata},
+        tracker::{
+            self,
+            reservation::{Metadata, Reservation},
+        },
     },
     metrics,
 };
@@ -73,11 +76,11 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Schem
     /// Dial a peer for which we have a reservation.
     async fn dial_peer(
         &mut self,
-        reservation: tracker::Reservation<E, C::PublicKey>,
+        reservation: Reservation<E, C::PublicKey>,
         supervisor: &mut spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
     ) {
         // Extract metadata from the reservation
-        let ResMetadata::Dialer(peer, address) = reservation.metadata().clone() else {
+        let Metadata::Dialer(peer, address) = reservation.metadata().clone() else {
             unreachable!("unexpected reservation metadata");
         };
 

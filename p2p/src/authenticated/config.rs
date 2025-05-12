@@ -69,6 +69,10 @@ pub struct Config<C: Scheme> {
     /// Frequency at which we will fetch a new list of dialable peers.
     pub query_frequency: Duration,
 
+    /// Times that dialing a given peer should fail before asking for updated peer information for
+    /// that peer.
+    pub dial_fail_limit: usize,
+
     /// Number of peer sets to track.
     ///
     /// We will attempt to maintain connections to peers stored
@@ -131,6 +135,7 @@ impl<C: Scheme> Config<C> {
             allowed_incoming_connection_rate: Quota::per_second(NZU32!(256)),
             dial_frequency: Duration::from_secs(2),
             query_frequency: Duration::from_secs(60),
+            dial_fail_limit: 2,
             tracked_peer_sets: 4,
             max_peer_set_size: 1 << 16, // 2^16
             gossip_bit_vec_frequency: Duration::from_secs(50),
@@ -170,6 +175,7 @@ impl<C: Scheme> Config<C> {
             allowed_incoming_connection_rate: Quota::per_second(NZU32!(256)),
             dial_frequency: Duration::from_secs(1),
             query_frequency: Duration::from_secs(30),
+            dial_fail_limit: 1,
             tracked_peer_sets: 4,
             max_peer_set_size: 1 << 16, // 2^16
             gossip_bit_vec_frequency: Duration::from_secs(5),
@@ -203,6 +209,7 @@ impl<C: Scheme> Config<C> {
             allowed_incoming_connection_rate: Quota::per_second(NZU32!(1_024)),
             dial_frequency: Duration::from_millis(2),
             query_frequency: Duration::from_millis(1_000),
+            dial_fail_limit: 1,
             tracked_peer_sets: 4,
             max_peer_set_size: 1 << 8, // 2^8
             gossip_bit_vec_frequency: Duration::from_secs(1),
