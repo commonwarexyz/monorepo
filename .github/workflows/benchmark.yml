@@ -34,8 +34,17 @@ jobs:
       matrix:
         include:
           - package: commonware-cryptography
+            cargo_flags: ""
+            file_suffix: ""
           - package: commonware-storage
+            cargo_flags: ""
+            file_suffix: ""
+          - package: commonware-storage
+            cargo_flags: "--features iouring"
+            file_suffix: "-iouring"
           - package: commonware-stream
+            cargo_flags: ""
+            file_suffix: ""
     steps:
       - uses: actions/checkout@v4
       - name: Install nightly Rust toolchain
@@ -43,20 +52,21 @@ jobs:
       - name: Run setup
         uses: ./.github/actions/setup
       - name: Compile benchmarks
-        run: cargo bench --no-run
-      - name: Run benchmark
-        run: cargo bench --benches -p ${{ matrix.package }} -- --output-format bencher | tee ${{ matrix.package }}.txt
-      - name: Run benchmarks with iouring feature
-        run: cargo bench --features iouring --benches -p ${{ matrix.package }} -- --output-format bencher | tee ${{ matrix.package }}.txt
+        run: cargo bench ${{ matrix.cargo_flags }} --no-run
+      - name: Run benchmarks
+        run: |
+          cargo bench ${{ matrix.cargo_flags }} \
+            --benches -p ${{ matrix.package }} \
+            -- --output-format bencher \
+            | tee "${{ matrix.package }}${{ matrix.file_suffix }}.txt"
       - name: Publish benchmark result
         uses: benchmark-action/github-action-benchmark@v1
         with:
-          name: ${{ matrix.package }}
+          name: "${{ matrix.package }}${{ matrix.file_suffix }}"
           tool: 'cargo'
-          output-file-path: ${{ matrix.package }}.txt
+          output-file-path: "${{ matrix.package }}${{ matrix.file_suffix }}.txt"
           github-token: ${{ secrets.BENCHMARKS_SECRET }}
           gh-repository: github.com/commonwarexyz/benchmarks
           gh-pages-branch: main
           benchmark-data-dir-path: 'docs'
           auto-push: true
-
