@@ -2123,6 +2123,8 @@ impl<
                             }
                         }
                     }
+
+                    // TODO: drop any messages with a view that is no longer interesting
                 }
             }
         });
