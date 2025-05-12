@@ -234,6 +234,25 @@ impl<
         true
     }
 
+    fn add_reserved_nullify(&mut self, public_key_index: u32) -> bool {
+        // Check if already nullified
+        match self.nullifies.entry(public_key_index) {
+            Entry::Occupied(mut entry) => {
+                if matches!(entry.get(), Status::None) {
+                    // Store the nullify
+                    entry.insert(Status::Pending);
+                    return true;
+                }
+                false
+            }
+            Entry::Vacant(entry) => {
+                // Store the nullify
+                entry.insert(Status::Pending);
+                true
+            }
+        }
+    }
+
     async fn add_verified_nullify(&mut self, public_key_index: u32, nullify: Nullify<V>) -> bool {
         // Check if already issued finalize
         let Status::Verified(ref previous) = self.finalizes[public_key_index as usize] else {
@@ -926,7 +945,7 @@ impl<
         debug!(view = self.view, "broadcasted nullify");
     }
 
-    async fn nullify(&mut self, sender: &C::PublicKey, nullify: Nullify<V>) -> bool {
+    fn nullify(&mut self, sender: &C::PublicKey, nullify: &Nullify<V>) -> bool {
         // Ensure we are in the right view to process this message
         if !self.interesting(nullify.view, false) {
             return false;
@@ -936,21 +955,28 @@ impl<
         let Some(public_key_index) = self.supervisor.is_participant(nullify.view, sender) else {
             return false;
         };
-        let Some(identity) = self.supervisor.identity(nullify.view) else {
-            return false;
-        };
 
-        // Verify signatures
+        // Verify sender is signer
         if public_key_index != nullify.signer() {
             return false;
         }
-        if !nullify.verify(&self.namespace, identity) {
-            return false;
-        }
+        self.reserve_nullify(public_key_index, nullify)
+    }
 
-        // Handle nullify
-        self.handle_nullify(public_key_index, nullify).await;
-        true
+    fn reserve_nullify(&mut self, public_key_index: u32, nullify: &Nullify<V>) -> bool {
+        // Check to see if nullify is for proposal in view
+        let view = nullify.view;
+        let round = self.views.entry(view).or_insert_with(|| {
+            Round::new(
+                &self.context,
+                self.reporter.clone(),
+                self.supervisor.clone(),
+                view,
+            )
+        });
+
+        // Try to reserve
+        round.add_reserved_nullify(public_key_index)
     }
 
     async fn handle_nullify(&mut self, public_key_index: u32, nullify: Nullify<V>) {
@@ -1264,7 +1290,7 @@ impl<
         self.tracked_views.set(self.views.len() as i64);
     }
 
-    async fn notarize(&mut self, sender: &C::PublicKey, notarize: &Notarize<V, D>) -> bool {
+    fn notarize(&mut self, sender: &C::PublicKey, notarize: &Notarize<V, D>) -> bool {
         // Ensure we are in the right view to process this message
         let view = notarize.view();
         if !self.interesting(view, false) {
@@ -2291,7 +2317,7 @@ impl<
                     let interesting = match msg {
                         Voter::Notarize(notarize) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::notarize(&s)).inc();
-                            let interesting = self.notarize(&s, &notarize).await;
+                            let interesting = self.notarize(&s, &notarize);
                             if interesting {
                                 verifier_sender
                                     .send((s.clone(), Voter::Notarize(notarize)))
@@ -2306,7 +2332,14 @@ impl<
                         }
                         Voter::Nullify(nullify) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::nullify(&s)).inc();
-                            self.nullify(&s, nullify).await
+                            let interesting = self.nullify(&s, &nullify);
+                            if interesting {
+                                verifier_sender
+                                    .send((s.clone(), Voter::Nullify(nullify)))
+                                    .await
+                                    .expect("unable to send nullify to verifier");
+                            }
+                            interesting
                         }
                         Voter::Nullification(nullification) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::nullification(&s)).inc();
