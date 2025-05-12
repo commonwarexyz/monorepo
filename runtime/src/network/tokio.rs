@@ -208,3 +208,22 @@ impl crate::Network for Network {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::network::tests;
+    use crate::network::tokio as TokioNetwork;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn test_trait() {
+        tests::test_network_trait(|| {
+            TokioNetwork::Network::from(
+                TokioNetwork::Config::default()
+                    .with_read_timeout(Duration::from_secs(15))
+                    .with_write_timeout(Duration::from_secs(15)),
+            )
+        })
+        .await;
+    }
+}

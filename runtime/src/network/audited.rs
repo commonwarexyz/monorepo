@@ -178,3 +178,117 @@ impl<N: crate::Network> crate::Network for Network<N> {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::deterministic::Auditor;
+    use crate::network::audited::Network as AuditedNetwork;
+    use crate::network::deterministic::Network as DeterministicNetwork;
+    use crate::network::tests;
+    use crate::{Listener as _, Network as _, Sink as _, Stream as _};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn test_trait() {
+        tests::test_network_trait(|| {
+            AuditedNetwork::new(
+                DeterministicNetwork::default(),
+                Arc::new(Auditor::default()),
+            )
+        })
+        .await;
+    }
+
+    // Test that running the same network operations on two audited networks
+    // produces the same audit events.
+    #[tokio::test]
+    async fn test_audit() {
+        const SERVER_MSG: &str = "server";
+        const CLIENT_MSG: &str = "client";
+
+        // Create two identical deterministic networks with separate auditors
+        let auditors = [Arc::new(Auditor::default()), Arc::new(Auditor::default())];
+        let networks = [
+            AuditedNetwork::new(DeterministicNetwork::default(), auditors[0].clone()),
+            AuditedNetwork::new(DeterministicNetwork::default(), auditors[1].clone()),
+        ];
+
+        // Helper function to verify auditor states match
+        let verify_auditors = |msg: &str| {
+            assert_eq!(
+                auditors[0].state(),
+                auditors[1].state(),
+                "Auditor states differ: {}",
+                msg
+            );
+        };
+
+        // Step 1: Test binding to an address
+        //
+        // Note that we're using a deterministic network, so both networks can use
+        // the same address because we're not actually binding to it.
+        let listener_addr = SocketAddr::from(([127, 0, 0, 1], 1234));
+        let listeners = [
+            networks[0].bind(listener_addr).await.unwrap(),
+            networks[1].bind(listener_addr).await.unwrap(),
+        ];
+        verify_auditors("after binding");
+
+        // Step 2: Test accepting connections
+        let mut server_handles = Vec::new();
+        for mut listener in listeners {
+            let handle = tokio::spawn(async move {
+                let (_, mut sink, mut stream) = listener.accept().await.unwrap();
+
+                // Receive data from client
+                let mut buf = [0u8; CLIENT_MSG.len()];
+                stream.recv(&mut buf).await.unwrap();
+                assert_eq!(&buf, CLIENT_MSG.as_bytes());
+
+                // Send response
+                sink.send(SERVER_MSG.as_bytes()).await.unwrap();
+            });
+            server_handles.push(handle);
+        }
+        verify_auditors("after accepting connections");
+
+        // Step 3: Test dialing and data exchange
+        let mut client_handles = Vec::new();
+        for network in &networks {
+            let network = network.clone();
+            let handle = tokio::spawn(async move {
+                let (mut sink, mut stream) = network.dial(listener_addr).await.unwrap();
+
+                // Send data to server
+                sink.send(CLIENT_MSG.as_bytes()).await.unwrap();
+
+                // Receive response
+                let mut buf = [0u8; SERVER_MSG.len()];
+                stream.recv(&mut buf).await.unwrap();
+                assert_eq!(&buf, SERVER_MSG.as_bytes());
+            });
+            client_handles.push(handle);
+        }
+        // Wait for all tasks to complete
+        for handle in server_handles {
+            handle.await.unwrap();
+        }
+        verify_auditors("after network operations");
+
+        // Step 4: Test error conditions (attempting to bind to same address again)
+        for network in &networks {
+            let result = network.bind(listener_addr).await;
+            assert!(result.is_err());
+        }
+        verify_auditors("after bind error");
+
+        // Step 5: Test dialing to non-existent server
+        let bad_addr = SocketAddr::from(([127, 0, 0, 1], 9999));
+        for network in &networks {
+            let result = network.dial(bad_addr).await;
+            assert!(result.is_err());
+        }
+        verify_auditors("after failed dial attempts");
+    }
+}
