@@ -1,4 +1,5 @@
 use crate::{deterministic::Auditor, Error, SinkOf, StreamOf};
+use bytes::Bytes;
 use sha2::Digest;
 use std::{net::SocketAddr, sync::Arc};
 
@@ -10,10 +11,10 @@ pub struct Sink<S: crate::Sink> {
 }
 
 impl<S: crate::Sink> crate::Sink for Sink<S> {
-    async fn send(&mut self, data: &[u8]) -> Result<(), Error> {
+    async fn send(&mut self, data: Bytes) -> Result<(), Error> {
         self.auditor.event(b"send_attempt", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
-            hasher.update(data);
+            hasher.update(&data);
         });
 
         self.inner.send(data).await.inspect_err(|e| {
@@ -25,7 +26,6 @@ impl<S: crate::Sink> crate::Sink for Sink<S> {
 
         self.auditor.event(b"send_success", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
-            hasher.update(data);
         });
         Ok(())
     }

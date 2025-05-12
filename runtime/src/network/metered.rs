@@ -1,4 +1,5 @@
 use crate::{SinkOf, StreamOf};
+use bytes::Bytes;
 use prometheus_client::{metrics::counter::Counter, registry::Registry};
 use std::{net::SocketAddr, sync::Arc};
 
@@ -54,9 +55,10 @@ pub struct Sink<S: crate::Sink> {
 }
 
 impl<S: crate::Sink> crate::Sink for Sink<S> {
-    async fn send(&mut self, data: &[u8]) -> Result<(), crate::Error> {
+    async fn send(&mut self, data: Bytes) -> Result<(), crate::Error> {
+        let data_len = data.len();
         self.inner.send(data).await?;
-        self.metrics.outbound_bandwidth.inc_by(data.len() as u64);
+        self.metrics.outbound_bandwidth.inc_by(data_len as u64);
         Ok(())
     }
 }

@@ -41,7 +41,7 @@ pub struct Sink {
 }
 
 impl SinkTrait for Sink {
-    async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
+    async fn send(&mut self, msg: Bytes) -> Result<(), Error> {
         let (os_send, data) = {
             let mut channel = self.channel.lock().unwrap();
             channel.buffer.extend(msg);
@@ -112,54 +112,53 @@ mod tests {
     fn test_send_recv() {
         let (mut sink, mut stream) = Channel::init();
 
-        let data = b"hello world";
+        let data = "hello world";
         let mut buf = vec![0; data.len()];
 
         block_on(async {
-            sink.send(data).await.unwrap();
+            sink.send(Bytes::from(data)).await.unwrap();
             stream.recv(&mut buf).await.unwrap();
         });
 
-        assert_eq!(buf, data);
+        assert_eq!(buf, data.as_bytes());
     }
 
     #[test]
     fn test_send_recv_partial_multiple() {
         let (mut sink, mut stream) = Channel::init();
 
-        let data1 = b"hello";
-        let data2 = b"world";
+        let data1 = "hello";
+        let data2 = "world";
         let mut buf1 = vec![0; data1.len()];
         let mut buf2 = vec![0; data2.len()];
 
         block_on(async {
-            sink.send(data1).await.unwrap();
-            sink.send(data2).await.unwrap();
+            sink.send(Bytes::from(data1)).await.unwrap();
+            sink.send(Bytes::from(data2)).await.unwrap();
             stream.recv(&mut buf1[0..3]).await.unwrap();
             stream.recv(&mut buf1[3..]).await.unwrap();
             stream.recv(&mut buf2).await.unwrap();
         });
 
-        assert_eq!(buf1, data1);
-        assert_eq!(buf2, data2);
+        assert_eq!(buf1, data1.as_bytes());
+        assert_eq!(buf2, data2.as_bytes());
     }
 
     #[test]
     fn test_send_recv_async() {
         let (mut sink, mut stream) = Channel::init();
-
-        let data = b"hello world";
+        let data = "hello world";
         let mut buf = vec![0; data.len()];
 
         block_on(async {
             futures::try_join!(stream.recv(&mut buf), async {
                 sleep(Duration::from_millis(10_000));
-                sink.send(data).await
+                sink.send(Bytes::from(data)).await
             },)
             .unwrap();
         });
 
-        assert_eq!(buf, data);
+        assert_eq!(buf, data.as_bytes());
     }
 
     #[test]
@@ -202,7 +201,7 @@ mod tests {
             drop(stream);
 
             // Try to send a message (longer than the requested amount), but the receiver is dropped.
-            let result = sink.send(b"hello world").await;
+            let result = sink.send(Bytes::from("hello world")).await;
             assert!(matches!(result, Err(Error::SendFailed)));
         });
     }

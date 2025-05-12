@@ -17,6 +17,7 @@
 //! `commonware-runtime` is **ALPHA** software and is not yet recommended for production use. Developers should
 //! expect breaking changes and occasional instability.
 
+use bytes::Bytes;
 use prometheus_client::registry::Metric;
 use std::io::Error as IoError;
 use std::{
@@ -272,7 +273,7 @@ pub trait Listener: Sync + Send + 'static {
 /// messages over a network connection.
 pub trait Sink: Sync + Send + 'static {
     /// Send a message to the sink.
-    fn send(&mut self, msg: &[u8]) -> impl Future<Output = Result<(), Error>> + Send;
+    fn send(&mut self, msg: Bytes) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 /// Interface that any runtime must implement to receive
@@ -1384,7 +1385,7 @@ mod tests {
                         "GET /metrics HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
                         address
                     );
-                    sink.send(request.as_bytes()).await.unwrap();
+                    sink.send(Bytes::from(request)).await.unwrap();
 
                     // Read and verify the HTTP status line
                     let status_line = read_line(&mut stream).await.unwrap();

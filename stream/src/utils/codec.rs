@@ -1,5 +1,5 @@
 use crate::Error;
-use bytes::Bytes;
+use bytes::{BufMut as _, Bytes, BytesMut};
 use commonware_runtime::{Sink, Stream};
 
 /// Sends data to the sink with a 4-byte length prefix.
@@ -19,12 +19,13 @@ pub async fn send_frame<S: Sink>(
     }
     let len: u32 = n.try_into().map_err(|_| Error::SendTooLarge(n))?;
 
-    // Send the length of the message
-    let f: [u8; 4] = len.to_be_bytes();
-    sink.send(&f).await.map_err(Error::SendFailed)?;
-
-    // Send the rest of the message
-    sink.send(buf).await.map_err(Error::SendFailed)?;
+    // Send the message, prefixed with its length
+    let mut prefixed_buf = BytesMut::with_capacity(4 + buf.len());
+    prefixed_buf.put_u32(len);
+    prefixed_buf.extend_from_slice(buf);
+    sink.send(prefixed_buf.into())
+        .await
+        .map_err(Error::SendFailed)?;
 
     Ok(())
 }
@@ -164,16 +165,17 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Do the writing manually without using send_frame
-            let mut buf = [0u8; MAX_MESSAGE_SIZE];
-            context.fill(&mut buf);
-            sink.send(&(MAX_MESSAGE_SIZE as u32).to_be_bytes())
-                .await
-                .unwrap();
-            sink.send(&buf).await.unwrap();
+            let mut msg = [0u8; MAX_MESSAGE_SIZE];
+            context.fill(&mut msg);
+
+            let mut buf = BytesMut::with_capacity(4 + msg.len());
+            buf.put_u32(MAX_MESSAGE_SIZE as u32);
+            buf.extend_from_slice(&msg);
+            sink.send(buf.into()).await.unwrap();
 
             let data = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await.unwrap();
-            assert_eq!(data.len(), buf.len());
-            assert_eq!(data, Bytes::from(buf.to_vec()));
+            assert_eq!(data.len(), MAX_MESSAGE_SIZE);
+            assert_eq!(data, msg.as_ref());
         });
     }
 
@@ -184,9 +186,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Manually insert a frame that gives MAX_MESSAGE_SIZE as the size
-            sink.send(&(MAX_MESSAGE_SIZE as u32).to_be_bytes())
-                .await
-                .unwrap();
+            let mut buf = BytesMut::with_capacity(4);
+            buf.put_u32(MAX_MESSAGE_SIZE as u32);
+            sink.send(buf.into()).await.unwrap();
 
             let result = recv_frame(&mut stream, MAX_MESSAGE_SIZE - 1).await;
             assert!(matches!(&result, Err(Error::RecvTooLarge(n)) if *n == MAX_MESSAGE_SIZE));
@@ -200,7 +202,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Manually insert a frame that gives zero as the size
-            sink.send(&(0u32).to_be_bytes()).await.unwrap();
+            let mut buf = BytesMut::with_capacity(4);
+            buf.put_u32(0);
+            sink.send(buf.into()).await.unwrap();
 
             let result = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await;
             assert!(matches!(&result, Err(Error::StreamClosed)));
