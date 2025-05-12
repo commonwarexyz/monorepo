@@ -2290,6 +2290,7 @@ impl<
                             self.handle_notarize(public_key_index, notarize).await;
                         }
                         Voter::Nullify(nullify) => {
+                            self.handle_nullify(public_key_index, nullify).await;
                         }
                         Voter::Finalize(finalize) => {
                         }
