@@ -62,3 +62,12 @@ pub trait Receiver: Debug + Send + 'static {
         &mut self,
     ) -> impl Future<Output = Result<Message<Self::PublicKey>, Self::Error>> + Send;
 }
+
+/// Interface for blocking other peers.
+pub trait Blocker: Clone + Send + 'static {
+    /// Public key type used to identify peers.
+    type PublicKey: Array;
+
+    /// Block a peer, disconnecting them if currently connected and preventing future connections.
+    fn block(&mut self, peer: Self::PublicKey) -> impl Future<Output = ()> + Send;
+}

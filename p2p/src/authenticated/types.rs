@@ -2,7 +2,7 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, ReadRangeExt, Write,
 };
-use commonware_cryptography::Verifier;
+use commonware_cryptography::{Signer, Verifier};
 use commonware_utils::BitVec as UtilsBitVec;
 use std::net::SocketAddr;
 
@@ -161,6 +161,21 @@ impl<C: Verifier> PeerInfo<C> {
             &self.public_key,
             &self.signature,
         )
+    }
+
+    pub fn sign<S: Signer<PublicKey = C::PublicKey, Signature = C::Signature>>(
+        signer: &mut S,
+        namespace: &[u8],
+        socket: SocketAddr,
+        timestamp: u64,
+    ) -> Self {
+        let signature = signer.sign(Some(namespace), &(socket, timestamp).encode());
+        PeerInfo {
+            socket,
+            timestamp,
+            public_key: signer.public_key(),
+            signature,
+        }
     }
 }
 

@@ -110,21 +110,16 @@ impl<K: Array, V: Array> Read for Operation<K, V> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        // Create a vector of the required size and copy the data into it.
         at_least(buf, Self::SIZE)?;
-        let mut data = vec![0; Self::SIZE];
-        buf.copy_to_slice(&mut data);
 
-        // Now, read-over and verify the data.
-        let mut buf: &[u8] = data.as_ref();
-        match u8::read(&mut buf)? {
+        match u8::read(buf)? {
             Self::UPDATE_CONTEXT => {
-                let key = K::read(&mut buf)?;
-                let value = V::read(&mut buf)?;
+                let key = K::read(buf)?;
+                let value = V::read(buf)?;
                 Ok(Self::Update(key, value))
             }
             Self::DELETE_CONTEXT => {
-                let key = K::read(&mut buf)?;
+                let key = K::read(buf)?;
                 // Check that the value is all zeroes
                 for _ in 0..V::SIZE {
                     if buf.get_u8() != 0 {
@@ -134,7 +129,7 @@ impl<K: Array, V: Array> Read for Operation<K, V> {
                 Ok(Self::Deleted(key))
             }
             Self::COMMIT_CONTEXT => {
-                let loc = u64::read(&mut buf)?;
+                let loc = u64::read(buf)?;
                 for _ in 0..(Self::SIZE - 1 - u64::SIZE) {
                     if buf.get_u8() != 0 {
                         return Err(CodecError::Invalid("Operation", "Commit value non-zero"));

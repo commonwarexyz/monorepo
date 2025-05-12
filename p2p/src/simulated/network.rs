@@ -19,7 +19,7 @@ use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
 };
@@ -60,6 +60,9 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: Array> {
     // A map from a public key to a peer
     peers: BTreeMap<P, Peer<P>>,
 
+    // A map of peers blocking each other
+    blocks: HashSet<(P, P)>,
+
     // Metrics for received and sent messages
     received_messages: Family<metrics::Message, Counter>,
     sent_messages: Family<metrics::Message, Counter>,
@@ -97,10 +100,11 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: Array> Network<E, P> {
                 receiver,
                 links: HashMap::new(),
                 peers: BTreeMap::new(),
+                blocks: HashSet::new(),
                 received_messages,
                 sent_messages,
             },
-            Oracle::new(oracle_sender),
+            Oracle::new(oracle_sender.clone()),
         )
     }
 
@@ -225,6 +229,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: Array> Network<E, P> {
                 }
                 send_result(result, Ok(()))
             }
+            ingress::Message::Block { from, to } => {
+                self.blocks.insert((from, to));
+            }
         }
     }
 
@@ -251,12 +258,16 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: Array> Network<E, P> {
                 continue;
             }
 
+            // Determine if the sender or recipient has blocked the other
+            let o_r = (origin.clone(), recipient.clone());
+            let r_o = (recipient.clone(), origin.clone());
+            if self.blocks.contains(&o_r) || self.blocks.contains(&r_o) {
+                trace!(?origin, ?recipient, reason = "blocked", "dropping message");
+                continue;
+            }
+
             // Determine if there is a link between the sender and recipient
-            let mut link = match self
-                .links
-                .get(&(origin.clone(), recipient.clone()))
-                .cloned()
-            {
+            let mut link = match self.links.get(&o_r).cloned() {
                 Some(link) => link,
                 None => {
                     trace!(?origin, ?recipient, reason = "no link", "dropping message",);

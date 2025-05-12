@@ -1,7 +1,7 @@
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::threshold_simplex::types::Finalization;
-use commonware_cryptography::Digest;
+use commonware_cryptography::{bls12381::primitives::variant::MinSig, Digest};
 
 /// Enum representing the valid formats for blocks.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11,7 +11,7 @@ pub enum BlockFormat<D: Digest> {
     Random(u128),
 
     /// A finalization certificate of a block from a different network.
-    Bridge(Finalization<D>),
+    Bridge(Finalization<MinSig, D>),
 }
 
 impl<D: Digest> Write for BlockFormat<D> {
@@ -63,7 +63,10 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode, FixedSize};
     use commonware_consensus::threshold_simplex::types::Proposal;
     use commonware_cryptography::{
-        bls12381::primitives::group::{self, Element, G2},
+        bls12381::primitives::{
+            group::{self, Element},
+            variant::Variant,
+        },
         sha256::Digest as Sha256Digest,
     };
     use rand::thread_rng;
@@ -72,11 +75,11 @@ mod tests {
         Sha256Digest::decode(&[123u8; Sha256Digest::SIZE][..]).unwrap()
     }
 
-    fn new_finalization() -> Finalization<Sha256Digest> {
+    fn new_finalization() -> Finalization<MinSig, Sha256Digest> {
         let scalar = group::Scalar::rand(&mut thread_rng());
-        let mut proposal_signature = G2::one();
+        let mut proposal_signature = <MinSig as Variant>::Signature::one();
         proposal_signature.mul(&scalar);
-        let mut seed_signature = G2::one();
+        let mut seed_signature = <MinSig as Variant>::Signature::one();
         seed_signature.mul(&scalar);
         Finalization {
             proposal: Proposal {

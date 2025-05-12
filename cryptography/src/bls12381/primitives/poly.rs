@@ -6,14 +6,13 @@
 //! security of the threshold schemes. Ensure that the scalar field operations
 //! are performed over the correct field and that all elements are valid.
 
+use super::variant::Variant;
 use crate::bls12381::primitives::{
     group::{self, Element, Scalar},
     Error,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{
-    varint::UInt, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
-};
+use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use rand::{rngs::OsRng, RngCore};
 use std::{collections::BTreeMap, hash::Hash};
 
@@ -21,17 +20,14 @@ use std::{collections::BTreeMap, hash::Hash};
 pub type Private = Poly<group::Private>;
 
 /// Public polynomials represent commitments to secrets on a private polynomial.
-pub type Public = Poly<group::Public>;
+pub type Public<V> = Poly<<V as Variant>::Public>;
 
 /// Signature polynomials are used in threshold signing (where a signature
 /// is interpolated using at least `threshold` evaluations).
-pub type Signature = Poly<group::Signature>;
+pub type Signature<V> = Poly<<V as Variant>::Signature>;
 
-/// The default partial signature type (G2).
-pub type PartialSignature = Eval<group::Signature>;
-
-/// The default partial signature length (G2).
-pub const PARTIAL_SIGNATURE_LENGTH: usize = u32::SIZE + group::SIGNATURE_LENGTH;
+/// The partial signature type.
+pub type PartialSignature<V> = Eval<<V as Variant>::Signature>;
 
 /// A polynomial evaluation at a specific index.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -379,7 +375,7 @@ impl<C: Element> EncodeSize for Poly<C> {
 }
 
 /// Returns the public key of the polynomial (constant term).
-pub fn public(public: &Public) -> &group::Public {
+pub fn public<V: Variant>(public: &Public<V>) -> &V::Public {
     public.constant()
 }
 
