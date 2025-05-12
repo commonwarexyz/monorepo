@@ -186,6 +186,7 @@ mod tests {
     use crate::network::deterministic::Network as DeterministicNetwork;
     use crate::network::tests;
     use crate::{Listener as _, Network as _, Sink as _, Stream as _};
+    use std::net::SocketAddr;
     use std::sync::Arc;
 
     #[tokio::test]
@@ -203,9 +204,6 @@ mod tests {
     // produces the same audit events.
     #[tokio::test]
     async fn test_audit() {
-        use crate::deterministic::Auditor;
-        use std::net::SocketAddr;
-
         const SERVER_MSG: &str = "server";
         const CLIENT_MSG: &str = "client";
 

@@ -167,6 +167,8 @@ mod tests {
     use crate::network::metered::Network as MeteredNetwork;
     use crate::network::tests;
     use crate::{Listener as _, Network as _, Sink as _, Stream as _};
+    use prometheus_client::registry::Registry;
+    use std::net::SocketAddr;
 
     #[tokio::test]
     async fn test_trait() {
@@ -181,10 +183,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_metrics() {
-        use crate::network::deterministic::Network as DeterministicNetwork;
-        use prometheus_client::registry::Registry;
-        use std::net::SocketAddr;
-
         const MSG_SIZE: u64 = 100;
 
         // Create a registry and network
