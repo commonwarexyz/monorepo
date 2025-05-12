@@ -2037,14 +2037,16 @@ impl<
         let (mut verified_sender, mut verified_receiver) =
             mpsc::channel::<(C::PublicKey, Voter<V, D>)>(1024);
         self.context.with_label("verifier").spawn({
+            let me = self.supervisor.share(0).unwrap().index;
             let namespace = self.namespace.clone();
             let supervisor = self.supervisor.clone();
-            |_| async move {
+            move |_| async move {
                 // Initialize view data structures
                 let mut messages = Vec::new();
                 #[allow(clippy::type_complexity)]
                 let mut work: BTreeMap<
                     (u64, Vec<u8>, Vec<u8>),
+                    // TODO: may not be deterministic?
                     HashSet<(PartialSignature<V>, usize)>,
                 > = BTreeMap::new();
 
@@ -2053,108 +2055,131 @@ impl<
                     messages.clear();
                     work.clear();
 
+                    assert!(messages.is_empty());
+                    assert!(work.is_empty());
+
                     // Wait for first item
                     //
                     // TODO: seed message with same signature be same across many messages (overwriting)? Cool feature btw
-                    while let Some((sender, msg)) = verifier_receiver.next().await {
-                        // Add first item
-                        let view = msg.view();
-                        let verifiable = msg.message(&namespace);
-                        let msg_idx = messages.len();
-                        println!("added {}: {:?} count={}", msg_idx, msg, verifiable.len());
-                        messages.push((sender, msg, verifiable.len()));
-                        for (namespace, message, signature) in verifiable.into_iter() {
-                            work.entry((view, namespace, message))
-                                .or_default()
-                                .insert((signature, msg_idx));
-                        }
+                    let Some((sender, msg)) = verifier_receiver.next().await else {
+                        println!("[{}] verifier shutdown", me);
+                        return;
+                    };
 
-                        // Pull as many messages as possible without waiting
-                        loop {
-                            match verifier_receiver.try_next() {
-                                Ok(Some((sender, msg))) => {
-                                    let view = msg.view();
-                                    let verifiable = msg.message(&namespace);
-                                    let msg_idx = messages.len();
-                                    println!(
-                                        "added {}: {:?} count={}",
-                                        msg_idx,
-                                        msg,
-                                        verifiable.len()
-                                    );
-                                    messages.push((sender, msg, verifiable.len()));
-                                    for (namespace, message, signature) in verifiable.into_iter() {
-                                        work.entry((view, namespace, message))
-                                            .or_default()
-                                            .insert((signature, msg_idx));
-                                    }
-                                }
-                                Ok(None) => {
-                                    return;
-                                }
-                                Err(_) => {
-                                    break;
-                                }
-                            }
-                        }
+                    // Add first item
+                    let view = msg.view();
+                    let verifiable = msg.message(&namespace);
+                    let msg_idx = messages.len();
+                    println!(
+                        "[{}] added (start) {}: {:?} count={}",
+                        me,
+                        msg_idx,
+                        msg,
+                        verifiable.len()
+                    );
+                    messages.push((sender, msg, verifiable.len()));
+                    for (namespace, message, signature) in verifiable.into_iter() {
+                        work.entry((view, namespace, message))
+                            .or_default()
+                            .insert((signature, msg_idx));
+                    }
 
-                        // Debug map
-                        for ((view, namespace, message), signatures) in work.iter() {
-                            println!(
-                                "map {}: {:?} count={}",
-                                signatures.len(),
-                                (view, namespace, message),
-                                signatures.len()
-                            );
-                        }
-
-                        // Verify messages or bisect (in order of most recent view to oldest)
-                        for ((view, namespace, message), signatures) in work.iter().rev() {
-                            let identity = supervisor.identity(*view).unwrap();
-                            let result = partial_verify_multiple_public_keys::<V, _>(
-                                identity,
-                                Some(namespace),
-                                message,
-                                signatures.iter().map(|(signature, _)| signature),
-                            );
-
-                            // If any are invalid, we block
-                            let mut skips = HashSet::new();
-                            if let Err(invalid) = result {
-                                for signature in invalid {
-                                    // TODO: block
-
-                                    // TODO: make more efficient
-                                    skips.insert(signature.index);
-                                }
-                            }
-
-                            // Notify the application (for any items in vec now out of items)
-                            for (signature, idx) in signatures.iter() {
-                                if skips.contains(&signature.index) {
-                                    continue;
-                                }
-                                let (sender, message, count) = &mut messages[*idx];
+                    // Pull as many messages as possible without waiting
+                    loop {
+                        match verifier_receiver.try_next() {
+                            Ok(Some((sender, msg))) => {
+                                let view = msg.view();
+                                let verifiable = msg.message(&namespace);
+                                let msg_idx = messages.len();
                                 println!(
-                                    "handle {}: {:?} count={}",
-                                    signature.index, message, count
+                                    "[{}] added (inner) {}: {:?} count={}",
+                                    me,
+                                    msg_idx,
+                                    msg,
+                                    verifiable.len()
                                 );
-                                *count -= 1;
-                                if *count > 0 {
-                                    continue;
+                                messages.push((sender, msg, verifiable.len()));
+                                for (namespace, message, signature) in verifiable.into_iter() {
+                                    work.entry((view, namespace, message))
+                                        .or_default()
+                                        .insert((signature, msg_idx));
                                 }
-
-                                // TODO: make this more efficient
-                                if let Err(err) = verified_sender
-                                    .send((sender.clone(), message.clone()))
-                                    .await
-                                {
-                                    warn!(?err, "failed to send verified message");
-                                    continue;
-                                }
+                            }
+                            Ok(None) => {
+                                return;
+                            }
+                            Err(_) => {
+                                break;
                             }
                         }
                     }
+
+                    // Debug map
+                    println!("[{}] starting verify: {}", me, work.len());
+                    for ((view, namespace, message), signatures) in work.iter() {
+                        println!(
+                            "[{}] {:?} count={}",
+                            me,
+                            (view, namespace, message),
+                            signatures.len()
+                        );
+                        for (signature, idx) in signatures.iter() {
+                            println!("[{}] {}: {:?}", me, idx, signature);
+                        }
+                    }
+
+                    // Verify messages or bisect (in order of most recent view to oldest)
+                    for ((view, namespace, message), signatures) in work.iter().rev() {
+                        let identity = supervisor.identity(*view).unwrap();
+                        let result = partial_verify_multiple_public_keys::<V, _>(
+                            identity,
+                            Some(namespace),
+                            message,
+                            signatures.iter().map(|(signature, _)| signature),
+                        );
+
+                        // If any are invalid, we block
+                        let mut skips = HashSet::new();
+                        if let Err(invalid) = result {
+                            for signature in invalid {
+                                // TODO: block
+
+                                // TODO: make more efficient
+                                skips.insert(signature.index);
+                            }
+                        }
+
+                        // Notify the application (for any items in vec now out of items)
+                        for (signature, idx) in signatures.iter() {
+                            if skips.contains(&signature.index) {
+                                continue;
+                            }
+                            let (sender, message, count) = &mut messages[*idx];
+                            println!(
+                                "[{}] {} handle {:?}: signature={:?}, count={}",
+                                me, *idx, message, signature, count
+                            );
+                            *count -= 1;
+                            if *count > 0 {
+                                continue;
+                            }
+
+                            // TODO: make this more efficient
+                            if let Err(err) = verified_sender
+                                .send((sender.clone(), message.clone()))
+                                .await
+                            {
+                                warn!(?err, "failed to send verified message");
+                                continue;
+                            }
+                        }
+                    }
+                    println!(
+                        "[{}] verified all messages: {} (work: {})",
+                        me,
+                        messages.len(),
+                        work.len()
+                    );
                 }
             }
         });
