@@ -241,7 +241,7 @@ mod tests {
         let mut server_handles = Vec::new();
         for mut listener in listeners {
             let handle = tokio::spawn(async move {
-                let (client_addr, mut sink, mut stream) = listener.accept().await.unwrap();
+                let (_, mut sink, mut stream) = listener.accept().await.unwrap();
 
                 // Receive data from client
                 let mut buf = [0u8; CLIENT_MSG.len()];
@@ -250,8 +250,6 @@ mod tests {
 
                 // Send response
                 sink.send(SERVER_MSG.as_bytes()).await.unwrap();
-
-                client_addr
             });
             server_handles.push(handle);
         }
