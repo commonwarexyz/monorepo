@@ -35,7 +35,7 @@ use futures::{
     channel::{mpsc, oneshot},
     executor::block_on,
     future::Either,
-    pin_mut, StreamExt,
+    pin_mut, SinkExt, StreamExt,
 };
 use prometheus_client::metrics::{
     counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
@@ -1961,6 +1961,8 @@ impl<
         // in case they help us avoid unnecessary work.
         let (mut verifier_sender, mut verifier_receiver) =
             mpsc::channel::<(C::PublicKey, Voter<V, D>)>(1024);
+        let (mut verified_sender, mut verified_receiver) =
+            mpsc::channel::<(C::PublicKey, Voter<V, D>)>(1024);
         self.context.with_label("verifier").spawn_blocking({
             let mut blocker = self.blocker.clone();
             let namespace = self.namespace.clone();
@@ -2025,18 +2027,39 @@ impl<
                             );
 
                             // If any are invalid, we block
-                            //
-                            // TODO: if invalid occur at different
+                            let mut skips = HashSet::new();
                             if let Err(invalid) = result {
                                 for signature in invalid {
                                     let idx = signatures.get(&signature).unwrap();
                                     let (sender, _, _) = &messages[*idx];
                                     blocker.block(sender.clone()).await;
                                     warn!(?sender, "blocked sender");
+
+                                    // TODO: make more efficient
+                                    skips.insert(signature.index);
                                 }
                             }
 
                             // Notify the application (for any items in vec now out of items)
+                            for (signature, idx) in signatures.iter() {
+                                if skips.contains(&signature.index) {
+                                    continue;
+                                }
+                                let (sender, message, count) = &mut messages[*idx];
+                                *count -= 1;
+                                if *count > 0 {
+                                    continue;
+                                }
+
+                                // TODO: make this more efficient
+                                if let Err(err) = verified_sender
+                                    .send((sender.clone(), message.clone()))
+                                    .await
+                                {
+                                    warn!(?err, "failed to send verified message");
+                                    continue;
+                                }
+                            }
                         }
                     }
                 })
