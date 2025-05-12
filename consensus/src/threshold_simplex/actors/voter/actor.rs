@@ -2294,7 +2294,7 @@ impl<
                             let interesting = self.notarize(&s, &notarize).await;
                             if interesting {
                                 verifier_sender
-                                    .send((s, Voter::Notarize(notarize)))
+                                    .send((s.clone(), Voter::Notarize(notarize)))
                                     .await
                                     .expect("unable to send notarize to verifier");
                             }
