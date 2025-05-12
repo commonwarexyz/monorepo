@@ -355,7 +355,7 @@ mod tests {
         assert!(record.sharable_info().is_none());
         assert!(!record.blocked());
         assert!(!record.reserved());
-        assert!(record.want());
+        assert!(record.want(1));
         assert!(record.deletable());
         assert!(!record.allowed());
     }
@@ -376,7 +376,7 @@ mod tests {
         ));
         assert!(!record.blocked());
         assert!(!record.reserved());
-        assert!(!record.want());
+        assert!(!record.want(1));
         assert!(!record.deletable());
         assert!(!record.allowed());
     }
@@ -392,7 +392,7 @@ mod tests {
         assert!(record.sharable_info().is_none());
         assert!(!record.blocked());
         assert!(!record.reserved());
-        assert!(record.want());
+        assert!(record.want(1));
         assert!(!record.deletable());
         assert!(record.allowed());
     }
@@ -779,45 +779,45 @@ mod tests {
 
         // Want information about unknown peers
         let record_unknown = Record::<Secp256r1>::unknown();
-        assert!(record_unknown.want());
+        assert!(record_unknown.want(1));
 
         // Don't want my own info
         let record_myself = Record::myself(peer_info.clone());
-        assert!(!record_myself.want());
+        assert!(!record_myself.want(1));
 
         // Want full bootstrapper info
         let record_boot = Record::<Secp256r1>::bootstrapper(test_socket());
-        assert!(record_boot.want());
+        assert!(record_boot.want(1));
 
         // Don't want to dial a blocked peer
         let mut record_blocked = Record::<Secp256r1>::unknown();
         record_blocked.block();
-        assert!(!record_blocked.want());
+        assert!(!record_blocked.want(1));
 
         // Haven't tried to dial yet
         let mut record_disc = Record::<Secp256r1>::unknown();
         record_disc.update(peer_info.clone());
-        assert!(!record_disc.want());
+        assert!(!record_disc.want(1));
 
         // Failed dialing
         record_disc.dial_failure(peer_info.socket);
-        assert!(record_disc.want());
+        assert!(record_disc.want(1));
         assert!(record_disc.reserve());
         record_disc.connect();
-        assert!(!record_disc.want());
+        assert!(!record_disc.want(1));
 
         // Release the connection, but still haven't failed dialing
         record_disc.release();
-        assert!(!record_disc.want());
+        assert!(!record_disc.want(1));
 
         // Fail dialing
         record_disc.dial_failure(peer_info.socket);
-        assert!(record_disc.want());
+        assert!(record_disc.want(1));
 
         // Update information
         let mut record_pers = Record::<Secp256r1>::bootstrapper(test_socket());
         record_pers.update(peer_info.clone());
-        assert!(!record_pers.want());
+        assert!(!record_pers.want(1));
     }
 
     #[test]
