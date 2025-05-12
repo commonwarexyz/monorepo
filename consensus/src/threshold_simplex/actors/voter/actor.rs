@@ -53,19 +53,26 @@ use tracing::{debug, trace, warn};
 
 const GENESIS_VIEW: View = 0;
 
-async fn recv_batch<T, F>(rx: &mut mpsc::Receiver<T>, mut f: F) -> bool
+async fn recv_batch<T, F>(rx: &mut mpsc::Receiver<T>, mut f: F, block: bool) -> bool
 where
     F: FnMut(T),
 {
-    match rx.next().await {
-        Some(first) => {
-            f(first);
-            while let Ok(Some(item)) = rx.try_next() {
-                f(item);
+    if block {
+        match rx.next().await {
+            Some(first) => {
+                f(first);
+                while let Ok(Some(item)) = rx.try_next() {
+                    f(item);
+                }
+                true // processed at least one item
             }
-            true // processed at least one item
+            None => false, // channel closed
         }
-        None => false, // channel closed
+    } else {
+        while let Ok(Some(item)) = rx.try_next() {
+            f(item);
+        }
+        true
     }
 }
 
@@ -2062,19 +2069,24 @@ impl<
 
                 loop {
                     // Read at least one message
-                    let alive = recv_batch(&mut verifier_receiver, |(sender, msg)| {
-                        let view = msg.view();
-                        let verifiable = msg.message(&namespace);
-                        messages.insert(counter, (sender, msg, verifiable.len()));
-                        for (ns, m, sig) in verifiable {
-                            work.entry((view, ns, m))
-                                .or_default()
-                                .entry(sig)
-                                .or_default()
-                                .push(counter);
-                        }
-                        counter = counter.wrapping_add(1);
-                    })
+                    let block = work.is_empty();
+                    let alive = recv_batch(
+                        &mut verifier_receiver,
+                        |(sender, msg)| {
+                            let view = msg.view();
+                            let verifiable = msg.message(&namespace);
+                            messages.insert(counter, (sender, msg, verifiable.len()));
+                            for (ns, m, sig) in verifiable {
+                                work.entry((view, ns, m))
+                                    .or_default()
+                                    .entry(sig)
+                                    .or_default()
+                                    .push(counter);
+                            }
+                            counter = counter.wrapping_add(1);
+                        },
+                        block,
+                    )
                     .await;
                     if !alive {
                         return;
@@ -2091,7 +2103,6 @@ impl<
                         &message,
                         signatures.keys(),
                     );
-                    debug!(items = signatures.len(), "batch verification");
 
                     // If any are signatures are invalid, block
                     let mut skips = HashSet::new();
@@ -2120,7 +2131,6 @@ impl<
                             }
 
                             // Remove entry
-                            debug!(i, "removing message");
                             let (sender, message, _) = entry.remove();
                             if let Err(err) = verified_sender.send((sender, message)).await {
                                 warn!(?err, "failed to send verified message");
