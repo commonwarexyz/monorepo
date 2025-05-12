@@ -409,12 +409,6 @@ impl<
         // Attempt to construct notarization
         for (proposal, notarizes) in self.notarized_proposals.iter() {
             if (notarizes.count_ones() as u32) < threshold {
-                debug!(
-                    ?proposal,
-                    notarizes = notarizes.count_ones(),
-                    threshold,
-                    "not enough notarizes"
-                );
                 continue;
             }
 
@@ -476,7 +470,6 @@ impl<
             })
             .unzip();
         if views.len() < threshold as usize {
-            debug!(count = views.len(), threshold, "not enough nullifies");
             return None;
         }
         debug!(view = self.view, "broadcasting nullification");
@@ -2039,10 +2032,9 @@ impl<
         let (mut verified_sender, mut verified_receiver) =
             mpsc::channel::<(C::PublicKey, Voter<V, D>)>(1024);
         self.context.with_label("verifier").spawn({
-            let me = self.supervisor.share(0).unwrap().index;
             let namespace = self.namespace.clone();
             let supervisor = self.supervisor.clone();
-            move |_| async move {
+            |_| async move {
                 // Initialize view data structures
                 let mut messages = Vec::new();
                 #[allow(clippy::type_complexity)]
@@ -2057,15 +2049,8 @@ impl<
                     messages.clear();
                     work.clear();
 
-                    assert!(messages.is_empty());
-                    assert!(work.is_empty());
-
                     // Wait for first item
-                    //
-                    // TODO: seed message with same signature be same across many messages (overwriting)? Cool feature btw
-                    println!("[{}] waiting for verifier", me);
                     let Some((sender, msg)) = verifier_receiver.next().await else {
-                        println!("[{}] verifier shutdown", me);
                         return;
                     };
 
@@ -2073,13 +2058,6 @@ impl<
                     let view = msg.view();
                     let verifiable = msg.message(&namespace);
                     let msg_idx = messages.len();
-                    println!(
-                        "[{}] added (start) {}: {:?} count={}",
-                        me,
-                        msg_idx,
-                        msg,
-                        verifiable.len()
-                    );
                     messages.push((sender, msg, verifiable.len()));
                     for (namespace, message, signature) in verifiable.into_iter() {
                         work.entry((view, namespace, message))
@@ -2094,13 +2072,6 @@ impl<
                                 let view = msg.view();
                                 let verifiable = msg.message(&namespace);
                                 let msg_idx = messages.len();
-                                println!(
-                                    "[{}] added (inner) {}: {:?} count={}",
-                                    me,
-                                    msg_idx,
-                                    msg,
-                                    verifiable.len()
-                                );
                                 messages.push((sender, msg, verifiable.len()));
                                 for (namespace, message, signature) in verifiable.into_iter() {
                                     work.entry((view, namespace, message))
@@ -2114,20 +2085,6 @@ impl<
                             Err(_) => {
                                 break;
                             }
-                        }
-                    }
-
-                    // Debug map
-                    println!("[{}] starting verify: {}", me, work.len());
-                    for ((view, namespace, message), signatures) in work.iter() {
-                        println!(
-                            "[{}] {:?} count={}",
-                            me,
-                            (view, namespace, message),
-                            signatures.len()
-                        );
-                        for (signature, idx) in signatures.iter() {
-                            println!("[{}] {}: {:?}", me, idx, signature);
                         }
                     }
 
@@ -2158,10 +2115,6 @@ impl<
                                 continue;
                             }
                             let (sender, message, count) = &mut messages[*idx];
-                            println!(
-                                "[{}] {} handle {:?}: signature={:?}, count={}",
-                                me, *idx, message, signature, count
-                            );
                             *count -= 1;
                             if *count > 0 {
                                 continue;
@@ -2177,12 +2130,6 @@ impl<
                             }
                         }
                     }
-                    println!(
-                        "[{}] verified all messages: {} (work: {})",
-                        me,
-                        messages.len(),
-                        work.len()
-                    );
                 }
             }
         });
@@ -2351,15 +2298,12 @@ impl<
                     // Process message
                     match msg {
                         Voter::Notarize(notarize) => {
-                            debug!(view, "received notarize from verifier");
                             self.handle_notarize(public_key_index, notarize).await;
                         }
                         Voter::Nullify(nullify) => {
-                            debug!(view, "received nullify from verifier");
                             self.handle_nullify(public_key_index, nullify).await;
                         }
                         Voter::Finalize(finalize) => {
-                            debug!(view, "received finalize from verifier");
                             self.handle_finalize(public_key_index, finalize).await;
                         }
                         Voter::Notarization(_)| Voter::Nullification(_) | Voter::Finalization(_) => {
