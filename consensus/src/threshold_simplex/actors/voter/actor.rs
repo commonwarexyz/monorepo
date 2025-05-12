@@ -236,13 +236,13 @@ impl<
 
     async fn add_verified_nullify(&mut self, public_key_index: u32, nullify: Nullify<V>) -> bool {
         // Check if already issued finalize
-        let Some(finalize) = self.finalizes[public_key_index as usize].as_ref() else {
+        let Status::Verified(ref previous) = self.finalizes[public_key_index as usize] else {
             // Store the nullify
             let item = self.nullifies.entry(public_key_index);
             return match item {
                 Entry::Occupied(_) => false,
                 Entry::Vacant(v) => {
-                    v.insert(nullify.clone());
+                    v.insert(Status::Verified(nullify.clone()));
                     self.reporter.report(Activity::Nullify(nullify)).await;
                     true
                 }
@@ -250,7 +250,7 @@ impl<
         };
 
         // Create fault
-        let activity = NullifyFinalize::new(nullify, finalize.clone());
+        let activity = NullifyFinalize::new(nullify, previous.clone());
         self.reporter
             .report(Activity::NullifyFinalize(activity))
             .await;
@@ -268,7 +268,7 @@ impl<
         finalize: Finalize<V, D>,
     ) -> bool {
         // Check if also issued nullify
-        if let Some(previous) = self.nullifies.get(&public_key_index) {
+        if let Some(Status::Verified(previous)) = self.nullifies.get(&public_key_index) {
             // Create fault
             let activity = NullifyFinalize::new(previous.clone(), finalize);
             self.reporter
@@ -283,7 +283,7 @@ impl<
         }
 
         // Check if already finalized
-        if let Some(previous) = self.finalizes[public_key_index as usize].as_ref() {
+        if let Status::Verified(ref previous) = self.finalizes[public_key_index as usize] {
             if previous == &finalize {
                 trace!(?finalize, ?previous, "already finalize");
                 return false;
@@ -304,12 +304,14 @@ impl<
 
         // Store the finalize
         if let Some(vec) = self.finalized_proposals.get_mut(&finalize.proposal) {
-            vec.push(public_key_index);
+            vec.set(public_key_index as usize);
         } else {
+            let mut vec = BitVec::zeroes(self.participants);
+            vec.set(public_key_index as usize);
             self.finalized_proposals
-                .insert(finalize.proposal.clone(), vec![public_key_index]);
+                .insert(finalize.proposal.clone(), vec);
         }
-        self.finalizes[public_key_index as usize] = Some(finalize.clone());
+        self.finalizes[public_key_index as usize] = Status::Verified(finalize.clone());
         self.reporter.report(Activity::Finalize(finalize)).await;
         true
     }
@@ -393,16 +395,20 @@ impl<
             );
 
             // Only select notarizes that are for this proposal
-            let notarizes = notarizes
-                .iter()
-                .filter_map(|x| self.notarizes[*x as usize].as_ref());
+            let notarizes = notarizes.iter().enumerate().filter_map(|(idx, alive)| {
+                if !alive {
+                    return None;
+                }
+                let Status::Verified(ref notarize) = self.notarizes[idx] else {
+                    return None;
+                };
+                Some(notarize)
+            });
 
             // Recover threshold signature
-            let proposals = notarizes
-                .clone()
-                .map(|x| &x.proposal_signature)
-                .collect::<Vec<_>>();
-            let seeds = notarizes.map(|x| &x.seed_signature).collect::<Vec<_>>();
+            let (proposals, seeds): (Vec<_>, Vec<_>) = notarizes
+                .map(|x| (&x.proposal_signature, &x.seed_signature))
+                .unzip();
             let (proposal_signature, seed_signature) =
                 threshold_signature_recover_pair::<V, _>(threshold, proposals, seeds)
                     .expect("failed to recover threshold signature");
