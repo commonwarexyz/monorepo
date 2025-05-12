@@ -56,7 +56,7 @@ const GENESIS_VIEW: View = 0;
 #[derive(Clone)]
 enum Status<O> {
     None,
-    Pending(O),
+    Pending,
     Verified(O),
 }
 
@@ -180,6 +180,18 @@ impl<
                     "proposal in notarization does not match stored proposal"
                 );
             }
+        }
+    }
+
+    fn add_reserved_notarize(&mut self, public_key_index: u32, notarize: &Notarize<V, D>) -> bool {
+        // Check if already notarized
+        if let Status::None = self.notarizes[public_key_index as usize] {
+            // Store the notarize
+            self.notarizes[public_key_index as usize] = Status::Pending;
+            true
+        } else {
+            trace!(?notarize, "already reserved notarize");
+            false
         }
     }
 
@@ -1237,41 +1249,44 @@ impl<
         self.tracked_views.set(self.views.len() as i64);
     }
 
-    async fn notarize(&mut self, sender: &C::PublicKey, notarize: Notarize<V, D>) -> bool {
+    async fn notarize(&mut self, sender: &C::PublicKey, notarize: &Notarize<V, D>) -> bool {
         // Ensure we are in the right view to process this message
         let view = notarize.view();
         if !self.interesting(view, false) {
             return false;
         }
 
-        // Verify that signer is a validator
+        // Verify that sender is a validator
         let Some(public_key_index) = self.supervisor.is_participant(view, sender) else {
             return false;
         };
-        let Some(identity) = self.supervisor.identity(view) else {
-            return false;
-        };
 
-        // Verify signatures
+        // Verify sender is signer
         if public_key_index != notarize.signer() {
             return false;
         }
-
-        // TODO: mark as pending
-
-        // TODO: pass to verify loop
-
-        if !notarize.verify(&self.namespace, identity) {
-            return false;
-        }
-
-        // Handle notarize
-        self.handle_notarize(public_key_index, notarize).await;
-        true
+        self.reserve_notarize(public_key_index, &notarize)
     }
 
-    async fn handle_notarize(&mut self, public_key_index: u32, notarize: Notarize<V, D>) {
+    fn reserve_notarize(&mut self, public_key_index: u32, notarize: &Notarize<V, D>) -> bool {
         // Check to see if notarize is for proposal in view
+        let view = notarize.view();
+        let round = self.views.entry(view).or_insert_with(|| {
+            Round::new(
+                &self.context,
+                self.reporter.clone(),
+                self.supervisor.clone(),
+                view,
+            )
+        });
+
+        // Try to reserve
+        round.add_reserved_notarize(public_key_index, notarize)
+    }
+
+    async fn handle_notarize(&mut self, notarize: Notarize<V, D>) {
+        // Check to see if notarize is for proposal in view
+        let public_key_index = notarize.signer();
         let view = notarize.view();
         let round = self.views.entry(view).or_insert_with(|| {
             Round::new(
@@ -2211,6 +2226,33 @@ impl<
                         },
                     }
                 },
+                verified = verified_receiver.next() => {
+                    // Break if there is an internal error
+                    let Some((sender, msg)) = verified else {
+                        break;
+                    };
+
+                    // Check if still interesting
+                    view = msg.view();
+                    if !self.interesting(view, false) {
+                        debug!(view, "verified message is not interesting");
+                        continue;
+                    }
+
+                    // Process message
+                    match msg {
+                        Voter::Notarize(notarize) => {
+                            self.handle_notarize(notarize).await;
+                        }
+                        Voter::Nullify(nullify) => {
+                        }
+                        Voter::Finalize(finalize) => {
+                        }
+                        Voter::Notarization(_)| Voter::Nullification(_) | Voter::Finalization(_) => {
+                            unreachable!("we should not receive these messages from the verifier")
+                        }
+                    };
+                },
                 msg = receiver.recv() => {
                     // Break if there is an internal error
                     let Ok((s, msg)) = msg else {
@@ -2230,7 +2272,14 @@ impl<
                     let interesting = match msg {
                         Voter::Notarize(notarize) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::notarize(&s)).inc();
-                            self.notarize(&s, notarize).await
+                            let interesting = self.notarize(&s, &notarize).await;
+                            if interesting {
+                                verifier_sender
+                                    .send((s, Voter::Notarize(notarize)))
+                                    .await
+                                    .expect("unable to send notarize to verifier");
+                            }
+                            interesting
                         }
                         Voter::Notarization(notarization) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::notarization(&s)).inc();
