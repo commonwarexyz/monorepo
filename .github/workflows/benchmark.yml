@@ -40,8 +40,8 @@ jobs:
             cargo_flags: ""
             file_suffix: ""
           - package: commonware-storage
-            cargo_flags: "--features iouring"
-            file_suffix: "-iouring"
+            cargo_flags: "--features iouring" # Additional features can be added here
+            file_suffix: "-features"
           - package: commonware-stream
             cargo_flags: ""
             file_suffix: ""

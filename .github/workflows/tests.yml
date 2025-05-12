@@ -15,7 +15,7 @@ jobs:
     strategy:
       matrix:
         features:
-          - "--all-features"
+          - "--features iouring"
           - ""
     steps:
     - name: Checkout repository
@@ -36,7 +36,7 @@ jobs:
     strategy:
       matrix:
         features:
-          - "--all-features"
+          - "--features iouring"
           - ""
     steps:
     - name: Checkout repository
@@ -51,7 +51,7 @@ jobs:
     strategy:
       matrix:
         features:
-          - "--all-features"
+          - "--features iouring"
           - ""
     steps:
     - name: Checkout repository
