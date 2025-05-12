@@ -281,6 +281,18 @@ impl<
         false
     }
 
+    fn add_reserved_finalize(&mut self, public_key_index: u32, finalize: &Finalize<V, D>) -> bool {
+        // Check if already finalized
+        if let Status::None = self.finalizes[public_key_index as usize] {
+            // Store the finalize
+            self.finalizes[public_key_index as usize] = Status::Pending;
+            true
+        } else {
+            trace!(?finalize, "already reserved finalize");
+            false
+        }
+    }
+
     async fn add_verified_finalize(
         &mut self,
         public_key_index: u32,
@@ -1460,7 +1472,7 @@ impl<
         self.enter_view(view + 1, seed);
     }
 
-    async fn finalize(&mut self, sender: &C::PublicKey, finalize: Finalize<V, D>) -> bool {
+    fn finalize(&mut self, sender: &C::PublicKey, finalize: &Finalize<V, D>) -> bool {
         // Ensure we are in the right view to process this message
         let view = finalize.view();
         if !self.interesting(view, false) {
@@ -1471,21 +1483,29 @@ impl<
         let Some(public_key_index) = self.supervisor.is_participant(view, sender) else {
             return false;
         };
-        let Some(identity) = self.supervisor.identity(view) else {
-            return false;
-        };
 
-        // Verify signature
+        // Verify sender is signer
         if public_key_index != finalize.signer() {
             return false;
         }
-        if !finalize.verify(&self.namespace, identity) {
-            return false;
-        }
 
-        // Handle finalize
-        self.handle_finalize(public_key_index, finalize).await;
-        true
+        self.reserve_finalize(public_key_index, &finalize)
+    }
+
+    fn reserve_finalize(&mut self, public_key_index: u32, finalize: &Finalize<V, D>) -> bool {
+        // Check to see if finalize is for proposal in view
+        let view = finalize.view();
+        let round = self.views.entry(view).or_insert_with(|| {
+            Round::new(
+                &self.context,
+                self.reporter.clone(),
+                self.supervisor.clone(),
+                view,
+            )
+        });
+
+        // Try to reserve
+        round.add_reserved_finalize(public_key_index, finalize)
     }
 
     async fn handle_finalize(&mut self, public_key_index: u32, finalize: Finalize<V, D>) {
@@ -2293,6 +2313,7 @@ impl<
                             self.handle_nullify(public_key_index, nullify).await;
                         }
                         Voter::Finalize(finalize) => {
+                            self.handle_finalize(public_key_index, finalize).await;
                         }
                         Voter::Notarization(_)| Voter::Nullification(_) | Voter::Finalization(_) => {
                             unreachable!("we should not receive these messages from the verifier")
@@ -2348,7 +2369,14 @@ impl<
                         }
                         Voter::Finalize(finalize) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::finalize(&s)).inc();
-                            self.finalize(&s, finalize).await
+                            let interesting = self.finalize(&s, &finalize);
+                            if interesting{
+                                verifier_sender
+                                    .send((s.clone(), Voter::Finalize(finalize)))
+                                    .await
+                                    .expect("unable to send finalize to verifier");
+                            }
+                            interesting
                         }
                         Voter::Finalization(finalization) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::finalization(&s)).inc();
