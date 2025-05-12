@@ -31,6 +31,7 @@ use commonware_p2p::{
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
 use commonware_utils::{quorum, BitVec};
+use core::panic;
 use futures::{
     channel::{mpsc, oneshot},
     executor::block_on,
@@ -2036,25 +2037,25 @@ impl<
             mpsc::channel::<(C::PublicKey, Voter<V, D>)>(1024);
         let (mut verified_sender, mut verified_receiver) =
             mpsc::channel::<(C::PublicKey, Voter<V, D>)>(1024);
-        self.context.with_label("verifier").spawn_blocking({
+        self.context.with_label("verifier").spawn({
             let namespace = self.namespace.clone();
             let supervisor = self.supervisor.clone();
-            || {
-                block_on(async move {
-                    // Initialize view data structures
-                    let mut messages = Vec::new();
-                    #[allow(clippy::type_complexity)]
-                    let mut work: BTreeMap<
-                        (u64, Vec<u8>, Vec<u8>),
-                        HashMap<PartialSignature<V>, usize>,
-                    > = BTreeMap::new();
+            |_| async move {
+                // Initialize view data structures
+                let mut messages = Vec::new();
+                #[allow(clippy::type_complexity)]
+                let mut work: BTreeMap<
+                    (u64, Vec<u8>, Vec<u8>),
+                    HashMap<PartialSignature<V>, usize>,
+                > = BTreeMap::new();
+
+                loop {
+                    // Clear data structures
+                    messages.clear();
+                    work.clear();
 
                     // Wait for first item
                     while let Some((sender, msg)) = verifier_receiver.next().await {
-                        // Clear data structures
-                        messages.clear();
-                        work.clear();
-
                         // Add first item
                         let view = msg.view();
                         let verifiable = msg.message(&namespace);
@@ -2136,7 +2137,7 @@ impl<
                             }
                         }
                     }
-                })
+                }
             }
         });
 
