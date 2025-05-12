@@ -34,6 +34,7 @@ use commonware_utils::{quorum, BitVec};
 use core::panic;
 use futures::{
     channel::{mpsc, oneshot},
+    executor::block_on,
     future::Either,
     pin_mut, SinkExt, StreamExt,
 };
@@ -2029,25 +2030,21 @@ impl<
         // in case they help us avoid unnecessary work.
         let (mut verifier_sender, mut verifier_receiver) =
             mpsc::channel::<(C::PublicKey, Voter<V, D>)>(1024);
-        let (mut verified_sender, mut verified_receiver) =
+        let (verified_sender, mut verified_receiver) =
             mpsc::channel::<(C::PublicKey, Voter<V, D>)>(1024);
         self.context.with_label("verifier").spawn({
             let namespace = self.namespace.clone();
             let supervisor = self.supervisor.clone();
-            |_| async move {
-                // Initialize view data structures
-                let mut messages = Vec::new();
-                #[allow(clippy::type_complexity)]
-                let mut work: BTreeMap<
-                    (u64, Vec<u8>, Vec<u8>),
-                    // TODO: may not be deterministic?
-                    HashSet<(PartialSignature<V>, usize)>,
-                > = BTreeMap::new();
-
+            |context| async move {
                 loop {
-                    // Clear data structures
-                    messages.clear();
-                    work.clear();
+                    // Initialize view data structures
+                    let mut messages = Vec::new();
+                    #[allow(clippy::type_complexity)]
+                    let mut work: BTreeMap<
+                        (u64, Vec<u8>, Vec<u8>),
+                        // TODO: may not be deterministic?
+                        HashSet<(PartialSignature<V>, usize)>,
+                    > = BTreeMap::new();
 
                     // Wait for first item
                     let Some((sender, msg)) = verifier_receiver.next().await else {
@@ -2089,47 +2086,61 @@ impl<
                     }
 
                     // Verify messages or bisect (in order of most recent view to oldest)
-                    for ((view, namespace, message), signatures) in work.iter().rev() {
-                        let identity = supervisor.identity(*view).unwrap();
-                        let result = partial_verify_multiple_public_keys::<V, _>(
-                            identity,
-                            Some(namespace),
-                            message,
-                            signatures.iter().map(|(signature, _)| signature),
-                        );
+                    context
+                        .with_label("verify")
+                        .spawn_blocking({
+                            let supervisor = supervisor.clone();
+                            let mut verified_sender = verified_sender.clone();
+                            move || {
+                                block_on(async {
+                                    for ((view, namespace, message), signatures) in
+                                        work.iter().rev()
+                                    {
+                                        let identity = supervisor.identity(*view).unwrap();
+                                        let result = partial_verify_multiple_public_keys::<V, _>(
+                                            identity,
+                                            Some(namespace),
+                                            message,
+                                            signatures.iter().map(|(signature, _)| signature),
+                                        );
 
-                        // If any are invalid, we block
-                        let mut skips = HashSet::new();
-                        if let Err(invalid) = result {
-                            for signature in invalid {
-                                // TODO: block
+                                        // If any are invalid, we block
+                                        let mut skips = HashSet::new();
+                                        if let Err(invalid) = result {
+                                            for signature in invalid {
+                                                // TODO: block
 
-                                // TODO: make more efficient
-                                skips.insert(signature.index);
-                            }
-                        }
+                                                // TODO: make more efficient
+                                                skips.insert(signature.index);
+                                            }
+                                        }
 
-                        // Notify the application (for any items in vec now out of items)
-                        for (signature, idx) in signatures.iter() {
-                            if skips.contains(&signature.index) {
-                                continue;
-                            }
-                            let (sender, message, count) = &mut messages[*idx];
-                            *count -= 1;
-                            if *count > 0 {
-                                continue;
-                            }
+                                        // Notify the application (for any items in vec now out of items)
+                                        for (signature, idx) in signatures.iter() {
+                                            if skips.contains(&signature.index) {
+                                                continue;
+                                            }
+                                            let (sender, message, count) = &mut messages[*idx];
+                                            *count -= 1;
+                                            if *count > 0 {
+                                                continue;
+                                            }
 
-                            // TODO: make this more efficient
-                            if let Err(err) = verified_sender
-                                .send((sender.clone(), message.clone()))
-                                .await
-                            {
-                                warn!(?err, "failed to send verified message");
-                                continue;
+                                            // TODO: make this more efficient
+                                            if let Err(err) = verified_sender
+                                                .send((sender.clone(), message.clone()))
+                                                .await
+                                            {
+                                                warn!(?err, "failed to send verified message");
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                })
                             }
-                        }
-                    }
+                        })
+                        .await
+                        .expect("failed to spawn verifier");
                 }
             }
         });
