@@ -394,20 +394,19 @@ impl<
                 "broadcasting notarization"
             );
 
-            // Only select notarizes that are for this proposal
-            let notarizes = notarizes.iter().enumerate().filter_map(|(idx, alive)| {
-                if !alive {
-                    return None;
-                }
-                let Status::Verified(ref notarize) = self.notarizes[idx] else {
-                    return None;
-                };
-                Some(notarize)
-            });
-
             // Recover threshold signature
             let (proposals, seeds): (Vec<_>, Vec<_>) = notarizes
-                .map(|x| (&x.proposal_signature, &x.seed_signature))
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, alive)| {
+                    if !alive {
+                        return None;
+                    }
+                    let Status::Verified(ref notarize) = self.notarizes[idx] else {
+                        return None;
+                    };
+                    Some((&notarize.proposal_signature, &notarize.seed_signature))
+                })
                 .unzip();
             let (proposal_signature, seed_signature) =
                 threshold_signature_recover_pair::<V, _>(threshold, proposals, seeds)
@@ -442,11 +441,14 @@ impl<
 
         // Recover threshold signature
         let nullifies = self.nullifies.values();
-        let views = nullifies
-            .clone()
-            .map(|x| &x.view_signature)
-            .collect::<Vec<_>>();
-        let seeds = nullifies.map(|x| &x.seed_signature).collect::<Vec<_>>();
+        let (views, seeds): (Vec<_>, Vec<_>) = nullifies
+            .filter_map(|x| {
+                let Status::Verified(ref nullify) = x else {
+                    return None;
+                };
+                Some((&nullify.view_signature, &nullify.seed_signature))
+            })
+            .unzip();
         let (view_signature, seed_signature) =
             threshold_signature_recover_pair::<V, _>(threshold, views, seeds)
                 .expect("failed to recover threshold signature");
