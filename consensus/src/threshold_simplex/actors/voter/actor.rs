@@ -2055,7 +2055,7 @@ impl<
 
                     // Wait for first item
                     //
-                    // TODO: seed message with same signature be same across many messages (overwriting)?
+                    // TODO: seed message with same signature be same across many messages (overwriting)? Cool feature btw
                     while let Some((sender, msg)) = verifier_receiver.next().await {
                         // Add first item
                         let view = msg.view();
@@ -2096,6 +2096,16 @@ impl<
                                     break;
                                 }
                             }
+                        }
+
+                        // Debug map
+                        for ((view, namespace, message), signatures) in work.iter() {
+                            println!(
+                                "map {}: {:?} count={}",
+                                signatures.len(),
+                                (view, namespace, message),
+                                signatures.len()
+                            );
                         }
 
                         // Verify messages or bisect (in order of most recent view to oldest)
