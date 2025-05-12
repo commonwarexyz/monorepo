@@ -128,9 +128,9 @@ impl<V: Variant, D: Digest> Verifiable<V> for Voter<V, D> {
         match self {
             Voter::Notarize(v) => v.message(namespace),
             Voter::Notarization(_) => unreachable!("not allowed"),
-            Voter::Nullify(_) => unimplemented!(),
+            Voter::Nullify(v) => v.message(namespace),
             Voter::Nullification(_) => unreachable!("not allowed"),
-            Voter::Finalize(_) => unimplemented!(),
+            Voter::Finalize(v) => v.message(namespace),
             Voter::Finalization(_) => unreachable!("not allowed"),
         }
     }
@@ -589,6 +589,25 @@ impl<V: Variant> Viewable for Nullify<V> {
     }
 }
 
+impl<V: Variant> Verifiable<V> for Nullify<V> {
+    fn message(&self, namespace: &[u8]) -> Vec<(Vec<u8>, Vec<u8>, PartialSignature<V>)> {
+        let nullify_namespace = nullify_namespace(namespace);
+        let view_message = view_message(self.view);
+        let nullify_batch = (
+            nullify_namespace,
+            view_message.to_vec(),
+            self.view_signature.clone(),
+        );
+        let seed_namespace = seed_namespace(namespace);
+        let seed_batch = (
+            seed_namespace,
+            view_message.to_vec(),
+            self.seed_signature.clone(),
+        );
+        vec![nullify_batch, seed_batch]
+    }
+}
+
 impl<V: Variant> Write for Nullify<V> {
     fn write(&self, writer: &mut impl BufMut) {
         UInt(self.view).write(writer);
@@ -768,6 +787,19 @@ impl<V: Variant, D: Digest> Attributable for Finalize<V, D> {
 impl<V: Variant, D: Digest> Viewable for Finalize<V, D> {
     fn view(&self) -> View {
         self.proposal.view()
+    }
+}
+
+impl<V: Variant, D: Digest> Verifiable<V> for Finalize<V, D> {
+    fn message(&self, namespace: &[u8]) -> Vec<(Vec<u8>, Vec<u8>, PartialSignature<V>)> {
+        let finalize_namespace = finalize_namespace(namespace);
+        let message = self.proposal.encode();
+        let batch = (
+            finalize_namespace,
+            message.to_vec(),
+            self.proposal_signature.clone(),
+        );
+        vec![batch]
     }
 }
 
