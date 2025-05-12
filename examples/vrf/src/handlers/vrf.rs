@@ -2,7 +2,10 @@ use crate::handlers::wire;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::bls12381::{
     dkg::player::Output,
-    primitives::{group, ops},
+    primitives::{
+        ops,
+        variant::{MinSig, Variant},
+    },
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -23,7 +26,7 @@ pub struct Vrf<E: Clock + Spawner, P: Array> {
     threshold: u32,
     contributors: Vec<P>,
     ordered_contributors: HashMap<P, u32>,
-    requests: mpsc::Receiver<(u64, Output)>,
+    requests: mpsc::Receiver<(u64, Output<MinSig>)>,
 }
 
 impl<E: Clock + Spawner, P: Array> Vrf<E, P> {
@@ -32,7 +35,7 @@ impl<E: Clock + Spawner, P: Array> Vrf<E, P> {
         timeout: Duration,
         threshold: u32,
         mut contributors: Vec<P>,
-        requests: mpsc::Receiver<(u64, Output)>,
+        requests: mpsc::Receiver<(u64, Output<MinSig>)>,
     ) -> Self {
         contributors.sort();
         let ordered_contributors = contributors
@@ -52,14 +55,15 @@ impl<E: Clock + Spawner, P: Array> Vrf<E, P> {
 
     async fn run_round(
         &self,
-        output: &Output,
+        output: &Output<MinSig>,
         round: u64,
         sender: &mut impl Sender<PublicKey = P>,
         receiver: &mut impl Receiver<PublicKey = P>,
-    ) -> Option<group::Signature> {
+    ) -> Option<<MinSig as Variant>::Signature> {
         // Construct payload
         let payload = round.to_be_bytes();
-        let signature = ops::partial_sign_message(&output.share, Some(VRF_NAMESPACE), &payload);
+        let signature =
+            ops::partial_sign_message::<MinSig>(&output.share, Some(VRF_NAMESPACE), &payload);
 
         // Construct partial signature
         let mut partials = vec![signature.clone()];
@@ -112,7 +116,7 @@ impl<E: Clock + Spawner, P: Array> Vrf<E, P> {
                                 );
                                 continue;
                             }
-                            match ops::partial_verify_message(&output.public, Some(VRF_NAMESPACE), &payload, &msg.signature) {
+                            match ops::partial_verify_message::<MinSig>(&output.public, Some(VRF_NAMESPACE), &payload, &msg.signature) {
                                 Ok(_) => {
                                     partials.push(msg.signature);
                                     debug!(round, dealer, "received partial signature");
@@ -132,7 +136,7 @@ impl<E: Clock + Spawner, P: Array> Vrf<E, P> {
         }
 
         // Aggregate partial signatures
-        match ops::threshold_signature_recover(self.threshold, &partials) {
+        match ops::threshold_signature_recover::<MinSig, _>(self.threshold, &partials) {
             Ok(signature) => Some(signature),
             Err(_) => {
                 warn!(round, "failed to aggregate partial signatures");

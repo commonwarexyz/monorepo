@@ -10,7 +10,10 @@ use commonware_bridge::{
 use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::threshold_simplex::types::{Finalization, Viewable};
 use commonware_cryptography::{
-    bls12381::primitives::group::{self, G1},
+    bls12381::primitives::{
+        group::G2,
+        variant::{MinSig, Variant},
+    },
     sha256::Digest as Sha256Digest,
     Digest, Ed25519, Hasher, Sha256, Signer,
 };
@@ -47,7 +50,7 @@ enum Message<D: Digest> {
     },
     GetFinalization {
         incoming: inbound::GetFinalization,
-        response: oneshot::Sender<Option<Finalization<D>>>,
+        response: oneshot::Sender<Option<Finalization<MinSig, D>>>,
     },
 }
 
@@ -112,9 +115,10 @@ fn main() {
     }
 
     // Configure networks
-    let mut namespaces: HashMap<G1, (G1, Vec<u8>)> = HashMap::new();
-    let mut blocks: HashMap<G1, HashMap<Sha256Digest, BlockFormat<Sha256Digest>>> = HashMap::new();
-    let mut finalizations: HashMap<G1, BTreeMap<u64, Finalization<Sha256Digest>>> = HashMap::new();
+    let mut namespaces: HashMap<G2, (G2, Vec<u8>)> = HashMap::new();
+    let mut blocks: HashMap<G2, HashMap<Sha256Digest, BlockFormat<Sha256Digest>>> = HashMap::new();
+    let mut finalizations: HashMap<G2, BTreeMap<u64, Finalization<MinSig, Sha256Digest>>> =
+        HashMap::new();
     let networks = matches
         .get_many::<String>("networks")
         .expect("Please provide networks");
@@ -123,7 +127,8 @@ fn main() {
     }
     for network in networks {
         let network = from_hex(network).expect("Network not well-formed");
-        let public = group::Public::decode(network.as_ref()).expect("Network not well-formed");
+        let public =
+            <MinSig as Variant>::Public::decode(network.as_ref()).expect("Network not well-formed");
         let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
         namespaces.insert(public, (public, namespace));
         blocks.insert(public, HashMap::new());

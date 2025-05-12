@@ -3,7 +3,11 @@
 //! participants are active at a given view.
 
 use commonware_cryptography::{
-    bls12381::primitives::{group, poly},
+    bls12381::primitives::{
+        group,
+        poly::Public,
+        variant::{MinSig, Variant},
+    },
     Hasher,
 };
 use commonware_utils::Array;
@@ -23,8 +27,8 @@ pub struct Config<H: Hasher, Si: Sink, St: Stream, P: Array> {
     pub hasher: H,
 
     pub namespace: Vec<u8>,
-    pub identity: poly::Public,
-    pub other_public: group::Public,
+    pub identity: Public<MinSig>,
+    pub other_public: <MinSig as Variant>::Public,
 
     /// Participants active in consensus.
     pub participants: Vec<P>,

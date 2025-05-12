@@ -14,7 +14,7 @@ use super::{
 };
 use crate::{Automaton, Monitor, Relay, Reporter, Supervisor, ThresholdSupervisor};
 use commonware_cryptography::{
-    bls12381::primitives::{group, poly},
+    bls12381::primitives::{group, poly, variant::Variant},
     Digest, Scheme,
 };
 use commonware_macros::select;
@@ -55,17 +55,18 @@ struct Verify<C: Scheme, D: Digest, E: Clock> {
 pub struct Engine<
     E: Clock + Spawner + Storage + Metrics,
     C: Scheme,
+    V: Variant,
     D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
     R: Relay<Digest = D>,
-    Z: Reporter<Activity = Activity<C, D>>,
+    Z: Reporter<Activity = Activity<C, V, D>>,
     M: Monitor<Index = Epoch>,
     Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
     TSu: ThresholdSupervisor<
         Index = Epoch,
         PublicKey = C::PublicKey,
         Share = group::Share,
-        Identity = poly::Public,
+        Identity = poly::Public<V>,
     >,
     NetS: Sender<PublicKey = C::PublicKey>,
     NetR: Receiver<PublicKey = C::PublicKey>,
@@ -140,6 +141,9 @@ pub struct Engine<
     // The number of concurrent operations when replaying journals.
     journal_replay_concurrency: usize,
 
+    // The number of bytes to buffer when replaying a journal.
+    journal_replay_buffer: usize,
+
     // A prefix for the journal names.
     // The rest of the name is the hex-encoded public keys of the relevant sequencer.
     journal_name_prefix: String,
@@ -148,7 +152,8 @@ pub struct Engine<
     journal_compression: Option<u8>,
 
     // A map of sequencer public keys to their journals.
-    journals: BTreeMap<C::PublicKey, Journal<E, (), Node<C, D>>>,
+    #[allow(clippy::type_complexity)]
+    journals: BTreeMap<C::PublicKey, Journal<E, Node<C, V, D>>>,
 
     ////////////////////////////////////////
     // State
@@ -158,11 +163,11 @@ pub struct Engine<
     // The tip is a `Node` which is comprised of a `Chunk` and,
     // if not the genesis chunk for that sequencer,
     // a threshold signature over the parent chunk.
-    tip_manager: TipManager<C, D>,
+    tip_manager: TipManager<C, V, D>,
 
     // Tracks the acknowledgements for chunks.
     // This is comprised of partial signatures or threshold signatures.
-    ack_manager: AckManager<C::PublicKey, D>,
+    ack_manager: AckManager<C::PublicKey, V, D>,
 
     // The current epoch.
     epoch: Epoch,
@@ -194,24 +199,25 @@ pub struct Engine<
 impl<
         E: Clock + Spawner + Storage + Metrics,
         C: Scheme,
+        V: Variant,
         D: Digest,
         A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
         R: Relay<Digest = D>,
-        Z: Reporter<Activity = Activity<C, D>>,
+        Z: Reporter<Activity = Activity<C, V, D>>,
         M: Monitor<Index = Epoch>,
         Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
         TSu: ThresholdSupervisor<
             Index = Epoch,
             PublicKey = C::PublicKey,
             Share = group::Share,
-            Identity = poly::Public,
+            Identity = poly::Public<V>,
         >,
         NetS: Sender<PublicKey = C::PublicKey>,
         NetR: Receiver<PublicKey = C::PublicKey>,
-    > Engine<E, C, D, A, R, Z, M, Su, TSu, NetS, NetR>
+    > Engine<E, C, V, D, A, R, Z, M, Su, TSu, NetS, NetR>
 {
     /// Creates a new engine with the given context and configuration.
-    pub fn new(context: E, cfg: Config<C, D, A, R, Z, M, Su, TSu>) -> Self {
+    pub fn new(context: E, cfg: Config<C, V, D, A, R, Z, M, Su, TSu>) -> Self {
         let metrics = metrics::Metrics::init(context.clone());
 
         Self {
@@ -231,11 +237,12 @@ impl<
             pending_verifies: FuturesPool::default(),
             journal_heights_per_section: cfg.journal_heights_per_section,
             journal_replay_concurrency: cfg.journal_replay_concurrency,
+            journal_replay_buffer: cfg.journal_replay_buffer,
             journal_name_prefix: cfg.journal_name_prefix,
             journal_compression: cfg.journal_compression,
             journals: BTreeMap::new(),
-            tip_manager: TipManager::<C, D>::new(),
-            ack_manager: AckManager::<C::PublicKey, D>::new(),
+            tip_manager: TipManager::<C, V, D>::new(),
+            ack_manager: AckManager::<C::PublicKey, V, D>::new(),
             epoch: 0,
             priority_proposals: cfg.priority_proposals,
             priority_acks: cfg.priority_acks,
@@ -471,7 +478,7 @@ impl<
         &mut self,
         context: &Context<C::PublicKey>,
         payload: &D,
-        ack_sender: &mut WrappedSender<NetS, (), Ack<C::PublicKey, D>>,
+        ack_sender: &mut WrappedSender<NetS, Ack<C::PublicKey, V, D>>,
     ) -> Result<(), Error> {
         // Get the tip
         let Some(tip) = self.tip_manager.get(&context.sequencer) else {
@@ -544,7 +551,7 @@ impl<
         &mut self,
         chunk: &Chunk<C::PublicKey, D>,
         epoch: Epoch,
-        threshold: group::Signature,
+        threshold: V::Signature,
     ) {
         // Set the threshold signature, returning early if it already exists
         if !self
@@ -569,7 +576,7 @@ impl<
     ///
     /// Returns an error if the ack is invalid, or can be ignored
     /// (e.g. already exists, threshold already exists, is outside the epoch bounds, etc.).
-    async fn handle_ack(&mut self, ack: &Ack<C::PublicKey, D>) -> Result<(), Error> {
+    async fn handle_ack(&mut self, ack: &Ack<C::PublicKey, V, D>) -> Result<(), Error> {
         // Get the quorum
         let Some(identity) = self.validators.identity(ack.epoch) else {
             return Err(Error::UnknownIdentity(ack.epoch));
@@ -590,7 +597,7 @@ impl<
     /// Handles a valid `Node` message, storing it as the tip.
     /// Alerts the automaton of the new node.
     /// Also appends the `Node` to the journal if it's new.
-    async fn handle_node(&mut self, node: &Node<C, D>) {
+    async fn handle_node(&mut self, node: &Node<C, V, D>) {
         // Store the tip
         let is_new = self.tip_manager.put(node);
 
@@ -667,7 +674,7 @@ impl<
         &mut self,
         context: Context<C::PublicKey>,
         payload: D,
-        node_sender: &mut WrappedSender<NetS, (), Node<C, D>>,
+        node_sender: &mut WrappedSender<NetS, Node<C, V, D>>,
     ) -> Result<(), Error> {
         let mut guard = self.metrics.propose.guard(Status::Dropped);
         let me = self.crypto.public_key();
@@ -734,7 +741,7 @@ impl<
     /// - this instance has not yet collected the threshold signature for the chunk.
     async fn rebroadcast(
         &mut self,
-        node_sender: &mut WrappedSender<NetS, (), Node<C, D>>,
+        node_sender: &mut WrappedSender<NetS, Node<C, V, D>>,
     ) -> Result<(), Error> {
         let mut guard = self.metrics.rebroadcast.guard(Status::Dropped);
 
@@ -771,8 +778,8 @@ impl<
     /// Send a  `Node` message to all validators in the given epoch.
     async fn broadcast(
         &mut self,
-        node: Node<C, D>,
-        node_sender: &mut WrappedSender<NetS, (), Node<C, D>>,
+        node: Node<C, V, D>,
+        node_sender: &mut WrappedSender<NetS, Node<C, V, D>>,
         epoch: Epoch,
     ) -> Result<(), Error> {
         // Get the validators for the epoch
@@ -810,7 +817,7 @@ impl<
     /// Else returns an error if the `Node` is invalid.
     fn validate_node(
         &mut self,
-        node: &Node<C, D>,
+        node: &Node<C, V, D>,
         sender: &C::PublicKey,
     ) -> Result<Option<Chunk<C::PublicKey, D>>, Error> {
         // Verify the sender
@@ -834,7 +841,7 @@ impl<
             let Some(identity) = self.validators.identity(parent.epoch) else {
                 return Err(Error::UnknownIdentity(parent.epoch));
             };
-            Some(poly::public(identity))
+            Some(poly::public::<V>(identity))
         } else {
             None
         };
@@ -848,7 +855,11 @@ impl<
     ///
     /// Returns the chunk, epoch, and partial signature if the ack is valid.
     /// Returns an error if the ack is invalid.
-    fn validate_ack(&self, ack: &Ack<C::PublicKey, D>, sender: &C::PublicKey) -> Result<(), Error> {
+    fn validate_ack(
+        &self,
+        ack: &Ack<C::PublicKey, V, D>,
+        sender: &C::PublicKey,
+    ) -> Result<(), Error> {
         // Validate chunk
         self.validate_chunk(&ack.chunk, ack.epoch)?;
 
@@ -960,10 +971,9 @@ impl<
             compression: self.journal_compression,
             codec_config: (),
         };
-        let mut journal =
-            Journal::<_, _, Node<C, D>>::init(self.context.with_label("journal"), cfg)
-                .await
-                .expect("unable to init journal");
+        let journal = Journal::<_, Node<C, V, D>>::init(self.context.with_label("journal"), cfg)
+            .await
+            .expect("unable to init journal");
 
         // Replay journal
         {
@@ -971,14 +981,14 @@ impl<
 
             // Prepare the stream
             let stream = journal
-                .replay(self.journal_replay_concurrency)
+                .replay(self.journal_replay_concurrency, self.journal_replay_buffer)
                 .await
                 .expect("unable to replay journal");
             pin_mut!(stream);
 
             // Read from the stream, which may be in arbitrary order.
             // Remember the highest node height
-            let mut tip: Option<Node<C, D>> = None;
+            let mut tip: Option<Node<C, V, D>> = None;
             let mut num_items = 0;
             while let Some(msg) = stream.next().await {
                 let (_, _, _, node) = msg.expect("unable to read from journal");
@@ -1014,7 +1024,7 @@ impl<
     ///
     /// To prevent ever writing two conflicting `Chunk`s at the same height,
     /// the journal must already be open and replayed.
-    async fn journal_append(&mut self, node: Node<C, D>) {
+    async fn journal_append(&mut self, node: Node<C, V, D>) {
         let section = self.get_journal_section(node.chunk.height);
         self.journals
             .get_mut(&node.chunk.sequencer)

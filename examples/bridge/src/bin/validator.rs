@@ -5,18 +5,19 @@ use commonware_bridge::{
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::threshold_simplex::{self, Engine};
 use commonware_cryptography::{
-    bls12381::primitives::{group, poly::Poly},
+    bls12381::primitives::{
+        group,
+        poly::{Poly, Public},
+        variant::{MinSig, Variant},
+    },
     Ed25519, Sha256, Signer,
 };
 use commonware_p2p::authenticated;
 use commonware_runtime::{tokio, Metrics, Network, Runner};
 use commonware_stream::public_key::{self, Connection};
-use commonware_utils::{from_hex, quorum, union};
+use commonware_utils::{from_hex, quorum, union, NZU32};
 use governor::Quota;
-use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-    num::NonZeroU32,
-};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::{str::FromStr, time::Duration};
 
 fn main() {
@@ -109,7 +110,7 @@ fn main() {
         .get_one::<String>("identity")
         .expect("Please provide identity");
     let identity = from_hex(identity).expect("Identity not well-formed");
-    let identity: Poly<group::Public> =
+    let identity: Public<MinSig> =
         Poly::decode_cfg(identity.as_ref(), &threshold).expect("Identity not well-formed");
     let share = matches
         .get_one::<String>("share")
@@ -133,14 +134,11 @@ fn main() {
         .get_one::<String>("other-public")
         .expect("Please provide other public");
     let other_public = from_hex(other_public).expect("Other identity not well-formed");
-    let other_public =
-        group::Public::decode(other_public.as_ref()).expect("Other identity not well-formed");
+    let other_public = <MinSig as Variant>::Public::decode(other_public.as_ref())
+        .expect("Other identity not well-formed");
 
     // Initialize context
-    let runtime_cfg = tokio::Config {
-        storage_directory: storage_directory.into(),
-        ..Default::default()
-    };
+    let runtime_cfg = tokio::Config::new().with_storage_directory(storage_directory);
     let executor = tokio::Runner::new(runtime_cfg.clone());
 
     // Configure indexer
@@ -191,13 +189,13 @@ fn main() {
         // for this channel.
         let (voter_sender, voter_receiver) = network.register(
             0,
-            Quota::per_second(NonZeroU32::new(10).unwrap()),
+            Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
             Some(3),
         );
         let (resolver_sender, resolver_receiver) = network.register(
             1,
-            Quota::per_second(NonZeroU32::new(10).unwrap()),
+            Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
             Some(3),
         );
@@ -232,6 +230,7 @@ fn main() {
                 namespace: consensus_namespace,
                 mailbox_size: 1024,
                 replay_concurrency: 1,
+                replay_buffer: 1024 * 1024,
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(10),
@@ -240,7 +239,7 @@ fn main() {
                 skip_timeout: 5,
                 max_fetch_count: 32,
                 fetch_concurrent: 2,
-                fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
             },
         );
 

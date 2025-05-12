@@ -34,12 +34,11 @@ cfg_if::cfg_if! {
         pub mod benchmarks;
     }
 }
+mod network;
 mod storage;
 pub mod telemetry;
 mod utils;
-pub use utils::{
-    create_pool, reschedule, Handle, RwLock, RwLockReadGuard, RwLockWriteGuard, Signal, Signaler,
-};
+pub use utils::*;
 
 /// Prefix for runtime metrics.
 const METRICS_PREFIX: &str = "runtime";
@@ -220,30 +219,53 @@ pub trait Clock: Clone + Send + Sync + 'static {
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static;
 }
 
+/// Syntactic sugar for the type of [Sink] used by a given [Network] N.
+pub type SinkOf<N> = <<N as Network>::Listener as Listener>::Sink;
+
+/// Syntactic sugar for the type of [Stream] used by a given [Network] N.
+pub type StreamOf<N> = <<N as Network>::Listener as Listener>::Stream;
+
+/// Syntactic sugar for the type of [Listener] used by a given [Network] N.
+pub type ListenerOf<N> = <N as crate::Network>::Listener;
+
 /// Interface that any runtime must implement to create
 /// network connections.
-pub trait Network<L, Si, St>: Clone + Send + Sync + 'static
-where
-    L: Listener<Si, St>,
-    Si: Sink,
-    St: Stream,
-{
+pub trait Network: Clone + Send + Sync + 'static {
+    /// The type of [Listener] that's returned when binding to a socket.
+    /// Accepting a connection returns a [Sink] and [Stream] which are defined
+    /// by the [Listener] and used to send and receive data over the connection.
+    type Listener: Listener;
+
     /// Bind to the given socket address.
-    fn bind(&self, socket: SocketAddr) -> impl Future<Output = Result<L, Error>> + Send;
+    fn bind(
+        &self,
+        socket: SocketAddr,
+    ) -> impl Future<Output = Result<Self::Listener, Error>> + Send;
 
     /// Dial the given socket address.
-    fn dial(&self, socket: SocketAddr) -> impl Future<Output = Result<(Si, St), Error>> + Send;
+    fn dial(
+        &self,
+        socket: SocketAddr,
+    ) -> impl Future<Output = Result<(SinkOf<Self>, StreamOf<Self>), Error>> + Send;
 }
 
 /// Interface that any runtime must implement to handle
 /// incoming network connections.
-pub trait Listener<Si, St>: Sync + Send + 'static
-where
-    Si: Sink,
-    St: Stream,
-{
+pub trait Listener: Sync + Send + 'static {
+    /// The type of [Sink] that's returned when accepting a connection.
+    /// This is used to send data to the remote connection.
+    type Sink: Sink;
+    /// The type of [Stream] that's returned when accepting a connection.
+    /// This is used to receive data from the remote connection.
+    type Stream: Stream;
+
     /// Accept an incoming connection.
-    fn accept(&mut self) -> impl Future<Output = Result<(SocketAddr, Si, St), Error>> + Send;
+    fn accept(
+        &mut self,
+    ) -> impl Future<Output = Result<(SocketAddr, Self::Sink, Self::Stream), Error>> + Send;
+
+    /// Returns the local address of the listener.
+    fn local_addr(&self) -> Result<SocketAddr, std::io::Error>;
 }
 
 /// Interface that any runtime must implement to send
@@ -1286,7 +1308,10 @@ mod tests {
             // Configure telemetry
             tokio::telemetry::init(
                 context.with_label("metrics"),
-                Level::INFO,
+                tokio::telemetry::Logging {
+                    level: Level::INFO,
+                    json: false,
+                },
                 Some(address),
                 None,
             );

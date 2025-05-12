@@ -1,21 +1,20 @@
 use crate::{ordered_broadcast::types::Epoch, Supervisor, ThresholdSupervisor};
-use commonware_cryptography::bls12381::primitives::{
-    group::{self, Public, Share},
-    poly::Poly,
-};
+use commonware_cryptography::bls12381::primitives::{group::Share, poly::Public, variant::Variant};
 use commonware_utils::Array;
-use std::collections::HashMap;
+use std::{collections::HashMap, marker::PhantomData};
 
 #[derive(Clone)]
-pub struct Validators<P: Array> {
-    identity: Poly<Public>,
+pub struct Validators<P: Array, V: Variant> {
+    identity: Public<V>,
     validators: Vec<P>,
     validators_map: HashMap<P, u32>,
     share: Option<Share>,
+
+    _phantom: PhantomData<V>,
 }
 
-impl<P: Array> Validators<P> {
-    pub fn new(identity: Poly<Public>, mut validators: Vec<P>, share: Option<Share>) -> Self {
+impl<P: Array, V: Variant> Validators<P, V> {
+    pub fn new(identity: Public<V>, mut validators: Vec<P>, share: Option<Share>) -> Self {
         // Setup validators
         validators.sort();
         let mut validators_map = HashMap::new();
@@ -28,11 +27,13 @@ impl<P: Array> Validators<P> {
             validators,
             validators_map,
             share,
+
+            _phantom: PhantomData,
         }
     }
 }
 
-impl<P: Array> Supervisor for Validators<P> {
+impl<P: Array, V: Variant> Supervisor for Validators<P, V> {
     type Index = Epoch;
     type PublicKey = P;
 
@@ -49,10 +50,10 @@ impl<P: Array> Supervisor for Validators<P> {
     }
 }
 
-impl<P: Array> ThresholdSupervisor for Validators<P> {
-    type Identity = Poly<Public>;
+impl<P: Array, V: Variant> ThresholdSupervisor for Validators<P, V> {
+    type Identity = Public<V>;
     type Share = Share;
-    type Seed = group::Signature;
+    type Seed = V::Signature;
 
     fn leader(&self, _: Self::Index, _: Self::Seed) -> Option<Self::PublicKey> {
         unimplemented!()

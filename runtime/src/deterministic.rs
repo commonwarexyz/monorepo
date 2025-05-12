@@ -23,19 +23,21 @@
 //! ```
 
 use crate::{
-    mocks,
+    network::{
+        audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
+        metered::Network as MeteredNetwork,
+    },
     storage::{
         audited::Storage as AuditedStorage, memory::Storage as MemStorage,
         metered::Storage as MeteredStorage,
     },
     utils::Signaler,
-    Clock, Error, Handle, Signal, METRICS_PREFIX,
+    Clock, Error, Handle, ListenerOf, Signal, METRICS_PREFIX,
 };
 use commonware_utils::{hex, SystemTimeExt};
 use futures::{
-    channel::mpsc,
     task::{waker_ref, ArcWake},
-    Future, SinkExt, StreamExt,
+    Future,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
@@ -48,17 +50,13 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BinaryHeap, HashMap},
     mem::replace,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-    ops::Range,
+    net::SocketAddr,
     pin::Pin,
     sync::{Arc, Mutex},
     task::{self, Poll, Waker},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tracing::trace;
-
-/// Range of ephemeral ports assigned to dialers.
-const EPHEMERAL_PORT_RANGE: Range<u16> = 32768..61000;
 
 /// Map of names to blob contents.
 pub type Partition = HashMap<Vec<u8>, Vec<u8>>;
@@ -137,194 +135,20 @@ impl Default for Auditor {
 }
 
 impl Auditor {
-    fn process_task(&self, task: u128, label: &str) {
+    /// Record that an event happened.
+    /// This auditor's hash will be updated with the event's `label` and
+    /// whatever other data is passed in the `payload` closure.
+    pub(crate) fn event<F>(&self, label: &'static [u8], payload: F)
+    where
+        F: FnOnce(&mut Sha256),
+    {
         let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"process_task");
-        hasher.update(task.to_be_bytes());
-        hasher.update(label.as_bytes());
-        *hash = hasher.finalize().to_vec();
-    }
 
-    fn stop(&self, value: i32) {
-        let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(&*hash);
-        hasher.update(b"stop");
-        hasher.update(value.to_be_bytes());
-        *hash = hasher.finalize().to_vec();
-    }
+        hasher.update(label);
+        payload(&mut hasher);
 
-    fn stopped(&self) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"stopped");
-        *hash = hasher.finalize().to_vec();
-    }
-
-    fn bind(&self, address: SocketAddr) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"bind");
-        hasher.update(address.to_string().as_bytes());
-        *hash = hasher.finalize().to_vec();
-    }
-
-    fn dial(&self, dialer: SocketAddr, listener: SocketAddr) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"dial");
-        hasher.update(dialer.to_string().as_bytes());
-        hasher.update(listener.to_string().as_bytes());
-        *hash = hasher.finalize().to_vec();
-    }
-
-    fn accept(&self, listener: SocketAddr, dialer: SocketAddr) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"accept");
-        hasher.update(listener.to_string().as_bytes());
-        hasher.update(dialer.to_string().as_bytes());
-        *hash = hasher.finalize().to_vec();
-    }
-
-    fn send(&self, sender: SocketAddr, receiver: SocketAddr, message: &[u8]) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"send");
-        hasher.update(sender.to_string().as_bytes());
-        hasher.update(receiver.to_string().as_bytes());
-        hasher.update(message);
-        *hash = hasher.finalize().to_vec();
-    }
-
-    fn recv(&self, receiver: SocketAddr, sender: SocketAddr, message: &[u8]) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"recv");
-        hasher.update(receiver.to_string().as_bytes());
-        hasher.update(sender.to_string().as_bytes());
-        hasher.update(message);
-        *hash = hasher.finalize().to_vec();
-    }
-
-    fn rand(&self, method: String) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"rand");
-        hasher.update(method.as_bytes());
-        *hash = hasher.finalize().to_vec();
-    }
-
-    pub(crate) fn open(&self, partition: &str, name: &[u8]) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"open");
-        hasher.update(partition.as_bytes());
-        hasher.update(name);
-        *hash = hasher.finalize().to_vec();
-    }
-
-    pub(crate) fn remove(&self, partition: &str, name: Option<&[u8]>) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"remove");
-        hasher.update(partition.as_bytes());
-        if let Some(name) = name {
-            hasher.update(name);
-        }
-        *hash = hasher.finalize().to_vec();
-    }
-
-    pub(crate) fn scan(&self, partition: &str) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"scan");
-        hasher.update(partition.as_bytes());
-        *hash = hasher.finalize().to_vec();
-    }
-
-    pub(crate) fn read_at(&self, partition: &str, name: &[u8], buf: usize, offset: u64) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"read_at");
-        hasher.update(partition.as_bytes());
-        hasher.update(name);
-        hasher.update(buf.to_be_bytes());
-        hasher.update(offset.to_be_bytes());
-        *hash = hasher.finalize().to_vec();
-    }
-
-    pub(crate) fn write_at(&self, partition: &str, name: &[u8], buf: &[u8], offset: u64) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"write_at");
-        hasher.update(partition.as_bytes());
-        hasher.update(name);
-        hasher.update(buf);
-        hasher.update(offset.to_be_bytes());
-        *hash = hasher.finalize().to_vec();
-    }
-
-    pub(crate) fn truncate(&self, partition: &str, name: &[u8], size: u64) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"truncate");
-        hasher.update(partition.as_bytes());
-        hasher.update(name);
-        hasher.update(size.to_be_bytes());
-        *hash = hasher.finalize().to_vec();
-    }
-
-    pub(crate) fn sync(&self, partition: &str, name: &[u8]) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"sync");
-        hasher.update(partition.as_bytes());
-        hasher.update(name);
-        *hash = hasher.finalize().to_vec();
-    }
-
-    pub(crate) fn close(&self, partition: &str, name: &[u8]) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"close");
-        hasher.update(partition.as_bytes());
-        hasher.update(name);
-        *hash = hasher.finalize().to_vec();
-    }
-
-    fn register(&self, name: &str, help: &str) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"register");
-        hasher.update(name.as_bytes());
-        hasher.update(help.as_bytes());
-        *hash = hasher.finalize().to_vec();
-    }
-
-    fn encode(&self) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&*hash);
-        hasher.update(b"encode");
         *hash = hasher.finalize().to_vec();
     }
 
@@ -342,17 +166,58 @@ impl Auditor {
 #[derive(Clone)]
 pub struct Config {
     /// Seed for the random number generator.
-    pub seed: u64,
+    seed: u64,
 
     /// The cycle duration determines how much time is advanced after each iteration of the event
     /// loop. This is useful to prevent starvation if some task never yields.
-    pub cycle: Duration,
+    cycle: Duration,
 
     /// If the runtime is still executing at this point (i.e. a test hasn't stopped), panic.
-    pub timeout: Option<Duration>,
+    timeout: Option<Duration>,
 }
 
 impl Config {
+    /// Returns a new [Config] with default values.
+    pub fn new() -> Self {
+        Self {
+            seed: 42,
+            cycle: Duration::from_millis(1),
+            timeout: None,
+        }
+    }
+
+    // Setters
+    /// See [Config]
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = seed;
+        self
+    }
+    /// See [Config]
+    pub fn with_cycle(mut self, cycle: Duration) -> Self {
+        self.cycle = cycle;
+        self
+    }
+    /// See [Config]
+    pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    // Getters
+    /// See [Config]
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+    /// See [Config]
+    pub fn cycle(&self) -> Duration {
+        self.cycle
+    }
+    /// See [Config]
+    pub fn timeout(&self) -> Option<Duration> {
+        self.timeout
+    }
+
+    /// Assert that the configuration is valid.
     pub fn assert(&self) {
         assert!(
             self.cycle != Duration::default() || self.timeout.is_none(),
@@ -363,11 +228,7 @@ impl Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self {
-            seed: 42,
-            cycle: Duration::from_millis(1),
-            timeout: None,
-        }
+        Self::new()
     }
 }
 
@@ -501,7 +362,10 @@ impl crate::Runner for Runner {
             trace!(iter, tasks = tasks.len(), "starting loop");
             for task in tasks {
                 // Record task for auditing
-                executor.auditor.process_task(task.id, &task.label);
+                executor.auditor.event(b"process_task", |hasher| {
+                    hasher.update(task.id.to_be_bytes());
+                    hasher.update(task.label.as_bytes());
+                });
                 trace!(id = task.id, "processing task");
 
                 // Record task poll
@@ -722,6 +586,8 @@ impl Tasks {
     }
 }
 
+type Network = MeteredNetwork<AuditedNetwork<DeterministicNetwork>>;
+
 /// Implementation of [crate::Spawner], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `deterministic`
 /// runtime.
@@ -729,7 +595,7 @@ pub struct Context {
     label: String,
     spawned: bool,
     executor: Arc<Executor>,
-    networking: Arc<Networking>,
+    network: Arc<Network>,
     storage: MeteredStorage<AuditedStorage<MemStorage>>,
 }
 
@@ -757,6 +623,9 @@ impl Context {
             AuditedStorage::new(MemStorage::default(), auditor.clone()),
             runtime_registry,
         );
+        let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
+        let network = MeteredNetwork::new(network, runtime_registry);
+
         let executor = Arc::new(Executor {
             registry: Mutex::new(registry),
             cycle: cfg.cycle,
@@ -773,11 +642,12 @@ impl Context {
             finished: Mutex::new(false),
             recovered: Mutex::new(false),
         });
+
         Context {
             label: String::new(),
             spawned: false,
             executor: executor.clone(),
-            networking: Arc::new(Networking::new(metrics, auditor)),
+            network: Arc::new(network),
             storage,
         }
     }
@@ -816,6 +686,9 @@ impl Context {
         // Copy state
         let auditor = self.executor.auditor.clone();
         let (signaler, signal) = Signaler::new();
+        let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
+        let network = MeteredNetwork::new(network, runtime_registry);
+
         let executor = Arc::new(Executor {
             // Copied from the current runtime
             cycle: self.executor.cycle,
@@ -839,7 +712,7 @@ impl Context {
             label: String::new(),
             spawned: false,
             executor,
-            networking: Arc::new(Networking::new(metrics, auditor.clone())),
+            network: Arc::new(network),
             storage: self.storage,
         }
     }
@@ -855,7 +728,7 @@ impl Clone for Context {
             label: self.label.clone(),
             spawned: false,
             executor: self.executor.clone(),
-            networking: self.networking.clone(),
+            network: self.network.clone(),
             storage: self.storage.clone(),
         }
     }
@@ -969,12 +842,14 @@ impl crate::Spawner for Context {
     }
 
     fn stop(&self, value: i32) {
-        self.executor.auditor.stop(value);
+        self.executor.auditor.event(b"stop", |hasher| {
+            hasher.update(value.to_be_bytes());
+        });
         self.executor.signaler.lock().unwrap().signal(value);
     }
 
     fn stopped(&self) -> Signal {
-        self.executor.auditor.stopped();
+        self.executor.auditor.event(b"stopped", |_| {});
         self.executor.signal.clone()
     }
 }
@@ -997,7 +872,7 @@ impl crate::Metrics for Context {
             label,
             spawned: false,
             executor: self.executor.clone(),
-            networking: self.networking.clone(),
+            network: self.network.clone(),
             storage: self.storage.clone(),
         }
     }
@@ -1012,7 +887,10 @@ impl crate::Metrics for Context {
         let help = help.into();
 
         // Register metric
-        self.executor.auditor.register(&name, &help);
+        self.executor.auditor.event(b"register", |hasher| {
+            hasher.update(name.as_bytes());
+            hasher.update(help.as_bytes());
+        });
         let prefixed_name = {
             let prefix = &self.label;
             if prefix.is_empty() {
@@ -1029,7 +907,7 @@ impl crate::Metrics for Context {
     }
 
     fn encode(&self) -> String {
-        self.executor.auditor.encode();
+        self.executor.auditor.event(b"encode", |_| {});
         let mut buffer = String::new();
         encode(&mut buffer, &self.executor.registry.lock().unwrap()).expect("encoding failed");
         buffer
@@ -1122,203 +1000,47 @@ impl GClock for Context {
 
 impl ReasonablyRealtime for Context {}
 
-type Dialable = mpsc::UnboundedSender<(
-    SocketAddr,
-    mocks::Sink,   // Listener -> Dialer
-    mocks::Stream, // Dialer -> Listener
-)>;
+impl crate::Network for Context {
+    type Listener = ListenerOf<Network>;
 
-/// Implementation of [crate::Network] for the `deterministic` runtime.
-///
-/// When a dialer connects to a listener, the listener is given a new ephemeral port
-/// from the range `32768..61000`. To keep things simple, it is not possible to
-/// bind to an ephemeral port. Likewise, if ports are not reused and when exhausted,
-/// the runtime will panic.
-struct Networking {
-    metrics: Arc<Metrics>,
-    auditor: Arc<Auditor>,
-    ephemeral: Mutex<u16>,
-    listeners: Mutex<HashMap<SocketAddr, Dialable>>,
-}
-
-impl Networking {
-    fn new(metrics: Arc<Metrics>, auditor: Arc<Auditor>) -> Self {
-        Self {
-            metrics,
-            auditor,
-            ephemeral: Mutex::new(EPHEMERAL_PORT_RANGE.start),
-            listeners: Mutex::new(HashMap::new()),
-        }
+    async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, Error> {
+        self.network.bind(socket).await
     }
 
-    fn bind(&self, socket: SocketAddr) -> Result<Listener, Error> {
-        self.auditor.bind(socket);
-
-        // If the IP is localhost, ensure the port is not in the ephemeral range
-        // so that it can be used for binding in the dial method
-        if socket.ip() == IpAddr::V4(Ipv4Addr::LOCALHOST)
-            && EPHEMERAL_PORT_RANGE.contains(&socket.port())
-        {
-            return Err(Error::BindFailed);
-        }
-
-        // Ensure the port is not already bound
-        let mut listeners = self.listeners.lock().unwrap();
-        if listeners.contains_key(&socket) {
-            return Err(Error::BindFailed);
-        }
-
-        // Bind the socket
-        let (sender, receiver) = mpsc::unbounded();
-        listeners.insert(socket, sender);
-        Ok(Listener {
-            auditor: self.auditor.clone(),
-            address: socket,
-            listener: receiver,
-            metrics: self.metrics.clone(),
-        })
-    }
-
-    async fn dial(&self, socket: SocketAddr) -> Result<(Sink, Stream), Error> {
-        // Assign dialer a port from the ephemeral range
-        let dialer = {
-            let mut ephemeral = self.ephemeral.lock().unwrap();
-            let dialer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), *ephemeral);
-            *ephemeral = ephemeral
-                .checked_add(1)
-                .expect("ephemeral port range exhausted");
-            dialer
-        };
-        self.auditor.dial(dialer, socket);
-
-        // Get listener
-        let mut sender = {
-            let listeners = self.listeners.lock().unwrap();
-            let sender = listeners.get(&socket).ok_or(Error::ConnectionFailed)?;
-            sender.clone()
-        };
-
-        // Construct connection
-        let (dialer_sender, dialer_receiver) = mocks::Channel::init();
-        let (listener_sender, listener_receiver) = mocks::Channel::init();
-        sender
-            .send((dialer, dialer_sender, listener_receiver))
-            .await
-            .map_err(|_| Error::ConnectionFailed)?;
-        Ok((
-            Sink {
-                metrics: self.metrics.clone(),
-                auditor: self.auditor.clone(),
-                me: dialer,
-                peer: socket,
-                sender: listener_sender,
-            },
-            Stream {
-                auditor: self.auditor.clone(),
-                me: dialer,
-                peer: socket,
-                receiver: dialer_receiver,
-            },
-        ))
-    }
-}
-
-impl crate::Network<Listener, Sink, Stream> for Context {
-    async fn bind(&self, socket: SocketAddr) -> Result<Listener, Error> {
-        self.networking.bind(socket)
-    }
-
-    async fn dial(&self, socket: SocketAddr) -> Result<(Sink, Stream), Error> {
-        self.networking.dial(socket).await
-    }
-}
-
-/// Implementation of [crate::Listener] for the `deterministic` runtime.
-pub struct Listener {
-    metrics: Arc<Metrics>,
-    auditor: Arc<Auditor>,
-    address: SocketAddr,
-    listener: mpsc::UnboundedReceiver<(SocketAddr, mocks::Sink, mocks::Stream)>,
-}
-
-impl crate::Listener<Sink, Stream> for Listener {
-    async fn accept(&mut self) -> Result<(SocketAddr, Sink, Stream), Error> {
-        let (socket, sender, receiver) = self.listener.next().await.ok_or(Error::ReadFailed)?;
-        self.auditor.accept(self.address, socket);
-        Ok((
-            socket,
-            Sink {
-                metrics: self.metrics.clone(),
-                auditor: self.auditor.clone(),
-                me: self.address,
-                peer: socket,
-                sender,
-            },
-            Stream {
-                auditor: self.auditor.clone(),
-                me: self.address,
-                peer: socket,
-                receiver,
-            },
-        ))
-    }
-}
-
-/// Implementation of [crate::Sink] for the `deterministic` runtime.
-pub struct Sink {
-    metrics: Arc<Metrics>,
-    auditor: Arc<Auditor>,
-    me: SocketAddr,
-    peer: SocketAddr,
-    sender: mocks::Sink,
-}
-
-impl crate::Sink for Sink {
-    async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
-        self.auditor.send(self.me, self.peer, msg);
-        self.sender.send(msg).await.map_err(|_| Error::SendFailed)?;
-        self.metrics.network_bandwidth.inc_by(msg.len() as u64);
-        Ok(())
-    }
-}
-
-/// Implementation of [crate::Stream] for the `deterministic` runtime.
-pub struct Stream {
-    auditor: Arc<Auditor>,
-    me: SocketAddr,
-    peer: SocketAddr,
-    receiver: mocks::Stream,
-}
-
-impl crate::Stream for Stream {
-    async fn recv(&mut self, buf: &mut [u8]) -> Result<(), Error> {
-        self.receiver
-            .recv(buf)
-            .await
-            .map_err(|_| Error::RecvFailed)?;
-        self.auditor.recv(self.me, self.peer, buf);
-        Ok(())
+    async fn dial(
+        &self,
+        socket: SocketAddr,
+    ) -> Result<(crate::SinkOf<Self>, crate::StreamOf<Self>), Error> {
+        self.network.dial(socket).await
     }
 }
 
 impl RngCore for Context {
     fn next_u32(&mut self) -> u32 {
-        self.executor.auditor.rand("next_u32".to_string());
+        self.executor.auditor.event(b"rand", |hasher| {
+            hasher.update(b"next_u32");
+        });
         self.executor.rng.lock().unwrap().next_u32()
     }
 
     fn next_u64(&mut self) -> u64 {
-        self.executor.auditor.rand("next_u64".to_string());
+        self.executor.auditor.event(b"rand", |hasher| {
+            hasher.update(b"next_u64");
+        });
         self.executor.rng.lock().unwrap().next_u64()
     }
 
     fn fill_bytes(&mut self, dest: &mut [u8]) {
-        self.executor.auditor.rand("fill_bytes".to_string());
+        self.executor.auditor.event(b"rand", |hasher| {
+            hasher.update(b"fill_bytes");
+        });
         self.executor.rng.lock().unwrap().fill_bytes(dest)
     }
 
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        self.executor.auditor.rand("try_fill_bytes".to_string());
+        self.executor.auditor.event(b"rand", |hasher| {
+            hasher.update(b"try_fill_bytes");
+        });
         self.executor.rng.lock().unwrap().try_fill_bytes(dest)
     }
 }

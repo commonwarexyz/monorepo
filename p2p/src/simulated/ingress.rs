@@ -26,6 +26,12 @@ pub enum Message<P: Array> {
         receiver: P,
         result: oneshot::Sender<Result<(), Error>>,
     },
+    Block {
+        /// The public key of the peer sending the block request.
+        from: P,
+        /// The public key of the peer to block.
+        to: P,
+    },
 }
 
 /// Describes a connection between two peers.
@@ -54,8 +60,17 @@ pub struct Oracle<P: Array> {
 }
 
 impl<P: Array> Oracle<P> {
+    /// Create a new instance of the oracle.
     pub(crate) fn new(sender: mpsc::UnboundedSender<Message<P>>) -> Self {
         Self { sender }
+    }
+
+    /// Spawn an individual control interface for a peer in the simulated network.
+    pub fn control(&self, me: P) -> Control<P> {
+        Control {
+            me,
+            sender: self.sender.clone(),
+        }
     }
 
     /// Register a new peer with the network that can interact over a given channel.
@@ -134,5 +149,29 @@ impl<P: Array> Oracle<P> {
             .await
             .map_err(|_| Error::NetworkClosed)?;
         r.await.map_err(|_| Error::NetworkClosed)?
+    }
+}
+
+/// Individual control interface for a peer in the simulated network.
+#[derive(Clone)]
+pub struct Control<P: Array> {
+    /// The public key of the peer this control interface is for.
+    me: P,
+
+    /// Sender for messages to the oracle.
+    sender: mpsc::UnboundedSender<Message<P>>,
+}
+
+impl<P: Array> crate::Blocker for Control<P> {
+    type PublicKey = P;
+
+    async fn block(&mut self, public_key: P) {
+        let _ = self
+            .sender
+            .send(Message::Block {
+                from: self.me.clone(),
+                to: public_key,
+            })
+            .await;
     }
 }

@@ -9,14 +9,11 @@ use super::{
 use crate::Channel;
 use commonware_cryptography::Scheme;
 use commonware_macros::select;
-use commonware_runtime::{
-    Clock, Handle, Listener, Metrics, Network as RNetwork, Sink, Spawner, Stream,
-};
+use commonware_runtime::{Clock, Handle, Metrics, Network as RNetwork, Spawner};
 use commonware_stream::public_key;
 use commonware_utils::union;
 use governor::{clock::ReasonablyRealtime, Quota};
 use rand::{CryptoRng, Rng};
-use std::marker::PhantomData;
 use tracing::{debug, info, warn};
 
 /// Unique suffix for all messages signed by the tracker.
@@ -27,10 +24,7 @@ const STREAM_SUFFIX: &[u8] = b"_STREAM";
 
 /// Implementation of an `authenticated` network.
 pub struct Network<
-    Si: Sink,
-    St: Stream,
-    L: Listener<Si, St>,
-    E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork<L, Si, St> + Metrics,
+    E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics,
     C: Scheme,
 > {
     context: E,
@@ -41,19 +35,10 @@ pub struct Network<
     tracker_mailbox: tracker::Mailbox<E, C>,
     router: router::Actor<E, C::PublicKey>,
     router_mailbox: router::Mailbox<C::PublicKey>,
-
-    _phantom_si: PhantomData<Si>,
-    _phantom_st: PhantomData<St>,
-    _phantom_l: PhantomData<L>,
 }
 
-impl<
-        Si: Sink,
-        St: Stream,
-        L: Listener<Si, St>,
-        E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork<L, Si, St> + Metrics,
-        C: Scheme,
-    > Network<Si, St, L, E, C>
+impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics, C: Scheme>
+    Network<E, C>
 {
     /// Create a new instance of an `authenticated` network.
     ///
@@ -100,10 +85,6 @@ impl<
                 tracker_mailbox,
                 router,
                 router_mailbox,
-
-                _phantom_si: PhantomData,
-                _phantom_st: PhantomData,
-                _phantom_l: PhantomData,
             },
             oracle,
         )

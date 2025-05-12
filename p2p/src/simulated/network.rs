@@ -8,10 +8,7 @@ use crate::{Channel, Message, Recipients};
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, FixedSize};
 use commonware_macros::select;
-use commonware_runtime::{
-    deterministic::{Listener, Sink, Stream},
-    Clock, Handle, Listener as _, Metrics, Network as RNetwork, Spawner,
-};
+use commonware_runtime::{Clock, Handle, Listener as _, Metrics, Network as RNetwork, Spawner};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::Array;
 use futures::{
@@ -22,7 +19,7 @@ use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
 };
@@ -38,8 +35,7 @@ pub struct Config {
 }
 
 /// Implementation of a simulated network.
-pub struct Network<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock + Metrics, P: Array>
-{
+pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: Array> {
     context: E,
 
     // Maximum size of a message that can be sent over the network
@@ -64,14 +60,15 @@ pub struct Network<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock +
     // A map from a public key to a peer
     peers: BTreeMap<P, Peer<P>>,
 
+    // A map of peers blocking each other
+    blocks: HashSet<(P, P)>,
+
     // Metrics for received and sent messages
     received_messages: Family<metrics::Message, Counter>,
     sent_messages: Family<metrics::Message, Counter>,
 }
 
-impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock + Metrics, P: Array>
-    Network<E, P>
-{
+impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: Array> Network<E, P> {
     /// Create a new simulated network with a given runtime and configuration.
     ///
     /// Returns a tuple containing the network instance and the oracle that can
@@ -103,10 +100,11 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock + Metrics, P: A
                 receiver,
                 links: HashMap::new(),
                 peers: BTreeMap::new(),
+                blocks: HashSet::new(),
                 received_messages,
                 sent_messages,
             },
-            Oracle::new(oracle_sender),
+            Oracle::new(oracle_sender.clone()),
         )
     }
 
@@ -231,6 +229,9 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock + Metrics, P: A
                 }
                 send_result(result, Ok(()))
             }
+            ingress::Message::Block { from, to } => {
+                self.blocks.insert((from, to));
+            }
         }
     }
 
@@ -257,12 +258,16 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock + Metrics, P: A
                 continue;
             }
 
+            // Determine if the sender or recipient has blocked the other
+            let o_r = (origin.clone(), recipient.clone());
+            let r_o = (recipient.clone(), origin.clone());
+            if self.blocks.contains(&o_r) || self.blocks.contains(&r_o) {
+                trace!(?origin, ?recipient, reason = "blocked", "dropping message");
+                continue;
+            }
+
             // Determine if there is a link between the sender and recipient
-            let mut link = match self
-                .links
-                .get(&(origin.clone(), recipient.clone()))
-                .cloned()
-            {
+            let mut link = match self.links.get(&o_r).cloned() {
                 Some(link) => link,
                 None => {
                     trace!(?origin, ?recipient, reason = "no link", "dropping message",);
@@ -492,7 +497,7 @@ impl<P: Array> Peer<P> {
     ///
     /// The peer will listen for incoming connections on the given `socket` address.
     /// `max_size` is the maximum size of a message that can be sent to the peer.
-    fn new<E: Spawner + RNetwork<Listener, Sink, Stream> + Metrics>(
+    fn new<E: Spawner + RNetwork + Metrics>(
         context: &mut E,
         public_key: P,
         socket: SocketAddr,
@@ -640,7 +645,7 @@ struct Link {
 }
 
 impl Link {
-    fn new<E: Spawner + RNetwork<Listener, Sink, Stream> + Metrics, P: Array>(
+    fn new<E: Spawner + RNetwork + Metrics, P: Array>(
         context: &mut E,
         dialer: P,
         socket: SocketAddr,

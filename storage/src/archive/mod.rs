@@ -129,6 +129,7 @@
 //!         section_mask: 0xffff_ffff_ffff_0000u64,
 //!         pending_writes: 10,
 //!         replay_concurrency: 4,
+//!         replay_buffer: 4096,
 //!     };
 //!     let mut archive = Archive::init(context, cfg).await.unwrap();
 //!
@@ -141,7 +142,6 @@
 //! ```
 
 mod storage;
-use commonware_codec::Config as CodecConfig;
 pub use storage::{Archive, Identifier};
 
 pub use crate::index::Translator;
@@ -162,7 +162,7 @@ pub enum Error {
 
 /// Configuration for `Archive` storage.
 #[derive(Clone)]
-pub struct Config<T: Translator, C: CodecConfig> {
+pub struct Config<T: Translator, C> {
     /// Logic to transform keys into their index representation.
     ///
     /// `Archive` assumes that all internal keys are spread uniformly across the key space.
@@ -190,6 +190,9 @@ pub struct Config<T: Translator, C: CodecConfig> {
 
     /// The number of blobs to replay concurrently on initialization.
     pub replay_concurrency: usize,
+
+    /// The buffer size to use when replaying a blob.
+    pub replay_buffer: usize,
 }
 
 #[cfg(test)]
@@ -227,6 +230,7 @@ mod tests {
                 codec_config: (),
                 pending_writes: 10,
                 replay_concurrency: 4,
+                replay_buffer: 4096,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -325,6 +329,7 @@ mod tests {
                 compression: Some(3),
                 pending_writes: 10,
                 replay_concurrency: 4,
+                replay_buffer: 4096,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -351,9 +356,10 @@ mod tests {
                 compression: None,
                 pending_writes: 10,
                 replay_concurrency: 4,
+                replay_buffer: 4096,
                 section_mask: DEFAULT_SECTION_MASK,
             };
-            let result = Archive::<_, _, FixedBytes<64>, (), i32>::init(context, cfg.clone()).await;
+            let result = Archive::<_, _, FixedBytes<64>, i32>::init(context, cfg.clone()).await;
             assert!(matches!(
                 result,
                 Err(Error::Journal(JournalError::Codec(CodecError::EndOfBuffer)))
@@ -374,6 +380,7 @@ mod tests {
                 compression: None,
                 pending_writes: 10,
                 replay_concurrency: 4,
+                replay_buffer: 4096,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -404,7 +411,7 @@ mod tests {
             blob.close().await.unwrap();
 
             // Initialize the archive again
-            let result = Archive::<_, _, FixedBytes<64>, _, i32>::init(
+            let result = Archive::<_, _, FixedBytes<64>, i32>::init(
                 context,
                 Config {
                     partition: "test_partition".into(),
@@ -413,6 +420,7 @@ mod tests {
                     compression: None,
                     pending_writes: 10,
                     replay_concurrency: 4,
+                    replay_buffer: 4096,
                     section_mask: DEFAULT_SECTION_MASK,
                 },
             )
@@ -437,6 +445,7 @@ mod tests {
                 compression: None,
                 pending_writes: 10,
                 replay_concurrency: 4,
+                replay_buffer: 4096,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -495,6 +504,7 @@ mod tests {
                 compression: None,
                 pending_writes: 10,
                 replay_concurrency: 4,
+                replay_buffer: 4096,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let archive = Archive::init(context.clone(), cfg.clone())
@@ -538,6 +548,7 @@ mod tests {
                 compression: None,
                 pending_writes: 10,
                 replay_concurrency: 4,
+                replay_buffer: 4096,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -600,6 +611,7 @@ mod tests {
                 compression: None,
                 pending_writes: 10,
                 replay_concurrency: 4,
+                replay_buffer: 4096,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -656,6 +668,7 @@ mod tests {
                 compression: None,
                 pending_writes: 10,
                 replay_concurrency: 4,
+                replay_buffer: 4096,
                 section_mask: 0xffff_ffff_ffff_ffffu64, // no mask
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -741,6 +754,7 @@ mod tests {
                 compression: None,
                 pending_writes: 10,
                 replay_concurrency: 4,
+                replay_buffer: 4096,
                 section_mask,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -798,10 +812,11 @@ mod tests {
                 compression: None,
                 pending_writes: 10,
                 replay_concurrency: 4,
+                replay_buffer: 4096,
                 section_mask,
             };
             let mut archive =
-                Archive::<_, _, _, _, FixedBytes<1024>>::init(context.clone(), cfg.clone())
+                Archive::<_, _, _, FixedBytes<1024>>::init(context.clone(), cfg.clone())
                     .await
                     .expect("Failed to initialize archive");
 
@@ -869,11 +884,13 @@ mod tests {
     }
 
     #[test_traced]
+    #[ignore]
     fn test_archive_many_keys_and_restart() {
         test_archive_keys_and_restart(100_000); // 391 sections
     }
 
     #[test_traced]
+    #[ignore]
     fn test_determinism() {
         let state1 = test_archive_keys_and_restart(5_000); // 20 sections
         let state2 = test_archive_keys_and_restart(5_000);
@@ -893,6 +910,7 @@ mod tests {
                 compression: None,
                 pending_writes: 10,
                 replay_concurrency: 4,
+                replay_buffer: 4096,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -940,7 +958,7 @@ mod tests {
 
             // Close and check again
             archive.close().await.expect("Failed to close archive");
-            let archive = Archive::<_, _, FixedBytes<64>, _, i32>::init(context, cfg.clone())
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 

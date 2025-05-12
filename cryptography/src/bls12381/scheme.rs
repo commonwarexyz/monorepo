@@ -20,17 +20,19 @@
 //! ```
 
 use super::primitives::{
-    group::{self, Element, Scalar},
+    group::{self, Scalar},
     ops,
+    variant::{MinPk, Variant},
 };
-use crate::{Array, Signer, Specification, Verifier};
+use crate::{Array, BatchScheme, Signer, Specification, Verifier};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     DecodeExt, EncodeFixed, Error as CodecError, FixedSize, Read, ReadExt, Write,
 };
-use commonware_utils::hex;
+use commonware_utils::{hex, union_unique};
 use rand::{CryptoRng, Rng};
 use std::{
+    borrow::Cow,
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
     ops::Deref,
@@ -48,7 +50,7 @@ const CURVE_NAME: &str = "bls12381";
 #[derive(Clone)]
 pub struct Bls12381 {
     private: group::Private,
-    public: group::Public,
+    public: <MinPk as Variant>::Public,
 }
 
 impl Specification for Bls12381 {
@@ -63,7 +65,8 @@ impl Verifier for Bls12381 {
         public_key: &PublicKey,
         signature: &Signature,
     ) -> bool {
-        ops::verify_message(&public_key.key, namespace, message, &signature.signature).is_ok()
+        ops::verify_message::<MinPk>(&public_key.key, namespace, message, &signature.signature)
+            .is_ok()
     }
 }
 
@@ -71,14 +74,13 @@ impl Signer for Bls12381 {
     type PrivateKey = PrivateKey;
 
     fn new<R: CryptoRng + Rng>(r: &mut R) -> Self {
-        let (private, public) = ops::keypair(r);
+        let (private, public) = ops::keypair::<_, MinPk>(r);
         Self { private, public }
     }
 
     fn from(private_key: PrivateKey) -> Option<Self> {
         let private = private_key.key.clone();
-        let mut public = group::Public::one();
-        public.mul(&private);
+        let public = ops::compute_public::<MinPk>(&private);
         Some(Self { private, public })
     }
 
@@ -91,7 +93,7 @@ impl Signer for Bls12381 {
     }
 
     fn sign(&mut self, namespace: Option<&[u8]>, message: &[u8]) -> Signature {
-        let signature = ops::sign_message(&self.private, namespace, message);
+        let signature = ops::sign_message::<MinPk>(&self.private, namespace, message);
         Signature::from(signature)
     }
 }
@@ -110,6 +112,8 @@ impl Write for PrivateKey {
 }
 
 impl Read for PrivateKey {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
         let key = group::Private::decode(raw.as_ref())
@@ -177,12 +181,12 @@ impl Display for PrivateKey {
 /// BLS12-381 public key.
 #[derive(Clone, Eq, PartialEq)]
 pub struct PublicKey {
-    raw: [u8; group::PUBLIC_KEY_LENGTH],
-    key: group::Public,
+    raw: [u8; <MinPk as Variant>::Public::SIZE],
+    key: <MinPk as Variant>::Public,
 }
 
-impl AsRef<group::Public> for PublicKey {
-    fn as_ref(&self) -> &group::Public {
+impl AsRef<<MinPk as Variant>::Public> for PublicKey {
+    fn as_ref(&self) -> &<MinPk as Variant>::Public {
         &self.key
     }
 }
@@ -194,16 +198,18 @@ impl Write for PublicKey {
 }
 
 impl Read for PublicKey {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let key = group::Public::decode(raw.as_ref())
+        let key = <MinPk as Variant>::Public::decode(raw.as_ref())
             .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
         Ok(Self { raw, key })
     }
 }
 
 impl FixedSize for PublicKey {
-    const SIZE: usize = group::PUBLIC_KEY_LENGTH;
+    const SIZE: usize = <MinPk as Variant>::Public::SIZE;
 }
 
 impl Array for PublicKey {}
@@ -239,8 +245,8 @@ impl Deref for PublicKey {
     }
 }
 
-impl From<group::Public> for PublicKey {
-    fn from(key: group::Public) -> Self {
+impl From<<MinPk as Variant>::Public> for PublicKey {
+    fn from(key: <MinPk as Variant>::Public) -> Self {
         let raw = key.encode_fixed();
         Self { raw, key }
     }
@@ -261,12 +267,12 @@ impl Display for PublicKey {
 /// BLS12-381 signature.
 #[derive(Clone, Eq, PartialEq)]
 pub struct Signature {
-    raw: [u8; group::SIGNATURE_LENGTH],
-    signature: group::Signature,
+    raw: [u8; <MinPk as Variant>::Signature::SIZE],
+    signature: <MinPk as Variant>::Signature,
 }
 
-impl AsRef<group::Signature> for Signature {
-    fn as_ref(&self) -> &group::Signature {
+impl AsRef<<MinPk as Variant>::Signature> for Signature {
+    fn as_ref(&self) -> &<MinPk as Variant>::Signature {
         &self.signature
     }
 }
@@ -278,16 +284,18 @@ impl Write for Signature {
 }
 
 impl Read for Signature {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let signature = group::Signature::decode(raw.as_ref())
+        let signature = <MinPk as Variant>::Signature::decode(raw.as_ref())
             .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
         Ok(Self { raw, signature })
     }
 }
 
 impl FixedSize for Signature {
-    const SIZE: usize = group::SIGNATURE_LENGTH;
+    const SIZE: usize = <MinPk as Variant>::Signature::SIZE;
 }
 
 impl Array for Signature {}
@@ -323,8 +331,8 @@ impl Deref for Signature {
     }
 }
 
-impl From<group::Signature> for Signature {
-    fn from(signature: group::Signature) -> Self {
+impl From<<MinPk as Variant>::Signature> for Signature {
+    fn from(signature: <MinPk as Variant>::Signature) -> Self {
         let raw = signature.encode_fixed();
         Self { raw, signature }
     }
@@ -339,6 +347,50 @@ impl Debug for Signature {
 impl Display for Signature {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", hex(&self.raw))
+    }
+}
+
+/// BLS12-381 batch verifier.
+pub struct Bls12381Batch {
+    publics: Vec<<MinPk as Variant>::Public>,
+    hms: Vec<<MinPk as Variant>::Signature>,
+    signatures: Vec<<MinPk as Variant>::Signature>,
+}
+
+impl Specification for Bls12381Batch {
+    type PublicKey = PublicKey;
+    type Signature = Signature;
+}
+
+impl BatchScheme for Bls12381Batch {
+    fn new() -> Self {
+        Self {
+            publics: Vec::new(),
+            hms: Vec::new(),
+            signatures: Vec::new(),
+        }
+    }
+
+    fn add(
+        &mut self,
+        namespace: Option<&[u8]>,
+        message: &[u8],
+        public_key: &Self::PublicKey,
+        signature: &Self::Signature,
+    ) -> bool {
+        self.publics.push(public_key.key);
+        let payload = match namespace {
+            Some(namespace) => Cow::Owned(union_unique(namespace, message)),
+            None => Cow::Borrowed(message),
+        };
+        let hm = ops::hash_message::<MinPk>(MinPk::MESSAGE, &payload);
+        self.hms.push(hm);
+        self.signatures.push(signature.signature);
+        true
+    }
+
+    fn verify<R: rand::RngCore + CryptoRng>(self, rng: &mut R) -> bool {
+        MinPk::batch_verify(rng, &self.publics, &self.hms, &self.signatures).is_ok()
     }
 }
 
@@ -363,7 +415,7 @@ mod tests {
     fn test_codec_public_key() {
         let original =
             parse_public_key("0xa491d1b0ecd9bb917989f0e74f0dea0422eac4a873e5e2644f368dffb9a6e20fd6e10c1b77654d067c0618f6e5a7f79a")
-                .unwrap();
+            .unwrap();
         let encoded = original.encode();
         assert_eq!(encoded.len(), PublicKey::SIZE);
         let decoded = PublicKey::decode(encoded).unwrap();
@@ -374,7 +426,7 @@ mod tests {
     fn test_codec_signature() {
         let original =
             parse_signature("0x882730e5d03f6b42c3abc26d3372625034e1d871b65a8a6b900a56dae22da98abbe1b68f85e49fe7652a55ec3d0591c20767677e33e5cbb1207315c41a9ac03be39c2e7668edc043d6cb1d9fd93033caa8a1c5b0e84bedaeb6c64972503a43eb")
-                .unwrap();
+            .unwrap();
         let encoded = original.encode();
         assert_eq!(encoded.len(), Signature::SIZE);
         let decoded = Signature::decode(encoded).unwrap();
@@ -444,6 +496,7 @@ mod tests {
             vector_verify_29(),
         ];
 
+        let mut batch = Bls12381Batch::new();
         for (index, test) in cases.into_iter().enumerate() {
             let (public_key, message, signature, expected) = test;
             let expected = if !expected {
@@ -451,10 +504,14 @@ mod tests {
                     || signature.is_err()
                     || !Bls12381::verify(None, &message, &public_key.unwrap(), &signature.unwrap())
             } else {
-                Bls12381::verify(None, &message, &public_key.unwrap(), &signature.unwrap())
+                let public_key = public_key.unwrap();
+                let signature = signature.unwrap();
+                batch.add(None, &message, &public_key, &signature);
+                Bls12381::verify(None, &message, &public_key, &signature)
             };
             assert!(expected, "vector_verify_{}", index + 1);
         }
+        assert!(batch.verify(&mut rand::thread_rng()));
     }
 
     /// Parse `sign` vector from hex encoded data.

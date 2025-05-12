@@ -6,18 +6,19 @@ use crate::{
     Automaton, Relay, Reporter, ThresholdSupervisor,
 };
 pub use actor::Actor;
-use commonware_cryptography::Scheme;
 use commonware_cryptography::{bls12381::primitives::group, Digest};
+use commonware_cryptography::{bls12381::primitives::variant::Variant, Scheme};
 pub use ingress::{Mailbox, Message};
 use std::time::Duration;
 
 pub struct Config<
     C: Scheme,
+    V: Variant,
     D: Digest,
     A: Automaton<Context = Context<D>>,
     R: Relay<Digest = D>,
-    F: Reporter<Activity = Activity<D>>,
-    S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
+    F: Reporter<Activity = Activity<V, D>>,
+    S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
 > {
     pub crypto: C,
     pub automaton: A,
@@ -35,6 +36,7 @@ pub struct Config<
     pub activity_timeout: View,
     pub skip_timeout: View,
     pub replay_concurrency: usize,
+    pub replay_buffer: usize,
 }
 
 #[cfg(test)]
@@ -47,7 +49,13 @@ mod tests {
     };
     use commonware_codec::Encode;
     use commonware_cryptography::{
-        bls12381::{dkg::ops, primitives::ops::threshold_signature_recover},
+        bls12381::{
+            dkg::ops,
+            primitives::{
+                ops::threshold_signature_recover,
+                variant::{MinPk, MinSig},
+            },
+        },
         hash, Ed25519, Sha256, Signer,
     };
     use commonware_macros::test_traced;
@@ -61,8 +69,7 @@ mod tests {
     use std::time::Duration;
     use std::{collections::BTreeMap, sync::Arc};
 
-    #[test_traced]
-    fn test_stale_backfill() {
+    fn stale_backfill<V: Variant>() {
         let n = 5;
         let threshold = quorum(n);
         let namespace = b"consensus".to_vec();
@@ -90,14 +97,14 @@ mod tests {
             schemes.sort_by_key(|s| s.public_key());
 
             // Derive threshold shares
-            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
+            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Initialize voter actor
             let scheme = schemes[0].clone();
             let validator = scheme.public_key();
             let mut participants = BTreeMap::new();
             participants.insert(0, (public.clone(), validators.clone(), shares[0].clone()));
-            let supervisor_config = mocks::supervisor::Config {
+            let supervisor_config = mocks::supervisor::Config::<_, V> {
                 namespace: namespace.clone(),
                 participants,
             };
@@ -131,6 +138,7 @@ mod tests {
                 activity_timeout: 10,
                 skip_timeout: 10,
                 replay_concurrency: 1,
+                replay_buffer: 1024 * 1024,
             };
             let (actor, mut mailbox) = Actor::new(context.clone(), cfg);
 
@@ -185,8 +193,8 @@ mod tests {
             let partials: Vec<_> = shares
                 .iter()
                 .map(|share| {
-                    let notarize = Notarize::sign(&namespace, share, proposal.clone());
-                    let finalize = Finalize::sign(&namespace, share, proposal.clone());
+                    let notarize = Notarize::<V, _>::sign(&namespace, share, proposal.clone());
+                    let finalize = Finalize::<V, _>::sign(&namespace, share, proposal.clone());
                     (finalize.proposal_signature, notarize.seed_signature)
                 })
                 .collect();
@@ -194,10 +202,12 @@ mod tests {
                 .iter()
                 .map(|(proposal_signature, _)| proposal_signature);
             let proposal_signature =
-                threshold_signature_recover(threshold, proposal_partials).unwrap();
+                threshold_signature_recover::<V, _>(threshold, proposal_partials).unwrap();
             let seed_partials = partials.iter().map(|(_, seed_signature)| seed_signature);
-            let seed_signature = threshold_signature_recover(threshold, seed_partials).unwrap();
-            let finalization = Finalization::new(proposal, proposal_signature, seed_signature);
+            let seed_signature =
+                threshold_signature_recover::<V, _>(threshold, seed_partials).unwrap();
+            let finalization =
+                Finalization::<V, _>::new(proposal, proposal_signature, seed_signature);
             let msg = Voter::Finalization(finalization).encode().into();
             peer_sender
                 .send(Recipients::All, msg, true)
@@ -222,8 +232,8 @@ mod tests {
             let partials: Vec<_> = shares
                 .iter()
                 .map(|share| {
-                    let notarize = Notarize::sign(&namespace, share, proposal.clone());
-                    let finalize = Finalize::sign(&namespace, share, proposal.clone());
+                    let notarize = Notarize::<V, _>::sign(&namespace, share, proposal.clone());
+                    let finalize = Finalize::<V, _>::sign(&namespace, share, proposal.clone());
                     (finalize.proposal_signature, notarize.seed_signature)
                 })
                 .collect();
@@ -231,9 +241,10 @@ mod tests {
                 .iter()
                 .map(|(proposal_signature, _)| proposal_signature);
             let proposal_signature =
-                threshold_signature_recover(threshold, proposal_partials).unwrap();
+                threshold_signature_recover::<V, _>(threshold, proposal_partials).unwrap();
             let seed_partials = partials.iter().map(|(_, seed_signature)| seed_signature);
-            let seed_signature = threshold_signature_recover(threshold, seed_partials).unwrap();
+            let seed_signature =
+                threshold_signature_recover::<V, _>(threshold, seed_partials).unwrap();
             let notarization = Notarization::new(proposal, proposal_signature, seed_signature);
             mailbox.notarization(notarization).await;
 
@@ -243,8 +254,8 @@ mod tests {
             let partials: Vec<_> = shares
                 .iter()
                 .map(|share| {
-                    let notarize = Notarize::sign(&namespace, share, proposal.clone());
-                    let finalize = Finalize::sign(&namespace, share, proposal.clone());
+                    let notarize = Notarize::<V, _>::sign(&namespace, share, proposal.clone());
+                    let finalize = Finalize::<V, _>::sign(&namespace, share, proposal.clone());
                     (finalize.proposal_signature, notarize.seed_signature)
                 })
                 .collect();
@@ -252,10 +263,12 @@ mod tests {
                 .iter()
                 .map(|(proposal_signature, _)| proposal_signature);
             let proposal_signature =
-                threshold_signature_recover(threshold, proposal_partials).unwrap();
+                threshold_signature_recover::<V, _>(threshold, proposal_partials).unwrap();
             let seed_partials = partials.iter().map(|(_, seed_signature)| seed_signature);
-            let seed_signature = threshold_signature_recover(threshold, seed_partials).unwrap();
-            let finalization = Finalization::new(proposal, proposal_signature, seed_signature);
+            let seed_signature =
+                threshold_signature_recover::<V, _>(threshold, seed_partials).unwrap();
+            let finalization =
+                Finalization::<V, _>::new(proposal, proposal_signature, seed_signature);
             let msg = Voter::Finalization(finalization).encode().into();
             peer_sender
                 .send(Recipients::All, msg, true)
@@ -274,5 +287,11 @@ mod tests {
                 _ => panic!("unexpected progress"),
             }
         });
+    }
+
+    #[test_traced]
+    fn test_stale_backfill() {
+        stale_backfill::<MinPk>();
+        stale_backfill::<MinSig>();
     }
 }

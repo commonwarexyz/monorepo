@@ -108,7 +108,7 @@ impl<
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         let metrics = metrics::Metrics::init(context.clone());
         let fetcher = Fetcher::new(
-            context.clone(),
+            context.with_label("fetcher"),
             cfg.requester_config,
             cfg.fetch_retry_timeout,
             cfg.priority_requests,
@@ -295,7 +295,7 @@ impl<
     /// Handles the case where the application responds to a request from an external peer.
     async fn handle_serve(
         &mut self,
-        sender: &mut WrappedSender<NetS, (), wire::Message<Key>>,
+        sender: &mut WrappedSender<NetS, wire::Message<Key>>,
         peer: P,
         id: u64,
         response: Result<Bytes, oneshot::Canceled>,
@@ -342,7 +342,7 @@ impl<
     /// Handle a network response from a peer.
     async fn handle_network_response(
         &mut self,
-        sender: &mut WrappedSender<NetS, (), wire::Message<Key>>,
+        sender: &mut WrappedSender<NetS, wire::Message<Key>>,
         peer: P,
         id: u64,
         response: Bytes,
@@ -372,7 +372,7 @@ impl<
     /// Handle a network response from a peer that did not have the data.
     async fn handle_network_error_response(
         &mut self,
-        sender: &mut WrappedSender<NetS, (), wire::Message<Key>>,
+        sender: &mut WrappedSender<NetS, wire::Message<Key>>,
         peer: P,
         id: u64,
     ) {
