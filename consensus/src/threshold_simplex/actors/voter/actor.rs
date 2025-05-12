@@ -2080,6 +2080,8 @@ impl<
                         return;
                     }
 
+                    // TODO: verify current view first
+
                     // Verify most recent (in order of most recent view to oldest)
                     let ((view, namespace, message), signatures) = work.pop_last().unwrap();
                     let identity = supervisor.identity(view).unwrap();
