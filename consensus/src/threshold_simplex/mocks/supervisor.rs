@@ -65,7 +65,7 @@ impl<P: Array, V: Variant, D: Digest> Supervisor<P, V, D> {
             validators.sort();
             let view_public = public::<V>(&identity);
             if public_key.is_none() {
-                public_key = Some(view_public.clone());
+                public_key = Some(*view_public);
             } else if public_key.as_ref().unwrap() != view_public {
                 panic!("public keys do not match");
             }

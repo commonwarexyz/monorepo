@@ -26,7 +26,7 @@ use commonware_cryptography::{
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
-    Blocker, Receiver, Recipients, Sender,
+    Receiver, Recipients, Sender,
 };
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
@@ -573,7 +573,6 @@ impl<
 pub struct Actor<
     E: Clock + Rng + Spawner + Storage + Metrics,
     C: Scheme,
-    B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     D: Digest,
     A: Automaton<Digest = D, Context = Context<D>>,
@@ -591,7 +590,6 @@ pub struct Actor<
 > {
     context: E,
     crypto: C,
-    blocker: B,
     automaton: A,
     relay: R,
     reporter: F,
@@ -631,7 +629,6 @@ pub struct Actor<
 impl<
         E: Clock + Rng + Spawner + Storage + Metrics,
         C: Scheme,
-        B: Blocker<PublicKey = C::PublicKey>,
         V: Variant,
         D: Digest,
         A: Automaton<Digest = D, Context = Context<D>>,
@@ -645,9 +642,9 @@ impl<
             PublicKey = C::PublicKey,
             Public = V::Public,
         >,
-    > Actor<E, C, B, V, D, A, R, F, S>
+    > Actor<E, C, V, D, A, R, F, S>
 {
-    pub fn new(context: E, cfg: Config<C, B, V, D, A, R, F, S>) -> (Self, Mailbox<V, D>) {
+    pub fn new(context: E, cfg: Config<C, V, D, A, R, F, S>) -> (Self, Mailbox<V, D>) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -692,7 +689,6 @@ impl<
             Self {
                 context,
                 crypto: cfg.crypto,
-                blocker: cfg.blocker,
                 automaton: cfg.automaton,
                 relay: cfg.relay,
                 reporter: cfg.reporter,
@@ -1318,7 +1314,7 @@ impl<
         if public_key_index != notarize.signer() {
             return false;
         }
-        self.reserve_notarize(public_key_index, &notarize)
+        self.reserve_notarize(public_key_index, notarize)
     }
 
     fn reserve_notarize(&mut self, public_key_index: u32, notarize: &Notarize<V, D>) -> bool {
@@ -1489,7 +1485,7 @@ impl<
             return false;
         }
 
-        self.reserve_finalize(public_key_index, &finalize)
+        self.reserve_finalize(public_key_index, finalize)
     }
 
     fn reserve_finalize(&mut self, public_key_index: u32, finalize: &Finalize<V, D>) -> bool {
@@ -2041,13 +2037,13 @@ impl<
         let (mut verified_sender, mut verified_receiver) =
             mpsc::channel::<(C::PublicKey, Voter<V, D>)>(1024);
         self.context.with_label("verifier").spawn_blocking({
-            let mut blocker = self.blocker.clone();
             let namespace = self.namespace.clone();
             let supervisor = self.supervisor.clone();
             || {
                 block_on(async move {
                     // Initialize view data structures
                     let mut messages = Vec::new();
+                    #[allow(clippy::type_complexity)]
                     let mut work: BTreeMap<
                         (u64, Vec<u8>, Vec<u8>),
                         HashMap<PartialSignature<V>, usize>,
@@ -2066,7 +2062,7 @@ impl<
                         messages.push((sender, msg, verifiable.len()));
                         for (namespace, message, signature) in verifiable.into_iter() {
                             work.entry((view, namespace, message))
-                                .or_insert_with(HashMap::new)
+                                .or_default()
                                 .insert(signature, msg_idx);
                         }
 
@@ -2080,7 +2076,7 @@ impl<
                                     messages.push((sender, msg, verifiable.len()));
                                     for (namespace, message, signature) in verifiable.into_iter() {
                                         work.entry((view, namespace, message))
-                                            .or_insert_with(HashMap::new)
+                                            .or_default()
                                             .insert(signature, msg_idx);
                                     }
                                 }
@@ -2098,8 +2094,8 @@ impl<
                             let identity = supervisor.identity(*view).unwrap();
                             let result = partial_verify_multiple_public_keys::<V, _>(
                                 identity,
-                                Some(&namespace),
-                                &message,
+                                Some(namespace),
+                                message,
                                 signatures.iter().map(|(signature, _)| signature),
                             );
 
@@ -2107,10 +2103,11 @@ impl<
                             let mut skips = HashSet::new();
                             if let Err(invalid) = result {
                                 for signature in invalid {
-                                    let idx = signatures.get(&signature).unwrap();
+                                    let idx = signatures.get(signature).unwrap();
                                     let (sender, _, _) = &messages[*idx];
-                                    blocker.block(sender.clone()).await;
-                                    warn!(?sender, "blocked sender");
+
+                                    // TODO: block
+                                    warn!(?sender, "blocking sender");
 
                                     // TODO: make more efficient
                                     skips.insert(signature.index);

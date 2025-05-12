@@ -1372,7 +1372,7 @@ mod tests {
         let node = Node::<Ed25519, V, Sha256Digest>::new(chunk.clone(), signature, None);
 
         // Verification should succeed
-        assert!(node.verify(NAMESPACE, &public).is_ok());
+        assert!(node.verify(NAMESPACE, public).is_ok());
 
         // Now create a node with invalid signature
         let tampered_signature = scheme.sign(Some(chunk_namespace.as_ref()), &node.encode());
@@ -1380,7 +1380,7 @@ mod tests {
 
         // Verification should fail
         assert!(matches!(
-            invalid_node.verify(NAMESPACE, &public),
+            invalid_node.verify(NAMESPACE, public),
             Err(Error::InvalidSequencerSignature)
         ));
     }
@@ -1432,7 +1432,7 @@ mod tests {
         let public = poly::public::<V>(&commitment);
 
         // Verification should succeed
-        assert!(node.verify(NAMESPACE, &public).is_ok());
+        assert!(node.verify(NAMESPACE, public).is_ok());
 
         // Now create a parent with invalid threshold signature
         // Generate a different set of BLS keys/shares
@@ -1455,7 +1455,7 @@ mod tests {
 
         // Verification should fail because the parent signature doesn't verify with the correct public key
         assert!(matches!(
-            node.verify(NAMESPACE, &public),
+            node.verify(NAMESPACE, public),
             Err(Error::InvalidThresholdSignature)
         ));
     }
