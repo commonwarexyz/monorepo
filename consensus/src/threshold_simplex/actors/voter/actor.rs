@@ -2089,6 +2089,7 @@ impl<
                         &message,
                         signatures.keys(),
                     );
+                    debug!(items = signatures.len(), "batch verification");
 
                     // If any are signatures are invalid, block
                     let mut skips = HashSet::new();
@@ -2115,8 +2116,10 @@ impl<
                             if *count > 0 {
                                 continue;
                             }
-                            let (sender, message, _) = entry.remove();
 
+                            // Remove entry
+                            debug!(i, "removing message");
+                            let (sender, message, _) = entry.remove();
                             if let Err(err) = verified_sender.send((sender, message)).await {
                                 warn!(?err, "failed to send verified message");
                                 continue;
