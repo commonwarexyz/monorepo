@@ -2045,7 +2045,7 @@ impl<
                 #[allow(clippy::type_complexity)]
                 let mut work: BTreeMap<
                     (u64, Vec<u8>, Vec<u8>),
-                    HashMap<PartialSignature<V>, usize>,
+                    HashSet<(PartialSignature<V>, usize)>,
                 > = BTreeMap::new();
 
                 loop {
@@ -2064,11 +2064,9 @@ impl<
                         println!("added {}: {:?} count={}", msg_idx, msg, verifiable.len());
                         messages.push((sender, msg, verifiable.len()));
                         for (namespace, message, signature) in verifiable.into_iter() {
-                            let previous = work
-                                .entry((view, namespace, message))
+                            work.entry((view, namespace, message))
                                 .or_default()
-                                .insert(signature, msg_idx);
-                            assert!(previous.is_none());
+                                .insert((signature, msg_idx));
                         }
 
                         // Pull as many messages as possible without waiting
@@ -2086,11 +2084,9 @@ impl<
                                     );
                                     messages.push((sender, msg, verifiable.len()));
                                     for (namespace, message, signature) in verifiable.into_iter() {
-                                        let previous = work
-                                            .entry((view, namespace, message))
+                                        work.entry((view, namespace, message))
                                             .or_default()
-                                            .insert(signature, msg_idx);
-                                        assert!(previous.is_none());
+                                            .insert((signature, msg_idx));
                                     }
                                 }
                                 Ok(None) => {
@@ -2116,11 +2112,7 @@ impl<
                             let mut skips = HashSet::new();
                             if let Err(invalid) = result {
                                 for signature in invalid {
-                                    let idx = signatures.get(signature).unwrap();
-                                    let (sender, _, _) = &messages[*idx];
-
                                     // TODO: block
-                                    warn!(?sender, "blocking sender");
 
                                     // TODO: make more efficient
                                     skips.insert(signature.index);
