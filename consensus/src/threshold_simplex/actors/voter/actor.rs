@@ -413,7 +413,7 @@ impl<
 
         // Attempt to construct notarization
         for (proposal, notarizes) in self.notarized_proposals.iter() {
-            if (notarizes.len() as u32) < threshold {
+            if (notarizes.count_ones() as u32) < threshold {
                 continue;
             }
 
@@ -505,7 +505,7 @@ impl<
 
         // Attempt to construct finalization
         for (proposal, finalizes) in self.finalized_proposals.iter() {
-            if (finalizes.len() as u32) < threshold {
+            if (finalizes.count_ones() as u32) < threshold {
                 continue;
             }
 
