@@ -1029,7 +1029,9 @@ impl<
             }
 
             // Check if leader has signed a digest
-            let notarize = round.notarizes[leader_index as usize].as_ref()?;
+            let Status::Verified(ref notarize) = round.notarizes[leader_index as usize] else {
+                return None;
+            };
             let proposal = &notarize.proposal;
 
             // Check parent validity
@@ -1200,7 +1202,7 @@ impl<
                     return;
                 }
             };
-            if round.notarizes[leader_index as usize].is_some()
+            if matches!(round.notarizes[leader_index as usize], Status::Verified(_))
                 || round.nullifies.contains_key(&leader_index)
             {
                 return;
@@ -1297,9 +1299,8 @@ impl<
         round.add_reserved_notarize(public_key_index, notarize)
     }
 
-    async fn handle_notarize(&mut self, notarize: Notarize<V, D>) {
+    async fn handle_notarize(&mut self, public_key_index: u32, notarize: Notarize<V, D>) {
         // Check to see if notarize is for proposal in view
-        let public_key_index = notarize.signer();
         let view = notarize.view();
         let round = self.views.entry(view).or_insert_with(|| {
             Round::new(
@@ -1639,6 +1640,8 @@ impl<
         view: u64,
     ) {
         // Get public key index
+        //
+        // TODO: if not validator, just continue
         let public_key_index = self.supervisor.share(view).unwrap().index;
 
         // Attempt to notarize
@@ -2252,10 +2255,13 @@ impl<
                         continue;
                     }
 
+                    // Get public key index
+                    let public_key_index = self.supervisor.is_participant(view, &sender).unwrap();
+
                     // Process message
                     match msg {
                         Voter::Notarize(notarize) => {
-                            self.handle_notarize(notarize).await;
+                            self.handle_notarize(public_key_index, notarize).await;
                         }
                         Voter::Nullify(nullify) => {
                         }
