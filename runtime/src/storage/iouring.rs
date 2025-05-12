@@ -13,6 +13,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
+/// Configuration for an iouring instance.
+/// See `man io_uring`.
 pub struct IoUringConfig {
     /// Size of the ring.
     pub size: u32,
@@ -33,8 +35,11 @@ impl Default for IoUringConfig {
 }
 
 #[derive(Clone, Debug)]
+/// Configuration for a [Storage].
 pub struct Config {
+    /// Where to store blobs.
     pub storage_directory: PathBuf,
+    /// Configuration for the io_uring instance.
     pub ring_config: IoUringConfig,
 }
 
@@ -51,7 +56,7 @@ fn new_ring(cfg: &IoUringConfig) -> Result<IoUring, std::io::Error> {
 
 /// Background task that polls for completed work and notifies waiters on completion.
 /// The user data field of all operations received on `receiver` will be ignored.
-async fn do_work(
+async fn run(
     cfg: IoUringConfig,
     mut receiver: mpsc::Receiver<(SqueueEntry, oneshot::Sender<i32>)>,
 ) {
@@ -129,7 +134,7 @@ pub struct Storage {
 impl Storage {
     /// Returns a new `Storage` instance.
     /// The `Spawner` is used to spawn the background task that handles IO operations.
-    pub fn start(cfg: &Config) -> Self {
+    pub fn start(cfg: Config) -> Self {
         let (io_sender, receiver) =
             mpsc::channel::<(SqueueEntry, oneshot::Sender<i32>)>(cfg.ring_config.size as usize);
 
@@ -137,8 +142,7 @@ impl Storage {
             storage_directory: cfg.storage_directory.clone(),
             io_sender,
         };
-        let iouring_config = cfg.ring_config.clone();
-        std::thread::spawn(|| block_on(do_work(iouring_config, receiver)));
+        std::thread::spawn(|| block_on(run(cfg.ring_config, receiver)));
         storage
     }
 }
@@ -275,10 +279,13 @@ impl crate::Blob for Blob {
             // Wait for the result
             let bytes_read = receiver.await.map_err(|_| Error::ReadFailed)?;
 
-            // If the return value is non-positive, it indicates an error.
+            // A non-positive return value indicates an error.
+
             let bytes_read: usize = bytes_read.try_into().map_err(|_| Error::ReadFailed)?;
             if bytes_read == 0 {
-                // Got EOF before filling buffer.
+                // A return value of 0 indicates EOF, which shouldn't happen because we
+                // aren't done reading into `buf`.
+                // See `man pread`.
                 return Err(Error::BlobInsufficientLength);
             }
             total_read += bytes_read;
@@ -312,17 +319,15 @@ impl crate::Blob for Blob {
             // Wait for the result
             let return_value = receiver.await.map_err(|_| Error::WriteFailed)?;
 
-            // If the return value is non-positive, it indicates an error.
+            // A negative return value indicates an error.
             let bytes_written: usize = return_value.try_into().map_err(|_| Error::WriteFailed)?;
-            if bytes_written == 0 {
-                return Err(Error::WriteFailed);
-            }
 
             total_written += bytes_written;
         }
         Ok(())
     }
 
+    // TODO: Make this async. See https://github.com/commonwarexyz/monorepo/issues/831
     async fn truncate(&self, len: u64) -> Result<(), Error> {
         self.file.set_len(len).map_err(|e| {
             Error::BlobTruncateFailed(
@@ -390,7 +395,7 @@ mod tests {
         let storage_directory =
             env::temp_dir().join(format!("commonware_iouring_storage_{}", rng.gen::<u64>()));
 
-        let storage = Storage::start(&Config {
+        let storage = Storage::start(Config {
             storage_directory: storage_directory.clone(),
             ring_config: Default::default(),
         });
