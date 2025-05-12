@@ -279,9 +279,8 @@ pub trait Sink: Sync + Send + 'static {
 /// Interface that any runtime must implement to receive
 /// messages over a network connection.
 pub trait Stream: Sync + Send + 'static {
-    /// Receive a message from the stream, storing it in the given buffer.
-    /// Reads exactly the number of bytes that fit in the buffer.
-    fn recv(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<(), Error>> + Send;
+    /// Reads exactly `length` bytes from the stream and returns them.
+    fn recv(&mut self, length: usize) -> impl Future<Output = Result<Bytes, Error>> + Send;
 }
 
 /// Interface to interact with storage.
@@ -1326,8 +1325,7 @@ mod tests {
             async fn read_line<St: Stream>(stream: &mut St) -> Result<String, Error> {
                 let mut line = Vec::new();
                 loop {
-                    let mut byte = [0; 1];
-                    stream.recv(&mut byte).await?;
+                    let byte = stream.recv(1).await?;
                     if byte[0] == b'\n' {
                         if line.last() == Some(&b'\r') {
                             line.pop(); // Remove trailing \r
@@ -1360,9 +1358,8 @@ mod tests {
                 stream: &mut St,
                 content_length: usize,
             ) -> Result<String, Error> {
-                let mut body = vec![0; content_length];
-                stream.recv(&mut body).await?;
-                String::from_utf8(body).map_err(|_| Error::ReadFailed)
+                let body = stream.recv(content_length).await?;
+                String::from_utf8(body.into()).map_err(|_| Error::ReadFailed)
             }
 
             // Simulate a client connecting to the server

@@ -35,13 +35,14 @@ pub struct Stream {
 }
 
 impl crate::Stream for Stream {
-    async fn recv(&mut self, buf: &mut [u8]) -> Result<(), Error> {
+    async fn recv(&mut self, len: usize) -> Result<Bytes, Error> {
+        let mut buf = vec![0; len];
         // Time out if we take too long to read
-        timeout(self.read_timeout, self.stream.read_exact(buf))
+        timeout(self.read_timeout, self.stream.read_exact(&mut buf))
             .await
             .map_err(|_| Error::Timeout)?
             .map_err(|_| Error::RecvFailed)?;
-        Ok(())
+        Ok(Bytes::from(buf))
     }
 }
 

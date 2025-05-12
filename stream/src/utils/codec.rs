@@ -1,5 +1,5 @@
 use crate::Error;
-use bytes::{BufMut as _, Bytes, BytesMut};
+use bytes::{Buf as _, BufMut as _, Bytes, BytesMut};
 use commonware_runtime::{Sink, Stream};
 
 /// Sends data to the sink with a 4-byte length prefix.
@@ -37,11 +37,16 @@ pub async fn recv_frame<T: Stream>(
     max_message_size: usize,
 ) -> Result<Bytes, Error> {
     // Read the first 4 bytes to get the length of the message
-    let mut buf = [0u8; 4];
-    stream.recv(&mut buf).await.map_err(Error::RecvFailed)?;
+    let mut read = stream
+        .recv(size_of::<u32>())
+        .await
+        .map_err(Error::RecvFailed)?;
+
+    let mut len_buf = [0u8; size_of::<u32>()];
+    read.copy_to_slice(&mut len_buf);
 
     // Validate frame size
-    let len = u32::from_be_bytes(buf) as usize;
+    let len = u32::from_be_bytes(len_buf) as usize;
     if len > max_message_size {
         return Err(Error::RecvTooLarge(len));
     }
@@ -50,10 +55,7 @@ pub async fn recv_frame<T: Stream>(
     }
 
     // Read the rest of the message
-    let mut buf = vec![0u8; len];
-    stream.recv(&mut buf).await.map_err(Error::RecvFailed)?;
-
-    Ok(Bytes::from(buf))
+    stream.recv(len).await.map_err(Error::RecvFailed)
 }
 
 #[cfg(test)]
@@ -122,12 +124,10 @@ mod tests {
             assert!(result.is_ok());
 
             // Do the reading manually without using recv_frame
-            let mut b = [0u8; 4];
-            stream.recv(&mut b).await.unwrap();
-            assert_eq!(b, (buf.len() as u32).to_be_bytes());
-            let mut b = [0u8; MAX_MESSAGE_SIZE];
-            stream.recv(&mut b).await.unwrap();
-            assert_eq!(b, buf);
+            let read = stream.recv(size_of::<u32>()).await.unwrap();
+            assert_eq!(read[0..4], (buf.len() as u32).to_be_bytes());
+            let read = stream.recv(MAX_MESSAGE_SIZE).await.unwrap();
+            assert_eq!(*read, buf);
         });
     }
 

@@ -74,29 +74,26 @@ pub struct Stream {
 }
 
 impl StreamTrait for Stream {
-    async fn recv(&mut self, buf: &mut [u8]) -> Result<(), Error> {
+    async fn recv(&mut self, len: usize) -> Result<Bytes, Error> {
         let os_recv = {
             let mut channel = self.channel.lock().unwrap();
 
             // If the message is fully available in the buffer,
             // drain the value into buf and return.
-            if channel.buffer.len() >= buf.len() {
-                let b: Vec<u8> = channel.buffer.drain(0..buf.len()).collect();
-                buf.copy_from_slice(&b);
-                return Ok(());
+            if channel.buffer.len() >= len {
+                let buf = channel.buffer.drain(0..len).collect::<Vec<u8>>();
+                return Ok(Bytes::from(buf));
             }
 
             // Otherwise, populate the waiter.
             assert!(channel.waiter.is_none());
             let (os_send, os_recv) = oneshot::channel();
-            channel.waiter = Some((buf.len(), os_send));
+            channel.waiter = Some((len, os_send));
             os_recv
         };
 
         // Wait for the waiter to be resolved.
-        let data = os_recv.await.map_err(|_| Error::RecvFailed)?;
-        buf.copy_from_slice(&data);
-        Ok(())
+        os_recv.await.map_err(|_| Error::RecvFailed)
     }
 }
 
@@ -113,52 +110,47 @@ mod tests {
         let (mut sink, mut stream) = Channel::init();
 
         let data = "hello world";
-        let mut buf = vec![0; data.len()];
 
         block_on(async {
             sink.send(Bytes::from(data)).await.unwrap();
-            stream.recv(&mut buf).await.unwrap();
+            let got = stream.recv(data.len()).await.unwrap();
+            assert_eq!(got.len(), data.len());
+            assert_eq!(got.as_ref(), data.as_bytes());
         });
-
-        assert_eq!(buf, data.as_bytes());
     }
 
     #[test]
-    fn test_send_recv_partial_multiple() {
+    fn test_recv_partial_multiple() {
         let (mut sink, mut stream) = Channel::init();
 
-        let data1 = "hello";
-        let data2 = "world";
-        let mut buf1 = vec![0; data1.len()];
-        let mut buf2 = vec![0; data2.len()];
+        let data = "hello";
 
         block_on(async {
-            sink.send(Bytes::from(data1)).await.unwrap();
-            sink.send(Bytes::from(data2)).await.unwrap();
-            stream.recv(&mut buf1[0..3]).await.unwrap();
-            stream.recv(&mut buf1[3..]).await.unwrap();
-            stream.recv(&mut buf2).await.unwrap();
+            sink.send(Bytes::from(data)).await.unwrap();
+            let got = stream.recv(3).await.unwrap();
+            assert_eq!(got.len(), 3);
+            assert_eq!(got.as_ref(), b"hel");
+            let got = stream.recv(2).await.unwrap();
+            assert_eq!(got.len(), 2);
+            assert_eq!(got.as_ref(), b"lo");
         });
-
-        assert_eq!(buf1, data1.as_bytes());
-        assert_eq!(buf2, data2.as_bytes());
     }
 
     #[test]
     fn test_send_recv_async() {
         let (mut sink, mut stream) = Channel::init();
         let data = "hello world";
-        let mut buf = vec![0; data.len()];
 
         block_on(async {
-            futures::try_join!(stream.recv(&mut buf), async {
-                sleep(Duration::from_millis(10_000));
-                sink.send(Bytes::from(data)).await
-            },)
-            .unwrap();
-        });
+            let (received, _) =
+                futures::try_join!(async { stream.recv(data.len()).await }, async {
+                    sleep(Duration::from_millis(10_000));
+                    sink.send(Bytes::from(data)).await
+                },)
+                .unwrap();
 
-        assert_eq!(buf, data.as_bytes());
+            assert_eq!(received.as_ref(), data.as_bytes());
+        });
     }
 
     #[test]
@@ -169,8 +161,7 @@ mod tests {
         // If the oneshot sender is dropped before the oneshot receiver is resolved,
         // the recv function should return an error.
         executor.start(|_| async move {
-            let mut buf = vec![0; 5];
-            let (v, _) = join!(stream.recv(&mut buf), async {
+            let (v, _) = join!(stream.recv(5), async {
                 // Take the waiter and drop it.
                 sink.channel.lock().unwrap().waiter.take();
             },);
@@ -186,12 +177,10 @@ mod tests {
         // If the waiter value has a min, but the oneshot receiver is dropped,
         // the send function should return an error when attempting to send the data.
         executor.start(|context| async move {
-            let mut buf = vec![0; 5];
-
             // Create a waiter using a recv call.
             // But then drop the receiver.
             select! {
-                v = stream.recv(&mut buf) => {
+                v = stream.recv(5) => {
                     panic!("unexpected value: {:?}", v);
                 },
                 _ = context.sleep(Duration::from_millis(100)) => {
@@ -213,9 +202,8 @@ mod tests {
 
         // If there is no data to read, test that the recv function just blocks. A timeout should return first.
         executor.start(|context| async move {
-            let mut buf = vec![0; 5];
             select! {
-                v = stream.recv(&mut buf) => {
+                v = stream.recv(5) => {
                     panic!("unexpected value: {:?}", v);
                 },
                 _ = context.sleep(Duration::from_millis(100)) => {
