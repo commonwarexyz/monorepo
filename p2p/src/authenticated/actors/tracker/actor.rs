@@ -9,7 +9,7 @@ use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::{union, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
 use governor::clock::Clock as GClock;
-use rand::Rng;
+use rand::{seq::SliceRandom, Rng};
 use std::time::Duration;
 use tracing::debug;
 
@@ -178,12 +178,20 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
                     };
                 }
                 Message::BitVec { bit_vec, mut peer } => {
-                    let Some(peers) = self.registry.infos(bit_vec) else {
+                    let Some(mut infos) = self.registry.infos(bit_vec) else {
                         peer.kill().await;
                         continue;
                     };
-                    if !peers.is_empty() {
-                        peer.peers(peers).await;
+
+                    // Truncate to a random selection of peers if we have too many infos
+                    if infos.len() > self.peer_gossip_max_count {
+                        infos.shuffle(&mut self.context);
+                        infos.truncate(self.peer_gossip_max_count);
+                    }
+
+                    // Send the info
+                    if !infos.is_empty() {
+                        peer.peers(infos).await;
                     }
                 }
                 Message::Peers { peers, mut peer } => {
