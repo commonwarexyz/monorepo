@@ -339,7 +339,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
     /// Return a digest of the operation.
     pub fn op_digest(hasher: &mut Basic<H>, op: &Operation<K, V>) -> H::Digest {
-        hasher.hash(&op.encode())
+        hasher.digest(&op.encode())
     }
 
     /// Get the value of `key` in the db, or None if it has no value.
@@ -444,7 +444,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         Ok(None)
     }
 
-    /// Return the root hash of the db.
+    /// Return the root of the db.
     pub fn root(&self, hasher: &mut Basic<H>) -> H::Digest {
         self.ops.root(hasher)
     }
@@ -497,13 +497,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     }
 
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
-    /// the log with the provided root hash.
+    /// the log with the provided root.
     pub async fn verify_proof(
         hasher: &mut H,
         proof: &Proof<H>,
         start_loc: u64,
         ops: &[Operation<K, V>],
-        root_hash: &H::Digest,
+        root_digest: &H::Digest,
     ) -> Result<bool, Error> {
         let start_pos = leaf_num_to_pos(start_loc);
         let end_loc = start_loc + ops.len() as u64 - 1;
@@ -516,7 +516,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             .collect::<Vec<_>>();
 
         let r = proof
-            .verify_range_inclusion(&mut hasher, digests, start_pos, end_pos, root_hash)
+            .verify_range_inclusion(&mut hasher, digests, start_pos, end_pos, root_digest)
             .await?;
 
         Ok(r)
@@ -650,7 +650,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
     /// Simulate a failed commit that successfully writes the log to the commit point, but without
     /// fully committing the MMR's cached elements to trigger MMR node recovery on reopening. The
-    /// root hash of the db at the point of a successful commit will be returned in the result.
+    /// root of the db at the point of a successful commit will be returned in the result.
     #[cfg(test)]
     pub async fn simulate_failed_commit_mmr(
         mut self,
@@ -948,10 +948,10 @@ mod test {
             assert_eq!(db.snapshot.keys(), 857);
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
-            let root_hash = db.root(&mut hasher);
+            let root_digest = db.root(&mut hasher);
             db.close().await.unwrap();
             let mut db = open_db(context.clone(), Sha256::new()).await;
-            assert_eq!(root_hash, db.root(&mut hasher));
+            assert_eq!(root_digest, db.root(&mut hasher));
             assert_eq!(db.op_count(), 2336);
             assert_eq!(db.inactivity_floor_loc, 1478);
             assert_eq!(db.snapshot.keys(), 857);
@@ -1114,10 +1114,10 @@ mod test {
             assert!(db.get(&k).await.unwrap().is_none());
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
-            let root_hash = db.root(&mut hasher);
+            let root_digest = db.root(&mut hasher);
             db.close().await.unwrap();
             let db = open_db(context.clone(), Sha256::new()).await;
-            assert_eq!(root_hash, db.root(&mut hasher));
+            assert_eq!(root_digest, db.root(&mut hasher));
             assert!(db.get(&k).await.unwrap().is_none());
         });
     }

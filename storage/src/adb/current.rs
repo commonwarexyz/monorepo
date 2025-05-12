@@ -313,8 +313,8 @@ impl<
 
         Ok(())
     }
-
-    /// Return the root hash of the db.
+    //
+    /// Return the root of the db.
     ///
     /// Current implementation just hashes the roots of the [Any] and [Bitmap] databases together.
     pub async fn root(&self, hasher: &mut H) -> Result<H::Digest, Error> {
@@ -568,8 +568,8 @@ pub mod test {
                 .await
                 .unwrap();
 
-            // We should be able to recover, so the root hash should differ from the previous
-            // commit, and the op count should be greater than before.
+            // We should be able to recover, so the root should differ from the previous commit, and
+            // the op count should be greater than before.
             let db = open_db(context.clone(), partition).await;
             let scenario_2_root = db.root(&mut hasher).await.unwrap();
             assert!(scenario_2_root != uncommitted_root);

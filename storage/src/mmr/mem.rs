@@ -76,7 +76,7 @@ impl<H: CHasher> Mmr<H> {
         }
     }
 
-    /// Return an [Mmr] initialized with the given nodes, oldest retained position, and hashes of
+    /// Return an [Mmr] initialized with the given nodes, oldest retained position, and digests of
     /// pinned nodes.
     pub fn init(nodes: Vec<H::Digest>, pruned_to_pos: u64, pinned_nodes: Vec<H::Digest>) -> Self {
         let mut mmr = Self {
@@ -164,8 +164,8 @@ impl<H: CHasher> Mmr<H> {
     /// Add an element to the MMR and return its position in the MMR.
     pub async fn add(&mut self, hasher: &mut impl Hasher<H>, element: &[u8]) -> Result<u64, Error> {
         let leaf_pos = self.size();
-        let hash = hasher.leaf_hash(leaf_pos, element).await?;
-        self.add_leaf_digest(hasher, hash).await?;
+        let digest = hasher.leaf_digest(leaf_pos, element).await?;
+        self.add_leaf_digest(hasher, digest).await?;
 
         Ok(leaf_pos)
     }
@@ -183,8 +183,8 @@ impl<H: CHasher> Mmr<H> {
         // Compute the new parent nodes if any, and insert them into the MMR.
         for sibling_pos in peaks.into_iter().rev() {
             let new_node_pos = self.size();
-            let sibling_hash = self.get_node_unchecked(sibling_pos);
-            digest = hasher.node_hash(new_node_pos, sibling_hash, &digest);
+            let sibling_digest = self.get_node_unchecked(sibling_pos);
+            digest = hasher.node_digest(new_node_pos, sibling_digest, &digest);
             self.nodes.push_back(digest);
         }
 
@@ -220,8 +220,8 @@ impl<H: CHasher> Mmr<H> {
     ///
     /// # Warning
     ///
-    /// This method will change the root hash and invalidate any previous inclusion proofs, and also
-    /// prevent using this structure as a base mmr for grafting.
+    /// This method will change the root and invalidate any previous inclusion proofs, and
+    /// also prevent using this structure as a base mmr for grafting.
     pub async fn update_leaf(
         &mut self,
         hasher: &mut impl Hasher<H>,
@@ -232,32 +232,32 @@ impl<H: CHasher> Mmr<H> {
             return Err(ElementPruned(pos));
         }
 
-        // Update the leaf node hash itself.
-        let mut hash = hasher.leaf_hash(pos, element).await?;
+        // Update the digest of the leaf node.
+        let mut digest = hasher.leaf_digest(pos, element).await?;
         let mut index = self.pos_to_index(pos);
-        self.nodes[index] = hash;
+        self.nodes[index] = digest;
 
+        // Update digests of all its ancestors.
         for (peak_pos, height) in self.peak_iterator() {
             if peak_pos < pos {
                 continue;
             }
 
-            // We have found the mountain containing the leaf we want to update. Now update the
-            // hashes of all nodes along the path from leaf to its peak.
+            // We have found the mountain containing the path we need to update.
             let path: Vec<_> = PathIterator::new(pos, peak_pos, height).collect();
             for (parent_pos, sibling_pos) in path.into_iter().rev() {
                 if parent_pos == pos {
                     panic!("pos was not for a leaf");
                 }
-                let sibling_hash = self.get_node_unchecked(sibling_pos);
-                hash = if sibling_pos == parent_pos - 1 {
+                let sibling_digest = self.get_node_unchecked(sibling_pos);
+                digest = if sibling_pos == parent_pos - 1 {
                     // The sibling is the right child of the parent.
-                    hasher.node_hash(parent_pos, &hash, sibling_hash)
+                    hasher.node_digest(parent_pos, &digest, sibling_digest)
                 } else {
-                    hasher.node_hash(parent_pos, sibling_hash, &hash)
+                    hasher.node_digest(parent_pos, sibling_digest, &digest)
                 };
                 index = self.pos_to_index(parent_pos);
-                self.nodes[index] = hash;
+                self.nodes[index] = digest;
             }
             return Ok(());
         }
@@ -265,13 +265,13 @@ impl<H: CHasher> Mmr<H> {
         panic!("invalid MMR")
     }
 
-    /// Computes the root hash of the MMR.
+    /// Computes the root of the MMR.
     pub fn root(&self, hasher: &mut impl Hasher<H>) -> H::Digest {
         let peaks = self
             .peak_iterator()
             .map(|(peak_pos, _)| self.get_node_unchecked(peak_pos));
         let size = self.size();
-        hasher.root_hash(size, peaks)
+        hasher.root_digest(size, peaks)
     }
 
     /// Return an inclusion proof for the specified element.
@@ -388,7 +388,7 @@ mod tests {
             mmr.prune_all();
             assert_eq!(mmr.size(), 0, "prune_all on empty MMR should do nothing");
 
-            assert_eq!(mmr.root(&mut hasher), hasher.root_hash(0, [].iter()));
+            assert_eq!(mmr.root(&mut hasher), hasher.root_digest(0, [].iter()));
 
             let clone = mmr.clone_pruned();
             assert_eq!(clone.size(), 0);
@@ -439,41 +439,41 @@ mod tests {
                 "mmr nodes needing parents not as expected"
             );
 
-            // verify leaf hashes
+            // verify leaf digests
             for leaf in leaves.iter().by_ref() {
-                let hash = hasher.leaf_hash(*leaf, &element).await.unwrap();
-                assert_eq!(mmr.get_node(*leaf).unwrap(), hash);
+                let digest = hasher.leaf_digest(*leaf, &element).await.unwrap();
+                assert_eq!(mmr.get_node(*leaf).unwrap(), digest);
             }
 
-            // verify height=1 hashes
-            let hash2 = hasher.node_hash(2, &mmr.nodes[0], &mmr.nodes[1]);
-            assert_eq!(mmr.nodes[2], hash2);
-            let hash5 = hasher.node_hash(5, &mmr.nodes[3], &mmr.nodes[4]);
-            assert_eq!(mmr.nodes[5], hash5);
-            let hash9 = hasher.node_hash(9, &mmr.nodes[7], &mmr.nodes[8]);
-            assert_eq!(mmr.nodes[9], hash9);
-            let hash12 = hasher.node_hash(12, &mmr.nodes[10], &mmr.nodes[11]);
-            assert_eq!(mmr.nodes[12], hash12);
-            let hash17 = hasher.node_hash(17, &mmr.nodes[15], &mmr.nodes[16]);
-            assert_eq!(mmr.nodes[17], hash17);
+            // verify height=1 node digests
+            let digest2 = hasher.node_digest(2, &mmr.nodes[0], &mmr.nodes[1]);
+            assert_eq!(mmr.nodes[2], digest2);
+            let digest5 = hasher.node_digest(5, &mmr.nodes[3], &mmr.nodes[4]);
+            assert_eq!(mmr.nodes[5], digest5);
+            let digest9 = hasher.node_digest(9, &mmr.nodes[7], &mmr.nodes[8]);
+            assert_eq!(mmr.nodes[9], digest9);
+            let digest12 = hasher.node_digest(12, &mmr.nodes[10], &mmr.nodes[11]);
+            assert_eq!(mmr.nodes[12], digest12);
+            let digest17 = hasher.node_digest(17, &mmr.nodes[15], &mmr.nodes[16]);
+            assert_eq!(mmr.nodes[17], digest17);
 
-            // verify height=2 hashes
-            let hash6 = hasher.node_hash(6, &mmr.nodes[2], &mmr.nodes[5]);
-            assert_eq!(mmr.nodes[6], hash6);
-            let hash13 = hasher.node_hash(13, &mmr.nodes[9], &mmr.nodes[12]);
-            assert_eq!(mmr.nodes[13], hash13);
-            let hash17 = hasher.node_hash(17, &mmr.nodes[15], &mmr.nodes[16]);
-            assert_eq!(mmr.nodes[17], hash17);
+            // verify height=2 node digests
+            let digest6 = hasher.node_digest(6, &mmr.nodes[2], &mmr.nodes[5]);
+            assert_eq!(mmr.nodes[6], digest6);
+            let digest13 = hasher.node_digest(13, &mmr.nodes[9], &mmr.nodes[12]);
+            assert_eq!(mmr.nodes[13], digest13);
+            let digest17 = hasher.node_digest(17, &mmr.nodes[15], &mmr.nodes[16]);
+            assert_eq!(mmr.nodes[17], digest17);
 
-            // verify topmost hash
-            let hash14 = hasher.node_hash(14, &mmr.nodes[6], &mmr.nodes[13]);
-            assert_eq!(mmr.nodes[14], hash14);
+            // verify topmost digest
+            let digest14 = hasher.node_digest(14, &mmr.nodes[6], &mmr.nodes[13]);
+            assert_eq!(mmr.nodes[14], digest14);
 
-            // verify root hash
-            let root_hash = mmr.root(&mut hasher);
-            let peak_hashes = [hash14, hash17, mmr.nodes[18]];
-            let expected_root_hash = hasher.root_hash(19, peak_hashes.iter());
-            assert_eq!(root_hash, expected_root_hash, "incorrect root hash");
+            // verify root
+            let root = mmr.root(&mut hasher);
+            let peak_digests = [digest14, digest17, mmr.nodes[18]];
+            let expected_root = hasher.root_digest(19, peak_digests.iter());
+            assert_eq!(root, expected_root, "incorrect root");
 
             // pruning tests
             mmr.prune_to_pos(14); // prune up to the tallest peak
@@ -486,11 +486,8 @@ mod tests {
             // at position 15.
             assert!(mmr.proof(15).await.is_ok());
 
-            let root_hash_after_prune = mmr.root(&mut hasher);
-            assert_eq!(
-                root_hash, root_hash_after_prune,
-                "root hash changed after pruning"
-            );
+            let root_after_prune = mmr.root(&mut hasher);
+            assert_eq!(root, root_after_prune, "root changed after pruning");
             assert!(
                 mmr.proof(11).await.is_err(),
                 "attempts to prove elements at or before the oldest retained should fail"
@@ -512,7 +509,7 @@ mod tests {
             let mmr_copy = Mmr::init(mmr.nodes.iter().copied().collect(), oldest_pos, digests);
             assert_eq!(mmr_copy.size(), 19);
             assert_eq!(mmr_copy.oldest_retained_pos(), mmr.oldest_retained_pos());
-            assert_eq!(mmr_copy.root(&mut hasher), root_hash);
+            assert_eq!(mmr_copy.root(&mut hasher), root);
 
             // Test that clone_pruned produces a valid copy of the MMR as if it had been cloned
             // after being fully pruned.
@@ -632,7 +629,7 @@ mod tests {
             let expected_root = ROOTS[199];
             assert_eq!(hex(&root), expected_root);
 
-            // Pop off one node at a time until empty, confirming the root hash is still is as expected.
+            // Pop off one node at a time until empty, confirming the root is still is as expected.
             for i in (0..199u64).rev() {
                 assert!(mmr.pop().is_ok());
                 let root = mmr.root(&mut hasher);
@@ -674,8 +671,8 @@ mod tests {
             let (mut mmr, leaves) = compute_big_mmr(&mut hasher).await.unwrap();
             let root = mmr.root(&mut hasher);
 
-            // For a few leaves, update the leaf and ensure the root hash changes, and the root hash
-            // reverts to its previous state then we update the leaf to its original value.
+            // For a few leaves, update the leaf and ensure the root changes, and the root reverts
+            // to its previous state then we update the leaf to its original value.
             for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
                 // Change the leaf.
                 mmr.update_leaf(&mut hasher, leaves[leaf], &element)
@@ -684,7 +681,7 @@ mod tests {
                 let updated_root = mmr.root(&mut hasher);
                 assert!(root != updated_root);
 
-                // Restore the leaf to its original value, ensure the root hash is as before.
+                // Restore the leaf to its original value, ensure the root is as before.
                 c_hasher.update(&leaf.to_be_bytes());
                 let element = c_hasher.finalize();
                 mmr.update_leaf(&mut hasher, leaves[leaf], &element)

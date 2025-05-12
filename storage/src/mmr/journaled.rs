@@ -308,7 +308,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         Ok(())
     }
 
-    /// Return the root hash of the MMR.
+    /// Return the root of the MMR.
     pub fn root(&self, h: &mut impl Hasher<H>) -> H::Digest {
         self.mem_mmr.root(h)
     }
@@ -563,8 +563,8 @@ mod tests {
             }
             assert_eq!(ROOTS[199], hex(&mmr.root(&mut hasher)));
 
-            // Pop off one node at a time without syncing until empty, confirming the root hash is
-            // still is as expected.
+            // Pop off one node at a time without syncing until empty, confirming the root is still
+            // is as expected.
             for i in (0..199u64).rev() {
                 assert!(mmr.pop(1).await.is_ok());
                 let root = mmr.root(&mut hasher);
@@ -786,7 +786,7 @@ mod tests {
 
             let mut hasher = Sha256::new();
             let mut hasher = Basic::new(&mut hasher);
-            // make sure pruning doesn't break root hashing, adding of new nodes, etc.
+            // make sure pruning doesn't break root computation, adding of new nodes, etc.
             const LEAF_COUNT: usize = 2000;
             let mut pruned_mmr = Mmr::init(context.clone(), &mut hasher, cfg.clone())
                 .await

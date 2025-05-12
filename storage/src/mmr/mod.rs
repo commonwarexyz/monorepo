@@ -22,8 +22,8 @@
 //!
 //! The "height" of a node is 0 for a leaf, 1 for the parent of 2 leaves, and so on.
 //!
-//! The "root hash" of an MMR is the result of hashing together the size of the MMR and the hashes
-//! of every peak in decreasing order of height.
+//! The "root digest" (or just "root") of an MMR is the result of hashing together the size of the
+//! MMR and the digests of every peak in decreasing order of height.
 //!
 //! # Examples
 //!
@@ -82,8 +82,7 @@ pub mod mem;
 mod tests;
 pub mod verification;
 
-/// A trait that allows generic access to MMR digests from its storage, for example in generating
-/// inclusion proofs.
+/// A trait for accessing MMR digests from storage.
 pub trait Storage<D: Digest>: Send + Sync {
     /// Return the number of elements in the MMR.
     fn size(&self) -> u64;
@@ -92,7 +91,7 @@ pub trait Storage<D: Digest>: Send + Sync {
     fn get_node(&self, position: u64) -> impl Future<Output = Result<Option<D>, Error>> + Send;
 }
 
-/// A trait for generic MMR building.
+/// A trait for building an MMR and computing the root.
 pub trait Builder<H: CHasher>: Send + Sync {
     /// Add an element to the MMR.
     fn add(

@@ -30,7 +30,7 @@ struct BitmapStorage<'a, H: CHasher> {
     last_chunk_mmr: &'a Mmr<H>,
 }
 
-impl<H: CHasher + Send + Sync> Storage<<H as CHasher>::Digest> for BitmapStorage<'_, H> {
+impl<H: CHasher + Send + Sync> Storage<H::Digest> for BitmapStorage<'_, H> {
     async fn get_node(&self, pos: u64) -> Result<Option<H::Digest>, Error> {
         if pos < self.mmr.size() {
             Ok(self.mmr.get_node(pos))
@@ -395,12 +395,12 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         self.mmr.update_leaf(hasher, leaf_pos, chunk).await
     }
 
-    /// Return the root hash of the Merkle tree over the bitmap.
+    /// Return the root of the Merkle tree over the bitmap.
     ///
     /// # Warning
     ///
-    /// The root hash will not change when adding "0" bits unless a chunk boundary is crossed. If
-    /// you require a hash that changes with every bit added, you can hash the value of
+    /// The root will not change when adding "0" bits unless a chunk boundary is crossed. If you
+    /// require a root digest that changes with every bit added, you can hash the value of
     /// `bit_count()` into the result.
     pub async fn root(&self, hasher: &mut impl Hasher<H>) -> Result<H::Digest, Error> {
         if self.next_bit == 0 {
@@ -447,17 +447,17 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     }
 
     /// Verify whether `proof` proves that the `chunk` containing the referenced bit belongs to the
-    /// bitmap corresponding to `root_hash`.
+    /// bitmap corresponding to `root_digest`.
     pub async fn verify_bit_inclusion(
         hasher: &mut impl Hasher<H>,
         proof: &Proof<H>,
         chunk: &[u8; N],
         bit_offset: u64,
-        root_hash: &H::Digest,
+        root_digest: &H::Digest,
     ) -> Result<bool, Error> {
         let leaf_pos = Self::leaf_pos(bit_offset);
         proof
-            .verify_element_inclusion(hasher, chunk, leaf_pos, root_hash)
+            .verify_element_inclusion(hasher, chunk, leaf_pos, root_digest)
             .await
     }
 }
@@ -543,7 +543,7 @@ mod tests {
     #[test]
     fn test_bitmap_building() {
         // Build the same bitmap with 2 chunks worth of bits in multiple ways and make sure they are
-        // equivalent based on their root hashes.
+        // equivalent based on their roots.
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let test_chunk = test_chunk(b"test");
@@ -678,7 +678,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bitmap_root_hash_boundaries() {
+    fn test_bitmap_root_boundaries() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Build a starting test MMR with two chunks worth of bits.
@@ -696,7 +696,7 @@ mod tests {
 
             let root = bitmap.root(&mut hasher).await.unwrap();
 
-            // Confirm that root hash changes if we add a 1 bit, even though we won't fill a chunk.
+            // Confirm that root changes if we add a 1 bit, even though we won't fill a chunk.
             bitmap.append(&mut hasher, true).await.unwrap();
             let new_root = bitmap.root(&mut hasher).await.unwrap();
             assert!(root != new_root);
@@ -706,18 +706,18 @@ mod tests {
             for _ in 0..(Bitmap::<Sha256, SHA256_SIZE>::CHUNK_SIZE * 8 - 1) {
                 bitmap.append(&mut hasher, false).await.unwrap();
                 let newer_root = bitmap.root(&mut hasher).await.unwrap();
-                // root hash won't change when adding 0s within the same chunk
+                // root won't change when adding 0s within the same chunk
                 assert_eq!(new_root, newer_root);
             }
             assert_eq!(bitmap.mmr.size(), 4); // chunk we filled should have been added to mmr
 
-            // Confirm the root hash changes when we add the next 0 bit since it's part of a new chunk.
+            // Confirm the root changes when we add the next 0 bit since it's part of a new chunk.
             bitmap.append(&mut hasher, false).await.unwrap();
             assert_eq!(bitmap.bit_count(), 256 * 3 + 1);
             let newer_root = bitmap.root(&mut hasher).await.unwrap();
             assert!(new_root != newer_root);
 
-            // Confirm pruning everything doesn't affect the root hash.
+            // Confirm pruning everything doesn't affect the root.
             bitmap.prune_to_bit(bitmap.bit_count());
             assert_eq!(bitmap.pruned_chunks, 3);
             assert_eq!(bitmap.bit_count(), 256 * 3 + 1);
@@ -752,8 +752,8 @@ mod tests {
 
             let root = bitmap.root(&mut hasher).await.unwrap();
 
-            // Flip each bit and confirm the root hash changes, then flip it back to confirm it is
-            // safely restored.
+            // Flip each bit and confirm the root changes, then flip it back to confirm it is safely
+            // restored.
             for bit_pos in (0..bitmap.bit_count()).rev() {
                 let bit = bitmap.get_bit(bit_pos);
                 bitmap.set_bit(&mut hasher, bit_pos, !bit).await.unwrap();

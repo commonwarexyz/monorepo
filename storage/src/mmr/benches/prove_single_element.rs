@@ -1,5 +1,5 @@
 use commonware_cryptography::{Hasher, Sha256};
-use commonware_storage::mmr::mem::Mmr;
+use commonware_storage::mmr::{hasher::Basic, mem::Mmr};
 use criterion::{criterion_group, Criterion};
 use futures::executor::block_on;
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
@@ -13,6 +13,7 @@ fn bench_prove_single_element(c: &mut Criterion) {
         let mut elements = Vec::with_capacity(n);
         let mut sampler = StdRng::seed_from_u64(0);
         let mut hasher = Sha256::new();
+        let mut hasher = Basic::new(&mut hasher);
         block_on(async {
             for _ in 0..n {
                 let element = Sha256::random(&mut sampler);
@@ -20,7 +21,7 @@ fn bench_prove_single_element(c: &mut Criterion) {
                 elements.push((pos, element));
             }
         });
-        let root_hash = mmr.root(&mut hasher);
+        let root_digest = mmr.root(&mut hasher);
 
         // Select SAMPLE_SIZE random elements without replacement and create/verify proofs
         c.bench_function(
@@ -37,14 +38,18 @@ fn bench_prove_single_element(c: &mut Criterion) {
                     |samples| {
                         block_on(async {
                             let mut hasher = Sha256::new();
+                            let mut hasher = Basic::new(&mut hasher);
                             for (pos, element) in samples {
                                 let proof = mmr.proof(pos).await.unwrap();
-                                assert!(proof.verify_element_inclusion(
-                                    &mut hasher,
-                                    &element,
-                                    pos,
-                                    &root_hash,
-                                ));
+                                assert!(proof
+                                    .verify_element_inclusion(
+                                        &mut hasher,
+                                        &element,
+                                        pos,
+                                        &root_digest,
+                                    )
+                                    .await
+                                    .unwrap());
                             }
                         });
                     },
