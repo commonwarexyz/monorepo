@@ -257,15 +257,10 @@ impl<
         // Check if already issued finalize
         let Status::Verified(ref previous) = self.finalizes[public_key_index as usize] else {
             // Store the nullify
-            let item = self.nullifies.entry(public_key_index);
-            return match item {
-                Entry::Occupied(_) => false,
-                Entry::Vacant(v) => {
-                    v.insert(Status::Verified(nullify.clone()));
-                    self.reporter.report(Activity::Nullify(nullify)).await;
-                    true
-                }
-            };
+            self.nullifies
+                .insert(public_key_index, Status::Verified(nullify.clone()));
+            self.reporter.report(Activity::Nullify(nullify)).await;
+            return true;
         };
 
         // Create fault
@@ -414,6 +409,12 @@ impl<
         // Attempt to construct notarization
         for (proposal, notarizes) in self.notarized_proposals.iter() {
             if (notarizes.count_ones() as u32) < threshold {
+                debug!(
+                    ?proposal,
+                    notarizes = notarizes.count_ones(),
+                    threshold,
+                    "not enough notarizes"
+                );
                 continue;
             }
 
@@ -475,6 +476,7 @@ impl<
             })
             .unzip();
         if views.len() < threshold as usize {
+            debug!(count = views.len(), threshold, "not enough nullifies");
             return None;
         }
         debug!(view = self.view, "broadcasting nullification");
@@ -2061,6 +2063,7 @@ impl<
                     // Wait for first item
                     //
                     // TODO: seed message with same signature be same across many messages (overwriting)? Cool feature btw
+                    println!("[{}] waiting for verifier", me);
                     let Some((sender, msg)) = verifier_receiver.next().await else {
                         println!("[{}] verifier shutdown", me);
                         return;
@@ -2348,12 +2351,15 @@ impl<
                     // Process message
                     match msg {
                         Voter::Notarize(notarize) => {
+                            debug!(view, "received notarize from verifier");
                             self.handle_notarize(public_key_index, notarize).await;
                         }
                         Voter::Nullify(nullify) => {
+                            debug!(view, "received nullify from verifier");
                             self.handle_nullify(public_key_index, nullify).await;
                         }
                         Voter::Finalize(finalize) => {
+                            debug!(view, "received finalize from verifier");
                             self.handle_finalize(public_key_index, finalize).await;
                         }
                         Voter::Notarization(_)| Voter::Nullification(_) | Voter::Finalization(_) => {
@@ -2380,14 +2386,13 @@ impl<
                     let interesting = match msg {
                         Voter::Notarize(notarize) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::notarize(&s)).inc();
-                            let interesting = self.notarize(&s, &notarize);
-                            if interesting {
+                            if self.notarize(&s, &notarize) {
                                 verifier_sender
                                     .send((s.clone(), Voter::Notarize(notarize)))
                                     .await
                                     .expect("unable to send notarize to verifier");
                             }
-                            interesting
+                            continue;
                         }
                         Voter::Notarization(notarization) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::notarization(&s)).inc();
@@ -2395,14 +2400,13 @@ impl<
                         }
                         Voter::Nullify(nullify) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::nullify(&s)).inc();
-                            let interesting = self.nullify(&s, &nullify);
-                            if interesting {
+                            if self.nullify(&s, &nullify) {
                                 verifier_sender
                                     .send((s.clone(), Voter::Nullify(nullify)))
                                     .await
                                     .expect("unable to send nullify to verifier");
                             }
-                            interesting
+                            continue;
                         }
                         Voter::Nullification(nullification) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::nullification(&s)).inc();
@@ -2410,14 +2414,13 @@ impl<
                         }
                         Voter::Finalize(finalize) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::finalize(&s)).inc();
-                            let interesting = self.finalize(&s, &finalize);
-                            if interesting{
+                            if self.finalize(&s, &finalize) {
                                 verifier_sender
                                     .send((s.clone(), Voter::Finalize(finalize)))
                                     .await
                                     .expect("unable to send finalize to verifier");
                             }
-                            interesting
+                            continue;
                         }
                         Voter::Finalization(finalization) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::finalization(&s)).inc();
