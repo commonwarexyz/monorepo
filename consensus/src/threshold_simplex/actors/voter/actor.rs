@@ -465,12 +465,6 @@ impl<
         }
 
         // Attempt to construct nullification
-        if (self.nullifies.len() as u32) < threshold {
-            return None;
-        }
-        debug!(view = self.view, "broadcasting nullification");
-
-        // Recover threshold signature
         let nullifies = self.nullifies.values();
         let (views, seeds): (Vec<_>, Vec<_>) = nullifies
             .filter_map(|x| {
@@ -480,6 +474,12 @@ impl<
                 Some((&nullify.view_signature, &nullify.seed_signature))
             })
             .unzip();
+        if views.len() < threshold as usize {
+            return None;
+        }
+        debug!(view = self.view, "broadcasting nullification");
+
+        // Recover threshold signature
         let (view_signature, seed_signature) =
             threshold_signature_recover_pair::<V, _>(threshold, views, seeds)
                 .expect("failed to recover threshold signature");
@@ -2054,16 +2054,21 @@ impl<
                     work.clear();
 
                     // Wait for first item
+                    //
+                    // TODO: seed message with same signature be same across many messages (overwriting)?
                     while let Some((sender, msg)) = verifier_receiver.next().await {
                         // Add first item
                         let view = msg.view();
                         let verifiable = msg.message(&namespace);
                         let msg_idx = messages.len();
+                        println!("added {}: {:?} count={}", msg_idx, msg, verifiable.len());
                         messages.push((sender, msg, verifiable.len()));
                         for (namespace, message, signature) in verifiable.into_iter() {
-                            work.entry((view, namespace, message))
+                            let previous = work
+                                .entry((view, namespace, message))
                                 .or_default()
                                 .insert(signature, msg_idx);
+                            assert!(previous.is_none());
                         }
 
                         // Pull as many messages as possible without waiting
@@ -2073,11 +2078,19 @@ impl<
                                     let view = msg.view();
                                     let verifiable = msg.message(&namespace);
                                     let msg_idx = messages.len();
+                                    println!(
+                                        "added {}: {:?} count={}",
+                                        msg_idx,
+                                        msg,
+                                        verifiable.len()
+                                    );
                                     messages.push((sender, msg, verifiable.len()));
                                     for (namespace, message, signature) in verifiable.into_iter() {
-                                        work.entry((view, namespace, message))
+                                        let previous = work
+                                            .entry((view, namespace, message))
                                             .or_default()
                                             .insert(signature, msg_idx);
+                                        assert!(previous.is_none());
                                     }
                                 }
                                 Ok(None) => {
@@ -2120,6 +2133,10 @@ impl<
                                     continue;
                                 }
                                 let (sender, message, count) = &mut messages[*idx];
+                                println!(
+                                    "handle {}: {:?} count={}",
+                                    signature.index, message, count
+                                );
                                 *count -= 1;
                                 if *count > 0 {
                                     continue;
