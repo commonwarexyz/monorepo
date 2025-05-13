@@ -3,10 +3,7 @@
 use crate::authenticated::{
     actors::{
         spawner,
-        tracker::{
-            self,
-            reservation::{Metadata, Reservation},
-        },
+        tracker::{self, Metadata, Reservation},
     },
     metrics,
 };

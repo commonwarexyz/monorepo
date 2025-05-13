@@ -1,33 +1,7 @@
+use super::Metadata;
 use commonware_runtime::{Metrics, Spawner};
 use commonware_utils::Array;
 use futures::{channel::mpsc, SinkExt};
-use std::net::SocketAddr;
-
-/// Reservation metadata.
-#[derive(Clone, Debug)]
-pub enum Metadata<P: Array> {
-    /// Dialer reservation.
-    ///
-    /// Contains:
-    /// - The public key of the peer.
-    /// - The socket address of the peer.
-    Dialer(P, SocketAddr),
-
-    /// Listener reservation.
-    ///
-    /// Contains the public key of the peer.
-    Listener(P),
-}
-
-impl<P: Array> Metadata<P> {
-    /// Get the public key of the peer associated with this metadata.
-    pub fn public_key(&self) -> &P {
-        match self {
-            Metadata::Dialer(public_key, _) => public_key,
-            Metadata::Listener(public_key) => public_key,
-        }
-    }
-}
 
 /// Reservation for a peer in the network. This is used to ensure that the peer is reserved only
 /// once, and that the reservation is released when the peer connection fails or is closed.

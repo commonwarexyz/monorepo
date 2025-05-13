@@ -11,13 +11,16 @@ use thiserror::Error;
 mod actor;
 mod directory;
 mod ingress;
+mod metadata;
 mod metrics;
 mod record;
-pub mod reservation;
+mod reservation;
 mod set;
 
 pub use actor::Actor;
 pub use ingress::{Mailbox, Oracle};
+pub use metadata::Metadata;
+pub use reservation::Reservation;
 
 #[derive(Clone, Debug)]
 pub struct Config<C: Scheme> {

@@ -324,7 +324,7 @@ mod tests {
         peer: &PublicKey,
         peer_mailbox: &peer::Mailbox<Ed25519>,
         peer_receiver: &mut mpsc::Receiver<peer::Message<Ed25519>>,
-    ) -> tracker::reservation::Reservation<Context, PublicKey> {
+    ) -> tracker::Reservation<Context, PublicKey> {
         let res = mailbox
             .listen(peer.clone())
             .await
@@ -896,10 +896,7 @@ mod tests {
             assert!(reservation.is_some());
             if let Some(res) = reservation {
                 match res.metadata() {
-                    crate::authenticated::actors::tracker::reservation::Metadata::Dialer(
-                        pk,
-                        addr,
-                    ) => {
+                    crate::authenticated::actors::tracker::Metadata::Dialer(pk, addr) => {
                         assert_eq!(pk, &boot_pk);
                         assert_eq!(*addr, boot_addr);
                     }

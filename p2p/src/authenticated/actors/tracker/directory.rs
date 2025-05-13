@@ -1,9 +1,4 @@
-use super::{
-    metrics::Metrics,
-    record::Record,
-    reservation::{Metadata, Reservation},
-    set::Set,
-};
+use super::{metrics::Metrics, record::Record, set::Set, Metadata, Reservation};
 use crate::authenticated::{
     metrics,
     types::{self, PeerInfo},

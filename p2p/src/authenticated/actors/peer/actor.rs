@@ -1,9 +1,6 @@
 use super::{Config, Error, Mailbox, Message, Relay};
 use crate::authenticated::{
-    actors::tracker::{
-        self,
-        reservation::{Metadata, Reservation},
-    },
+    actors::tracker::{self, Metadata, Reservation},
     channels::Channels,
     metrics, types,
 };

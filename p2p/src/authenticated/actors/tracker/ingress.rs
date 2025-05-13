@@ -1,4 +1,4 @@
-use super::reservation::Reservation;
+use super::Reservation;
 use crate::authenticated::{actors::peer, types};
 use commonware_cryptography::Verifier;
 use commonware_runtime::{Metrics, Spawner};
