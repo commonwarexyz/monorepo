@@ -74,7 +74,6 @@ pub enum Message<E: Spawner + Metrics, C: Verifier> {
     /// Request a list of dialable peers.
     Dialable {
         /// One-shot channel to send the list of dialable peers.
-        #[allow(clippy::type_complexity)]
         responder: oneshot::Sender<Vec<C::PublicKey>>,
     },
 
@@ -118,7 +117,7 @@ impl<E: Spawner + Metrics, C: Verifier> Mailbox<E, C> {
         Self { sender }
     }
 
-    /// Send an `Connect` message to the tracker.
+    /// Send a `Connect` message to the tracker.
     pub async fn connect(
         &mut self,
         public_key: C::PublicKey,

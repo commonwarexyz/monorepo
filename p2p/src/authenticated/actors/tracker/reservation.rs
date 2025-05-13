@@ -12,8 +12,11 @@ pub struct Reservation<E: Spawner + Metrics, P: Array> {
     /// Metadata about the reservation.
     metadata: Metadata<P>,
 
-    /// Sender used to notify the completion of the reservation.
-    closer: mpsc::Sender<Metadata<P>>,
+    /// Sender used to automatically notify the completion of the reservation when it is dropped.
+    ///
+    /// Stored as an `Option` to avoid unnecessary cloning by `take`ing the value when
+    /// dropping the reservation.
+    closer: Option<mpsc::Sender<Metadata<P>>>,
 }
 
 impl<E: Spawner + Metrics, P: Array> Reservation<E, P> {
@@ -22,7 +25,7 @@ impl<E: Spawner + Metrics, P: Array> Reservation<E, P> {
         Self {
             context,
             metadata,
-            closer,
+            closer: Some(closer),
         }
     }
 }
@@ -36,15 +39,16 @@ impl<E: Spawner + Metrics, P: Array> Reservation<E, P> {
 
 impl<E: Spawner + Metrics, P: Array> Drop for Reservation<E, P> {
     fn drop(&mut self) {
+        let mut closer = self.closer.take().expect("Reservation::drop called twice");
+
         // If the mailbox is not full, we can release the reservation immediately without spawning a task.
-        let Err(e) = self.closer.try_send(self.metadata.clone()) else {
+        let Err(e) = closer.try_send(self.metadata.clone()) else {
             // Sent successfully, nothing to do.
             return;
         };
         if e.is_full() {
             // If the mailbox is full, we need to spawn a task to handle the release. If we used `block_on` here,
             // it could cause a deadlock.
-            let mut closer = self.closer.clone();
             let metadata = self.metadata.clone();
             self.context.spawn_ref()(async move {
                 closer.send(metadata).await.unwrap();

@@ -51,7 +51,6 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> 
 
 impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> {
     /// Create a new tracker [`Actor`] from the given `context` and `cfg`.
-    #[allow(clippy::type_complexity)]
     pub fn new(context: E, mut cfg: Config<C>) -> (Self, Mailbox<E, C>, Oracle<E, C>) {
         // Sign my own information
         let socket = cfg.address;

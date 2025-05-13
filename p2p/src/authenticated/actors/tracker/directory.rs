@@ -219,6 +219,10 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Directory<
                 self.delete_if_needed(peer);
             });
         }
+
+        // Attempt to remove any old records from the rate limiter.
+        // This is a best-effort attempt to prevent memory usage from growing indefinitely.
+        self.rate_limiter.shrink_to_fit();
     }
 
     /// Returns a vector of dialable peers. That is, unconnected peers for which we have a socket.

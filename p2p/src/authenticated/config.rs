@@ -63,10 +63,12 @@ pub struct Config<C: Scheme> {
     /// Quota for incoming connections across all peers.
     pub allowed_incoming_connection_rate: Quota,
 
-    /// Frequency at which we make a new dial attempt to a peer.
+    /// Average frequency at which we make a single dial attempt across all peers.
     pub dial_frequency: Duration,
 
-    /// Frequency at which we will fetch a new list of dialable peers.
+    /// Average frequency at which we will fetch a new list of dialable peers.
+    /// 
+    /// This value also limits the rate at which we attempt to re-dial any single peer.
     pub query_frequency: Duration,
 
     /// Times that dialing a given peer should fail before asking for updated peer information for
@@ -133,7 +135,7 @@ impl<C: Scheme> Config<C> {
             handshake_timeout: Duration::from_secs(5),
             allowed_connection_rate_per_peer: Quota::per_minute(NZU32!(1)),
             allowed_incoming_connection_rate: Quota::per_second(NZU32!(256)),
-            dial_frequency: Duration::from_secs(2),
+            dial_frequency: Duration::from_millis(1_000),
             query_frequency: Duration::from_secs(60),
             dial_fail_limit: 2,
             tracked_peer_sets: 4,
@@ -173,7 +175,7 @@ impl<C: Scheme> Config<C> {
             handshake_timeout: Duration::from_secs(5),
             allowed_connection_rate_per_peer: Quota::per_second(NZU32!(1)),
             allowed_incoming_connection_rate: Quota::per_second(NZU32!(256)),
-            dial_frequency: Duration::from_secs(1),
+            dial_frequency: Duration::from_millis(500),
             query_frequency: Duration::from_secs(30),
             dial_fail_limit: 1,
             tracked_peer_sets: 4,

@@ -59,17 +59,6 @@ pub struct Record<C: Verifier> {
     persistent: bool,
 }
 
-/// Returns `true` if the new information is more recent than the existing one.
-fn should_update<C: Verifier>(existing_ts: u64, info: &PeerInfo<C>) -> bool {
-    // Ensure the new info is more recent.
-    let incoming_ts = info.timestamp;
-    if existing_ts >= incoming_ts {
-        trace!(peer = ?info.public_key, ?existing_ts, ?incoming_ts, "peer discovery not updated");
-        return false;
-    }
-    true
-}
-
 impl<C: Verifier> Record<C> {
     // ---------- Constructors ----------
 
@@ -117,7 +106,17 @@ impl<C: Verifier> Record<C> {
                 true
             }
             Address::Discovered(prev, _) => {
-                if !should_update(prev.timestamp, &info) {
+                // Ensure the new info is more recent.
+                let existing_ts = prev.timestamp;
+                let incoming_ts = info.timestamp;
+                if existing_ts >= incoming_ts {
+                    let peer = info.public_key;
+                    trace!(
+                        ?peer,
+                        ?existing_ts,
+                        ?incoming_ts,
+                        "peer discovery not updated"
+                    );
                     return false;
                 }
                 self.address = Address::Discovered(info, 0);
