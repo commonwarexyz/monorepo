@@ -39,7 +39,7 @@ pub struct Stream {
 impl crate::Stream for Stream {
     // TODO danlaine: revisit this.
     async fn recv<B: BoundedBufMut>(&mut self, mut buf: B) -> Result<B, Error> {
-        let mut tmp = vec![0u8; buf.bytes_total()];
+        let mut tmp = vec![0u8; buf.capacity()];
         // Time out if we take too long to read
         timeout(self.read_timeout, self.stream.read_exact(&mut tmp))
             .await

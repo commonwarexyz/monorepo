@@ -55,7 +55,7 @@ pub struct Sink<S: crate::Sink> {
 
 impl<S: crate::Sink> crate::Sink for Sink<S> {
     async fn send<B: BoundedBuf>(&mut self, data: B) -> Result<(), crate::Error> {
-        let len = data.bytes_total();
+        let len = data.len();
         self.inner.send(data).await?;
         self.metrics.outbound_bandwidth.inc_by(len as u64);
         Ok(())
@@ -71,9 +71,7 @@ pub struct Stream<S: crate::Stream> {
 impl<S: crate::Stream> crate::Stream for Stream<S> {
     async fn recv<B: BoundedBufMut>(&mut self, buf: B) -> Result<B, crate::Error> {
         let buf = self.inner.recv(buf).await?;
-        self.metrics
-            .inbound_bandwidth
-            .inc_by(buf.bytes_total() as u64);
+        self.metrics.inbound_bandwidth.inc_by(buf.capacity() as u64);
         Ok(buf)
     }
 }

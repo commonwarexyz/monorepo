@@ -1383,7 +1383,7 @@ mod tests {
                         "GET /metrics HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
                         address
                     );
-                    sink.send(Bytes::from(request.clone())).await.unwrap();
+                    sink.send(Bytes::from(request)).await.unwrap();
 
                     // Read and verify the HTTP status line
                     let status_line = read_line(&mut stream).await.unwrap();

@@ -17,7 +17,7 @@
 pub unsafe trait IoBuf: Unpin + Send + 'static {
     /// Returns a raw pointer to the vector’s buffer.
     ///
-    /// This method is to be used by the `tokio-uring` runtime and it is not
+    /// This method is to be used internally and it is not
     /// expected for users to call it directly.
     ///
     /// The implementation must ensure that, while the `tokio-uring` runtime
@@ -27,19 +27,15 @@ pub unsafe trait IoBuf: Unpin + Send + 'static {
 
     /// Number of initialized bytes.
     ///
-    /// This method is to be used by the `tokio-uring` runtime and it is not
+    /// This method is to be used internally and it is not
     /// expected for users to call it directly.
-    ///
-    /// For `Vec`, this is identical to `len()`.
-    fn bytes_init(&self) -> usize;
+    fn len(&self) -> usize;
 
     /// Total size of the buffer, including uninitialized memory, if any.
     ///
-    /// This method is to be used by the `tokio-uring` runtime and it is not
+    /// This method is to be used internally and it is not
     /// expected for users to call it directly.
-    ///
-    /// For `Vec`, this is identical to `capacity()`.
-    fn bytes_total(&self) -> usize;
+    fn capacity(&self) -> usize;
 }
 
 unsafe impl IoBuf for Vec<u8> {
@@ -47,11 +43,11 @@ unsafe impl IoBuf for Vec<u8> {
         self.as_ptr()
     }
 
-    fn bytes_init(&self) -> usize {
+    fn len(&self) -> usize {
         self.len()
     }
 
-    fn bytes_total(&self) -> usize {
+    fn capacity(&self) -> usize {
         self.capacity()
     }
 }
@@ -61,12 +57,12 @@ unsafe impl IoBuf for &'static [u8] {
         self.as_ptr()
     }
 
-    fn bytes_init(&self) -> usize {
+    fn len(&self) -> usize {
         <[u8]>::len(self)
     }
 
-    fn bytes_total(&self) -> usize {
-        IoBuf::bytes_init(self)
+    fn capacity(&self) -> usize {
+        IoBuf::len(self)
     }
 }
 
@@ -75,12 +71,12 @@ unsafe impl IoBuf for &'static str {
         self.as_ptr()
     }
 
-    fn bytes_init(&self) -> usize {
+    fn len(&self) -> usize {
         <str>::len(self)
     }
 
-    fn bytes_total(&self) -> usize {
-        IoBuf::bytes_init(self)
+    fn capacity(&self) -> usize {
+        IoBuf::len(self)
     }
 }
 
@@ -89,11 +85,11 @@ unsafe impl IoBuf for bytes::Bytes {
         self.as_ptr()
     }
 
-    fn bytes_init(&self) -> usize {
+    fn len(&self) -> usize {
         self.len()
     }
 
-    fn bytes_total(&self) -> usize {
+    fn capacity(&self) -> usize {
         self.len()
     }
 }
@@ -103,11 +99,11 @@ unsafe impl IoBuf for bytes::BytesMut {
         self.as_ptr()
     }
 
-    fn bytes_init(&self) -> usize {
+    fn len(&self) -> usize {
         self.len()
     }
 
-    fn bytes_total(&self) -> usize {
+    fn capacity(&self) -> usize {
         self.capacity()
     }
 }

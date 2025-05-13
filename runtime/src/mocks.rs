@@ -44,9 +44,7 @@ impl SinkTrait for Sink {
     async fn send<B: BoundedBuf>(&mut self, msg: B) -> Result<(), Error> {
         let (os_send, data) = {
             let mut channel = self.channel.lock().unwrap();
-            msg.slice_full().iter().for_each(|b| {
-                channel.buffer.push_back(*b);
-            });
+            channel.buffer.extend(msg.slice_full().iter());
 
             // If there is a waiter and the buffer is large enough,
             // return the waiter (while clearing the waiter field).
@@ -82,8 +80,8 @@ impl StreamTrait for Stream {
 
             // If the message is fully available in the buffer,
             // drain the value into buf and return.
-            if channel.buffer.len() >= buf.bytes_total() {
-                let b: Vec<u8> = channel.buffer.drain(0..buf.bytes_total()).collect();
+            if channel.buffer.len() >= buf.capacity() {
+                let b: Vec<u8> = channel.buffer.drain(0..buf.capacity()).collect();
                 buf.put_slice(&b);
                 return Ok(buf);
             }
@@ -91,7 +89,7 @@ impl StreamTrait for Stream {
             // Otherwise, populate the waiter.
             assert!(channel.waiter.is_none());
             let (os_send, os_recv) = oneshot::channel();
-            channel.waiter = Some((buf.bytes_total(), os_send));
+            channel.waiter = Some((buf.capacity(), os_send));
             os_recv
         };
 

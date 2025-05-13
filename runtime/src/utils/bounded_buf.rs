@@ -52,7 +52,7 @@ pub trait BoundedBuf: Unpin + Send + 'static {
 
     /// Returns a `Slice` with the view's full range.
     ///
-    /// This method is to be used by the `tokio-uring` runtime and it is not
+    /// This method is to be used internally and it is not
     /// expected for users to call it directly.
     fn slice_full(self) -> Slice<Self::Buf>;
 
@@ -70,10 +70,10 @@ pub trait BoundedBuf: Unpin + Send + 'static {
     fn stable_ptr(&self) -> *const u8;
 
     /// Number of initialized bytes available via this view.
-    fn bytes_init(&self) -> usize;
+    fn len(&self) -> usize;
 
     /// Total size of the view, including uninitialized memory, if any.
-    fn bytes_total(&self) -> usize;
+    fn capacity(&self) -> usize;
 }
 
 impl<T: IoBuf> BoundedBuf for T {
@@ -89,22 +89,22 @@ impl<T: IoBuf> BoundedBuf for T {
             Bound::Unbounded => 0,
         };
 
-        assert!(begin < self.bytes_total());
+        assert!(begin < self.capacity());
 
         let end = match range.end_bound() {
             Bound::Included(&n) => n.checked_add(1).expect("out of range"),
             Bound::Excluded(&n) => n,
-            Bound::Unbounded => self.bytes_total(),
+            Bound::Unbounded => self.capacity(),
         };
 
-        assert!(end <= self.bytes_total());
-        assert!(begin <= self.bytes_init());
+        assert!(end <= self.capacity());
+        assert!(begin <= self.len());
 
         Slice::new(self, begin, end)
     }
 
     fn slice_full(self) -> Slice<Self> {
-        let end = self.bytes_total();
+        let end = self.capacity();
         Slice::new(self, 0, end)
     }
 
@@ -124,11 +124,11 @@ impl<T: IoBuf> BoundedBuf for T {
         IoBuf::stable_ptr(self)
     }
 
-    fn bytes_init(&self) -> usize {
-        IoBuf::bytes_init(self)
+    fn len(&self) -> usize {
+        IoBuf::len(self)
     }
 
-    fn bytes_total(&self) -> usize {
-        IoBuf::bytes_total(self)
+    fn capacity(&self) -> usize {
+        IoBuf::capacity(self)
     }
 }

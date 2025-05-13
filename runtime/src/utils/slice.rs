@@ -173,7 +173,7 @@ impl<T: IoBuf> BoundedBuf for Slice<T> {
         };
 
         assert!(end <= self.end);
-        assert!(begin <= self.buf.bytes_init());
+        assert!(begin <= self.buf.len());
 
         Slice::new(self.buf, begin, end)
     }
@@ -191,8 +191,8 @@ impl<T: IoBuf> BoundedBuf for Slice<T> {
     }
 
     fn from_buf_bounds(buf: T, bounds: Self::Bounds) -> Self {
-        assert!(bounds.start <= buf.bytes_init());
-        assert!(bounds.end <= buf.bytes_total());
+        assert!(bounds.start <= buf.len());
+        assert!(bounds.end <= buf.capacity());
         Slice::new(buf, bounds.start, bounds.end)
     }
 
@@ -200,11 +200,11 @@ impl<T: IoBuf> BoundedBuf for Slice<T> {
         super::deref(&self.buf)[self.begin..].as_ptr()
     }
 
-    fn bytes_init(&self) -> usize {
+    fn len(&self) -> usize {
         ops::Deref::deref(self).len()
     }
 
-    fn bytes_total(&self) -> usize {
+    fn capacity(&self) -> usize {
         self.end - self.begin
     }
 }
