@@ -46,7 +46,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         return Err(Error::CreationAttempted);
     }
     std::fs::create_dir_all(&deployer_directory)?;
-    info!(path = ?deployer_directory, "created directory");
+    info!(path = ?deployer_directory, "created deployer directory");
 
     // Ensure no instance is duplicated or named MONITORING_NAME
     let mut instance_names = HashSet::new();
