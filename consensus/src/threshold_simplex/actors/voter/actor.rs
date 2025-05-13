@@ -6,7 +6,7 @@ use crate::{
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Context,
             Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
-            NullifyFinalize, PartialVerifier, Proposal, Verifiable, View, Viewable, Voter,
+            NullifyFinalize, PartialVerifier, Proposal, View, Viewable, Voter,
         },
     },
     Automaton, Relay, Reporter, ThresholdSupervisor, LATENCY,
@@ -14,11 +14,8 @@ use crate::{
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
-        ops::{
-            partial_verify_multiple_public_keys, threshold_signature_recover,
-            threshold_signature_recover_pair,
-        },
-        poly::{self, PartialSignature},
+        ops::{threshold_signature_recover, threshold_signature_recover_pair},
+        poly,
         variant::Variant,
     },
     Digest, Scheme,
@@ -41,10 +38,7 @@ use prometheus_client::metrics::{
     counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
 };
 use rand::Rng;
-use std::{
-    collections::{btree_map, hash_map::Entry, HashSet},
-    sync::atomic::AtomicI64,
-};
+use std::sync::atomic::AtomicI64;
 use std::{
     collections::{BTreeMap, HashMap},
     time::{Duration, SystemTime},
@@ -220,12 +214,9 @@ impl<
         }
     }
 
-    async fn add_verified_notarize(
-        &mut self,
-        public_key_index: u32,
-        notarize: Notarize<V, D>,
-    ) -> bool {
+    async fn add_verified_notarize(&mut self, notarize: Notarize<V, D>) -> bool {
         // Check if already notarized
+        let public_key_index = notarize.signer();
         if let Status::Verified(ref previous) = self.notarizes[public_key_index as usize] {
             if previous == &notarize {
                 trace!(?notarize, ?previous, "already notarized");
@@ -271,8 +262,9 @@ impl<
         }
     }
 
-    async fn add_verified_nullify(&mut self, public_key_index: u32, nullify: Nullify<V>) -> bool {
+    async fn add_verified_nullify(&mut self, nullify: Nullify<V>) -> bool {
         // Check if already issued finalize
+        let public_key_index = nullify.signer();
         let Status::Verified(ref previous) = self.finalizes[public_key_index as usize] else {
             // Store the nullify
             self.nullified.set(public_key_index as usize);
@@ -306,12 +298,9 @@ impl<
         }
     }
 
-    async fn add_verified_finalize(
-        &mut self,
-        public_key_index: u32,
-        finalize: Finalize<V, D>,
-    ) -> bool {
+    async fn add_verified_finalize(&mut self, finalize: Finalize<V, D>) -> bool {
         // Check if also issued nullify
+        let public_key_index = finalize.signer();
         if let Status::Verified(ref previous) = self.nullifies[public_key_index as usize] {
             // Create fault
             let activity = NullifyFinalize::new(previous.clone(), finalize);
@@ -963,7 +952,7 @@ impl<
         let nullify = Nullify::sign(&self.namespace, share, self.view);
 
         // Handle the nullify
-        self.handle_nullify(share.index, nullify.clone()).await;
+        self.handle_nullify(nullify.clone()).await;
 
         // Sync the journal
         self.journal
@@ -1016,7 +1005,7 @@ impl<
         round.add_reserved_nullify(public_key_index)
     }
 
-    async fn handle_nullify(&mut self, public_key_index: u32, nullify: Nullify<V>) {
+    async fn handle_nullify(&mut self, nullify: Nullify<V>) {
         // Check to see if nullify is for proposal in view
         let view = nullify.view;
         let round = self.views.entry(view).or_insert_with(|| {
@@ -1030,7 +1019,7 @@ impl<
 
         // Handle nullify
         let msg = Voter::Nullify(nullify.clone());
-        if round.add_verified_nullify(public_key_index, nullify).await && self.journal.is_some() {
+        if round.add_verified_nullify(nullify).await && self.journal.is_some() {
             self.journal
                 .as_mut()
                 .unwrap()
@@ -1363,7 +1352,7 @@ impl<
         round.add_reserved_notarize(public_key_index, notarize)
     }
 
-    async fn handle_notarize(&mut self, public_key_index: u32, notarize: Notarize<V, D>) {
+    async fn handle_notarize(&mut self, notarize: Notarize<V, D>) {
         // Check to see if notarize is for proposal in view
         let view = notarize.view();
         let round = self.views.entry(view).or_insert_with(|| {
@@ -1377,11 +1366,7 @@ impl<
 
         // Handle notarize
         let msg = Voter::Notarize(notarize.clone());
-        if round
-            .add_verified_notarize(public_key_index, notarize)
-            .await
-            && self.journal.is_some()
-        {
+        if round.add_verified_notarize(notarize).await && self.journal.is_some() {
             self.journal
                 .as_mut()
                 .unwrap()
@@ -1534,7 +1519,7 @@ impl<
         round.add_reserved_finalize(public_key_index, finalize)
     }
 
-    async fn handle_finalize(&mut self, public_key_index: u32, finalize: Finalize<V, D>) {
+    async fn handle_finalize(&mut self, finalize: Finalize<V, D>) {
         // Get view for finalize
         let view = finalize.view();
         let round = self.views.entry(view).or_insert_with(|| {
@@ -1548,11 +1533,7 @@ impl<
 
         // Handle finalize
         let msg = Voter::Finalize(finalize.clone());
-        if round
-            .add_verified_finalize(public_key_index, finalize)
-            .await
-            && self.journal.is_some()
-        {
+        if round.add_verified_finalize(finalize).await && self.journal.is_some() {
             self.journal
                 .as_mut()
                 .unwrap()
@@ -1719,8 +1700,7 @@ impl<
         // Attempt to notarize
         if let Some(notarize) = self.construct_notarize(view) {
             // Handle the notarize
-            self.handle_notarize(public_key_index, notarize.clone())
-                .await;
+            self.handle_notarize(notarize.clone()).await;
 
             // Sync the journal
             self.journal
@@ -1860,8 +1840,7 @@ impl<
         // Attempt to finalize
         if let Some(finalize) = self.construct_finalize(view) {
             // Handle the finalize
-            self.handle_finalize(public_key_index, finalize.clone())
-                .await;
+            self.handle_finalize(finalize.clone()).await;
 
             // Sync the journal
             self.journal
@@ -1975,7 +1954,7 @@ impl<
                             [public_key_index as usize]
                             == self.crypto.public_key();
                         let proposal = notarize.proposal.clone();
-                        self.handle_notarize(public_key_index, notarize).await;
+                        self.handle_notarize(notarize).await;
 
                         // Update round info
                         if me {
@@ -1999,7 +1978,7 @@ impl<
                         let me = self.supervisor.participants(view).unwrap()
                             [public_key_index as usize]
                             == self.crypto.public_key();
-                        self.handle_nullify(public_key_index, nullify).await;
+                        self.handle_nullify(nullify).await;
 
                         // Update round info
                         if me {
@@ -2021,7 +2000,7 @@ impl<
                         let me = self.supervisor.participants(view).unwrap()
                             [public_key_index as usize]
                             == self.crypto.public_key();
-                        self.handle_finalize(public_key_index, finalize).await;
+                        self.handle_finalize(finalize).await;
 
                         // Update round info
                         //
@@ -2064,8 +2043,7 @@ impl<
         // in case they help us avoid unnecessary work.
         let (mut verifier_sender, mut verifier_receiver) =
             mpsc::channel::<(View, View, C::PublicKey, Voter<V, D>)>(1024);
-        let (mut verified_sender, mut verified_receiver) =
-            mpsc::channel::<(C::PublicKey, Voter<V, D>)>(1024);
+        let (mut verified_sender, mut verified_receiver) = mpsc::channel::<(Voter<V, D>)>(1024);
         self.context.with_label("verifier").spawn({
             let mut latest = observed_view;
             let namespace = self.namespace.clone();
@@ -2257,7 +2235,7 @@ impl<
                 },
                 verified = verified_receiver.next() => {
                     // Break if there is an internal error
-                    let Some((sender, msg)) = verified else {
+                    let Some(msg) = verified else {
                         break;
                     };
 
@@ -2268,19 +2246,16 @@ impl<
                         continue;
                     }
 
-                    // Get public key index
-                    let public_key_index = self.supervisor.is_participant(view, &sender).unwrap();
-
                     // Process message
                     match msg {
                         Voter::Notarize(notarize) => {
-                            self.handle_notarize(public_key_index, notarize).await;
+                            self.handle_notarize(notarize).await;
                         }
                         Voter::Nullify(nullify) => {
-                            self.handle_nullify(public_key_index, nullify).await;
+                            self.handle_nullify(nullify).await;
                         }
                         Voter::Finalize(finalize) => {
-                            self.handle_finalize(public_key_index, finalize).await;
+                            self.handle_finalize(finalize).await;
                         }
                         Voter::Notarization(_)| Voter::Nullification(_) | Voter::Finalization(_) => {
                             unreachable!("we should not receive these messages from the verifier")
