@@ -754,7 +754,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dial_failure_increments_and_connect_resets() {
+    fn test_dial_failure_and_dial_success() {
         let socket = test_socket();
         let peer_info = create_peer_info::<Secp256r1>(18, socket, 1000);
         let mut record = Record::<Secp256r1>::unknown();
@@ -782,26 +782,16 @@ mod tests {
             "Failure count should not change for wrong socket"
         );
 
-        // Reserve and connect resets failures
-        assert!(record.reserve());
-        record.connect();
+        // Success resets failures
+        record.dial_success();
         assert!(
             matches!(&record.address, Address::Discovered(_, 0)),
-            "Failures should reset on connect"
+            "Failures should reset"
         );
 
-        // Fail dial again after connect/release
-        record.release();
+        // Fail dial again
         record.dial_failure(socket);
         assert!(matches!(&record.address, Address::Discovered(_, 1)));
-
-        // Release does not reset failures
-        assert!(record.reserve());
-        record.release();
-        assert!(
-            matches!(&record.address, Address::Discovered(_, 1)),
-            "Failures should not reset on release"
-        );
     }
 
     #[test]
@@ -847,11 +837,15 @@ mod tests {
         );
 
         // Status Active
-        record_disc.connect(); // fails reset to 0
+        record_disc.connect();
         assert!(!record_disc.want(min_fails), "Should not want when Active");
 
         // Status Inert again (after release)
         record_disc.release();
+        assert!(record_disc.want(min_fails));
+
+        // Reset failures
+        record_disc.dial_success(); // Reset failures
         assert!(
             !record_disc.want(min_fails),
             "Should not want when Inert and fails=0"
