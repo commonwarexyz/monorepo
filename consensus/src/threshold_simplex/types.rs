@@ -104,6 +104,7 @@ fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
 }
 
 pub struct PartialVerifier<V: Variant, D: Digest> {
+    view: Option<View>,
     namespace: Vec<u8>,
     identity: Poly<V::Public>,
 
@@ -115,6 +116,7 @@ pub struct PartialVerifier<V: Variant, D: Digest> {
 impl<V: Variant, D: Digest> PartialVerifier<V, D> {
     pub fn new(namespace: Vec<u8>, identity: Poly<V::Public>) -> Self {
         Self {
+            view: None,
             identity,
             namespace,
 
@@ -125,14 +127,29 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
     }
 
     pub fn add_notarize(&mut self, notarize: Notarize<V, D>) {
+        if let Some(view) = self.view {
+            assert_eq!(view, notarize.proposal.view);
+        } else {
+            self.view = Some(notarize.proposal.view);
+        }
         self.notarizes.push(notarize);
     }
 
     pub fn add_nullify(&mut self, nullify: Nullify<V>) {
+        if let Some(view) = self.view {
+            assert_eq!(view, nullify.view);
+        } else {
+            self.view = Some(nullify.view);
+        }
         self.nullifies.push(nullify);
     }
 
     pub fn add_finalize(&mut self, finalize: Finalize<V, D>) {
+        if let Some(view) = self.view {
+            assert_eq!(view, finalize.proposal.view);
+        } else {
+            self.view = Some(finalize.proposal.view);
+        }
         self.finalizes.push(finalize);
     }
 
