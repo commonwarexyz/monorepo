@@ -346,21 +346,32 @@ impl<V: Variant, D: Digest> Notarize<V, D> {
         identity: &Poly<V::Public>,
         mut notarizes: Vec<Notarize<V, D>>,
     ) -> (Vec<Notarize<V, D>>, Vec<u32>) {
+        // Prepare to verify
+        if notarizes.is_empty() {
+            return (notarizes, vec![]);
+        } else if notarizes.len() == 1 {
+            // If there is only one notarize, verify it directly (will perform
+            // inner aggregation)
+            let valid = notarizes[0].verify(namespace, identity);
+            if valid {
+                return (notarizes, vec![]);
+            } else {
+                return (vec![], vec![notarizes[0].signer()]);
+            }
+        }
+        let proposal = &notarizes[0].proposal;
+        let mut invalid = BTreeSet::new();
+
         // Verify proposal signatures
-        assert!(!notarizes.is_empty());
         let notarize_namespace = notarize_namespace(namespace);
-        let notarize_message = notarizes[0].proposal.encode();
+        let notarize_message = proposal.encode();
         let notarize_signatures = notarizes.iter().map(|n| &n.proposal_signature);
-        let notarize_result = partial_verify_multiple_public_keys::<V, _>(
+        if let Err(err) = partial_verify_multiple_public_keys::<V, _>(
             identity,
             Some(&notarize_namespace),
             &notarize_message,
             notarize_signatures,
-        );
-
-        // Remove invalid notarizes
-        let mut invalid = BTreeSet::new();
-        if let Err(err) = notarize_result {
+        ) {
             for signature in err.iter() {
                 invalid.insert(signature.index);
             }
@@ -368,28 +379,24 @@ impl<V: Variant, D: Digest> Notarize<V, D> {
 
         // Verify seed signatures
         let seed_namespace = seed_namespace(namespace);
-        let seed_message = view_message(notarizes[0].proposal.view);
+        let seed_message = view_message(proposal.view);
         let seed_signatures = notarizes
             .iter()
             .filter(|n| !invalid.contains(&n.seed_signature.index))
             .map(|n| &n.seed_signature);
-        let seed_result = partial_verify_multiple_public_keys::<V, _>(
+        if let Err(err) = partial_verify_multiple_public_keys::<V, _>(
             identity,
             Some(&seed_namespace),
             &seed_message,
             seed_signatures,
-        );
-
-        // Update invalid notarizes
-        if let Err(err) = seed_result {
+        ) {
             for signature in err.iter() {
                 invalid.insert(signature.index);
             }
         }
 
         // Remove invalid notarizes
-        notarizes.retain(|n| !invalid.contains(&n.proposal_signature.index));
-
+        notarizes.retain(|n| !invalid.contains(&n.seed_signature.index));
         (notarizes, invalid.into_iter().collect())
     }
 
