@@ -525,11 +525,10 @@ impl<
                             for notarization in response.notarizations {
                                 let view = notarization.view();
                                 let entry = Entry { task: Task::Notarization, view };
-                                if !self.required.contains(&entry) {
+                                if !self.required.remove(&entry) {
                                     debug!(view, sender = ?s, "unnecessary notarization");
                                     continue;
                                 }
-                                self.required.remove(&entry);
                                 self.notarizations.insert(view, notarization.clone());
                                 voter.notarization(notarization).await;
                                 notarizations_found.insert(view);
@@ -538,11 +537,10 @@ impl<
                             for nullification in response.nullifications {
                                 let view = nullification.view;
                                 let entry = Entry { task: Task::Nullification, view };
-                                if !self.required.contains(&entry) {
+                                if !self.required.remove(&entry) {
                                     debug!(view, sender = ?s, "unnecessary nullification");
                                     continue;
                                 }
-                                self.required.remove(&entry);
                                 self.nullifications.insert(view, nullification.clone());
                                 voter.nullification(nullification).await;
                                 nullifications_found.insert(view);
