@@ -30,8 +30,8 @@ pub trait Hasher<H: CHasher>: Send + Sync {
     /// Compute the digest of a byte slice.
     fn digest(&mut self, data: &[u8]) -> H::Digest;
 
-    /// Access the underlying commonware_cryptography hasher.
-    fn c_hasher(&mut self) -> &mut H;
+    /// Access the inner commonware_cryptography hasher.
+    fn inner(&mut self) -> &mut H;
 }
 
 /// The standard hasher to use with an MMR for computing leaf, node and root digests.
@@ -63,7 +63,7 @@ impl<'a, H: CHasher> Basic<'a, H> {
 }
 
 impl<H: CHasher> Hasher<H> for Basic<'_, H> {
-    fn c_hasher(&mut self) -> &mut H {
+    fn inner(&mut self) -> &mut H {
         self.hasher
     }
 
@@ -136,9 +136,7 @@ impl<'a, H: CHasher, S: Storage<H::Digest>> Grafting<'a, H, S> {
 
         // Walking up self.height levels from the rightmost leaf involves simply adding self.height
         // to its position.
-        let base_leaf_pos = leaf_num_to_pos(base_leaf_num);
-
-        base_leaf_pos + self.height as u64
+        leaf_num_to_pos(base_leaf_num) + self.height as u64
     }
 }
 
@@ -178,8 +176,8 @@ impl<H: CHasher, S: Storage<H::Digest>> Hasher<H> for Grafting<'_, H, S> {
         self.hasher.digest(data)
     }
 
-    fn c_hasher(&mut self) -> &mut H {
-        self.hasher.c_hasher()
+    fn inner(&mut self) -> &mut H {
+        self.hasher.inner()
     }
 }
 

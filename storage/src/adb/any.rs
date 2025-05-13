@@ -13,8 +13,7 @@ use crate::{
     journal::fixed::{Config as JConfig, Journal},
     mmr::{
         bitmap::Bitmap,
-        hasher::Basic,
-        hasher::Hasher,
+        hasher::{Basic, Hasher},
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
         journaled::{Config as MmrConfig, Mmr},
         verification::Proof,
@@ -108,9 +107,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config, translator: T) -> Result<Self, Error> {
         let mut hasher = H::new();
-        let mut b_hasher = Basic::new(&mut hasher);
         let mut snapshot: Index<T, u64> = Index::init(context.with_label("snapshot"), translator);
-        let (mmr, log) = Self::init_mmr_and_log(context, &mut b_hasher, cfg).await?;
+        let (mmr, log) = Self::init_mmr_and_log(context, &mut hasher, cfg).await?;
 
         let start_leaf_num = leaf_pos_to_num(mmr.pruned_to_pos()).unwrap();
         let inactivity_floor_loc = Self::build_snapshot_from_log(
@@ -138,12 +136,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// db will be as of the last committed operation.
     pub(super) async fn init_mmr_and_log(
         context: E,
-        hasher: &mut Basic<'_, H>,
+        hasher: &mut H,
         cfg: Config,
     ) -> Result<(Mmr<E, H>, Journal<E, Operation<K, V>>), Error> {
+        let mut hasher = Basic::new(hasher);
         let mut mmr = Mmr::init(
             context.with_label("mmr"),
-            hasher,
+            &mut hasher,
             MmrConfig {
                 journal_partition: cfg.mmr_journal_partition,
                 metadata_partition: cfg.mmr_metadata_partition,
@@ -197,8 +196,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             warn!(op_count, "MMR lags behind log, replaying log to catch up");
             while next_mmr_leaf_num < log_size {
                 let op = log.read(next_mmr_leaf_num).await?;
-                let digest = Self::op_digest(hasher, &op);
-                mmr.add(hasher, &digest).await?;
+                let digest = Self::op_digest(&mut hasher, &op);
+                mmr.add(&mut hasher, &digest).await?;
                 next_mmr_leaf_num += 1;
             }
         }
@@ -510,11 +509,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             .map(|op| Any::<E, _, _, _, T>::op_digest(&mut hasher, op))
             .collect::<Vec<_>>();
 
-        let r = proof
+        proof
             .verify_range_inclusion(&mut hasher, digests, start_pos, end_pos, root_digest)
-            .await?;
-
-        Ok(r)
+            .await
+            .map_err(Error::MmrError)
     }
 
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
@@ -1171,7 +1169,7 @@ mod test {
             let cfg = any_db_config();
             let (mmr, log) = Any::<_, Digest, Digest, _, TwoCap>::init_mmr_and_log(
                 context.clone(),
-                &mut hasher,
+                hasher.inner(),
                 cfg,
             )
             .await

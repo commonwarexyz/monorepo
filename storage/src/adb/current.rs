@@ -45,7 +45,8 @@ pub struct Config {
     pub bitmap_metadata_partition: String,
 }
 
-type GHasher<'a, E, H> = Grafting<'a, H, Mmr<E, H>>;
+/// A hasher type used with the status bitmap of the [Current] database.
+type Grafter<'a, E, H> = Grafting<'a, H, Mmr<E, H>>;
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of whether
 /// a key ever had a specific value, and whether the key currently has that value.
@@ -89,6 +90,10 @@ impl<
         N == Self::_MULTIPLE * H::Digest::SIZE,
         "chunk size must be expected multiple of the digest size",
     );
+    const _CHUNK_SIZE_IS_POW_OF_2_ASSERT_: () = assert!(
+        N.is_power_of_two(),
+        "chunk size must be a power of 2 to allow for grafting",
+    );
 
     /// Initializes a [Current] authenticated database from the given `config`.
     pub async fn init(context: E, config: Config, translator: T) -> Result<Self, Error> {
@@ -110,9 +115,8 @@ impl<
 
         // Initialize the db's mmr/log.
         let mut hasher = H::new();
-        let mut b_hasher = Basic::new(&mut hasher);
         let (mut mmr, log) =
-            Any::<_, _, _, _, T>::init_mmr_and_log(context.clone(), &mut b_hasher, cfg).await?;
+            Any::<_, _, _, _, T>::init_mmr_and_log(context.clone(), &mut hasher, cfg).await?;
 
         // Ensure consistency between the bitmap and the db's MMR.
         let mmr_pruned_pos = mmr.pruned_to_pos();
@@ -130,7 +134,7 @@ impl<
         let pruned_bits = status.pruned_bits();
         let bitmap_pruned_pos = leaf_num_to_pos(pruned_bits);
         let mmr_pruned_leaves = leaf_pos_to_num(mmr_pruned_pos).unwrap();
-        let mut g_hasher = GHasher::new(&mut hasher, 9, &mmr);
+        let mut grafter = Grafter::new(&mut hasher, Self::grafting_height(), &mmr);
 
         if bitmap_pruned_pos < mmr_pruned_pos {
             // The bitmap should never be behind the mmr more than one chunk's worth of bits, since
@@ -142,7 +146,7 @@ impl<
             // Prepend the missing (inactive) bits needed to align the bitmap, which can only be
             // pruned to a chunk boundary, with the MMR's pruning boundary.
             for _ in pruned_bits..mmr_pruned_leaves {
-                status.append(&mut g_hasher, false).await?;
+                status.append(&mut grafter, false).await?;
             }
         }
 
@@ -152,7 +156,7 @@ impl<
             start_leaf_num,
             &log,
             &mut snapshot,
-            Some((&mut g_hasher, &mut status)),
+            Some((&mut grafter, &mut status)),
         )
         .await
         .unwrap();
@@ -204,20 +208,29 @@ impl<
         self.any.get(key).await
     }
 
+    /// Get the level of the base MMR into which we are grafting.
+    ///
+    /// This value is log2 of the chunk size in bits. Since we assume the chunk size is a power of
+    /// 2, we compute this from trailing_zeros.
+    fn grafting_height() -> u32 {
+        Bitmap::<H, N>::CHUNK_SIZE_BITS.trailing_zeros()
+    }
+
     /// Updates `key` to have value `value`. If the key already has this same value, then this is a
     /// no-op. The operation is reflected in the snapshot, but will be subject to rollback until the
     /// next successful `commit`.
     pub async fn update(&mut self, key: K, value: V) -> Result<UpdateResult, Error> {
         let update_result = self.any.update(key, value).await?;
-        let mut g_hasher = GHasher::new(&mut self.any.hasher, 9, &self.any.ops);
+        let mut grafter =
+            Grafter::new(&mut self.any.hasher, Self::grafting_height(), &self.any.ops);
         match update_result {
             UpdateResult::NoOp => return Ok(update_result),
             UpdateResult::Inserted(_) => (),
             UpdateResult::Updated(old_loc, _) => {
-                self.status.set_bit(&mut g_hasher, old_loc, false).await?;
+                self.status.set_bit(&mut grafter, old_loc, false).await?;
             }
         }
-        self.status.append(&mut g_hasher, true).await?;
+        self.status.append(&mut grafter, true).await?;
 
         Ok(update_result)
     }
@@ -230,9 +243,10 @@ impl<
             return Ok(());
         };
 
-        let mut g_hasher = GHasher::new(&mut self.any.hasher, 9, &self.any.ops);
-        self.status.append(&mut g_hasher, false).await?;
-        self.status.set_bit(&mut g_hasher, old_loc, false).await?;
+        let mut grafter =
+            Grafter::new(&mut self.any.hasher, Self::grafting_height(), &self.any.ops);
+        self.status.append(&mut grafter, false).await?;
+        self.status.set_bit(&mut grafter, old_loc, false).await?;
 
         Ok(())
     }
@@ -265,9 +279,10 @@ impl<
                 .move_op_if_active(op, self.any.inactivity_floor_loc)
                 .await?;
             if let Some(old_loc) = old_loc {
-                let mut g_hasher = GHasher::new(&mut self.any.hasher, 9, &self.any.ops);
-                self.status.set_bit(&mut g_hasher, old_loc, false).await?;
-                self.status.append(&mut g_hasher, true).await?;
+                let mut grafter =
+                    Grafter::new(&mut self.any.hasher, Self::grafting_height(), &self.any.ops);
+                self.status.set_bit(&mut grafter, old_loc, false).await?;
+                self.status.append(&mut grafter, true).await?;
             }
             self.any.inactivity_floor_loc += 1;
         }
@@ -275,8 +290,9 @@ impl<
         self.any
             .apply_op(Operation::Commit(self.any.inactivity_floor_loc))
             .await?;
-        let mut g_hasher = GHasher::new(&mut self.any.hasher, 9, &self.any.ops);
-        self.status.append(&mut g_hasher, false).await?;
+        let mut grafter =
+            Grafter::new(&mut self.any.hasher, Self::grafting_height(), &self.any.ops);
+        self.status.append(&mut grafter, false).await?;
 
         Ok(())
     }
@@ -313,8 +329,8 @@ impl<
         let mut b_hasher = Basic::new(hasher);
         let any_root = self.any.root(&mut b_hasher);
 
-        let mut g_hasher = GHasher::new(hasher, 9, &self.any.ops);
-        let bitmap_root = self.status.root(&mut g_hasher).await?;
+        let mut grafter = Grafter::new(hasher, Self::grafting_height(), &self.any.ops);
+        let bitmap_root = self.status.root(&mut grafter).await?;
 
         hasher.update(any_root.as_ref());
         hasher.update(bitmap_root.as_ref());

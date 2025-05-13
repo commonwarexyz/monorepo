@@ -11,8 +11,8 @@ pub async fn build_and_check_test_roots_mmr(mmr: &mut impl Builder<Sha256>) {
     let mut hasher = Sha256::new();
     let mut hasher = Basic::new(&mut hasher);
     for i in 0u64..199 {
-        hasher.c_hasher().update(&i.to_be_bytes());
-        let element = hasher.c_hasher().finalize();
+        hasher.inner().update(&i.to_be_bytes());
+        let element = hasher.inner().finalize();
         let root = mmr.root(&mut hasher);
         let expected_root = ROOTS[i as usize];
         assert_eq!(hex(&root), expected_root, "at: {}", i);
@@ -23,8 +23,8 @@ pub async fn build_and_check_test_roots_mmr(mmr: &mut impl Builder<Sha256>) {
 /// Build an MMR for testing with 199 elements.
 pub async fn build_test_mmr<H: CHasher>(hasher: &mut impl Hasher<H>, mmr: &mut impl Builder<H>) {
     for i in 0u64..199 {
-        hasher.c_hasher().update(&i.to_be_bytes());
-        let element = hasher.c_hasher().finalize();
+        hasher.inner().update(&i.to_be_bytes());
+        let element = hasher.inner().finalize();
         mmr.add(hasher, &element).await.unwrap();
     }
 }
