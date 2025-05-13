@@ -52,8 +52,7 @@ impl<S: crate::Stream> crate::Stream for Stream<S> {
 
         self.auditor.event(b"recv_success", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
-            // TODO danlaine: do we need this?
-            // hasher.update(buf);
+            hasher.update(deref(buf.get_buf()));
         });
         Ok(buf)
     }
