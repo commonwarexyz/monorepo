@@ -643,6 +643,7 @@ pub struct Actor<
     broadcast_messages: Family<metrics::Message, Counter>,
     notarization_latency: Histogram,
     finalization_latency: Histogram,
+    batch_size: Option<Histogram>,
 }
 
 impl<
@@ -677,6 +678,8 @@ impl<
         let broadcast_messages = Family::<metrics::Message, Counter>::default();
         let notarization_latency = Histogram::new(LATENCY.into_iter());
         let finalization_latency = Histogram::new(LATENCY.into_iter());
+        let batch_size =
+            Histogram::new([1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0].into_iter());
         context.register("current_view", "current view", current_view.clone());
         context.register("tracked_views", "tracked views", tracked_views.clone());
         context.register("skipped_views", "skipped views", skipped_views.clone());
@@ -699,6 +702,11 @@ impl<
             "finalization_latency",
             "finalization latency",
             finalization_latency.clone(),
+        );
+        context.register(
+            "verify_batch_size",
+            "number of messages in a partial signature verification batch",
+            batch_size.clone(),
         );
 
         // Initialize store
@@ -744,6 +752,7 @@ impl<
                 broadcast_messages,
                 notarization_latency,
                 finalization_latency,
+                batch_size: Some(batch_size),
             },
             mailbox,
         )
@@ -2061,6 +2070,7 @@ impl<
             let mut latest = observed_view;
             let namespace = self.namespace.clone();
             let supervisor = self.supervisor.clone();
+            let batch_size = self.batch_size.take().unwrap();
             move |_| async move {
                 // Initialize view data structures
                 let mut counter: usize = 0;
@@ -2130,6 +2140,7 @@ impl<
                         count = signatures.len(),
                         "performing batch verification"
                     );
+                    batch_size.observe(signatures.len() as f64);
                     let identity = supervisor.identity(view).unwrap();
                     let result = partial_verify_multiple_public_keys::<V, _>(
                         identity,
