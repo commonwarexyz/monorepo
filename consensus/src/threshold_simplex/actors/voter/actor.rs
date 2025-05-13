@@ -2065,12 +2065,13 @@ impl<
                         return;
                     }
 
-                    // Select some verifier (preferring the current view)
-                    let (view, mut verifier) = if let Some(verifier) = work.remove(&latest) {
-                        (latest, verifier)
+                    // Select some verifier (preferring the current view) without removing it initially
+                    let view = if work.contains_key(&latest) {
+                        latest
                     } else {
-                        work.pop_last().unwrap()
+                        *work.keys().next_back().unwrap()
                     };
+                    let verifier = work.get_mut(&view).unwrap();
 
                     // Verify messages
                     let identity = supervisor.identity(view).unwrap();
@@ -2093,9 +2094,9 @@ impl<
                         }
                     }
 
-                    // Return verifier if still has work
-                    if !drop {
-                        work.insert(view, verifier);
+                    // Remove verifier if it no longer has work
+                    if drop {
+                        work.remove(&view);
                     }
 
                     // Drop any old verifiers
