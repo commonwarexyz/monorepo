@@ -34,15 +34,13 @@ impl Verifier for Ed25519 {
         public_key: &Self::PublicKey,
         signature: &Self::Signature,
     ) -> bool {
+        let signature = ed25519_consensus::Signature::from(signature.raw);
         match namespace {
             Some(namespace) => {
                 let payload = union_unique(namespace, message);
-                public_key
-                    .key
-                    .verify(&signature.signature, &payload)
-                    .is_ok()
+                public_key.key.verify(&signature, &payload).is_ok()
             }
-            None => public_key.key.verify(&signature.signature, message).is_ok(),
+            None => public_key.key.verify(&signature, message).is_ok(),
         }
     }
 }
@@ -107,11 +105,9 @@ impl BatchScheme for Ed25519Batch {
             Some(namespace) => Cow::Owned(union_unique(namespace, message)),
             None => Cow::Borrowed(message),
         };
-        let item = ed25519_consensus::batch::Item::from((
-            public_key.key.into(),
-            signature.signature,
-            &payload,
-        ));
+        let signature = ed25519_consensus::Signature::from(signature.raw);
+        let item =
+            ed25519_consensus::batch::Item::from((public_key.key.into(), signature, &payload));
         self.verifier.queue(item);
         true
     }
@@ -124,13 +120,12 @@ impl BatchScheme for Ed25519Batch {
 /// Ed25519 Private Key.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct PrivateKey {
-    raw: [u8; PRIVATE_KEY_LENGTH],
     key: ed25519_consensus::SigningKey,
 }
 
 impl Write for PrivateKey {
     fn write(&self, buf: &mut impl BufMut) {
-        self.raw.write(buf);
+        self.key.as_bytes().write(buf);
     }
 }
 
@@ -140,7 +135,7 @@ impl Read for PrivateKey {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
         let key = ed25519_consensus::SigningKey::from(raw);
-        Ok(Self { raw, key })
+        Ok(Self { key })
     }
 }
 
@@ -154,19 +149,19 @@ impl Eq for PrivateKey {}
 
 impl Hash for PrivateKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.raw.hash(state);
+        self.key.as_bytes().hash(state);
     }
 }
 
 impl PartialEq for PrivateKey {
     fn eq(&self, other: &Self) -> bool {
-        self.raw == other.raw
+        self.key.as_bytes() == other.key.as_bytes()
     }
 }
 
 impl Ord for PrivateKey {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.raw.cmp(&other.raw)
+        self.key.as_bytes().cmp(other.key.as_bytes())
     }
 }
 
@@ -178,46 +173,44 @@ impl PartialOrd for PrivateKey {
 
 impl AsRef<[u8]> for PrivateKey {
     fn as_ref(&self) -> &[u8] {
-        &self.raw
+        self.key.as_bytes()
     }
 }
 
 impl Deref for PrivateKey {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        &self.raw
+        self.key.as_bytes()
     }
 }
 
 impl From<ed25519_consensus::SigningKey> for PrivateKey {
     fn from(key: ed25519_consensus::SigningKey) -> Self {
-        let raw = key.to_bytes();
-        Self { raw, key }
+        Self { key }
     }
 }
 
 impl Debug for PrivateKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", hex(&self.raw))
+        write!(f, "{}", hex(self.key.as_bytes()))
     }
 }
 
 impl Display for PrivateKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", hex(&self.raw))
+        write!(f, "{}", hex(self.key.as_bytes()))
     }
 }
 
 /// Ed25519 Public Key.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct PublicKey {
-    raw: [u8; PUBLIC_KEY_LENGTH],
     key: ed25519_consensus::VerificationKey,
 }
 
 impl Write for PublicKey {
     fn write(&self, buf: &mut impl BufMut) {
-        self.raw.write(buf);
+        self.key.as_bytes().write(buf);
     }
 }
 
@@ -228,7 +221,7 @@ impl Read for PublicKey {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
         let key = VerificationKey::try_from(raw)
             .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
-        Ok(Self { raw, key })
+        Ok(Self { key })
     }
 }
 
@@ -240,33 +233,32 @@ impl Array for PublicKey {}
 
 impl AsRef<[u8]> for PublicKey {
     fn as_ref(&self) -> &[u8] {
-        &self.raw
+        self.key.as_bytes()
     }
 }
 
 impl Deref for PublicKey {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        &self.raw
+        self.key.as_bytes()
     }
 }
 
 impl From<VerificationKey> for PublicKey {
     fn from(key: VerificationKey) -> Self {
-        let raw = key.to_bytes();
-        Self { raw, key }
+        Self { key }
     }
 }
 
 impl Debug for PublicKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", hex(&self.raw))
+        write!(f, "{}", hex(self.key.as_bytes()))
     }
 }
 
 impl Display for PublicKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", hex(&self.raw))
+        write!(f, "{}", hex(self.key.as_bytes()))
     }
 }
 
@@ -274,7 +266,6 @@ impl Display for PublicKey {
 #[derive(Clone, Eq, PartialEq)]
 pub struct Signature {
     raw: [u8; SIGNATURE_LENGTH],
-    signature: ed25519_consensus::Signature,
 }
 
 impl Write for Signature {
@@ -288,8 +279,7 @@ impl Read for Signature {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let signature = ed25519_consensus::Signature::from(raw);
-        Ok(Self { raw, signature })
+        Ok(Self { raw })
     }
 }
 
@@ -332,10 +322,8 @@ impl Deref for Signature {
 
 impl From<ed25519_consensus::Signature> for Signature {
     fn from(value: ed25519_consensus::Signature) -> Self {
-        let raw = value.to_bytes();
         Self {
-            raw,
-            signature: value,
+            raw: value.to_bytes(),
         }
     }
 }
