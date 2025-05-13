@@ -96,7 +96,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Registry<E
 
         // Other initialization.
         let metrics = Metrics::init(context.clone());
-        metrics.tracked.set(peers.len() as i64);
+        metrics.tracked.set((peers.len() - 1) as i64); // Exclude self
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
 
         Self {
@@ -271,7 +271,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Registry<E
 
     /// Returns the sharable information for a given peer.
     pub fn info(&self, peer: &C::PublicKey) -> Option<PeerInfo<C>> {
-        self.peers.get(peer).and_then(|r| r.sharable_info())
+        self.peers.get(peer).and_then(|r| r.sharable())
     }
 
     /// Returns all available peer information for a given bit vector.
@@ -302,7 +302,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Registry<E
             .enumerate()
             .filter_map(|(i, b)| {
                 let peer = (!b).then_some(&set[i])?; // Only consider peers that the requester wants
-                let info = self.peers.get(peer).and_then(|r| r.sharable_info());
+                let info = self.peers.get(peer).and_then(|r| r.sharable());
                 // We may have information signed over a timestamp greater than the current time,
                 // but within our synchrony bound. Avoid sharing this information as it could get us
                 // blocked by other peers due to clock skew. Consider timestamps earlier than the

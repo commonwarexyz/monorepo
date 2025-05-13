@@ -53,15 +53,13 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
     /// Create a new tracker [`Actor`] from the given `context` and `cfg`.
     #[allow(clippy::type_complexity)]
     pub fn new(context: E, mut cfg: Config<C>) -> (Self, Mailbox<E, C>, Oracle<E, C>) {
-        // Initialization
-        let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
-
         // Sign my own information
         let socket = cfg.address;
         let timestamp = context.current().epoch_millis();
         let ip_namespace = union(&cfg.namespace, NAMESPACE_SUFFIX_IP);
         let myself = types::PeerInfo::sign(&mut cfg.crypto, &ip_namespace, socket, timestamp);
 
+        // General initialization
         let registry_cfg = registry::Config {
             mailbox_size: cfg.mailbox_size,
             max_sets: cfg.tracked_peer_sets,
@@ -69,6 +67,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
             rate_limit: cfg.allowed_connection_rate_per_peer,
         };
         let registry = Registry::init(context.clone(), cfg.bootstrappers, myself, registry_cfg);
+        let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
 
         (
             Self {
@@ -90,7 +89,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
     /// Handle an incoming list of peer information.
     ///
     /// Returns an error if the list itself or any entries can be considered malformed.
-    fn validate_peers(&mut self, infos: &Vec<types::PeerInfo<C>>) -> Result<(), Error> {
+    fn validate(&mut self, infos: &Vec<types::PeerInfo<C>>) -> Result<(), Error> {
         // Ensure there aren't too many peers sent
         if infos.len() > self.peer_gossip_max_count {
             return Err(Error::TooManyPeers(infos.len()));
@@ -184,9 +183,10 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
                     };
 
                     // Truncate to a random selection of peers if we have too many infos
-                    if infos.len() > self.peer_gossip_max_count {
-                        infos.shuffle(&mut self.context);
-                        infos.truncate(self.peer_gossip_max_count);
+                    let max = self.peer_gossip_max_count;
+                    if infos.len() > max {
+                        infos.partial_shuffle(&mut self.context, max);
+                        infos.truncate(max);
                     }
 
                     // Send the info
@@ -195,7 +195,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
                     }
                 }
                 Message::Peers { peers, mut peer } => {
-                    if let Err(e) = self.validate_peers(&peers) {
+                    if let Err(e) = self.validate(&peers) {
                         debug!(error = ?e, "failed to handle peers");
                         peer.kill().await;
                         continue;
@@ -901,7 +901,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_peers_kill_on_too_many() {
+    fn test_validate_kill_on_too_many() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut cfg = default_test_config(Ed25519::from_seed(0), Vec::new());
@@ -955,7 +955,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_peers_kill_on_private_ip_disallowed() {
+    fn test_validate_kill_on_private_ip_disallowed() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut cfg = default_test_config(Ed25519::from_seed(0), Vec::new());
@@ -987,7 +987,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_peers_kill_on_synchrony_bound() {
+    fn test_validate_kill_on_synchrony_bound() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg_initial = default_test_config(Ed25519::from_seed(0), Vec::new());
@@ -1020,7 +1020,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_peers_kill_on_invalid_signature() {
+    fn test_validate_kill_on_invalid_signature() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg_initial = default_test_config(Ed25519::from_seed(0), Vec::new());

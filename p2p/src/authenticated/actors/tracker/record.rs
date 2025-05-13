@@ -228,7 +228,7 @@ impl<C: Verifier> Record<C> {
 
     /// Get the peer information if it is sharable. The information is considered sharable if it is
     /// known and we are connected to the peer.
-    pub fn sharable_info(&self) -> Option<PeerInfo<C>> {
+    pub fn sharable(&self) -> Option<PeerInfo<C>> {
         match &self.address {
             Address::Unknown => None,
             Address::Myself(info) => Some(info),
@@ -348,7 +348,7 @@ mod tests {
         assert_eq!(record.sets, 0);
         assert!(!record.persistent);
         assert_eq!(record.socket(), None);
-        assert!(record.sharable_info().is_none());
+        assert!(record.sharable().is_none());
         assert!(!record.blocked());
         assert!(!record.reserved());
         assert!(record.want(0), "Should want info for unknown peer");
@@ -368,7 +368,7 @@ mod tests {
         assert!(record.persistent);
         assert_eq!(record.socket(), Some(my_info.socket),);
         assert!(compare_optional_peer_info(
-            record.sharable_info().as_ref(),
+            record.sharable().as_ref(),
             &my_info
         ));
         assert!(!record.blocked());
@@ -387,7 +387,7 @@ mod tests {
         assert_eq!(record.sets, 0);
         assert!(record.persistent);
         assert_eq!(record.socket(), Some(socket));
-        assert!(record.sharable_info().is_none());
+        assert!(record.sharable().is_none());
         assert!(!record.blocked());
         assert!(!record.reserved());
         assert!(record.want(0), "Should want info for bootstrapper");
@@ -407,7 +407,7 @@ mod tests {
             matches!(&record.address, Address::Discovered(info, 0) if peer_info_contents_are_equal(info, &peer_info)),
             "Address should be Discovered with 0 failures"
         );
-        assert!(record.sharable_info().is_none(), "Info not sharable yet");
+        assert!(record.sharable().is_none(), "Info not sharable yet");
         assert!(!record.persistent);
     }
 
@@ -424,7 +424,7 @@ mod tests {
             matches!(&record.address, Address::Discovered(info, 0) if peer_info_contents_are_equal(info, &peer_info)),
             "Address should be Discovered with 0 failures"
         );
-        assert!(record.sharable_info().is_none());
+        assert!(record.sharable().is_none());
         assert!(record.persistent, "Should remain persistent after update");
     }
 
@@ -690,47 +690,47 @@ mod tests {
     }
 
     #[test]
-    fn test_sharable_info_logic() {
+    fn test_sharable_logic() {
         let socket = test_socket();
         let peer_info_data = create_peer_info::<Secp256r1>(12, socket, 100);
 
         // Unknown: Not sharable
         let record_unknown = Record::<Secp256r1>::unknown();
-        assert!(record_unknown.sharable_info().is_none());
+        assert!(record_unknown.sharable().is_none());
 
         // Myself: Sharable
         let record_myself = Record::myself(peer_info_data.clone());
         assert!(compare_optional_peer_info(
-            record_myself.sharable_info().as_ref(),
+            record_myself.sharable().as_ref(),
             &peer_info_data
         ));
 
         // Bootstrapper (no PeerInfo yet): Not sharable
         let record_boot = Record::<Secp256r1>::bootstrapper(socket);
-        assert!(record_boot.sharable_info().is_none());
+        assert!(record_boot.sharable().is_none());
 
         // Blocked: Not sharable
         let mut record_blocked = Record::<Secp256r1>::unknown();
         record_blocked.block();
-        assert!(record_blocked.sharable_info().is_none());
+        assert!(record_blocked.sharable().is_none());
 
         // Discovered but not Active: Not sharable
         let mut record_disc = Record::<Secp256r1>::unknown();
         assert!(record_disc.update(peer_info_data.clone()));
-        assert!(record_disc.sharable_info().is_none()); // Status Inert
+        assert!(record_disc.sharable().is_none()); // Status Inert
         assert!(record_disc.reserve());
-        assert!(record_disc.sharable_info().is_none()); // Status Reserved
+        assert!(record_disc.sharable().is_none()); // Status Reserved
 
         // Discovered and Active: Sharable
         record_disc.connect();
         assert!(compare_optional_peer_info(
-            record_disc.sharable_info().as_ref(),
+            record_disc.sharable().as_ref(),
             &peer_info_data
         ));
 
         // Released after Active: Not sharable
         record_disc.release();
-        assert!(record_disc.sharable_info().is_none());
+        assert!(record_disc.sharable().is_none());
     }
 
     #[test]
