@@ -1692,11 +1692,6 @@ impl<
         sender: &mut WrappedSender<Sr, Voter<V, D>>,
         view: u64,
     ) {
-        // Get public key index
-        //
-        // TODO: if not validator, just continue
-        let public_key_index = self.supervisor.share(view).unwrap().index;
-
         // Attempt to notarize
         if let Some(notarize) = self.construct_notarize(view) {
             // Handle the notarize
@@ -2042,8 +2037,8 @@ impl<
         // We attempt to verify notarization/nullification/finalization messages right away (outside this loop)
         // in case they help us avoid unnecessary work.
         let (mut verifier_sender, mut verifier_receiver) =
-            mpsc::channel::<(View, View, C::PublicKey, Voter<V, D>)>(1024);
-        let (mut verified_sender, mut verified_receiver) = mpsc::channel::<(Voter<V, D>)>(1024);
+            mpsc::channel::<(View, View, Voter<V, D>)>(1024);
+        let (mut verified_sender, mut verified_receiver) = mpsc::channel::<Voter<V, D>>(1024);
         self.context.with_label("verifier").spawn({
             let mut latest = observed_view;
             let namespace = self.namespace.clone();
@@ -2059,12 +2054,10 @@ impl<
                     if !recv_batch(
                         &mut verifier_receiver,
                         work.is_empty(),
-                        |(min, current, sender, msg)| {
+                        |(min, current, msg)| {
                             min_view = min;
                             latest = current;
-                            work.entry(current)
-                                .or_insert(PartialVerifier::new())
-                                .add(msg);
+                            work.entry(current).or_default().add(msg);
                         },
                     )
                     .await
@@ -2082,10 +2075,22 @@ impl<
                     // Verify messages
                     let identity = supervisor.identity(view).unwrap();
                     let (voters, failed, drop) = verifier.verify(&namespace, identity);
+                    let batch = voters.len() + failed.len();
+                    debug!(view, batch, "batch verified messages");
+                    batch_size.observe(batch as f64);
 
                     // Send messages
                     for msg in voters {
                         verified_sender.send(msg).await.unwrap();
+                    }
+
+                    // Block invalid signers
+                    if !failed.is_empty() {
+                        let participants = supervisor.participants(view).unwrap();
+                        for invalid in failed {
+                            let signer = participants[invalid as usize].clone();
+                            warn!(?signer, "blocking peer");
+                        }
                     }
 
                     // Return verifier if still has work
@@ -2294,7 +2299,7 @@ impl<
                             self.received_messages.get_or_create(&metrics::PeerMessage::notarize(&s)).inc();
                             if self.notarize(&s, &notarize) {
                                 verifier_sender
-                                    .send((self.min_view, self.view, s.clone(), Voter::Notarize(notarize)))
+                                    .send((self.min_view, self.view, Voter::Notarize(notarize)))
                                     .await
                                     .expect("unable to send notarize to verifier");
                             }
@@ -2308,7 +2313,7 @@ impl<
                             self.received_messages.get_or_create(&metrics::PeerMessage::nullify(&s)).inc();
                             if self.nullify(&s, &nullify) {
                                 verifier_sender
-                                    .send((self.min_view, self.view, s.clone(), Voter::Nullify(nullify)))
+                                    .send((self.min_view, self.view, Voter::Nullify(nullify)))
                                     .await
                                     .expect("unable to send nullify to verifier");
                             }
@@ -2322,7 +2327,7 @@ impl<
                             self.received_messages.get_or_create(&metrics::PeerMessage::finalize(&s)).inc();
                             if self.finalize(&s, &finalize) {
                                 verifier_sender
-                                    .send((self.min_view, self.view, s.clone(), Voter::Finalize(finalize)))
+                                    .send((self.min_view, self.view, Voter::Finalize(finalize)))
                                     .await
                                     .expect("unable to send finalize to verifier");
                             }

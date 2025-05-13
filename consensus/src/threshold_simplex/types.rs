@@ -170,6 +170,12 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
     }
 }
 
+impl<V: Variant, D: Digest> Default for PartialVerifier<V, D> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Voter represents all possible message types that can be sent by validators
 /// in the consensus protocol.
 #[derive(Clone, Debug, PartialEq)]
