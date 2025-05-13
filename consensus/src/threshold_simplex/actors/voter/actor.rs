@@ -42,7 +42,7 @@ use prometheus_client::metrics::{
 };
 use rand::Rng;
 use std::{
-    collections::{hash_map::Entry, HashSet},
+    collections::{btree_map, hash_map::Entry, HashSet},
     sync::atomic::AtomicI64,
 };
 use std::{
@@ -632,6 +632,7 @@ pub struct Actor<
     mailbox_receiver: mpsc::Receiver<Message<V, D>>,
 
     last_finalized: View,
+    min_view: View,
     view: View,
     views: BTreeMap<View, Round<C, V, D, F, S>>,
 
@@ -732,6 +733,7 @@ impl<
                 mailbox_receiver,
 
                 last_finalized: 0,
+                min_view: 0,
                 view: 0,
                 views: BTreeMap::new(),
 
@@ -1301,6 +1303,7 @@ impl<
                 break next;
             }
         };
+        self.min_view = min;
 
         // Prune journal up to min
         if pruned {
@@ -2051,20 +2054,22 @@ impl<
         // We attempt to verify notarization/nullification/finalization messages right away (outside this loop)
         // in case they help us avoid unnecessary work.
         let (mut verifier_sender, mut verifier_receiver) =
-            mpsc::channel::<(C::PublicKey, Voter<V, D>)>(1024);
+            mpsc::channel::<(View, View, C::PublicKey, Voter<V, D>)>(1024);
         let (mut verified_sender, mut verified_receiver) =
             mpsc::channel::<(C::PublicKey, Voter<V, D>)>(1024);
         self.context.with_label("verifier").spawn({
+            let mut latest = observed_view;
             let namespace = self.namespace.clone();
             let supervisor = self.supervisor.clone();
-            |_| async move {
+            move |_| async move {
                 // Initialize view data structures
                 let mut counter: usize = 0;
+                let mut min_view: View = 0;
                 let mut messages = HashMap::new();
                 #[allow(clippy::type_complexity)]
                 let mut work: BTreeMap<
-                    (u64, Vec<u8>, Vec<u8>),
-                    HashMap<PartialSignature<V>, Vec<usize>>,
+                    u64,
+                    BTreeMap<(Vec<u8>, Vec<u8>), HashMap<PartialSignature<V>, Vec<usize>>>,
                 > = BTreeMap::new();
 
                 loop {
@@ -2072,14 +2077,18 @@ impl<
                     let block = work.is_empty();
                     let alive = recv_batch(
                         &mut verifier_receiver,
-                        |(sender, msg)| {
+                        |(min, current, sender, msg)| {
+                            min_view = min;
+                            latest = current;
                             let view = msg.view();
                             let verifiable = msg.message(&namespace);
                             messages.insert(counter, (sender, msg, verifiable.len()));
-                            for (ns, m, sig) in verifiable {
-                                work.entry((view, ns, m))
+                            for (namespace, message, signature) in verifiable {
+                                work.entry(view)
                                     .or_default()
-                                    .entry(sig)
+                                    .entry((namespace, message))
+                                    .or_default()
+                                    .entry(signature)
                                     .or_default()
                                     .push(counter);
                             }
@@ -2092,10 +2101,29 @@ impl<
                         return;
                     }
 
-                    // TODO: verify current view first
+                    // Attempt to do something in current view
+                    let (view, (namespace, message), signatures) =
+                        if let btree_map::Entry::Occupied(mut entry) = work.entry(latest) {
+                            let records = entry.get_mut();
+                            let ((namespace, message), signatures) = records.pop_first().unwrap();
+                            if records.is_empty() {
+                                entry.remove();
+                            }
+                            (latest, (namespace, message), signatures)
+                        } else {
+                            let newest = *work.keys().next_back().unwrap();
+                            let btree_map::Entry::Occupied(mut entry) = work.entry(newest) else {
+                                unreachable!("missing view");
+                            };
+                            let records = entry.get_mut();
+                            let ((namespace, message), signatures) = records.pop_first().unwrap();
+                            if records.is_empty() {
+                                entry.remove();
+                            }
+                            (newest, (namespace, message), signatures)
+                        };
 
-                    // Verify most recent (in order of most recent view to oldest)
-                    let ((view, namespace, message), signatures) = work.pop_last().unwrap();
+                    // If nothing to do in current, take next highest (may be ahead of current view)
                     let identity = supervisor.identity(view).unwrap();
                     let result = partial_verify_multiple_public_keys::<V, _>(
                         identity,
@@ -2139,7 +2167,33 @@ impl<
                         }
                     }
 
-                    // TODO: drop any messages with a view that is no longer interesting
+                    // Drop any records that are no longer needed (ensures we don't keep around
+                    // messages from blocked parties)
+                    loop {
+                        let Some(entry) = work.first_entry() else {
+                            break;
+                        };
+                        if *entry.key() < min_view {
+                            let remaining = entry.remove();
+                            for (_, signatures) in remaining {
+                                for (_, idx) in signatures {
+                                    for i in idx {
+                                        let Entry::Occupied(mut entry) = messages.entry(i) else {
+                                            unreachable!("missing message");
+                                        };
+                                        let (_, _, count) = entry.get_mut();
+                                        *count -= 1;
+                                        if *count > 0 {
+                                            continue;
+                                        }
+                                        entry.remove();
+                                    }
+                                }
+                            }
+                        } else {
+                            break;
+                        }
+                    }
                 }
             }
         });
@@ -2342,7 +2396,7 @@ impl<
                             self.received_messages.get_or_create(&metrics::PeerMessage::notarize(&s)).inc();
                             if self.notarize(&s, &notarize) {
                                 verifier_sender
-                                    .send((s.clone(), Voter::Notarize(notarize)))
+                                    .send((self.min_view, self.view, s.clone(), Voter::Notarize(notarize)))
                                     .await
                                     .expect("unable to send notarize to verifier");
                             }
@@ -2356,7 +2410,7 @@ impl<
                             self.received_messages.get_or_create(&metrics::PeerMessage::nullify(&s)).inc();
                             if self.nullify(&s, &nullify) {
                                 verifier_sender
-                                    .send((s.clone(), Voter::Nullify(nullify)))
+                                    .send((self.min_view, self.view, s.clone(), Voter::Nullify(nullify)))
                                     .await
                                     .expect("unable to send nullify to verifier");
                             }
@@ -2370,7 +2424,7 @@ impl<
                             self.received_messages.get_or_create(&metrics::PeerMessage::finalize(&s)).inc();
                             if self.finalize(&s, &finalize) {
                                 verifier_sender
-                                    .send((s.clone(), Voter::Finalize(finalize)))
+                                    .send((self.min_view, self.view, s.clone(), Voter::Finalize(finalize)))
                                     .await
                                     .expect("unable to send finalize to verifier");
                             }
