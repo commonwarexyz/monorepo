@@ -953,7 +953,7 @@ mod tests {
     #[test_traced]
     fn test_backfill() {
         backfill::<MinPk>();
-        // backfill::<MinSig>();
+        backfill::<MinSig>();
     }
 
     fn one_offline<V: Variant>() {

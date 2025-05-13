@@ -517,6 +517,7 @@ impl<
                             let mut notarizations_found = BTreeMap::new();
                             let mut nullifications_found = BTreeMap::new();
                             let mut batch = HashMap::new();
+                            let mut invalid = false;
                             for notarization in response.notarizations {
                                 let view = notarization.view();
                                 let entry = Entry { task: Task::Notarization, view };
@@ -527,34 +528,55 @@ impl<
                                 let items = notarization.message(&self.namespace);
                                 let mut unique = 0;
                                 for (namespace, message, signature) in items {
-                                    // TODO: verify there is a match for anything already existing
-                                    if batch.insert((namespace, message), (view, signature)).is_none() {
+                                    if let Some((past_view, past_signature)) = batch.insert((namespace, message), (view, signature)) {
+                                        if past_view != view || past_signature != signature {
+                                            invalid = true;
+                                            break;
+                                        }
+                                    } else {
                                         unique += 1;
-                                        continue;
-                                    };
+                                    }
+                                }
+                                if invalid {
+                                    break;
                                 }
                                 if unique > 0 {
                                     notarizations_found.insert(view, notarization.clone());
                                 }
                             }
-                            for nullification in response.nullifications {
-                                let view = nullification.view;
-                                let entry = Entry { task: Task::Nullification, view };
-                                if !self.required.contains(&entry) {
-                                    debug!(view, sender = ?s, "unnecessary nullification");
-                                    continue;
-                                }
-                                let items = nullification.message(&self.namespace);
-                                let mut unique = 0;
-                                for (namespace, message, signature) in items {
-                                    if batch.insert((namespace, message), (view, signature)).is_none() {
-                                        unique += 1;
+                            if !invalid {
+                                for nullification in response.nullifications {
+                                    let view = nullification.view;
+                                    let entry = Entry { task: Task::Nullification, view };
+                                    if !self.required.contains(&entry) {
+                                        debug!(view, sender = ?s, "unnecessary nullification");
                                         continue;
-                                    };
+                                    }
+                                    let items = nullification.message(&self.namespace);
+                                    let mut unique = 0;
+                                    for (namespace, message, signature) in items {
+                                        if let Some((past_view, past_signature)) = batch.insert((namespace, message), (view, signature)) {
+                                            if past_view != view || past_signature != signature {
+                                                invalid = true;
+                                                break;
+                                            }
+                                        } else {
+                                            unique += 1;
+                                        }
+                                    }
+                                    if invalid {
+                                        break;
+                                    }
+                                    if unique > 0 {
+                                        nullifications_found.insert(view, nullification.clone());
+                                    }
                                 }
-                                if unique > 0 {
-                                    nullifications_found.insert(view, nullification.clone());
-                                }
+                            }
+                            if invalid {
+                                debug!(sender = ?s, "invalid response");
+                                self.requester.block(s);
+                                self.send(true, &mut sender).await;
+                                continue;
                             }
 
                             // Ensure there is something useful to do
