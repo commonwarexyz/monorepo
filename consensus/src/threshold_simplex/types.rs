@@ -1,6 +1,6 @@
 //! Types used in [`threshold_simplex`](crate::threshold_simplex).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -1246,9 +1246,27 @@ impl Read for Request {
 
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let id = UInt::read(reader)?.into();
+        let mut views = HashSet::new();
         let notarizations = Vec::<View>::read_range(reader, ..=*max_len)?;
+        for view in notarizations.iter() {
+            if !views.insert(view) {
+                return Err(Error::Invalid(
+                    "consensus::threshold_simplex::Request",
+                    "Duplicate notarization",
+                ));
+            }
+        }
         let remaining = max_len - notarizations.len();
+        views.clear();
         let nullifications = Vec::<View>::read_range(reader, ..=remaining)?;
+        for view in nullifications.iter() {
+            if !views.insert(view) {
+                return Err(Error::Invalid(
+                    "consensus::threshold_simplex::Request",
+                    "Duplicate nullification",
+                ));
+            }
+        }
         Ok(Request {
             id,
             notarizations,
@@ -1282,6 +1300,8 @@ impl<V: Variant, D: Digest> Response<V, D> {
             nullifications,
         }
     }
+
+    pub fn verify(&self, namespace: &[u8], public_key: &V::Public) -> bool {}
 }
 
 impl<V: Variant, D: Digest> Write for Response<V, D> {
@@ -1305,9 +1325,27 @@ impl<V: Variant, D: Digest> Read for Response<V, D> {
 
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let id = UInt::read(reader)?.into();
+        let mut views = HashSet::new();
         let notarizations = Vec::<Notarization<V, D>>::read_range(reader, ..=*max_len)?;
+        for notarization in notarizations.iter() {
+            if !views.insert(notarization.proposal.view) {
+                return Err(Error::Invalid(
+                    "consensus::threshold_simplex::Response",
+                    "Duplicate notarization",
+                ));
+            }
+        }
         let remaining = max_len - notarizations.len();
+        views.clear();
         let nullifications = Vec::<Nullification<V>>::read_range(reader, ..=remaining)?;
+        for nullification in nullifications.iter() {
+            if !views.insert(nullification.view) {
+                return Err(Error::Invalid(
+                    "consensus::threshold_simplex::Response",
+                    "Duplicate nullification",
+                ));
+            }
+        }
         Ok(Response {
             id,
             notarizations,
