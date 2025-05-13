@@ -34,13 +34,14 @@ pub trait Hasher<H: CHasher>: Send + Sync {
     fn inner(&mut self) -> &mut H;
 }
 
-/// The standard hasher to use with an MMR for computing leaf, node and root digests.
-pub struct Basic<'a, H: CHasher> {
+/// The standard hasher to use with an MMR for computing leaf, node and root digests. Leverages no
+/// external data.
+pub struct Standard<'a, H: CHasher> {
     hasher: &'a mut H,
 }
 
-impl<'a, H: CHasher> Basic<'a, H> {
-    /// Creates a new `Basic` hasher.
+impl<'a, H: CHasher> Standard<'a, H> {
+    /// Creates a new [Standard] hasher.
     pub fn new(hasher: &'a mut H) -> Self {
         Self { hasher }
     }
@@ -62,7 +63,7 @@ impl<'a, H: CHasher> Basic<'a, H> {
     }
 }
 
-impl<H: CHasher> Hasher<H> for Basic<'_, H> {
+impl<H: CHasher> Hasher<H> for Standard<'_, H> {
     fn inner(&mut self) -> &mut H {
         self.hasher
     }
@@ -101,7 +102,7 @@ impl<H: CHasher> Hasher<H> for Basic<'_, H> {
 /// Hasher for computing leaf, node and root digests when the tree is being grafted onto another
 /// MMR.
 pub struct Grafting<'a, H: CHasher, S: Storage<H::Digest>> {
-    hasher: Basic<'a, H>,
+    hasher: Standard<'a, H>,
     height: u32,
     base_mmr: &'a S,
 }
@@ -109,14 +110,14 @@ pub struct Grafting<'a, H: CHasher, S: Storage<H::Digest>> {
 impl<'a, H: CHasher, S: Storage<H::Digest>> Grafting<'a, H, S> {
     pub fn new(hasher: &'a mut H, height: u32, base_mmr: &'a S) -> Self {
         Self {
-            hasher: Basic::new(hasher),
+            hasher: Standard::new(hasher),
             height,
             base_mmr,
         }
     }
 
-    /// Access the underlying Basic (non-grafting) hasher.
-    pub fn basic(&mut self) -> &mut Basic<'a, H> {
+    /// Access the underlying [Standard] (non-grafting) hasher.
+    pub fn standard(&mut self) -> &mut Standard<'a, H> {
         &mut self.hasher
     }
 
@@ -218,7 +219,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = H::new();
-            let mut mmr_hasher = Basic::new(&mut hasher);
+            let mut mmr_hasher = Standard::new(&mut hasher);
             // input hashes to use
             let digest1 = test_digest::<H>(1);
             let digest2 = test_digest::<H>(2);
@@ -239,7 +240,7 @@ mod tests {
 
     fn test_node_digest<H: CHasher>() {
         let mut hasher = H::new();
-        let mut mmr_hasher = Basic::new(&mut hasher);
+        let mut mmr_hasher = Standard::new(&mut hasher);
         // input hashes to use
 
         let d1 = test_digest::<H>(1);
@@ -276,7 +277,7 @@ mod tests {
 
     fn test_root_digest<H: CHasher>() {
         let mut hasher = H::new();
-        let mut mmr_hasher = Basic::new(&mut hasher);
+        let mut mmr_hasher = Standard::new(&mut hasher);
         // input digests to use
         let d1 = test_digest::<H>(1);
         let d2 = test_digest::<H>(2);
@@ -319,7 +320,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = Sha256::new();
-            let mut hasher = Basic::new(&mut hasher);
+            let mut hasher = Standard::new(&mut hasher);
             let mut base_mmr = Mmr::new();
             build_test_mmr(&mut hasher, &mut base_mmr).await;
             let root = base_mmr.root(&mut hasher);
@@ -347,7 +348,7 @@ mod tests {
             // Try grafting at a height of 1 instead of 0, which requires we double the # of leaves in the base
             // tree to maintain the corresponding # of segments.
             let mut hasher = Sha256::new();
-            let mut hasher = Basic::new(&mut hasher);
+            let mut hasher = Standard::new(&mut hasher);
             build_test_mmr(&mut hasher, &mut base_mmr).await;
             {
                 let mut hasher = Sha256::new();

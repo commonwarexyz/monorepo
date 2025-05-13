@@ -264,7 +264,7 @@ impl Iterator for PathIterator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{hasher::Basic, mem::Mmr};
+    use crate::mmr::{hasher::Standard, mem::Mmr};
     use commonware_cryptography::{sha256::hash, Sha256};
     use commonware_runtime::{deterministic, Runner};
 
@@ -278,7 +278,7 @@ mod tests {
             // its number and back again.
             let mut mmr = Mmr::new();
             let mut hasher = Sha256::default();
-            let mut hasher = Basic::new(&mut hasher);
+            let mut hasher = Standard::new(&mut hasher);
             let mut num_to_pos = Vec::new();
             for _ in 0u64..1000 {
                 num_to_pos.push(mmr.add(&mut hasher, &digest).await.unwrap());

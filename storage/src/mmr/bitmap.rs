@@ -465,7 +465,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::hasher::Basic;
+    use crate::mmr::hasher::Standard;
     use commonware_codec::FixedSize;
     use commonware_cryptography::{hash, Sha256};
     use commonware_macros::test_traced;
@@ -496,7 +496,7 @@ mod tests {
 
             // Add a single bit
             let mut hasher = Sha256::new();
-            let mut hasher = Basic::new(&mut hasher);
+            let mut hasher = Standard::new(&mut hasher);
             let root = bitmap.root(&mut hasher).await.unwrap();
             bitmap.append(&mut hasher, true).await.unwrap();
             // Root should change
@@ -548,7 +548,7 @@ mod tests {
         executor.start(|_| async move {
             let test_chunk = test_chunk(b"test");
             let mut hasher = Sha256::new();
-            let mut hasher = Basic::new(&mut hasher);
+            let mut hasher = Standard::new(&mut hasher);
 
             // Add each bit one at a time after the first chunk.
             let mut bitmap = Bitmap::<_, SHA256_SIZE>::new();
@@ -607,7 +607,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = Sha256::new();
-            let mut hasher = Basic::new(&mut hasher);
+            let mut hasher = Standard::new(&mut hasher);
             let mut bitmap = Bitmap::<_, SHA256_SIZE>::new();
             bitmap
                 .append_chunk_unchecked(&mut hasher, &test_chunk(b"test"))
@@ -627,7 +627,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = Sha256::new();
-            let mut hasher = Basic::new(&mut hasher);
+            let mut hasher = Standard::new(&mut hasher);
             let mut bitmap = Bitmap::<_, SHA256_SIZE>::new();
             bitmap
                 .append_chunk_unchecked(&mut hasher, &test_chunk(b"test"))
@@ -646,7 +646,7 @@ mod tests {
     fn test_bitmap_get_out_of_bounds_bit_panic() {
         let executor = deterministic::Runner::default();
         let mut hasher = Sha256::new();
-        let mut hasher = Basic::new(&mut hasher);
+        let mut hasher = Standard::new(&mut hasher);
         executor.start(|_| async move {
             let mut bitmap = Bitmap::<_, SHA256_SIZE>::new();
             bitmap
@@ -661,7 +661,7 @@ mod tests {
     fn test_bitmap_get_pruned_bit_panic() {
         let executor = deterministic::Runner::default();
         let mut hasher = Sha256::new();
-        let mut hasher = Basic::new(&mut hasher);
+        let mut hasher = Standard::new(&mut hasher);
         executor.start(|_| async move {
             let mut bitmap = Bitmap::<_, SHA256_SIZE>::new();
             bitmap
@@ -684,7 +684,7 @@ mod tests {
             // Build a starting test MMR with two chunks worth of bits.
             let mut bitmap = Bitmap::<_, SHA256_SIZE>::default();
             let mut hasher = Sha256::new();
-            let mut hasher = Basic::new(&mut hasher);
+            let mut hasher = Standard::new(&mut hasher);
             bitmap
                 .append_chunk_unchecked(&mut hasher, &test_chunk(b"test"))
                 .await
@@ -732,7 +732,7 @@ mod tests {
             // Build a test MMR with two chunks worth of bits.
             let mut bitmap = Bitmap::<_, SHA256_SIZE>::default();
             let mut hasher = Sha256::new();
-            let mut hasher = Basic::new(&mut hasher);
+            let mut hasher = Standard::new(&mut hasher);
             bitmap
                 .append_chunk_unchecked(&mut hasher, &test_chunk(b"test"))
                 .await
@@ -786,7 +786,7 @@ mod tests {
         executor.start(|_| async move {
             // Build a bitmap with 10 chunks worth of bits.
             let mut hasher = Sha256::new();
-            let mut hasher = Basic::new(&mut hasher);
+            let mut hasher = Standard::new(&mut hasher);
             let mut bitmap = Bitmap::<_, N>::new();
             for i in 0u32..10 {
                 bitmap
@@ -862,7 +862,7 @@ mod tests {
 
             // Add a non-trivial amount of data.
             let mut hasher = Sha256::new();
-            let mut hasher = Basic::new(&mut hasher);
+            let mut hasher = Standard::new(&mut hasher);
             for i in 0..FULL_CHUNK_COUNT {
                 bitmap
                     .append_chunk_unchecked(

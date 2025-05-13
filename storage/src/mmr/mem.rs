@@ -220,8 +220,8 @@ impl<H: CHasher> Mmr<H> {
     ///
     /// # Warning
     ///
-    /// This method will change the root and invalidate any previous inclusion proofs, and
-    /// also prevent using this structure as a base mmr for grafting.
+    /// This method will change the root and invalidate any previous inclusion proofs, and also
+    /// prevent using this structure as a base mmr for grafting.
     pub async fn update_leaf(
         &mut self,
         hasher: &mut impl Hasher<H>,
@@ -358,7 +358,7 @@ impl<H: CHasher> Mmr<H> {
 mod tests {
     use super::*;
     use crate::mmr::{
-        hasher::Basic,
+        hasher::Standard,
         iterator::leaf_num_to_pos,
         tests::{build_and_check_test_roots_mmr, ROOTS},
     };
@@ -373,7 +373,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = Sha256::default();
-            let mut hasher = Basic::new(&mut hasher);
+            let mut hasher = Standard::new(&mut hasher);
             let mut mmr = Mmr::new();
             assert_eq!(
                 mmr.peak_iterator().next(),
@@ -406,7 +406,7 @@ mod tests {
             let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
             let mut leaves: Vec<u64> = Vec::new();
             let mut hasher = Sha256::default();
-            let mut hasher = Basic::new(&mut hasher);
+            let mut hasher = Standard::new(&mut hasher);
             for _ in 0..11 {
                 leaves.push(mmr.add(&mut hasher, &element).await.unwrap());
                 assert_eq!(mmr.last_leaf_pos().unwrap(), *leaves.last().unwrap());
@@ -533,7 +533,7 @@ mod tests {
             let mut mmr = Mmr::new();
             let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
             let mut hasher = Sha256::default();
-            let mut hasher = Basic::new(&mut hasher);
+            let mut hasher = Standard::new(&mut hasher);
             for _ in 0..1000 {
                 mmr.prune_all();
                 mmr.add(&mut hasher, &element).await.unwrap();
@@ -549,7 +549,7 @@ mod tests {
             let mut mmr = Mmr::new();
             let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
             let mut hasher = Sha256::default();
-            let mut hasher = Basic::new(&mut hasher);
+            let mut hasher = Standard::new(&mut hasher);
             for _ in 0..1001 {
                 assert!(
                     PeakIterator::check_validity(mmr.size()),
@@ -587,7 +587,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = Sha256::default();
-            let mut hasher = Basic::new(&mut hasher);
+            let mut hasher = Standard::new(&mut hasher);
             let mut c_hasher = Sha256::default();
             let mut mmr = Mmr::new();
             for i in 0u64..199 {
@@ -622,7 +622,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = Sha256::default();
-            let mut hasher = Basic::new(&mut hasher);
+            let mut hasher = Standard::new(&mut hasher);
             let mut c_hasher = Sha256::default();
             let (mut mmr, _) = compute_big_mmr(&mut hasher).await.unwrap();
             let root = mmr.root(&mut hasher);
@@ -663,7 +663,7 @@ mod tests {
     #[test]
     fn test_mem_mmr_update_leaf() {
         let mut hasher = Sha256::default();
-        let mut hasher = Basic::new(&mut hasher);
+        let mut hasher = Standard::new(&mut hasher);
         let mut c_hasher = Sha256::default();
         let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
         let executor = deterministic::Runner::default();
@@ -712,7 +712,7 @@ mod tests {
     #[should_panic(expected = "pos was not for a leaf")]
     fn test_mem_mmr_update_leaf_panic_invalid() {
         let mut hasher = Sha256::default();
-        let mut hasher = Basic::new(&mut hasher);
+        let mut hasher = Standard::new(&mut hasher);
         let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
 
         let executor = deterministic::Runner::default();

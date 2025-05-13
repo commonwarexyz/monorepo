@@ -13,7 +13,7 @@ use crate::{
     journal::fixed::{Config as JConfig, Journal},
     mmr::{
         bitmap::Bitmap,
-        hasher::{Basic, Hasher},
+        hasher::{Hasher, Standard},
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
         journaled::{Config as MmrConfig, Mmr},
         verification::Proof,
@@ -115,7 +115,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             start_leaf_num,
             &log,
             &mut snapshot,
-            None::<(&mut Basic<'_, H>, &mut Bitmap<H, UNUSED_N>)>,
+            None::<(&mut Standard<'_, H>, &mut Bitmap<H, UNUSED_N>)>,
         )
         .await?;
 
@@ -139,7 +139,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         hasher: &mut H,
         cfg: Config,
     ) -> Result<(Mmr<E, H>, Journal<E, Operation<K, V>>), Error> {
-        let mut hasher = Basic::new(hasher);
+        let mut hasher = Standard::new(hasher);
         let mut mmr = Mmr::init(
             context.with_label("mmr"),
             &mut hasher,
@@ -332,7 +332,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     }
 
     /// Return a digest of the operation.
-    pub fn op_digest(hasher: &mut Basic<H>, op: &Operation<K, V>) -> H::Digest {
+    pub fn op_digest(hasher: &mut Standard<H>, op: &Operation<K, V>) -> H::Digest {
         hasher.digest(&op.encode())
     }
 
@@ -439,7 +439,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     }
 
     /// Return the root of the db.
-    pub fn root(&self, hasher: &mut Basic<H>) -> H::Digest {
+    pub fn root(&self, hasher: &mut Standard<H>) -> H::Digest {
         self.ops.root(hasher)
     }
 
@@ -447,7 +447,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// `commit` method must be called to make any applied operation persistent & recoverable.
     pub(super) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<u64, Error> {
         // Update the ops MMR.
-        let mut hasher = Basic::new(&mut self.hasher);
+        let mut hasher = Standard::new(&mut self.hasher);
         let digest = Self::op_digest(&mut hasher, &op);
         self.ops.add(&mut hasher, &digest).await?;
         self.uncommitted_ops += 1;
@@ -503,7 +503,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         let end_loc = start_loc + ops.len() as u64 - 1;
         let end_pos = leaf_num_to_pos(end_loc);
 
-        let mut hasher = Basic::new(hasher);
+        let mut hasher = Standard::new(hasher);
         let digests = ops
             .iter()
             .map(|op| Any::<E, _, _, _, T>::op_digest(&mut hasher, op))
@@ -651,7 +651,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     ) -> Result<H::Digest, Error> {
         self.apply_op(Operation::Commit(self.inactivity_floor_loc))
             .await?;
-        let mut hasher = Basic::new(hasher);
+        let mut hasher = Standard::new(hasher);
         let root = self.root(&mut hasher);
         self.log.close().await?;
         self.ops.simulate_partial_sync(write_limit).await?;
@@ -679,7 +679,7 @@ mod test {
     use super::*;
     use crate::{
         index::translator::{EightCap, TwoCap},
-        mmr::{hasher::Basic, mem::Mmr as MemMmr},
+        mmr::{hasher::Standard, mem::Mmr as MemMmr},
     };
     use commonware_codec::{DecodeExt, FixedSize};
     use commonware_cryptography::{hash, sha256::Digest, Hasher as CHasher, Sha256};
@@ -718,7 +718,7 @@ mod test {
         executor.start(|context| async move {
             let mut db = open_db(context.clone()).await;
             let mut hasher = Sha256::new();
-            let mut hasher = Basic::new(&mut hasher);
+            let mut hasher = Standard::new(&mut hasher);
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.oldest_retained_loc(), None);
             assert!(matches!(db.prune_inactive().await, Ok(())));
@@ -757,7 +757,7 @@ mod test {
             // Build a db with 2 keys and make sure updates and deletions of those keys work as
             // expected.
             let mut hasher = Sha256::new();
-            let mut hasher = Basic::new(&mut hasher);
+            let mut hasher = Standard::new(&mut hasher);
             let mut db = open_db(context.clone()).await;
 
             let d1 = Sha256::fill(1u8);
@@ -894,7 +894,7 @@ mod test {
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
             let mut hasher = Sha256::new();
-            let mut hasher = Basic::new(&mut hasher);
+            let mut hasher = Standard::new(&mut hasher);
             let mut db = open_db(context.clone()).await;
 
             let mut map = HashMap::<Digest, Digest>::default();
@@ -1003,7 +1003,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = Sha256::new();
-            let mut hasher = Basic::new(&mut hasher);
+            let mut hasher = Standard::new(&mut hasher);
             let mut db = open_db(context.clone()).await;
 
             // Insert 1000 keys then sync.
@@ -1054,7 +1054,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = Sha256::new();
-            let mut hasher = Basic::new(&mut hasher);
+            let mut hasher = Standard::new(&mut hasher);
             let mut db = open_db(context.clone()).await;
 
             // Update the same key many times.
@@ -1081,7 +1081,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = Sha256::new();
-            let mut hasher = Basic::new(&mut hasher);
+            let mut hasher = Standard::new(&mut hasher);
             let mut db = open_db(context.clone()).await;
 
             let mut map = HashMap::<Digest, Digest>::default();
@@ -1129,7 +1129,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = Sha256::new();
-            let mut hasher = Basic::new(&mut hasher);
+            let mut hasher = Standard::new(&mut hasher);
             let mut db = open_db(context.clone()).await;
 
             for i in 0u64..ELEMENTS {

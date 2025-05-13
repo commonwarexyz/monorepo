@@ -386,7 +386,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::Proof;
-    use crate::mmr::{hasher::Basic, mem::Mmr};
+    use crate::mmr::{hasher::Standard, mem::Mmr};
     use commonware_cryptography::{hash, sha256::Digest, Hasher, Sha256};
     use commonware_runtime::{deterministic, Runner};
 
@@ -403,7 +403,7 @@ mod tests {
             let element = Digest::from(*b"01234567012345670123456701234567");
             let mut leaves: Vec<u64> = Vec::new();
             let mut hasher = Sha256::new();
-            let mut hasher = Basic::new(&mut hasher);
+            let mut hasher = Standard::new(&mut hasher);
             for _ in 0..11 {
                 leaves.push(mmr.add(&mut hasher, &element).await.unwrap());
             }
@@ -527,7 +527,7 @@ mod tests {
             let mut elements = Vec::new();
             let mut element_positions = Vec::new();
             let mut hasher = Sha256::new();
-            let mut hasher = Basic::new(&mut hasher);
+            let mut hasher = Standard::new(&mut hasher);
             for i in 0..49 {
                 elements.push(test_digest(i));
                 element_positions.push(
@@ -728,7 +728,7 @@ mod tests {
             let mut elements = Vec::new();
             let mut element_positions = Vec::new();
             let mut hasher = Sha256::new();
-            let mut hasher = Basic::new(&mut hasher);
+            let mut hasher = Standard::new(&mut hasher);
             for i in 0..49 {
                 elements.push(test_digest(i));
                 element_positions.push(
@@ -770,7 +770,7 @@ mod tests {
             let mut elements = Vec::new();
             let mut element_positions = Vec::new();
             let mut hasher = Sha256::new();
-            let mut hasher = Basic::new(&mut hasher);
+            let mut hasher = Standard::new(&mut hasher);
             for i in 0..49 {
                 elements.push(test_digest(i));
                 element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()).await.unwrap());
@@ -790,7 +790,7 @@ mod tests {
             // test range proofs over all possible ranges of at least 2 elements
             let root_digest = mmr.root(&mut hasher);
             let mut hasher = Sha256::new();
-            let mut hasher = Basic::new(&mut hasher);
+            let mut hasher = Standard::new(&mut hasher);
             for i in 0..elements.len() {
                 for j in i + 1..elements.len() {
                     let start_pos = element_positions[i];
@@ -855,7 +855,7 @@ mod tests {
             let mut elements = Vec::new();
             let mut element_positions = Vec::new();
             let mut hasher = Sha256::new();
-            let mut hasher = Basic::new(&mut hasher);
+            let mut hasher = Standard::new(&mut hasher);
             for i in 0..25 {
                 elements.push(test_digest(i));
                 element_positions.push(

@@ -12,7 +12,7 @@ use crate::{
     index::{Index, Translator},
     mmr::{
         bitmap::Bitmap,
-        hasher::{Basic, Grafting},
+        hasher::{Grafting, Standard},
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
         journaled::Mmr,
     },
@@ -326,7 +326,7 @@ impl<
     ///
     /// Current implementation just hashes the roots of the [Any] and [Bitmap] databases together.
     pub async fn root(&self, hasher: &mut H) -> Result<H::Digest, Error> {
-        let mut b_hasher = Basic::new(hasher);
+        let mut b_hasher = Standard::new(hasher);
         let any_root = self.any.root(&mut b_hasher);
 
         let mut grafter = Grafter::new(hasher, Self::grafting_height(), &self.any.ops);

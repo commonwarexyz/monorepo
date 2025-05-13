@@ -1,5 +1,5 @@
 use crate::mmr::{
-    hasher::{Basic, Hasher},
+    hasher::{Hasher, Standard},
     Builder,
 };
 use commonware_cryptography::{Hasher as CHasher, Sha256};
@@ -9,7 +9,7 @@ use commonware_utils::hex;
 /// roots match that from the builder's root computation
 pub async fn build_and_check_test_roots_mmr(mmr: &mut impl Builder<Sha256>) {
     let mut hasher = Sha256::new();
-    let mut hasher = Basic::new(&mut hasher);
+    let mut hasher = Standard::new(&mut hasher);
     for i in 0u64..199 {
         hasher.inner().update(&i.to_be_bytes());
         let element = hasher.inner().finalize();
