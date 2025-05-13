@@ -6,7 +6,7 @@ use crate::{
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Context,
             Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
-            NullifyFinalize, Proposal, Verifiable, View, Viewable, Voter,
+            NullifyFinalize, PartialVerifier, Proposal, Verifiable, View, Viewable, Voter,
         },
     },
     Automaton, Relay, Reporter, ThresholdSupervisor, LATENCY,
@@ -2073,36 +2073,20 @@ impl<
             let batch_size = self.batch_size.take().unwrap();
             move |_| async move {
                 // Initialize view data structures
-                let mut counter: usize = 0;
                 let mut min_view: View = 0;
-                let mut messages = HashMap::new();
-                #[allow(clippy::type_complexity)]
-                let mut work: BTreeMap<
-                    u64,
-                    BTreeMap<(Vec<u8>, Vec<u8>), HashMap<PartialSignature<V>, Vec<usize>>>,
-                > = BTreeMap::new();
+                let mut work: BTreeMap<u64, PartialVerifier<V, D>> = BTreeMap::new();
 
                 loop {
-                    // Read at least one message
+                    // Read at least one message (if there doesn't already exist a backlog)
                     if !recv_batch(
                         &mut verifier_receiver,
                         work.is_empty(),
                         |(min, current, sender, msg)| {
                             min_view = min;
                             latest = current;
-                            let view = msg.view();
-                            let verifiable = msg.message(&namespace);
-                            messages.insert(counter, (sender, msg, verifiable.len()));
-                            for (namespace, message, signature) in verifiable {
-                                work.entry(view)
-                                    .or_default()
-                                    .entry((namespace, message))
-                                    .or_default()
-                                    .entry(signature)
-                                    .or_default()
-                                    .push(counter);
-                            }
-                            counter = counter.wrapping_add(1);
+                            work.entry(current)
+                                .or_insert(PartialVerifier::new())
+                                .add(msg);
                         },
                     )
                     .await
@@ -2110,107 +2094,18 @@ impl<
                         return;
                     }
 
-                    // Attempt to do something in current view
-                    let (view, (namespace, message), signatures) =
-                        if let btree_map::Entry::Occupied(mut entry) = work.entry(latest) {
-                            let records = entry.get_mut();
-                            let ((namespace, message), signatures) = records.pop_first().unwrap();
-                            if records.is_empty() {
-                                entry.remove();
-                            }
-                            (latest, (namespace, message), signatures)
-                        } else {
-                            let newest = *work.keys().next_back().unwrap();
-                            let btree_map::Entry::Occupied(mut entry) = work.entry(newest) else {
-                                unreachable!("missing view");
-                            };
-                            let records = entry.get_mut();
-                            let ((namespace, message), signatures) = records.pop_first().unwrap();
-                            if records.is_empty() {
-                                entry.remove();
-                            }
-                            (newest, (namespace, message), signatures)
-                        };
+                    // Select some verifier (preferring the current view)
+                    let (view, mut verifier) = if let Some(verifier) = work.remove(&latest) {
+                        (latest, verifier)
+                    } else {
+                        work.pop_last().unwrap()
+                    };
 
-                    // If nothing to do in current, take next highest (may be ahead of current view)
-                    trace!(
-                        view,
-                        current = latest,
-                        min_view,
-                        count = signatures.len(),
-                        "performing batch verification"
-                    );
-                    batch_size.observe(signatures.len() as f64);
+                    // Verify messages
                     let identity = supervisor.identity(view).unwrap();
-                    let result = partial_verify_multiple_public_keys::<V, _>(
-                        identity,
-                        Some(&namespace),
-                        &message,
-                        signatures.keys(),
-                    );
+                    let (voters, failed, drop) = verifier.verify(&namespace, &identity);
 
-                    // If any are signatures are invalid, block
-                    let mut skips = HashSet::new();
-                    if let Err(invalid) = result {
-                        for signature in invalid {
-                            // TODO: block
-
-                            // TODO: make more efficient
-                            skips.insert(signature.index);
-                        }
-                    }
-
-                    // Notify the application (for any items in vec now out of items)
-                    for (signature, idx) in signatures.into_iter() {
-                        if skips.contains(&signature.index) {
-                            continue;
-                        }
-                        for i in idx.into_iter() {
-                            let Entry::Occupied(mut entry) = messages.entry(i) else {
-                                unreachable!("missing message");
-                            };
-                            let (_, _, count) = entry.get_mut();
-                            *count -= 1;
-                            if *count > 0 {
-                                continue;
-                            }
-
-                            // Remove entry
-                            let (sender, message, _) = entry.remove();
-                            if let Err(err) = verified_sender.send((sender, message)).await {
-                                warn!(?err, "failed to send verified message");
-                                continue;
-                            }
-                        }
-                    }
-
-                    // Drop any records that are no longer needed (ensures we don't keep around
-                    // messages from blocked parties)
-                    loop {
-                        let Some(entry) = work.first_entry() else {
-                            break;
-                        };
-                        if *entry.key() < min_view {
-                            let remaining = entry.remove();
-                            for (_, signatures) in remaining {
-                                for (_, idx) in signatures {
-                                    for i in idx {
-                                        let Entry::Occupied(mut entry) = messages.entry(i) else {
-                                            unreachable!("missing message");
-                                        };
-                                        let (_, _, count) = entry.get_mut();
-                                        *count -= 1;
-                                        if *count > 0 {
-                                            continue;
-                                        }
-                                        entry.remove();
-                                    }
-                                }
-                            }
-                        } else {
-                            break;
-                        }
-                    }
+                    // Send messages
                 }
             }
         });

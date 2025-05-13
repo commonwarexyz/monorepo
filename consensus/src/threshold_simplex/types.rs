@@ -105,8 +105,6 @@ fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
 
 pub struct PartialVerifier<V: Variant, D: Digest> {
     view: Option<View>,
-    namespace: Vec<u8>,
-    identity: Poly<V::Public>,
 
     notarizes: Vec<Notarize<V, D>>,
     nullifies: Vec<Nullify<V>>,
@@ -114,11 +112,9 @@ pub struct PartialVerifier<V: Variant, D: Digest> {
 }
 
 impl<V: Variant, D: Digest> PartialVerifier<V, D> {
-    pub fn new(namespace: Vec<u8>, identity: Poly<V::Public>) -> Self {
+    pub fn new() -> Self {
         Self {
             view: None,
-            identity,
-            namespace,
 
             notarizes: Vec::new(),
             nullifies: Vec::new(),
@@ -126,74 +122,50 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
         }
     }
 
-    pub fn add_notarize(&mut self, notarize: Notarize<V, D>) {
+    pub fn add(&mut self, msg: Voter<V, D>) {
         if let Some(view) = self.view {
-            assert_eq!(view, notarize.proposal.view);
+            assert_eq!(view, msg.view());
         } else {
-            self.view = Some(notarize.proposal.view);
+            self.view = Some(msg.view());
         }
-        self.notarizes.push(notarize);
-    }
-
-    pub fn add_nullify(&mut self, nullify: Nullify<V>) {
-        if let Some(view) = self.view {
-            assert_eq!(view, nullify.view);
-        } else {
-            self.view = Some(nullify.view);
+        match msg {
+            Voter::Notarize(notarize) => self.notarizes.push(notarize),
+            Voter::Nullify(nullify) => self.nullifies.push(nullify),
+            Voter::Finalize(finalize) => self.finalizes.push(finalize),
+            Voter::Notarization(_) | Voter::Nullification(_) | Voter::Finalization(_) => {
+                unreachable!("should not be adding recovered messages to partial verifier");
+            }
         }
-        self.nullifies.push(nullify);
-    }
-
-    pub fn add_finalize(&mut self, finalize: Finalize<V, D>) {
-        if let Some(view) = self.view {
-            assert_eq!(view, finalize.proposal.view);
-        } else {
-            self.view = Some(finalize.proposal.view);
-        }
-        self.finalizes.push(finalize);
     }
 
     pub fn verify(
-        mut self,
-    ) -> (
-        Vec<Notarize<V, D>>,
-        Vec<Nullify<V>>,
-        Vec<Finalize<V, D>>,
-        Vec<u32>,
-    ) {
-        // Prepare to verify
-        let mut invalid = BTreeSet::new();
+        &mut self,
+        namespace: &[u8],
+        identity: &Poly<V::Public>,
+    ) -> (Vec<Voter<V, D>>, Vec<u32>, bool) {
+        // Verify messages in vector with most messages
+        let notarize_len = self.notarizes.len();
+        let nullify_len = self.nullifies.len();
+        let finalize_len = self.finalizes.len();
+        let (voters, failed) = if notarize_len >= nullify_len && notarize_len >= finalize_len {
+            let (notarizes, failed) =
+                Notarize::verify_multiple(namespace, identity, std::mem::take(&mut self.notarizes));
+            (notarizes.into_iter().map(Voter::Notarize).collect(), failed)
+        } else if nullify_len >= finalize_len {
+            let (nullifies, failed) =
+                Nullify::verify_multiple(namespace, identity, std::mem::take(&mut self.nullifies));
+            (nullifies.into_iter().map(Voter::Nullify).collect(), failed)
+        } else {
+            let (finalizes, failed) =
+                Finalize::verify_multiple(namespace, identity, std::mem::take(&mut self.finalizes));
+            (finalizes.into_iter().map(Voter::Finalize).collect(), failed)
+        };
 
-        // Verify notarizes
-        let (notarizes, failed) =
-            Notarize::verify_multiple(&self.namespace, &self.identity, self.notarizes);
-        for signature in failed {
-            invalid.insert(signature);
-        }
-
-        // Verify nullifies
-        self.nullifies
-            .retain(|nullify| !invalid.contains(&nullify.view_signature.index));
-        let (nullifies, failed) =
-            Nullify::verify_multiple(&self.namespace, &self.identity, self.nullifies);
-        for signature in failed {
-            invalid.insert(signature);
-        }
-
-        // Verify finalizes
-        self.finalizes
-            .retain(|finalize| !invalid.contains(&finalize.proposal_signature.index));
-        let (finalizes, failed) =
-            Finalize::verify_multiple(&self.namespace, &self.identity, self.finalizes);
-        for signature in failed {
-            invalid.insert(signature);
-        }
-
+        // Return whether or not we should drop the partial verifier
         (
-            notarizes,
-            nullifies,
-            finalizes,
-            invalid.into_iter().collect(),
+            voters,
+            failed,
+            self.notarizes.is_empty() && self.nullifies.is_empty() && self.finalizes.is_empty(),
         )
     }
 }
