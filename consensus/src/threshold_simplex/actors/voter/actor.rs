@@ -2057,7 +2057,7 @@ impl<
                         |(min, current, msg)| {
                             min_view = min;
                             latest = current;
-                            work.entry(current).or_default().add(msg);
+                            work.entry(msg.view()).or_default().add(msg);
                         },
                     )
                     .await
