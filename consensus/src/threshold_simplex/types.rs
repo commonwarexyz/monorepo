@@ -138,6 +138,7 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
         }
     }
 
+    // TODO: need to support multiple proposals (right now, just verify based on first notarize)
     pub fn verify(
         &mut self,
         namespace: &[u8],
