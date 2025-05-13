@@ -725,8 +725,8 @@ mod test {
             assert_eq!(db.root(&mut hasher), MemMmr::default().root(&mut hasher));
 
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
-            let d1 = <Sha256 as CHasher>::Digest::decode(vec![1u8; SHA256_SIZE].as_ref()).unwrap();
-            let d2 = <Sha256 as CHasher>::Digest::decode(vec![2u8; SHA256_SIZE].as_ref()).unwrap();
+            let d1 = Sha256::fill(1u8);
+            let d2 = Sha256::fill(2u8);
             let root = db.root(&mut hasher);
             db.update(d1, d2).await.unwrap();
             db.close().await.unwrap();
@@ -760,8 +760,8 @@ mod test {
             let mut hasher = Basic::new(&mut hasher);
             let mut db = open_db(context.clone()).await;
 
-            let d1 = <Sha256 as CHasher>::Digest::decode(vec![1u8; SHA256_SIZE].as_ref()).unwrap();
-            let d2 = <Sha256 as CHasher>::Digest::decode(vec![2u8; SHA256_SIZE].as_ref()).unwrap();
+            let d1 = Sha256::fill(1u8);
+            let d2 = Sha256::fill(2u8);
 
             assert!(db.get(&d1).await.unwrap().is_none());
             assert!(db.get(&d2).await.unwrap().is_none());
