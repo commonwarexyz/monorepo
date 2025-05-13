@@ -67,7 +67,7 @@ pub struct Config<C: Scheme> {
     pub dial_frequency: Duration,
 
     /// Average frequency at which we will fetch a new list of dialable peers.
-    /// 
+    ///
     /// This value also limits the rate at which we attempt to re-dial any single peer.
     pub query_frequency: Duration,
 

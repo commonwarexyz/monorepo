@@ -215,7 +215,7 @@ impl<C: Verifier> Record<C> {
     /// - It is not ourselves
     /// - We are not already connected
     pub fn dialable(&self) -> bool {
-        matches!(self.status, Status::Inert | Status::Reserved)
+        self.status == Status::Inert
             && matches!(
                 self.address,
                 Address::Bootstrapper(_) | Address::Discovered(_, _)
