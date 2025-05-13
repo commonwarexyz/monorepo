@@ -103,6 +103,84 @@ fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, FINALIZE_SUFFIX)
 }
 
+pub struct PartialVerifier<V: Variant, D: Digest> {
+    namespace: Vec<u8>,
+    identity: Poly<V::Public>,
+
+    notarizes: Vec<Notarize<V, D>>,
+    nullifies: Vec<Nullify<V>>,
+    finalizes: Vec<Finalize<V, D>>,
+}
+
+impl<V: Variant, D: Digest> PartialVerifier<V, D> {
+    pub fn new(namespace: Vec<u8>, identity: Poly<V::Public>) -> Self {
+        Self {
+            identity,
+            namespace,
+
+            notarizes: Vec::new(),
+            nullifies: Vec::new(),
+            finalizes: Vec::new(),
+        }
+    }
+
+    pub fn add_notarize(&mut self, notarize: Notarize<V, D>) {
+        self.notarizes.push(notarize);
+    }
+
+    pub fn add_nullify(&mut self, nullify: Nullify<V>) {
+        self.nullifies.push(nullify);
+    }
+
+    pub fn add_finalize(&mut self, finalize: Finalize<V, D>) {
+        self.finalizes.push(finalize);
+    }
+
+    pub fn verify(
+        mut self,
+    ) -> (
+        Vec<Notarize<V, D>>,
+        Vec<Nullify<V>>,
+        Vec<Finalize<V, D>>,
+        Vec<u32>,
+    ) {
+        // Prepare to verify
+        let mut invalid = BTreeSet::new();
+
+        // Verify notarizes
+        let (notarizes, failed) =
+            Notarize::verify_multiple(&self.namespace, &self.identity, self.notarizes);
+        for signature in failed {
+            invalid.insert(signature);
+        }
+
+        // Verify nullifies
+        self.nullifies
+            .retain(|nullify| !invalid.contains(&nullify.view_signature.index));
+        let (nullifies, failed) =
+            Nullify::verify_multiple(&self.namespace, &self.identity, self.nullifies);
+        for signature in failed {
+            invalid.insert(signature);
+        }
+
+        // Verify finalizes
+        self.finalizes
+            .retain(|finalize| !invalid.contains(&finalize.proposal_signature.index));
+        let (finalizes, failed) =
+            Finalize::verify_multiple(&self.namespace, &self.identity, self.finalizes);
+        for signature in failed {
+            invalid.insert(signature);
+        }
+
+        (
+            notarizes,
+            nullifies,
+            finalizes,
+            invalid.into_iter().collect(),
+        )
+    }
+}
+
 /// Voter represents all possible message types that can be sent by validators
 /// in the consensus protocol.
 #[derive(Clone, Debug, PartialEq)]
