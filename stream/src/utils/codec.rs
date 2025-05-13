@@ -36,7 +36,10 @@ pub async fn recv_frame<T: Stream>(
     max_message_size: usize,
 ) -> Result<Bytes, Error> {
     // Read the first 4 bytes to get the length of the message
-    let len_buf = stream.recv(vec![0; 4]).await.map_err(Error::RecvFailed)?;
+    let len_buf = stream
+        .recv(Vec::with_capacity(4))
+        .await
+        .map_err(Error::RecvFailed)?;
     assert_eq!(len_buf.len(), 4);
 
     // Validate frame size
@@ -50,7 +53,7 @@ pub async fn recv_frame<T: Stream>(
 
     // Read the rest of the message
     let read = stream
-        .recv(vec![0u8; len])
+        .recv(Vec::with_capacity(len))
         .await
         .map_err(Error::RecvFailed)?;
 
@@ -123,9 +126,12 @@ mod tests {
             assert!(result.is_ok());
 
             // Do the reading manually without using recv_frame
-            let read = stream.recv(vec![0u8; 4]).await.unwrap();
+            let read = stream.recv(Vec::with_capacity(4)).await.unwrap();
             assert_eq!(read, (buf.len() as u32).to_be_bytes());
-            let read = stream.recv(vec![0u8; MAX_MESSAGE_SIZE]).await.unwrap();
+            let read = stream
+                .recv(Vec::with_capacity(MAX_MESSAGE_SIZE))
+                .await
+                .unwrap();
             assert_eq!(read, buf);
         });
     }

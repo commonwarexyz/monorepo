@@ -199,7 +199,10 @@ mod tests {
         // Create a server task that accepts one connection and echoes data
         let server = tokio::spawn(async move {
             let (_, mut sink, mut stream) = listener.accept().await.unwrap();
-            let buf = stream.recv(vec![0u8; MSG_SIZE as usize]).await.unwrap();
+            let buf = stream
+                .recv(Vec::with_capacity(MSG_SIZE as usize))
+                .await
+                .unwrap();
             sink.send(buf).await.unwrap();
         });
 

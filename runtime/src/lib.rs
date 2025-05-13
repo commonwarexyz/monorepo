@@ -1326,7 +1326,7 @@ mod tests {
             async fn read_line<St: Stream>(stream: &mut St) -> Result<String, Error> {
                 let mut line = Vec::new();
                 loop {
-                    let byte = stream.recv(vec![0; 1]).await?;
+                    let byte = stream.recv(Vec::with_capacity(1)).await?;
                     if byte[0] == b'\n' {
                         if line.last() == Some(&b'\r') {
                             line.pop(); // Remove trailing \r
@@ -1359,7 +1359,7 @@ mod tests {
                 stream: &mut St,
                 content_length: usize,
             ) -> Result<String, Error> {
-                let read = stream.recv(vec![0; content_length]).await?;
+                let read = stream.recv(Vec::with_capacity(content_length)).await?;
                 String::from_utf8(read).map_err(|_| Error::ReadFailed)
             }
 
