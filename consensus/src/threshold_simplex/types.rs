@@ -1,6 +1,6 @@
 //! Types used in [`threshold_simplex`](crate::threshold_simplex).
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -1301,7 +1301,64 @@ impl<V: Variant, D: Digest> Response<V, D> {
         }
     }
 
-    pub fn verify(&self, namespace: &[u8], public_key: &V::Public) -> bool {}
+    pub fn verify(&self, namespace: &[u8], public_key: &V::Public) -> bool {
+        // Prepare to verify
+        let mut seeds = HashMap::new();
+        let mut messages = Vec::new();
+        let mut signatures = Vec::new();
+
+        // Parse all notarizations
+        for notarization in self.notarizations.iter() {
+            // Prepare notarize message
+            let notarize_namespace = notarize_namespace(namespace);
+            let notarize_message = notarization.proposal.encode();
+            let notarize_message = (Some(notarize_namespace.as_ref()), notarize_message.as_ref());
+            messages.push(notarize_message);
+            signatures.push(&notarization.proposal_signature);
+
+            // Add seed message (if not already present)
+            if let Some(previous) = seeds.get(&notarization.proposal.view) {
+                if *previous != &notarization.seed_signature {
+                    return false;
+                }
+            } else {
+                let seed_namespace = seed_namespace(namespace);
+                let seed_message = view_message(notarization.proposal.view);
+                let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
+                messages.push(seed_message);
+                signatures.push(&notarization.seed_signature);
+                seeds.insert(notarization.proposal.view, &notarization.seed_signature);
+            }
+        }
+
+        // Parse all nullifications
+        for nullification in self.nullifications.iter() {
+            // Prepare nullify message
+            let nullify_namespace = nullify_namespace(namespace);
+            let nullify_message = view_message(nullification.view);
+            let nullify_message = (Some(nullify_namespace.as_ref()), nullify_message.as_ref());
+            messages.push(nullify_message);
+            signatures.push(&nullification.view_signature);
+
+            // Add seed message (if not already present)
+            if let Some(previous) = seeds.get(&nullification.view) {
+                if *previous != &nullification.seed_signature {
+                    return false;
+                }
+            } else {
+                let seed_namespace = seed_namespace(namespace);
+                let seed_message = view_message(nullification.view);
+                let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
+                messages.push(seed_message);
+                signatures.push(&nullification.seed_signature);
+                seeds.insert(nullification.view, &nullification.seed_signature);
+            }
+        }
+
+        // Aggregate signatures
+        let signature = aggregate_signatures::<V, _>(signatures);
+        aggregate_verify_multiple_messages::<V, _>(public_key, &messages, &signature, 1).is_ok()
+    }
 }
 
 impl<V: Variant, D: Digest> Write for Response<V, D> {
