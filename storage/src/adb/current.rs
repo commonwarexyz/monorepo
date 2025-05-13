@@ -91,12 +91,7 @@ impl<
     );
 
     /// Initializes a [Current] authenticated database from the given `config`.
-    pub async fn init(
-        context: E,
-        config: Config,
-        translator: T,
-        mut hasher: H,
-    ) -> Result<Self, Error> {
+    pub async fn init(context: E, config: Config, translator: T) -> Result<Self, Error> {
         // Initialize the MMR journal and metadata.
         let cfg = AConfig {
             mmr_journal_partition: config.mmr_journal_partition,
@@ -114,12 +109,14 @@ impl<
         .await?;
 
         // Initialize the db's mmr/log.
+        let mut hasher = H::new();
         let mut b_hasher = Basic::new(&mut hasher);
         let (mut mmr, log) =
             Any::<_, _, _, _, T>::init_mmr_and_log(context.clone(), &mut b_hasher, cfg).await?;
 
         // Ensure consistency between the bitmap and the db's MMR.
-        let mut start_leaf_num = leaf_pos_to_num(mmr.pruned_to_pos()).unwrap();
+        let mmr_pruned_pos = mmr.pruned_to_pos();
+        let mut start_leaf_num = leaf_pos_to_num(mmr_pruned_pos).unwrap();
         let bit_count = status.bit_count();
         if start_leaf_num < bit_count {
             // This can happen if the commit operation failed before the mmr was pruned.
@@ -130,31 +127,18 @@ impl<
             start_leaf_num = bit_count;
         }
 
-        let mut pruned_bits = status.pruned_bits();
+        let pruned_bits = status.pruned_bits();
         let bitmap_pruned_pos = leaf_num_to_pos(pruned_bits);
-        let mmr_pruned_pos = mmr.pruned_to_pos();
         let mmr_pruned_leaves = leaf_pos_to_num(mmr_pruned_pos).unwrap();
-        let mut snapshot = Index::init(context.with_label("snapshot"), translator);
         let mut g_hasher = GHasher::new(&mut hasher, 9, &mmr);
-        if bitmap_pruned_pos < mmr.pruned_to_pos() {
+
+        if bitmap_pruned_pos < mmr_pruned_pos {
+            // The bitmap should never be behind the mmr more than one chunk's worth of bits, since
+            // the mmr is always pruned after it.
             let chunk_bits = Bitmap::<H, N>::CHUNK_SIZE_BITS;
-            if mmr_pruned_leaves > chunk_bits && pruned_bits < mmr_pruned_leaves - chunk_bits {
-                // This is unusual but can happen if we fail to write the bitmap after pruning
-                // inactive bits from the any db, so we warn about it.
-                warn!(
-                    pruned_bits,
-                    mmr_pruned_leaves,
-                    "bitmap pruned position precedes MMR pruned position by more than 1 chunk"
-                );
-                status.prune_to_bit(start_leaf_num);
-                status
-                    .write_pruned(
-                        context.with_label("bitmap"),
-                        &config.bitmap_metadata_partition,
-                    )
-                    .await?;
-                pruned_bits = status.pruned_bits();
-            }
+            assert!(
+                mmr_pruned_leaves <= chunk_bits || pruned_bits >= mmr_pruned_leaves - chunk_bits
+            );
             // Prepend the missing (inactive) bits needed to align the bitmap, which can only be
             // pruned to a chunk boundary, with the MMR's pruning boundary.
             for _ in pruned_bits..mmr_pruned_leaves {
@@ -163,12 +147,12 @@ impl<
         }
 
         // Replay the log to generate the snapshot & populate the retained portion of the bitmap.
+        let mut snapshot = Index::init(context.with_label("snapshot"), translator);
         let inactivity_floor_loc = Any::build_snapshot_from_log(
-            &mut g_hasher,
             start_leaf_num,
             &log,
             &mut snapshot,
-            Some(&mut status),
+            Some((&mut g_hasher, &mut status)),
         )
         .await
         .unwrap();
@@ -263,6 +247,13 @@ impl<
         self.any.sync().await
     }
 
+    /// Raise the inactivity floor by exactly `max_steps` steps, followed by applying a commit
+    /// operation. Each step either advances over an inactive operation, or re-applies an active
+    /// operation to the tip and then advances over it. An active bit will be added to the status
+    /// bitmap for any moved operation, with its old location in the bitmap flipped to false.
+    ///
+    /// This method does not change the state of the db's snapshot, but it always changes the root
+    /// since it applies at least one operation.
     async fn raise_inactivity_floor(&mut self, max_steps: u64) -> Result<(), Error> {
         for _ in 0..max_steps {
             if self.any.inactivity_floor_loc == self.op_count() {
@@ -291,10 +282,11 @@ impl<
     }
 
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
-    /// upon return from this function.
+    /// upon return from this function. Also raises the inactivity floor according to the schedule,
+    /// and prunes those operations below it.
     pub async fn commit(&mut self) -> Result<(), Error> {
         // Failure recovery relies on this specific order of these three disk-based operations:
-        //  (1) commit/sync the adb::any mmr to disk (which raises the inactivity floor).
+        //  (1) commit/sync the any db to disk (which raises the inactivity floor).
         //  (2) prune the bitmap to the updated inactivity floor and write its state to disk.
         //  (3) prune the any db of inactive operations.
         self.commit_ops().await?; // (1)
@@ -313,7 +305,7 @@ impl<
 
         Ok(())
     }
-    //
+
     /// Return the root of the db.
     ///
     /// Current implementation just hashes the roots of the [Any] and [Bitmap] databases together.
@@ -397,7 +389,6 @@ pub mod test {
             context,
             current_db_config(partition_prefix),
             TwoCap,
-            Sha256::new(),
         )
         .await
         .unwrap()

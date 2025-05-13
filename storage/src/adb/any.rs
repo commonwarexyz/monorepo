@@ -87,6 +87,7 @@ pub struct Any<
     /// The number of operations that are pending commit.
     pub(super) uncommitted_ops: u64,
 
+    /// Cryptographic hasher to re-use within mutable operations requiring digest computation.
     pub(super) hasher: H,
 }
 
@@ -105,23 +106,18 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 {
     /// Returns any `Any` adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(
-        context: E,
-        mut hasher: H,
-        cfg: Config,
-        translator: T,
-    ) -> Result<Self, Error> {
+    pub async fn init(context: E, cfg: Config, translator: T) -> Result<Self, Error> {
+        let mut hasher = H::new();
         let mut b_hasher = Basic::new(&mut hasher);
         let mut snapshot: Index<T, u64> = Index::init(context.with_label("snapshot"), translator);
         let (mmr, log) = Self::init_mmr_and_log(context, &mut b_hasher, cfg).await?;
 
         let start_leaf_num = leaf_pos_to_num(mmr.pruned_to_pos()).unwrap();
-        let inactivity_floor_loc = Self::build_snapshot_from_log::<UNUSED_N>(
-            &mut b_hasher,
+        let inactivity_floor_loc = Self::build_snapshot_from_log(
             start_leaf_num,
             &log,
             &mut snapshot,
-            None,
+            None::<(&mut Basic<'_, H>, &mut Bitmap<H, UNUSED_N>)>,
         )
         .await?;
 
@@ -219,15 +215,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// corresponding to the portion of the database below the inactivity floor, and this method
     /// will panic otherwise.
     pub(super) async fn build_snapshot_from_log<const N: usize>(
-        bitmap_hasher: &mut impl Hasher<H>,
         start_leaf_num: u64,
         log: &Journal<E, Operation<K, V>>,
         snapshot: &mut Index<T, u64>,
-        mut bitmap: Option<&mut Bitmap<H, N>>,
+        mut bitmap: Option<(&mut impl Hasher<H>, &mut Bitmap<H, N>)>,
     ) -> Result<u64, Error> {
         let mut inactivity_floor_loc = start_leaf_num;
         let log_size = log.size().await?;
-        if let Some(ref bitmap) = bitmap {
+        if let Some((_, ref bitmap)) = bitmap {
             assert_eq!(start_leaf_num, bitmap.bit_count());
         }
 
@@ -252,8 +247,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                             }
 
                             // The mapped key is the same; delete it from the snapshot.
-                            if let Some(ref mut bitmap_ref) = bitmap {
-                                bitmap_ref.set_bit(bitmap_hasher, *loc, false).await?;
+                            if let Some((ref mut hasher, ref mut bitmap)) = bitmap {
+                                bitmap.set_bit(*hasher, *loc, false).await?;
                             }
                             cursor.delete();
                             break;
@@ -263,26 +258,26 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 Operation::Update(key, _) => {
                     let update_result =
                         Any::<E, K, V, H, T>::update_loc(snapshot, log, key, None, i).await?;
-                    if let Some(ref mut bitmap_ref) = bitmap {
+                    if let Some((ref mut hasher, ref mut bitmap)) = bitmap {
                         match update_result {
                             UpdateResult::NoOp => unreachable!("unexpected no-op update"),
                             UpdateResult::Inserted(_) => {
-                                bitmap_ref.append(bitmap_hasher, true).await?;
+                                bitmap.append(*hasher, true).await?;
                             }
                             UpdateResult::Updated(old_loc, _) => {
-                                bitmap_ref.set_bit(bitmap_hasher, old_loc, false).await?;
-                                bitmap_ref.append(bitmap_hasher, true).await?;
+                                bitmap.set_bit(*hasher, old_loc, false).await?;
+                                bitmap.append(*hasher, true).await?;
                             }
                         }
                     }
                 }
                 Operation::Commit(loc) => inactivity_floor_loc = loc,
             }
-            if let Some(ref mut bitmap_ref) = bitmap {
+            if let Some((ref mut hasher, ref mut bitmap)) = bitmap {
                 // If we reach this point and a bit hasn't been added for the operation, then it's
                 // an inactive operation and we need to tag it as such in the bitmap.
-                if bitmap_ref.bit_count() == i {
-                    bitmap_ref.append(bitmap_hasher, false).await?;
+                if bitmap.bit_count() == i {
+                    bitmap.append(*hasher, false).await?;
                 }
             }
         }
@@ -602,8 +597,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
     /// Raise the inactivity floor by exactly `max_steps` steps, followed by applying a commit
     /// operation. Each step either advances over an inactive operation, or re-applies an active
-    /// operation to the tip and then advances over it. If the bitmap is populated, then an active
-    /// bit will be added for any moved operation, with its old location flipped to false.
+    /// operation to the tip and then advances over it.
     ///
     /// This method does not change the state of the db's snapshot, but it always changes the root
     /// since it applies at least one operation.
@@ -714,9 +708,8 @@ mod test {
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db<E: RStorage + Clock + Metrics>(
         context: E,
-        hasher: Sha256,
     ) -> Any<E, Digest, Digest, Sha256, EightCap> {
-        Any::<E, Digest, Digest, Sha256, EightCap>::init(context, hasher, any_db_config(), EightCap)
+        Any::<E, Digest, Digest, Sha256, EightCap>::init(context, any_db_config(), EightCap)
             .await
             .unwrap()
     }
@@ -725,7 +718,7 @@ mod test {
     pub fn test_any_db_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.clone(), Sha256::new()).await;
+            let mut db = open_db(context.clone()).await;
             let mut hasher = Sha256::new();
             let mut hasher = Basic::new(&mut hasher);
             assert_eq!(db.op_count(), 0);
@@ -739,7 +732,7 @@ mod test {
             let root = db.root(&mut hasher);
             db.update(d1, d2).await.unwrap();
             db.close().await.unwrap();
-            let mut db = open_db(context.clone(), Sha256::new()).await;
+            let mut db = open_db(context.clone()).await;
             assert_eq!(db.root(&mut hasher), root);
             assert_eq!(db.op_count(), 0);
 
@@ -748,7 +741,7 @@ mod test {
             assert_eq!(db.op_count(), 1); // floor op added
             let root = db.root(&mut hasher);
             assert!(matches!(db.prune_inactive().await, Ok(())));
-            let mut db = open_db(context.clone(), Sha256::new()).await;
+            let mut db = open_db(context.clone()).await;
             assert_eq!(db.root(&mut hasher), root);
 
             // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
@@ -767,7 +760,7 @@ mod test {
             // expected.
             let mut hasher = Sha256::new();
             let mut hasher = Basic::new(&mut hasher);
-            let mut db = open_db(context.clone(), Sha256::new()).await;
+            let mut db = open_db(context.clone()).await;
 
             let d1 = <Sha256 as CHasher>::Digest::decode(vec![1u8; SHA256_SIZE].as_ref()).unwrap();
             let d2 = <Sha256 as CHasher>::Digest::decode(vec![2u8; SHA256_SIZE].as_ref()).unwrap();
@@ -855,7 +848,7 @@ mod test {
             assert_eq!(db.log.size().await.unwrap(), 9);
             let root = db.root(&mut hasher);
             db.close().await.unwrap();
-            let mut db = open_db(context.clone(), Sha256::new()).await;
+            let mut db = open_db(context.clone()).await;
             assert_eq!(db.log.size().await.unwrap(), 9);
             assert_eq!(db.root(&mut hasher), root);
 
@@ -876,7 +869,7 @@ mod test {
             db.commit().await.unwrap();
             let root = db.root(&mut hasher);
             db.close().await.unwrap();
-            let mut db = open_db(context, Sha256::new()).await;
+            let mut db = open_db(context).await;
             assert_eq!(db.root(&mut hasher), root);
             assert_eq!(db.snapshot.keys(), 2);
 
@@ -904,7 +897,7 @@ mod test {
         executor.start(|context| async move {
             let mut hasher = Sha256::new();
             let mut hasher = Basic::new(&mut hasher);
-            let mut db = open_db(context.clone(), Sha256::new()).await;
+            let mut db = open_db(context.clone()).await;
 
             let mut map = HashMap::<Digest, Digest>::default();
             for i in 0u64..ELEMENTS {
@@ -950,7 +943,7 @@ mod test {
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
             let root_digest = db.root(&mut hasher);
             db.close().await.unwrap();
-            let mut db = open_db(context.clone(), Sha256::new()).await;
+            let mut db = open_db(context.clone()).await;
             assert_eq!(root_digest, db.root(&mut hasher));
             assert_eq!(db.op_count(), 2336);
             assert_eq!(db.inactivity_floor_loc, 1478);
@@ -1013,7 +1006,7 @@ mod test {
         executor.start(|context| async move {
             let mut hasher = Sha256::new();
             let mut hasher = Basic::new(&mut hasher);
-            let mut db = open_db(context.clone(), Sha256::new()).await;
+            let mut db = open_db(context.clone()).await;
 
             // Insert 1000 keys then sync.
             const ELEMENTS: u64 = 1000;
@@ -1041,7 +1034,7 @@ mod test {
 
             // Journaled MMR recovery should read the orphaned leaf & its parents, then log
             // replaying will restore the rest.
-            let mut db = open_db(context.clone(), Sha256::new()).await;
+            let mut db = open_db(context.clone()).await;
             assert_eq!(db.root(&mut hasher), root);
 
             // Write some additional nodes, simulate failed log commit, and test we recover to the previous commit point.
@@ -1051,7 +1044,7 @@ mod test {
                 db.update(k, v).await.unwrap();
             }
             db.simulate_failed_commit_log().await.unwrap();
-            let db = open_db(context.clone(), Sha256::new()).await;
+            let db = open_db(context.clone()).await;
             assert_eq!(db.root(&mut hasher), root);
         });
     }
@@ -1064,7 +1057,7 @@ mod test {
         executor.start(|context| async move {
             let mut hasher = Sha256::new();
             let mut hasher = Basic::new(&mut hasher);
-            let mut db = open_db(context.clone(), Sha256::new()).await;
+            let mut db = open_db(context.clone()).await;
 
             // Update the same key many times.
             const UPDATES: u64 = 100;
@@ -1078,7 +1071,7 @@ mod test {
             db.close().await.unwrap();
 
             // Simulate a failed commit and test that the log replay doesn't leave behind old data.
-            let db = open_db(context.clone(), Sha256::new()).await;
+            let db = open_db(context.clone()).await;
             let iter = db.snapshot.get(&k);
             assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
             assert_eq!(db.root(&mut hasher), root);
@@ -1091,7 +1084,7 @@ mod test {
         executor.start(|context| async move {
             let mut hasher = Sha256::new();
             let mut hasher = Basic::new(&mut hasher);
-            let mut db = open_db(context.clone(), Sha256::new()).await;
+            let mut db = open_db(context.clone()).await;
 
             let mut map = HashMap::<Digest, Digest>::default();
             const ELEMENTS: u64 = 10;
@@ -1116,7 +1109,7 @@ mod test {
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
             let root_digest = db.root(&mut hasher);
             db.close().await.unwrap();
-            let db = open_db(context.clone(), Sha256::new()).await;
+            let db = open_db(context.clone()).await;
             assert_eq!(root_digest, db.root(&mut hasher));
             assert!(db.get(&k).await.unwrap().is_none());
         });
@@ -1139,7 +1132,7 @@ mod test {
         executor.start(|context| async move {
             let mut hasher = Sha256::new();
             let mut hasher = Basic::new(&mut hasher);
-            let mut db = open_db(context.clone(), Sha256::new()).await;
+            let mut db = open_db(context.clone()).await;
 
             for i in 0u64..ELEMENTS {
                 let k = hash(&i.to_be_bytes());
@@ -1191,11 +1184,10 @@ mod test {
                 Index::init(context.with_label("snapshot"), TwoCap);
             let inactivity_floor_loc =
                 Any::<_, _, _, Sha256, TwoCap>::build_snapshot_from_log::<SHA256_SIZE>(
-                    &mut hasher,
                     start_leaf_num,
                     &log,
                     &mut snapshot,
-                    Some(&mut bitmap),
+                    Some((&mut hasher, &mut bitmap)),
                 )
                 .await
                 .unwrap();
