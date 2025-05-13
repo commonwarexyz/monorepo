@@ -1281,6 +1281,9 @@ impl<V: Variant, D: Digest> Response<V, D> {
 
     pub fn verify(&self, namespace: &[u8], public_key: &V::Public) -> bool {
         // Prepare to verify
+        if self.notarizations.is_empty() && self.nullifications.is_empty() {
+            return true;
+        }
         let mut seeds = HashMap::new();
         let mut messages = Vec::new();
         let mut signatures = Vec::new();
