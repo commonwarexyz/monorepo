@@ -30,7 +30,7 @@ pub trait Hasher<H: CHasher>: Send + Sync {
     /// Compute the digest of a byte slice.
     fn digest(&mut self, data: &[u8]) -> H::Digest;
 
-    /// Access the inner commonware_cryptography hasher.
+    /// Access the inner [CHasher] hasher.
     fn inner(&mut self) -> &mut H;
 }
 
@@ -99,8 +99,66 @@ impl<H: CHasher> Hasher<H> for Standard<'_, H> {
     }
 }
 
-/// Hasher for computing leaf, node and root digests when the tree is being grafted onto another
+/// Hasher for computing leaf, node and root digests when the tree is being _grafted_ onto another
 /// MMR.
+///
+/// ## Terminology
+///
+/// * **Peak Tree**: The MMR or Merkle tree that is being grafted.
+/// * **Base MMR**: The MMR onto which we are grafting (cannot be a Merkle tree).
+///
+/// Grafting involves mapping the leaves of the peak tree to corresponding nodes in the base MMR. It
+/// allows for shorter inclusion proofs over the combined trees compared to treating them as
+/// independent.
+///
+/// One example use case is the [Current](crate::adb::current::Current) authenticated database,
+/// where a MMR is built over a log of operations, and a merkle tree over a bitmap indicating the
+/// activity state of each operation. If we were to treat the two trees as independent, then an
+/// inclusion proof for an operation and its activity state would involve a full branch from each
+/// structure. When using grafting, we can trim the branch from the base MMR at the point it "flows"
+/// up into the peak tree, reducing the size of the proof by a constant factor up to 2.
+///
+/// For concreteness, let's assume we have a base MMR over a log of 8 operations represented by the
+/// 8 leaves:
+///
+/// ```text
+///    Height
+///      3              14
+///                   /    \
+///                  /      \
+///                 /        \
+///                /          \
+///      2        6            13
+///             /   \        /    \
+///      1     2     5      9     12
+///           / \   / \    / \   /  \
+///      0   0   1 3   4  7   8 10  11
+/// ```
+///
+/// Let's assume each leaf in our peak tree corresponds to 4 leaves in the base MMR. The structure
+/// of the peak tree can be obtained by chopping off the bottom log2(4)=2 levels of the base MMR
+/// structure:
+///
+///
+/// ```text
+///    Height
+///      1              2 (was 14)
+///                   /    \
+///                  /      \
+///                 /        \
+///                /          \
+///      0        0 (was 6)    1 (was 13)
+/// ```
+///
+/// The inverse of this procedure provides our algorithm for mapping a peak tree leaf's position to
+/// a base MMR node position: take the leaf's position in the peak tree, map it to any of the
+/// corresponding leaves in the base MMR, then walk up the base MMR structure exactly the number of
+/// levels we removed.
+///
+/// In this example, leaf 0 in the peak tree corresponds to leaves \[0,1,3,4\] in the base MMR.
+/// Walking up two levels from any of these base MMR leaves produces node 6 of the base MMR, which
+/// is thus its grafting point. Leaf 1 in the peak tree corresponds to leaves \[7,8,10,11\] in the
+/// base MMR, yielding node 13 as its grafting point.
 pub struct Grafting<'a, H: CHasher, S: Storage<H::Digest>> {
     hasher: Standard<'a, H>,
     height: u32,
