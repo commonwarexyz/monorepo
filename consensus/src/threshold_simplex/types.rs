@@ -380,8 +380,17 @@ impl<V: Variant, D: Digest> Notarize<V, D> {
             seed_signatures,
         );
 
-        // Remove invalid seed signatures
-        (notarizes, invalid)
+        // Update invalid notarizes
+        if let Err(err) = seed_result {
+            for signature in err.iter() {
+                invalid.insert(signature.index);
+            }
+        }
+
+        // Remove invalid notarizes
+        notarizes.retain(|n| !invalid.contains(&n.proposal_signature.index));
+
+        (notarizes, invalid.into_iter().collect())
     }
 
     /// Creates a new signed notarize using BLS threshold signatures.
