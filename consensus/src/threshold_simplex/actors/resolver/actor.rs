@@ -527,6 +527,7 @@ impl<
                                 let items = notarization.message(&self.namespace);
                                 let mut unique = 0;
                                 for (namespace, message, signature) in items {
+                                    // TODO: verify there is a match for anything already existing
                                     if batch.insert((namespace, message), (view, signature)).is_none() {
                                         unique += 1;
                                         continue;
