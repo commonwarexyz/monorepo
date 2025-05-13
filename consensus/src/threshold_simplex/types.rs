@@ -1,5 +1,7 @@
 //! Types used in [`threshold_simplex`](crate::threshold_simplex).
 
+use std::collections::{BTreeSet, HashMap, HashSet};
+
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write,
@@ -9,7 +11,8 @@ use commonware_cryptography::{
         group::Share,
         ops::{
             aggregate_signatures, aggregate_verify_multiple_messages, partial_sign_message,
-            partial_verify_message, partial_verify_multiple_messages, verify_message,
+            partial_verify_message, partial_verify_multiple_messages,
+            partial_verify_multiple_public_keys, verify_message,
         },
         poly::{PartialSignature, Poly},
         variant::Variant,
@@ -59,11 +62,6 @@ pub trait Seedable<V: Variant> {
     fn seed(&self) -> Seed<V>;
 }
 
-// TODO: better naming
-pub trait Verifiable<V: Variant> {
-    fn message(&self, namespace: &[u8]) -> Vec<(Vec<u8>, Vec<u8>, PartialSignature<V>)>;
-}
-
 // Constants for domain separation in signature verification
 // These are used to prevent cross-protocol attacks and message-type confusion
 const SEED_SUFFIX: &[u8] = b"_SEED";
@@ -105,6 +103,79 @@ fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, FINALIZE_SUFFIX)
 }
 
+pub struct PartialVerifier<V: Variant, D: Digest> {
+    view: Option<View>,
+
+    notarizes: Vec<Notarize<V, D>>,
+    nullifies: Vec<Nullify<V>>,
+    finalizes: Vec<Finalize<V, D>>,
+}
+
+impl<V: Variant, D: Digest> PartialVerifier<V, D> {
+    pub fn new() -> Self {
+        Self {
+            view: None,
+
+            notarizes: Vec::new(),
+            nullifies: Vec::new(),
+            finalizes: Vec::new(),
+        }
+    }
+
+    pub fn add(&mut self, msg: Voter<V, D>) {
+        if let Some(view) = self.view {
+            assert_eq!(view, msg.view());
+        } else {
+            self.view = Some(msg.view());
+        }
+        match msg {
+            Voter::Notarize(notarize) => self.notarizes.push(notarize),
+            Voter::Nullify(nullify) => self.nullifies.push(nullify),
+            Voter::Finalize(finalize) => self.finalizes.push(finalize),
+            Voter::Notarization(_) | Voter::Nullification(_) | Voter::Finalization(_) => {
+                unreachable!("should not be adding recovered messages to partial verifier");
+            }
+        }
+    }
+
+    pub fn verify(
+        &mut self,
+        namespace: &[u8],
+        identity: &Poly<V::Public>,
+    ) -> (Vec<Voter<V, D>>, Vec<u32>, bool) {
+        // Verify messages in vector with most messages
+        let notarize_len = self.notarizes.len();
+        let nullify_len = self.nullifies.len();
+        let finalize_len = self.finalizes.len();
+        let (voters, failed) = if notarize_len >= nullify_len && notarize_len >= finalize_len {
+            let (notarizes, failed) =
+                Notarize::verify_multiple(namespace, identity, std::mem::take(&mut self.notarizes));
+            (notarizes.into_iter().map(Voter::Notarize).collect(), failed)
+        } else if nullify_len >= finalize_len {
+            let (nullifies, failed) =
+                Nullify::verify_multiple(namespace, identity, std::mem::take(&mut self.nullifies));
+            (nullifies.into_iter().map(Voter::Nullify).collect(), failed)
+        } else {
+            let (finalizes, failed) =
+                Finalize::verify_multiple(namespace, identity, std::mem::take(&mut self.finalizes));
+            (finalizes.into_iter().map(Voter::Finalize).collect(), failed)
+        };
+
+        // Return whether or not we should drop the partial verifier
+        (
+            voters,
+            failed,
+            self.notarizes.is_empty() && self.nullifies.is_empty() && self.finalizes.is_empty(),
+        )
+    }
+}
+
+impl<V: Variant, D: Digest> Default for PartialVerifier<V, D> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Voter represents all possible message types that can be sent by validators
 /// in the consensus protocol.
 #[derive(Clone, Debug, PartialEq)]
@@ -121,19 +192,6 @@ pub enum Voter<V: Variant, D: Digest> {
     Finalize(Finalize<V, D>),
     /// A recovered threshold signature for a finalization
     Finalization(Finalization<V, D>),
-}
-
-impl<V: Variant, D: Digest> Verifiable<V> for Voter<V, D> {
-    fn message(&self, namespace: &[u8]) -> Vec<(Vec<u8>, Vec<u8>, PartialSignature<V>)> {
-        match self {
-            Voter::Notarize(v) => v.message(namespace),
-            Voter::Notarization(_) => unreachable!("not allowed"),
-            Voter::Nullify(v) => v.message(namespace),
-            Voter::Nullification(_) => unreachable!("not allowed"),
-            Voter::Finalize(v) => v.message(namespace),
-            Voter::Finalization(_) => unreachable!("not allowed"),
-        }
-    }
 }
 
 impl<V: Variant, D: Digest> Write for Voter<V, D> {
@@ -338,6 +396,70 @@ impl<V: Variant, D: Digest> Notarize<V, D> {
         .is_ok()
     }
 
+    pub fn verify_multiple(
+        namespace: &[u8],
+        identity: &Poly<V::Public>,
+        notarizes: Vec<Notarize<V, D>>,
+    ) -> (Vec<Notarize<V, D>>, Vec<u32>) {
+        // Prepare to verify
+        if notarizes.is_empty() {
+            return (notarizes, vec![]);
+        } else if notarizes.len() == 1 {
+            // If there is only one notarize, verify it directly (will perform
+            // inner aggregation)
+            let valid = notarizes[0].verify(namespace, identity);
+            if valid {
+                return (notarizes, vec![]);
+            } else {
+                return (vec![], vec![notarizes[0].signer()]);
+            }
+        }
+        let proposal = &notarizes[0].proposal;
+        let mut invalid = BTreeSet::new();
+
+        // Verify proposal signatures
+        let notarize_namespace = notarize_namespace(namespace);
+        let notarize_message = proposal.encode();
+        let notarize_signatures = notarizes.iter().map(|n| &n.proposal_signature);
+        if let Err(err) = partial_verify_multiple_public_keys::<V, _>(
+            identity,
+            Some(&notarize_namespace),
+            &notarize_message,
+            notarize_signatures,
+        ) {
+            for signature in err.iter() {
+                invalid.insert(signature.index);
+            }
+        }
+
+        // Verify seed signatures
+        let seed_namespace = seed_namespace(namespace);
+        let seed_message = view_message(proposal.view);
+        let seed_signatures = notarizes
+            .iter()
+            .filter(|n| !invalid.contains(&n.seed_signature.index))
+            .map(|n| &n.seed_signature);
+        if let Err(err) = partial_verify_multiple_public_keys::<V, _>(
+            identity,
+            Some(&seed_namespace),
+            &seed_message,
+            seed_signatures,
+        ) {
+            for signature in err.iter() {
+                invalid.insert(signature.index);
+            }
+        }
+
+        // Remove invalid notarizes
+        (
+            notarizes
+                .into_iter()
+                .filter(|n| !invalid.contains(&n.signer()))
+                .collect(),
+            invalid.into_iter().collect(),
+        )
+    }
+
     /// Creates a new signed notarize using BLS threshold signatures.
     pub fn sign(namespace: &[u8], share: &Share, proposal: Proposal<D>) -> Self {
         let notarize_namespace = notarize_namespace(namespace);
@@ -361,27 +483,6 @@ impl<V: Variant, D: Digest> Attributable for Notarize<V, D> {
 impl<V: Variant, D: Digest> Viewable for Notarize<V, D> {
     fn view(&self) -> View {
         self.proposal.view()
-    }
-}
-
-// TODO: incorporate into sign/verify
-impl<V: Variant, D: Digest> Verifiable<V> for Notarize<V, D> {
-    fn message(&self, namespace: &[u8]) -> Vec<(Vec<u8>, Vec<u8>, PartialSignature<V>)> {
-        let notarize_namespace = notarize_namespace(namespace);
-        let notarize_message = self.proposal.encode();
-        let notarize_batch = (
-            notarize_namespace,
-            notarize_message.to_vec(),
-            self.proposal_signature.clone(),
-        );
-        let seed_namespace = seed_namespace(namespace);
-        let seed_message = view_message(self.proposal.view);
-        let seed_batch = (
-            seed_namespace,
-            seed_message.to_vec(),
-            self.seed_signature.clone(),
-        );
-        vec![notarize_batch, seed_batch]
     }
 }
 
@@ -578,6 +679,67 @@ impl<V: Variant> Nullify<V> {
         .is_ok()
     }
 
+    pub fn verify_multiple(
+        namespace: &[u8],
+        identity: &Poly<V::Public>,
+        nullifies: Vec<Nullify<V>>,
+    ) -> (Vec<Nullify<V>>, Vec<u32>) {
+        // Prepare to verify
+        if nullifies.is_empty() {
+            return (nullifies, vec![]);
+        } else if nullifies.len() == 1 {
+            let valid = nullifies[0].verify(namespace, identity);
+            if valid {
+                return (nullifies, vec![]);
+            } else {
+                return (vec![], vec![nullifies[0].signer()]);
+            }
+        }
+        let selected = &nullifies[0];
+        let mut invalid = BTreeSet::new();
+
+        // Verify view signature
+        let nullify_namespace = nullify_namespace(namespace);
+        let view_message = view_message(selected.view);
+        let view_signatures = nullifies.iter().map(|n| &n.view_signature);
+        if let Err(err) = partial_verify_multiple_public_keys::<V, _>(
+            identity,
+            Some(&nullify_namespace),
+            &view_message,
+            view_signatures,
+        ) {
+            for signature in err.iter() {
+                invalid.insert(signature.index);
+            }
+        }
+
+        // Verify seed signature
+        let seed_namespace = seed_namespace(namespace);
+        let seed_signatures = nullifies
+            .iter()
+            .filter(|n| !invalid.contains(&n.seed_signature.index))
+            .map(|n| &n.seed_signature);
+        if let Err(err) = partial_verify_multiple_public_keys::<V, _>(
+            identity,
+            Some(&seed_namespace),
+            &view_message,
+            seed_signatures,
+        ) {
+            for signature in err.iter() {
+                invalid.insert(signature.index);
+            }
+        }
+
+        // Return valid nullifies and invalid signers
+        (
+            nullifies
+                .into_iter()
+                .filter(|n| !invalid.contains(&n.signer()))
+                .collect(),
+            invalid.into_iter().collect(),
+        )
+    }
+
     /// Creates a new signed nullify using BLS threshold signatures.
     pub fn sign(namespace: &[u8], share: &Share, view: View) -> Self {
         let nullify_namespace = nullify_namespace(namespace);
@@ -600,25 +762,6 @@ impl<V: Variant> Attributable for Nullify<V> {
 impl<V: Variant> Viewable for Nullify<V> {
     fn view(&self) -> View {
         self.view
-    }
-}
-
-impl<V: Variant> Verifiable<V> for Nullify<V> {
-    fn message(&self, namespace: &[u8]) -> Vec<(Vec<u8>, Vec<u8>, PartialSignature<V>)> {
-        let nullify_namespace = nullify_namespace(namespace);
-        let view_message = view_message(self.view);
-        let nullify_batch = (
-            nullify_namespace,
-            view_message.to_vec(),
-            self.view_signature.clone(),
-        );
-        let seed_namespace = seed_namespace(namespace);
-        let seed_batch = (
-            seed_namespace,
-            view_message.to_vec(),
-            self.seed_signature.clone(),
-        );
-        vec![nullify_batch, seed_batch]
     }
 }
 
@@ -795,6 +938,50 @@ impl<V: Variant, D: Digest> Finalize<V, D> {
         .is_ok()
     }
 
+    pub fn verify_multiple(
+        namespace: &[u8],
+        identity: &Poly<V::Public>,
+        finalizes: Vec<Finalize<V, D>>,
+    ) -> (Vec<Finalize<V, D>>, Vec<u32>) {
+        // Prepare to verify
+        if finalizes.is_empty() {
+            return (finalizes, vec![]);
+        } else if finalizes.len() == 1 {
+            let valid = finalizes[0].verify(namespace, identity);
+            if valid {
+                return (finalizes, vec![]);
+            } else {
+                return (vec![], vec![finalizes[0].signer()]);
+            }
+        }
+        let proposal = &finalizes[0].proposal;
+        let mut invalid = BTreeSet::new();
+
+        // Verify proposal signature
+        let finalize_namespace = finalize_namespace(namespace);
+        let finalize_message = proposal.encode();
+        let finalize_signatures = finalizes.iter().map(|f| &f.proposal_signature);
+        if let Err(err) = partial_verify_multiple_public_keys::<V, _>(
+            identity,
+            Some(&finalize_namespace),
+            &finalize_message,
+            finalize_signatures,
+        ) {
+            for signature in err.iter() {
+                invalid.insert(signature.index);
+            }
+        }
+
+        // Return valid finalizes and invalid signers
+        (
+            finalizes
+                .into_iter()
+                .filter(|f| !invalid.contains(&f.signer()))
+                .collect(),
+            invalid.into_iter().collect(),
+        )
+    }
+
     /// Creates a new signed finalize using BLS threshold signatures.
     pub fn sign(namespace: &[u8], share: &Share, proposal: Proposal<D>) -> Self {
         let finalize_namespace = finalize_namespace(namespace);
@@ -814,19 +1001,6 @@ impl<V: Variant, D: Digest> Attributable for Finalize<V, D> {
 impl<V: Variant, D: Digest> Viewable for Finalize<V, D> {
     fn view(&self) -> View {
         self.proposal.view()
-    }
-}
-
-impl<V: Variant, D: Digest> Verifiable<V> for Finalize<V, D> {
-    fn message(&self, namespace: &[u8]) -> Vec<(Vec<u8>, Vec<u8>, PartialSignature<V>)> {
-        let finalize_namespace = finalize_namespace(namespace);
-        let message = self.proposal.encode();
-        let batch = (
-            finalize_namespace,
-            message.to_vec(),
-            self.proposal_signature.clone(),
-        );
-        vec![batch]
     }
 }
 
@@ -1050,9 +1224,27 @@ impl Read for Request {
 
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let id = UInt::read(reader)?.into();
+        let mut views = HashSet::new();
         let notarizations = Vec::<View>::read_range(reader, ..=*max_len)?;
+        for view in notarizations.iter() {
+            if !views.insert(view) {
+                return Err(Error::Invalid(
+                    "consensus::threshold_simplex::Request",
+                    "Duplicate notarization",
+                ));
+            }
+        }
         let remaining = max_len - notarizations.len();
+        views.clear();
         let nullifications = Vec::<View>::read_range(reader, ..=remaining)?;
+        for view in nullifications.iter() {
+            if !views.insert(view) {
+                return Err(Error::Invalid(
+                    "consensus::threshold_simplex::Request",
+                    "Duplicate nullification",
+                ));
+            }
+        }
         Ok(Request {
             id,
             notarizations,
@@ -1086,6 +1278,73 @@ impl<V: Variant, D: Digest> Response<V, D> {
             nullifications,
         }
     }
+
+    pub fn verify(&self, namespace: &[u8], public_key: &V::Public) -> bool {
+        // Prepare to verify
+        let mut seeds = HashMap::new();
+        let mut messages = Vec::new();
+        let mut signatures = Vec::new();
+
+        // Parse all notarizations
+        let notarize_namespace = notarize_namespace(namespace);
+        let seed_namespace = seed_namespace(namespace);
+        for notarization in self.notarizations.iter() {
+            // Prepare notarize message
+            let notarize_message = notarization.proposal.encode().to_vec();
+            let notarize_message = (Some(notarize_namespace.as_slice()), notarize_message);
+            messages.push(notarize_message);
+            signatures.push(&notarization.proposal_signature);
+
+            // Add seed message (if not already present)
+            if let Some(previous) = seeds.get(&notarization.proposal.view) {
+                if *previous != &notarization.seed_signature {
+                    return false;
+                }
+            } else {
+                let seed_message = view_message(notarization.proposal.view);
+                let seed_message = (Some(seed_namespace.as_slice()), seed_message);
+                messages.push(seed_message);
+                signatures.push(&notarization.seed_signature);
+                seeds.insert(notarization.proposal.view, &notarization.seed_signature);
+            }
+        }
+
+        // Parse all nullifications
+        let nullify_namespace = nullify_namespace(namespace);
+        for nullification in self.nullifications.iter() {
+            // Prepare nullify message
+            let nullify_message = view_message(nullification.view);
+            let nullify_message = (Some(nullify_namespace.as_slice()), nullify_message);
+            messages.push(nullify_message);
+            signatures.push(&nullification.view_signature);
+
+            // Add seed message (if not already present)
+            if let Some(previous) = seeds.get(&nullification.view) {
+                if *previous != &nullification.seed_signature {
+                    return false;
+                }
+            } else {
+                let seed_message = view_message(nullification.view);
+                let seed_message = (Some(seed_namespace.as_slice()), seed_message);
+                messages.push(seed_message);
+                signatures.push(&nullification.seed_signature);
+                seeds.insert(nullification.view, &nullification.seed_signature);
+            }
+        }
+
+        // Aggregate signatures
+        let signature = aggregate_signatures::<V, _>(signatures);
+        aggregate_verify_multiple_messages::<V, _>(
+            public_key,
+            &messages
+                .iter()
+                .map(|(namespace, message)| (namespace.as_deref(), message.as_ref()))
+                .collect::<Vec<_>>(),
+            &signature,
+            1,
+        )
+        .is_ok()
+    }
 }
 
 impl<V: Variant, D: Digest> Write for Response<V, D> {
@@ -1109,9 +1368,27 @@ impl<V: Variant, D: Digest> Read for Response<V, D> {
 
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let id = UInt::read(reader)?.into();
+        let mut views = HashSet::new();
         let notarizations = Vec::<Notarization<V, D>>::read_range(reader, ..=*max_len)?;
+        for notarization in notarizations.iter() {
+            if !views.insert(notarization.proposal.view) {
+                return Err(Error::Invalid(
+                    "consensus::threshold_simplex::Response",
+                    "Duplicate notarization",
+                ));
+            }
+        }
         let remaining = max_len - notarizations.len();
+        views.clear();
         let nullifications = Vec::<Nullification<V>>::read_range(reader, ..=remaining)?;
+        for nullification in nullifications.iter() {
+            if !views.insert(nullification.view) {
+                return Err(Error::Invalid(
+                    "consensus::threshold_simplex::Response",
+                    "Duplicate nullification",
+                ));
+            }
+        }
         Ok(Response {
             id,
             notarizations,

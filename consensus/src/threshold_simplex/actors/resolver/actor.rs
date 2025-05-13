@@ -10,7 +10,7 @@ use crate::{
     ThresholdSupervisor,
 };
 use commonware_cryptography::{
-    bls12381::primitives::{ops, poly, variant::Variant},
+    bls12381::primitives::{poly, variant::Variant},
     Digest, Scheme,
 };
 use commonware_macros::select;
@@ -28,7 +28,7 @@ use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use rand::{seq::IteratorRandom, Rng};
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet},
     time::{Duration, SystemTime},
 };
 use tracing::{debug, warn};
@@ -513,11 +513,15 @@ impl<
                             };
                             self.inflight.clear(request.id);
 
-                            // Compute batch
-                            let mut notarizations_found = BTreeMap::new();
-                            let mut nullifications_found = BTreeMap::new();
-                            let mut batch = HashMap::new();
-                            let mut invalid = false;
+                            // Verify message
+                            if !response.verify(&self.namespace, &public_key) {
+                                warn!(sender = ?s, "invalid message");
+                                self.requester.block(s);
+                                continue;
+                            }
+
+                            // Update cache
+                            let mut notarizations_found = BTreeSet::new();
                             for notarization in response.notarizations {
                                 let view = notarization.view();
                                 let entry = Entry { task: Task::Notarization, view };
@@ -525,107 +529,43 @@ impl<
                                     debug!(view, sender = ?s, "unnecessary notarization");
                                     continue;
                                 }
-                                let items = notarization.message(&self.namespace);
-                                let mut unique = 0;
-                                for (namespace, message, signature) in items {
-                                    if let Some((past_view, past_signature)) = batch.insert((namespace, message), (view, signature)) {
-                                        if past_view != view || past_signature != signature {
-                                            invalid = true;
-                                            break;
-                                        }
-                                    } else {
-                                        unique += 1;
-                                    }
-                                }
-                                if invalid {
-                                    break;
-                                }
-                                if unique > 0 {
-                                    notarizations_found.insert(view, notarization.clone());
-                                }
-                            }
-                            if !invalid {
-                                for nullification in response.nullifications {
-                                    let view = nullification.view;
-                                    let entry = Entry { task: Task::Nullification, view };
-                                    if !self.required.contains(&entry) {
-                                        debug!(view, sender = ?s, "unnecessary nullification");
-                                        continue;
-                                    }
-                                    let items = nullification.message(&self.namespace);
-                                    let mut unique = 0;
-                                    for (namespace, message, signature) in items {
-                                        if let Some((past_view, past_signature)) = batch.insert((namespace, message), (view, signature)) {
-                                            if past_view != view || past_signature != signature {
-                                                invalid = true;
-                                                break;
-                                            }
-                                        } else {
-                                            unique += 1;
-                                        }
-                                    }
-                                    if invalid {
-                                        break;
-                                    }
-                                    if unique > 0 {
-                                        nullifications_found.insert(view, nullification.clone());
-                                    }
-                                }
-                            }
-                            if invalid {
-                                debug!(sender = ?s, "invalid response");
-                                self.requester.block(s);
-                                self.send(true, &mut sender).await;
-                                continue;
-                            }
-
-                            // Ensure there is something useful to do
-                            if notarizations_found.is_empty() && nullifications_found.is_empty() {
-                                debug!(sender = ?s, "response not useful");
-                                self.send(true, &mut sender).await;
-                                continue;
-                            }
-
-                            // Verify aggregate signature
-                            let (messages, signatures): (Vec<_>, Vec<_>) = batch
-                                .iter()
-                                .map(|((namespace, message), (_, signature))| {
-                                    ((Some(namespace.as_ref()), message.as_ref()), signature)
-                                }).unzip();
-                            let signature = ops::aggregate_signatures::<V, _>(signatures);
-                            if let Err(err) = ops::aggregate_verify_multiple_messages::<V,_>(&public_key, &messages, &signature, 1) {
-                                // We don't reward a peer for sending us a response that doesn't help us
-                                debug!(sender = ?s, ?err,"invalid response");
-                                self.requester.block(s);
-                                self.send(true, &mut sender).await;
-                                continue;
-                            }
-
-                            // Update voter
-                            debug!(
-                                sender = ?s,
-                                notarizations = ?notarizations_found,
-                                nullifications = ?nullifications_found,
-                                "verified response",
-                            );
-                            for (view, notarization) in notarizations_found.into_iter() {
-                                let entry = Entry { task: Task::Notarization, view };
                                 self.required.remove(&entry);
                                 self.notarizations.insert(view, notarization.clone());
                                 voter.notarization(notarization).await;
+                                notarizations_found.insert(view);
                             }
-                            for (view, nullification) in nullifications_found.into_iter() {
+                            let mut nullifications_found = BTreeSet::new();
+                            for nullification in response.nullifications {
+                                let view = nullification.view;
                                 let entry = Entry { task: Task::Nullification, view };
+                                if !self.required.contains(&entry) {
+                                    debug!(view, sender = ?s, "unnecessary nullification");
+                                    continue;
+                                }
                                 self.required.remove(&entry);
                                 self.nullifications.insert(view, nullification.clone());
                                 voter.nullification(nullification).await;
+                                nullifications_found.insert(view);
                             }
 
                             // Update performance
-                            self.requester.resolve(request);
+                            let mut shuffle = false;
+                            if !notarizations_found.is_empty() || !nullifications_found.is_empty() {
+                                self.requester.resolve(request);
+                                debug!(
+                                    sender = ?s,
+                                    notarizations = ?notarizations_found,
+                                    nullifications = ?nullifications_found,
+                                    "response useful",
+                                );
+                            } else {
+                                // We don't reward a peer for sending us a response that doesn't help us
+                                shuffle = true;
+                                debug!(sender = ?s, "response not useful");
+                            }
 
                             // If still work to do, send another request
-                            self.send(false, &mut sender).await;
+                            self.send(shuffle, &mut sender).await;
                         },
                     }
                 },
