@@ -15,9 +15,12 @@ use prometheus_client::metrics::gauge::Gauge;
 use rayon::{ThreadPool, ThreadPoolBuildError, ThreadPoolBuilder};
 use std::{
     any::Any,
+    cmp,
     future::Future,
+    ops,
     panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
     pin::Pin,
+    ptr,
     sync::{Arc, Once},
     task::{Context, Poll},
 };
@@ -677,6 +680,183 @@ async fn task(i: usize) -> usize {
     i
 }
 
+/// An `io-uring` compatible buffer.
+///
+/// The `IoBuf` trait is implemented by buffer types that can be used with
+/// io-uring operations. Users will not need to use this trait directly.
+/// The [`BoundedBuf`] trait provides some useful methods including `slice`.
+///
+/// # Safety
+///
+/// Buffers passed to `io-uring` operations must reference a stable memory
+/// region. While the runtime holds ownership to a buffer, the pointer returned
+/// by `stable_ptr` must remain valid even if the `IoBuf` value is moved.
+///
+/// [`BoundedBuf`]: crate::buf::BoundedBuf
+///
+/// The `IoBuf` trait and implementations are from tokio-uring:
+/// https://docs.rs/tokio-uring/latest/src/tokio_uring/buf/io_buf.rs.html
+/// We don't want to depend on the whole crate, so we copy the relevant parts here.
+pub unsafe trait IoBuf: Unpin + Send + 'static {
+    /// Returns a raw pointer to the vector’s buffer.
+    ///
+    /// This method is to be used by the `tokio-uring` runtime and it is not
+    /// expected for users to call it directly.
+    ///
+    /// The implementation must ensure that, while the `tokio-uring` runtime
+    /// owns the value, the pointer returned by `stable_ptr` **does not**
+    /// change.
+    fn stable_ptr(&self) -> *const u8;
+
+    /// Number of initialized bytes.
+    ///
+    /// This method is to be used by the `tokio-uring` runtime and it is not
+    /// expected for users to call it directly.
+    ///
+    /// For `Vec`, this is identical to `len()`.
+    fn bytes_init(&self) -> usize;
+
+    /// Total size of the buffer, including uninitialized memory, if any.
+    ///
+    /// This method is to be used by the `tokio-uring` runtime and it is not
+    /// expected for users to call it directly.
+    ///
+    /// For `Vec`, this is identical to `capacity()`.
+    fn bytes_total(&self) -> usize;
+}
+
+unsafe impl IoBuf for Vec<u8> {
+    fn stable_ptr(&self) -> *const u8 {
+        self.as_ptr()
+    }
+
+    fn bytes_init(&self) -> usize {
+        self.len()
+    }
+
+    fn bytes_total(&self) -> usize {
+        self.capacity()
+    }
+}
+
+unsafe impl IoBuf for &'static [u8] {
+    fn stable_ptr(&self) -> *const u8 {
+        self.as_ptr()
+    }
+
+    fn bytes_init(&self) -> usize {
+        <[u8]>::len(self)
+    }
+
+    fn bytes_total(&self) -> usize {
+        IoBuf::bytes_init(self)
+    }
+}
+
+unsafe impl IoBuf for &'static str {
+    fn stable_ptr(&self) -> *const u8 {
+        self.as_ptr()
+    }
+
+    fn bytes_init(&self) -> usize {
+        <str>::len(self)
+    }
+
+    fn bytes_total(&self) -> usize {
+        IoBuf::bytes_init(self)
+    }
+}
+
+unsafe impl IoBuf for bytes::Bytes {
+    fn stable_ptr(&self) -> *const u8 {
+        self.as_ptr()
+    }
+
+    fn bytes_init(&self) -> usize {
+        self.len()
+    }
+
+    fn bytes_total(&self) -> usize {
+        self.len()
+    }
+}
+
+unsafe impl IoBuf for bytes::BytesMut {
+    fn stable_ptr(&self) -> *const u8 {
+        self.as_ptr()
+    }
+
+    fn bytes_init(&self) -> usize {
+        self.len()
+    }
+
+    fn bytes_total(&self) -> usize {
+        self.capacity()
+    }
+}
+
+/// A mutable`io-uring` compatible buffer.
+///
+/// The `IoBufMut` trait is implemented by buffer types that can be used with
+/// io-uring operations. Users will not need to use this trait directly.
+///
+/// # Safety
+///
+/// Buffers passed to `io-uring` operations must reference a stable memory
+/// region. While the runtime holds ownership to a buffer, the pointer returned
+/// by `stable_mut_ptr` must remain valid even if the `IoBufMut` value is moved.
+///
+/// The `IoBufMut` trait and implementations are from tokio-uring:
+/// https://docs.rs/tokio-uring/latest/src/tokio_uring/buf/io_buf_mut.rs.html
+/// We don't want to depend on the whole crate, so we copy the relevant parts here.
+pub unsafe trait IoBufMut: IoBuf {
+    /// Returns a raw mutable pointer to the vector’s buffer.
+    ///
+    /// This method is to be used by the runtime and it is not
+    /// expected for users to call it directly.
+    ///
+    /// The implementation must ensure that, while the runtime
+    /// owns the value, the pointer returned by `stable_mut_ptr` **does not**
+    /// change.
+    fn stable_mut_ptr(&mut self) -> *mut u8;
+
+    /// Updates the number of initialized bytes.
+    ///
+    /// If the specified `pos` is greater than the value returned by
+    /// [`IoBuf::bytes_init`], it becomes the new water mark as returned by
+    /// `IoBuf::bytes_init`.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that all bytes starting at `stable_mut_ptr()` up
+    /// to `pos` are initialized and owned by the buffer.
+    unsafe fn set_init(&mut self, pos: usize);
+}
+
+unsafe impl IoBufMut for Vec<u8> {
+    fn stable_mut_ptr(&mut self) -> *mut u8 {
+        self.as_mut_ptr()
+    }
+
+    unsafe fn set_init(&mut self, init_len: usize) {
+        if self.len() < init_len {
+            self.set_len(init_len);
+        }
+    }
+}
+
+unsafe impl IoBufMut for bytes::BytesMut {
+    fn stable_mut_ptr(&mut self) -> *mut u8 {
+        self.as_mut_ptr()
+    }
+
+    unsafe fn set_init(&mut self, init_len: usize) {
+        if self.len() < init_len {
+            self.set_len(init_len);
+        }
+    }
+}
+
 #[cfg(test)]
 pub fn run_tasks(tasks: usize, runner: crate::deterministic::Runner) -> (String, Vec<usize>) {
     runner.start(|context| async move {
@@ -694,6 +874,422 @@ pub fn run_tasks(tasks: usize, runner: crate::deterministic::Runner) -> (String,
         assert_eq!(outputs.len(), tasks);
         (context.auditor().state(), outputs)
     })
+}
+
+pub(crate) fn deref(buf: &impl IoBuf) -> &[u8] {
+    // Safety: the `IoBuf` trait is marked as unsafe and is expected to be
+    // implemented correctly.
+    unsafe { std::slice::from_raw_parts(buf.stable_ptr(), buf.bytes_init()) }
+}
+
+pub(crate) fn deref_mut(buf: &mut impl IoBufMut) -> &mut [u8] {
+    // Safety: the `IoBufMut` trait is marked as unsafe and is expected to be
+    // implemented correct.
+    unsafe { std::slice::from_raw_parts_mut(buf.stable_mut_ptr(), buf.bytes_init()) }
+}
+
+/// An owned view into a contiguous sequence of bytes.
+///
+/// This is similar to Rust slices (`&buf[..]`) but owns the underlying buffer.
+/// This type is useful for performing io-uring read and write operations using
+/// a subset of a buffer.
+///
+/// Slices are created using [`BoundedBuf::slice`].
+///
+/// # Examples
+///
+/// Creating a slice
+///
+/// ```
+/// use tokio_uring::buf::BoundedBuf;
+///
+/// let buf = b"hello world".to_vec();
+/// let slice = buf.slice(..5);
+///
+/// assert_eq!(&slice[..], b"hello");
+/// ```
+pub struct Slice<T> {
+    buf: T,
+    begin: usize,
+    end: usize,
+}
+
+impl<T> Slice<T> {
+    pub(crate) fn new(buf: T, begin: usize, end: usize) -> Slice<T> {
+        Slice { buf, begin, end }
+    }
+
+    /// Offset in the underlying buffer at which this slice starts.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tokio_uring::buf::BoundedBuf;
+    ///
+    /// let buf = b"hello world".to_vec();
+    /// let slice = buf.slice(1..5);
+    ///
+    /// assert_eq!(1, slice.begin());
+    /// ```
+    pub fn begin(&self) -> usize {
+        self.begin
+    }
+
+    /// Ofset in the underlying buffer at which this slice ends.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tokio_uring::buf::BoundedBuf;
+    ///
+    /// let buf = b"hello world".to_vec();
+    /// let slice = buf.slice(1..5);
+    ///
+    /// assert_eq!(5, slice.end());
+    /// ```
+    pub fn end(&self) -> usize {
+        self.end
+    }
+
+    /// Gets a reference to the underlying buffer.
+    ///
+    /// This method escapes the slice's view.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tokio_uring::buf::BoundedBuf;
+    ///
+    /// let buf = b"hello world".to_vec();
+    /// let slice = buf.slice(..5);
+    ///
+    /// assert_eq!(slice.get_ref(), b"hello world");
+    /// assert_eq!(&slice[..], b"hello");
+    /// ```
+    pub fn get_ref(&self) -> &T {
+        &self.buf
+    }
+
+    /// Gets a mutable reference to the underlying buffer.
+    ///
+    /// This method escapes the slice's view.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tokio_uring::buf::BoundedBuf;
+    ///
+    /// let buf = b"hello world".to_vec();
+    /// let mut slice = buf.slice(..5);
+    ///
+    /// slice.get_mut()[0] = b'b';
+    ///
+    /// assert_eq!(slice.get_mut(), b"bello world");
+    /// assert_eq!(&slice[..], b"bello");
+    /// ```
+    pub fn get_mut(&mut self) -> &mut T {
+        &mut self.buf
+    }
+
+    /// Unwraps this `Slice`, returning the underlying buffer.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tokio_uring::buf::BoundedBuf;
+    ///
+    /// let buf = b"hello world".to_vec();
+    /// let slice = buf.slice(..5);
+    ///
+    /// let buf = slice.into_inner();
+    /// assert_eq!(buf, b"hello world");
+    /// ```
+    pub fn into_inner(self) -> T {
+        self.buf
+    }
+}
+
+impl<T: IoBuf> ops::Deref for Slice<T> {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        let buf_bytes = super::deref(&self.buf);
+        let end = cmp::min(self.end, buf_bytes.len());
+        &buf_bytes[self.begin..end]
+    }
+}
+
+impl<T: IoBufMut> ops::DerefMut for Slice<T> {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        let buf_bytes = super::deref_mut(&mut self.buf);
+        let end = cmp::min(self.end, buf_bytes.len());
+        &mut buf_bytes[self.begin..end]
+    }
+}
+
+impl<T: IoBuf> BoundedBuf for Slice<T> {
+    type Buf = T;
+    type Bounds = ops::Range<usize>;
+
+    fn slice(self, range: impl ops::RangeBounds<usize>) -> Slice<T> {
+        use ops::Bound;
+
+        let begin = match range.start_bound() {
+            Bound::Included(&n) => self.begin.checked_add(n).expect("out of range"),
+            Bound::Excluded(&n) => self
+                .begin
+                .checked_add(n)
+                .and_then(|x| x.checked_add(1))
+                .expect("out of range"),
+            Bound::Unbounded => self.begin,
+        };
+
+        assert!(begin <= self.end);
+
+        let end = match range.end_bound() {
+            Bound::Included(&n) => self
+                .begin
+                .checked_add(n)
+                .and_then(|x| x.checked_add(1))
+                .expect("out of range"),
+            Bound::Excluded(&n) => self.begin.checked_add(n).expect("out of range"),
+            Bound::Unbounded => self.end,
+        };
+
+        assert!(end <= self.end);
+        assert!(begin <= self.buf.bytes_init());
+
+        Slice::new(self.buf, begin, end)
+    }
+
+    fn slice_full(self) -> Slice<T> {
+        self
+    }
+
+    fn get_buf(&self) -> &T {
+        &self.buf
+    }
+
+    fn bounds(&self) -> Self::Bounds {
+        self.begin..self.end
+    }
+
+    fn from_buf_bounds(buf: T, bounds: Self::Bounds) -> Self {
+        assert!(bounds.start <= buf.bytes_init());
+        assert!(bounds.end <= buf.bytes_total());
+        Slice::new(buf, bounds.start, bounds.end)
+    }
+
+    fn stable_ptr(&self) -> *const u8 {
+        super::deref(&self.buf)[self.begin..].as_ptr()
+    }
+
+    fn bytes_init(&self) -> usize {
+        ops::Deref::deref(self).len()
+    }
+
+    fn bytes_total(&self) -> usize {
+        self.end - self.begin
+    }
+}
+
+impl<T: IoBufMut> BoundedBufMut for Slice<T> {
+    type BufMut = T;
+
+    fn stable_mut_ptr(&mut self) -> *mut u8 {
+        super::deref_mut(&mut self.buf)[self.begin..].as_mut_ptr()
+    }
+
+    unsafe fn set_init(&mut self, pos: usize) {
+        self.buf.set_init(self.begin + pos);
+    }
+}
+
+/// A possibly bounded view into an owned [`IoBuf`] buffer.
+///
+/// Because buffers are passed by ownership to the runtime, Rust's slice API
+/// (`&buf[..]`) cannot be used. Instead, `tokio-uring` provides an owned slice
+/// API: [`.slice()`]. The method takes ownership of the buffer and returns a
+/// [`Slice`] value that tracks the requested range.
+///
+/// This trait provides a generic way to use buffers and `Slice` views
+/// into such buffers with `io-uring` operations.
+///
+/// [`.slice()`]: BoundedBuf::slice
+pub trait BoundedBuf: Unpin + Send + 'static {
+    /// The type of the underlying buffer.
+    type Buf: IoBuf;
+
+    /// The type representing the range bounds of the view.
+    type Bounds: ops::RangeBounds<usize>;
+
+    /// Returns a view of the buffer with the specified range.
+    ///
+    /// This method is similar to Rust's slicing (`&buf[..]`), but takes
+    /// ownership of the buffer. The range bounds are specified against
+    /// the possibly offset beginning of the `self` view into the buffer
+    /// and the end bound, if specified, must not exceed the view's total size.
+    /// Note that the range may extend into the uninitialized part of the
+    /// buffer, but it must start (if so bounded) in the initialized part
+    /// or immediately adjacent to it.
+    ///
+    /// # Panics
+    ///
+    /// If the range is invalid with regard to the recipient's total size or
+    /// the length of its initialized part, the implementation of this method
+    /// should panic.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tokio_uring::buf::BoundedBuf;
+    ///
+    /// let buf = b"hello world".to_vec();
+    /// let slice = buf.slice(5..10);
+    /// assert_eq!(&slice[..], b" worl");
+    /// let slice = slice.slice(1..3);
+    /// assert_eq!(&slice[..], b"wo");
+    /// ```
+    fn slice(self, range: impl ops::RangeBounds<usize>) -> Slice<Self::Buf>;
+
+    /// Returns a `Slice` with the view's full range.
+    ///
+    /// This method is to be used by the `tokio-uring` runtime and it is not
+    /// expected for users to call it directly.
+    fn slice_full(self) -> Slice<Self::Buf>;
+
+    /// Gets a reference to the underlying buffer.
+    fn get_buf(&self) -> &Self::Buf;
+
+    /// Returns the range bounds for this view.
+    fn bounds(&self) -> Self::Bounds;
+
+    /// Constructs a view from an underlying buffer and range bounds.
+    fn from_buf_bounds(buf: Self::Buf, bounds: Self::Bounds) -> Self;
+
+    /// Like [`IoBuf::stable_ptr`],
+    /// but possibly offset to the view's starting position.
+    fn stable_ptr(&self) -> *const u8;
+
+    /// Number of initialized bytes available via this view.
+    fn bytes_init(&self) -> usize;
+
+    /// Total size of the view, including uninitialized memory, if any.
+    fn bytes_total(&self) -> usize;
+}
+
+impl<T: IoBuf> BoundedBuf for T {
+    type Buf = Self;
+    type Bounds = ops::RangeFull;
+
+    fn slice(self, range: impl ops::RangeBounds<usize>) -> Slice<Self> {
+        use ops::Bound;
+
+        let begin = match range.start_bound() {
+            Bound::Included(&n) => n,
+            Bound::Excluded(&n) => n.checked_add(1).expect("out of range"),
+            Bound::Unbounded => 0,
+        };
+
+        assert!(begin < self.bytes_total());
+
+        let end = match range.end_bound() {
+            Bound::Included(&n) => n.checked_add(1).expect("out of range"),
+            Bound::Excluded(&n) => n,
+            Bound::Unbounded => self.bytes_total(),
+        };
+
+        assert!(end <= self.bytes_total());
+        assert!(begin <= self.bytes_init());
+
+        Slice::new(self, begin, end)
+    }
+
+    fn slice_full(self) -> Slice<Self> {
+        let end = self.bytes_total();
+        Slice::new(self, 0, end)
+    }
+
+    fn get_buf(&self) -> &Self {
+        self
+    }
+
+    fn bounds(&self) -> Self::Bounds {
+        ..
+    }
+
+    fn from_buf_bounds(buf: Self, _: ops::RangeFull) -> Self {
+        buf
+    }
+
+    fn stable_ptr(&self) -> *const u8 {
+        IoBuf::stable_ptr(self)
+    }
+
+    fn bytes_init(&self) -> usize {
+        IoBuf::bytes_init(self)
+    }
+
+    fn bytes_total(&self) -> usize {
+        IoBuf::bytes_total(self)
+    }
+}
+
+/// A possibly bounded view into an owned [`IoBufMut`] buffer.
+///
+/// This trait provides a generic way to use mutable buffers and `Slice` views
+/// into such buffers with `io-uring` operations.
+pub trait BoundedBufMut: BoundedBuf<Buf = Self::BufMut> + Send {
+    /// The type of the underlying buffer.
+    type BufMut: IoBufMut;
+
+    /// Like [`IoBufMut::stable_mut_ptr`],
+    /// but possibly offset to the view's starting position.
+    fn stable_mut_ptr(&mut self) -> *mut u8;
+
+    /// Like [`IoBufMut::set_init`],
+    /// but the position is possibly offset to the view's starting position.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that all bytes starting at `stable_mut_ptr()` up
+    /// to `pos` are initialized and owned by the buffer.
+    unsafe fn set_init(&mut self, pos: usize);
+
+    /// Copies the given byte slice into the buffer, starting at
+    /// this view's offset.
+    ///
+    /// # Panics
+    ///
+    /// If the slice's length exceeds the destination's total capacity,
+    /// this method panics.
+    fn put_slice(&mut self, src: &[u8]) {
+        assert!(self.bytes_total() >= src.len());
+        let dst = self.stable_mut_ptr();
+
+        // Safety:
+        // dst pointer validity is ensured by stable_mut_ptr;
+        // the length is checked to not exceed the view's total capacity;
+        // src (immutable) and dst (mutable) cannot point to overlapping memory;
+        // after copying the amount of bytes given by the slice, it's safe
+        // to mark them as initialized in the buffer.
+        unsafe {
+            ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
+            self.set_init(src.len());
+        }
+    }
+}
+
+impl<T: IoBufMut> BoundedBufMut for T {
+    type BufMut = T;
+
+    fn stable_mut_ptr(&mut self) -> *mut u8 {
+        IoBufMut::stable_mut_ptr(self)
+    }
+
+    unsafe fn set_init(&mut self, pos: usize) {
+        IoBufMut::set_init(self, pos)
+    }
 }
 
 #[cfg(test)]
