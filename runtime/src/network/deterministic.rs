@@ -1,4 +1,4 @@
-use crate::{mocks, BoundedBuf, BoundedBufMut, Error};
+use crate::{mocks, Error, IoBuf, IoBufMut};
 use futures::{channel::mpsc, SinkExt as _, StreamExt as _};
 use std::{
     collections::HashMap,
@@ -16,7 +16,7 @@ pub struct Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send<B: BoundedBuf>(&mut self, msg: B) -> Result<(), Error> {
+    async fn send<B: IoBuf>(&mut self, msg: B) -> Result<(), Error> {
         self.sender.send(msg).await.map_err(|_| Error::SendFailed)
     }
 }
@@ -27,7 +27,7 @@ pub struct Stream {
 }
 
 impl crate::Stream for Stream {
-    async fn recv<B: BoundedBufMut>(&mut self, buf: B) -> Result<B, Error> {
+    async fn recv<B: IoBufMut>(&mut self, buf: B) -> Result<B, Error> {
         self.receiver.recv(buf).await.map_err(|_| Error::RecvFailed)
     }
 }

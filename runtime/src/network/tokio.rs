@@ -1,4 +1,4 @@
-use crate::{BoundedBuf, BoundedBufMut, Error};
+use crate::{deref_mut, BoundedBuf, Error, IoBuf, IoBufMut};
 use std::{net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
@@ -17,7 +17,7 @@ pub struct Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send<B: BoundedBuf>(&mut self, msg: B) -> Result<(), Error> {
+    async fn send<B: IoBuf>(&mut self, msg: B) -> Result<(), Error> {
         // Time out if we take too long to write
         timeout(
             self.write_timeout,
@@ -37,16 +37,16 @@ pub struct Stream {
 }
 
 impl crate::Stream for Stream {
-    // TODO danlaine: revisit this.
-    async fn recv<B: BoundedBufMut>(&mut self, mut buf: B) -> Result<B, Error> {
-        let mut tmp = vec![0u8; buf.capacity()];
+    async fn recv<B: IoBufMut>(&mut self, mut buf: B) -> Result<B, Error> {
         // Time out if we take too long to read
-        timeout(self.read_timeout, self.stream.read_exact(&mut tmp))
-            .await
-            .map_err(|_| Error::Timeout)?
-            .map_err(|_| Error::RecvFailed)?;
+        timeout(
+            self.read_timeout,
+            self.stream.read_exact(deref_mut(&mut buf)),
+        )
+        .await
+        .map_err(|_| Error::Timeout)?
+        .map_err(|_| Error::RecvFailed)?;
 
-        buf.put_slice(&tmp);
         Ok(buf)
     }
 }

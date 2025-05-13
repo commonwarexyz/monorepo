@@ -272,7 +272,7 @@ pub trait Listener: Sync + Send + 'static {
 /// messages over a network connection.
 pub trait Sink: Sync + Send + 'static {
     /// Send a message to the sink.
-    fn send<B: BoundedBuf>(&mut self, msg: B) -> impl Future<Output = Result<(), Error>> + Send;
+    fn send<B: IoBuf>(&mut self, msg: B) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 /// Interface that any runtime must implement to receive
@@ -280,7 +280,7 @@ pub trait Sink: Sync + Send + 'static {
 pub trait Stream: Sync + Send + 'static {
     /// Receive a message from the stream, storing it in the given buffer.
     /// Reads exactly the number of bytes that fit in the buffer.
-    fn recv<B: BoundedBufMut>(&mut self, buf: B) -> impl Future<Output = Result<B, Error>> + Send;
+    fn recv<B: IoBufMut>(&mut self, buf: B) -> impl Future<Output = Result<B, Error>> + Send;
 }
 
 /// Interface to interact with storage.
