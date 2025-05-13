@@ -2077,7 +2077,7 @@ impl<
                     let identity = supervisor.identity(view).unwrap();
                     let (voters, failed, drop) = verifier.verify(&namespace, identity);
                     let batch = voters.len() + failed.len();
-                    debug!(view, batch, "batch verified messages");
+                    trace!(view, batch, "batch verified messages");
                     batch_size.observe(batch as f64);
 
                     // Send messages
