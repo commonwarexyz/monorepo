@@ -18,7 +18,7 @@ pub trait SystemTimeExt {
 
     /// Adds a random `Duration` to the current time between `0` and `jitter * 2` and returns the
     /// resulting `SystemTime`. The random duration is generated using the provided `context`.
-    fn add_jittered(&self, context: &mut impl Rng, jitter: Duration) -> SystemTime;
+    fn add_jittered(&self, rng: &mut impl Rng, jitter: Duration) -> SystemTime;
 }
 
 impl SystemTimeExt for SystemTime {
@@ -31,8 +31,8 @@ impl SystemTimeExt for SystemTime {
         self.epoch().as_millis().min(u64::MAX as u128) as u64
     }
 
-    fn add_jittered(&self, context: &mut impl Rng, jitter: Duration) -> SystemTime {
-        *self + context.gen_range(Duration::default()..=jitter * 2)
+    fn add_jittered(&self, rng: &mut impl Rng, jitter: Duration) -> SystemTime {
+        *self + rng.gen_range(Duration::default()..=jitter * 2)
     }
 }
 

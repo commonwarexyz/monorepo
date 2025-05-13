@@ -17,6 +17,11 @@ futures = { workspace = true }
 rand = { workspace = true }
 thiserror = { workspace = true }
 
+# Enable "js" feature when WASM is target
+[target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
+version = "0.2.15"
+features = ["js"]
+
 [dev-dependencies]
 num-bigint = "0.4.6"
 
