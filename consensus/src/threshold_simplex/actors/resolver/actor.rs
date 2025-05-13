@@ -514,7 +514,6 @@ impl<
                             self.inflight.clear(request.id);
 
                             // Verify message
-                            let public_key = self.supervisor.public();
                             if !response.verify(&self.namespace, &public_key) {
                                 warn!(sender = ?s, "invalid message");
                                 self.requester.block(s);
