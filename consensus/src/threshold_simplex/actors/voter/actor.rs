@@ -2084,6 +2084,9 @@ impl<
                     let (voters, failed, drop) = verifier.verify(&namespace, &identity);
 
                     // Send messages
+                    for msg in voters {
+                        verified_sender.send(msg).await.unwrap();
+                    }
                 }
             }
         });
