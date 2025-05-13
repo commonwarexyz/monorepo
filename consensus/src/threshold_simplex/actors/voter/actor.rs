@@ -53,7 +53,7 @@ use tracing::{debug, trace, warn};
 
 const GENESIS_VIEW: View = 0;
 
-async fn recv_batch<T, F>(rx: &mut mpsc::Receiver<T>, mut f: F, block: bool) -> bool
+async fn recv_batch<T, F>(rx: &mut mpsc::Receiver<T>, block: bool, mut f: F) -> bool
 where
     F: FnMut(T),
 {
@@ -2074,9 +2074,9 @@ impl<
 
                 loop {
                     // Read at least one message
-                    let block = work.is_empty();
-                    let alive = recv_batch(
+                    if !recv_batch(
                         &mut verifier_receiver,
+                        work.is_empty(),
                         |(min, current, sender, msg)| {
                             min_view = min;
                             latest = current;
@@ -2094,10 +2094,9 @@ impl<
                             }
                             counter = counter.wrapping_add(1);
                         },
-                        block,
                     )
-                    .await;
-                    if !alive {
+                    .await
+                    {
                         return;
                     }
 
@@ -2124,6 +2123,13 @@ impl<
                         };
 
                     // If nothing to do in current, take next highest (may be ahead of current view)
+                    trace!(
+                        view,
+                        current = latest,
+                        min_view,
+                        count = signatures.len(),
+                        "performing batch verification"
+                    );
                     let identity = supervisor.identity(view).unwrap();
                     let result = partial_verify_multiple_public_keys::<V, _>(
                         identity,
