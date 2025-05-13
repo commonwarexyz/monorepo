@@ -1,5 +1,4 @@
-use crate::{deterministic::Auditor, BoundedBuf, BoundedBufMut, Error, SinkOf, StreamOf};
-use bytes::Bytes;
+use crate::{deref, deterministic::Auditor, BoundedBuf, BoundedBufMut, Error, SinkOf, StreamOf};
 use sha2::Digest;
 use std::{net::SocketAddr, sync::Arc};
 
@@ -12,16 +11,12 @@ pub struct Sink<S: crate::Sink> {
 
 impl<S: crate::Sink> crate::Sink for Sink<S> {
     async fn send<B: BoundedBuf>(&mut self, data: B) -> Result<(), Error> {
-        // We have to copy the data because the only way to get the bytes from
-        // `data` is to consume it. We need the data in order to hash it.
-        let copy: Vec<u8> = data.slice_full().iter().copied().collect();
-
         self.auditor.event(b"send_attempt", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
-            hasher.update(&copy);
+            hasher.update(deref(data.get_buf()));
         });
 
-        self.inner.send(copy).await.inspect_err(|e| {
+        self.inner.send(data).await.inspect_err(|e| {
             self.auditor.event(b"send_failure", |hasher| {
                 hasher.update(self.remote_addr.to_string().as_bytes());
                 hasher.update(e.to_string().as_bytes());

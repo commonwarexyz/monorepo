@@ -14,6 +14,7 @@ use std::ops;
 /// into such buffers with `io-uring` operations.
 ///
 /// [`.slice()`]: BoundedBuf::slice
+#[allow(clippy::len_without_is_empty)]
 pub trait BoundedBuf: Unpin + Send + 'static {
     /// The type of the underlying buffer.
     type Buf: IoBuf;

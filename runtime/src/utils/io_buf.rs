@@ -13,7 +13,7 @@
 /// region. While the runtime holds ownership to a buffer, the pointer returned
 /// by `stable_ptr` must remain valid even if the `IoBuf` value is moved.
 ///
-/// [`BoundedBuf`]: crate::buf::BoundedBuf
+#[allow(clippy::len_without_is_empty)]
 pub unsafe trait IoBuf: Unpin + Send + 'static {
     /// Returns a raw pointer to the vector’s buffer.
     ///
