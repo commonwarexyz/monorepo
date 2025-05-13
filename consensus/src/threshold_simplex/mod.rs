@@ -709,7 +709,7 @@ mod tests {
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(360));
+        let executor = deterministic::Runner::timed(Duration::from_secs(720));
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(

@@ -121,7 +121,8 @@ struct Round<
     broadcast_notarization: bool,
 
     // Track nullifies (ensuring any participant only has one recorded nullify)
-    nullifies: HashMap<u32, Status<Nullify<V>>>,
+    nullified: BitVec,
+    nullifies: Vec<Status<Nullify<V>>>,
     nullification: Option<Nullification<V>>,
     broadcast_nullify: bool,
     broadcast_nullification: bool,
@@ -173,7 +174,8 @@ impl<
             broadcast_notarize: false,
             broadcast_notarization: false,
 
-            nullifies: HashMap::new(),
+            nullified: BitVec::zeroes(participants),
+            nullifies: vec![Status::None; participants],
             nullification: None,
             broadcast_nullify: false,
             broadcast_nullification: false,
@@ -259,20 +261,13 @@ impl<
 
     fn add_reserved_nullify(&mut self, public_key_index: u32) -> bool {
         // Check if already nullified
-        match self.nullifies.entry(public_key_index) {
-            Entry::Occupied(mut entry) => {
-                if matches!(entry.get(), Status::None) {
-                    // Store the nullify
-                    entry.insert(Status::Pending);
-                    return true;
-                }
-                false
-            }
-            Entry::Vacant(entry) => {
-                // Store the nullify
-                entry.insert(Status::Pending);
-                true
-            }
+        if let Status::None = self.nullifies[public_key_index as usize] {
+            // Store the nullify
+            self.nullifies[public_key_index as usize] = Status::Pending;
+            true
+        } else {
+            trace!(?public_key_index, "already reserved nullify");
+            false
         }
     }
 
@@ -280,8 +275,8 @@ impl<
         // Check if already issued finalize
         let Status::Verified(ref previous) = self.finalizes[public_key_index as usize] else {
             // Store the nullify
-            self.nullifies
-                .insert(public_key_index, Status::Verified(nullify.clone()));
+            self.nullified.set(public_key_index as usize);
+            self.nullifies[public_key_index as usize] = Status::Verified(nullify.clone());
             self.reporter.report(Activity::Nullify(nullify)).await;
             return true;
         };
@@ -317,7 +312,7 @@ impl<
         finalize: Finalize<V, D>,
     ) -> bool {
         // Check if also issued nullify
-        if let Some(Status::Verified(previous)) = self.nullifies.get(&public_key_index) {
+        if let Status::Verified(ref previous) = self.nullifies[public_key_index as usize] {
             // Create fault
             let activity = NullifyFinalize::new(previous.clone(), finalize);
             self.reporter
@@ -483,21 +478,26 @@ impl<
         }
 
         // Attempt to construct nullification
-        let nullifies = self.nullifies.values();
-        let (views, seeds): (Vec<_>, Vec<_>) = nullifies
-            .filter_map(|x| {
-                let Status::Verified(ref nullify) = x else {
-                    return None;
-                };
-                Some((&nullify.view_signature, &nullify.seed_signature))
-            })
-            .unzip();
-        if views.len() < threshold as usize {
+        if self.nullified.count_ones() < threshold as usize {
             return None;
         }
         debug!(view = self.view, "broadcasting nullification");
 
         // Recover threshold signature
+        let (views, seeds): (Vec<_>, Vec<_>) = self
+            .nullified
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, alive)| {
+                if !alive {
+                    return None;
+                }
+                let Status::Verified(ref nullify) = self.nullifies[idx] else {
+                    return None;
+                };
+                Some((&nullify.view_signature, &nullify.seed_signature))
+            })
+            .unzip();
         let (view_signature, seed_signature) =
             threshold_signature_recover_pair::<V, _>(threshold, views, seeds)
                 .expect("failed to recover threshold signature");
@@ -579,7 +579,7 @@ impl<
         let threshold = quorum(self.participants as u32);
         let at_least_one_honest = (threshold - 1) / 2 + 1;
         for (proposal, notarizes) in self.notarized_proposals.iter() {
-            if notarizes.len() < at_least_one_honest as usize {
+            if notarizes.count_ones() < at_least_one_honest as usize {
                 continue;
             }
             return Some(proposal.parent);
@@ -767,7 +767,7 @@ impl<
         let notarizes = round.notarized_proposals.get(proposal)?;
         let identity = self.supervisor.identity(view)?;
         let threshold = identity.required();
-        if notarizes.len() >= threshold as usize {
+        if notarizes.count_ones() >= threshold as usize {
             return Some(&proposal.payload);
         }
         None
@@ -783,7 +783,7 @@ impl<
             None => return false,
         };
         let threshold = identity.required();
-        round.nullification.is_some() || round.nullifies.len() >= threshold as usize
+        round.nullification.is_some() || round.nullified.count_ones() >= threshold as usize
     }
 
     fn is_finalized(&self, view: View) -> Option<&D> {
@@ -1266,7 +1266,7 @@ impl<
                 }
             };
             if matches!(round.notarizes[leader_index as usize], Status::Verified(_))
-                || round.nullifies.contains_key(&leader_index)
+                || matches!(round.nullifies[leader_index as usize], Status::Verified(_))
             {
                 return;
             }
