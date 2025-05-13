@@ -865,6 +865,50 @@ impl<V: Variant, D: Digest> Finalize<V, D> {
         .is_ok()
     }
 
+    pub fn verify_multiple(
+        namespace: &[u8],
+        identity: &Poly<V::Public>,
+        finalizes: Vec<Finalize<V, D>>,
+    ) -> (Vec<Finalize<V, D>>, Vec<u32>) {
+        // Prepare to verify
+        if finalizes.is_empty() {
+            return (finalizes, vec![]);
+        } else if finalizes.len() == 1 {
+            let valid = finalizes[0].verify(namespace, identity);
+            if valid {
+                return (finalizes, vec![]);
+            } else {
+                return (vec![], vec![finalizes[0].signer()]);
+            }
+        }
+        let proposal = &finalizes[0].proposal;
+        let mut invalid = BTreeSet::new();
+
+        // Verify proposal signature
+        let finalize_namespace = finalize_namespace(namespace);
+        let finalize_message = proposal.encode();
+        let finalize_signatures = finalizes.iter().map(|f| &f.proposal_signature);
+        if let Err(err) = partial_verify_multiple_public_keys::<V, _>(
+            identity,
+            Some(&finalize_namespace),
+            &finalize_message,
+            finalize_signatures,
+        ) {
+            for signature in err.iter() {
+                invalid.insert(signature.index);
+            }
+        }
+
+        // Return valid finalizes and invalid signers
+        (
+            finalizes
+                .into_iter()
+                .filter(|f| !invalid.contains(&f.signer()))
+                .collect(),
+            invalid.into_iter().collect(),
+        )
+    }
+
     /// Creates a new signed finalize using BLS threshold signatures.
     pub fn sign(namespace: &[u8], share: &Share, proposal: Proposal<D>) -> Self {
         let finalize_namespace = finalize_namespace(namespace);
