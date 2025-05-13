@@ -10,7 +10,7 @@ pub type Bootstrapper<P> = (P, SocketAddr);
 ///
 /// # Warning
 /// It is recommended to synchronize this configuration across peers in the network (with the
-/// exception of `crypto`, `registry`, `listen`, `bootstrappers`, `allow_private_ips`, and `mailbox_size`).
+/// exception of `crypto`, `listen`, `bootstrappers`, `allow_private_ips`, and `mailbox_size`).
 /// If this is not synchronized, connections could be unnecessarily dropped, messages could be parsed incorrectly,
 /// and/or peers will rate limit each other during normal operation.
 #[derive(Clone)]

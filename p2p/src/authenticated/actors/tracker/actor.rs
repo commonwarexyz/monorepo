@@ -1,6 +1,6 @@
 use super::{
+    directory::{self, Directory},
     ingress::{Mailbox, Message, Oracle},
-    registry::{self, Registry},
     Config, Error,
 };
 use crate::authenticated::{ip, types};
@@ -46,7 +46,7 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> 
 
     // ---------- State ----------
     /// Tracks peer sets and peer connectivity information.
-    registry: Registry<E, C>,
+    directory: Directory<E, C>,
 }
 
 impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> {
@@ -60,13 +60,13 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
         let myself = types::PeerInfo::sign(&mut cfg.crypto, &ip_namespace, socket, timestamp);
 
         // General initialization
-        let registry_cfg = registry::Config {
+        let directory_cfg = directory::Config {
             mailbox_size: cfg.mailbox_size,
             max_sets: cfg.tracked_peer_sets,
             dial_fail_limit: cfg.dial_fail_limit,
             rate_limit: cfg.allowed_connection_rate_per_peer,
         };
-        let registry = Registry::init(context.clone(), cfg.bootstrappers, myself, registry_cfg);
+        let directory = Directory::init(context.clone(), cfg.bootstrappers, myself, directory_cfg);
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
 
         (
@@ -79,7 +79,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
                 max_peer_set_size: cfg.max_peer_set_size,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
                 receiver,
-                registry,
+                directory,
             },
             Mailbox::new(sender.clone()),
             Oracle::new(sender),
@@ -132,7 +132,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
 
     async fn run(mut self) {
         while let Some(msg) = self.receiver.next().await {
-            self.registry.process_releases();
+            self.directory.process_releases();
             match msg {
                 Message::Register { index, peers } => {
                     // Ensure that peer set is not too large.
@@ -141,23 +141,23 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
                     let max = self.max_peer_set_size;
                     assert!(len <= max, "peer set too large: {} > {}", len, max);
 
-                    self.registry.add_set(index, peers);
+                    self.directory.add_set(index, peers);
                 }
                 Message::Initialize {
                     public_key,
                     mut peer,
                 } => {
                     // Kill if peer is not authorized
-                    if !self.registry.allowed(&public_key) {
+                    if !self.directory.allowed(&public_key) {
                         peer.kill().await;
                         continue;
                     }
 
                     // Mark the record as connected
-                    self.registry.connect(&public_key);
+                    self.directory.connect(&public_key);
 
                     // Proactively send our own info to the peer
-                    let info = self.registry.info(&self.crypto.public_key()).unwrap();
+                    let info = self.directory.info(&self.crypto.public_key()).unwrap();
                     let _ = peer.peers(vec![info]).await;
                 }
                 Message::Construct {
@@ -165,19 +165,19 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
                     mut peer,
                 } => {
                     // Kill if peer is not authorized
-                    if !self.registry.allowed(&public_key) {
+                    if !self.directory.allowed(&public_key) {
                         peer.kill().await;
                         continue;
                     }
 
-                    if let Some(bit_vec) = self.registry.get_random_bit_vec() {
+                    if let Some(bit_vec) = self.directory.get_random_bit_vec() {
                         let _ = peer.bit_vec(bit_vec).await;
                     } else {
                         debug!("no peer sets available");
                     };
                 }
                 Message::BitVec { bit_vec, mut peer } => {
-                    let Some(mut infos) = self.registry.infos(bit_vec) else {
+                    let Some(mut infos) = self.directory.infos(bit_vec) else {
                         peer.kill().await;
                         continue;
                     };
@@ -200,26 +200,26 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
                         peer.kill().await;
                         continue;
                     }
-                    self.registry.update_peers(peers);
+                    self.directory.update_peers(peers);
                 }
                 Message::Dialable { responder } => {
-                    let _ = responder.send(self.registry.dialable());
+                    let _ = responder.send(self.directory.dialable());
                 }
                 Message::Dial {
                     public_key,
                     reservation,
                 } => {
-                    let _ = reservation.send(self.registry.dial(&public_key));
+                    let _ = reservation.send(self.directory.dial(&public_key));
                 }
                 Message::Listen {
                     public_key,
                     reservation,
                 } => {
-                    let _ = reservation.send(self.registry.listen(&public_key));
+                    let _ = reservation.send(self.directory.listen(&public_key));
                 }
                 Message::Block { public_key } => {
                     // Block the peer
-                    self.registry.block(&public_key);
+                    self.directory.block(&public_key);
 
                     // We don't have to kill the peer now. It will be sent a `Kill` message the next
                     // time it sends the `Initialize` or `Construct` message to the tracker.
@@ -1116,7 +1116,7 @@ mod tests {
 
             // --- Register set 0, then Construct for authorized peer1 ---
             let mut set0_peers = vec![tracker_pk.clone(), peer1_pk.clone(), peer2_pk.clone()];
-            set0_peers.sort(); // Registry expects sorted, Oracle also benefits
+            set0_peers.sort(); // Directory expects sorted, Oracle also benefits
             oracle.register(0, set0_peers.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 

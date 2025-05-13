@@ -23,7 +23,7 @@ use std::{
 };
 use tracing::debug;
 
-/// Configuration for the [`Registry`].
+/// Configuration for the [`Directory`].
 pub struct Config {
     /// The maximum number of peer sets to track.
     pub mailbox_size: usize,
@@ -40,7 +40,7 @@ pub struct Config {
 }
 
 /// Represents a collection of records for all peers.
-pub struct Registry<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> {
+pub struct Directory<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> {
     context: E,
 
     // ---------- Configuration ----------
@@ -75,7 +75,7 @@ pub struct Registry<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verif
     metrics: Metrics,
 }
 
-impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Registry<E, C> {
+impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Directory<E, C> {
     /// Create a new set of records using the given bootstrappers and local node information.
     pub fn init(
         context: E,

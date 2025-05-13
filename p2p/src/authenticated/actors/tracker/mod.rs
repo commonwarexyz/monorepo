@@ -9,10 +9,10 @@ use std::time::Duration;
 use thiserror::Error;
 
 mod actor;
+mod directory;
 mod ingress;
 mod metrics;
 mod record;
-mod registry;
 pub mod reservation;
 mod set;
 
