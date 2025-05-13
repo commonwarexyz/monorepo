@@ -13,11 +13,12 @@ use commonware_runtime::{
     telemetry::traces::status, Clock, Handle, Metrics, Network, SinkOf, Spawner, StreamOf,
 };
 use commonware_stream::public_key::{Config as StreamConfig, Connection};
+use commonware_utils::SystemTimeExt;
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use rand::{seq::SliceRandom, CryptoRng, Rng};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use tracing::{debug, debug_span, Instrument};
 
 /// Configuration for the dialer actor.
@@ -156,7 +157,10 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Schem
             select! {
                 _ = self.context.sleep_until(dial_deadline) => {
                     // Update the deadline.
-                    dial_deadline = self.random_wait(self.dial_frequency);
+                    dial_deadline = dial_deadline.add_jittered(
+                        &mut self.context,
+                        self.dial_frequency,
+                    );
 
                     // Pop the queue until we can reserve a peer.
                     // If a peer is reserved, attempt to dial it.
@@ -170,7 +174,10 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Schem
                 },
                 _ = self.context.sleep_until(query_deadline) => {
                     // Update the deadline.
-                    query_deadline = self.random_wait(self.query_frequency);
+                    query_deadline = query_deadline.add_jittered(
+                        &mut self.context,
+                        self.query_frequency,
+                    );
 
                     // Only update the queue if it is empty.
                     if self.queue.is_empty() {
@@ -182,13 +189,5 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Schem
                 }
             }
         }
-    }
-
-    /// Generates a deadline between 0 and twice-the-average duration from the current time.
-    ///
-    /// This is used to introduce jitter to the dialer, preventing two peers from
-    /// dialing each other at the same time.
-    fn random_wait(&mut self, average: Duration) -> SystemTime {
-        self.context.current() + self.context.gen_range(Duration::default()..average * 2)
     }
 }

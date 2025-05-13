@@ -14,11 +14,11 @@ documentation = "https://docs.rs/commonware-utils"
 commonware-codec = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }
+rand = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 num-bigint = "0.4.6"
-rand = { workspace = true }
 
 [lib]
 bench = false
