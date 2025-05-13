@@ -4,7 +4,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::bls12381::primitives::{
     group,
-    poly::Public,
+    poly::{self, Public},
     variant::{MinSig, Variant},
 };
 use commonware_utils::{modulo, Array};
@@ -60,6 +60,7 @@ impl<P: Array> TSu for Supervisor<P> {
     type Seed = <MinSig as Variant>::Signature;
     type Identity = Public<MinSig>;
     type Share = group::Share;
+    type Public = <MinSig as Variant>::Public;
 
     fn leader(&self, _: Self::Index, seed: Self::Seed) -> Option<Self::PublicKey> {
         let seed = seed.encode();
@@ -69,6 +70,10 @@ impl<P: Array> TSu for Supervisor<P> {
 
     fn identity(&self, _: Self::Index) -> Option<&Self::Identity> {
         Some(&self.identity)
+    }
+
+    fn public(&self) -> &Self::Public {
+        poly::public::<MinSig>(&self.identity)
     }
 
     fn share(&self, _: Self::Index) -> Option<&Self::Share> {
