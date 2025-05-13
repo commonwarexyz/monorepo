@@ -70,6 +70,7 @@ where
     }
 }
 
+// TODO: by not storing the message in pending, we may drop what are otherwise considered conflicting messages
 #[derive(Clone)]
 enum Status<O> {
     None,
