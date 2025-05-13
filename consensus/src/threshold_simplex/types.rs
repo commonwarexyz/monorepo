@@ -1,5 +1,7 @@
 //! Types used in [`threshold_simplex`](crate::threshold_simplex).
 
+use std::collections::BTreeSet;
+
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write,
@@ -9,7 +11,8 @@ use commonware_cryptography::{
         group::Share,
         ops::{
             aggregate_signatures, aggregate_verify_multiple_messages, partial_sign_message,
-            partial_verify_message, partial_verify_multiple_messages, verify_message,
+            partial_verify_message, partial_verify_multiple_messages,
+            partial_verify_multiple_public_keys, verify_message,
         },
         poly::{PartialSignature, Poly},
         variant::Variant,
@@ -336,6 +339,49 @@ impl<V: Variant, D: Digest> Notarize<V, D> {
             [&self.proposal_signature, &self.seed_signature],
         )
         .is_ok()
+    }
+
+    pub fn verify_multiple(
+        namespace: &[u8],
+        identity: &Poly<V::Public>,
+        mut notarizes: Vec<Notarize<V, D>>,
+    ) -> (Vec<Notarize<V, D>>, Vec<u32>) {
+        // Verify proposal signatures
+        assert!(!notarizes.is_empty());
+        let notarize_namespace = notarize_namespace(namespace);
+        let notarize_message = notarizes[0].proposal.encode();
+        let notarize_signatures = notarizes.iter().map(|n| &n.proposal_signature);
+        let notarize_result = partial_verify_multiple_public_keys::<V, _>(
+            identity,
+            Some(&notarize_namespace),
+            &notarize_message,
+            notarize_signatures,
+        );
+
+        // Remove invalid notarizes
+        let mut invalid = BTreeSet::new();
+        if let Err(err) = notarize_result {
+            for signature in err.iter() {
+                invalid.insert(signature.index);
+            }
+        }
+
+        // Verify seed signatures
+        let seed_namespace = seed_namespace(namespace);
+        let seed_message = view_message(notarizes[0].proposal.view);
+        let seed_signatures = notarizes
+            .iter()
+            .filter(|n| !invalid.contains(&n.seed_signature.index))
+            .map(|n| &n.seed_signature);
+        let seed_result = partial_verify_multiple_public_keys::<V, _>(
+            identity,
+            Some(&seed_namespace),
+            &seed_message,
+            seed_signatures,
+        );
+
+        // Remove invalid seed signatures
+        (notarizes, invalid)
     }
 
     /// Creates a new signed notarize using BLS threshold signatures.
