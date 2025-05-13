@@ -23,15 +23,15 @@ pub async fn authorize(config_path: &PathBuf, ip: Option<String>) -> Result<(), 
     info!(tag = tag.as_str(), "loaded configuration");
 
     // Check deployment status
-    let temp_dir = deployer_directory(tag);
-    if !temp_dir.exists() {
+    let deployer_directory = deployer_directory(tag);
+    if !deployer_directory.exists() {
         return Err(Error::DeploymentDoesNotExist(tag.clone()));
     }
-    let created_file = temp_dir.join(CREATED_FILE_NAME);
+    let created_file = deployer_directory.join(CREATED_FILE_NAME);
     if !created_file.exists() {
         return Err(Error::DeploymentNotComplete(tag.clone()));
     }
-    let destroyed_file = temp_dir.join(DESTROYED_FILE_NAME);
+    let destroyed_file = deployer_directory.join(DESTROYED_FILE_NAME);
     if destroyed_file.exists() {
         return Err(Error::DeploymentAlreadyDestroyed(tag.clone()));
     }

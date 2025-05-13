@@ -229,7 +229,7 @@ cfg_if::cfg_if! {
 
         /// Directory where deployer files are stored
         fn deployer_directory(tag: &str) -> PathBuf {
-            let base_dir = std::env::var("HOME").unwrap_or_else(|_| String::from("/tmp"));
+            let base_dir = std::env::var("HOME").expect("$HOME is not configured");
             PathBuf::from(format!("{}/.deployer/{}", base_dir, tag))
         }
 

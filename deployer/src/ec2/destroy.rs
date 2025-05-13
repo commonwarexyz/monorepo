@@ -20,13 +20,13 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
     info!(tag = tag.as_str(), "loaded configuration");
 
     // Ensure deployment directory exists
-    let temp_dir = deployer_directory(tag);
-    if !temp_dir.exists() {
+    let deployer_directory = deployer_directory(tag);
+    if !deployer_directory.exists() {
         return Err(Error::DeploymentDoesNotExist(tag.clone()));
     }
 
     // Ensure not already destroyed
-    let destroyed_file = deployer_directory(tag).join(DESTROYED_FILE_NAME);
+    let destroyed_file = deployer_directory.join(DESTROYED_FILE_NAME);
     if destroyed_file.exists() {
         warn!("infrastructure already destroyed");
         return Ok(());
