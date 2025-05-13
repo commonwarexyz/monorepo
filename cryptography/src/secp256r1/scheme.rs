@@ -46,10 +46,9 @@ impl CommonwareVerifier for Secp256r1 {
             Some(namespace) => Cow::Owned(union_unique(namespace, message)),
             None => Cow::Borrowed(message),
         };
-        public_key
-            .key
-            .verify(&payload, &signature.signature)
-            .is_ok()
+        let public_key = VerifyingKey::from_sec1_bytes(&public_key.raw).unwrap();
+        let signature = p256::ecdsa::Signature::from_slice(&signature.raw).unwrap();
+        public_key.verify(&payload, &signature).is_ok()
     }
 }
 
@@ -63,7 +62,7 @@ impl CommonwareSigner for Secp256r1 {
     }
 
     fn from(private_key: PrivateKey) -> Option<Self> {
-        let signer = private_key.key.clone();
+        let signer = SigningKey::from_slice(&private_key.raw).unwrap();
         let verifier = signer.verifying_key().to_owned();
         Some(Self { signer, verifier })
     }
@@ -93,11 +92,6 @@ impl CommonwareSigner for Secp256r1 {
 #[derive(Clone, Eq, PartialEq, Zeroize, ZeroizeOnDrop)]
 pub struct PrivateKey {
     raw: [u8; PRIVATE_KEY_LENGTH],
-    // `ZeroizeOnDrop` is implemented for `SigningKey` and can't be called directly.
-    //
-    // Reference: https://github.com/RustCrypto/signatures/blob/a83c494216b6f3dacba5d4e4376785e2ea142044/ecdsa/src/signing.rs#L487-L493
-    #[zeroize(skip)]
-    key: SigningKey,
 }
 
 impl Write for PrivateKey {
@@ -111,9 +105,8 @@ impl Read for PrivateKey {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let key =
-            SigningKey::from_slice(&raw).map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
-        Ok(Self { raw, key })
+        SigningKey::from_slice(&raw).map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+        Ok(Self { raw })
     }
 }
 
@@ -156,8 +149,9 @@ impl Deref for PrivateKey {
 
 impl From<SigningKey> for PrivateKey {
     fn from(signer: SigningKey) -> Self {
-        let raw = signer.to_bytes().into();
-        Self { raw, key: signer }
+        Self {
+            raw: signer.to_bytes().into(),
+        }
     }
 }
 
@@ -177,7 +171,6 @@ impl Display for PrivateKey {
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct PublicKey {
     raw: [u8; PUBLIC_KEY_LENGTH],
-    key: VerifyingKey,
 }
 
 impl Write for PublicKey {
@@ -191,9 +184,9 @@ impl Read for PublicKey {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; PUBLIC_KEY_LENGTH]>::read(buf)?;
-        let key = VerifyingKey::from_sec1_bytes(&raw)
+        VerifyingKey::from_sec1_bytes(&raw)
             .map_err(|_| CodecError::Invalid(CURVE_NAME, "Invalid PublicKey"))?;
-        Ok(Self { raw, key })
+        Ok(Self { raw })
     }
 }
 
@@ -226,7 +219,7 @@ impl From<VerifyingKey> for PublicKey {
     fn from(verifier: VerifyingKey) -> Self {
         let encoded = verifier.to_encoded_point(true);
         let raw: [u8; PUBLIC_KEY_LENGTH] = encoded.as_bytes().try_into().unwrap();
-        Self { raw, key: verifier }
+        Self { raw }
     }
 }
 
@@ -246,7 +239,6 @@ impl Display for PublicKey {
 #[derive(Clone, Eq, PartialEq)]
 pub struct Signature {
     raw: [u8; SIGNATURE_LENGTH],
-    signature: p256::ecdsa::Signature,
 }
 
 impl Write for Signature {
@@ -266,7 +258,7 @@ impl Read for Signature {
             // Reject any signatures with a `s` value in the upper half of the curve order.
             return Err(CodecError::Invalid(CURVE_NAME, "Signature S is high"));
         }
-        Ok(Self { raw, signature })
+        Ok(Self { raw })
     }
 }
 
@@ -309,8 +301,9 @@ impl Deref for Signature {
 
 impl From<p256::ecdsa::Signature> for Signature {
     fn from(signature: p256::ecdsa::Signature) -> Self {
-        let raw = signature.to_bytes().into();
-        Self { raw, signature }
+        Self {
+            raw: signature.to_bytes().into(),
+        }
     }
 }
 
