@@ -1308,11 +1308,12 @@ impl<V: Variant, D: Digest> Response<V, D> {
         let mut signatures = Vec::new();
 
         // Parse all notarizations
+        let notarize_namespace = notarize_namespace(namespace);
+        let seed_namespace = seed_namespace(namespace);
         for notarization in self.notarizations.iter() {
             // Prepare notarize message
-            let notarize_namespace = notarize_namespace(namespace);
-            let notarize_message = notarization.proposal.encode();
-            let notarize_message = (Some(notarize_namespace.as_ref()), notarize_message.as_ref());
+            let notarize_message = notarization.proposal.encode().to_vec();
+            let notarize_message = (Some(notarize_namespace.as_slice()), notarize_message);
             messages.push(notarize_message);
             signatures.push(&notarization.proposal_signature);
 
@@ -1322,9 +1323,8 @@ impl<V: Variant, D: Digest> Response<V, D> {
                     return false;
                 }
             } else {
-                let seed_namespace = seed_namespace(namespace);
                 let seed_message = view_message(notarization.proposal.view);
-                let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
+                let seed_message = (Some(seed_namespace.as_slice()), seed_message);
                 messages.push(seed_message);
                 signatures.push(&notarization.seed_signature);
                 seeds.insert(notarization.proposal.view, &notarization.seed_signature);
@@ -1332,11 +1332,11 @@ impl<V: Variant, D: Digest> Response<V, D> {
         }
 
         // Parse all nullifications
+        let nullify_namespace = nullify_namespace(namespace);
         for nullification in self.nullifications.iter() {
             // Prepare nullify message
-            let nullify_namespace = nullify_namespace(namespace);
             let nullify_message = view_message(nullification.view);
-            let nullify_message = (Some(nullify_namespace.as_ref()), nullify_message.as_ref());
+            let nullify_message = (Some(nullify_namespace.as_slice()), nullify_message);
             messages.push(nullify_message);
             signatures.push(&nullification.view_signature);
 
@@ -1346,9 +1346,8 @@ impl<V: Variant, D: Digest> Response<V, D> {
                     return false;
                 }
             } else {
-                let seed_namespace = seed_namespace(namespace);
                 let seed_message = view_message(nullification.view);
-                let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
+                let seed_message = (Some(seed_namespace.as_slice()), seed_message);
                 messages.push(seed_message);
                 signatures.push(&nullification.seed_signature);
                 seeds.insert(nullification.view, &nullification.seed_signature);
@@ -1357,7 +1356,16 @@ impl<V: Variant, D: Digest> Response<V, D> {
 
         // Aggregate signatures
         let signature = aggregate_signatures::<V, _>(signatures);
-        aggregate_verify_multiple_messages::<V, _>(public_key, &messages, &signature, 1).is_ok()
+        aggregate_verify_multiple_messages::<V, _>(
+            public_key,
+            &messages
+                .iter()
+                .map(|(namespace, message)| (namespace.as_deref(), message.as_ref()))
+                .collect::<Vec<_>>(),
+            &signature,
+            1,
+        )
+        .is_ok()
     }
 }
 
