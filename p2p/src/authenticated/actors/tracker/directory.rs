@@ -143,9 +143,12 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Directory<
     /// # Panics
     ///
     /// Panics if the peer is not tracked or if the peer is not in the reserved state.
-    pub fn connect(&mut self, peer: &C::PublicKey) {
+    pub fn connect(&mut self, peer: &C::PublicKey, dialer: bool) {
         // Set the record as connected
         let record = self.peers.get_mut(peer).unwrap();
+        if dialer {
+            record.dial_success();
+        }
         record.connect();
 
         // We may have to update the sets.

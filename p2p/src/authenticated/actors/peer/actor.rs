@@ -1,6 +1,9 @@
 use super::{Config, Error, Mailbox, Message, Relay};
 use crate::authenticated::{
-    actors::tracker::{self, reservation::Reservation},
+    actors::tracker::{
+        self,
+        reservation::{Metadata, Reservation},
+    },
     channels::Channels,
     metrics, types,
 };
@@ -38,7 +41,7 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: Verifier>
     rate_limited: Family<metrics::Message, Counter>,
 
     // When reservation goes out-of-scope, the tracker will be notified.
-    _reservation: Reservation<E, C::PublicKey>,
+    reservation: Reservation<E, C::PublicKey>,
 }
 
 impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Verifier> Actor<E, C> {
@@ -68,7 +71,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Ver
                 sent_messages: cfg.sent_messages,
                 received_messages: cfg.received_messages,
                 rate_limited: cfg.rate_limited,
-                _reservation: reservation,
+                reservation,
             },
             Relay::new(low_sender, high_sender),
         )
@@ -126,9 +129,10 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Ver
             let mut tracker = tracker.clone();
             let mailbox = self.mailbox.clone();
             let rate_limits = rate_limits.clone();
+            let dialer = matches!(self.reservation.metadata(), Metadata::Dialer(..));
             move |context| async move {
                 // Allow tracker to initialize the peer
-                tracker.initialize(peer.clone(), mailbox.clone()).await;
+                tracker.connect(peer.clone(), dialer, mailbox.clone()).await;
 
                 // Set the initial deadline to now to start gossiping immediately
                 let mut deadline = context.current();

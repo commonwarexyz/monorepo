@@ -143,8 +143,9 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
 
                     self.directory.add_set(index, peers);
                 }
-                Message::Initialize {
+                Message::Connect {
                     public_key,
+                    dialer,
                     mut peer,
                 } => {
                     // Kill if peer is not authorized
@@ -154,7 +155,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
                     }
 
                     // Mark the record as connected
-                    self.directory.connect(&public_key);
+                    self.directory.connect(&public_key, dialer);
 
                     // Proactively send our own info to the peer
                     let info = self.directory.info(&self.crypto.public_key()).unwrap();
@@ -222,7 +223,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
                     self.directory.block(&public_key);
 
                     // We don't have to kill the peer now. It will be sent a `Kill` message the next
-                    // time it sends the `Initialize` or `Construct` message to the tracker.
+                    // time it sends the `Connect` or `Construct` message to the tracker.
                 }
             }
         }
@@ -328,7 +329,10 @@ mod tests {
             .listen(peer.clone())
             .await
             .expect("reservation failed");
-        mailbox.initialize(peer.clone(), peer_mailbox.clone()).await;
+        let dialer = false;
+        mailbox
+            .connect(peer.clone(), dialer, peer_mailbox.clone())
+            .await;
         let response = peer_receiver
             .next()
             .await
@@ -396,7 +400,7 @@ mod tests {
     }
 
     #[test]
-    fn test_initialize_unauthorized_peer_is_killed() {
+    fn test_connect_unauthorized_peer_is_killed() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = default_test_config(Ed25519::from_seed(0), Vec::new());
@@ -405,17 +409,26 @@ mod tests {
             let (_unauth_signer, unauth_pk) = new_signer_and_pk(1);
             let (peer_mailbox, mut peer_receiver) = peer::Mailbox::test();
 
-            mailbox.initialize(unauth_pk, peer_mailbox).await;
-
+            // Connect as listener
+            mailbox
+                .connect(unauth_pk.clone(), false, peer_mailbox.clone())
+                .await;
             assert!(
                 matches!(peer_receiver.next().await, Some(peer::Message::Kill)),
-                "Unauthorized peer should be killed on Initialize"
+                "Unauthorized peer should be killed on Connect"
+            );
+
+            // Connect as dialer
+            mailbox.connect(unauth_pk, true, peer_mailbox).await;
+            assert!(
+                matches!(peer_receiver.next().await, Some(peer::Message::Kill)),
+                "Unauthorized peer should be killed on Connect"
             );
         });
     }
 
     #[test]
-    fn test_initialize_authorized_peer_receives_tracker_info() {
+    fn test_connect_authorized_peer_receives_tracker_info() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg_initial = default_test_config(Ed25519::from_seed(0), Vec::new());
@@ -438,7 +451,7 @@ mod tests {
 
             let _res = mailbox.listen(auth_pk.clone()).await.unwrap();
             mailbox
-                .initialize(auth_pk.clone(), peer_mailbox.clone())
+                .connect(auth_pk.clone(), false, peer_mailbox.clone())
                 .await;
 
             match peer_receiver.next().await {

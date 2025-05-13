@@ -167,15 +167,12 @@ impl<C: Verifier> Record<C> {
         false
     }
 
-    /// Marks the peer as connected. The peer must have the status [`Status::Reserved`].
+    /// Marks the peer as connected.
+    ///
+    /// The peer must have the status [`Status::Reserved`].
     pub fn connect(&mut self) {
         assert!(matches!(self.status, Status::Reserved));
         self.status = Status::Active;
-
-        // Reset the failure count
-        if let Address::Discovered(_, fails) = &mut self.address {
-            *fails = 0;
-        }
     }
 
     /// Releases any reservation on the peer.
@@ -191,6 +188,17 @@ impl<C: Verifier> Record<C> {
             if info.socket == socket {
                 *fails += 1;
             }
+        }
+    }
+
+    /// Indicate that a dial succeeded for this peer.
+    ///
+    /// Due to race conditions, it's possible that we connected using a socket that is now ejected
+    /// from the record. However, in this case, the record would already have the `fails` set to 0,
+    /// so we can avoid checking against the socket.
+    pub fn dial_success(&mut self) {
+        if let Address::Discovered(_, fails) = &mut self.address {
+            *fails = 0;
         }
     }
 

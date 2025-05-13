@@ -27,9 +27,12 @@ pub enum Message<E: Spawner + Metrics, C: Verifier> {
     /// Notify the tracker that a peer has been successfully connected, and that a
     /// [`types::Payload::Peers`] message (containing solely the local node's information) should be
     /// sent to the peer.
-    Initialize {
+    Connect {
         /// The public key of the peer.
         public_key: C::PublicKey,
+
+        /// `true` if we are the dialer, `false` if we are the listener.
+        dialer: bool,
 
         /// The mailbox of the peer actor.
         peer: peer::Mailbox<C>,
@@ -115,10 +118,19 @@ impl<E: Spawner + Metrics, C: Verifier> Mailbox<E, C> {
         Self { sender }
     }
 
-    /// Send an `Initialize` message to the tracker.
-    pub async fn initialize(&mut self, public_key: C::PublicKey, peer: peer::Mailbox<C>) {
+    /// Send an `Connect` message to the tracker.
+    pub async fn connect(
+        &mut self,
+        public_key: C::PublicKey,
+        dialer: bool,
+        peer: peer::Mailbox<C>,
+    ) {
         self.sender
-            .send(Message::Initialize { public_key, peer })
+            .send(Message::Connect {
+                public_key,
+                dialer,
+                peer,
+            })
             .await
             .unwrap();
     }
