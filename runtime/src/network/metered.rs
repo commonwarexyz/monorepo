@@ -200,20 +200,20 @@ mod tests {
         // Create a server task that accepts one connection and echoes data
         let server = tokio::spawn(async move {
             let (_, mut sink, mut stream) = listener.accept().await.unwrap();
-            let mut buf = [0u8; MSG_SIZE as usize];
-            stream.recv(&mut buf).await.unwrap();
-            sink.send(&buf).await.unwrap();
+            let read = stream.recv(MSG_SIZE as usize).await.unwrap();
+            sink.send(read).await.unwrap();
         });
 
         // Send and receive data as client
         let (mut client_sink, mut client_stream) = network.dial(addr).await.unwrap();
 
         // Send fixed-size data and receive response
-        let test_data = [42u8; MSG_SIZE as usize];
-        client_sink.send(&test_data).await.unwrap();
+        let test_data = Vec::from([42u8; MSG_SIZE as usize]);
+        client_sink.send(test_data.clone().into()).await.unwrap();
 
-        let mut response = [0u8; MSG_SIZE as usize];
-        client_stream.recv(&mut response).await.unwrap();
+        let read = client_stream.recv(MSG_SIZE as usize).await.unwrap();
+        assert_eq!(read.len(), MSG_SIZE as usize);
+        assert_eq!(&read, &test_data);
 
         // Wait for server to complete
         server.await.unwrap();

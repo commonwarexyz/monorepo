@@ -186,6 +186,7 @@ mod tests {
     use crate::network::deterministic::Network as DeterministicNetwork;
     use crate::network::tests;
     use crate::{Listener as _, Network as _, Sink as _, Stream as _};
+    use bytes::Bytes;
     use std::net::SocketAddr;
     use std::sync::Arc;
 
@@ -242,12 +243,11 @@ mod tests {
                 let (_, mut sink, mut stream) = listener.accept().await.unwrap();
 
                 // Receive data from client
-                let mut buf = [0u8; CLIENT_MSG.len()];
-                stream.recv(&mut buf).await.unwrap();
-                assert_eq!(&buf, CLIENT_MSG.as_bytes());
+                let read = stream.recv(CLIENT_MSG.len()).await.unwrap();
+                assert_eq!(&read, CLIENT_MSG.as_bytes());
 
                 // Send response
-                sink.send(SERVER_MSG.as_bytes()).await.unwrap();
+                sink.send(Bytes::from(SERVER_MSG)).await.unwrap();
             });
             server_handles.push(handle);
         }
@@ -261,12 +261,11 @@ mod tests {
                 let (mut sink, mut stream) = network.dial(listener_addr).await.unwrap();
 
                 // Send data to server
-                sink.send(CLIENT_MSG.as_bytes()).await.unwrap();
+                sink.send(CLIENT_MSG.into()).await.unwrap();
 
                 // Receive response
-                let mut buf = [0u8; SERVER_MSG.len()];
-                stream.recv(&mut buf).await.unwrap();
-                assert_eq!(&buf, SERVER_MSG.as_bytes());
+                let read = stream.recv(SERVER_MSG.len()).await.unwrap();
+                assert_eq!(&read, &SERVER_MSG);
             });
             client_handles.push(handle);
         }
