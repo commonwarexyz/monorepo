@@ -2081,12 +2081,20 @@ impl<
 
                     // Verify messages
                     let identity = supervisor.identity(view).unwrap();
-                    let (voters, failed, drop) = verifier.verify(&namespace, &identity);
+                    let (voters, failed, drop) = verifier.verify(&namespace, identity);
 
                     // Send messages
                     for msg in voters {
                         verified_sender.send(msg).await.unwrap();
                     }
+
+                    // Return verifier if still has work
+                    if !drop {
+                        work.insert(view, verifier);
+                    }
+
+                    // Drop any old verifiers
+                    work.retain(|view, _| *view >= min_view);
                 }
             }
         });
