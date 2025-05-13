@@ -6,7 +6,7 @@ use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{
     bls12381::{
         dkg::{player::Output, Dealer, Player},
-        primitives::group,
+        primitives::{group, variant::MinSig},
     },
     Scheme,
 };
@@ -34,7 +34,7 @@ pub struct Contributor<E: Clock + Rng + Spawner, C: Scheme> {
     lazy: bool,
     forger: bool,
 
-    signatures: mpsc::Sender<(u64, Output)>,
+    signatures: mpsc::Sender<(u64, Output<MinSig>)>,
 }
 
 impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
@@ -48,7 +48,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
         corrupt: bool,
         lazy: bool,
         forger: bool,
-    ) -> (Self, mpsc::Receiver<(u64, Output)>) {
+    ) -> (Self, mpsc::Receiver<(u64, Output<MinSig>)>) {
         contributors.sort();
         let contributors_ordered: HashMap<C::PublicKey, u32> = contributors
             .iter()
@@ -78,10 +78,10 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
 
     async fn run_round(
         &mut self,
-        previous: Option<&Output>,
+        previous: Option<&Output<MinSig>>,
         sender: &mut impl Sender<PublicKey = C::PublicKey>,
         receiver: &mut impl Receiver<PublicKey = C::PublicKey>,
-    ) -> (u64, Option<Output>) {
+    ) -> (u64, Option<Output<MinSig>>) {
         // Configure me
         let me = self.crypto.public_key();
         let me_idx = *self.contributors_ordered.get(&me).unwrap();
@@ -159,7 +159,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
         let mut dealer_obj = if should_deal {
             let previous = previous.map(|previous| previous.share.clone());
             let (dealer, commitment, shares) =
-                Dealer::new(&mut self.context, previous, self.contributors.clone());
+                Dealer::<_, MinSig>::new(&mut self.context, previous, self.contributors.clone());
             Some((dealer, commitment, shares, HashMap::new()))
         } else {
             None

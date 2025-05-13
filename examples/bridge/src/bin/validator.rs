@@ -5,7 +5,11 @@ use commonware_bridge::{
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::threshold_simplex::{self, Engine};
 use commonware_cryptography::{
-    bls12381::primitives::{group, poly::Poly},
+    bls12381::primitives::{
+        group,
+        poly::{Poly, Public},
+        variant::{MinSig, Variant},
+    },
     Ed25519, Sha256, Signer,
 };
 use commonware_p2p::authenticated;
@@ -106,7 +110,7 @@ fn main() {
         .get_one::<String>("identity")
         .expect("Please provide identity");
     let identity = from_hex(identity).expect("Identity not well-formed");
-    let identity: Poly<group::Public> =
+    let identity: Public<MinSig> =
         Poly::decode_cfg(identity.as_ref(), &threshold).expect("Identity not well-formed");
     let share = matches
         .get_one::<String>("share")
@@ -130,8 +134,8 @@ fn main() {
         .get_one::<String>("other-public")
         .expect("Please provide other public");
     let other_public = from_hex(other_public).expect("Other identity not well-formed");
-    let other_public =
-        group::Public::decode(other_public.as_ref()).expect("Other identity not well-formed");
+    let other_public = <MinSig as Variant>::Public::decode(other_public.as_ref())
+        .expect("Other identity not well-formed");
 
     // Initialize context
     let runtime_cfg = tokio::Config::new().with_storage_directory(storage_directory);

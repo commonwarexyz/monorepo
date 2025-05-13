@@ -1,4 +1,7 @@
-use commonware_cryptography::bls12381::{dkg, primitives};
+use commonware_cryptography::bls12381::{
+    dkg,
+    primitives::{self, variant::MinSig},
+};
 use commonware_utils::quorum;
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
@@ -13,14 +16,19 @@ fn benchmark_threshold_signature_recover(c: &mut Criterion) {
         c.bench_function(&format!("{}/n={} t={}", module_path!(), n, t), |b| {
             b.iter_batched(
                 || {
-                    let (_, shares) = dkg::ops::generate_shares(&mut rng, None, n, t);
+                    let (_, shares) = dkg::ops::generate_shares::<_, MinSig>(&mut rng, None, n, t);
                     shares
                         .iter()
-                        .map(|s| primitives::ops::partial_sign_message(s, Some(namespace), msg))
+                        .map(|s| {
+                            primitives::ops::partial_sign_message::<MinSig>(s, Some(namespace), msg)
+                        })
                         .collect::<Vec<_>>()
                 },
                 |partials| {
-                    black_box(primitives::ops::threshold_signature_recover(t, &partials).unwrap());
+                    black_box(
+                        primitives::ops::threshold_signature_recover::<MinSig, _>(t, &partials)
+                            .unwrap(),
+                    );
                 },
                 BatchSize::SmallInput,
             );

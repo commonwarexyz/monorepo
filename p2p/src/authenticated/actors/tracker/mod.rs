@@ -10,6 +10,7 @@ use thiserror::Error;
 
 mod actor;
 mod ingress;
+mod metrics;
 mod record;
 mod set;
 
@@ -40,8 +41,8 @@ pub enum Error {
     ReceivedSelf,
     #[error("invalid signature")]
     InvalidSignature,
+    #[error("synchrony bound violated")]
+    SynchronyBound,
     #[error("peervec length mismatch: expected {0} bytes, got {1}")]
     BitVecLengthMismatch(usize, usize),
-    #[error("peervec has extra bit")]
-    BitVecExtraBit,
 }

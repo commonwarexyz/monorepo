@@ -3,6 +3,7 @@ use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRange
 use commonware_cryptography::bls12381::primitives::{
     group,
     poly::{self, Eval},
+    variant::{MinSig, Variant},
 };
 use commonware_utils::{quorum, Array};
 use std::collections::HashMap;
@@ -52,7 +53,7 @@ pub enum Payload<Sig: Array> {
     /// Optionally includes a pre-existing group public key if reforming a group.
     Start {
         /// Optional existing group public polynomial commitment.
-        group: Option<poly::Public>,
+        group: Option<poly::Public<MinSig>>,
     },
 
     /// Message sent by a dealer node to a player node.
@@ -61,7 +62,7 @@ pub enum Payload<Sig: Array> {
     /// share calculated for the receiving player.
     Share {
         /// The dealer's public commitment (coefficients of the polynomial).
-        commitment: poly::Public,
+        commitment: poly::Public<MinSig>,
         /// The secret share evaluated for the recipient player.
         share: group::Share,
     },
@@ -85,7 +86,7 @@ pub enum Payload<Sig: Array> {
     /// and potentially revealed shares (e.g., for handling unresponsive players).
     Commitment {
         /// The dealer's public commitment.
-        commitment: poly::Public,
+        commitment: poly::Public<MinSig>,
         /// A map of player public key identifiers to their corresponding acknowledgment signatures.
         acks: HashMap<u32, Sig>,
         /// A vector of shares revealed by the dealer, potentially for players who did not acknowledge.
@@ -97,7 +98,7 @@ pub enum Payload<Sig: Array> {
     /// Contains the final aggregated commitments and revealed shares from all participating dealers.
     Success {
         /// A map of dealer public key identifiers to their final public commitments.
-        commitments: HashMap<u32, poly::Public>,
+        commitments: HashMap<u32, poly::Public<MinSig>>,
         /// A map of player public key identifiers to their corresponding revealed shares,
         /// aggregated from all dealers' [`Payload::Commitment`] messages.
         reveals: HashMap<u32, group::Share>,
@@ -160,10 +161,10 @@ impl<Sig: Array> Read for Payload<Sig> {
         let t = quorum(u32::try_from(*p).unwrap()) as usize; // threshold
         let result = match tag {
             0 => Payload::Start {
-                group: Option::<poly::Public>::read_cfg(buf, &t)?,
+                group: Option::<poly::Public<MinSig>>::read_cfg(buf, &t)?,
             },
             1 => Payload::Share {
-                commitment: poly::Public::read_cfg(buf, &t)?,
+                commitment: poly::Public::<MinSig>::read_cfg(buf, &t)?,
                 share: group::Share::read(buf)?,
             },
             2 => Payload::Ack {
@@ -171,7 +172,7 @@ impl<Sig: Array> Read for Payload<Sig> {
                 signature: Sig::read(buf)?,
             },
             3 => {
-                let commitment = poly::Public::read_cfg(buf, &t)?;
+                let commitment = poly::Public::<MinSig>::read_cfg(buf, &t)?;
                 let acks = HashMap::<u32, Sig>::read_range(buf, ..=*p)?;
                 let r = p.checked_sub(acks.len()).unwrap(); // The lengths of the two sets must sum to exactly p.
                 let reveals = Vec::<group::Share>::read_range(buf, r..=r)?;
@@ -182,8 +183,10 @@ impl<Sig: Array> Read for Payload<Sig> {
                 }
             }
             4 => {
-                let commitments =
-                    HashMap::<u32, poly::Public>::read_cfg(buf, &((..=*p).into(), ((), t)))?;
+                let commitments = HashMap::<u32, poly::Public<MinSig>>::read_cfg(
+                    buf,
+                    &((..=*p).into(), ((), t)),
+                )?;
                 let reveals = HashMap::<u32, group::Share>::read_range(buf, ..=*p)?;
                 Payload::Success {
                     commitments,
@@ -229,7 +232,7 @@ pub struct Vrf {
     /// The round number associated with this VRF output.
     pub round: u64,
     /// The VRF signature/proof, represented as an evaluation of a threshold signature.
-    pub signature: Eval<group::Signature>,
+    pub signature: Eval<<MinSig as Variant>::Signature>,
 }
 
 impl Write for Vrf {
@@ -244,7 +247,7 @@ impl Read for Vrf {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let round = UInt::read(buf)?.into();
-        let signature = Eval::<group::Signature>::read(buf)?;
+        let signature = Eval::<<MinSig as Variant>::Signature>::read(buf)?;
         Ok(Self { round, signature })
     }
 }
@@ -263,6 +266,7 @@ mod tests {
         bls12381::primitives::{
             group::{self, Element},
             poly,
+            variant::Variant,
         },
         ed25519::Signature,
     };
@@ -283,8 +287,8 @@ mod tests {
         }
     }
 
-    fn new_eval(v: u32) -> Eval<group::Signature> {
-        let mut signature = group::Signature::one();
+    fn new_eval(v: u32) -> Eval<<MinSig as Variant>::Signature> {
+        let mut signature = <MinSig as Variant>::Signature::one();
         let scalar = group::Scalar::rand(&mut thread_rng());
         signature.mul(&scalar);
         Eval {
@@ -293,11 +297,11 @@ mod tests {
         }
     }
 
-    fn new_poly() -> poly::Public {
-        let mut public = group::Public::one();
+    fn new_poly() -> poly::Public<MinSig> {
+        let mut public = <MinSig as Variant>::Public::one();
         let scalar = group::Scalar::rand(&mut thread_rng());
         public.mul(&scalar);
-        poly::Public::from(vec![public; T])
+        poly::Public::<MinSig>::from(vec![public; T])
     }
 
     #[test]
@@ -364,7 +368,7 @@ mod tests {
 
     #[test]
     fn test_dkg_success_codec() {
-        let mut commitments = HashMap::<u32, poly::Public>::new();
+        let mut commitments = HashMap::<u32, poly::Public<MinSig>>::new();
         commitments.insert(1, new_poly());
         let mut reveals = HashMap::<u32, group::Share>::new();
         reveals.insert(1, new_share(123));
