@@ -17,16 +17,15 @@ pub async fn send_frame<S: Sink>(
     if n > max_message_size {
         return Err(Error::SendTooLarge(n));
     }
-    let len: u32 = n.try_into().map_err(|_| Error::SendTooLarge(n))?;
 
+    // Prefix `buf` with its length and send it
     let mut prefixed_buf = BytesMut::with_capacity(4 + buf.len());
+    let len: u32 = n.try_into().map_err(|_| Error::SendTooLarge(n))?;
     prefixed_buf.put_u32(len);
     prefixed_buf.extend_from_slice(buf);
     sink.send(prefixed_buf.freeze())
         .await
-        .map_err(Error::SendFailed)?;
-
-    Ok(())
+        .map_err(Error::SendFailed)
 }
 
 /// Receives data from the stream with a 4-byte length prefix.
@@ -36,11 +35,7 @@ pub async fn recv_frame<T: Stream>(
     max_message_size: usize,
 ) -> Result<Bytes, Error> {
     // Read the first 4 bytes to get the length of the message
-    let len_buf = stream
-        .recv(Vec::with_capacity(4))
-        .await
-        .map_err(Error::RecvFailed)?;
-    assert_eq!(len_buf.len(), 4);
+    let len_buf = stream.recv(vec![0; 4]).await.map_err(Error::RecvFailed)?;
 
     // Validate frame size
     let len = u32::from_be_bytes(len_buf[..4].try_into().unwrap()) as usize;
@@ -52,11 +47,7 @@ pub async fn recv_frame<T: Stream>(
     }
 
     // Read the rest of the message
-    let read = stream
-        .recv(Vec::with_capacity(len))
-        .await
-        .map_err(Error::RecvFailed)?;
-
+    let read = stream.recv(vec![0; len]).await.map_err(Error::RecvFailed)?;
     Ok(read.into())
 }
 
@@ -126,7 +117,7 @@ mod tests {
             assert!(result.is_ok());
 
             // Do the reading manually without using recv_frame
-            let read = stream.recv(Vec::with_capacity(4)).await.unwrap();
+            let read = stream.recv(vec![0; 4]).await.unwrap();
             assert_eq!(read, (buf.len() as u32).to_be_bytes());
             let read = stream
                 .recv(Vec::with_capacity(MAX_MESSAGE_SIZE))

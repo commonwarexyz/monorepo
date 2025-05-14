@@ -2,7 +2,7 @@
 // We don't want to depend on the whole crate, so we've copied/adapted the relevant parts.
 use super::IoBuf;
 
-/// A mutable`io-uring` compatible buffer.
+/// A mutable `io-uring` compatible buffer.
 ///
 /// The `IoBufMut` trait is implemented by buffer types that can be used with
 /// io-uring operations. Users will not need to use this trait directly.
@@ -13,7 +13,7 @@ use super::IoBuf;
 /// region. While the runtime holds ownership to a buffer, the pointer returned
 /// by `stable_mut_ptr` must remain valid even if the `IoBufMut` value is moved.
 pub unsafe trait IoBufMut: IoBuf {
-    /// Returns a raw mutable pointer to the vector’s buffer.
+    /// Returns a raw mutable pointer to this buffer.
     ///
     /// This method is to be used by the runtime and it is not
     /// expected for users to call it directly.
