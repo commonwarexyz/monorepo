@@ -206,7 +206,7 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
         self.notarizes_force = true;
     }
 
-    fn verify_notarizes(
+    pub fn verify_notarizes(
         &mut self,
         namespace: &[u8],
         identity: &Poly<V::Public>,
@@ -243,7 +243,7 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
         self.nullifies_verified + self.nullifies.len() >= self.quorum as usize
     }
 
-    fn verify_finalizes(
+    pub fn verify_finalizes(
         &mut self,
         namespace: &[u8],
         identity: &Poly<V::Public>,

@@ -78,7 +78,7 @@ struct Round<
     supervisor: S,
 
     view: View,
-    participants: usize,
+    quorum: u32,
 
     leader: Option<C::PublicKey>,
 
@@ -133,13 +133,14 @@ impl<
 {
     pub fn new(clock: &impl Clock, reporter: R, supervisor: S, view: View) -> Self {
         let participants = supervisor.participants(view).unwrap().len();
+        let quorum = quorum(participants as u32);
         Self {
             start: clock.current(),
             reporter,
             supervisor,
 
             view,
-            participants,
+            quorum,
 
             leader: None,
             leader_deadline: None,
@@ -529,8 +530,7 @@ impl<
 
     /// Returns whether at least one honest participant has notarized a proposal.
     pub fn at_least_one_honest(&self) -> Option<View> {
-        let threshold = quorum(self.participants as u32);
-        let at_least_one_honest = (threshold - 1) / 2 + 1;
+        let at_least_one_honest = (self.quorum - 1) / 2 + 1;
         if self.notarizes_verified < at_least_one_honest as usize {
             return None;
         }

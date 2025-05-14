@@ -137,7 +137,10 @@ impl<
                         finalized: new_finalized,
                     } => {
                         current = new_current;
-                        work.entry(current).or_default().mark(leader);
+                        let quorum = self.supervisor.identity(current).unwrap().required();
+                        work.entry(current)
+                            .or_insert(PartialVerifier::new(quorum))
+                            .mark(leader);
                         finalized = new_finalized;
                     }
                     Message::Message(message) => {
@@ -146,7 +149,11 @@ impl<
                         // Only add messages if the view matters to us
                         if message.view() >= finalized {
                             blocking = false;
-                            work.entry(message.view()).or_default().add(message);
+                            let quorum =
+                                self.supervisor.identity(message.view()).unwrap().required();
+                            work.entry(message.view())
+                                .or_insert(PartialVerifier::new(quorum))
+                                .add(message);
                         }
                     }
                 },
@@ -159,18 +166,29 @@ impl<
             // Look for a ready verifier (prioritizing the current view)
             let mut selected = None;
             if let Some(verifier) = work.get_mut(&current) {
-                if verifier.ready_current() {
-                    selected = Some((current, verifier));
+                if verifier.ready_notarizes() {
+                    let identity = self.supervisor.identity(current).unwrap();
+                    let (voters, failed) = verifier.verify_notarizes(&self.namespace, identity);
+                    selected = Some((current, voters, failed));
+                } else if verifier.ready_nullifies() {
+                    let identity = self.supervisor.identity(current).unwrap();
+                    let (voters, failed) = verifier.verify_nullifies(&self.namespace, identity);
+                    selected = Some((current, voters, failed));
                 }
             }
             if selected.is_none() {
-                selected = work
+                let potential = work
                     .iter_mut()
                     .rev()
-                    .find(|(_, verifier)| verifier.ready_past())
+                    .find(|(_, verifier)| verifier.ready_finalizes())
                     .map(|(view, verifier)| (*view, verifier));
+                if let Some((view, verifier)) = potential {
+                    let identity = self.supervisor.identity(view).unwrap();
+                    let (voters, failed) = verifier.verify_finalizes(&self.namespace, identity);
+                    selected = Some((view, voters, failed));
+                }
             }
-            let Some((view, verifier)) = selected else {
+            let Some((view, voters, failed)) = selected else {
                 blocking = true;
                 trace!(
                     current,
@@ -181,15 +199,11 @@ impl<
                 continue;
             };
 
-            // Verify messages
-            let identity = self.supervisor.identity(view).unwrap();
-            let (voters, failed) = verifier.verify(&self.namespace, identity, view == current);
+            // Send messages
             let batch = voters.len() + failed.len();
             trace!(view, batch, "batch verified messages");
             self.verified.inc_by(batch as u64);
             self.batch_size.observe(batch as f64);
-
-            // Send messages
             for msg in voters {
                 consensus.voter(msg).await;
             }
