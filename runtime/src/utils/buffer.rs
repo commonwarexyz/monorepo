@@ -114,10 +114,14 @@ impl<B: Blob> Buffer<B> {
         let bytes_to_read = std::cmp::min(self.buffer_size as u64, blob_remaining) as usize;
 
         // Read the data - we only need a single read operation since we know exactly how much data is available
-        let buffer = std::mem::take(&mut self.buffer);
+        // Note that the last refill may cause `self.buffer` to have length < `self.buffer_size`
+        // because `bytes_to_read` < `self.buffer_size`.
         self.buffer = self
             .blob
-            .read_at(BytesMut::from(&buffer[..bytes_to_read]), self.blob_position)
+            .read_at(
+                BytesMut::from(&self.buffer[..bytes_to_read]),
+                self.blob_position,
+            )
             .await?;
         self.buffer_valid_len = bytes_to_read;
         Ok(bytes_to_read)
