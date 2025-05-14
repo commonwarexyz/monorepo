@@ -148,7 +148,7 @@ mod tests {
             let backfiller = resolver::Mailbox::new(backfiller_sender);
 
             // Create a dummy verifier mailbox
-            let (verifier_sender, _) = mpsc::channel(1024);
+            let (verifier_sender, mut _verifier_receiver) = mpsc::channel(1024);
             let verifier = verifier::Mailbox::new(verifier_sender);
 
             // Create a dummy network mailbox
