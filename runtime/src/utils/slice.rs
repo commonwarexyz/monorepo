@@ -216,7 +216,7 @@ impl<T: IoBufMut> BoundedBufMut for Slice<T> {
         super::deref_mut(&mut self.buf)[self.begin..].as_mut_ptr()
     }
 
-    unsafe fn set_init(&mut self, pos: usize) {
+    unsafe fn set_len(&mut self, pos: usize) {
         self.buf.set_len(self.begin + pos);
     }
 }

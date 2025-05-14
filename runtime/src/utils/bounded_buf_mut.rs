@@ -14,14 +14,14 @@ pub trait BoundedBufMut: BoundedBuf<Buf = Self::BufMut> + Send {
     /// but possibly offset to the view's starting position.
     fn stable_mut_ptr(&mut self) -> *mut u8;
 
-    /// Like [`IoBufMut::set_init`],
+    /// Like [`IoBufMut::set_len`],
     /// but the position is possibly offset to the view's starting position.
     ///
     /// # Safety
     ///
     /// The caller must ensure that all bytes starting at `stable_mut_ptr()` up
     /// to `pos` are initialized and owned by the buffer.
-    unsafe fn set_init(&mut self, pos: usize);
+    unsafe fn set_len(&mut self, pos: usize);
 
     /// Copies the given byte slice into the buffer, starting at
     /// this view's offset.
@@ -42,7 +42,7 @@ pub trait BoundedBufMut: BoundedBuf<Buf = Self::BufMut> + Send {
         // to mark them as initialized in the buffer.
         unsafe {
             std::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
-            self.set_init(src.len());
+            self.set_len(src.len());
         }
     }
 }
@@ -54,7 +54,7 @@ impl<T: IoBufMut> BoundedBufMut for T {
         IoBufMut::stable_mut_ptr(self)
     }
 
-    unsafe fn set_init(&mut self, pos: usize) {
+    unsafe fn set_len(&mut self, pos: usize) {
         IoBufMut::set_len(self, pos)
     }
 }
