@@ -1,4 +1,4 @@
-// The contents of this file are from based on https://github.com/tokio-rs/tokio-uring at commit 7761222.
+// The contents of this file are based on https://github.com/tokio-rs/tokio-uring at commit 7761222.
 // We don't want to depend on the whole crate, so we've copied/adapted the relevant parts.
 use super::IoBuf;
 
@@ -36,6 +36,11 @@ pub unsafe trait IoBufMut: IoBuf {
         unsafe {
             std::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
         }
+    }
+
+    /// Returns the buffer as a mutable slice.
+    fn deref_mut(&mut self) -> &mut [u8] {
+        unsafe { std::slice::from_raw_parts_mut(self.stable_mut_ptr(), self.len()) }
     }
 }
 

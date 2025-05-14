@@ -44,7 +44,7 @@ impl SinkTrait for Sink {
     async fn send<B: IoBuf>(&mut self, msg: B) -> Result<(), Error> {
         let (os_send, data) = {
             let mut channel = self.channel.lock().unwrap();
-            channel.buffer.extend(crate::deref(&msg));
+            channel.buffer.extend(msg.as_ref());
 
             // If there is a waiter and the buffer is large enough,
             // return the waiter (while clearing the waiter field).

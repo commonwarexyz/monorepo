@@ -1,4 +1,4 @@
-// The contents of this file are from based on https://github.com/tokio-rs/tokio-uring at commit 7761222.
+// The contents of this file are based on https://github.com/tokio-rs/tokio-uring at commit 7761222.
 // We don't want to depend on the whole crate, so we've copied/adapted the relevant parts.
 
 /// An `io-uring` compatible buffer.
@@ -24,6 +24,11 @@ pub unsafe trait IoBuf: Unpin + Send + 'static {
 
     /// Length of the buffer.
     fn len(&self) -> usize;
+
+    /// Returns the buffer as a slice.
+    fn as_ref(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.stable_ptr(), self.len()) }
+    }
 }
 
 unsafe impl IoBuf for Vec<u8> {
