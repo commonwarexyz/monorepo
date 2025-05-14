@@ -53,7 +53,7 @@ const GENESIS_VIEW: View = 0;
 #[derive(Clone)]
 enum Status<O> {
     None,
-    Pending,
+    Pending(O),
     Verified(O),
 }
 
@@ -184,13 +184,24 @@ impl<
 
     fn add_reserved_notarize(&mut self, public_key_index: u32, notarize: &Notarize<V, D>) -> bool {
         // Check if already notarized
-        if let Status::None = self.notarizes[public_key_index as usize] {
-            // Store the notarize
-            self.notarizes[public_key_index as usize] = Status::Pending;
-            true
-        } else {
-            trace!(?notarize, "already reserved notarize");
-            false
+        match self.notarizes[public_key_index as usize] {
+            Status::None => {
+                // Store the notarize
+                self.notarizes[public_key_index as usize] = Status::Pending(notarize.clone());
+                true
+            }
+            Status::Pending(ref previous) => {
+                if previous != notarize {
+                    unimplemented!("conflicting notarize or invalid signature");
+                }
+                false
+            }
+            Status::Verified(ref previous) => {
+                if previous != notarize {
+                    unimplemented!("conflicting notarize or invalid signature");
+                }
+                false
+            }
         }
     }
 
@@ -230,15 +241,25 @@ impl<
         true
     }
 
-    fn add_reserved_nullify(&mut self, public_key_index: u32) -> bool {
+    fn add_reserved_nullify(&mut self, public_key_index: u32, nullify: &Nullify<V>) -> bool {
         // Check if already nullified
-        if let Status::None = self.nullifies[public_key_index as usize] {
-            // Store the nullify
-            self.nullifies[public_key_index as usize] = Status::Pending;
-            true
-        } else {
-            trace!(?public_key_index, "already reserved nullify");
-            false
+        match self.nullifies[public_key_index as usize] {
+            Status::None => {
+                self.nullifies[public_key_index as usize] = Status::Pending(nullify.clone());
+                true
+            }
+            Status::Pending(ref previous) => {
+                if previous != nullify {
+                    unimplemented!("conflicting nullify or invalid signature");
+                }
+                false
+            }
+            Status::Verified(ref previous) => {
+                if previous != nullify {
+                    unimplemented!("conflicting nullify or invalid signature");
+                }
+                false
+            }
         }
     }
 
@@ -267,14 +288,23 @@ impl<
     }
 
     fn add_reserved_finalize(&mut self, public_key_index: u32, finalize: &Finalize<V, D>) -> bool {
-        // Check if already finalized
-        if let Status::None = self.finalizes[public_key_index as usize] {
-            // Store the finalize
-            self.finalizes[public_key_index as usize] = Status::Pending;
-            true
-        } else {
-            trace!(?finalize, "already reserved finalize");
-            false
+        match self.finalizes[public_key_index as usize] {
+            Status::None => {
+                self.finalizes[public_key_index as usize] = Status::Pending(finalize.clone());
+                true
+            }
+            Status::Pending(ref previous) => {
+                if previous != finalize {
+                    unimplemented!("conflicting finalize or invalid signature");
+                }
+                false
+            }
+            Status::Verified(ref previous) => {
+                if previous != finalize {
+                    unimplemented!("conflicting finalize or invalid signature");
+                }
+                false
+            }
         }
     }
 
