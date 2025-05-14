@@ -2189,7 +2189,7 @@ impl<
                     // Skip if there is a decoding error
                     let Ok(msg) = msg else {
                         warn!(sender = ?s, "blocking peer");
-                        self.blocker.block(s);
+                        self.blocker.block(s).await;
                         continue;
                     };
 
@@ -2244,7 +2244,7 @@ impl<
                         }
                         Action::Block => {
                             trace!(sender=?s, view, "blocking peer");
-                            self.blocker.block(s);
+                            self.blocker.block(s).await;
                             continue;
                         }
                     }

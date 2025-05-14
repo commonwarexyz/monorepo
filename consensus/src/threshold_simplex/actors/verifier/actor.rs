@@ -228,7 +228,7 @@ impl<
                 for invalid in failed {
                     let signer = participants[invalid as usize].clone();
                     warn!(?signer, "blocking peer");
-                    self.blocker.block(signer);
+                    self.blocker.block(signer).await;
                 }
             }
 

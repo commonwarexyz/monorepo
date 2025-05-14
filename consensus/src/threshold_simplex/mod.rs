@@ -340,8 +340,10 @@ mod tests {
                     application_cfg,
                 );
                 actor.start();
+                let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme,
+                    blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),
@@ -592,8 +594,10 @@ mod tests {
                         application_cfg,
                     );
                     actor.start();
+                    let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
                         crypto: scheme,
+                        blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: supervisor.clone(),
@@ -777,8 +781,10 @@ mod tests {
                     application_cfg,
                 );
                 actor.start();
+                let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme.clone(),
+                    blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),
@@ -895,8 +901,10 @@ mod tests {
                 application_cfg,
             );
             actor.start();
+            let blocker = oracle.control(scheme.public_key());
             let cfg = config::Config {
                 crypto: scheme,
+                blocker,
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: supervisor.clone(),
@@ -1033,8 +1041,10 @@ mod tests {
                     application_cfg,
                 );
                 actor.start();
+                let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme,
+                    blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),
@@ -1255,8 +1265,10 @@ mod tests {
                     application_cfg,
                 );
                 actor.start();
+                let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme,
+                    blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),
@@ -1422,8 +1434,10 @@ mod tests {
                     application_cfg,
                 );
                 actor.start();
+                let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme.clone(),
+                    blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),
@@ -1584,8 +1598,10 @@ mod tests {
                     application_cfg,
                 );
                 actor.start();
+                let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme.clone(),
+                    blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),
@@ -1774,8 +1790,10 @@ mod tests {
                     application_cfg,
                 );
                 actor.start();
+                let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme,
+                    blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),
@@ -1954,8 +1972,10 @@ mod tests {
                         application_cfg,
                     );
                     actor.start();
+                    let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
                         crypto: scheme,
+                        blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: supervisor.clone(),
@@ -2128,8 +2148,10 @@ mod tests {
                         application_cfg,
                     );
                     actor.start();
+                    let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
                         crypto: scheme,
+                        blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: supervisor.clone(),
@@ -2298,8 +2320,10 @@ mod tests {
                         application_cfg,
                     );
                     actor.start();
+                    let blocker = oracle.control(scheme.public_key());
                     let cfg = config::Config {
                         crypto: scheme,
+                        blocker,
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: supervisor.clone(),
@@ -2432,8 +2456,10 @@ mod tests {
                     application_cfg,
                 );
                 actor.start();
+                let blocker = oracle.control(scheme.public_key());
                 let cfg = config::Config {
                     crypto: scheme,
+                    blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: supervisor.clone(),

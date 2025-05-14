@@ -464,7 +464,7 @@ impl<
                         Err(err) => {
                             warn!(?err, sender = ?s, "blocking peer");
                             self.requester.block(s.clone());
-                            self.blocker.block(s);
+                            self.blocker.block(s).await;
                             continue;
                         },
                     };
@@ -520,7 +520,7 @@ impl<
                             if !response.verify(&self.namespace, &public_key) {
                                 warn!(sender = ?s, "blocking peer");
                                 self.requester.block(s.clone());
-                                self.blocker.block(s);
+                                self.blocker.block(s).await;
                                 continue;
                             }
 
