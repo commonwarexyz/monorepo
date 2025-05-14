@@ -1,12 +1,12 @@
 use super::{Config, Mailbox, Message};
 use crate::{
     threshold_simplex::{
-        actors::resolver,
+        actors::{resolver, verifier},
         metrics,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Context,
             Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
-            NullifyFinalize, PartialVerifier, Proposal, View, Viewable, Voter,
+            NullifyFinalize, Proposal, View, Viewable, Voter,
         },
     },
     Automaton, Relay, Reporter, ThresholdSupervisor, LATENCY,
@@ -32,7 +32,7 @@ use core::panic;
 use futures::{
     channel::{mpsc, oneshot},
     future::Either,
-    pin_mut, SinkExt, StreamExt,
+    pin_mut, StreamExt,
 };
 use prometheus_client::metrics::{
     counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
@@ -46,29 +46,6 @@ use std::{
 use tracing::{debug, trace, warn};
 
 const GENESIS_VIEW: View = 0;
-
-async fn recv_batch<T, F>(rx: &mut mpsc::Receiver<T>, block: bool, mut f: F) -> bool
-where
-    F: FnMut(T),
-{
-    if block {
-        match rx.next().await {
-            Some(first) => {
-                f(first);
-                while let Ok(Some(item)) = rx.try_next() {
-                    f(item);
-                }
-                true // processed at least one item
-            }
-            None => false, // channel closed
-        }
-    } else {
-        while let Ok(Some(item)) = rx.try_next() {
-            f(item);
-        }
-        true
-    }
-}
 
 // TODO: by not storing the message in pending, we may drop what are otherwise considered conflicting messages
 #[derive(Clone)]
@@ -622,7 +599,7 @@ pub struct Actor<
     mailbox_receiver: mpsc::Receiver<Message<V, D>>,
 
     last_finalized: View,
-    min_view: View,
+    oldest: View,
     view: View,
     views: BTreeMap<View, Round<C, V, D, F, S>>,
 
@@ -633,7 +610,6 @@ pub struct Actor<
     broadcast_messages: Family<metrics::Message, Counter>,
     notarization_latency: Histogram,
     finalization_latency: Histogram,
-    batch_size: Option<Histogram>,
 }
 
 impl<
@@ -668,8 +644,6 @@ impl<
         let broadcast_messages = Family::<metrics::Message, Counter>::default();
         let notarization_latency = Histogram::new(LATENCY.into_iter());
         let finalization_latency = Histogram::new(LATENCY.into_iter());
-        let batch_size =
-            Histogram::new([1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0].into_iter());
         context.register("current_view", "current view", current_view.clone());
         context.register("tracked_views", "tracked views", tracked_views.clone());
         context.register("skipped_views", "skipped views", skipped_views.clone());
@@ -692,11 +666,6 @@ impl<
             "finalization_latency",
             "finalization latency",
             finalization_latency.clone(),
-        );
-        context.register(
-            "verify_batch_size",
-            "number of messages in a partial signature verification batch",
-            batch_size.clone(),
         );
 
         // Initialize store
@@ -731,7 +700,7 @@ impl<
                 mailbox_receiver,
 
                 last_finalized: 0,
-                min_view: 0,
+                oldest: 0,
                 view: 0,
                 views: BTreeMap::new(),
 
@@ -742,7 +711,6 @@ impl<
                 broadcast_messages,
                 notarization_latency,
                 finalization_latency,
-                batch_size: Some(batch_size),
             },
             mailbox,
         )
@@ -1282,7 +1250,7 @@ impl<
     async fn prune_views(&mut self) {
         // Get last min
         let mut pruned = false;
-        let min = loop {
+        let oldest = loop {
             // Get next key
             let next = match self.views.keys().next() {
                 Some(next) => *next,
@@ -1302,14 +1270,14 @@ impl<
                 break next;
             }
         };
-        self.min_view = min;
+        self.oldest = oldest;
 
         // Prune journal up to min
         if pruned {
             self.journal
                 .as_mut()
                 .unwrap()
-                .prune(min)
+                .prune(oldest)
                 .await
                 .expect("unable to prune journal");
         }
@@ -1892,18 +1860,18 @@ impl<
     }
 
     pub fn start(
-        self,
+        mut self,
+        verifier: verifier::Mailbox<V, D>,
         backfiller: resolver::Mailbox<V, D>,
         sender: impl Sender<PublicKey = C::PublicKey>,
         receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) -> Handle<()> {
-        self.context
-            .clone()
-            .spawn(|_| self.run(backfiller, sender, receiver))
+        self.context.spawn_ref()(self.run(verifier, backfiller, sender, receiver))
     }
 
     async fn run(
         mut self,
+        mut verifier: verifier::Mailbox<V, D>,
         mut backfiller: resolver::Mailbox<V, D>,
         sender: impl Sender<PublicKey = C::PublicKey>,
         receiver: impl Receiver<PublicKey = C::PublicKey>,
@@ -2033,79 +2001,6 @@ impl<
         // Create shutdown tracker
         let mut shutdown = self.context.stopped();
 
-        // Spawn partial signature verifier
-        //
-        // We attempt to verify notarization/nullification/finalization messages right away (outside this loop)
-        // in case they help us avoid unnecessary work.
-        let (mut verifier_sender, mut verifier_receiver) =
-            mpsc::channel::<(View, View, Voter<V, D>)>(1024);
-        let (mut verified_sender, mut verified_receiver) = mpsc::channel::<Voter<V, D>>(1024);
-        self.context.with_label("verifier").spawn({
-            let mut latest = observed_view;
-            let namespace = self.namespace.clone();
-            let supervisor = self.supervisor.clone();
-            let batch_size = self.batch_size.take().unwrap();
-            move |_| async move {
-                // Initialize view data structures
-                let mut min_view: View = 0;
-                let mut work: BTreeMap<u64, PartialVerifier<V, D>> = BTreeMap::new();
-
-                loop {
-                    // Read at least one message (if there doesn't already exist a backlog)
-                    if !recv_batch(
-                        &mut verifier_receiver,
-                        work.is_empty(),
-                        |(min, current, msg)| {
-                            min_view = min;
-                            latest = current;
-                            work.entry(msg.view()).or_default().add(msg);
-                        },
-                    )
-                    .await
-                    {
-                        return;
-                    }
-
-                    // Select some verifier (preferring the current view) without removing it initially
-                    let view = if work.contains_key(&latest) {
-                        latest
-                    } else {
-                        *work.keys().next_back().unwrap()
-                    };
-                    let verifier = work.get_mut(&view).unwrap();
-
-                    // Verify messages
-                    let identity = supervisor.identity(view).unwrap();
-                    let (voters, failed, drop) = verifier.verify(&namespace, identity);
-                    let batch = voters.len() + failed.len();
-                    trace!(view, batch, "batch verified messages");
-                    batch_size.observe(batch as f64);
-
-                    // Send messages
-                    for msg in voters {
-                        verified_sender.send(msg).await.unwrap();
-                    }
-
-                    // Block invalid signers
-                    if !failed.is_empty() {
-                        let participants = supervisor.participants(view).unwrap();
-                        for invalid in failed {
-                            let signer = participants[invalid as usize].clone();
-                            warn!(?signer, "blocking peer");
-                        }
-                    }
-
-                    // Remove verifier if it no longer has work
-                    if drop {
-                        work.remove(&view);
-                    }
-
-                    // Drop any old verifiers
-                    work.retain(|view, _| *view >= min_view);
-                }
-            }
-        });
-
         // Process messages
         let mut pending_set = None;
         let mut pending_propose_context = None;
@@ -2148,6 +2043,7 @@ impl<
 
             // Wait for a timeout to fire or for a message to arrive
             let timeout = self.timeout_deadline();
+            let start = self.view;
             let view;
             select! {
                 _ = &mut shutdown => {
@@ -2241,6 +2137,22 @@ impl<
 
                     // Handle backfill
                     match msg {
+                        Message::Voter(voter) => {
+                            match voter{
+                                Voter::Notarize(notarize) => {
+                                    self.handle_notarize(notarize).await;
+                                }
+                                Voter::Nullify(nullify) => {
+                                    self.handle_nullify(nullify).await;
+                                }
+                                Voter::Finalize(finalize) => {
+                                    self.handle_finalize(finalize).await;
+                                }
+                                Voter::Notarization(_)| Voter::Nullification(_) | Voter::Finalization(_) => {
+                                    unreachable!("we should not receive these messages from the verifier")
+                                }
+                            };
+                        },
                         Message::Notarization(notarization)  => {
                             debug!(view, "received notarization from backfiller");
                             self.handle_notarization(notarization).await;
@@ -2250,35 +2162,6 @@ impl<
                             self.handle_nullification(nullification).await;
                         },
                     }
-                },
-                verified = verified_receiver.next() => {
-                    // Break if there is an internal error
-                    let Some(msg) = verified else {
-                        break;
-                    };
-
-                    // Check if still interesting
-                    view = msg.view();
-                    if !self.interesting(view, false) {
-                        debug!(view, "verified message is not interesting");
-                        continue;
-                    }
-
-                    // Process message
-                    match msg {
-                        Voter::Notarize(notarize) => {
-                            self.handle_notarize(notarize).await;
-                        }
-                        Voter::Nullify(nullify) => {
-                            self.handle_nullify(nullify).await;
-                        }
-                        Voter::Finalize(finalize) => {
-                            self.handle_finalize(finalize).await;
-                        }
-                        Voter::Notarization(_)| Voter::Nullification(_) | Voter::Finalization(_) => {
-                            unreachable!("we should not receive these messages from the verifier")
-                        }
-                    };
                 },
                 msg = receiver.recv() => {
                     // Break if there is an internal error
@@ -2300,10 +2183,7 @@ impl<
                         Voter::Notarize(notarize) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::notarize(&s)).inc();
                             if self.notarize(&s, &notarize) {
-                                verifier_sender
-                                    .send((self.min_view, self.view, Voter::Notarize(notarize)))
-                                    .await
-                                    .expect("unable to send notarize to verifier");
+                                verifier.message(Voter::Notarize(notarize)).await;
                             }
                             continue;
                         }
@@ -2314,10 +2194,7 @@ impl<
                         Voter::Nullify(nullify) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::nullify(&s)).inc();
                             if self.nullify(&s, &nullify) {
-                                verifier_sender
-                                    .send((self.min_view, self.view, Voter::Nullify(nullify)))
-                                    .await
-                                    .expect("unable to send nullify to verifier");
+                                verifier.message(Voter::Nullify(nullify)).await;
                             }
                             continue;
                         }
@@ -2328,10 +2205,7 @@ impl<
                         Voter::Finalize(finalize) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::finalize(&s)).inc();
                             if self.finalize(&s, &finalize) {
-                                verifier_sender
-                                    .send((self.min_view, self.view, Voter::Finalize(finalize)))
-                                    .await
-                                    .expect("unable to send finalize to verifier");
+                                verifier.message(Voter::Finalize(finalize)).await;
                             }
                             continue;
                         }
@@ -2353,6 +2227,11 @@ impl<
             // After sending all required messages, prune any views
             // we no longer need
             self.prune_views().await;
+
+            // Update the verifier if we have moved to a new view
+            if self.view > start {
+                verifier.update(self.view, self.oldest).await;
+            }
         }
     }
 }
