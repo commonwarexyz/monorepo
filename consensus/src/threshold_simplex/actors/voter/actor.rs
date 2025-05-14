@@ -48,6 +48,8 @@ use tracing::{debug, trace, warn};
 const GENESIS_VIEW: View = 0;
 
 // TODO: by not storing the message in pending, we may drop what are otherwise considered conflicting messages
+//
+// To fix this, we should queue up any messages that don't match the current item in pending? This could mean conflicting nullifications?
 #[derive(Clone)]
 enum Status<O> {
     None,
