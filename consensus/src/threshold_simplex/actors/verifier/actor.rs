@@ -10,6 +10,7 @@ use commonware_cryptography::{
     bls12381::primitives::{poly, variant::Variant},
     Digest, Scheme,
 };
+use commonware_p2p::Blocker;
 use commonware_runtime::{Handle, Metrics, Spawner};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
@@ -42,6 +43,7 @@ where
 pub struct Actor<
     E: Spawner + Metrics,
     C: Scheme,
+    B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     D: Digest,
     S: ThresholdSupervisor<
@@ -52,6 +54,7 @@ pub struct Actor<
     >,
 > {
     context: E,
+    blocker: B,
     supervisor: S,
 
     namespace: Vec<u8>,
@@ -68,6 +71,7 @@ pub struct Actor<
 impl<
         E: Spawner + Metrics,
         C: Scheme,
+        B: Blocker<PublicKey = C::PublicKey>,
         V: Variant,
         D: Digest,
         S: ThresholdSupervisor<
@@ -76,9 +80,9 @@ impl<
             PublicKey = C::PublicKey,
             Public = V::Public,
         >,
-    > Actor<E, C, V, D, S>
+    > Actor<E, C, B, V, D, S>
 {
-    pub fn new(context: E, cfg: Config<S>) -> (Self, Mailbox<V, D>) {
+    pub fn new(context: E, cfg: Config<B, S>) -> (Self, Mailbox<V, D>) {
         let added = Counter::default();
         let verified = Counter::default();
         let batch_size =
@@ -98,6 +102,7 @@ impl<
         (
             Self {
                 context,
+                blocker: cfg.blocker,
                 supervisor: cfg.supervisor,
 
                 namespace: cfg.namespace,
@@ -223,6 +228,7 @@ impl<
                 for invalid in failed {
                     let signer = participants[invalid as usize].clone();
                     warn!(?signer, "blocking peer");
+                    self.blocker.block(signer);
                 }
             }
 
