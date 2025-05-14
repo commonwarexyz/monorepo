@@ -1,7 +1,8 @@
 //! A mock implementation of a channel that implements the Sink and Stream traits.
 
-use crate::{Error, StableBuf, StableBufMut, Sink as SinkTrait, Stream as StreamTrait};
+use crate::{Error, Sink as SinkTrait, Stream as StreamTrait};
 use bytes::Bytes;
+use commonware_utils::{StableBuf, StableBufMut};
 use futures::channel::oneshot;
 use std::{
     collections::VecDeque,

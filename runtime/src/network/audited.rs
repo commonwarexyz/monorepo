@@ -1,4 +1,5 @@
-use crate::{deterministic::Auditor, Error, StableBuf, StableBufMut, SinkOf, StreamOf};
+use crate::{deterministic::Auditor, Error, SinkOf, StreamOf};
+use commonware_utils::{StableBuf, StableBufMut};
 use sha2::Digest;
 use std::{net::SocketAddr, sync::Arc};
 

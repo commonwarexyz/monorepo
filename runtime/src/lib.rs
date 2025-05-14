@@ -17,6 +17,7 @@
 //! `commonware-runtime` is **ALPHA** software and is not yet recommended for production use. Developers should
 //! expect breaking changes and occasional instability.
 
+use commonware_utils::{StableBuf, StableBufMut};
 use prometheus_client::registry::Metric;
 use std::io::Error as IoError;
 use std::{

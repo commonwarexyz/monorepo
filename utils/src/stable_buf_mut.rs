@@ -1,6 +1,7 @@
 // The contents of this file are based on https://github.com/tokio-rs/tokio-uring at commit 7761222.
 // We don't want to depend on the whole crate, so we've copied/adapted the relevant parts.
-use super::StableBuf;
+
+use crate::stable_buf::StableBuf;
 
 /// A mutable `io-uring` compatible buffer.
 ///

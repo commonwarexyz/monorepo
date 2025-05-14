@@ -1,4 +1,5 @@
-use crate::{Error, StableBuf, StableBufMut};
+use crate::Error;
+use commonware_utils::{StableBuf, StableBufMut};
 use std::{net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
