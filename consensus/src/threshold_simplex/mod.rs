@@ -494,6 +494,10 @@ mod tests {
                     }
                 }
             }
+
+            // Ensure no blocked connections
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty());
         });
     }
 
@@ -641,7 +645,7 @@ mod tests {
                 // Exit at random points for unclean shutdown of entire set
                 let wait =
                     context.gen_range(Duration::from_millis(10)..Duration::from_millis(2_000));
-                select! {
+                let result = select! {
                     _ = context.sleep(wait) => {
                         // Collect supervisors to check faults
                         {
@@ -663,7 +667,13 @@ mod tests {
                         }
                         (true,context)
                     }
-                }
+                };
+
+                // Ensure no blocked connections
+                let blocked = oracle.blocked().await.unwrap();
+                assert!(blocked.is_empty());
+
+                result
             };
 
             let (complete, context) = if let Some(prev_ctx) = prev_ctx {
@@ -938,6 +948,10 @@ mod tests {
             while latest < required_containers {
                 latest = monitor.next().await.expect("event missing");
             }
+
+            // Ensure no blocked connections
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty());
         });
     }
 
@@ -1164,6 +1178,10 @@ mod tests {
                 assert!(exceptions <= max_exceptions);
             }
             assert!(exceptions <= max_exceptions);
+
+            // Ensure no blocked connections
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty());
         });
     }
 
@@ -1350,6 +1368,10 @@ mod tests {
                     }
                 }
             }
+
+            // Ensure no blocked connections
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty());
         });
     }
 
@@ -1514,6 +1536,10 @@ mod tests {
                     assert!(faults.is_empty());
                 }
             }
+
+            // Ensure no blocked connections
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty());
         });
     }
 
@@ -1702,6 +1728,10 @@ mod tests {
                     assert!(faults.is_empty());
                 }
             }
+
+            // Ensure no blocked connections
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty());
         });
     }
 
@@ -1843,6 +1873,11 @@ mod tests {
                     assert!(faults.is_empty());
                 }
             }
+
+            // Ensure no blocked connections
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty());
+
             context.auditor().state()
         })
     }
@@ -2040,6 +2075,14 @@ mod tests {
             }
             assert!(count_conflicting_notarize > 0);
             assert!(count_conflicting_finalize > 0);
+
+            // Ensure conflicter is blocked
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(!blocked.is_empty());
+            for (a, b) in blocked {
+                assert_ne!(&a, byz);
+                assert_eq!(&b, byz);
+            }
         });
     }
 
@@ -2211,6 +2254,14 @@ mod tests {
                 }
             }
             assert!(count_nullify_and_finalize > 0);
+
+            // Ensure nullifier is blocked
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(!blocked.is_empty());
+            for (a, b) in blocked {
+                assert_ne!(&a, byz);
+                assert_eq!(&b, byz);
+            }
         });
     }
 
@@ -2368,6 +2419,10 @@ mod tests {
                     assert!(faults.is_empty());
                 }
             }
+
+            // Ensure no blocked connections
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty());
         });
     }
 
@@ -2509,6 +2564,10 @@ mod tests {
                     assert!(faults.is_empty());
                 }
             }
+
+            // Ensure no blocked connections
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty());
         })
     }
 
