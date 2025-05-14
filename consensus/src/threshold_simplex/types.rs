@@ -225,7 +225,10 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
         if self.leader.is_none() || self.leader_proposal.is_none() {
             return false;
         }
-        self.notarizes_verified + self.notarizes.len() >= self.quorum as usize
+        if self.notarizes_verified + self.notarizes.len() < self.quorum as usize {
+            return false;
+        }
+        !self.notarizes.is_empty()
     }
 
     pub fn verify_nullifies(
@@ -239,8 +242,11 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
         (nullifies.into_iter().map(Voter::Nullify).collect(), failed)
     }
 
-    pub fn ready_nullifies(&self) -> bool {
-        self.nullifies_verified + self.nullifies.len() >= self.quorum as usize
+    pub fn ready_nullifies(&mut self) -> bool {
+        if self.nullifies_verified + self.nullifies.len() < self.quorum as usize {
+            return false;
+        }
+        !self.nullifies.is_empty()
     }
 
     pub fn verify_finalizes(
@@ -258,7 +264,10 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
         if self.leader.is_none() || self.leader_proposal.is_none() {
             return false;
         }
-        self.finalizes_verified + self.finalizes.len() >= self.quorum as usize
+        if self.finalizes_verified + self.finalizes.len() < self.quorum as usize {
+            return false;
+        }
+        !self.finalizes.is_empty()
     }
 }
 

@@ -148,9 +148,9 @@ impl<
 
                         // Only add messages if the view matters to us
                         if message.view() >= finalized {
-                            let quorum =
-                                self.supervisor.identity(message.view()).unwrap().required();
-                            work.entry(message.view())
+                            let view = message.view();
+                            let quorum = self.supervisor.identity(view).unwrap().required();
+                            work.entry(view)
                                 .or_insert(PartialVerifier::new(quorum))
                                 .add(message);
                         }
