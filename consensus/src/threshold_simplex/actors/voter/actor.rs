@@ -704,7 +704,8 @@ impl<
             return Some(&notarization.proposal.payload);
         }
         let proposal = round.proposal.as_ref()?;
-        assert_eq!(proposal, round.notarizes_selected.as_ref().unwrap());
+        let notarize_proposal = round.notarizes_selected.as_ref()?;
+        assert_eq!(proposal, notarize_proposal);
         let identity = self.supervisor.identity(view)?;
         let threshold = identity.required();
         if round.notarizes_verified >= threshold as usize {
@@ -732,7 +733,8 @@ impl<
             return Some(&finalization.proposal.payload);
         }
         let proposal = round.proposal.as_ref()?;
-        assert_eq!(proposal, round.finalizes_selected.as_ref().unwrap());
+        let finalize_proposal = round.finalizes_selected.as_ref()?;
+        assert_eq!(proposal, finalize_proposal);
         let identity = self.supervisor.identity(view)?;
         let threshold = identity.required();
         if round.finalizes_verified >= threshold as usize {
