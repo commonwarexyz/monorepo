@@ -1,10 +1,11 @@
 use crate::stable_buf::StableBuf;
 
 /// A mutable buffer with a stable memory address.
+/// # Safety
+/// The implementor must guarantee that the pointer remains valid
+/// and unchanged while the buffer is being used.
 pub unsafe trait StableBufMut: StableBuf {
     /// Returns a raw pointer to this buffer.
-    /// The implementor must guarantee that the pointer remains valid
-    /// and unchanged while the buffer is being used.
     fn stable_mut_ptr(&mut self) -> *mut u8;
 
     /// Copies the given byte slice into this buffer.

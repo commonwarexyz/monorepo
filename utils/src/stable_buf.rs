@@ -1,9 +1,10 @@
 /// A buffer with a stable memory address.
+/// # Safety
+/// The implementor must guarantee that the pointer remains valid
+/// and unchanged while the buffer is being used.
 #[allow(clippy::len_without_is_empty)]
 pub unsafe trait StableBuf: Unpin + Send + 'static {
     /// Returns a raw pointer to this buffer.
-    /// The implementor must guarantee that the pointer remains valid
-    /// and unchanged while the buffer is being used.
     fn stable_ptr(&self) -> *const u8;
 
     /// Length of the buffer.
