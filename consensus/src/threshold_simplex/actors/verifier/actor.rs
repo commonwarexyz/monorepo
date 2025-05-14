@@ -180,7 +180,7 @@ impl<
                 let potential = work
                     .iter_mut()
                     .rev()
-                    .find(|(_, verifier)| verifier.ready_finalizes())
+                    .find(|(view, verifier)| *view != &current && verifier.ready_finalizes())
                     .map(|(view, verifier)| (*view, verifier));
                 if let Some((view, verifier)) = potential {
                     let identity = self.supervisor.identity(view).unwrap();

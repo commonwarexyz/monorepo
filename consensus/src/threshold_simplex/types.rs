@@ -125,7 +125,7 @@ pub struct PartialVerifier<V: Variant, D: Digest> {
 impl<V: Variant, D: Digest> PartialVerifier<V, D> {
     pub fn new(quorum: u32) -> Self {
         Self {
-            quorum,
+            quorum: quorum - 1, // Don't count self
 
             leader: None,
             leader_proposal: None,
