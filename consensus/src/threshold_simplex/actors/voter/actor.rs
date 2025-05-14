@@ -932,10 +932,7 @@ impl<
         let nullify = Nullify::sign(&self.namespace, share, self.view);
 
         // Handle the nullify
-        if matches!(
-            self.reserve_nullify(share.index, &nullify).await,
-            Action::Process
-        ) {
+        if matches!(self.reserve_nullify(&nullify).await, Action::Process) {
             self.handle_nullify(nullify.clone()).await;
 
             // Sync the journal
@@ -971,10 +968,10 @@ impl<
         if public_key_index != nullify.signer() {
             return Action::Block;
         }
-        self.reserve_nullify(public_key_index, nullify).await
+        self.reserve_nullify(nullify).await
     }
 
-    async fn reserve_nullify(&mut self, public_key_index: u32, nullify: &Nullify<V>) -> Action {
+    async fn reserve_nullify(&mut self, nullify: &Nullify<V>) -> Action {
         // Check to see if nullify is for proposal in view
         let view = nullify.view;
         let round = self.views.entry(view).or_insert_with(|| {
@@ -987,7 +984,7 @@ impl<
         });
 
         // Try to reserve
-        round.add_reserved_nullify(public_key_index, nullify).await
+        round.add_reserved_nullify(nullify).await
     }
 
     async fn handle_nullify(&mut self, nullify: Nullify<V>) {
@@ -2204,13 +2201,14 @@ impl<
                     // We opt to not filter by `interesting()` here because each message type has a different
                     // configuration for handling `future` messages.
                     view = msg.view();
-                    let interesting = match msg {
+                    let action = match msg {
                         Voter::Notarize(notarize) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::notarize(&s)).inc();
-                            if self.notarize(&s, &notarize) {
+                            let action = self.notarize(&s, &notarize).await;
+                            if matches!(action, Action::Process) {
                                 verifier.message(Voter::Notarize(notarize)).await;
                             }
-                            continue;
+                            action
                         }
                         Voter::Notarization(notarization) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::notarization(&s)).inc();
@@ -2218,10 +2216,11 @@ impl<
                         }
                         Voter::Nullify(nullify) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::nullify(&s)).inc();
-                            if self.nullify(&s, &nullify) {
+                            let action = self.nullify(&s, &nullify).await;
+                            if matches!(action, Action::Process) {
                                 verifier.message(Voter::Nullify(nullify)).await;
                             }
-                            continue;
+                            action
                         }
                         Voter::Nullification(nullification) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::nullification(&s)).inc();
@@ -2229,19 +2228,28 @@ impl<
                         }
                         Voter::Finalize(finalize) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::finalize(&s)).inc();
-                            if self.finalize(&s, &finalize) {
+                            let action = self.finalize(&s, &finalize).await;
+                            if matches!(action, Action::Process) {
                                 verifier.message(Voter::Finalize(finalize)).await;
                             }
-                            continue;
+                            action
                         }
                         Voter::Finalization(finalization) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::finalization(&s)).inc();
                             self.finalization(finalization).await
                         }
                     };
-                    if !interesting {
-                        trace!(sender=?s, view, "dropped message");
-                        continue;
+                    match action {
+                        Action::Process => {}
+                        Action::Skip => {
+                            trace!(sender=?s, view, "dropped useless");
+                            continue;
+                        }
+                        Action::Block => {
+                            // TODO: add blocker
+                            trace!(sender=?s, view, "blocked sender");
+                            continue;
+                        }
                     }
                 },
             };
