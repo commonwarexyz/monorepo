@@ -546,7 +546,7 @@ impl<
 pub struct Actor<
     E: Clock + Rng + Spawner + Storage + Metrics,
     C: Scheme,
-    B: Blocker,
+    B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     D: Digest,
     A: Automaton<Digest = D, Context = Context<D>>,
@@ -604,7 +604,7 @@ pub struct Actor<
 impl<
         E: Clock + Rng + Spawner + Storage + Metrics,
         C: Scheme,
-        B: Blocker,
+        B: Blocker<PublicKey = C::PublicKey>,
         V: Variant,
         D: Digest,
         A: Automaton<Digest = D, Context = Context<D>>,
@@ -2188,6 +2188,8 @@ impl<
 
                     // Skip if there is a decoding error
                     let Ok(msg) = msg else {
+                        warn!(sender = ?s, "blocking peer");
+                        self.blocker.block(s);
                         continue;
                     };
 
@@ -2241,8 +2243,8 @@ impl<
                             continue;
                         }
                         Action::Block => {
-                            // TODO: add blocker
-                            trace!(sender=?s, view, "blocked sender");
+                            trace!(sender=?s, view, "blocking peer");
+                            self.blocker.block(s);
                             continue;
                         }
                     }
