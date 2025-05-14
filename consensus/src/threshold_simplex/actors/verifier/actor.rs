@@ -124,39 +124,48 @@ impl<
         let mut finalized: View = 0;
         let mut work: BTreeMap<u64, PartialVerifier<V, D>> = BTreeMap::new();
         let mut blocking = true;
+        let mut initialized = false;
 
         loop {
             // Read at least one message (if there doesn't already exist a backlog)
-            if !recv_batch(
-                &mut self.mailbox_receiver,
-                blocking,
-                |message| match message {
+            if !recv_batch(&mut self.mailbox_receiver, blocking, |message| {
+                match message {
                     Message::Update {
                         current: new_current,
                         leader,
                         finalized: new_finalized,
                     } => {
                         current = new_current;
-                        let quorum = self.supervisor.identity(current).unwrap().required();
+                        finalized = new_finalized;
+
+                        // If this is our first item, we may have some previous work completed
+                        // from before restart. We should just verify everything (may just be
+                        // nullifies) as soon as we can.
+                        let quorum = if initialized {
+                            Some(self.supervisor.identity(current).unwrap().required())
+                        } else {
+                            initialized = true;
+                            None
+                        };
                         work.entry(current)
                             .or_insert(PartialVerifier::new(quorum))
                             .mark(leader);
-                        finalized = new_finalized;
                     }
                     Message::Message(message) => {
                         self.added.inc();
 
                         // Only add messages if the view matters to us
                         if message.view() >= finalized {
+                            assert!(initialized);
                             let view = message.view();
-                            let quorum = self.supervisor.identity(view).unwrap().required();
+                            let quorum = Some(self.supervisor.identity(view).unwrap().required());
                             work.entry(view)
                                 .or_insert(PartialVerifier::new(quorum))
                                 .add(message);
                         }
                     }
-                },
-            )
+                }
+            })
             .await
             {
                 return;

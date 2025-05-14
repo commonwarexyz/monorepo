@@ -106,7 +106,7 @@ fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
 }
 
 pub struct PartialVerifier<V: Variant, D: Digest> {
-    quorum: u32,
+    quorum: Option<usize>,
 
     leader: Option<u32>,
     leader_proposal: Option<Proposal<D>>,
@@ -123,9 +123,9 @@ pub struct PartialVerifier<V: Variant, D: Digest> {
 }
 
 impl<V: Variant, D: Digest> PartialVerifier<V, D> {
-    pub fn new(quorum: u32) -> Self {
+    pub fn new(quorum: Option<u32>) -> Self {
         Self {
-            quorum: quorum - 1, // don't count self
+            quorum: quorum.map(|q| q.saturating_sub(1) as usize), // don't count self
 
             leader: None,
             leader_proposal: None,
@@ -219,15 +219,31 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
     }
 
     pub fn ready_notarizes(&self) -> bool {
+        // If we have the leader's notarize, we should verify immediately to start
+        // block verification.
         if self.notarizes_force {
             return true;
         }
+
+        // If we don't yet know the leader, notarizes may contain messages for
+        // a number of different proposals.
         if self.leader.is_none() || self.leader_proposal.is_none() {
             return false;
         }
-        if self.notarizes_verified + self.notarizes.len() < self.quorum as usize {
-            return false;
+        if let Some(quorum) = self.quorum {
+            // If we have already performed sufficient verifications, there is nothing more
+            // to do.
+            if self.notarizes_verified >= quorum {
+                return false;
+            }
+
+            // If we don't have enough to reach the quorum, there is nothing to do yet.
+            if self.notarizes_verified + self.notarizes.len() < quorum {
+                return false;
+            }
         }
+
+        // If we have nothing to verify, there is nothing to do.
         !self.notarizes.is_empty()
     }
 
@@ -243,9 +259,20 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
     }
 
     pub fn ready_nullifies(&mut self) -> bool {
-        if self.nullifies_verified + self.nullifies.len() < self.quorum as usize {
-            return false;
+        if let Some(quorum) = self.quorum {
+            // If we have already performed sufficient verifications, there is nothing more
+            // to do.
+            if self.nullifies_verified >= quorum {
+                return false;
+            }
+
+            // If we don't have enough to reach the quorum, there is nothing to do yet.
+            if self.nullifies_verified + self.nullifies.len() < quorum {
+                return false;
+            }
         }
+
+        // If we have nothing to verify, there is nothing to do.
         !self.nullifies.is_empty()
     }
 
@@ -261,12 +288,25 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
     }
 
     pub fn ready_finalizes(&self) -> bool {
+        // If we don't yet know the leader, finalizers may contain messages for
+        // a number of different proposals.
         if self.leader.is_none() || self.leader_proposal.is_none() {
             return false;
         }
-        if self.finalizes_verified + self.finalizes.len() < self.quorum as usize {
-            return false;
+        if let Some(quorum) = self.quorum {
+            // If we have already performed sufficient verifications, there is nothing more
+            // to do.
+            if self.finalizes_verified >= quorum {
+                return false;
+            }
+
+            // If we don't have enough to reach the quorum, there is nothing to do yet.
+            if self.finalizes_verified + self.finalizes.len() < quorum {
+                return false;
+            }
         }
+
+        // If we have nothing to verify, there is nothing to do.
         !self.finalizes.is_empty()
     }
 }
