@@ -108,9 +108,9 @@ fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
 pub struct PartialVerifier<V: Variant, D: Digest> {
     view: Option<View>,
 
-    notarizes: BTreeMap<Proposal<D>, Vec<Notarize<V, D>>>,
-    nullifies: Vec<Nullify<V>>,
-    finalizes: BTreeMap<Proposal<D>, Vec<Finalize<V, D>>>,
+    notarizes: BTreeMap<Proposal<D>, HashMap<u32, Notarize<V, D>>>,
+    nullifies: HashMap<u32, Nullify<V>>,
+    finalizes: BTreeMap<Proposal<D>, HashMap<u32, Finalize<V, D>>>,
 }
 
 impl<V: Variant, D: Digest> PartialVerifier<V, D> {
@@ -119,12 +119,12 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
             view: None,
 
             notarizes: BTreeMap::new(),
-            nullifies: Vec::new(),
+            nullifies: HashMap::new(),
             finalizes: BTreeMap::new(),
         }
     }
 
-    pub fn add(&mut self, msg: Voter<V, D>) {
+    pub fn add(&mut self, msg: Voter<V, D>) -> bool {
         if let Some(view) = self.view {
             assert_eq!(view, msg.view());
         } else {
@@ -135,13 +135,15 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
                 .notarizes
                 .entry(notarize.proposal.clone())
                 .or_default()
-                .push(notarize),
-            Voter::Nullify(nullify) => self.nullifies.push(nullify),
+                .insert(notarize.signer(), notarize)
+                .is_none(),
+            Voter::Nullify(nullify) => self.nullifies.insert(nullify.signer(), nullify).is_none(),
             Voter::Finalize(finalize) => self
                 .finalizes
                 .entry(finalize.proposal.clone())
                 .or_default()
-                .push(finalize),
+                .insert(finalize.signer(), finalize)
+                .is_none(),
             Voter::Notarization(_) | Voter::Nullification(_) | Voter::Finalization(_) => {
                 unreachable!("should not be adding recovered messages to partial verifier");
             }
@@ -155,6 +157,8 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
         namespace: &[u8],
         identity: &Poly<V::Public>,
     ) -> (Vec<Voter<V, D>>, Vec<u32>) {
+        // TODO: if leader is in notarizes, prefer that
+
         // Find the proposal with the most notarizes
         let best_notarize = self
             .notarizes
@@ -188,7 +192,11 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
             let (notarizes, failed) = Notarize::verify_multiple(
                 namespace,
                 identity,
-                self.notarizes.remove(&proposal).unwrap(),
+                self.notarizes
+                    .remove(&proposal)
+                    .unwrap()
+                    .into_values()
+                    .collect(),
             );
             (notarizes.into_iter().map(Voter::Notarize).collect(), failed)
         } else if finalize_count >= nullifies_count {
@@ -196,12 +204,19 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
             let (finalizes, failed) = Finalize::verify_multiple(
                 namespace,
                 identity,
-                self.finalizes.remove(&proposal).unwrap(),
+                self.finalizes
+                    .remove(&proposal)
+                    .unwrap()
+                    .into_values()
+                    .collect(),
             );
             (finalizes.into_iter().map(Voter::Finalize).collect(), failed)
         } else {
-            let (nullifies, failed) =
-                Nullify::verify_multiple(namespace, identity, std::mem::take(&mut self.nullifies));
+            let (nullifies, failed) = Nullify::verify_multiple(
+                namespace,
+                identity,
+                std::mem::take(&mut self.nullifies).into_values().collect(),
+            );
             (nullifies.into_iter().map(Voter::Nullify).collect(), failed)
         }
     }
