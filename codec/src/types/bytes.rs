@@ -66,4 +66,17 @@ mod tests {
             ));
         }
     }
+
+    #[test]
+    fn test_conformity() {
+        assert_eq!(Bytes::new().encode(), &[0x00][..]);
+        assert_eq!(
+            Bytes::from_static(b"hello").encode(),
+            &[0x05, b'h', b'e', b'l', b'l', b'o'][..]
+        );
+        let long_bytes = Bytes::from(vec![0xAA; 150]);
+        let mut expected = vec![0x96, 0x01]; // Varint for 150
+        expected.extend_from_slice(&[0xAA; 150]);
+        assert_eq!(long_bytes.encode(), expected.as_slice());
+    }
 }

@@ -300,4 +300,122 @@ mod tests {
         assert_eq!(none.encode_size(), 1);
         assert_eq!(none.encode().len(), 1);
     }
+
+    #[test]
+    fn test_conformity() {
+        // Bool
+        assert_eq!(true.encode(), &[0x01][..]);
+        assert_eq!(false.encode(), &[0x00][..]);
+
+        // 8-bit integers
+        assert_eq!(0u8.encode(), &[0x00][..]);
+        assert_eq!(255u8.encode(), &[0xFF][..]);
+        assert_eq!(0i8.encode(), &[0x00][..]);
+        assert_eq!((-1i8).encode(), &[0xFF][..]);
+        assert_eq!(127i8.encode(), &[0x7F][..]);
+        assert_eq!((-128i8).encode(), &[0x80][..]);
+
+        // 16-bit integers
+        assert_eq!(0u16.encode(), &[0x00, 0x00][..]);
+        assert_eq!(0xABCDu16.encode(), &[0xAB, 0xCD][..]);
+        assert_eq!(u16::MAX.encode(), &[0xFF, 0xFF][..]);
+        assert_eq!(0i16.encode(), &[0x00, 0x00][..]);
+        assert_eq!((-1i16).encode(), &[0xFF, 0xFF][..]);
+        assert_eq!(0x1234i16.encode(), &[0x12, 0x34][..]);
+
+        // 32-bit integers
+        assert_eq!(0u32.encode(), &[0x00, 0x00, 0x00, 0x00][..]);
+        assert_eq!(0xABCDEF01u32.encode(), &[0xAB, 0xCD, 0xEF, 0x01][..]);
+        assert_eq!(u32::MAX.encode(), &[0xFF, 0xFF, 0xFF, 0xFF][..]);
+        assert_eq!(0i32.encode(), &[0x00, 0x00, 0x00, 0x00][..]);
+        assert_eq!((-1i32).encode(), &[0xFF, 0xFF, 0xFF, 0xFF][..]);
+        assert_eq!(0x12345678i32.encode(), &[0x12, 0x34, 0x56, 0x78][..]);
+
+        // 64-bit integers
+        assert_eq!(
+            0u64.encode(),
+            &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00][..]
+        );
+        assert_eq!(
+            0x0123456789ABCDEFu64.encode(),
+            &[0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF][..]
+        );
+        assert_eq!(
+            u64::MAX.encode(),
+            &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF][..]
+        );
+        assert_eq!(
+            0i64.encode(),
+            &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00][..]
+        );
+        assert_eq!(
+            (-1i64).encode(),
+            &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF][..]
+        );
+
+        // 128-bit integers
+        let u128_val = 0x0123456789ABCDEF0123456789ABCDEFu128;
+        let u128_bytes = [
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB,
+            0xCD, 0xEF,
+        ];
+        assert_eq!(u128_val.encode(), &u128_bytes[..]);
+        assert_eq!(u128::MAX.encode(), &[0xFF; 16][..]);
+        assert_eq!((-1i128).encode(), &[0xFF; 16][..]);
+
+        assert_eq!(0.0f32.encode(), 0.0f32.to_be_bytes()[..]);
+        assert_eq!(1.0f32.encode(), 1.0f32.to_be_bytes()[..]);
+        assert_eq!((-1.0f32).encode(), (-1.0f32).to_be_bytes()[..]);
+        assert_eq!(f32::MAX.encode(), f32::MAX.to_be_bytes()[..]);
+        assert_eq!(f32::MIN.encode(), f32::MIN.to_be_bytes()[..]);
+        assert_eq!(f32::NAN.encode(), f32::NAN.to_be_bytes()[..]);
+        assert_eq!(f32::INFINITY.encode(), f32::INFINITY.to_be_bytes()[..]);
+        assert_eq!(
+            f32::NEG_INFINITY.encode(),
+            f32::NEG_INFINITY.to_be_bytes()[..]
+        );
+
+        // 32-bit floats
+        assert_eq!(1.0f32.encode(), &[0x3F, 0x80, 0x00, 0x00][..]);
+        assert_eq!((-1.0f32).encode(), &[0xBF, 0x80, 0x00, 0x00][..]);
+
+        // 64-bit floats
+        assert_eq!(0.0f64.encode(), 0.0f64.to_be_bytes()[..]);
+        assert_eq!(1.0f64.encode(), 1.0f64.to_be_bytes()[..]);
+        assert_eq!((-1.0f64).encode(), (-1.0f64).to_be_bytes()[..]);
+        assert_eq!(f64::MAX.encode(), f64::MAX.to_be_bytes()[..]);
+        assert_eq!(f64::MIN.encode(), f64::MIN.to_be_bytes()[..]);
+        assert_eq!(f64::NAN.encode(), f64::NAN.to_be_bytes()[..]);
+        assert_eq!(f64::INFINITY.encode(), f64::INFINITY.to_be_bytes()[..]);
+        assert_eq!(
+            f64::NEG_INFINITY.encode(),
+            f64::NEG_INFINITY.to_be_bytes()[..]
+        );
+        assert_eq!(
+            1.0f64.encode(),
+            &[0x3F, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00][..]
+        );
+        assert_eq!(
+            (-1.0f64).encode(),
+            &[0xBF, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00][..]
+        );
+
+        // Fixed-size array
+        assert_eq!([1, 2, 3].encode(), &[0x01, 0x02, 0x03][..]);
+        assert_eq!([].encode(), &[][..]);
+
+        // Option
+        assert_eq!(Some(42u32).encode(), &[0x01, 0x00, 0x00, 0x00, 0x2A][..]);
+        assert_eq!(None::<u32>.encode(), &[0][..]);
+
+        // Usize
+        assert_eq!(0usize.encode(), &[0x00][..]);
+        assert_eq!(1usize.encode(), &[0x01][..]);
+        assert_eq!(127usize.encode(), &[0x7F][..]);
+        assert_eq!(128usize.encode(), &[0x80, 0x01][..]);
+        assert_eq!(
+            (u32::MAX as usize).encode(),
+            &[0xFF, 0xFF, 0xFF, 0xFF, 0x0F][..]
+        );
+    }
 }

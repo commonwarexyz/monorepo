@@ -61,4 +61,27 @@ mod tests {
             assert_eq!(value, decoded);
         }
     }
+
+    #[test]
+    fn test_conformity() {
+        let t1 = (true, 0x42u8);
+        assert_eq!(t1.encode(), &[0x01, 0x42][..]);
+
+        let t2 = (0xABCDu16, false, 0xDEADBEEFu32);
+        assert_eq!(t2.encode(), &[0xAB, 0xCD, 0x00, 0xDE, 0xAD, 0xBE, 0xEF][..]);
+
+        let t3 = ((0x01u8, 0x02u8), 0x03u8); // Nested tuple
+        assert_eq!(t3.encode(), &[0x01, 0x02, 0x03][..]);
+
+        let t_option_some = (Some(0x1234u16), 0xFFu8);
+        // Some -> 0x01
+        // 0x1234u16 -> 0x12, 0x34
+        // 0xFFu8 -> 0xFF
+        assert_eq!(t_option_some.encode(), &[0x01, 0x12, 0x34, 0xFF][..]);
+
+        let t_option_none = (0xFFu8, Option::<u16>::None);
+        // 0xFFu8 -> 0xFF
+        // None -> 0x00
+        assert_eq!(t_option_none.encode(), &[0xFF, 0x00][..]);
+    }
 }
