@@ -377,42 +377,6 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_buffer_advance() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Create a memory blob with some test data
-            let data = b"Hello, world!";
-            let (blob, size) = context.open("partition", b"test").await.unwrap();
-            assert_eq!(size, 0);
-            blob.write_at(data.to_vec(), 0).await.unwrap();
-            let size = data.len() as u64;
-
-            // Create a buffer reader
-            let buffer_size = 20;
-            let mut reader = Buffer::new(blob, size, buffer_size);
-
-            // Advance 5 bytes
-            reader.advance(5).unwrap();
-            assert_eq!(reader.position(), 5);
-
-            let mut buf = [0u8; 7];
-            reader.read_exact(&mut buf, 7).await.unwrap();
-            assert_eq!(&buf, b", world");
-
-            // Position should now be 12
-            assert_eq!(reader.position(), 12);
-
-            // Read the last byte
-            let mut buf = [0u8; 1];
-            reader.read_exact(&mut buf, 1).await.unwrap();
-            assert_eq!(&buf, b"!");
-
-            // Should be at the end now
-            assert_eq!(reader.blob_remaining(), 0);
-        });
-    }
-
-    #[test_traced]
     fn test_buffer_cross_boundary() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

@@ -157,16 +157,6 @@ impl<B: Blob> Buffer<B> {
         Ok(())
     }
 
-    /// Advances the read position by `bytes` without reading data.
-    pub fn advance(&mut self, bytes: usize) -> Result<(), Error> {
-        if self.buffer_position + bytes > self.buffer_valid_len {
-            return Err(Error::BlobInsufficientLength);
-        }
-
-        self.buffer_position += bytes;
-        Ok(())
-    }
-
     /// Returns the current absolute position in the blob.
     pub fn position(&self) -> u64 {
         self.blob_position + self.buffer_position as u64
