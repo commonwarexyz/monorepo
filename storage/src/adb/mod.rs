@@ -22,8 +22,14 @@ pub mod operation;
 pub enum Error {
     #[error("mmr error: {0}")]
     MmrError(#[from] crate::mmr::Error),
+
     #[error("metadata error: {0}")]
     MetadataError(#[from] crate::metadata::Error<U64>),
+
     #[error("journal error: {0}")]
     JournalError(#[from] crate::journal::Error),
+
+    /// The requested key was not found in the snapshot.
+    #[error("key not found")]
+    KeyNotFound(),
 }

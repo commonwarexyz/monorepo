@@ -83,7 +83,7 @@ impl<H: CHasher> Proof<H> {
         }
     }
 
-    pub(super) async fn reconstruct_root<M: Hasher<H>, T>(
+    pub async fn reconstruct_root<M: Hasher<H>, T>(
         &self,
         hasher: &mut M,
         elements: T,
@@ -239,25 +239,25 @@ impl<H: CHasher> Proof<H> {
         let mut start_tree_with_element = (u64::MAX, 0);
         let mut end_tree_with_element = (u64::MAX, 0);
         let mut peak_iterator = PeakIterator::new(size);
-        while let Some(item) = peak_iterator.next() {
-            if start_tree_with_element.0 == u64::MAX && item.0 >= start_element_pos {
+        while let Some(peak) = peak_iterator.next() {
+            if start_tree_with_element.0 == u64::MAX && peak.0 >= start_element_pos {
                 // Found the first tree to contain an element in the range
-                start_tree_with_element = item;
-                if item.0 >= end_element_pos {
+                start_tree_with_element = peak;
+                if peak.0 >= end_element_pos {
                     // Start and end tree are the same
-                    end_tree_with_element = item;
+                    end_tree_with_element = peak;
                     continue;
                 }
-                for item in peak_iterator.by_ref() {
-                    if item.0 >= end_element_pos {
+                for peak in peak_iterator.by_ref() {
+                    if peak.0 >= end_element_pos {
                         // Found the last tree to contain an element in the range
-                        end_tree_with_element = item;
+                        end_tree_with_element = peak;
                         break;
                     }
                 }
             } else {
                 // Tree is outside the range, its peak is thus required.
-                positions.push(item.0);
+                positions.push(peak.0);
             }
         }
         assert!(start_tree_with_element.0 != u64::MAX);
@@ -298,9 +298,8 @@ impl<H: CHasher> Proof<H> {
         positions
     }
 
-    /// Return an inclusion proof for the specified range of elements, inclusive of both endpoints.
-    ///
-    /// Returns ElementPruned error if some element needed to generate the proof has been pruned.
+    /// Return an inclusion proof for the specified range of elements, inclusive of both endpoints. Returns
+    /// ElementPruned error if some element needed to generate the proof has been pruned.
     pub async fn range_proof<S: Storage<H::Digest>>(
         mmr: &S,
         start_element_pos: u64,

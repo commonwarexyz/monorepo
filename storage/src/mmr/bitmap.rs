@@ -420,31 +420,9 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 
         let leaf_pos = Self::leaf_pos(bit_offset);
         let chunk = self.get_chunk(bit_offset);
+        let storage = self.get_storage(hasher).await?;
 
-        if leaf_pos == self.mmr.size() {
-            assert!(self.next_bit > 0);
-            // Proof is over a bit in the partial chunk. In this case only a single digest is
-            // required in the proof: the mmr's root.
-            return Ok((
-                Proof {
-                    size: self.bit_count(),
-                    digests: vec![self.mmr.root(hasher)],
-                },
-                *chunk,
-            ));
-        }
-
-        let mut proof = Proof::<H>::range_proof(&self.mmr, leaf_pos, leaf_pos).await?;
-        proof.size = self.bit_count();
-        if self.next_bit == 0 {
-            // Bitmap is chunk aligned.
-            return Ok((proof, *chunk));
-        }
-
-        // Since the bitmap wasn't chunk aligned, we'll need to include the digest of the last chunk
-        // in the proof to be able to re-derive the root.
-        let last_chunk_digest = hasher.digest(self.last_chunk());
-        proof.digests.push(last_chunk_digest);
+        let proof = Proof::<H>::range_proof(&storage, leaf_pos, leaf_pos).await?;
 
         Ok((proof, *chunk))
     }

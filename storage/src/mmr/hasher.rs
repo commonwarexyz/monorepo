@@ -1,10 +1,7 @@
 //! Decorator for a cryptographic hasher that implements the MMR-specific hashing logic.
 
-use crate::mmr::{
-    iterator::{leaf_num_to_pos, leaf_pos_to_num},
-    Error, Storage,
-};
-use commonware_cryptography::Hasher as CHasher;
+use crate::mmr::{iterator::pos_to_height, Error, Storage};
+use commonware_cryptography::{Digest, Hasher as CHasher};
 use std::future::Future;
 
 /// A trait for computing the various digests of an MMR.
@@ -181,22 +178,79 @@ impl<'a, H: CHasher, S: Storage<H::Digest>> Grafting<'a, H, S> {
 
     /// Compute the position of the leaf in the base tree onto which we should graft the leaf at
     /// position `pos` in the source tree.
-    ///
-    /// This position is computed by walking up the MMR exactly self.height steps from the leaf.
-    /// Since we don't know exactly where in the subtree this leaf falls, we map it to the
-    /// right-most leaf in the subtree and walk up from there. Runtime is O(log2(n)) in the given
-    /// position.
     fn destination_pos(&self, pos: u64) -> u64 {
-        let peak_leaf_num = leaf_pos_to_num(pos).unwrap();
-        let chunk_size_bits = 1 << self.height;
-
-        // The rightmost-leaf in the corresponding segment of the peak tree:
-        let base_leaf_num = (peak_leaf_num * chunk_size_bits) + chunk_size_bits - 1;
-
-        // Walking up self.height levels from the rightmost leaf involves simply adding self.height
-        // to its position.
-        leaf_num_to_pos(base_leaf_num) + self.height as u64
+        destination_pos(pos, self.height)
     }
+}
+
+/// Compute the position of the node in the base tree onto which we should graft the node at
+/// position `pos` in the source tree.
+///
+/// This algorithm performs walks down corresponding branches of the peak and base trees. When we
+/// find the node in the peak tree we are looking for, we return the position of the corresponding
+/// node reached in the base tree.
+fn destination_pos(peak_node_pos: u64, height: u32) -> u64 {
+    let leading_zeros = (peak_node_pos + 1).leading_zeros();
+    let mut peak_pos = u64::MAX >> leading_zeros;
+    let mut base_pos = u64::MAX >> (leading_zeros - height);
+    let mut peak_height = peak_pos.trailing_ones() - 1;
+    let mut base_height = peak_height + height;
+    peak_pos -= 1;
+    base_pos -= 1;
+    assert_eq!(peak_height, pos_to_height(peak_pos));
+    assert_eq!(base_height, pos_to_height(base_pos));
+
+    while base_height >= height {
+        if peak_pos == peak_node_pos {
+            break;
+        }
+        let left_pos = peak_pos - (1 << peak_height);
+
+        if left_pos < peak_node_pos {
+            peak_pos -= 1;
+            base_pos -= 1;
+        } else {
+            peak_pos = left_pos;
+            base_pos -= 1 << base_height;
+        }
+        peak_height -= 1;
+        base_height -= 1;
+    }
+
+    base_pos
+}
+
+/// Inverse computation of destination_pos, with an analogous implementation involving
+/// walks down corresponding branches of both trees.
+fn source_pos(base_node_pos: u64, height: u32) -> u64 {
+    let leading_zeros = (base_node_pos + 1).leading_zeros();
+    let mut base_pos = u64::MAX >> leading_zeros;
+    let mut peak_pos = u64::MAX >> (leading_zeros + height);
+    let mut base_height = base_pos.trailing_ones() - 1;
+    let mut peak_height = base_height - height;
+
+    base_pos -= 1;
+    peak_pos -= 1;
+
+    assert_eq!(peak_height, pos_to_height(peak_pos));
+    assert_eq!(base_height, pos_to_height(base_pos));
+
+    while base_pos != base_node_pos {
+        let left_pos = base_pos - (1 << base_height);
+
+        if left_pos < base_node_pos {
+            base_pos -= 1;
+            peak_pos -= 1;
+        } else {
+            base_pos = left_pos;
+            peak_pos -= 1 << peak_height;
+        }
+
+        base_height -= 1;
+        peak_height -= 1;
+    }
+
+    peak_pos
 }
 
 impl<H: CHasher, S: Storage<H::Digest>> Hasher<H> for Grafting<'_, H, S> {
@@ -240,9 +294,46 @@ impl<H: CHasher, S: Storage<H::Digest>> Hasher<H> for Grafting<'_, H, S> {
     }
 }
 
+/// A [Storage] implementation that makes grafted trees look like a single MMR for conveniently
+/// generating inclusion proofs.
+pub struct GraftedStorage<'a, D: Digest, S1: Storage<D>, S2: Storage<D>> {
+    peak_tree: &'a S1,
+    base_mmr: &'a S2,
+    height: u32,
+
+    _marker: std::marker::PhantomData<D>,
+}
+
+impl<'a, D: Digest, S1: Storage<D>, S2: Storage<D>> GraftedStorage<'a, D, S1, S2> {
+    /// Creates a new [GraftedStorage] instance.
+    pub fn new(peak_tree: &'a S1, base_mmr: &'a S2, height: u32) -> Self {
+        Self {
+            peak_tree,
+            base_mmr,
+            height,
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<D: Digest, S1: Storage<D>, S2: Storage<D>> Storage<D> for GraftedStorage<'_, D, S1, S2> {
+    fn size(&self) -> u64 {
+        self.base_mmr.size()
+    }
+
+    async fn get_node(&self, pos: u64) -> Result<Option<D>, Error> {
+        if pos >= self.peak_tree.size() {
+            return self.base_mmr.get_node(pos).await;
+        }
+
+        self.peak_tree.get_node(source_pos(pos, self.height)).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::mmr::{
+        iterator::leaf_num_to_pos,
         mem::Mmr,
         tests::{build_test_mmr, ROOTS},
     };
@@ -371,6 +462,19 @@ mod tests {
             out, out2,
             "root should change with different number of hashes"
         );
+    }
+
+    /// For a variety of grafting heights and node positions, check that destination_pos and
+    /// source_pos are inverse functions.
+    #[test]
+    fn test_hasher_dest_source_pos_conversion() {
+        for grafting_height in 1..10 {
+            for pos in 0..10000 {
+                let dest_pos = destination_pos(pos, grafting_height);
+                let source_pos = source_pos(dest_pos, grafting_height);
+                assert_eq!(pos, source_pos);
+            }
+        }
     }
 
     #[test]

@@ -12,15 +12,18 @@ use crate::{
     index::{Index, Translator},
     mmr::{
         bitmap::Bitmap,
-        hasher::{Grafting, Standard},
-        iterator::{leaf_num_to_pos, leaf_pos_to_num},
+        hasher::{GraftedStorage, Grafting, Hasher, Standard},
+        iterator::{leaf_num_to_pos, leaf_pos_to_num, PeakIterator},
         journaled::Mmr,
+        verification::Proof,
+        Storage,
     },
 };
 use commonware_codec::FixedSize;
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
+use futures::future::try_join_all;
 use tracing::warn;
 
 /// Configuration for a [Current] authenticated db.
@@ -220,7 +223,7 @@ impl<
     ///
     /// This value is log2 of the chunk size in bits. Since we assume the chunk size is a power of
     /// 2, we compute this from trailing_zeros.
-    fn grafting_height() -> u32 {
+    const fn grafting_height() -> u32 {
         Bitmap::<H, N>::CHUNK_SIZE_BITS.trailing_zeros()
     }
 
@@ -331,19 +334,121 @@ impl<
     }
 
     /// Return the root of the db.
-    ///
-    /// Current implementation just hashes the roots of the [Any] and [Bitmap] databases together.
     pub async fn root(&self, hasher: &mut H) -> Result<H::Digest, Error> {
-        let mut b_hasher = Standard::new(hasher);
-        let any_root = self.any.root(&mut b_hasher);
+        let ops = &self.any.ops;
+        let height = Self::grafting_height();
+        let mut grafter = Grafter::new(hasher, height, ops);
+        let bitmap_storage = self.status.get_storage(&mut grafter).await?;
+        let grafted_mmr = GraftedStorage::new(&bitmap_storage, ops, height);
+        let peak_futures =
+            PeakIterator::new(ops.size()).map(|(peak_pos, _)| grafted_mmr.get_node(peak_pos));
+        let peaks = try_join_all(peak_futures).await?;
+        let unwrapped_peaks = peaks.iter().map(|p| p.as_ref().unwrap());
+        let digest = grafter.root_digest(ops.size(), unwrapped_peaks);
 
+        Ok(digest)
+    }
+
+    pub async fn range_proof(
+        &self,
+        hasher: &mut H,
+        start_loc: u64,
+        max_ops: u64,
+    ) -> Result<(Proof<H>, Vec<Operation<K, V>>), Error> {
+        let mmr = &self.any.ops;
+        let start_pos = leaf_num_to_pos(start_loc);
+        let end_pos_last = mmr.last_leaf_pos().unwrap();
+        let end_pos_max = leaf_num_to_pos(start_loc + max_ops - 1);
+        let (end_pos, end_loc) = if end_pos_last < end_pos_max {
+            (end_pos_last, leaf_pos_to_num(end_pos_last).unwrap())
+        } else {
+            (end_pos_max, start_loc + max_ops - 1)
+        };
+        let height = Self::grafting_height();
         let mut grafter = Grafter::new(hasher, Self::grafting_height(), &self.any.ops);
-        let bitmap_root = self.status.root(&mut grafter).await?;
+        let bitmap_storage = self.status.get_storage(&mut grafter).await?;
+        let grafted_mmr = GraftedStorage::new(&bitmap_storage, mmr, height);
 
-        hasher.update(any_root.as_ref());
-        hasher.update(bitmap_root.as_ref());
+        let proof = Proof::<H>::range_proof(&grafted_mmr, start_pos, end_pos).await?;
 
-        Ok(hasher.finalize())
+        let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
+        let futures = (start_loc..=end_loc)
+            .map(|i| self.any.log.read(i))
+            .collect::<Vec<_>>();
+        try_join_all(futures)
+            .await?
+            .into_iter()
+            .for_each(|op| ops.push(op));
+
+        Ok((proof, ops))
+    }
+
+    /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
+    /// the log with the provided root.
+    pub async fn verify_range_proof(
+        hasher: &mut H,
+        proof: &Proof<H>,
+        start_loc: u64,
+        ops: &[Operation<K, V>],
+        root_digest: &H::Digest,
+    ) -> Result<bool, Error> {
+        let start_pos = leaf_num_to_pos(start_loc);
+        let end_loc = start_loc + ops.len() as u64 - 1;
+        let end_pos = leaf_num_to_pos(end_loc);
+
+        let mut hasher = Standard::new(hasher);
+        let digests = ops
+            .iter()
+            .map(|op| Any::<E, _, _, _, T>::op_digest(&mut hasher, op))
+            .collect::<Vec<_>>();
+
+        proof
+            .verify_range_inclusion(&mut hasher, digests, start_pos, end_pos, root_digest)
+            .await
+            .map_err(Error::MmrError)
+    }
+
+    /// Generate and return a proof of the current value of `key`, along with the current value
+    /// itself and the location of its last-active update operation. Returns KeyNotFound error if
+    /// the key is not currently assigned any value.
+    pub async fn current_value_proof(
+        &self,
+        hasher: &mut H,
+        key: &K,
+    ) -> Result<(Proof<H>, V, u64), Error> {
+        let op = self.any.get_with_loc(key).await?;
+        let Some(op) = op else {
+            return Err(Error::KeyNotFound());
+        };
+        let pos = leaf_num_to_pos(op.1);
+        let height = Self::grafting_height();
+        let base_mmr = &self.any.ops;
+        let mut grafter = Grafter::new(hasher, height, base_mmr);
+        let bitmap_storage = self.status.get_storage(&mut grafter).await?;
+        let grafted_mmr = GraftedStorage::new(&bitmap_storage, &self.any.ops, height);
+
+        let proof = Proof::<H>::range_proof(&grafted_mmr, pos, pos).await?;
+
+        Ok((proof, op.0, op.1))
+    }
+
+    /// Return true if the proof authenticates that `key` currently has value `value` in the db with the given root.
+    pub async fn verify_current_value_proof(
+        hasher: &mut H,
+        proof: &Proof<H>,
+        key: K,
+        value: V,
+        loc: u64,
+        root_digest: &H::Digest,
+    ) -> Result<bool, Error> {
+        let pos = leaf_num_to_pos(loc);
+        let mut hasher = Standard::new(hasher);
+        let digest = Any::<E, _, _, _, T>::op_digest(&mut hasher, &Operation::Update(key, value));
+
+        proof
+            .verify_element_inclusion(&mut hasher, &digest, pos, root_digest)
+            .await
+            .map_err(Error::MmrError)
     }
 
     /// Close the db. Operations that have not been committed will be lost.
@@ -449,6 +554,7 @@ pub mod test {
             db = open_db(context.clone(), partition).await;
             assert_eq!(db.op_count(), 4); // 1 update, 1 commit, 2 moves.
                                           // repeated update should be no-op
+
             assert!(matches!(
                 db.update(k1, v1).await.unwrap(),
                 UpdateResult::NoOp
@@ -511,6 +617,133 @@ pub mod test {
         }
 
         Ok(())
+    }
+
+    #[test_traced("WARN")]
+    pub fn test_current_db_range_proofs() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let partition = "range_proofs";
+            let mut hasher = Sha256::new();
+            let mut db = open_db(context.clone(), partition).await;
+            apply_random_ops(100, true, context.next_u64(), &mut db)
+                .await
+                .unwrap();
+            let root = db.root(&mut hasher).await.unwrap();
+
+            // Make sure size-constrained batches of operations are provable from the oldest
+            // retained op to tip.
+            let max_ops = 4;
+            let end_loc = db.op_count();
+            let start_pos = db.any.ops.pruned_to_pos();
+            let start_loc = leaf_pos_to_num(start_pos).unwrap();
+
+            for i in start_loc..end_loc {
+                let (proof, log) = db.range_proof(&mut hasher, i, max_ops).await.unwrap();
+                assert!(
+                    Current::<deterministic::Context, _, _, _, TwoCap, 64>::verify_range_proof(
+                        &mut hasher,
+                        &proof,
+                        i,
+                        &log,
+                        &root
+                    )
+                    .await
+                    .unwrap()
+                );
+            }
+        });
+    }
+
+    #[test_traced("WARN")]
+    pub fn test_current_db_current_value_proof() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let partition = "range_proofs";
+            let mut hasher = Sha256::new();
+            let mut db = open_db(context.clone(), partition).await;
+            apply_random_ops(500, true, context.next_u64(), &mut db)
+                .await
+                .unwrap();
+            let root = db.root(&mut hasher).await.unwrap();
+
+            // Confirm bad keys produce the expected error.
+            let bad_key = Sha256::fill(0xAA);
+            let res = db
+                .current_value_proof(&mut hasher, &bad_key)
+                .await;
+            assert!(matches!(res, Err(Error::KeyNotFound())));
+
+            let start = db.oldest_retained_loc().unwrap();
+            for i in start..db.status.bit_count() {
+                if !db.status.get_bit(i) {
+                    continue;
+                }
+                // Found an active operation! Create a proof for its active current key/value.
+                let op = db.any.log.read(i).await.unwrap();
+                let key = op.to_key().unwrap();
+                let (proof, val, loc) = db
+                    .current_value_proof(&mut hasher, op.to_key().unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(val, *op.to_value().unwrap());
+                // Proof should validate against the current value and correct root.
+                assert!(
+                    Current::<deterministic::Context, _, _, _, TwoCap, 64>::verify_current_value_proof(
+                        &mut hasher,
+                        &proof,
+                        *key,
+                        val,
+                        loc,
+                        &root
+                    )
+                    .await
+                    .unwrap()
+                );
+                // Proof should fail against the wrong value.
+                let wrong_val = Sha256::fill(0xFF);
+                assert!(
+                    !Current::<deterministic::Context, _, _, _, TwoCap, 64>::verify_current_value_proof(
+                        &mut hasher,
+                        &proof,
+                        *key,
+                        wrong_val,
+                        loc,
+                        &root
+                    )
+                    .await
+                    .unwrap()
+                );
+                // Proof should fail against the wrong key.
+                let wrong_key = Sha256::fill(0xEE);
+                assert!(
+                    !Current::<deterministic::Context, _, _, _, TwoCap, 64>::verify_current_value_proof(
+                        &mut hasher,
+                        &proof,
+                        wrong_key,
+                        val,
+                        loc,
+                        &root
+                    )
+                    .await
+                    .unwrap()
+                );
+                // Proof should fail against the wrong root.
+                let wrong_root = Sha256::fill(0xDD);
+                assert!(
+                    !Current::<deterministic::Context, _, _, _, TwoCap, 64>::verify_current_value_proof(
+                        &mut hasher,
+                        &proof,
+                        wrong_key,
+                        val,
+                        loc,
+                        &wrong_root,
+                    )
+                    .await
+                    .unwrap()
+                )
+            }
+        });
     }
 
     /// This test builds a random database, and makes sure that its state is correctly restored
