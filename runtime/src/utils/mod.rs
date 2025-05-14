@@ -22,10 +22,6 @@ mod io_buf;
 pub use io_buf::IoBuf;
 mod io_buf_mut;
 pub use io_buf_mut::IoBufMut;
-mod slice;
-pub use slice::Slice;
-mod bounded_buf;
-pub use bounded_buf::BoundedBuf;
 
 /// Yield control back to the runtime.
 pub async fn reschedule() {

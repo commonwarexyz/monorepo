@@ -1,6 +1,6 @@
 //! A mock implementation of a channel that implements the Sink and Stream traits.
 
-use crate::{BoundedBuf, Error, IoBuf, IoBufMut, Sink as SinkTrait, Stream as StreamTrait};
+use crate::{Error, IoBuf, IoBufMut, Sink as SinkTrait, Stream as StreamTrait};
 use bytes::Bytes;
 use futures::channel::oneshot;
 use std::{
@@ -44,7 +44,7 @@ impl SinkTrait for Sink {
     async fn send<B: IoBuf>(&mut self, msg: B) -> Result<(), Error> {
         let (os_send, data) = {
             let mut channel = self.channel.lock().unwrap();
-            channel.buffer.extend(msg.slice_full().as_ref());
+            channel.buffer.extend(crate::deref(&msg));
 
             // If there is a waiter and the buffer is large enough,
             // return the waiter (while clearing the waiter field).

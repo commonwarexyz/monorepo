@@ -1,4 +1,4 @@
-use crate::{deref_mut, BoundedBuf, Error, IoBuf, IoBufMut};
+use crate::{deref, deref_mut, Error, IoBuf, IoBufMut};
 use std::{net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
@@ -19,13 +19,10 @@ pub struct Sink {
 impl crate::Sink for Sink {
     async fn send<B: IoBuf>(&mut self, msg: B) -> Result<(), Error> {
         // Time out if we take too long to write
-        timeout(
-            self.write_timeout,
-            self.sink.write_all(msg.slice_full().as_ref()),
-        )
-        .await
-        .map_err(|_| Error::Timeout)?
-        .map_err(|_| Error::SendFailed)?;
+        timeout(self.write_timeout, self.sink.write_all(deref(&msg)))
+            .await
+            .map_err(|_| Error::Timeout)?
+            .map_err(|_| Error::SendFailed)?;
         Ok(())
     }
 }

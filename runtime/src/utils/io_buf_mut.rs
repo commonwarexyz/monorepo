@@ -23,22 +23,16 @@ pub unsafe trait IoBufMut: IoBuf {
     /// change.
     fn stable_mut_ptr(&mut self) -> *mut u8;
 
-    /// Copies the given byte slice into the buffer, starting at
-    /// this view's offset.
+    /// Copies the given byte slice into this buffer.
     ///
-    /// # Panics
-    ///
-    /// If the slice's length exceeds the destination's total capacity,
-    /// this method panics.
+    /// Panics if `src` exceeds this buffer's length.
     fn put_slice(&mut self, src: &[u8]) {
         let dst = self.stable_mut_ptr();
 
         // Safety:
-        // dst pointer validity is ensured by stable_mut_ptr;
-        // the length is checked to not exceed the view's total capacity;
-        // src (immutable) and dst (mutable) cannot point to overlapping memory;
-        // after copying the amount of bytes given by the slice, it's safe
-        // to mark them as initialized in the buffer.
+        // * dst pointer validity is ensured by stable_mut_ptr;
+        // * the length is checked to not exceed the buf's length;
+        // * src (immutable) and dst (mutable) cannot point to overlapping memory;
         unsafe {
             std::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
         }
