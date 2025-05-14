@@ -27,7 +27,7 @@ use commonware_p2p::{
 };
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
-use commonware_utils::{quorum, BitVec};
+use commonware_utils::quorum;
 use core::panic;
 use futures::{
     channel::{mpsc, oneshot},
@@ -40,16 +40,13 @@ use prometheus_client::metrics::{
 use rand::Rng;
 use std::sync::atomic::AtomicI64;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, trace, warn};
 
 const GENESIS_VIEW: View = 0;
 
-// TODO: by not storing the message in pending, we may drop what are otherwise considered conflicting messages
-//
-// To fix this, we should queue up any messages that don't match the current item in pending? This could mean conflicting nullifications?
 #[derive(Clone)]
 enum Status<O> {
     None,
@@ -95,22 +92,24 @@ struct Round<
     verified_proposal: bool,
 
     // Track notarizes for all proposals (ensuring any participant only has one recorded notarize)
-    notarized_proposals: HashMap<Proposal<D>, BitVec>,
     notarizes: Vec<Status<Notarize<V, D>>>,
+    notarizes_verified: usize,
+    notarizes_selected: Option<Proposal<D>>,
     notarization: Option<Notarization<V, D>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
 
     // Track nullifies (ensuring any participant only has one recorded nullify)
-    nullified: BitVec,
     nullifies: Vec<Status<Nullify<V>>>,
+    nullifies_verified: usize,
     nullification: Option<Nullification<V>>,
     broadcast_nullify: bool,
     broadcast_nullification: bool,
 
     // Track finalizes for all proposals (ensuring any participant only has one recorded finalize)
-    finalized_proposals: HashMap<Proposal<D>, BitVec>,
     finalizes: Vec<Status<Finalize<V, D>>>,
+    finalizes_verified: usize,
+    finalizes_selected: Option<Proposal<D>>,
     finalization: Option<Finalization<V, D>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
@@ -149,20 +148,22 @@ impl<
             proposal: None,
             verified_proposal: false,
 
-            notarized_proposals: HashMap::new(),
             notarizes: vec![Status::None; participants],
+            notarizes_verified: 0,
+            notarizes_selected: None,
             notarization: None,
             broadcast_notarize: false,
             broadcast_notarization: false,
 
-            nullified: BitVec::zeroes(participants),
             nullifies: vec![Status::None; participants],
+            nullifies_verified: 0,
             nullification: None,
             broadcast_nullify: false,
             broadcast_nullification: false,
 
-            finalized_proposals: HashMap::new(),
             finalizes: vec![Status::None; participants],
+            finalizes_verified: 0,
+            finalizes_selected: None,
             finalization: None,
             broadcast_finalize: false,
             broadcast_finalization: false,
@@ -221,17 +222,12 @@ impl<
     }
 
     async fn add_verified_notarize(&mut self, notarize: Notarize<V, D>) {
-        let public_key_index = notarize.signer();
-        if let Some(vec) = self.notarized_proposals.get_mut(&notarize.proposal) {
-            vec.set(public_key_index as usize);
-        } else {
-            let mut vec = BitVec::zeroes(self.participants);
-            vec.set(public_key_index as usize);
-            self.notarized_proposals
-                .insert(notarize.proposal.clone(), vec);
+        self.notarizes_verified += 1;
+        if self.notarizes_selected.is_none() {
+            self.notarizes_selected = Some(notarize.proposal.clone());
         }
+        let public_key_index = notarize.signer();
         self.notarizes[public_key_index as usize] = Status::Verified(notarize.clone());
-        self.reporter.report(Activity::Notarize(notarize)).await;
     }
 
     async fn add_reserved_nullify(&mut self, nullify: &Nullify<V>) -> Action {
@@ -260,7 +256,7 @@ impl<
         let public_key_index = nullify.signer();
         let Status::Verified(ref previous) = self.finalizes[public_key_index as usize] else {
             // Store the nullify
-            self.nullified.set(public_key_index as usize);
+            self.nullifies_verified += 1;
             self.nullifies[public_key_index as usize] = Status::Verified(nullify.clone());
             return true;
         };
@@ -326,13 +322,9 @@ impl<
         }
 
         // Store the finalize
-        if let Some(vec) = self.finalized_proposals.get_mut(&finalize.proposal) {
-            vec.set(public_key_index as usize);
-        } else {
-            let mut vec = BitVec::zeroes(self.participants);
-            vec.set(public_key_index as usize);
-            self.finalized_proposals
-                .insert(finalize.proposal.clone(), vec);
+        self.finalizes_verified += 1;
+        if self.finalizes_selected.is_none() {
+            self.finalizes_selected = Some(finalize.proposal.clone());
         }
         self.finalizes[public_key_index as usize] = Status::Verified(finalize.clone());
         true
@@ -403,44 +395,35 @@ impl<
         }
 
         // Attempt to construct notarization
-        for (proposal, notarizes) in self.notarized_proposals.iter() {
-            if (notarizes.count_ones() as u32) < threshold {
-                continue;
-            }
-
-            // There should never exist enough notarizes for multiple proposals, so it doesn't
-            // matter which one we choose.
-            debug!(
-                ?proposal,
-                verified = self.verified_proposal,
-                "broadcasting notarization"
-            );
-
-            // Recover threshold signature
-            let (proposals, seeds): (Vec<_>, Vec<_>) = notarizes
-                .iter()
-                .enumerate()
-                .filter_map(|(idx, alive)| {
-                    if !alive {
-                        return None;
-                    }
-                    let Status::Verified(ref notarize) = self.notarizes[idx] else {
-                        return None;
-                    };
-                    Some((&notarize.proposal_signature, &notarize.seed_signature))
-                })
-                .unzip();
-            let (proposal_signature, seed_signature) =
-                threshold_signature_recover_pair::<V, _>(threshold, proposals, seeds)
-                    .expect("failed to recover threshold signature");
-
-            // Construct notarization
-            let notarization =
-                Notarization::new(proposal.clone(), proposal_signature, seed_signature);
-            self.broadcast_notarization = true;
-            return Some(notarization);
+        if self.notarizes_verified < threshold as usize {
+            return None;
         }
-        None
+        let proposal = self.notarizes_selected.as_ref().unwrap().clone();
+        debug!(
+            ?proposal,
+            verified = self.verified_proposal,
+            "broadcasting notarization"
+        );
+
+        // Recover threshold signature
+        let (proposals, seeds): (Vec<_>, Vec<_>) = self
+            .notarizes
+            .iter()
+            .filter_map(|status| {
+                let Status::Verified(ref notarize) = status else {
+                    return None;
+                };
+                Some((&notarize.proposal_signature, &notarize.seed_signature))
+            })
+            .unzip();
+        let (proposal_signature, seed_signature) =
+            threshold_signature_recover_pair::<V, _>(threshold, proposals, seeds)
+                .expect("failed to recover threshold signature");
+
+        // Construct notarization
+        let notarization = Notarization::new(proposal, proposal_signature, seed_signature);
+        self.broadcast_notarization = true;
+        Some(notarization)
     }
 
     async fn nullifiable(&mut self, threshold: u32, force: bool) -> Option<Nullification<V>> {
@@ -456,21 +439,17 @@ impl<
         }
 
         // Attempt to construct nullification
-        if self.nullified.count_ones() < threshold as usize {
+        if self.nullifies_verified < threshold as usize {
             return None;
         }
         debug!(view = self.view, "broadcasting nullification");
 
         // Recover threshold signature
         let (views, seeds): (Vec<_>, Vec<_>) = self
-            .nullified
+            .nullifies
             .iter()
-            .enumerate()
-            .filter_map(|(idx, alive)| {
-                if !alive {
-                    return None;
-                }
-                let Status::Verified(ref nullify) = self.nullifies[idx] else {
+            .filter_map(|status| {
+                let Status::Verified(ref nullify) = status else {
                     return None;
                 };
                 Some((&nullify.view_signature, &nullify.seed_signature))
@@ -500,69 +479,61 @@ impl<
         }
 
         // Attempt to construct finalization
-        for (proposal, finalizes) in self.finalized_proposals.iter() {
-            if (finalizes.count_ones() as u32) < threshold {
-                continue;
-            }
-
-            // Ensure we have a notarization
-            let Some(notarization) = &self.notarization else {
-                continue;
-            };
-            let seed_signature = notarization.seed_signature;
-
-            // Check notarization and finalization proposal match
-            if notarization.proposal != *proposal {
-                warn!(
-                    ?proposal,
-                    ?notarization.proposal,
-                    "finalization proposal does not match notarization"
-                );
-            }
-
-            // There should never exist enough finalizes for multiple proposals, so it doesn't
-            // matter which one we choose.
-            debug!(
-                ?proposal,
-                verified = self.verified_proposal,
-                "broadcasting finalization"
-            );
-
-            // Only select finalizes that are for this proposal
-            let proposals = finalizes.iter().enumerate().filter_map(|(idx, alive)| {
-                if !alive {
-                    return None;
-                }
-                let Status::Verified(ref finalize) = self.finalizes[idx] else {
-                    return None;
-                };
-                Some(&finalize.proposal_signature)
-            });
-
-            // Recover threshold signature
-            let proposal_signature = threshold_signature_recover::<V, _>(threshold, proposals)
-                .expect("failed to recover threshold signature");
-
-            // Construct finalization
-            let finalization =
-                Finalization::new(proposal.clone(), proposal_signature, seed_signature);
-            self.broadcast_finalization = true;
-            return Some(finalization);
+        if self.finalizes_verified < threshold as usize {
+            return None;
         }
-        None
+        let proposal = self.finalizes_selected.as_ref().unwrap().clone();
+
+        // Ensure we have a notarization
+        let Some(notarization) = &self.notarization else {
+            return None;
+        };
+        let seed_signature = notarization.seed_signature;
+
+        // Check notarization and finalization proposal match
+        if notarization.proposal != proposal {
+            warn!(
+                ?proposal,
+                ?notarization.proposal,
+                "finalization proposal does not match notarization"
+            );
+        }
+
+        // There should never exist enough finalizes for multiple proposals, so it doesn't
+        // matter which one we choose.
+        debug!(
+            ?proposal,
+            verified = self.verified_proposal,
+            "broadcasting finalization"
+        );
+
+        // Only select verified finalizes
+        let proposals = self.finalizes.iter().filter_map(|status| {
+            let Status::Verified(ref finalize) = status else {
+                return None;
+            };
+            Some(&finalize.proposal_signature)
+        });
+
+        // Recover threshold signature
+        let proposal_signature = threshold_signature_recover::<V, _>(threshold, proposals)
+            .expect("failed to recover threshold signature");
+
+        // Construct finalization
+        let finalization = Finalization::new(proposal.clone(), proposal_signature, seed_signature);
+        self.broadcast_finalization = true;
+        Some(finalization)
     }
 
     /// Returns whether at least one honest participant has notarized a proposal.
     pub fn at_least_one_honest(&self) -> Option<View> {
         let threshold = quorum(self.participants as u32);
         let at_least_one_honest = (threshold - 1) / 2 + 1;
-        for (proposal, notarizes) in self.notarized_proposals.iter() {
-            if notarizes.count_ones() < at_least_one_honest as usize {
-                continue;
-            }
-            return Some(proposal.parent);
+        if self.notarizes_verified < at_least_one_honest as usize {
+            return None;
         }
-        None
+        let proposal = self.notarizes_selected.as_ref().unwrap().clone();
+        Some(proposal.parent)
     }
 }
 
@@ -731,10 +702,10 @@ impl<
             return Some(&notarization.proposal.payload);
         }
         let proposal = round.proposal.as_ref()?;
-        let notarizes = round.notarized_proposals.get(proposal)?;
+        assert_eq!(proposal, round.notarizes_selected.as_ref().unwrap());
         let identity = self.supervisor.identity(view)?;
         let threshold = identity.required();
-        if notarizes.count_ones() >= threshold as usize {
+        if round.notarizes_verified >= threshold as usize {
             return Some(&proposal.payload);
         }
         None
@@ -750,7 +721,7 @@ impl<
             None => return false,
         };
         let threshold = identity.required();
-        round.nullification.is_some() || round.nullified.count_ones() >= threshold as usize
+        round.nullification.is_some() || round.nullifies_verified >= threshold as usize
     }
 
     fn is_finalized(&self, view: View) -> Option<&D> {
@@ -759,10 +730,10 @@ impl<
             return Some(&finalization.proposal.payload);
         }
         let proposal = round.proposal.as_ref()?;
-        let finalizes = round.finalized_proposals.get(proposal)?;
+        assert_eq!(proposal, round.finalizes_selected.as_ref().unwrap());
         let identity = self.supervisor.identity(view)?;
         let threshold = identity.required();
-        if finalizes.len() >= threshold as usize {
+        if round.finalizes_verified >= threshold as usize {
             return Some(&proposal.payload);
         }
         None
