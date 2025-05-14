@@ -192,7 +192,7 @@ impl<B: Blob> Buffer<B> {
                 .read_at(&mut self.buffer[remaining..remaining + read_size], read_pos)
                 .await
             {
-                Ok(()) => {
+                Ok(read) => {
                     self.buffer_valid_len = remaining + read_size;
                 }
                 Err(e) => return Err(e),

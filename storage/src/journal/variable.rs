@@ -1245,7 +1245,7 @@ mod tests {
     struct MockBlob {}
 
     impl Blob for MockBlob {
-        async fn read_at(&self, _buf: &mut [u8], _offset: u64) -> Result<(), RError> {
+        async fn read_at<B: StableBufMut>(&self, _buf: &mut [u8], _offset: u64) -> Result<(), RError> {
             Ok(())
         }
 

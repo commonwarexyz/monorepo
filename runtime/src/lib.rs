@@ -335,14 +335,18 @@ pub trait Blob: Clone + Send + Sync + 'static {
     ///
     /// `read_at` does not return the number of bytes read because it
     /// only returns once the entire buffer has been filled.
-    fn read_at(
+    fn read_at<B: StableBufMut>(
         &self,
-        buf: &mut [u8],
+        buf: B,
+        offset: u64,
+    ) -> impl Future<Output = Result<B, Error>> + Send;
+
+    /// Write `buf` to the blob at the given offset.
+    fn write_at<B: StableBuf>(
+        &self,
+        buf: B,
         offset: u64,
     ) -> impl Future<Output = Result<(), Error>> + Send;
-
-    /// Write to the blob at the given offset.
-    fn write_at(&self, buf: &[u8], offset: u64) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Truncate the blob to the given length.
     fn truncate(&self, len: u64) -> impl Future<Output = Result<(), Error>> + Send;
@@ -551,7 +555,7 @@ mod tests {
 
             // Write data to the blob
             let data = b"Hello, Storage!";
-            blob.write_at(data, 0)
+            blob.write_at(Vec::from(data), 0)
                 .await
                 .expect("Failed to write to blob");
 
@@ -559,11 +563,11 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Read data from the blob
-            let mut buffer = vec![0u8; data.len()];
-            blob.read_at(&mut buffer, 0)
+            let read = blob
+                .read_at(vec![0; data.len()], 0)
                 .await
                 .expect("Failed to read from blob");
-            assert_eq!(&buffer, data);
+            assert_eq!(read, data);
 
             // Close the blob
             blob.close().await.expect("Failed to close blob");
@@ -583,11 +587,11 @@ mod tests {
             assert_eq!(len, data.len() as u64);
 
             // Read data part of message back
-            let mut buffer = vec![0u8; 7];
-            blob.read_at(&mut buffer, 7)
+            let read = blob
+                .read_at(vec![0u8; 7], 7)
                 .await
                 .expect("Failed to read data");
-            assert_eq!(&buffer, b"Storage");
+            assert_eq!(read, b"Storage");
 
             // Close the blob
             blob.close().await.expect("Failed to close blob");
@@ -634,38 +638,37 @@ mod tests {
             // Write data at different offsets
             let data1 = b"Hello";
             let data2 = b"World";
-            blob.write_at(data1, 0)
+            blob.write_at(Vec::from(data1), 0)
                 .await
                 .expect("Failed to write data1");
-            blob.write_at(data2, 5)
+            blob.write_at(Vec::from(data2), 5)
                 .await
                 .expect("Failed to write data2");
 
             // Read data back
-            let mut buffer = vec![0u8; 10];
-            blob.read_at(&mut buffer, 0)
+            let read = blob
+                .read_at(vec![0u8; 10], 0)
                 .await
                 .expect("Failed to read data");
-            assert_eq!(&buffer[..5], data1);
-            assert_eq!(&buffer[5..], data2);
+            assert_eq!(&read[..5], data1);
+            assert_eq!(&read[5..], data2);
 
             // Rewrite data without affecting length
             let data3 = b"Store";
-            blob.write_at(data3, 5)
+            blob.write_at(Vec::from(data3), 5)
                 .await
                 .expect("Failed to write data3");
 
             // Truncate the blob
             blob.truncate(5).await.expect("Failed to truncate blob");
-            let mut buffer = vec![0u8; 5];
-            blob.read_at(&mut buffer, 0)
+            let read = blob
+                .read_at(vec![0; 5], 0)
                 .await
                 .expect("Failed to read data");
-            assert_eq!(&buffer[..5], data1);
+            assert_eq!(&read[..5], data1);
 
             // Full read after truncation
-            let mut buffer = vec![0u8; 10];
-            let result = blob.read_at(&mut buffer, 0).await;
+            let result = blob.read_at(vec![0u8; 10], 0).await;
             assert!(result.is_err());
 
             // Close the blob
@@ -691,10 +694,10 @@ mod tests {
                     .expect("Failed to open blob");
 
                 // Write data at different offsets
-                blob.write_at(data1, 0)
+                blob.write_at(Vec::from(data1), 0)
                     .await
                     .expect("Failed to write data1");
-                blob.write_at(data2, 5 + additional as u64)
+                blob.write_at(Vec::from(data2), 5 + additional as u64)
                     .await
                     .expect("Failed to write data2");
 
@@ -711,12 +714,12 @@ mod tests {
                 assert_eq!(len, (data1.len() + data2.len() + additional) as u64);
 
                 // Read data back
-                let mut buffer = vec![0u8; 10 + additional];
-                blob.read_at(&mut buffer, 0)
+                let read = blob
+                    .read_at(vec![0u8; 10 + additional], 0)
                     .await
                     .expect("Failed to read data");
-                assert_eq!(&buffer[..5], b"Hello");
-                assert_eq!(&buffer[5 + additional..], b"World");
+                assert_eq!(&read[..5], b"Hello");
+                assert_eq!(&read[5 + additional..], b"World");
 
                 // Close the blob
                 blob.close().await.expect("Failed to close blob");
@@ -740,18 +743,18 @@ mod tests {
 
             // Read data past file length (empty file)
             let mut buffer = vec![0u8; 10];
-            let result = blob.read_at(&mut buffer, 0).await;
+            let result = blob.read_at(vec![], 0).await;
             assert!(result.is_err());
 
             // Write data to the blob
-            let data = b"Hello, Storage!";
+            let data = b"Hello, Storage!".to_vec();
             blob.write_at(data, 0)
                 .await
                 .expect("Failed to write to blob");
 
             // Read data past file length (non-empty file)
             let mut buffer = vec![0u8; 20];
-            let result = blob.read_at(&mut buffer, 0).await;
+            let result = blob.read_at(vec![], 0).await;
             assert!(result.is_err());
         })
     }
@@ -772,7 +775,7 @@ mod tests {
 
             // Write data to the blob
             let data = b"Hello, Storage!";
-            blob.write_at(data, 0)
+            blob.write_at(Vec::from(data), 0)
                 .await
                 .expect("Failed to write to blob");
 
@@ -783,21 +786,21 @@ mod tests {
             let check1 = context.with_label("check1").spawn({
                 let blob = blob.clone();
                 move |_| async move {
-                    let mut buffer = vec![0u8; data.len()];
-                    blob.read_at(&mut buffer, 0)
+                    let read = blob
+                        .read_at(vec![0u8; data.len()], 0)
                         .await
                         .expect("Failed to read from blob");
-                    assert_eq!(&buffer, data);
+                    assert_eq!(read, data);
                 }
             });
             let check2 = context.with_label("check2").spawn({
                 let blob = blob.clone();
                 move |_| async move {
-                    let mut buffer = vec![0u8; data.len()];
-                    blob.read_at(&mut buffer, 0)
+                    let read = blob
+                        .read_at(vec![0; data.len()], 0)
                         .await
                         .expect("Failed to read from blob");
-                    assert_eq!(&buffer, data);
+                    assert_eq!(read, data);
                 }
             });
 
@@ -807,11 +810,11 @@ mod tests {
             assert!(result.1.is_ok());
 
             // Read data from the blob
-            let mut buffer = vec![0u8; data.len()];
-            blob.read_at(&mut buffer, 0)
+            let read = blob
+                .read_at(vec![0; data.len()], 0)
                 .await
                 .expect("Failed to read from blob");
-            assert_eq!(&buffer, data);
+            assert_eq!(read, data);
 
             // Close the blob
             blob.close().await.expect("Failed to close blob");
