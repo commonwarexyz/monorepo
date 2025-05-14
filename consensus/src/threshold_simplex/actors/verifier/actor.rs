@@ -111,12 +111,13 @@ impl<
         let mut current: View = 0;
         let mut finalized: View = 0;
         let mut work: BTreeMap<u64, PartialVerifier<V, D>> = BTreeMap::new();
+        let mut blocking = true;
 
         loop {
             // Read at least one message (if there doesn't already exist a backlog)
             if !recv_batch(
                 &mut self.mailbox_receiver,
-                work.is_empty(),
+                blocking,
                 |message| match message {
                     Message::Update {
                         current: new_current,
@@ -128,6 +129,7 @@ impl<
                         finalized = new_finalized;
                     }
                     Message::Message(message) => {
+                        blocking = false;
                         work.entry(message.view()).or_default().add(message);
                     }
                 },
@@ -152,6 +154,7 @@ impl<
                     .map(|(view, verifier)| (*view, verifier));
             }
             let Some((view, verifier)) = selected else {
+                blocking = true;
                 trace!(
                     current,
                     finalized,
