@@ -38,11 +38,6 @@ use bytes::BytesMut;
 ///     reader.read_exact(&mut header, 16).await.expect("unable to read data");
 ///     println!("Read header: {:?}", header);
 ///
-///     // Peek at upcoming data without advancing the read position
-///     let peek_size = 8;
-///     let peeked_data = reader.peek(peek_size).await.expect("unable to peek data");
-///     println!("Peeked data: {:?}", peeked_data);
-///
 ///     // Position is still at 16 (after header)
 ///     assert_eq!(reader.position(), 16);
 /// });
