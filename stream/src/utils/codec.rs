@@ -119,10 +119,7 @@ mod tests {
             // Do the reading manually without using recv_frame
             let read = stream.recv(vec![0; 4]).await.unwrap();
             assert_eq!(read, (buf.len() as u32).to_be_bytes());
-            let read = stream
-                .recv(Vec::with_capacity(MAX_MESSAGE_SIZE))
-                .await
-                .unwrap();
+            let read = stream.recv(vec![0; MAX_MESSAGE_SIZE]).await.unwrap();
             assert_eq!(read, buf);
         });
     }
