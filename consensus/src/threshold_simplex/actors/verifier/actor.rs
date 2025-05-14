@@ -135,6 +135,11 @@ impl<
                 return;
             }
 
+            // If work is still empty, continue (could happen if just got Update)
+            if work.is_empty() {
+                continue;
+            }
+
             // Select some verifier (preferring the current view) without removing it initially
             let view = if work.contains_key(&latest) {
                 latest
