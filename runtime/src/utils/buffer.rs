@@ -157,53 +157,6 @@ impl<B: Blob> Buffer<B> {
         Ok(())
     }
 
-    /// Peeks at the next `size` bytes without advancing the read position.
-    /// Returns a slice to the peeked data or an error if not enough bytes are available.
-    pub async fn peek(&mut self, size: usize) -> Result<&[u8], Error> {
-        // Quick check if we already have enough data in the buffer
-        if self.buffer_remaining() >= size {
-            return Ok(&self.buffer[self.buffer_position..(self.buffer_position + size)]);
-        }
-
-        // Check if enough total bytes are available
-        let total_available = (self.buffer_remaining() as u64 + self.blob_remaining()) as usize;
-        if total_available < size {
-            return Err(Error::BlobInsufficientLength);
-        }
-
-        // We need to do a more complex operation: copy remaining data to beginning,
-        // then refill the rest of the buffer
-        let remaining = self.buffer_remaining();
-        if remaining > 0 {
-            // Copy the remaining data to the beginning of the buffer
-            self.buffer
-                .copy_within(self.buffer_position..self.buffer_valid_len, 0);
-        }
-
-        // Update positions
-        self.blob_position += self.buffer_position as u64;
-        self.buffer_valid_len = remaining;
-        self.buffer_position = 0;
-
-        // Read more data into the buffer after the remaining data
-        let read_pos = self.blob_position + remaining as u64;
-        let bytes_blob_remaining = self.blob_size.saturating_sub(read_pos);
-        let read_size =
-            std::cmp::min((self.buffer_size - remaining) as u64, bytes_blob_remaining) as usize;
-        if read_size > 0 {
-            let read = self.blob.read_at(vec![0; read_size], read_pos).await?;
-            self.buffer_valid_len = remaining + read_size;
-            self.buffer[remaining..self.buffer_valid_len].copy_from_slice(&read);
-        }
-
-        // If we could not fill the buffer, return an error
-        if self.buffer_valid_len < size {
-            return Err(Error::BlobInsufficientLength);
-        }
-
-        Ok(&self.buffer[0..size])
-    }
-
     /// Advances the read position by `bytes` without reading data.
     pub fn advance(&mut self, bytes: usize) -> Result<(), Error> {
         if self.buffer_position + bytes > self.buffer_valid_len {

@@ -377,7 +377,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_buffer_peek_and_advance() {
+    fn test_buffer_advance() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create a memory blob with some test data
@@ -391,20 +391,9 @@ mod tests {
             let buffer_size = 20;
             let mut reader = Buffer::new(blob, size, buffer_size);
 
-            // Peek at the first 5 bytes
-            let peeked = reader.peek(5).await.unwrap();
-            assert_eq!(peeked, b"Hello");
-
-            // Position should still be 0
-            assert_eq!(reader.position(), 0);
-
             // Advance 5 bytes
             reader.advance(5).unwrap();
             assert_eq!(reader.position(), 5);
-
-            // Peek and read more
-            let peeked = reader.peek(7).await.unwrap();
-            assert_eq!(peeked, b", world");
 
             let mut buf = [0u8; 7];
             reader.read_exact(&mut buf, 7).await.unwrap();
@@ -445,10 +434,6 @@ mod tests {
 
             // Position should be 15
             assert_eq!(reader.position(), 15);
-
-            // Peek at data that crosses another boundary
-            let peeked = reader.peek(10).await.unwrap();
-            assert_eq!(peeked, b"PQRSTUVWXY");
 
             // Read the rest
             let mut buf = [0u8; 11];
