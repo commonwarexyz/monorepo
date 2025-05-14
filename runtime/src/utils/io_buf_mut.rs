@@ -22,40 +22,16 @@ pub unsafe trait IoBufMut: IoBuf {
     /// owns the value, the pointer returned by `stable_mut_ptr` **does not**
     /// change.
     fn stable_mut_ptr(&mut self) -> *mut u8;
-
-    /// Updates the number of initialized bytes.
-    ///
-    /// If the specified `pos` is greater than the value returned by
-    /// [`IoBuf::len`], it becomes the new water mark as returned by
-    /// `IoBuf::len`.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that all bytes starting at `stable_mut_ptr()` up
-    /// to `pos` are initialized and owned by the buffer.
-    unsafe fn set_len(&mut self, pos: usize);
 }
 
 unsafe impl IoBufMut for Vec<u8> {
     fn stable_mut_ptr(&mut self) -> *mut u8 {
         self.as_mut_ptr()
     }
-
-    unsafe fn set_len(&mut self, len: usize) {
-        if self.len() < len {
-            self.set_len(len);
-        }
-    }
 }
 
 unsafe impl IoBufMut for bytes::BytesMut {
     fn stable_mut_ptr(&mut self) -> *mut u8 {
         self.as_mut_ptr()
-    }
-
-    unsafe fn set_len(&mut self, init_len: usize) {
-        if self.len() < init_len {
-            self.set_len(init_len);
-        }
     }
 }
