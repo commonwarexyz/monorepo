@@ -1,5 +1,6 @@
 //! Utility functions for `std::time`.
 
+use rand::Rng;
 use std::time::{Duration, SystemTime};
 
 /// Extension trait to add methods to `std::time::SystemTime`
@@ -14,6 +15,10 @@ pub trait SystemTimeExt {
     /// Panics if the system time is before the Unix epoch.
     /// Saturates at `u64::MAX`.
     fn epoch_millis(&self) -> u64;
+
+    /// Adds a random `Duration` to the current time between `0` and `jitter * 2` and returns the
+    /// resulting `SystemTime`. The random duration is generated using the provided `context`.
+    fn add_jittered(&self, rng: &mut impl Rng, jitter: Duration) -> SystemTime;
 }
 
 impl SystemTimeExt for SystemTime {
@@ -24,6 +29,10 @@ impl SystemTimeExt for SystemTime {
 
     fn epoch_millis(&self) -> u64 {
         self.epoch().as_millis().min(u64::MAX as u128) as u64
+    }
+
+    fn add_jittered(&self, rng: &mut impl Rng, jitter: Duration) -> SystemTime {
+        *self + rng.gen_range(Duration::default()..=jitter * 2)
     }
 }
 
@@ -71,5 +80,28 @@ mod tests {
     fn test_epoch_millis_panics() {
         let time = SystemTime::UNIX_EPOCH - Duration::from_secs(1);
         time.epoch_millis();
+    }
+
+    #[test]
+    fn test_add_jittered() {
+        let mut rng = rand::thread_rng();
+        let time = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        let jitter = Duration::from_secs(2);
+
+        // Ensure we generate values both below and above the average time.
+        let (mut below, mut above) = (false, false);
+        for _ in 0..100 {
+            let new_time = time.add_jittered(&mut rng, jitter);
+
+            // Record values higher or lower than the average
+            let avg = time + jitter;
+            below |= new_time < avg;
+            above |= new_time > avg;
+
+            // Check bounds
+            assert!(new_time >= time);
+            assert!(new_time <= time + (jitter * 2));
+        }
+        assert!(below && above);
     }
 }
