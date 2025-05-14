@@ -57,6 +57,12 @@ enum Status<O> {
     Verified(O),
 }
 
+enum Action {
+    Skip,
+    Block,
+    Process,
+}
+
 struct Round<
     C: Scheme,
     V: Variant,
@@ -183,52 +189,57 @@ impl<
         }
     }
 
-    fn add_reserved_notarize(&mut self, public_key_index: u32, notarize: &Notarize<V, D>) -> bool {
+    async fn add_reserved_notarize(
+        &mut self,
+        public_key_index: u32,
+        notarize: &Notarize<V, D>,
+    ) -> Action {
         // Check if already notarized
         match self.notarizes[public_key_index as usize] {
             Status::None => {
                 // Store the notarize
                 self.notarizes[public_key_index as usize] = Status::Pending(notarize.clone());
-                true
+                Action::Process
             }
             Status::Pending(ref previous) => {
                 if previous != notarize {
-                    unimplemented!("conflicting notarize or invalid signature");
+                    // Create fault
+                    let activity = ConflictingNotarize::new(previous.clone(), notarize.clone());
+                    self.reporter
+                        .report(Activity::ConflictingNotarize(activity))
+                        .await;
+                    warn!(
+                        view = self.view,
+                        signer = public_key_index,
+                        "recorded fault"
+                    );
+                    Action::Block
+                } else {
+                    Action::Skip
                 }
-                false
             }
             Status::Verified(ref previous) => {
                 if previous != notarize {
-                    unimplemented!("conflicting notarize or invalid signature");
+                    // Create fault
+                    let activity = ConflictingNotarize::new(previous.clone(), notarize.clone());
+                    self.reporter
+                        .report(Activity::ConflictingNotarize(activity))
+                        .await;
+                    warn!(
+                        view = self.view,
+                        signer = public_key_index,
+                        "recorded fault"
+                    );
+                    Action::Block
+                } else {
+                    Action::Skip
                 }
-                false
             }
         }
     }
 
-    async fn add_verified_notarize(&mut self, notarize: Notarize<V, D>) -> bool {
-        // Check if already notarized
+    async fn add_verified_notarize(&mut self, notarize: Notarize<V, D>) {
         let public_key_index = notarize.signer();
-        if let Status::Verified(ref previous) = self.notarizes[public_key_index as usize] {
-            if previous == &notarize {
-                trace!(?notarize, ?previous, "already notarized");
-                return false;
-            }
-
-            // Create fault
-            let activity = ConflictingNotarize::new(previous.clone(), notarize);
-            self.reporter
-                .report(Activity::ConflictingNotarize(activity))
-                .await;
-            warn!(
-                view = self.view,
-                signer = public_key_index,
-                "recorded fault"
-            );
-            return false;
-        }
-
-        // Store the notarize
         if let Some(vec) = self.notarized_proposals.get_mut(&notarize.proposal) {
             vec.set(public_key_index as usize);
         } else {
@@ -239,27 +250,27 @@ impl<
         }
         self.notarizes[public_key_index as usize] = Status::Verified(notarize.clone());
         self.reporter.report(Activity::Notarize(notarize)).await;
-        true
     }
 
-    fn add_reserved_nullify(&mut self, public_key_index: u32, nullify: &Nullify<V>) -> bool {
+    fn add_reserved_nullify(&mut self, public_key_index: u32, nullify: &Nullify<V>) -> Action{
         // Check if already nullified
         match self.nullifies[public_key_index as usize] {
             Status::None => {
                 self.nullifies[public_key_index as usize] = Status::Pending(nullify.clone());
-                true
+                Action::Process
             }
             Status::Pending(ref previous) => {
                 if previous != nullify {
-                    unimplemented!("conflicting nullify or invalid signature");
+                    Action::Block
+                } else {
+                    Action::Skip
                 }
-                false
-            }
             Status::Verified(ref previous) => {
                 if previous != nullify {
-                    unimplemented!("conflicting nullify or invalid signature");
+                    Action::Block
+                } else {
+                    Action::Skip
                 }
-                false
             }
         }
     }
