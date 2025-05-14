@@ -2017,6 +2017,19 @@ impl<
         self.current_view.set(observed_view as i64);
         self.tracked_views.set(self.views.len() as i64);
 
+        // Initialize verifier with leader
+        let round = self.views.get_mut(&observed_view).expect("missing round");
+        let leader = self
+            .supervisor
+            .is_participant(
+                observed_view,
+                round.leader.as_ref().expect("missing leader"),
+            )
+            .unwrap();
+        verifier
+            .update(observed_view, leader, self.last_finalized)
+            .await;
+
         // Create shutdown tracker
         let mut shutdown = self.context.stopped();
 
