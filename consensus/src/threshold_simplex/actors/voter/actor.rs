@@ -1003,7 +1003,7 @@ impl<
         });
 
         // Try to reserve
-        round.add_reserved_nullify(public_key_index)
+        round.add_reserved_nullify(public_key_index, nullify)
     }
 
     async fn handle_nullify(&mut self, nullify: Nullify<V>) {

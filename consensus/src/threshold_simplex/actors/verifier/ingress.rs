@@ -3,7 +3,11 @@ use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
 use futures::{channel::mpsc, SinkExt};
 
 pub enum Message<V: Variant, D: Digest> {
-    Update { latest: View, oldest: View },
+    Update {
+        latest: View,
+        leader: u32,
+        oldest: View,
+    },
     Message(Voter<V, D>),
 }
 
@@ -17,9 +21,13 @@ impl<V: Variant, D: Digest> Mailbox<V, D> {
         Self { sender }
     }
 
-    pub async fn update(&mut self, latest: View, oldest: View) {
+    pub async fn update(&mut self, latest: View, leader: u32, oldest: View) {
         self.sender
-            .send(Message::Update { latest, oldest })
+            .send(Message::Update {
+                latest,
+                leader,
+                oldest,
+            })
             .await
             .expect("Failed to send update");
     }
