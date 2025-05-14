@@ -221,6 +221,7 @@ fn main() {
             context.with_label("engine"),
             threshold_simplex::Config {
                 crypto: signer.clone(),
+                blocker: oracle,
                 automaton: mailbox.clone(),
                 relay: mailbox.clone(),
                 reporter: mailbox.clone(),
