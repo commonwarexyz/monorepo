@@ -24,9 +24,9 @@ use crate::{Blob, Error};
 /// executor.start(|context| async move {
 ///     // Open a blob and add some data (e.g., a journal file)
 ///     let (blob, size) = context.open("my_partition", b"my_data").await.expect("unable to open blob");
-///     let data = b"Hello, world! This is a test.";
-///     blob.write_at(data, 0).await.expect("unable to write data");
+///     let data = b"Hello, world! This is a test.".to_vec();
 ///     let size = data.len() as u64;
+///     blob.write_at(data, 0).await.expect("unable to write data");
 ///
 ///     // Create a buffer
 ///     let buffer = 64 * 1024;
