@@ -234,8 +234,26 @@ impl<
     }
 
     async fn add_reserved_nullify(&mut self, nullify: &Nullify<V>) -> Action {
-        // Check if already nullified
+        // Check if finalized
         let public_key_index = nullify.signer();
+        match self.finalizes[public_key_index as usize] {
+            Status::None => {}
+            Status::Pending(ref previous) | Status::Verified(ref previous) => {
+                // Create fault
+                let activity = NullifyFinalize::new(nullify.clone(), previous.clone());
+                self.reporter
+                    .report(Activity::NullifyFinalize(activity))
+                    .await;
+                warn!(
+                    view = self.view,
+                    signer = public_key_index,
+                    "recorded fault"
+                );
+                return Action::Block;
+            }
+        }
+
+        // Check if already nullified
         match self.nullifies[public_key_index as usize] {
             Status::None => {
                 self.reporter
@@ -254,30 +272,33 @@ impl<
         }
     }
 
-    async fn add_verified_nullify(&mut self, nullify: Nullify<V>) -> bool {
-        // Check if already issued finalize
+    async fn add_verified_nullify(&mut self, nullify: Nullify<V>) {
         let public_key_index = nullify.signer();
-        let Status::Verified(ref previous) = self.finalizes[public_key_index as usize] else {
-            // Store the nullify
-            self.nullifies_verified += 1;
-            self.nullifies[public_key_index as usize] = Status::Verified(nullify.clone());
-            return true;
-        };
-
-        // Create fault
-        let activity = NullifyFinalize::new(nullify, previous.clone());
-        self.reporter
-            .report(Activity::NullifyFinalize(activity))
-            .await;
-        warn!(
-            view = self.view,
-            signer = public_key_index,
-            "recorded fault"
-        );
-        false
+        self.nullifies_verified += 1;
+        self.nullifies[public_key_index as usize] = Status::Verified(nullify);
     }
 
     async fn add_reserved_finalize(&mut self, finalize: &Finalize<V, D>) -> Action {
+        // Check if already nullified
+        let public_key_index = finalize.signer();
+        match self.nullifies[public_key_index as usize] {
+            Status::None => {}
+            Status::Pending(ref previous) | Status::Verified(ref previous) => {
+                // Create fault
+                let activity = NullifyFinalize::new(previous.clone(), finalize.clone());
+                self.reporter
+                    .report(Activity::NullifyFinalize(activity))
+                    .await;
+                warn!(
+                    view = self.view,
+                    signer = public_key_index,
+                    "recorded fault"
+                );
+                return Action::Block;
+            }
+        }
+
+        // Check if already finalized
         let public_key_index = finalize.signer();
         match self.finalizes[public_key_index as usize] {
             Status::None => {
@@ -307,30 +328,13 @@ impl<
         }
     }
 
-    async fn add_verified_finalize(&mut self, finalize: Finalize<V, D>) -> bool {
-        // Check if also issued nullify
+    async fn add_verified_finalize(&mut self, finalize: Finalize<V, D>) {
         let public_key_index = finalize.signer();
-        if let Status::Verified(ref previous) = self.nullifies[public_key_index as usize] {
-            // Create fault
-            let activity = NullifyFinalize::new(previous.clone(), finalize);
-            self.reporter
-                .report(Activity::NullifyFinalize(activity))
-                .await;
-            warn!(
-                view = self.view,
-                signer = public_key_index,
-                "recorded fault"
-            );
-            return false;
-        }
-
-        // Store the finalize
         self.finalizes_verified += 1;
         if self.finalizes_selected.is_none() {
             self.finalizes_selected = Some(finalize.proposal.clone());
         }
-        self.finalizes[public_key_index as usize] = Status::Verified(finalize.clone());
-        true
+        self.finalizes[public_key_index as usize] = Status::Verified(finalize);
     }
 
     fn add_verified_notarization(&mut self, notarization: Notarization<V, D>) -> bool {
@@ -973,8 +977,8 @@ impl<
         });
 
         // Handle nullify
-        let msg = Voter::Nullify(nullify.clone());
-        if round.add_verified_nullify(nullify).await && self.journal.is_some() {
+        if self.journal.is_some() {
+            let msg = Voter::Nullify(nullify.clone());
             self.journal
                 .as_mut()
                 .unwrap()
@@ -982,6 +986,7 @@ impl<
                 .await
                 .expect("unable to append nullify");
         }
+        round.add_verified_nullify(nullify).await
     }
 
     async fn our_proposal(&mut self, proposal: Proposal<D>) -> bool {
@@ -1487,8 +1492,8 @@ impl<
         });
 
         // Handle finalize
-        let msg = Voter::Finalize(finalize.clone());
-        if round.add_verified_finalize(finalize).await && self.journal.is_some() {
+        if self.journal.is_some() {
+            let msg = Voter::Finalize(finalize.clone());
             self.journal
                 .as_mut()
                 .unwrap()
@@ -1496,6 +1501,7 @@ impl<
                 .await
                 .expect("unable to append to journal");
         }
+        round.add_verified_finalize(finalize).await
     }
 
     async fn finalization(&mut self, finalization: Finalization<V, D>) -> Action {
