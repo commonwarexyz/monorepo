@@ -108,8 +108,8 @@ impl<
 
     pub async fn run(mut self, mut consensus: voter::Mailbox<V, D>) {
         // Initialize view data structures
-        let mut latest: View = 0;
-        let mut oldest: View = 0;
+        let mut current: View = 0;
+        let mut finalized: View = 0;
         let mut work: BTreeMap<u64, PartialVerifier<V, D>> = BTreeMap::new();
 
         loop {
@@ -119,13 +119,13 @@ impl<
                 work.is_empty(),
                 |message| match message {
                     Message::Update {
-                        latest: new_latest,
+                        current: new_current,
                         leader,
-                        oldest: new_oldest,
+                        finalized: new_finalized,
                     } => {
-                        latest = new_latest;
-                        work.entry(latest).or_default().mark(leader);
-                        oldest = new_oldest;
+                        current = new_current;
+                        work.entry(current).or_default().mark(leader);
+                        finalized = new_finalized;
                     }
                     Message::Message(message) => {
                         work.entry(message.view()).or_default().add(message);
@@ -137,40 +137,32 @@ impl<
                 return;
             }
 
-            // Select some verifier (preferring the current view and then the latest)
-            let selected = {
-                if let Some(verifier) = work.get_mut(&latest) {
-                    if verifier.is_empty() {
-                        None
-                    } else {
-                        Some((latest, verifier))
-                    }
+            // Look for some verifier that is ready (preferring the current view)
+            let verifier = if let Some(verifier) = work.get_mut(&current) {
+                if verifier.ready() {
+                    Some((current, verifier))
                 } else {
                     None
                 }
-            };
-            let (view, verifier) = if let Some(selected) = selected {
-                selected
             } else {
                 let mut selected = None;
-                let iter = work.iter_mut().rev();
-                for (view, verifier) in iter {
-                    if !verifier.is_empty() {
+                for (view, verifier) in work.iter_mut() {
+                    if verifier.ready() {
                         selected = Some((*view, verifier));
                         break;
                     }
                 }
-                let Some(selected) = selected else {
-                    continue;
-                };
                 selected
+            };
+            let Some((view, verifier)) = verifier else {
+                continue;
             };
 
             // Verify messages
             let identity = self.supervisor.identity(view).unwrap();
             let (voters, failed) = verifier.verify(&self.namespace, identity);
             let batch = voters.len() + failed.len();
-            trace!(view, latest, batch, "batch verified messages");
+            trace!(view, batch, "batch verified messages");
             self.batch_size.observe(batch as f64);
 
             // Send messages
@@ -187,8 +179,8 @@ impl<
                 }
             }
 
-            // Drop old verifiers once they are no longer needed
-            work.retain(|view, _| *view >= oldest);
+            // Drop any verifiers lower than the last finalized view
+            work.retain(|view, _| *view >= finalized);
         }
     }
 }

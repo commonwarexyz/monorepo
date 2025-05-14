@@ -4,9 +4,9 @@ use futures::{channel::mpsc, SinkExt};
 
 pub enum Message<V: Variant, D: Digest> {
     Update {
-        latest: View,
+        current: View,
         leader: u32,
-        oldest: View,
+        finalized: View,
     },
     Message(Voter<V, D>),
 }
@@ -21,12 +21,12 @@ impl<V: Variant, D: Digest> Mailbox<V, D> {
         Self { sender }
     }
 
-    pub async fn update(&mut self, latest: View, leader: u32, oldest: View) {
+    pub async fn update(&mut self, current: View, leader: u32, finalized: View) {
         self.sender
             .send(Message::Update {
-                latest,
+                current,
                 leader,
-                oldest,
+                finalized,
             })
             .await
             .expect("Failed to send update");

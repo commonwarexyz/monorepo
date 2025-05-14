@@ -19,7 +19,7 @@ use commonware_cryptography::{
 };
 use commonware_utils::union;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     hash::Hash,
 };
 
@@ -229,8 +229,8 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
 
     pub fn ready(&self) -> bool {
         ((self.leader.is_some() && self.leader_proposal.is_some())
-            && (self.notarizes.len() > 0 || self.finalizes.len() > 0))
-            || self.nullifies.len() > 0
+            && (!self.notarizes.is_empty() || !self.finalizes.is_empty()))
+            || !self.nullifies.is_empty()
     }
 }
 
