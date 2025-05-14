@@ -137,18 +137,34 @@ impl<
                 return;
             }
 
-            // If work is still empty, continue (could happen if just got Update)
-            if work.is_empty() {
-                continue;
-            }
-
             // Select some verifier (preferring the current view) without removing it initially
-            let view = if work.contains_key(&latest) {
-                latest
-            } else {
-                *work.keys().next_back().unwrap()
+            let selected = {
+                if let Some(verifier) = work.get_mut(&latest) {
+                    if verifier.is_empty() {
+                        None
+                    } else {
+                        Some((latest, verifier))
+                    }
+                } else {
+                    None
+                }
             };
-            let verifier = work.get_mut(&view).unwrap();
+            let (view, verifier) = if let Some(selected) = selected {
+                selected
+            } else {
+                let mut selected = None;
+                let iter = work.iter_mut().rev();
+                for (view, verifier) in iter {
+                    if !verifier.is_empty() {
+                        selected = Some((*view, verifier));
+                        break;
+                    }
+                }
+                let Some(selected) = selected else {
+                    continue;
+                };
+                selected
+            };
 
             // Verify messages
             let identity = self.supervisor.identity(view).unwrap();
@@ -171,12 +187,7 @@ impl<
                 }
             }
 
-            // If the verifier is empty, remove it
-            if verifier.is_empty() {
-                work.remove(&view);
-            }
-
-            // Drop any old verifiers
+            // Drop old verifiers once they are no longer needed
             work.retain(|view, _| *view >= oldest);
         }
     }
