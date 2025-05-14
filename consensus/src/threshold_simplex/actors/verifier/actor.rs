@@ -150,7 +150,7 @@ impl<
 
             // Verify messages
             let identity = self.supervisor.identity(view).unwrap();
-            let (voters, failed, drop) = verifier.verify(&self.namespace, identity);
+            let (voters, failed) = verifier.verify(&self.namespace, identity);
             let batch = voters.len() + failed.len();
             trace!(view, batch, "batch verified messages");
             self.batch_size.observe(batch as f64);

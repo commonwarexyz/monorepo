@@ -1,10 +1,5 @@
 //! Types used in [`threshold_simplex`](crate::threshold_simplex).
 
-use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    hash::Hash,
-};
-
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write,
@@ -22,7 +17,11 @@ use commonware_cryptography::{
     },
     Digest,
 };
-use commonware_utils::{quorum, union};
+use commonware_utils::union;
+use std::{
+    collections::{BTreeSet, HashMap, HashSet},
+    hash::Hash,
+};
 
 /// View is a monotonically increasing counter that represents the current focus of consensus.
 /// Each View corresponds to a round in the consensus protocol where validators attempt to agree
@@ -154,76 +153,54 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
         namespace: &[u8],
         identity: &Poly<V::Public>,
     ) -> (Vec<Voter<V, D>>, Vec<u32>) {
-        // Count messages in each task
-        let mut best_notarize = None;
-        for (proposal, notarizes) in self.notarizes.iter() {
-            if let Some((_, len)) = best_notarize {
-                if notarizes.len() > len {
-                    best_notarize = Some((proposal.clone(), notarizes.len()));
-                }
-            } else {
-                best_notarize = Some((proposal.clone(), notarizes.len()));
-            }
-        }
-        let mut best_finalize = None;
-        for (proposal, finalizes) in self.finalizes.iter() {
-            if let Some((_, len)) = best_finalize {
-                if finalizes.len() > len {
-                    best_finalize = Some((proposal.clone(), finalizes.len()));
-                }
-            } else {
-                best_finalize = Some((proposal.clone(), finalizes.len()));
-            }
-        }
-        let nullifies = self.nullifies.len();
+        // Find the proposal with the most notarizes
+        let best_notarize = self
+            .notarizes
+            .iter()
+            .max_by_key(|(_, msgs)| msgs.len())
+            .map(|(proposal, _)| {
+                (
+                    proposal.clone(),
+                    self.notarizes.get(proposal).unwrap().len(),
+                )
+            });
 
-        // Verify task with most messages
-        if let Some((proposal, len)) = best_notarize {
-            if len >= best_finalize.map_or(0, |(_, len)| len) && len >= nullifies {
-                // Verify notarizes
-                let (notarizes, failed) = Notarize::verify_multiple(
-                    namespace,
-                    identity,
-                    std::mem::take(&mut self.notarizes.get_mut(&proposal).unwrap()),
-                );
-                (notarizes.into_iter().map(Voter::Notarize).collect(), failed)
-            } else if best_finalize.map_or(false, |(_, len)| len >= nullifies) {
-                // Verify finalizes
-                let (finalizes, failed) = Finalize::verify_multiple(
-                    namespace,
-                    identity,
-                    std::mem::take(&mut self.finalizes.get_mut(&proposal).unwrap()),
-                );
-                (finalizes.into_iter().map(Voter::Finalize).collect(), failed)
-            } else {
-                // Verify nullifies
-                let (nullifies, failed) = Nullify::verify_multiple(
-                    namespace,
-                    identity,
-                    std::mem::take(&mut self.nullifies),
-                );
-                (nullifies.into_iter().map(Voter::Nullify).collect(), failed)
-            }
-        } else if let Some((proposal, len)) = best_finalize {
-            if len >= nullifies {
-                // Verify finalizes
-                let (finalizes, failed) = Finalize::verify_multiple(
-                    namespace,
-                    identity,
-                    std::mem::take(&mut self.finalizes.get_mut(&proposal).unwrap()),
-                );
-                (finalizes.into_iter().map(Voter::Finalize).collect(), failed)
-            } else {
-                // Verify nullifies
-                let (nullifies, failed) = Nullify::verify_multiple(
-                    namespace,
-                    identity,
-                    std::mem::take(&mut self.nullifies),
-                );
-                (nullifies.into_iter().map(Voter::Nullify).collect(), failed)
-            }
+        // Find the proposal with the most finalizes
+        let best_finalize = self
+            .finalizes
+            .iter()
+            .max_by_key(|(_, msgs)| msgs.len())
+            .map(|(proposal, _)| {
+                (
+                    proposal.clone(),
+                    self.finalizes.get(proposal).unwrap().len(),
+                )
+            });
+
+        // Decide which type of message to verify based on counts
+        let nullifies_count = self.nullifies.len();
+        let notarize_count = best_notarize.as_ref().map_or(0, |(_, len)| *len);
+        let finalize_count = best_finalize.as_ref().map_or(0, |(_, len)| *len);
+        if notarize_count >= finalize_count
+            && notarize_count >= nullifies_count
+            && best_notarize.is_some()
+        {
+            let (proposal, _) = best_notarize.unwrap();
+            let (notarizes, failed) = Notarize::verify_multiple(
+                namespace,
+                identity,
+                std::mem::take(self.notarizes.get_mut(&proposal).unwrap()),
+            );
+            (notarizes.into_iter().map(Voter::Notarize).collect(), failed)
+        } else if finalize_count >= nullifies_count && best_finalize.is_some() {
+            let (proposal, _) = best_finalize.unwrap();
+            let (finalizes, failed) = Finalize::verify_multiple(
+                namespace,
+                identity,
+                std::mem::take(self.finalizes.get_mut(&proposal).unwrap()),
+            );
+            (finalizes.into_iter().map(Voter::Finalize).collect(), failed)
         } else {
-            // Verify nullifies
             let (nullifies, failed) =
                 Nullify::verify_multiple(namespace, identity, std::mem::take(&mut self.nullifies));
             (nullifies.into_iter().map(Voter::Nullify).collect(), failed)
