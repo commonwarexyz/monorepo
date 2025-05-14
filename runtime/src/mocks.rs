@@ -82,8 +82,8 @@ impl StreamTrait for Stream {
 
             // If the message is fully available in the buffer,
             // drain the value into buf and return.
-            if channel.buffer.len() >= buf.capacity() {
-                let b: Vec<u8> = channel.buffer.drain(0..buf.capacity()).collect();
+            if channel.buffer.len() >= buf.len() {
+                let b: Vec<u8> = channel.buffer.drain(0..buf.len()).collect();
                 buf.put_slice(&b);
                 return Ok(buf);
             }
@@ -91,13 +91,13 @@ impl StreamTrait for Stream {
             // Otherwise, populate the waiter.
             assert!(channel.waiter.is_none());
             let (os_send, os_recv) = oneshot::channel();
-            channel.waiter = Some((buf.capacity(), os_send));
+            channel.waiter = Some((buf.len(), os_send));
             os_recv
         };
 
         // Wait for the waiter to be resolved.
         let data = os_recv.await.map_err(|_| Error::RecvFailed)?;
-        assert_eq!(data.len(), buf.capacity());
+        assert_eq!(data.len(), buf.len());
         buf.put_slice(&data);
         Ok(buf)
     }

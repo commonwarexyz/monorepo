@@ -1,4 +1,4 @@
-use crate::{BoundedBuf, Error, IoBuf, IoBufMut};
+use crate::{deref_mut, BoundedBuf, Error, IoBuf, IoBufMut};
 use std::{net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
@@ -38,25 +38,18 @@ pub struct Stream {
 
 impl crate::Stream for Stream {
     async fn recv<B: IoBufMut>(&mut self, mut buf: B) -> Result<B, Error> {
-        let buf_len = buf.len();
-        let buf_capacity = buf.capacity();
-        let remaining = buf_capacity - buf_len;
-        if remaining == 0 {
+        if buf.len() == 0 {
             return Ok(buf);
         }
 
-        let dst =
-            unsafe { std::slice::from_raw_parts_mut(buf.stable_mut_ptr().add(buf_len), remaining) };
-
         // Time out if we take too long to read
-        timeout(self.read_timeout, self.stream.read_exact(dst))
-            .await
-            .map_err(|_| Error::Timeout)?
-            .map_err(|_| Error::RecvFailed)?;
-
-        unsafe {
-            buf.set_len(buf_capacity);
-        }
+        timeout(
+            self.read_timeout,
+            self.stream.read_exact(deref_mut(&mut buf)),
+        )
+        .await
+        .map_err(|_| Error::Timeout)?
+        .map_err(|_| Error::RecvFailed)?;
 
         Ok(buf)
     }
