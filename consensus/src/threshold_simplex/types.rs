@@ -108,18 +108,16 @@ fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
 
 pub struct PartialVerifier<V: Variant, D: Digest> {
     view: Option<View>,
-    leader: Option<u32>,
 
-    notarizes: HashMap<Proposal<D>, (usize, Vec<Notarize<V, D>>)>, // (verified, pending)
+    notarizes: HashMap<Proposal<D>, Vec<Notarize<V, D>>>,
     nullifies: Vec<Nullify<V>>,
-    finalizes: HashMap<Proposal<D>, (usize, Vec<Finalize<V, D>>)>, // (verified, pending)
+    finalizes: HashMap<Proposal<D>, Vec<Finalize<V, D>>>,
 }
 
 impl<V: Variant, D: Digest> PartialVerifier<V, D> {
     pub fn new() -> Self {
         Self {
             view: None,
-            leader: None,
 
             notarizes: HashMap::new(),
             nullifies: Vec::new(),
@@ -138,14 +136,12 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
                 .notarizes
                 .entry(notarize.proposal.clone())
                 .or_default()
-                .1
                 .push(notarize),
             Voter::Nullify(nullify) => self.nullifies.push(nullify),
             Voter::Finalize(finalize) => self
                 .finalizes
                 .entry(finalize.proposal.clone())
                 .or_default()
-                .1
                 .push(finalize),
             Voter::Notarization(_) | Voter::Nullification(_) | Voter::Finalization(_) => {
                 unreachable!("should not be adding recovered messages to partial verifier");
@@ -153,41 +149,85 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
         }
     }
 
-    pub fn update(&mut self, leader: u32) {
-        self.leader = Some(leader);
-    }
-
-    // TODO: need to support multiple proposals (right now, just verify based on first notarize)
     pub fn verify(
         &mut self,
         namespace: &[u8],
         identity: &Poly<V::Public>,
-        quorum: u32,
-    ) -> (Vec<Voter<V, D>>, Vec<u32>, bool) {
-        // Verify messages in vector with most messages
-        let notarize_len = self.notarizes.len();
-        let nullify_len = self.nullifies.len();
-        let finalize_len = self.finalizes.len();
-        let (voters, failed) = if notarize_len >= nullify_len && notarize_len >= finalize_len {
-            let (notarizes, failed) =
-                Notarize::verify_multiple(namespace, identity, std::mem::take(&mut self.notarizes));
-            (notarizes.into_iter().map(Voter::Notarize).collect(), failed)
-        } else if nullify_len >= finalize_len {
+    ) -> (Vec<Voter<V, D>>, Vec<u32>) {
+        // Count messages in each task
+        let mut best_notarize = None;
+        for (proposal, notarizes) in self.notarizes.iter() {
+            if let Some((_, len)) = best_notarize {
+                if notarizes.len() > len {
+                    best_notarize = Some((proposal.clone(), notarizes.len()));
+                }
+            } else {
+                best_notarize = Some((proposal.clone(), notarizes.len()));
+            }
+        }
+        let mut best_finalize = None;
+        for (proposal, finalizes) in self.finalizes.iter() {
+            if let Some((_, len)) = best_finalize {
+                if finalizes.len() > len {
+                    best_finalize = Some((proposal.clone(), finalizes.len()));
+                }
+            } else {
+                best_finalize = Some((proposal.clone(), finalizes.len()));
+            }
+        }
+        let nullifies = self.nullifies.len();
+
+        // Verify task with most messages
+        if let Some((proposal, len)) = best_notarize {
+            if len >= best_finalize.map_or(0, |(_, len)| len) && len >= nullifies {
+                // Verify notarizes
+                let (notarizes, failed) = Notarize::verify_multiple(
+                    namespace,
+                    identity,
+                    std::mem::take(&mut self.notarizes.get_mut(&proposal).unwrap()),
+                );
+                (notarizes.into_iter().map(Voter::Notarize).collect(), failed)
+            } else if best_finalize.map_or(false, |(_, len)| len >= nullifies) {
+                // Verify finalizes
+                let (finalizes, failed) = Finalize::verify_multiple(
+                    namespace,
+                    identity,
+                    std::mem::take(&mut self.finalizes.get_mut(&proposal).unwrap()),
+                );
+                (finalizes.into_iter().map(Voter::Finalize).collect(), failed)
+            } else {
+                // Verify nullifies
+                let (nullifies, failed) = Nullify::verify_multiple(
+                    namespace,
+                    identity,
+                    std::mem::take(&mut self.nullifies),
+                );
+                (nullifies.into_iter().map(Voter::Nullify).collect(), failed)
+            }
+        } else if let Some((proposal, len)) = best_finalize {
+            if len >= nullifies {
+                // Verify finalizes
+                let (finalizes, failed) = Finalize::verify_multiple(
+                    namespace,
+                    identity,
+                    std::mem::take(&mut self.finalizes.get_mut(&proposal).unwrap()),
+                );
+                (finalizes.into_iter().map(Voter::Finalize).collect(), failed)
+            } else {
+                // Verify nullifies
+                let (nullifies, failed) = Nullify::verify_multiple(
+                    namespace,
+                    identity,
+                    std::mem::take(&mut self.nullifies),
+                );
+                (nullifies.into_iter().map(Voter::Nullify).collect(), failed)
+            }
+        } else {
+            // Verify nullifies
             let (nullifies, failed) =
                 Nullify::verify_multiple(namespace, identity, std::mem::take(&mut self.nullifies));
             (nullifies.into_iter().map(Voter::Nullify).collect(), failed)
-        } else {
-            let (finalizes, failed) =
-                Finalize::verify_multiple(namespace, identity, std::mem::take(&mut self.finalizes));
-            (finalizes.into_iter().map(Voter::Finalize).collect(), failed)
-        };
-
-        // Return whether or not we should drop the partial verifier
-        (
-            voters,
-            failed,
-            self.notarizes.is_empty() && self.nullifies.is_empty() && self.finalizes.is_empty(),
-        )
+        }
     }
 }
 
