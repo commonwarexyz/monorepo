@@ -313,6 +313,12 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         self.mem_mmr.root(h)
     }
 
+    /// Computes a root digest that only includes peaks whose height are no greater than
+    /// `max_height`. This root is useful when another tree is being grafted onto this one.
+    pub fn filtered_root(&self, hasher: &mut impl Hasher<H>, max_height: u32) -> H::Digest {
+        self.mem_mmr.filtered_root(hasher, max_height)
+    }
+
     /// Sync any new elements to disk.
     pub async fn sync(&mut self) -> Result<(), Error> {
         if self.size() == 0 {
@@ -380,6 +386,14 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         self.range_proof(element_pos, element_pos).await
     }
 
+    pub async fn filtered_proof(
+        &self,
+        element_pos: u64,
+        max_height: u32,
+    ) -> Result<Proof<H>, Error> {
+        Proof::<H>::range_proof::<Mmr<E, H>>(self, element_pos, element_pos, Some(max_height)).await
+    }
+
     /// Return an inclusion proof for the specified range of elements, inclusive of both endpoints.
     ///
     /// Returns ElementPruned error if some element needed to generate the proof has been pruned.
@@ -388,7 +402,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         start_element_pos: u64,
         end_element_pos: u64,
     ) -> Result<Proof<H>, Error> {
-        Proof::<H>::range_proof::<Mmr<E, H>>(self, start_element_pos, end_element_pos).await
+        Proof::<H>::range_proof::<Mmr<E, H>>(self, start_element_pos, end_element_pos, None).await
     }
 
     /// Prune as many nodes as possible, leaving behind at most items_per_blob nodes in the current
