@@ -10,10 +10,12 @@ use crate::{
 pub use actor::Actor;
 use commonware_cryptography::{bls12381::primitives::group, Digest};
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Scheme};
+use commonware_p2p::Blocker;
 pub use ingress::{Mailbox, Message};
 
 pub struct Config<
     C: Scheme,
+    B: Blocker,
     V: Variant,
     D: Digest,
     A: Automaton<Context = Context<D>>,
@@ -22,6 +24,7 @@ pub struct Config<
     S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
 > {
     pub crypto: C,
+    pub blocker: B,
     pub automaton: A,
     pub relay: R,
     pub reporter: F,
@@ -125,6 +128,7 @@ mod tests {
             actor.start();
             let cfg = Config {
                 crypto: scheme,
+                blocker: oracle.control(validator.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: supervisor.clone(),

@@ -4,12 +4,14 @@ use commonware_cryptography::{
     bls12381::primitives::{group, variant::Variant},
     Digest, Scheme,
 };
+use commonware_p2p::Blocker;
 use governor::Quota;
 use std::time::Duration;
 
 /// Configuration for the consensus engine.
 pub struct Config<
     C: Scheme,
+    B: Blocker,
     V: Variant,
     D: Digest,
     A: Automaton<Context = Context<D>>,
@@ -25,6 +27,9 @@ pub struct Config<
 > {
     /// Cryptographic primitives.
     pub crypto: C,
+
+    /// Blocker for the network.
+    pub blocker: B,
 
     /// Automaton for the consensus engine.
     pub automaton: A,
@@ -97,6 +102,7 @@ pub struct Config<
 
 impl<
         C: Scheme,
+        B: Blocker,
         V: Variant,
         D: Digest,
         A: Automaton<Context = Context<D>>,
@@ -109,7 +115,7 @@ impl<
             Public = V::Public,
             PublicKey = C::PublicKey,
         >,
-    > Config<C, V, D, A, R, F, S>
+    > Config<C, B, V, D, A, R, F, S>
 {
     /// Assert enforces that all configuration values are valid.
     pub fn assert(&self) {

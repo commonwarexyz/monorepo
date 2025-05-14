@@ -23,7 +23,7 @@ use commonware_cryptography::{
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
-    Receiver, Recipients, Sender,
+    Blocker, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
@@ -546,6 +546,7 @@ impl<
 pub struct Actor<
     E: Clock + Rng + Spawner + Storage + Metrics,
     C: Scheme,
+    B: Blocker,
     V: Variant,
     D: Digest,
     A: Automaton<Digest = D, Context = Context<D>>,
@@ -563,6 +564,7 @@ pub struct Actor<
 > {
     context: E,
     crypto: C,
+    blocker: B,
     automaton: A,
     relay: R,
     reporter: F,
@@ -602,6 +604,7 @@ pub struct Actor<
 impl<
         E: Clock + Rng + Spawner + Storage + Metrics,
         C: Scheme,
+        B: Blocker,
         V: Variant,
         D: Digest,
         A: Automaton<Digest = D, Context = Context<D>>,
@@ -615,9 +618,9 @@ impl<
             PublicKey = C::PublicKey,
             Public = V::Public,
         >,
-    > Actor<E, C, V, D, A, R, F, S>
+    > Actor<E, C, B, V, D, A, R, F, S>
 {
-    pub fn new(context: E, cfg: Config<C, V, D, A, R, F, S>) -> (Self, Mailbox<V, D>) {
+    pub fn new(context: E, cfg: Config<C, B, V, D, A, R, F, S>) -> (Self, Mailbox<V, D>) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -662,6 +665,7 @@ impl<
             Self {
                 context,
                 crypto: cfg.crypto,
+                blocker: cfg.blocker,
                 automaton: cfg.automaton,
                 relay: cfg.relay,
                 reporter: cfg.reporter,
