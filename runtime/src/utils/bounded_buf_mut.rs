@@ -22,7 +22,6 @@ pub trait BoundedBufMut: BoundedBuf<Buf = Self::BufMut> + Send {
     /// If the slice's length exceeds the destination's total capacity,
     /// this method panics.
     fn put_slice(&mut self, src: &[u8]) {
-        assert!(self.capacity() >= src.len());
         let dst = self.stable_mut_ptr();
 
         // Safety:

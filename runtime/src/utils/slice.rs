@@ -203,10 +203,6 @@ impl<T: IoBuf> BoundedBuf for Slice<T> {
     fn len(&self) -> usize {
         ops::Deref::deref(self).len()
     }
-
-    fn capacity(&self) -> usize {
-        self.end - self.begin
-    }
 }
 
 impl<T: IoBufMut> BoundedBufMut for Slice<T> {

@@ -72,9 +72,6 @@ pub trait BoundedBuf: Unpin + Send + 'static {
 
     /// Number of initialized bytes available via this view.
     fn len(&self) -> usize;
-
-    /// Total size of the view, including uninitialized memory, if any.
-    fn capacity(&self) -> usize;
 }
 
 impl<T: IoBuf> BoundedBuf for T {
@@ -90,22 +87,20 @@ impl<T: IoBuf> BoundedBuf for T {
             Bound::Unbounded => 0,
         };
 
-        assert!(begin < self.capacity());
-
         let end = match range.end_bound() {
             Bound::Included(&n) => n.checked_add(1).expect("out of range"),
             Bound::Excluded(&n) => n,
-            Bound::Unbounded => self.capacity(),
+            Bound::Unbounded => self.len(),
         };
 
-        assert!(end <= self.capacity());
+        assert!(end <= self.len());
         assert!(begin <= self.len());
 
         Slice::new(self, begin, end)
     }
 
     fn slice_full(self) -> Slice<Self> {
-        let end = self.capacity();
+        let end = self.len();
         Slice::new(self, 0, end)
     }
 
@@ -127,9 +122,5 @@ impl<T: IoBuf> BoundedBuf for T {
 
     fn len(&self) -> usize {
         IoBuf::len(self)
-    }
-
-    fn capacity(&self) -> usize {
-        IoBuf::capacity(self)
     }
 }
