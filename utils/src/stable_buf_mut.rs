@@ -1,3 +1,7 @@
+//! # Acknowledgements
+//! This code is inspired by `tokio-uring`
+//! https://github.com/tokio-rs/tokio-uring at commit 7761222.
+
 use crate::stable_buf::StableBuf;
 
 /// A mutable buffer with a stable memory address.
