@@ -1,25 +1,9 @@
-// The contents of this file are based on https://github.com/tokio-rs/tokio-uring at commit 7761222.
-// We don't want to depend on the whole crate, so we've copied/adapted the relevant parts.
-
-/// An `io-uring` compatible buffer.
-///
-/// The `IoBuf` trait is implemented by buffer types that can be used with
-/// io-uring operations. Users will not need to use this trait directly.
-///
-/// # Safety
-///
-/// Buffers passed to `io-uring` operations must reference a stable memory
-/// region. While the runtime holds ownership to a buffer, the pointer returned
-/// by `stable_ptr` must remain valid even if the `IoBuf` value is moved.
+/// A buffer with a stable memory address.
 #[allow(clippy::len_without_is_empty)]
 pub unsafe trait StableBuf: Unpin + Send + 'static {
-    /// Returns a raw pointer to the vector’s buffer.
-    ///
-    /// This method is to be used internally and it is not
-    /// expected for users to call it directly.
-    ///
-    /// The implementation must ensure that the pointer
-    /// returned by `stable_ptr` **does not** change.
+    /// Returns a raw pointer to this buffer.
+    /// The implementor must guarantee that the pointer remains valid
+    /// and unchanged while the buffer is being used.
     fn stable_ptr(&self) -> *const u8;
 
     /// Length of the buffer.
