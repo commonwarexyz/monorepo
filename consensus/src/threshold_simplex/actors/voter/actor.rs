@@ -2230,7 +2230,9 @@ impl<
 
             // Update the verifier if we have moved to a new view
             if self.view > start {
-                verifier.update(self.view, self.oldest).await;
+                let leader = self.views.get(&self.view).unwrap().leader.as_ref().unwrap();
+                let leader = self.supervisor.is_participant(self.view, &leader).unwrap();
+                verifier.update(self.view, leader, self.oldest).await;
             }
         }
     }

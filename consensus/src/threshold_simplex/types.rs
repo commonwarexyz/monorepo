@@ -1,6 +1,9 @@
 //! Types used in [`threshold_simplex`](crate::threshold_simplex).
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    hash::Hash,
+};
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -19,7 +22,7 @@ use commonware_cryptography::{
     },
     Digest,
 };
-use commonware_utils::union;
+use commonware_utils::{quorum, union};
 
 /// View is a monotonically increasing counter that represents the current focus of consensus.
 /// Each View corresponds to a round in the consensus protocol where validators attempt to agree
@@ -105,20 +108,22 @@ fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
 
 pub struct PartialVerifier<V: Variant, D: Digest> {
     view: Option<View>,
+    leader: Option<u32>,
 
-    notarizes: Vec<Notarize<V, D>>,
+    notarizes: HashMap<Proposal<D>, (usize, Vec<Notarize<V, D>>)>, // (verified, pending)
     nullifies: Vec<Nullify<V>>,
-    finalizes: Vec<Finalize<V, D>>,
+    finalizes: HashMap<Proposal<D>, (usize, Vec<Finalize<V, D>>)>, // (verified, pending)
 }
 
 impl<V: Variant, D: Digest> PartialVerifier<V, D> {
     pub fn new() -> Self {
         Self {
             view: None,
+            leader: None,
 
-            notarizes: Vec::new(),
+            notarizes: HashMap::new(),
             nullifies: Vec::new(),
-            finalizes: Vec::new(),
+            finalizes: HashMap::new(),
         }
     }
 
@@ -129,13 +134,27 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
             self.view = Some(msg.view());
         }
         match msg {
-            Voter::Notarize(notarize) => self.notarizes.push(notarize),
+            Voter::Notarize(notarize) => self
+                .notarizes
+                .entry(notarize.proposal.clone())
+                .or_default()
+                .1
+                .push(notarize),
             Voter::Nullify(nullify) => self.nullifies.push(nullify),
-            Voter::Finalize(finalize) => self.finalizes.push(finalize),
+            Voter::Finalize(finalize) => self
+                .finalizes
+                .entry(finalize.proposal.clone())
+                .or_default()
+                .1
+                .push(finalize),
             Voter::Notarization(_) | Voter::Nullification(_) | Voter::Finalization(_) => {
                 unreachable!("should not be adding recovered messages to partial verifier");
             }
         }
+    }
+
+    pub fn update(&mut self, leader: u32) {
+        self.leader = Some(leader);
     }
 
     // TODO: need to support multiple proposals (right now, just verify based on first notarize)
@@ -143,6 +162,7 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
         &mut self,
         namespace: &[u8],
         identity: &Poly<V::Public>,
+        quorum: u32,
     ) -> (Vec<Voter<V, D>>, Vec<u32>, bool) {
         // Verify messages in vector with most messages
         let notarize_len = self.notarizes.len();
