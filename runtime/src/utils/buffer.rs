@@ -116,7 +116,7 @@ impl<B: Blob> Buffer<B> {
             .read_at(vec![0; bytes_to_read], self.blob_position)
             .await?;
         // Copy the read data into the buffer
-        self.buffer.copy_from_slice(&read);
+        self.buffer[..bytes_to_read].copy_from_slice(&read);
 
         self.buffer_valid_len = bytes_to_read;
 
