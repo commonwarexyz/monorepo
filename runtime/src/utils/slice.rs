@@ -1,7 +1,7 @@
 // The contents of this file are from based on https://github.com/tokio-rs/tokio-uring at commit 7761222.
 // We don't want to depend on the whole crate, so we've copied/adapted the relevant parts.
 
-use super::{BoundedBuf, BoundedBufMut, IoBuf, IoBufMut};
+use super::{BoundedBuf, IoBuf, IoBufMut};
 use std::{cmp, ops};
 
 /// An owned view into a contiguous sequence of bytes.
@@ -202,13 +202,5 @@ impl<T: IoBuf> BoundedBuf for Slice<T> {
 
     fn len(&self) -> usize {
         ops::Deref::deref(self).len()
-    }
-}
-
-impl<T: IoBufMut> BoundedBufMut for Slice<T> {
-    type BufMut = T;
-
-    fn stable_mut_ptr(&mut self) -> *mut u8 {
-        super::deref_mut(&mut self.buf)[self.begin..].as_mut_ptr()
     }
 }

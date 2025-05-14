@@ -1,8 +1,6 @@
 //! A mock implementation of a channel that implements the Sink and Stream traits.
 
-use crate::{
-    BoundedBuf, BoundedBufMut, Error, IoBuf, IoBufMut, Sink as SinkTrait, Stream as StreamTrait,
-};
+use crate::{BoundedBuf, Error, IoBuf, IoBufMut, Sink as SinkTrait, Stream as StreamTrait};
 use bytes::Bytes;
 use futures::channel::oneshot;
 use std::{
