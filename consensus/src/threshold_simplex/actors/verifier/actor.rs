@@ -138,12 +138,17 @@ impl<
             }
 
             // Look for some verifier that is ready (preferring the current view)
-            let verifier = if let Some(verifier) = work.get_mut(&current) {
+            let selected = if let Some(verifier) = work.get_mut(&current) {
                 if verifier.ready_current() {
                     Some((current, verifier))
                 } else {
                     None
                 }
+            } else {
+                None
+            };
+            let selected = if let Some(selected) = selected {
+                Some(selected)
             } else {
                 let mut selected = None;
                 for (view, verifier) in work.iter_mut() {
@@ -154,7 +159,7 @@ impl<
                 }
                 selected
             };
-            let Some((view, verifier)) = verifier else {
+            let Some((view, verifier)) = selected else {
                 trace!(
                     current,
                     finalized,
