@@ -41,9 +41,9 @@ unsafe impl IoBufMut for Vec<u8> {
         self.as_mut_ptr()
     }
 
-    unsafe fn set_len(&mut self, init_len: usize) {
-        if self.len() < init_len {
-            self.set_len(init_len);
+    unsafe fn set_len(&mut self, len: usize) {
+        if self.len() < len {
+            self.set_len(len);
         }
     }
 }
