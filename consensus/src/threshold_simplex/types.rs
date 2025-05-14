@@ -19,7 +19,7 @@ use commonware_cryptography::{
 };
 use commonware_utils::union;
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     hash::Hash,
 };
 
@@ -108,9 +108,9 @@ fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
 pub struct PartialVerifier<V: Variant, D: Digest> {
     view: Option<View>,
 
-    notarizes: HashMap<Proposal<D>, Vec<Notarize<V, D>>>,
+    notarizes: BTreeMap<Proposal<D>, Vec<Notarize<V, D>>>,
     nullifies: Vec<Nullify<V>>,
-    finalizes: HashMap<Proposal<D>, Vec<Finalize<V, D>>>,
+    finalizes: BTreeMap<Proposal<D>, Vec<Finalize<V, D>>>,
 }
 
 impl<V: Variant, D: Digest> PartialVerifier<V, D> {
@@ -118,9 +118,9 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
         Self {
             view: None,
 
-            notarizes: HashMap::new(),
+            notarizes: BTreeMap::new(),
             nullifies: Vec::new(),
-            finalizes: HashMap::new(),
+            finalizes: BTreeMap::new(),
         }
     }
 
@@ -148,6 +148,8 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
         }
     }
 
+    // TODO: should prefer notarize message containing leader (otherwise could get bombarded with useless
+    // junk we try to verify first)
     pub fn verify(
         &mut self,
         namespace: &[u8],
@@ -330,7 +332,7 @@ impl<V: Variant, D: Digest> Viewable for Voter<V, D> {
 
 /// Proposal represents a proposed block in the protocol.
 /// It includes the view number, the parent view, and the actual payload (typically a digest of block data).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Proposal<D: Digest> {
     /// The view (round) in which this proposal is made
     pub view: View,
