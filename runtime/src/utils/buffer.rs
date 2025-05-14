@@ -1,4 +1,5 @@
 use crate::{Blob, Error};
+use bytes::BytesMut;
 
 /// A reader that buffers content from a [Blob] to optimize the performance
 /// of a full scan of contents.
@@ -50,7 +51,7 @@ pub struct Buffer<B: Blob> {
     /// The underlying blob to read from.
     blob: B,
     /// The buffer storing the data read from the blob.
-    buffer: Vec<u8>,
+    buffer: BytesMut,
     /// The current position in the blob from where the buffer was filled.
     blob_position: u64,
     /// The size of the blob.
@@ -71,9 +72,11 @@ impl<B: Blob> Buffer<B> {
     /// Panics if `buffer_size` is zero.
     pub fn new(blob: B, blob_size: u64, buffer_size: usize) -> Self {
         assert!(buffer_size > 0, "Buffer size must be greater than zero");
+        let mut buffer = BytesMut::with_capacity(buffer_size);
+        buffer.resize(buffer_size, 0);
         Self {
             blob,
-            buffer: vec![0; buffer_size],
+            buffer,
             blob_position: 0,
             blob_size,
             buffer_position: 0,
