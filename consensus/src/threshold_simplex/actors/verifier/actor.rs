@@ -169,6 +169,11 @@ impl<
                 }
             }
 
+            // If the verifier is empty, remove it
+            if verifier.is_empty() {
+                work.remove(&view);
+            }
+
             // Drop any old verifiers
             work.retain(|view, _| *view >= oldest);
         }

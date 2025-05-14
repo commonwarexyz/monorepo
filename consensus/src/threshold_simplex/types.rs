@@ -181,23 +181,20 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
         let nullifies_count = self.nullifies.len();
         let notarize_count = best_notarize.as_ref().map_or(0, |(_, len)| *len);
         let finalize_count = best_finalize.as_ref().map_or(0, |(_, len)| *len);
-        if notarize_count >= finalize_count
-            && notarize_count >= nullifies_count
-            && best_notarize.is_some()
-        {
+        if notarize_count >= finalize_count && notarize_count >= nullifies_count {
             let (proposal, _) = best_notarize.unwrap();
             let (notarizes, failed) = Notarize::verify_multiple(
                 namespace,
                 identity,
-                std::mem::take(self.notarizes.get_mut(&proposal).unwrap()),
+                self.notarizes.remove(&proposal).unwrap(),
             );
             (notarizes.into_iter().map(Voter::Notarize).collect(), failed)
-        } else if finalize_count >= nullifies_count && best_finalize.is_some() {
+        } else if finalize_count >= nullifies_count {
             let (proposal, _) = best_finalize.unwrap();
             let (finalizes, failed) = Finalize::verify_multiple(
                 namespace,
                 identity,
-                std::mem::take(self.finalizes.get_mut(&proposal).unwrap()),
+                self.finalizes.remove(&proposal).unwrap(),
             );
             (finalizes.into_iter().map(Voter::Finalize).collect(), failed)
         } else {
@@ -205,6 +202,10 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
                 Nullify::verify_multiple(namespace, identity, std::mem::take(&mut self.nullifies));
             (nullifies.into_iter().map(Voter::Nullify).collect(), failed)
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.notarizes.is_empty() && self.finalizes.is_empty() && self.nullifies.is_empty()
     }
 }
 
