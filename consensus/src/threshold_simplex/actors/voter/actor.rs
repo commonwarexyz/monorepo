@@ -609,10 +609,9 @@ pub struct Actor<
 
     mailbox_receiver: mpsc::Receiver<Message<V, D>>,
 
-    last_finalized: View,
-    oldest: View,
     view: View,
     views: BTreeMap<View, Round<C, V, D, F, S>>,
+    last_finalized: View,
 
     current_view: Gauge,
     tracked_views: Gauge,
@@ -711,7 +710,6 @@ impl<
                 mailbox_receiver,
 
                 last_finalized: 0,
-                oldest: 0,
                 view: 0,
                 views: BTreeMap::new(),
 
@@ -1283,7 +1281,6 @@ impl<
                 break next;
             }
         };
-        self.oldest = oldest;
 
         // Prune journal up to min
         if pruned {
@@ -2268,7 +2265,9 @@ impl<
                     .supervisor
                     .is_participant(self.view, round.leader.as_ref().expect("missing leader"))
                     .expect("missing participant");
-                verifier.update(self.view, leader, self.oldest).await;
+                verifier
+                    .update(self.view, leader, self.last_finalized)
+                    .await;
             }
         }
     }

@@ -155,6 +155,12 @@ impl<
                 selected
             };
             let Some((view, verifier)) = verifier else {
+                trace!(
+                    current,
+                    finalized,
+                    waiting = work.len(),
+                    "no verifier ready"
+                );
                 continue;
             };
 
