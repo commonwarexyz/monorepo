@@ -120,9 +120,11 @@ impl<
                 |message| match message {
                     Message::Update {
                         latest: new_latest,
+                        leader,
                         oldest: new_oldest,
                     } => {
                         latest = new_latest;
+                        work.entry(latest).or_default().mark(leader);
                         oldest = new_oldest;
                     }
                     Message::Message(message) => {

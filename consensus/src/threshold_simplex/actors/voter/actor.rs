@@ -78,6 +78,7 @@ struct Round<
     participants: usize,
 
     leader: Option<C::PublicKey>,
+
     leader_deadline: Option<SystemTime>,
     advance_deadline: Option<SystemTime>,
     nullify_retry: Option<SystemTime>,
@@ -2262,7 +2263,12 @@ impl<
 
             // Update the verifier if we have moved to a new view
             if self.view > start {
-                verifier.update(self.view, self.oldest).await;
+                let round = self.views.get_mut(&self.view).expect("missing round");
+                let leader = self
+                    .supervisor
+                    .is_participant(self.view, round.leader.as_ref().expect("missing leader"))
+                    .expect("missing participant");
+                verifier.update(self.view, leader, self.oldest).await;
             }
         }
     }
