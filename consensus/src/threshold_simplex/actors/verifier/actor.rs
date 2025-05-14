@@ -139,7 +139,7 @@ impl<
 
             // Look for some verifier that is ready (preferring the current view)
             let verifier = if let Some(verifier) = work.get_mut(&current) {
-                if verifier.ready() {
+                if verifier.ready_current() {
                     Some((current, verifier))
                 } else {
                     None
@@ -147,7 +147,7 @@ impl<
             } else {
                 let mut selected = None;
                 for (view, verifier) in work.iter_mut() {
-                    if verifier.ready() {
+                    if verifier.ready_past() {
                         selected = Some((*view, verifier));
                         break;
                     }
@@ -166,7 +166,7 @@ impl<
 
             // Verify messages
             let identity = self.supervisor.identity(view).unwrap();
-            let (voters, failed) = verifier.verify(&self.namespace, identity);
+            let (voters, failed) = verifier.verify(&self.namespace, identity, view == current);
             let batch = voters.len() + failed.len();
             trace!(view, batch, "batch verified messages");
             self.batch_size.observe(batch as f64);

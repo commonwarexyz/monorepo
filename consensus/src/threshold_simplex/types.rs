@@ -197,28 +197,17 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
         self.leader_proposal = Some(proposal);
     }
 
-    pub fn verify(
+    /// If we are in this view, we only care about notarizes and nullifies
+    fn verify_current(
         &mut self,
         namespace: &[u8],
         identity: &Poly<V::Public>,
     ) -> (Vec<Voter<V, D>>, Vec<u32>) {
         // If leader and proposal are set, attempt to verify notarizes then finalizes
-        if self.leader.is_some() && self.leader_proposal.is_some() {
-            if !self.notarizes.is_empty() {
-                let (notarizes, failed) = Notarize::verify_multiple(
-                    namespace,
-                    identity,
-                    std::mem::take(&mut self.notarizes),
-                );
-                return (notarizes.into_iter().map(Voter::Notarize).collect(), failed);
-            } else if !self.finalizes.is_empty() {
-                let (finalizes, failed) = Finalize::verify_multiple(
-                    namespace,
-                    identity,
-                    std::mem::take(&mut self.finalizes),
-                );
-                return (finalizes.into_iter().map(Voter::Finalize).collect(), failed);
-            }
+        if !self.notarizes.is_empty() {
+            let (notarizes, failed) =
+                Notarize::verify_multiple(namespace, identity, std::mem::take(&mut self.notarizes));
+            return (notarizes.into_iter().map(Voter::Notarize).collect(), failed);
         }
 
         // If we've made it here, attempt to verify nullifies
@@ -227,10 +216,37 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
         (nullifies.into_iter().map(Voter::Nullify).collect(), failed)
     }
 
-    pub fn ready(&self) -> bool {
-        ((self.leader.is_some() && self.leader_proposal.is_some())
-            && (!self.notarizes.is_empty() || !self.finalizes.is_empty()))
+    pub fn ready_current(&self) -> bool {
+        (self.leader.is_some() && self.leader_proposal.is_some() && !self.notarizes.is_empty())
             || !self.nullifies.is_empty()
+    }
+
+    /// If we aren't in this view, we only care about finalizes
+    fn verify_past(
+        &mut self,
+        namespace: &[u8],
+        identity: &Poly<V::Public>,
+    ) -> (Vec<Voter<V, D>>, Vec<u32>) {
+        let (finalizes, failed) =
+            Finalize::verify_multiple(namespace, identity, std::mem::take(&mut self.finalizes));
+        (finalizes.into_iter().map(Voter::Finalize).collect(), failed)
+    }
+
+    pub fn ready_past(&self) -> bool {
+        self.leader.is_some() && self.leader_proposal.is_some() && !self.finalizes.is_empty()
+    }
+
+    pub fn verify(
+        &mut self,
+        namespace: &[u8],
+        identity: &Poly<V::Public>,
+        current: bool,
+    ) -> (Vec<Voter<V, D>>, Vec<u32>) {
+        if current {
+            self.verify_current(namespace, identity)
+        } else {
+            self.verify_past(namespace, identity)
+        }
     }
 }
 
