@@ -252,7 +252,7 @@ impl<
         self.reporter.report(Activity::Notarize(notarize)).await;
     }
 
-    fn add_reserved_nullify(&mut self, public_key_index: u32, nullify: &Nullify<V>) -> Action{
+    fn add_reserved_nullify(&mut self, public_key_index: u32, nullify: &Nullify<V>) -> Action {
         // Check if already nullified
         match self.nullifies[public_key_index as usize] {
             Status::None => {
@@ -265,6 +265,7 @@ impl<
                 } else {
                     Action::Skip
                 }
+            }
             Status::Verified(ref previous) => {
                 if previous != nullify {
                     Action::Block
@@ -299,23 +300,49 @@ impl<
         false
     }
 
-    fn add_reserved_finalize(&mut self, public_key_index: u32, finalize: &Finalize<V, D>) -> bool {
+    async fn add_reserved_finalize(
+        &mut self,
+        public_key_index: u32,
+        finalize: &Finalize<V, D>,
+    ) -> Action {
         match self.finalizes[public_key_index as usize] {
             Status::None => {
                 self.finalizes[public_key_index as usize] = Status::Pending(finalize.clone());
-                true
+                Action::Process
             }
             Status::Pending(ref previous) => {
                 if previous != finalize {
-                    unimplemented!("conflicting finalize or invalid signature");
+                    // Create fault
+                    let activity = ConflictingFinalize::new(previous.clone(), finalize.clone());
+                    self.reporter
+                        .report(Activity::ConflictingFinalize(activity))
+                        .await;
+                    warn!(
+                        view = self.view,
+                        signer = public_key_index,
+                        "recorded fault"
+                    );
+                    Action::Block
+                } else {
+                    Action::Skip
                 }
-                false
             }
             Status::Verified(ref previous) => {
                 if previous != finalize {
-                    unimplemented!("conflicting finalize or invalid signature");
+                    // Create fault
+                    let activity = ConflictingFinalize::new(previous.clone(), finalize.clone());
+                    self.reporter
+                        .report(Activity::ConflictingFinalize(activity))
+                        .await;
+                    warn!(
+                        view = self.view,
+                        signer = public_key_index,
+                        "recorded fault"
+                    );
+                    Action::Block
+                } else {
+                    Action::Skip
                 }
-                false
             }
         }
     }
@@ -328,26 +355,6 @@ impl<
             let activity = NullifyFinalize::new(previous.clone(), finalize);
             self.reporter
                 .report(Activity::NullifyFinalize(activity))
-                .await;
-            warn!(
-                view = self.view,
-                signer = public_key_index,
-                "recorded fault"
-            );
-            return false;
-        }
-
-        // Check if already finalized
-        if let Status::Verified(ref previous) = self.finalizes[public_key_index as usize] {
-            if previous == &finalize {
-                trace!(?finalize, ?previous, "already finalize");
-                return false;
-            }
-
-            // Create fault
-            let activity = ConflictingFinalize::new(previous.clone(), finalize);
-            self.reporter
-                .report(Activity::ConflictingFinalize(activity))
                 .await;
             warn!(
                 view = self.view,
@@ -984,25 +991,25 @@ impl<
         debug!(view = self.view, "broadcasted nullify");
     }
 
-    fn nullify(&mut self, sender: &C::PublicKey, nullify: &Nullify<V>) -> bool {
+    fn nullify(&mut self, sender: &C::PublicKey, nullify: &Nullify<V>) -> Action {
         // Ensure we are in the right view to process this message
         if !self.interesting(nullify.view, false) {
-            return false;
+            return Action::Skip;
         }
 
         // Verify that signer is a validator
         let Some(public_key_index) = self.supervisor.is_participant(nullify.view, sender) else {
-            return false;
+            return Action::Block;
         };
 
         // Verify sender is signer
         if public_key_index != nullify.signer() {
-            return false;
+            return Action::Block;
         }
         self.reserve_nullify(public_key_index, nullify)
     }
 
-    fn reserve_nullify(&mut self, public_key_index: u32, nullify: &Nullify<V>) -> bool {
+    fn reserve_nullify(&mut self, public_key_index: u32, nullify: &Nullify<V>) -> Action {
         // Check to see if nullify is for proposal in view
         let view = nullify.view;
         let round = self.views.entry(view).or_insert_with(|| {
