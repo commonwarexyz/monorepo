@@ -137,28 +137,20 @@ impl<
                 return;
             }
 
-            // Look for some verifier that is ready (preferring the current view)
-            let selected = if let Some(verifier) = work.get_mut(&current) {
+            // Look for a ready verifier (prioritizing the current view)
+            let mut selected = None;
+            if let Some(verifier) = work.get_mut(&current) {
                 if verifier.ready_current() {
-                    Some((current, verifier))
-                } else {
-                    None
+                    selected = Some((current, verifier));
                 }
-            } else {
-                None
-            };
-            let selected = if let Some(selected) = selected {
-                Some(selected)
-            } else {
-                let mut selected = None;
-                for (view, verifier) in work.iter_mut() {
-                    if verifier.ready_past() {
-                        selected = Some((*view, verifier));
-                        break;
-                    }
-                }
-                selected
-            };
+            }
+            if selected.is_none() {
+                selected = work
+                    .iter_mut()
+                    .rev()
+                    .find(|(_, verifier)| verifier.ready_past())
+                    .map(|(view, verifier)| (*view, verifier));
+            }
             let Some((view, verifier)) = selected else {
                 trace!(
                     current,
