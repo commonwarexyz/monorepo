@@ -189,36 +189,18 @@ impl<
         }
     }
 
-    async fn add_reserved_notarize(
-        &mut self,
-        public_key_index: u32,
-        notarize: &Notarize<V, D>,
-    ) -> Action {
+    async fn add_reserved_notarize(&mut self, notarize: &Notarize<V, D>) -> Action {
         // Check if already notarized
+        let public_key_index = notarize.signer();
         match self.notarizes[public_key_index as usize] {
             Status::None => {
-                // Store the notarize
+                self.reporter
+                    .report(Activity::Notarize(notarize.clone()))
+                    .await;
                 self.notarizes[public_key_index as usize] = Status::Pending(notarize.clone());
                 Action::Process
             }
-            Status::Pending(ref previous) => {
-                if previous != notarize {
-                    // Create fault
-                    let activity = ConflictingNotarize::new(previous.clone(), notarize.clone());
-                    self.reporter
-                        .report(Activity::ConflictingNotarize(activity))
-                        .await;
-                    warn!(
-                        view = self.view,
-                        signer = public_key_index,
-                        "recorded fault"
-                    );
-                    Action::Block
-                } else {
-                    Action::Skip
-                }
-            }
-            Status::Verified(ref previous) => {
+            Status::Pending(ref previous) | Status::Verified(ref previous) => {
                 if previous != notarize {
                     // Create fault
                     let activity = ConflictingNotarize::new(previous.clone(), notarize.clone());
@@ -252,21 +234,18 @@ impl<
         self.reporter.report(Activity::Notarize(notarize)).await;
     }
 
-    fn add_reserved_nullify(&mut self, public_key_index: u32, nullify: &Nullify<V>) -> Action {
+    async fn add_reserved_nullify(&mut self, nullify: &Nullify<V>) -> Action {
         // Check if already nullified
+        let public_key_index = nullify.signer();
         match self.nullifies[public_key_index as usize] {
             Status::None => {
+                self.reporter
+                    .report(Activity::Nullify(nullify.clone()))
+                    .await;
                 self.nullifies[public_key_index as usize] = Status::Pending(nullify.clone());
                 Action::Process
             }
-            Status::Pending(ref previous) => {
-                if previous != nullify {
-                    Action::Block
-                } else {
-                    Action::Skip
-                }
-            }
-            Status::Verified(ref previous) => {
+            Status::Pending(ref previous) | Status::Verified(ref previous) => {
                 if previous != nullify {
                     Action::Block
                 } else {
@@ -283,7 +262,6 @@ impl<
             // Store the nullify
             self.nullified.set(public_key_index as usize);
             self.nullifies[public_key_index as usize] = Status::Verified(nullify.clone());
-            self.reporter.report(Activity::Nullify(nullify)).await;
             return true;
         };
 
@@ -300,34 +278,17 @@ impl<
         false
     }
 
-    async fn add_reserved_finalize(
-        &mut self,
-        public_key_index: u32,
-        finalize: &Finalize<V, D>,
-    ) -> Action {
+    async fn add_reserved_finalize(&mut self, finalize: &Finalize<V, D>) -> Action {
+        let public_key_index = finalize.signer();
         match self.finalizes[public_key_index as usize] {
             Status::None => {
+                self.reporter
+                    .report(Activity::Finalize(finalize.clone()))
+                    .await;
                 self.finalizes[public_key_index as usize] = Status::Pending(finalize.clone());
                 Action::Process
             }
-            Status::Pending(ref previous) => {
-                if previous != finalize {
-                    // Create fault
-                    let activity = ConflictingFinalize::new(previous.clone(), finalize.clone());
-                    self.reporter
-                        .report(Activity::ConflictingFinalize(activity))
-                        .await;
-                    warn!(
-                        view = self.view,
-                        signer = public_key_index,
-                        "recorded fault"
-                    );
-                    Action::Block
-                } else {
-                    Action::Skip
-                }
-            }
-            Status::Verified(ref previous) => {
+            Status::Pending(ref previous) | Status::Verified(ref previous) => {
                 if previous != finalize {
                     // Create fault
                     let activity = ConflictingFinalize::new(previous.clone(), finalize.clone());
@@ -374,7 +335,6 @@ impl<
                 .insert(finalize.proposal.clone(), vec);
         }
         self.finalizes[public_key_index as usize] = Status::Verified(finalize.clone());
-        self.reporter.report(Activity::Finalize(finalize)).await;
         true
     }
 
@@ -972,15 +932,20 @@ impl<
         let nullify = Nullify::sign(&self.namespace, share, self.view);
 
         // Handle the nullify
-        self.handle_nullify(nullify.clone()).await;
+        if matches!(
+            self.reserve_nullify(share.index, &nullify).await,
+            Action::Process
+        ) {
+            self.handle_nullify(nullify.clone()).await;
 
-        // Sync the journal
-        self.journal
-            .as_mut()
-            .unwrap()
-            .sync(self.view)
-            .await
-            .expect("unable to sync journal");
+            // Sync the journal
+            self.journal
+                .as_mut()
+                .unwrap()
+                .sync(self.view)
+                .await
+                .expect("unable to sync journal");
+        }
 
         // Broadcast nullify
         let msg = Voter::Nullify(nullify);
@@ -991,7 +956,7 @@ impl<
         debug!(view = self.view, "broadcasted nullify");
     }
 
-    fn nullify(&mut self, sender: &C::PublicKey, nullify: &Nullify<V>) -> Action {
+    async fn nullify(&mut self, sender: &C::PublicKey, nullify: &Nullify<V>) -> Action {
         // Ensure we are in the right view to process this message
         if !self.interesting(nullify.view, false) {
             return Action::Skip;
@@ -1006,10 +971,10 @@ impl<
         if public_key_index != nullify.signer() {
             return Action::Block;
         }
-        self.reserve_nullify(public_key_index, nullify)
+        self.reserve_nullify(public_key_index, nullify).await
     }
 
-    fn reserve_nullify(&mut self, public_key_index: u32, nullify: &Nullify<V>) -> Action {
+    async fn reserve_nullify(&mut self, public_key_index: u32, nullify: &Nullify<V>) -> Action {
         // Check to see if nullify is for proposal in view
         let view = nullify.view;
         let round = self.views.entry(view).or_insert_with(|| {
@@ -1022,7 +987,7 @@ impl<
         });
 
         // Try to reserve
-        round.add_reserved_nullify(public_key_index, nullify)
+        round.add_reserved_nullify(public_key_index, nullify).await
     }
 
     async fn handle_nullify(&mut self, nullify: Nullify<V>) {
@@ -1337,26 +1302,26 @@ impl<
         self.tracked_views.set(self.views.len() as i64);
     }
 
-    fn notarize(&mut self, sender: &C::PublicKey, notarize: &Notarize<V, D>) -> bool {
+    async fn notarize(&mut self, sender: &C::PublicKey, notarize: &Notarize<V, D>) -> Action {
         // Ensure we are in the right view to process this message
         let view = notarize.view();
         if !self.interesting(view, false) {
-            return false;
+            return Action::Skip;
         }
 
         // Verify that sender is a validator
         let Some(public_key_index) = self.supervisor.is_participant(view, sender) else {
-            return false;
+            return Action::Block;
         };
 
         // Verify sender is signer
         if public_key_index != notarize.signer() {
-            return false;
+            return Action::Block;
         }
-        self.reserve_notarize(public_key_index, notarize)
+        self.reserve_notarize(notarize).await
     }
 
-    fn reserve_notarize(&mut self, public_key_index: u32, notarize: &Notarize<V, D>) -> bool {
+    async fn reserve_notarize(&mut self, notarize: &Notarize<V, D>) -> Action {
         // Check to see if notarize is for proposal in view
         let view = notarize.view();
         let round = self.views.entry(view).or_insert_with(|| {
@@ -1369,7 +1334,7 @@ impl<
         });
 
         // Try to reserve
-        round.add_reserved_notarize(public_key_index, notarize)
+        round.add_reserved_notarize(notarize).await
     }
 
     async fn handle_notarize(&mut self, notarize: Notarize<V, D>) {
@@ -1385,8 +1350,8 @@ impl<
         });
 
         // Handle notarize
-        let msg = Voter::Notarize(notarize.clone());
-        if round.add_verified_notarize(notarize).await && self.journal.is_some() {
+        if self.journal.is_some() {
+            let msg = Voter::Notarize(notarize.clone());
             self.journal
                 .as_mut()
                 .unwrap()
@@ -1394,32 +1359,33 @@ impl<
                 .await
                 .expect("unable to append to journal");
         }
+        round.add_verified_notarize(notarize).await;
     }
 
-    async fn notarization(&mut self, notarization: Notarization<V, D>) -> bool {
+    async fn notarization(&mut self, notarization: Notarization<V, D>) -> Action {
         // Check if we are still in a view where this notarization could help
         let view = notarization.view();
         if !self.interesting(view, true) {
-            return false;
+            return Action::Skip;
         }
 
         // Determine if we already broadcast notarization for this view (in which
         // case we can ignore this message)
         if let Some(ref round) = self.views.get_mut(&view) {
             if round.broadcast_notarization {
-                return false;
+                return Action::Skip;
             }
         }
 
         // Verify notarization
         let public_key = self.supervisor.public();
         if !notarization.verify(&self.namespace, public_key) {
-            return false;
+            return Action::Block;
         }
 
         // Handle notarization
         self.handle_notarization(notarization).await;
-        true
+        Action::Process
     }
 
     async fn handle_notarization(&mut self, notarization: Notarization<V, D>) {
@@ -1450,29 +1416,29 @@ impl<
         self.enter_view(view + 1, seed);
     }
 
-    async fn nullification(&mut self, nullification: Nullification<V>) -> bool {
+    async fn nullification(&mut self, nullification: Nullification<V>) -> Action {
         // Check if we are still in a view where this notarization could help
         if !self.interesting(nullification.view, true) {
-            return false;
+            return Action::Skip;
         }
 
         // Determine if we already broadcast nullification for this view (in which
         // case we can ignore this message)
         if let Some(ref round) = self.views.get_mut(&nullification.view) {
             if round.broadcast_nullification {
-                return false;
+                return Action::Skip;
             }
         }
 
         // Verify nullification
         let public_key = self.supervisor.public();
         if !nullification.verify(&self.namespace, public_key) {
-            return false;
+            return Action::Block;
         }
 
         // Handle notarization
         self.handle_nullification(nullification).await;
-        true
+        Action::Process
     }
 
     async fn handle_nullification(&mut self, nullification: Nullification<V>) {
@@ -1503,27 +1469,27 @@ impl<
         self.enter_view(view + 1, seed);
     }
 
-    fn finalize(&mut self, sender: &C::PublicKey, finalize: &Finalize<V, D>) -> bool {
+    async fn finalize(&mut self, sender: &C::PublicKey, finalize: &Finalize<V, D>) -> Action {
         // Ensure we are in the right view to process this message
         let view = finalize.view();
         if !self.interesting(view, false) {
-            return false;
+            return Action::Skip;
         }
 
         // Verify that signer is a validator
         let Some(public_key_index) = self.supervisor.is_participant(view, sender) else {
-            return false;
+            return Action::Block;
         };
 
         // Verify sender is signer
         if public_key_index != finalize.signer() {
-            return false;
+            return Action::Block;
         }
 
-        self.reserve_finalize(public_key_index, finalize)
+        self.reserve_finalize(finalize).await
     }
 
-    fn reserve_finalize(&mut self, public_key_index: u32, finalize: &Finalize<V, D>) -> bool {
+    async fn reserve_finalize(&mut self, finalize: &Finalize<V, D>) -> Action {
         // Check to see if finalize is for proposal in view
         let view = finalize.view();
         let round = self.views.entry(view).or_insert_with(|| {
@@ -1536,7 +1502,7 @@ impl<
         });
 
         // Try to reserve
-        round.add_reserved_finalize(public_key_index, finalize)
+        round.add_reserved_finalize(finalize).await
     }
 
     async fn handle_finalize(&mut self, finalize: Finalize<V, D>) {
@@ -1563,30 +1529,30 @@ impl<
         }
     }
 
-    async fn finalization(&mut self, finalization: Finalization<V, D>) -> bool {
+    async fn finalization(&mut self, finalization: Finalization<V, D>) -> Action {
         // Check if we are still in a view where this finalization could help
         let view = finalization.view();
         if !self.interesting(view, true) {
-            return false;
+            return Action::Skip;
         }
 
         // Determine if we already broadcast finalization for this view (in which
         // case we can ignore this message)
         if let Some(ref round) = self.views.get_mut(&view) {
             if round.broadcast_finalization {
-                return false;
+                return Action::Skip;
             }
         }
 
         // Verify finalization
         let public_key = self.supervisor.public();
         if !finalization.verify(&self.namespace, public_key) {
-            return false;
+            return Action::Block;
         }
 
         // Process finalization
         self.handle_finalization(finalization).await;
-        true
+        Action::Process
     }
 
     async fn handle_finalization(&mut self, finalization: Finalization<V, D>) {
@@ -1715,6 +1681,10 @@ impl<
         // Attempt to notarize
         if let Some(notarize) = self.construct_notarize(view) {
             // Handle the notarize
+            assert!(matches!(
+                self.reserve_notarize(&notarize).await,
+                Action::Process
+            ));
             self.handle_notarize(notarize.clone()).await;
 
             // Sync the journal
@@ -1726,7 +1696,7 @@ impl<
                 .expect("unable to sync journal");
 
             // Broadcast the notarize
-            let msg = Voter::Notarize(notarize.clone());
+            let msg = Voter::Notarize(notarize);
             sender.send(Recipients::All, msg, true).await.unwrap();
             self.broadcast_messages
                 .get_or_create(&metrics::NOTARIZE)
@@ -1855,6 +1825,10 @@ impl<
         // Attempt to finalize
         if let Some(finalize) = self.construct_finalize(view) {
             // Handle the finalize
+            assert!(matches!(
+                self.reserve_finalize(&finalize).await,
+                Action::Process
+            ));
             self.handle_finalize(finalize.clone()).await;
 
             // Sync the journal
