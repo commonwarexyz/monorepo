@@ -142,8 +142,12 @@ impl<
                     }
                     Message::Message(message) => {
                         self.added.inc();
-                        blocking = false;
-                        work.entry(message.view()).or_default().add(message);
+
+                        // Only add messages if the view matters to us
+                        if message.view() >= finalized {
+                            blocking = false;
+                            work.entry(message.view()).or_default().add(message);
+                        }
                     }
                 },
             )
