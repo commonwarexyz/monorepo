@@ -124,14 +124,18 @@ mod tests {
     #[test]
     fn test_send_recv_partial_multiple() {
         let (mut sink, mut stream) = Channel::init();
-        let data = b"hello!".to_vec();
+        let data = b"hello".to_vec();
+        let data2 = b" world".to_vec();
 
         block_on(async {
             sink.send(data).await.unwrap();
-            let buf = stream.recv(vec![0; 3]).await.unwrap();
-            assert_eq!(buf, b"hel");
+            sink.send(data2).await.unwrap();
+            let buf = stream.recv(vec![0; 5]).await.unwrap();
+            assert_eq!(buf, b"hello");
             let buf = stream.recv(buf).await.unwrap();
-            assert_eq!(buf, b"lo!");
+            assert_eq!(buf, b" worl");
+            let buf = stream.recv(vec![0; 1]).await.unwrap();
+            assert_eq!(buf, b"d");
         });
     }
 
