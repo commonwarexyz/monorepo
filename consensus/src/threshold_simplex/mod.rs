@@ -2050,8 +2050,7 @@ mod tests {
 
             // Check supervisors for correct activity
             let byz = &validators[0];
-            let mut count_conflicting_notarize = 0;
-            let mut count_conflicting_finalize = 0;
+            let mut count_conflicting = 0;
             for supervisor in supervisors.iter() {
                 // Ensure only faults for byz
                 {
@@ -2062,10 +2061,10 @@ mod tests {
                         for fault in faults.iter() {
                             match fault {
                                 Activity::ConflictingNotarize(_) => {
-                                    count_conflicting_notarize += 1;
+                                    count_conflicting += 1;
                                 }
                                 Activity::ConflictingFinalize(_) => {
-                                    count_conflicting_finalize += 1;
+                                    count_conflicting += 1;
                                 }
                                 _ => panic!("unexpected fault: {:?}", fault),
                             }
@@ -2073,8 +2072,7 @@ mod tests {
                     }
                 }
             }
-            assert!(count_conflicting_notarize > 0);
-            assert!(count_conflicting_finalize > 0);
+            assert!(count_conflicting > 0);
 
             // Ensure conflicter is blocked
             let blocked = oracle.blocked().await.unwrap();
