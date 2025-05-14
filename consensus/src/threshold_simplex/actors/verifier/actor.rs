@@ -148,7 +148,6 @@ impl<
 
                         // Only add messages if the view matters to us
                         if message.view() >= finalized {
-                            blocking = false;
                             let quorum =
                                 self.supervisor.identity(message.view()).unwrap().required();
                             work.entry(message.view())
@@ -198,6 +197,7 @@ impl<
                 );
                 continue;
             };
+            blocking = false;
 
             // Send messages
             let batch = voters.len() + failed.len();
