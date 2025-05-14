@@ -137,7 +137,7 @@ impl<
                 return;
             }
 
-            // Select some verifier (preferring the current view) without removing it initially
+            // Select some verifier (preferring the current view and then the latest)
             let selected = {
                 if let Some(verifier) = work.get_mut(&latest) {
                     if verifier.is_empty() {
@@ -170,7 +170,7 @@ impl<
             let identity = self.supervisor.identity(view).unwrap();
             let (voters, failed) = verifier.verify(&self.namespace, identity);
             let batch = voters.len() + failed.len();
-            trace!(view, batch, "batch verified messages");
+            trace!(view, latest, batch, "batch verified messages");
             self.batch_size.observe(batch as f64);
 
             // Send messages
