@@ -97,6 +97,7 @@ impl StreamTrait for Stream {
 
         // Wait for the waiter to be resolved.
         let data = os_recv.await.map_err(|_| Error::RecvFailed)?;
+        assert_eq!(data.len(), buf.capacity());
         buf.put_slice(&data);
         Ok(buf)
     }

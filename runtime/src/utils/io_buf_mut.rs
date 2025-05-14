@@ -33,7 +33,7 @@ pub unsafe trait IoBufMut: IoBuf {
     ///
     /// The caller must ensure that all bytes starting at `stable_mut_ptr()` up
     /// to `pos` are initialized and owned by the buffer.
-    unsafe fn set_init(&mut self, pos: usize);
+    unsafe fn set_len(&mut self, pos: usize);
 }
 
 unsafe impl IoBufMut for Vec<u8> {
@@ -41,7 +41,7 @@ unsafe impl IoBufMut for Vec<u8> {
         self.as_mut_ptr()
     }
 
-    unsafe fn set_init(&mut self, init_len: usize) {
+    unsafe fn set_len(&mut self, init_len: usize) {
         if self.len() < init_len {
             self.set_len(init_len);
         }
@@ -53,7 +53,7 @@ unsafe impl IoBufMut for bytes::BytesMut {
         self.as_mut_ptr()
     }
 
-    unsafe fn set_init(&mut self, init_len: usize) {
+    unsafe fn set_len(&mut self, init_len: usize) {
         if self.len() < init_len {
             self.set_len(init_len);
         }

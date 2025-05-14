@@ -55,6 +55,6 @@ impl<T: IoBufMut> BoundedBufMut for T {
     }
 
     unsafe fn set_init(&mut self, pos: usize) {
-        IoBufMut::set_init(self, pos)
+        IoBufMut::set_len(self, pos)
     }
 }

@@ -39,7 +39,8 @@ pub struct Stream {
 impl crate::Stream for Stream {
     async fn recv<B: IoBufMut>(&mut self, mut buf: B) -> Result<B, Error> {
         let buf_len = buf.len();
-        let remaining = buf.capacity() - buf_len;
+        let capacity = buf.capacity();
+        let remaining = capacity - buf_len;
         if remaining == 0 {
             return Ok(buf);
         }
@@ -54,7 +55,7 @@ impl crate::Stream for Stream {
             .map_err(|_| Error::RecvFailed)?;
 
         unsafe {
-            buf.set_init(buf_len + remaining);
+            buf.set_len(capacity);
         }
 
         Ok(buf)

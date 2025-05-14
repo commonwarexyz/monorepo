@@ -217,6 +217,6 @@ impl<T: IoBufMut> BoundedBufMut for Slice<T> {
     }
 
     unsafe fn set_init(&mut self, pos: usize) {
-        self.buf.set_init(self.begin + pos);
+        self.buf.set_len(self.begin + pos);
     }
 }
