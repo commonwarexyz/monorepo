@@ -44,7 +44,7 @@ pub struct Config<
 mod tests {
     use super::*;
     use crate::threshold_simplex::{
-        actors::resolver,
+        actors::{resolver, verifier},
         mocks,
         types::{Finalization, Finalize, Notarization, Notarize, Proposal, Voter},
     };
@@ -147,6 +147,10 @@ mod tests {
             let (backfiller_sender, mut backfiller_receiver) = mpsc::channel(1);
             let backfiller = resolver::Mailbox::new(backfiller_sender);
 
+            // Create a dummy verifier mailbox
+            let (verifier_sender, mut _verifier_receiver) = mpsc::channel(1024);
+            let verifier = verifier::Mailbox::new(verifier_sender);
+
             // Create a dummy network mailbox
             let peer = schemes[1].public_key();
             let (voter_sender, voter_receiver) =
@@ -186,7 +190,7 @@ mod tests {
             });
 
             // Run the actor
-            actor.start(backfiller, voter_sender, voter_receiver);
+            actor.start(verifier, backfiller, voter_sender, voter_receiver);
 
             // Send finalization over network (view 100)
             let payload = hash(b"test");

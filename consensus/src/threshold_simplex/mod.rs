@@ -269,7 +269,6 @@ mod tests {
         // Create context
         let n = 5;
         let threshold = quorum(n);
-        let max_exceptions = 10;
         let required_containers = 100;
         let activity_timeout = 10;
         let skip_timeout = 5;
@@ -405,7 +404,6 @@ mod tests {
                 }
 
                 // Ensure no forks
-                let mut exceptions = 0;
                 let mut notarized = HashMap::new();
                 let mut finalized = HashMap::new();
                 {
@@ -413,7 +411,6 @@ mod tests {
                     for view in 1..latest_complete {
                         // Ensure only one payload proposed per view
                         let Some(payloads) = notarizes.get(&view) else {
-                            exceptions += 1;
                             continue;
                         };
                         if payloads.len() > 1 {
@@ -427,9 +424,6 @@ mod tests {
                             // have started later.
                             panic!("view: {}", view);
                         }
-                        if notarizers.len() != n as usize {
-                            exceptions += 1;
-                        }
                     }
                 }
                 {
@@ -437,11 +431,9 @@ mod tests {
                     for view in 1..latest_complete {
                         // Ensure notarization matches digest from notarizes
                         let Some(notarization) = notarizations.get(&view) else {
-                            exceptions += 1;
                             continue;
                         };
                         let Some(digest) = notarized.get(&view) else {
-                            exceptions += 1;
                             continue;
                         };
                         assert_eq!(&notarization.proposal.payload, digest);
@@ -452,7 +444,6 @@ mod tests {
                     for view in 1..latest_complete {
                         // Ensure only one payload proposed per view
                         let Some(payloads) = finalizes.get(&view) else {
-                            exceptions += 1;
                             continue;
                         };
                         if payloads.len() > 1 {
@@ -471,9 +462,6 @@ mod tests {
                             // We can't verify that everyone participated at every view because some nodes may
                             // have started later.
                             panic!("view: {}", view);
-                        }
-                        if finalizers.len() != n as usize {
-                            exceptions += 1;
                         }
 
                         // Ensure no nullifies for any finalizers
@@ -495,19 +483,14 @@ mod tests {
                     for view in 1..latest_complete {
                         // Ensure finalization matches digest from finalizes
                         let Some(finalization) = finalizations.get(&view) else {
-                            exceptions += 1;
                             continue;
                         };
                         let Some(digest) = finalized.get(&view) else {
-                            exceptions += 1;
                             continue;
                         };
                         assert_eq!(&finalization.proposal.payload, digest);
                     }
                 }
-
-                // Ensure exceptions within allowed
-                assert!(exceptions <= max_exceptions);
             }
         });
     }

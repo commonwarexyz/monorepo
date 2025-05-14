@@ -1,7 +1,5 @@
 //! Types used in [`threshold_simplex`](crate::threshold_simplex).
 
-use std::collections::{BTreeSet, HashMap, HashSet};
-
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write,
@@ -20,6 +18,10 @@ use commonware_cryptography::{
     Digest,
 };
 use commonware_utils::union;
+use std::{
+    collections::{BTreeSet, HashMap, HashSet},
+    hash::Hash,
+};
 
 /// View is a monotonically increasing counter that represents the current focus of consensus.
 /// Each View corresponds to a round in the consensus protocol where validators attempt to agree
@@ -104,76 +106,208 @@ fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
 }
 
 pub struct PartialVerifier<V: Variant, D: Digest> {
-    view: Option<View>,
+    quorum: Option<usize>,
+
+    leader: Option<u32>,
+    leader_proposal: Option<Proposal<D>>,
 
     notarizes: Vec<Notarize<V, D>>,
+    notarizes_force: bool,
+    notarizes_verified: usize,
+
     nullifies: Vec<Nullify<V>>,
+    nullifies_verified: usize,
+
     finalizes: Vec<Finalize<V, D>>,
+    finalizes_verified: usize,
 }
 
 impl<V: Variant, D: Digest> PartialVerifier<V, D> {
-    pub fn new() -> Self {
+    pub fn new(quorum: Option<u32>) -> Self {
         Self {
-            view: None,
+            quorum: quorum.map(|q| q.saturating_sub(1) as usize), // don't count self
+
+            leader: None,
+            leader_proposal: None,
 
             notarizes: Vec::new(),
+            notarizes_force: false,
+            notarizes_verified: 0,
+
             nullifies: Vec::new(),
+            nullifies_verified: 0,
+
             finalizes: Vec::new(),
+            finalizes_verified: 0,
         }
     }
 
     pub fn add(&mut self, msg: Voter<V, D>) {
-        if let Some(view) = self.view {
-            assert_eq!(view, msg.view());
-        } else {
-            self.view = Some(msg.view());
-        }
         match msg {
-            Voter::Notarize(notarize) => self.notarizes.push(notarize),
+            Voter::Notarize(notarize) => {
+                if let Some(ref leader_proposal) = self.leader_proposal {
+                    // If leader proposal is set and the message is not for it, drop it
+                    if leader_proposal != &notarize.proposal {
+                        return;
+                    }
+                } else if let Some(leader) = self.leader {
+                    // If leader is set but leader proposal is not, set it
+                    if leader == notarize.signer() {
+                        // Set the leader proposal
+                        self.leader_proposal = Some(notarize.proposal.clone());
+
+                        // Drop all notarizes/finalizes that aren't for the leader proposal
+                        self.notarizes.retain(|n| n.proposal == notarize.proposal);
+                        self.finalizes.retain(|f| f.proposal == notarize.proposal);
+
+                        // Force the notarizes to be verified
+                        self.notarizes_force = true;
+                    }
+                }
+
+                // If we've made it this far, add the notarize
+                self.notarizes.push(notarize);
+            }
             Voter::Nullify(nullify) => self.nullifies.push(nullify),
-            Voter::Finalize(finalize) => self.finalizes.push(finalize),
+            Voter::Finalize(finalize) => {
+                // If leader proposal is set and the message is not for it, drop it
+                if let Some(ref leader_proposal) = self.leader_proposal {
+                    if leader_proposal != &finalize.proposal {
+                        return;
+                    }
+                }
+
+                // If we've made it this far, add the finalize
+                self.finalizes.push(finalize);
+            }
             Voter::Notarization(_) | Voter::Nullification(_) | Voter::Finalization(_) => {
                 unreachable!("should not be adding recovered messages to partial verifier");
             }
         }
     }
 
-    // TODO: need to support multiple proposals (right now, just verify based on first notarize)
-    pub fn verify(
+    pub fn mark(&mut self, leader: u32) {
+        // Set the leader
+        assert!(self.leader.is_none());
+        self.leader = Some(leader);
+
+        // Look for a notarize from the leader
+        let Some(notarize) = self.notarizes.iter().find(|n| n.signer() == leader) else {
+            return;
+        };
+
+        // Drop all notarizes/finalizes that aren't for the leader proposal
+        let proposal = notarize.proposal.clone();
+        self.notarizes.retain(|n| n.proposal == proposal);
+        self.finalizes.retain(|f| f.proposal == proposal);
+
+        // If we find one, set the leader proposal
+        self.leader_proposal = Some(proposal);
+        self.notarizes_force = true;
+    }
+
+    pub fn verify_notarizes(
         &mut self,
         namespace: &[u8],
         identity: &Poly<V::Public>,
-    ) -> (Vec<Voter<V, D>>, Vec<u32>, bool) {
-        // Verify messages in vector with most messages
-        let notarize_len = self.notarizes.len();
-        let nullify_len = self.nullifies.len();
-        let finalize_len = self.finalizes.len();
-        let (voters, failed) = if notarize_len >= nullify_len && notarize_len >= finalize_len {
-            let (notarizes, failed) =
-                Notarize::verify_multiple(namespace, identity, std::mem::take(&mut self.notarizes));
-            (notarizes.into_iter().map(Voter::Notarize).collect(), failed)
-        } else if nullify_len >= finalize_len {
-            let (nullifies, failed) =
-                Nullify::verify_multiple(namespace, identity, std::mem::take(&mut self.nullifies));
-            (nullifies.into_iter().map(Voter::Nullify).collect(), failed)
-        } else {
-            let (finalizes, failed) =
-                Finalize::verify_multiple(namespace, identity, std::mem::take(&mut self.finalizes));
-            (finalizes.into_iter().map(Voter::Finalize).collect(), failed)
-        };
-
-        // Return whether or not we should drop the partial verifier
-        (
-            voters,
-            failed,
-            self.notarizes.is_empty() && self.nullifies.is_empty() && self.finalizes.is_empty(),
-        )
+    ) -> (Vec<Voter<V, D>>, Vec<u32>) {
+        self.notarizes_force = false;
+        let (notarizes, failed) =
+            Notarize::verify_multiple(namespace, identity, std::mem::take(&mut self.notarizes));
+        self.notarizes_verified += notarizes.len();
+        (notarizes.into_iter().map(Voter::Notarize).collect(), failed)
     }
-}
 
-impl<V: Variant, D: Digest> Default for PartialVerifier<V, D> {
-    fn default() -> Self {
-        Self::new()
+    pub fn ready_notarizes(&self) -> bool {
+        // If we have the leader's notarize, we should verify immediately to start
+        // block verification.
+        if self.notarizes_force {
+            return true;
+        }
+
+        // If we don't yet know the leader, notarizes may contain messages for
+        // a number of different proposals.
+        if self.leader.is_none() || self.leader_proposal.is_none() {
+            return false;
+        }
+        if let Some(quorum) = self.quorum {
+            // If we have already performed sufficient verifications, there is nothing more
+            // to do.
+            if self.notarizes_verified >= quorum {
+                return false;
+            }
+
+            // If we don't have enough to reach the quorum, there is nothing to do yet.
+            if self.notarizes_verified + self.notarizes.len() < quorum {
+                return false;
+            }
+        }
+
+        // If we have nothing to verify, there is nothing to do.
+        !self.notarizes.is_empty()
+    }
+
+    pub fn verify_nullifies(
+        &mut self,
+        namespace: &[u8],
+        identity: &Poly<V::Public>,
+    ) -> (Vec<Voter<V, D>>, Vec<u32>) {
+        let (nullifies, failed) =
+            Nullify::verify_multiple(namespace, identity, std::mem::take(&mut self.nullifies));
+        self.nullifies_verified += nullifies.len();
+        (nullifies.into_iter().map(Voter::Nullify).collect(), failed)
+    }
+
+    pub fn ready_nullifies(&mut self) -> bool {
+        if let Some(quorum) = self.quorum {
+            // If we have already performed sufficient verifications, there is nothing more
+            // to do.
+            if self.nullifies_verified >= quorum {
+                return false;
+            }
+
+            // If we don't have enough to reach the quorum, there is nothing to do yet.
+            if self.nullifies_verified + self.nullifies.len() < quorum {
+                return false;
+            }
+        }
+
+        // If we have nothing to verify, there is nothing to do.
+        !self.nullifies.is_empty()
+    }
+
+    pub fn verify_finalizes(
+        &mut self,
+        namespace: &[u8],
+        identity: &Poly<V::Public>,
+    ) -> (Vec<Voter<V, D>>, Vec<u32>) {
+        let (finalizes, failed) =
+            Finalize::verify_multiple(namespace, identity, std::mem::take(&mut self.finalizes));
+        self.finalizes_verified += finalizes.len();
+        (finalizes.into_iter().map(Voter::Finalize).collect(), failed)
+    }
+
+    pub fn ready_finalizes(&self) -> bool {
+        // If we don't yet know the leader, finalizers may contain messages for
+        // a number of different proposals.
+        if self.leader.is_none() || self.leader_proposal.is_none() {
+            return false;
+        }
+        if let Some(quorum) = self.quorum {
+            // If we have already performed sufficient verifications, there is nothing more
+            // to do.
+            if self.finalizes_verified >= quorum {
+                return false;
+            }
+
+            // If we don't have enough to reach the quorum, there is nothing to do yet.
+            if self.finalizes_verified + self.finalizes.len() < quorum {
+                return false;
+            }
+        }
+
+        // If we have nothing to verify, there is nothing to do.
+        !self.finalizes.is_empty()
     }
 }
 
@@ -292,7 +426,7 @@ impl<V: Variant, D: Digest> Viewable for Voter<V, D> {
 
 /// Proposal represents a proposed block in the protocol.
 /// It includes the view number, the parent view, and the actual payload (typically a digest of block data).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Proposal<D: Digest> {
     /// The view (round) in which this proposal is made
     pub view: View,

@@ -1,5 +1,5 @@
 use super::{
-    actors::{resolver, voter},
+    actors::{resolver, verifier, voter},
     config::Config,
     types::{Activity, Context, View},
 };
@@ -37,6 +37,10 @@ pub struct Engine<
 
     voter: voter::Actor<E, C, V, D, A, R, F, S>,
     voter_mailbox: voter::Mailbox<V, D>,
+
+    verifier: verifier::Actor<E, C, V, D, S>,
+    verifier_mailbox: verifier::Mailbox<V, D>,
+
     resolver: resolver::Actor<E, C, V, D, S>,
     resolver_mailbox: resolver::Mailbox<V, D>,
 }
@@ -66,7 +70,7 @@ impl<
 
         // Create voter
         let (voter, voter_mailbox) = voter::Actor::new(
-            context.clone(),
+            context.with_label("voter"),
             voter::Config {
                 crypto: cfg.crypto.clone(),
                 automaton: cfg.automaton,
@@ -87,9 +91,19 @@ impl<
             },
         );
 
+        // Create verifier
+        let (verifier, verifier_mailbox) = verifier::Actor::<E, C, V, D, S>::new(
+            context.with_label("verifier"),
+            verifier::Config {
+                supervisor: cfg.supervisor.clone(),
+                namespace: cfg.namespace.clone(),
+                mailbox_size: cfg.mailbox_size,
+            },
+        );
+
         // Create resolver
         let (resolver, resolver_mailbox) = resolver::Actor::new(
-            context.clone(),
+            context.with_label("resolver"),
             resolver::Config {
                 crypto: cfg.crypto,
                 supervisor: cfg.supervisor,
@@ -109,6 +123,10 @@ impl<
 
             voter,
             voter_mailbox,
+
+            verifier,
+            verifier_mailbox,
+
             resolver,
             resolver_mailbox,
         }
@@ -146,9 +164,15 @@ impl<
     ) {
         // Start the voter
         let (voter_sender, voter_receiver) = voter_network;
-        let mut voter_task = self
-            .voter
-            .start(self.resolver_mailbox, voter_sender, voter_receiver);
+        let mut voter_task = self.voter.start(
+            self.verifier_mailbox,
+            self.resolver_mailbox,
+            voter_sender,
+            voter_receiver,
+        );
+
+        // Start the verifier
+        let mut verifier_task = self.verifier.start(self.voter_mailbox.clone());
 
         // Start the resolver
         let (resolver_sender, resolver_receiver) = resolver_network;
@@ -161,10 +185,17 @@ impl<
             _ = &mut voter_task => {
                 debug!("voter finished");
                 resolver_task.abort();
+                verifier_task.abort();
+            },
+            _ = &mut verifier_task => {
+                debug!("verifier finished");
+                voter_task.abort();
+                resolver_task.abort();
             },
             _ = &mut resolver_task => {
                 debug!("resolver finished");
                 voter_task.abort();
+                verifier_task.abort();
             },
         }
     }

@@ -307,14 +307,12 @@ impl<
     }
 
     pub fn start(
-        self,
+        mut self,
         voter: voter::Mailbox<V, D>,
         sender: impl Sender<PublicKey = C::PublicKey>,
         receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) -> Handle<()> {
-        self.context
-            .clone()
-            .spawn(|_| self.run(voter, sender, receiver))
+        self.context.spawn_ref()(self.run(voter, sender, receiver))
     }
 
     async fn run(
