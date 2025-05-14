@@ -18,10 +18,10 @@ mod buffer;
 pub use buffer::Buffer;
 mod handle;
 pub use handle::Handle;
-mod io_buf;
-pub use io_buf::IoBuf;
-mod io_buf_mut;
-pub use io_buf_mut::IoBufMut;
+mod stable_buf;
+pub use stable_buf::StableBuf;
+mod stable_buf_mut;
+pub use stable_buf_mut::StableBufMut;
 
 /// Yield control back to the runtime.
 pub async fn reschedule() {

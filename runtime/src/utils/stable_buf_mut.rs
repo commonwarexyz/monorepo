@@ -1,6 +1,6 @@
 // The contents of this file are based on https://github.com/tokio-rs/tokio-uring at commit 7761222.
 // We don't want to depend on the whole crate, so we've copied/adapted the relevant parts.
-use super::IoBuf;
+use super::StableBuf;
 
 /// A mutable `io-uring` compatible buffer.
 ///
@@ -12,7 +12,7 @@ use super::IoBuf;
 /// Buffers passed to `io-uring` operations must reference a stable memory
 /// region. While the runtime holds ownership to a buffer, the pointer returned
 /// by `stable_mut_ptr` must remain valid even if the `IoBufMut` value is moved.
-pub unsafe trait IoBufMut: IoBuf {
+pub unsafe trait StableBufMut: StableBuf {
     /// Returns a raw mutable pointer to this buffer.
     ///
     /// This method is to be used by the runtime and it is not
@@ -44,13 +44,13 @@ pub unsafe trait IoBufMut: IoBuf {
     }
 }
 
-unsafe impl IoBufMut for Vec<u8> {
+unsafe impl StableBufMut for Vec<u8> {
     fn stable_mut_ptr(&mut self) -> *mut u8 {
         self.as_mut_ptr()
     }
 }
 
-unsafe impl IoBufMut for bytes::BytesMut {
+unsafe impl StableBufMut for bytes::BytesMut {
     fn stable_mut_ptr(&mut self) -> *mut u8 {
         self.as_mut_ptr()
     }

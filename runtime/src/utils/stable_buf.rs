@@ -12,7 +12,7 @@
 /// region. While the runtime holds ownership to a buffer, the pointer returned
 /// by `stable_ptr` must remain valid even if the `IoBuf` value is moved.
 #[allow(clippy::len_without_is_empty)]
-pub unsafe trait IoBuf: Unpin + Send + 'static {
+pub unsafe trait StableBuf: Unpin + Send + 'static {
     /// Returns a raw pointer to the vector’s buffer.
     ///
     /// This method is to be used internally and it is not
@@ -31,7 +31,7 @@ pub unsafe trait IoBuf: Unpin + Send + 'static {
     }
 }
 
-unsafe impl IoBuf for Vec<u8> {
+unsafe impl StableBuf for Vec<u8> {
     fn stable_ptr(&self) -> *const u8 {
         self.as_ptr()
     }
@@ -41,7 +41,7 @@ unsafe impl IoBuf for Vec<u8> {
     }
 }
 
-unsafe impl IoBuf for &'static [u8] {
+unsafe impl StableBuf for &'static [u8] {
     fn stable_ptr(&self) -> *const u8 {
         self.as_ptr()
     }
@@ -51,7 +51,7 @@ unsafe impl IoBuf for &'static [u8] {
     }
 }
 
-unsafe impl IoBuf for &'static str {
+unsafe impl StableBuf for &'static str {
     fn stable_ptr(&self) -> *const u8 {
         self.as_ptr()
     }
@@ -61,7 +61,7 @@ unsafe impl IoBuf for &'static str {
     }
 }
 
-unsafe impl IoBuf for bytes::Bytes {
+unsafe impl StableBuf for bytes::Bytes {
     fn stable_ptr(&self) -> *const u8 {
         self.as_ptr()
     }
@@ -71,7 +71,7 @@ unsafe impl IoBuf for bytes::Bytes {
     }
 }
 
-unsafe impl IoBuf for bytes::BytesMut {
+unsafe impl StableBuf for bytes::BytesMut {
     fn stable_ptr(&self) -> *const u8 {
         self.as_ptr()
     }

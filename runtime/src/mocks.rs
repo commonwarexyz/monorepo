@@ -1,6 +1,6 @@
 //! A mock implementation of a channel that implements the Sink and Stream traits.
 
-use crate::{Error, IoBuf, IoBufMut, Sink as SinkTrait, Stream as StreamTrait};
+use crate::{Error, StableBuf, StableBufMut, Sink as SinkTrait, Stream as StreamTrait};
 use bytes::Bytes;
 use futures::channel::oneshot;
 use std::{
@@ -41,7 +41,7 @@ pub struct Sink {
 }
 
 impl SinkTrait for Sink {
-    async fn send<B: IoBuf>(&mut self, msg: B) -> Result<(), Error> {
+    async fn send<B: StableBuf>(&mut self, msg: B) -> Result<(), Error> {
         let (os_send, data) = {
             let mut channel = self.channel.lock().unwrap();
             channel.buffer.extend(msg.as_ref());
@@ -74,7 +74,7 @@ pub struct Stream {
 }
 
 impl StreamTrait for Stream {
-    async fn recv<B: IoBufMut>(&mut self, mut buf: B) -> Result<B, Error> {
+    async fn recv<B: StableBufMut>(&mut self, mut buf: B) -> Result<B, Error> {
         let os_recv = {
             let mut channel = self.channel.lock().unwrap();
 
