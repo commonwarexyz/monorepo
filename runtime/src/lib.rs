@@ -17,6 +17,7 @@
 //! `commonware-runtime` is **ALPHA** software and is not yet recommended for production use. Developers should
 //! expect breaking changes and occasional instability.
 
+use commonware_utils::{StableBuf, StableBufMut};
 use prometheus_client::registry::Metric;
 use std::io::Error as IoError;
 use std::{
@@ -272,7 +273,7 @@ pub trait Listener: Sync + Send + 'static {
 /// messages over a network connection.
 pub trait Sink: Sync + Send + 'static {
     /// Send a message to the sink.
-    fn send(&mut self, msg: &[u8]) -> impl Future<Output = Result<(), Error>> + Send;
+    fn send<B: StableBuf>(&mut self, msg: B) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 /// Interface that any runtime must implement to receive
@@ -280,7 +281,7 @@ pub trait Sink: Sync + Send + 'static {
 pub trait Stream: Sync + Send + 'static {
     /// Receive a message from the stream, storing it in the given buffer.
     /// Reads exactly the number of bytes that fit in the buffer.
-    fn recv(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<(), Error>> + Send;
+    fn recv<B: StableBufMut>(&mut self, buf: B) -> impl Future<Output = Result<B, Error>> + Send;
 }
 
 /// Interface to interact with storage.
@@ -356,6 +357,7 @@ pub trait Blob: Clone + Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use commonware_macros::select;
     use futures::channel::oneshot;
     use futures::{channel::mpsc, future::ready, join, SinkExt, StreamExt};
@@ -1325,8 +1327,7 @@ mod tests {
             async fn read_line<St: Stream>(stream: &mut St) -> Result<String, Error> {
                 let mut line = Vec::new();
                 loop {
-                    let mut byte = [0; 1];
-                    stream.recv(&mut byte).await?;
+                    let byte = stream.recv(vec![0; 1]).await?;
                     if byte[0] == b'\n' {
                         if line.last() == Some(&b'\r') {
                             line.pop(); // Remove trailing \r
@@ -1359,9 +1360,8 @@ mod tests {
                 stream: &mut St,
                 content_length: usize,
             ) -> Result<String, Error> {
-                let mut body = vec![0; content_length];
-                stream.recv(&mut body).await?;
-                String::from_utf8(body).map_err(|_| Error::ReadFailed)
+                let read = stream.recv(vec![0; content_length]).await?;
+                String::from_utf8(read).map_err(|_| Error::ReadFailed)
             }
 
             // Simulate a client connecting to the server
@@ -1384,7 +1384,7 @@ mod tests {
                         "GET /metrics HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
                         address
                     );
-                    sink.send(request.as_bytes()).await.unwrap();
+                    sink.send(Bytes::from(request)).await.unwrap();
 
                     // Read and verify the HTTP status line
                     let status_line = read_line(&mut stream).await.unwrap();

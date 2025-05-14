@@ -1,4 +1,5 @@
 use crate::{deterministic::Auditor, Error, SinkOf, StreamOf};
+use commonware_utils::{StableBuf, StableBufMut};
 use sha2::Digest;
 use std::{net::SocketAddr, sync::Arc};
 
@@ -10,10 +11,10 @@ pub struct Sink<S: crate::Sink> {
 }
 
 impl<S: crate::Sink> crate::Sink for Sink<S> {
-    async fn send(&mut self, data: &[u8]) -> Result<(), Error> {
+    async fn send<B: StableBuf>(&mut self, data: B) -> Result<(), Error> {
         self.auditor.event(b"send_attempt", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
-            hasher.update(data);
+            hasher.update(data.as_ref());
         });
 
         self.inner.send(data).await.inspect_err(|e| {
@@ -25,7 +26,6 @@ impl<S: crate::Sink> crate::Sink for Sink<S> {
 
         self.auditor.event(b"send_success", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
-            hasher.update(data);
         });
         Ok(())
     }
@@ -39,12 +39,12 @@ pub struct Stream<S: crate::Stream> {
 }
 
 impl<S: crate::Stream> crate::Stream for Stream<S> {
-    async fn recv(&mut self, buf: &mut [u8]) -> Result<(), Error> {
+    async fn recv<B: StableBufMut>(&mut self, buf: B) -> Result<B, Error> {
         self.auditor.event(b"recv_attempt", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
         });
 
-        self.inner.recv(buf).await.inspect_err(|e| {
+        let buf = self.inner.recv(buf).await.inspect_err(|e| {
             self.auditor.event(b"recv_failure", |hasher| {
                 hasher.update(self.remote_addr.to_string().as_bytes());
                 hasher.update(e.to_string().as_bytes());
@@ -53,9 +53,9 @@ impl<S: crate::Stream> crate::Stream for Stream<S> {
 
         self.auditor.event(b"recv_success", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
-            hasher.update(buf);
+            hasher.update(buf.as_ref());
         });
-        Ok(())
+        Ok(buf)
     }
 }
 
@@ -242,12 +242,11 @@ mod tests {
                 let (_, mut sink, mut stream) = listener.accept().await.unwrap();
 
                 // Receive data from client
-                let mut buf = [0u8; CLIENT_MSG.len()];
-                stream.recv(&mut buf).await.unwrap();
+                let buf = stream.recv(vec![0; CLIENT_MSG.len()]).await.unwrap();
                 assert_eq!(&buf, CLIENT_MSG.as_bytes());
 
                 // Send response
-                sink.send(SERVER_MSG.as_bytes()).await.unwrap();
+                sink.send(Vec::from(SERVER_MSG)).await.unwrap();
             });
             server_handles.push(handle);
         }
@@ -261,11 +260,10 @@ mod tests {
                 let (mut sink, mut stream) = network.dial(listener_addr).await.unwrap();
 
                 // Send data to server
-                sink.send(CLIENT_MSG.as_bytes()).await.unwrap();
+                sink.send(Vec::from(CLIENT_MSG)).await.unwrap();
 
                 // Receive response
-                let mut buf = [0u8; SERVER_MSG.len()];
-                stream.recv(&mut buf).await.unwrap();
+                let buf = stream.recv(vec![0; SERVER_MSG.len()]).await.unwrap();
                 assert_eq!(&buf, SERVER_MSG.as_bytes());
             });
             client_handles.push(handle);
