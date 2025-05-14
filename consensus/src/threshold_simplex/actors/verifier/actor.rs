@@ -12,7 +12,7 @@ use commonware_cryptography::{
 };
 use commonware_runtime::{Handle, Metrics, Spawner};
 use futures::{channel::mpsc, StreamExt};
-use prometheus_client::metrics::histogram::Histogram;
+use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
 use std::{collections::BTreeMap, marker::PhantomData};
 use tracing::{trace, warn};
 
@@ -58,6 +58,8 @@ pub struct Actor<
 
     mailbox_receiver: mpsc::Receiver<Message<V, D>>,
 
+    added: Counter,
+    verified: Counter,
     batch_size: Histogram,
 
     _phantom: PhantomData<C>,
@@ -77,8 +79,16 @@ impl<
     > Actor<E, C, V, D, S>
 {
     pub fn new(context: E, cfg: Config<S>) -> (Self, Mailbox<V, D>) {
+        let added = Counter::default();
+        let verified = Counter::default();
         let batch_size =
             Histogram::new([1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0].into_iter());
+        context.register(
+            "added",
+            "number of messages added to the verifier",
+            added.clone(),
+        );
+        context.register("verified", "number of messages verified", verified.clone());
         context.register(
             "batch_size",
             "number of messages in a partial signature verification batch",
@@ -94,6 +104,8 @@ impl<
 
                 mailbox_receiver: receiver,
 
+                added,
+                verified,
                 batch_size,
 
                 _phantom: PhantomData,
@@ -129,6 +141,7 @@ impl<
                         finalized = new_finalized;
                     }
                     Message::Message(message) => {
+                        self.added.inc();
                         blocking = false;
                         work.entry(message.view()).or_default().add(message);
                     }
@@ -169,6 +182,7 @@ impl<
             let (voters, failed) = verifier.verify(&self.namespace, identity, view == current);
             let batch = voters.len() + failed.len();
             trace!(view, batch, "batch verified messages");
+            self.verified.inc_by(batch as u64);
             self.batch_size.observe(batch as f64);
 
             // Send messages
