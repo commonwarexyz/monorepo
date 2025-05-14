@@ -111,9 +111,13 @@ impl<B: Blob> Buffer<B> {
         let bytes_to_read = std::cmp::min(self.buffer_size as u64, blob_remaining) as usize;
 
         // Read the data - we only need a single read operation since we know exactly how much data is available
-        self.blob
-            .read_at(&mut self.buffer[..bytes_to_read], self.blob_position)
+        let read = self
+            .blob
+            .read_at(vec![0; bytes_to_read], self.blob_position)
             .await?;
+        // Copy the read data into the buffer
+        self.buffer.copy_from_slice(&read);
+
         self.buffer_valid_len = bytes_to_read;
 
         Ok(bytes_to_read)
@@ -187,13 +191,10 @@ impl<B: Blob> Buffer<B> {
         let read_size =
             std::cmp::min((self.buffer_size - remaining) as u64, bytes_blob_remaining) as usize;
         if read_size > 0 {
-            match self
-                .blob
-                .read_at(&mut self.buffer[remaining..remaining + read_size], read_pos)
-                .await
-            {
+            match self.blob.read_at(vec![0; read_size], read_pos).await {
                 Ok(read) => {
                     self.buffer_valid_len = remaining + read_size;
+                    self.buffer[remaining..self.buffer_valid_len].copy_from_slice(&read);
                 }
                 Err(e) => return Err(e),
             }

@@ -742,8 +742,7 @@ mod tests {
                 .expect("Failed to open blob");
 
             // Read data past file length (empty file)
-            let mut buffer = vec![0u8; 10];
-            let result = blob.read_at(vec![], 0).await;
+            let result = blob.read_at(vec![0u8; 10], 0).await;
             assert!(result.is_err());
 
             // Write data to the blob
@@ -753,8 +752,7 @@ mod tests {
                 .expect("Failed to write to blob");
 
             // Read data past file length (non-empty file)
-            let mut buffer = vec![0u8; 20];
-            let result = blob.read_at(vec![], 0).await;
+            let result = blob.read_at(vec![0u8; 20], 0).await;
             assert!(result.is_err());
         })
     }

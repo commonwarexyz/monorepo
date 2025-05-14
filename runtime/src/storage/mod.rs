@@ -7,8 +7,6 @@ pub mod tokio;
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use bytes::Bytes;
-
     use crate::{Blob, Storage};
 
     /// Runs the full suite of tests on the provided storage implementation.
