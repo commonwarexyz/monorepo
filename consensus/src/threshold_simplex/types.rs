@@ -106,38 +106,43 @@ fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
 }
 
 pub struct PartialVerifier<V: Variant, D: Digest> {
-    view: Option<View>,
+    quorum: u32,
 
     leader: Option<u32>,
     leader_proposal: Option<Proposal<D>>,
 
     notarizes: Vec<Notarize<V, D>>,
+    notarizes_force: bool,
+    notarizes_verified: usize,
+
     nullifies: Vec<Nullify<V>>,
+    nullifies_verified: usize,
+
     finalizes: Vec<Finalize<V, D>>,
+    finalizes_verified: usize,
 }
 
 impl<V: Variant, D: Digest> PartialVerifier<V, D> {
-    pub fn new() -> Self {
+    pub fn new(quorum: u32) -> Self {
         Self {
-            view: None,
+            quorum,
 
             leader: None,
             leader_proposal: None,
 
             notarizes: Vec::new(),
+            notarizes_force: false,
+            notarizes_verified: 0,
+
             nullifies: Vec::new(),
+            nullifies_verified: 0,
+
             finalizes: Vec::new(),
+            finalizes_verified: 0,
         }
     }
 
     pub fn add(&mut self, msg: Voter<V, D>) {
-        // Assert view is correct
-        if let Some(view) = self.view {
-            assert_eq!(view, msg.view());
-        } else {
-            self.view = Some(msg.view());
-        }
-
         match msg {
             Voter::Notarize(notarize) => {
                 if let Some(ref leader_proposal) = self.leader_proposal {
@@ -154,6 +159,9 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
                         // Drop all notarizes/finalizes that aren't for the leader proposal
                         self.notarizes.retain(|n| n.proposal == notarize.proposal);
                         self.finalizes.retain(|f| f.proposal == notarize.proposal);
+
+                        // Force the notarizes to be verified
+                        self.notarizes_force = true;
                     }
                 }
 
@@ -195,64 +203,62 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
 
         // If we find one, set the leader proposal
         self.leader_proposal = Some(proposal);
+        self.notarizes_force = true;
     }
 
-    /// If we are in this view, we only care about notarizes and nullifies
-    fn verify_current(
+    fn verify_notarizes(
         &mut self,
         namespace: &[u8],
         identity: &Poly<V::Public>,
     ) -> (Vec<Voter<V, D>>, Vec<u32>) {
-        // If leader and proposal are set, attempt to verify notarizes then finalizes
-        if !self.notarizes.is_empty() {
-            let (notarizes, failed) =
-                Notarize::verify_multiple(namespace, identity, std::mem::take(&mut self.notarizes));
-            return (notarizes.into_iter().map(Voter::Notarize).collect(), failed);
-        }
+        self.notarizes_force = false;
+        let (notarizes, failed) =
+            Notarize::verify_multiple(namespace, identity, std::mem::take(&mut self.notarizes));
+        self.notarizes_verified += notarizes.len();
+        (notarizes.into_iter().map(Voter::Notarize).collect(), failed)
+    }
 
-        // If we've made it here, attempt to verify nullifies
+    pub fn ready_notarizes(&self) -> bool {
+        if self.notarizes_force {
+            return true;
+        }
+        if self.leader.is_none() || self.leader_proposal.is_none() {
+            return false;
+        }
+        self.notarizes_verified + self.notarizes.len() >= self.quorum as usize
+    }
+
+    pub fn verify_nullifies(
+        &mut self,
+        namespace: &[u8],
+        identity: &Poly<V::Public>,
+    ) -> (Vec<Voter<V, D>>, Vec<u32>) {
         let (nullifies, failed) =
             Nullify::verify_multiple(namespace, identity, std::mem::take(&mut self.nullifies));
+        self.nullifies_verified += nullifies.len();
         (nullifies.into_iter().map(Voter::Nullify).collect(), failed)
     }
 
-    pub fn ready_current(&self) -> bool {
-        (self.leader.is_some() && self.leader_proposal.is_some() && !self.notarizes.is_empty())
-            || !self.nullifies.is_empty()
+    pub fn ready_nullifies(&self) -> bool {
+        self.nullifies_verified + self.nullifies.len() >= self.quorum as usize
     }
 
-    /// If we aren't in this view, we only care about finalizes
-    fn verify_past(
+    fn verify_finalizes(
         &mut self,
         namespace: &[u8],
         identity: &Poly<V::Public>,
     ) -> (Vec<Voter<V, D>>, Vec<u32>) {
         let (finalizes, failed) =
             Finalize::verify_multiple(namespace, identity, std::mem::take(&mut self.finalizes));
+        self.finalizes_verified += finalizes.len();
         (finalizes.into_iter().map(Voter::Finalize).collect(), failed)
     }
 
-    pub fn ready_past(&self) -> bool {
-        self.leader.is_some() && self.leader_proposal.is_some() && !self.finalizes.is_empty()
-    }
-
-    pub fn verify(
-        &mut self,
-        namespace: &[u8],
-        identity: &Poly<V::Public>,
-        current: bool,
-    ) -> (Vec<Voter<V, D>>, Vec<u32>) {
-        if current {
-            self.verify_current(namespace, identity)
-        } else {
-            self.verify_past(namespace, identity)
+    pub fn ready_finalizes(&self) -> bool {
+        if self.leader.is_none() || self.leader_proposal.is_none() {
+            return false;
         }
-    }
-}
-
-impl<V: Variant, D: Digest> Default for PartialVerifier<V, D> {
-    fn default() -> Self {
-        Self::new()
+        self.finalizes_verified + self.finalizes.len() >= self.quorum as usize
     }
 }
 
