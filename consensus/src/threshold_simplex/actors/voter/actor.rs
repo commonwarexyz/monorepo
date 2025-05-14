@@ -91,7 +91,8 @@ struct Round<
     requested_proposal: bool,
     verified_proposal: bool,
 
-    // Track notarizes for all proposals (ensuring any participant only has one recorded notarize)
+    // We only receive verified notarizes for the leader's proposal, so we don't
+    // need to track multiple proposals here.
     notarizes: Vec<Status<Notarize<V, D>>>,
     notarizes_verified: usize,
     notarizes_selected: Option<Proposal<D>>,
@@ -106,7 +107,8 @@ struct Round<
     broadcast_nullify: bool,
     broadcast_nullification: bool,
 
-    // Track finalizes for all proposals (ensuring any participant only has one recorded finalize)
+    // We only receive verified finalizes for the leader's proposal, so we don't
+    // need to track multiple proposals here.
     finalizes: Vec<Status<Finalize<V, D>>>,
     finalizes_verified: usize,
     finalizes_selected: Option<Proposal<D>>,
