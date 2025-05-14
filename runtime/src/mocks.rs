@@ -116,7 +116,7 @@ mod tests {
 
         block_on(async {
             sink.send(data.clone()).await.unwrap();
-            let buf = stream.recv(Vec::with_capacity(data.len())).await.unwrap();
+            let buf = stream.recv(vec![0; data.len()]).await.unwrap();
             assert_eq!(buf, data);
         });
     }
@@ -128,7 +128,7 @@ mod tests {
 
         block_on(async {
             sink.send(data).await.unwrap();
-            let buf = stream.recv(Vec::with_capacity(3)).await.unwrap();
+            let buf = stream.recv(vec![0; 3]).await.unwrap();
             assert_eq!(buf, b"hel");
             let buf = stream.recv(buf).await.unwrap();
             assert_eq!(buf, b"lo!");
@@ -141,7 +141,7 @@ mod tests {
 
         let data = b"hello world";
         let buf = block_on(async {
-            futures::try_join!(stream.recv(Vec::with_capacity(data.len())), async {
+            futures::try_join!(stream.recv(vec![0; data.len()]), async {
                 sleep(Duration::from_millis(10_000));
                 sink.send(data.to_vec()).await
             },)
@@ -160,7 +160,7 @@ mod tests {
         // If the oneshot sender is dropped before the oneshot receiver is resolved,
         // the recv function should return an error.
         executor.start(|_| async move {
-            let (v, _) = join!(stream.recv(Vec::with_capacity(5)), async {
+            let (v, _) = join!(stream.recv(vec![0; 5]), async {
                 // Take the waiter and drop it.
                 sink.channel.lock().unwrap().waiter.take();
             },);
@@ -179,7 +179,7 @@ mod tests {
             // Create a waiter using a recv call.
             // But then drop the receiver.
             select! {
-                v = stream.recv( Vec::with_capacity(5)) => {
+                v = stream.recv( vec![0;5]) => {
                     panic!("unexpected value: {:?}", v);
                 },
                 _ = context.sleep(Duration::from_millis(100)) => {
@@ -202,7 +202,7 @@ mod tests {
         // If there is no data to read, test that the recv function just blocks. A timeout should return first.
         executor.start(|context| async move {
             select! {
-                v = stream.recv(Vec::with_capacity(5)) => {
+                v = stream.recv(vec![0;5]) => {
                     panic!("unexpected value: {:?}", v);
                 },
                 _ = context.sleep(Duration::from_millis(100)) => {

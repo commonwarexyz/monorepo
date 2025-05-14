@@ -241,10 +241,7 @@ mod tests {
                 let (_, mut sink, mut stream) = listener.accept().await.unwrap();
 
                 // Receive data from client
-                let buf = stream
-                    .recv(Vec::with_capacity(CLIENT_MSG.len()))
-                    .await
-                    .unwrap();
+                let buf = stream.recv(vec![0; CLIENT_MSG.len()]).await.unwrap();
                 assert_eq!(&buf, CLIENT_MSG.as_bytes());
 
                 // Send response
@@ -265,10 +262,7 @@ mod tests {
                 sink.send(Vec::from(CLIENT_MSG)).await.unwrap();
 
                 // Receive response
-                let buf = stream
-                    .recv(Vec::with_capacity(SERVER_MSG.len()))
-                    .await
-                    .unwrap();
+                let buf = stream.recv(vec![0; SERVER_MSG.len()]).await.unwrap();
                 assert_eq!(&buf, SERVER_MSG.as_bytes());
             });
             client_handles.push(handle);
