@@ -133,6 +133,7 @@ impl crate::Sink for Sink {
         while bytes_sent < msg.len() {
             let remaining = &msg[bytes_sent..];
 
+            // Create the io_uring send operation
             let op = io_uring::opcode::Send::new(
                 self.as_raw_fd(),
                 remaining.as_ptr(),
@@ -140,17 +141,19 @@ impl crate::Sink for Sink {
             )
             .build();
 
+            // Submit the operation to the io_uring event loop
             let (tx, rx) = oneshot::channel();
-
             self.submitter
                 .send((op, tx))
                 .await
                 .map_err(|_| crate::Error::SendFailed)?;
+            
+            // Wait for the operation to complete
             let result = rx.await.map_err(|_| crate::Error::SendFailed)?;
-            if result <= 0 {
-                return Err(crate::Error::SendFailed);
-            }
-            bytes_sent += result as usize;
+            
+            // Negative result indicates an error
+            let result: usize = result.try_into().map_err(|_| crate::Error::SendFailed)?;
+            bytes_sent += result;
         }
         Ok(())
     }
@@ -176,6 +179,7 @@ impl crate::Stream for Stream {
         while bytes_received < buf_len {
             let remaining = &mut buf_ref[bytes_received..];
 
+            // Create the io_uring recv operation
             let op = io_uring::opcode::Recv::new(
                 self.as_raw_fd(),
                 remaining.as_mut_ptr(),
@@ -183,14 +187,17 @@ impl crate::Stream for Stream {
             )
             .build();
 
+            // Submit the operation to the io_uring event loop
             let (tx, rx) = oneshot::channel();
-
             self.submitter
                 .send((op, tx))
                 .await
                 .map_err(|_| crate::Error::RecvFailed)?;
+
+            // Wait for the operation to complete
             let result = rx.await.map_err(|_| crate::Error::RecvFailed)?;
             if result <= 0 {
+                // Non-positive result indicates an error or EOF.
                 return Err(crate::Error::RecvFailed);
             }
             bytes_received += result as usize;
