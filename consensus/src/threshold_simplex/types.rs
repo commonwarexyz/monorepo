@@ -707,20 +707,6 @@ impl<V: Variant, D: Digest> Notarization<V, D> {
         )
         .is_ok()
     }
-
-    pub fn message(&self, namespace: &[u8]) -> Vec<(Vec<u8>, Vec<u8>, V::Signature)> {
-        let notarize_namespace = notarize_namespace(namespace);
-        let notarize_message = self.proposal.encode();
-        let notarize_batch = (
-            notarize_namespace,
-            notarize_message.to_vec(),
-            self.proposal_signature,
-        );
-        let seed_namespace = seed_namespace(namespace);
-        let seed_message = view_message(self.proposal.view);
-        let seed_batch = (seed_namespace, seed_message.to_vec(), self.seed_signature);
-        vec![notarize_batch, seed_batch]
-    }
 }
 
 impl<V: Variant, D: Digest> Viewable for Notarization<V, D> {
@@ -979,19 +965,6 @@ impl<V: Variant> Nullification<V> {
             1,
         )
         .is_ok()
-    }
-
-    pub fn message(&self, namespace: &[u8]) -> Vec<(Vec<u8>, Vec<u8>, V::Signature)> {
-        let nullify_namespace = nullify_namespace(namespace);
-        let view_message = view_message(self.view);
-        let nullify_batch = (
-            nullify_namespace,
-            view_message.to_vec(),
-            self.view_signature,
-        );
-        let seed_namespace = seed_namespace(namespace);
-        let seed_batch = (seed_namespace, view_message.to_vec(), self.seed_signature);
-        vec![nullify_batch, seed_batch]
     }
 }
 
