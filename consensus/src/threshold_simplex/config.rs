@@ -11,7 +11,7 @@ use std::time::Duration;
 /// Configuration for the consensus engine.
 pub struct Config<
     C: Scheme,
-    B: Blocker,
+    B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     D: Digest,
     A: Automaton<Context = Context<D>>,
@@ -29,6 +29,8 @@ pub struct Config<
     pub crypto: C,
 
     /// Blocker for the network.
+    ///
+    /// Blocking is handled by [commonware_p2p].
     pub blocker: B,
 
     /// Automaton for the consensus engine.
@@ -93,7 +95,7 @@ pub struct Config<
 
     /// Maximum rate of requests to send to a given peer.
     ///
-    /// Inbound rate limiting is handled by `commonware-p2p`.
+    /// Inbound rate limiting is handled by [commonware_p2p].
     pub fetch_rate_per_peer: Quota,
 
     /// Number of concurrent requests to make at once.
@@ -102,7 +104,7 @@ pub struct Config<
 
 impl<
         C: Scheme,
-        B: Blocker,
+        B: Blocker<PublicKey = C::PublicKey>,
         V: Variant,
         D: Digest,
         A: Automaton<Context = Context<D>>,
