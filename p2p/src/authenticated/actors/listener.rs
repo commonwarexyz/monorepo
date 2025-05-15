@@ -70,7 +70,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         sink: SinkOf<E>,
         stream: StreamOf<E>,
         mut tracker: tracker::Mailbox<E, C>,
-        mut supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C>,
+        mut supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
     ) {
         // Create span
         let span = debug_span!("listener", ?address);
@@ -96,16 +96,13 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         //
         // Reserve also checks if the peer is authorized.
         let peer = incoming.peer();
-        let reservation = match tracker
-            .reserve(peer.clone())
+        let Some(reservation) = tracker
+            .listen(peer.clone())
             .instrument(debug_span!("reserve"))
             .await
-        {
-            Some(reservation) => reservation,
-            None => {
-                status::error(&span, "unable to reserve connection to peer", None);
-                return;
-            }
+        else {
+            status::error(&span, "unable to reserve connection to peer", None);
+            return;
         };
 
         // Perform handshake
@@ -126,13 +123,13 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         drop(guard);
 
         // Start peer to handle messages
-        supervisor.spawn(peer, stream, reservation).await;
+        supervisor.spawn(stream, reservation).await;
     }
 
     pub fn start(
         self,
         tracker: tracker::Mailbox<E, C>,
-        supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C>,
+        supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
     ) -> Handle<()> {
         self.context
             .clone()
@@ -142,7 +139,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
     async fn run(
         self,
         tracker: tracker::Mailbox<E, C>,
-        supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C>,
+        supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
     ) {
         // Start listening for incoming connections
         let mut listener = self

@@ -103,13 +103,13 @@
 //!
 //! ## `ec2 create`
 //!
-//! 1. Validates configuration and generates an SSH key pair, stored in `/tmp/deployer-{tag}/id_rsa_{tag}`.
+//! 1. Validates configuration and generates an SSH key pair, stored in `$HOME/.commonware_deployer/{tag}/id_rsa_{tag}`.
 //! 2. Creates VPCs, subnets, internet gateways, route tables, and security groups per region.
 //! 3. Establishes VPC peering between the monitoring region and binary regions.
 //! 4. Launches the monitoring instance, uploads service files, and installs Prometheus, Grafana, Loki, and Pyroscope.
 //! 5. Launches binary instances, uploads binaries, configurations, and hosts.yaml, and installs Promtail and the binary.
 //! 6. Configures BBR on all instances and updates the monitoring security group for Loki traffic.
-//! 7. Marks completion with `/tmp/deployer-{tag}/created`.
+//! 7. Marks completion with `$HOME/.commonware_deployer/{tag}/created`.
 //!
 //! ## `ec2 update`
 //!
@@ -126,11 +126,11 @@
 //!
 //! 1. Terminates all instances across regions.
 //! 2. Deletes security groups, subnets, route tables, VPC peering connections, internet gateways, key pairs, and VPCs in dependency order.
-//! 3. Marks destruction with `/tmp/deployer-{tag}/destroyed`, retaining the directory to prevent tag reuse.
+//! 3. Marks destruction with `$HOME/.commonware_deployer/{tag}/destroyed`, retaining the directory to prevent tag reuse.
 //!
 //! # Persistence
 //!
-//! * A temporary directory `/tmp/deployer-{tag}` stores the SSH private key, service files, and status files (`created`, `destroyed`).
+//! * A directory `$HOME/.commonware_deployer/{tag}` stores the SSH private key, service files, and status files (`created`, `destroyed`).
 //! * The deployment state is tracked via these files, ensuring operations respect prior create/destroy actions.
 //!
 //! # Example Configuration
@@ -229,7 +229,8 @@ cfg_if::cfg_if! {
 
         /// Directory where deployer files are stored
         fn deployer_directory(tag: &str) -> PathBuf {
-            PathBuf::from(format!("/tmp/deployer-{}", tag))
+            let base_dir = std::env::var("HOME").expect("$HOME is not configured");
+            PathBuf::from(format!("{}/.commonware_deployer/{}", base_dir, tag))
         }
 
         /// Errors that can occur when deploying infrastructure on AWS

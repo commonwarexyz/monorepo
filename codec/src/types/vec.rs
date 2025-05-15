@@ -67,4 +67,28 @@ mod tests {
             ));
         }
     }
+
+    #[test]
+    fn test_conformity() {
+        assert_eq!(Vec::<u8>::new().encode(), &[0x00][..]);
+        assert_eq!(
+            vec![0x01u8, 0x02u8, 0x03u8].encode(),
+            &[0x03, 0x01, 0x02, 0x03][..]
+        );
+
+        let v_u16: Vec<u16> = vec![0x1234, 0xABCD];
+        assert_eq!(v_u16.encode(), &[0x02, 0x12, 0x34, 0xAB, 0xCD][..]);
+
+        let v_bool: Vec<bool> = vec![true, false, true];
+        assert_eq!(v_bool.encode(), &[0x03, 0x01, 0x00, 0x01][..]);
+
+        let v_empty_u32: Vec<u32> = Vec::new();
+        assert_eq!(v_empty_u32.encode(), &[0x00][..]);
+
+        // Test with a length that requires a multi-byte varint
+        let v_long_u8: Vec<u8> = vec![0xCC; 200]; // 200 = 0xC8 = 0x80 + 0x48 -> 0xC8 0x01
+        let mut expected_long_u8 = vec![0xC8, 0x01];
+        expected_long_u8.extend_from_slice(&[0xCC; 200]);
+        assert_eq!(v_long_u8.encode(), expected_long_u8.as_slice());
+    }
 }

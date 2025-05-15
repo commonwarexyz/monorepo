@@ -1,4 +1,4 @@
-use crate::{mocks, Error};
+use crate::{mocks, Error, StableBuf, StableBufMut};
 use futures::{channel::mpsc, SinkExt as _, StreamExt as _};
 use std::{
     collections::HashMap,
@@ -16,7 +16,7 @@ pub struct Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
+    async fn send<B: StableBuf>(&mut self, msg: B) -> Result<(), Error> {
         self.sender.send(msg).await.map_err(|_| Error::SendFailed)
     }
 }
@@ -27,7 +27,7 @@ pub struct Stream {
 }
 
 impl crate::Stream for Stream {
-    async fn recv(&mut self, buf: &mut [u8]) -> Result<(), Error> {
+    async fn recv<B: StableBufMut>(&mut self, buf: B) -> Result<B, Error> {
         self.receiver.recv(buf).await.map_err(|_| Error::RecvFailed)
     }
 }
@@ -139,5 +139,16 @@ impl crate::Network for Network {
                 receiver: dialer_receiver,
             },
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::network::deterministic as DeterministicNetwork;
+    use crate::network::tests;
+
+    #[tokio::test]
+    async fn test_trait() {
+        tests::test_network_trait(DeterministicNetwork::Network::default).await;
     }
 }

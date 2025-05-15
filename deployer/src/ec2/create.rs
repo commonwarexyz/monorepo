@@ -41,12 +41,12 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     info!(tag = tag.as_str(), "loaded configuration");
 
     // Create a temporary directory for local files
-    let temp_dir = deployer_directory(tag);
-    if temp_dir.exists() {
+    let tag_directory = deployer_directory(tag);
+    if tag_directory.exists() {
         return Err(Error::CreationAttempted);
     }
-    std::fs::create_dir_all(&temp_dir)?;
-    info!(path = ?temp_dir, "created temporary directory");
+    std::fs::create_dir_all(&tag_directory)?;
+    info!(path = ?tag_directory, "created tag directory");
 
     // Ensure no instance is duplicated or named MONITORING_NAME
     let mut instance_names = HashSet::new();
@@ -63,8 +63,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
 
     // Generate SSH key pair
     let key_name = format!("deployer-{}", tag);
-    let private_key_path = temp_dir.join(format!("id_rsa_{}", tag));
-    let public_key_path = temp_dir.join(format!("id_rsa_{}.pub", tag));
+    let private_key_path = tag_directory.join(format!("id_rsa_{}", tag));
+    let public_key_path = tag_directory.join(format!("id_rsa_{}.pub", tag));
     let output = Command::new("ssh-keygen")
         .arg("-t")
         .arg("rsa")
@@ -391,35 +391,35 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     info!("launched binary instances");
 
     // Write systemd service files
-    let prometheus_service_path = temp_dir.join("prometheus.service");
+    let prometheus_service_path = tag_directory.join("prometheus.service");
     std::fs::write(&prometheus_service_path, PROMETHEUS_SERVICE)?;
-    let loki_service_path = temp_dir.join("loki.service");
+    let loki_service_path = tag_directory.join("loki.service");
     std::fs::write(&loki_service_path, LOKI_SERVICE)?;
-    let pyroscope_service_path = temp_dir.join("pyroscope.service");
+    let pyroscope_service_path = tag_directory.join("pyroscope.service");
     std::fs::write(&pyroscope_service_path, PYROSCOPE_SERVICE)?;
-    let tempo_service_path = temp_dir.join("tempo.service");
+    let tempo_service_path = tag_directory.join("tempo.service");
     std::fs::write(&tempo_service_path, TEMPO_SERVICE)?;
-    let promtail_service_path = temp_dir.join("promtail.service");
+    let promtail_service_path = tag_directory.join("promtail.service");
     std::fs::write(&promtail_service_path, PROMTAIL_SERVICE)?;
-    let node_exporter_service_path = temp_dir.join("node_exporter.service");
+    let node_exporter_service_path = tag_directory.join("node_exporter.service");
     std::fs::write(&node_exporter_service_path, NODE_EXPORTER_SERVICE)?;
-    let pyroscope_agent_service_path = temp_dir.join("pyroscope-agent.service");
+    let pyroscope_agent_service_path = tag_directory.join("pyroscope-agent.service");
     std::fs::write(&pyroscope_agent_service_path, PYROSCOPE_AGENT_SERVICE)?;
-    let pyroscope_agent_timer_path = temp_dir.join("pyroscope-agent.timer");
+    let pyroscope_agent_timer_path = tag_directory.join("pyroscope-agent.timer");
     std::fs::write(&pyroscope_agent_timer_path, PYROSCOPE_AGENT_TIMER)?;
-    let binary_service_path = temp_dir.join("binary.service");
+    let binary_service_path = tag_directory.join("binary.service");
     std::fs::write(&binary_service_path, BINARY_SERVICE)?;
-    let memleak_agent_service_path = temp_dir.join("memleak-agent.service");
+    let memleak_agent_service_path = tag_directory.join("memleak-agent.service");
     std::fs::write(&memleak_agent_service_path, MEMLEAK_AGENT_SERVICE)?;
-    let memleak_agent_script_path = temp_dir.join("memleak-agent.sh");
+    let memleak_agent_script_path = tag_directory.join("memleak-agent.sh");
     std::fs::write(&memleak_agent_script_path, MEMLEAK_AGENT_SCRIPT)?;
 
     // Write logrotate configuration file
-    let logrotate_conf_path = temp_dir.join("logrotate.conf");
+    let logrotate_conf_path = tag_directory.join("logrotate.conf");
     std::fs::write(&logrotate_conf_path, LOGROTATE_CONF)?;
 
     // Add BBR configuration file
-    let bbr_conf_path = temp_dir.join("99-bbr.conf");
+    let bbr_conf_path = tag_directory.join("99-bbr.conf");
     std::fs::write(&bbr_conf_path, BBR_CONF)?;
 
     // Configure monitoring instance
@@ -436,17 +436,17 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         })
         .collect();
     let prom_config = generate_prometheus_config(&instances);
-    let prom_path = temp_dir.join("prometheus.yml");
+    let prom_path = tag_directory.join("prometheus.yml");
     std::fs::write(&prom_path, prom_config)?;
-    let datasources_path = temp_dir.join("datasources.yml");
+    let datasources_path = tag_directory.join("datasources.yml");
     std::fs::write(&datasources_path, DATASOURCES_YML)?;
-    let all_yaml_path = temp_dir.join("all.yml");
+    let all_yaml_path = tag_directory.join("all.yml");
     std::fs::write(&all_yaml_path, ALL_YML)?;
-    let loki_config_path = temp_dir.join("loki.yml");
+    let loki_config_path = tag_directory.join("loki.yml");
     std::fs::write(&loki_config_path, LOKI_CONFIG)?;
-    let pyroscope_config_path = temp_dir.join("pyroscope.yml");
+    let pyroscope_config_path = tag_directory.join("pyroscope.yml");
     std::fs::write(&pyroscope_config_path, PYROSCOPE_CONFIG)?;
-    let tempo_yml_path = temp_dir.join("tempo.yml");
+    let tempo_yml_path = tag_directory.join("tempo.yml");
     std::fs::write(&tempo_yml_path, TEMPO_CONFIG)?;
     rsync_file(
         private_key,
@@ -572,14 +572,14 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             .collect(),
     };
     let hosts_yaml = serde_yaml::to_string(&hosts)?;
-    let hosts_path = temp_dir.join("hosts.yaml");
+    let hosts_path = tag_directory.join("hosts.yaml");
     std::fs::write(&hosts_path, hosts_yaml)?;
 
     // Configure binary instances
     info!("configuring binary instances");
     let mut start_futures = Vec::new();
     for deployment in &deployments {
-        let temp_dir = temp_dir.clone();
+        let tag_directory = tag_directory.clone();
         let instance = deployment.instance.clone();
         wait_for_instances_ready(&ec2_clients[&instance.region], &[deployment.id.clone()]).await?;
         let ip = deployment.ip.clone();
@@ -610,7 +610,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 "/home/ubuntu/hosts.yaml",
             )
             .await?;
-            let promtail_config_path = temp_dir.join(format!("promtail_{}.yml", instance.name));
+            let promtail_config_path =
+                tag_directory.join(format!("promtail_{}.yml", instance.name));
             std::fs::write(
                 &promtail_config_path,
                 promtail_config(
@@ -663,7 +664,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             )
             .await?;
             let pyroscope_agent_script_path =
-                temp_dir.join(format!("pyroscope-agent_{}.sh", instance.name));
+                tag_directory.join(format!("pyroscope-agent_{}.sh", instance.name));
             std::fs::write(
                 &pyroscope_agent_script_path,
                 generate_pyroscope_script(
@@ -826,7 +827,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     info!("updated monitoring security group");
 
     // Mark deployment as complete
-    File::create(temp_dir.join(CREATED_FILE_NAME))?;
+    File::create(tag_directory.join(CREATED_FILE_NAME))?;
     info!(
         monitoring = monitoring_ip.as_str(),
         binary = ?all_binary_ips,

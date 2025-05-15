@@ -1,5 +1,9 @@
 use super::{Config, Error, Mailbox, Message, Relay};
-use crate::authenticated::{actors::tracker, channels::Channels, metrics, types};
+use crate::authenticated::{
+    actors::tracker::{self, Metadata, Reservation},
+    channels::Channels,
+    metrics, types,
+};
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Verifier;
 use commonware_macros::select;
@@ -34,11 +38,15 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: Verifier>
     rate_limited: Family<metrics::Message, Counter>,
 
     // When reservation goes out-of-scope, the tracker will be notified.
-    _reservation: tracker::Reservation<E, C>,
+    reservation: Reservation<E, C::PublicKey>,
 }
 
 impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Verifier> Actor<E, C> {
-    pub fn new(context: E, cfg: Config, reservation: tracker::Reservation<E, C>) -> (Self, Relay) {
+    pub fn new(
+        context: E,
+        cfg: Config,
+        reservation: Reservation<E, C::PublicKey>,
+    ) -> (Self, Relay) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
@@ -51,7 +59,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Ver
                 allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
                 allowed_peers_rate: cfg.allowed_peers_rate,
                 codec_config: types::Config {
-                    max_bitvec: cfg.max_peer_set_size,
+                    max_bit_vec: cfg.max_peer_set_size,
                     max_peers: cfg.peer_gossip_max_count,
                 },
                 control: control_receiver,
@@ -60,7 +68,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Ver
                 sent_messages: cfg.sent_messages,
                 received_messages: cfg.received_messages,
                 rate_limited: cfg.rate_limited,
-                _reservation: reservation,
+                reservation,
             },
             Relay::new(low_sender, high_sender),
         )
@@ -118,8 +126,15 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Ver
             let mut tracker = tracker.clone();
             let mailbox = self.mailbox.clone();
             let rate_limits = rate_limits.clone();
+            let dialer = matches!(self.reservation.metadata(), Metadata::Dialer(..));
             move |context| async move {
-                let mut deadline = context.current() + self.gossip_bit_vec_frequency;
+                // Allow tracker to initialize the peer
+                tracker.connect(peer.clone(), dialer, mailbox.clone()).await;
+
+                // Set the initial deadline to now to start gossiping immediately
+                let mut deadline = context.current();
+
+                // Enter into the main loop
                 loop {
                     select! {
                         _ = context.sleep_until(deadline) => {

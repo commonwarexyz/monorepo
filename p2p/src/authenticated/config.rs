@@ -10,7 +10,7 @@ pub type Bootstrapper<P> = (P, SocketAddr);
 ///
 /// # Warning
 /// It is recommended to synchronize this configuration across peers in the network (with the
-/// exception of `crypto`, `registry`, `listen`, `bootstrappers`, `allow_private_ips`, and `mailbox_size`).
+/// exception of `crypto`, `listen`, `bootstrappers`, `allow_private_ips`, and `mailbox_size`).
 /// If this is not synchronized, connections could be unnecessarily dropped, messages could be parsed incorrectly,
 /// and/or peers will rate limit each other during normal operation.
 #[derive(Clone)]
@@ -63,11 +63,17 @@ pub struct Config<C: Scheme> {
     /// Quota for incoming connections across all peers.
     pub allowed_incoming_connection_rate: Quota,
 
-    /// Frequency to attempt to dial known addresses.
+    /// Average frequency at which we make a single dial attempt across all peers.
     pub dial_frequency: Duration,
 
-    /// Quota for peers to dial.
-    pub dial_rate: Quota,
+    /// Average frequency at which we will fetch a new list of dialable peers.
+    ///
+    /// This value also limits the rate at which we attempt to re-dial any single peer.
+    pub query_frequency: Duration,
+
+    /// Times that dialing a given peer should fail before asking for updated peer information for
+    /// that peer.
+    pub dial_fail_limit: usize,
 
     /// Number of peer sets to track.
     ///
@@ -129,8 +135,9 @@ impl<C: Scheme> Config<C> {
             handshake_timeout: Duration::from_secs(5),
             allowed_connection_rate_per_peer: Quota::per_minute(NZU32!(1)),
             allowed_incoming_connection_rate: Quota::per_second(NZU32!(256)),
-            dial_frequency: Duration::from_secs(60),
-            dial_rate: Quota::per_minute(NZU32!(30)),
+            dial_frequency: Duration::from_millis(1_000),
+            query_frequency: Duration::from_secs(60),
+            dial_fail_limit: 2,
             tracked_peer_sets: 4,
             max_peer_set_size: 1 << 16, // 2^16
             gossip_bit_vec_frequency: Duration::from_secs(50),
@@ -168,8 +175,9 @@ impl<C: Scheme> Config<C> {
             handshake_timeout: Duration::from_secs(5),
             allowed_connection_rate_per_peer: Quota::per_second(NZU32!(1)),
             allowed_incoming_connection_rate: Quota::per_second(NZU32!(256)),
-            dial_frequency: Duration::from_secs(5),
-            dial_rate: Quota::per_second(NZU32!(30)),
+            dial_frequency: Duration::from_millis(500),
+            query_frequency: Duration::from_secs(30),
+            dial_fail_limit: 1,
             tracked_peer_sets: 4,
             max_peer_set_size: 1 << 16, // 2^16
             gossip_bit_vec_frequency: Duration::from_secs(5),
@@ -199,10 +207,11 @@ impl<C: Scheme> Config<C> {
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
-            allowed_connection_rate_per_peer: Quota::per_second(NZU32!(1_024)),
+            allowed_connection_rate_per_peer: Quota::per_second(NZU32!(4)),
             allowed_incoming_connection_rate: Quota::per_second(NZU32!(1_024)),
-            dial_frequency: Duration::from_secs(1),
-            dial_rate: Quota::per_second(NZU32!(1_024)),
+            dial_frequency: Duration::from_millis(200),
+            query_frequency: Duration::from_millis(5_000),
+            dial_fail_limit: 1,
             tracked_peer_sets: 4,
             max_peer_set_size: 1 << 8, // 2^8
             gossip_bit_vec_frequency: Duration::from_secs(1),
