@@ -1364,9 +1364,6 @@ mod tests {
             let handle = context.spawn_dedicated(|| {
                 panic!("dedicated task panicked");
             });
-
-            // Because the task panics in a dedicated thread, the `should_panic` attribute will not
-            // catch the panic.
             assert!(matches!(handle.await, Err(Error::Exited)));
         });
     }

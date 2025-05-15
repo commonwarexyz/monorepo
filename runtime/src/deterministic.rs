@@ -847,7 +847,7 @@ impl crate::Spawner for Context {
             .clone();
 
         // Initialize the blocking task
-        let (f, handle) = Handle::init(f, gauge, false);
+        let (f, handle) = Handle::init_blocking(f, gauge, false);
 
         // Spawn the task
         let f = async move { f() };
@@ -880,7 +880,7 @@ impl crate::Spawner for Context {
             .clone();
 
         // Initialize the dedicated task
-        let (f, handle) = Handle::init(f, gauge, false);
+        let (f, handle) = Handle::init_blocking(f, gauge, false);
 
         // Spawn the task
         let f = async move { f() };
