@@ -1,6 +1,6 @@
 use super::{append_random_data, get_journal};
 use commonware_runtime::{
-    benchmarks::{context, tokio},
+    benchmarks::{context, tokio::Runner as TokioBenchRunner},
     tokio::{Config, Context, Runner},
     Runner as _,
 };
@@ -47,7 +47,7 @@ fn bench_fixed_replay(c: &mut Criterion) {
     for items in [1_000, 10_000, 100_000, 500_000] {
         // Create a config we can use across all benchmarks (with a fixed `storage_directory`), allowing the
         // same test file to be re-used.
-        let cfg = Config::default();
+        let cfg = Config::default().with_storage_directory_from_env();
 
         // Generate a large temp journal with random data.
         let runner = Runner::new(cfg.clone());
@@ -59,7 +59,7 @@ fn bench_fixed_replay(c: &mut Criterion) {
         });
 
         // Run the benchmarks
-        let runner = tokio::Runner::new(cfg.clone());
+        let runner = TokioBenchRunner::new(cfg.clone());
         for buffer in [128, 16_384, 65_536, 1_048_576] {
             c.bench_function(
                 &format!(
