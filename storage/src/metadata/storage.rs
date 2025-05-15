@@ -95,8 +95,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
 
         // Read blob
         let len = len.try_into().map_err(|_| Error::BlobTooLarge(len))?;
-        let mut buf = vec![0u8; len];
-        blob.read_at(&mut buf, 0).await?;
+        let buf = blob.read_at(vec![0u8; len], 0).await?;
 
         // Verify integrity
         if buf.len() < 20 {
@@ -242,7 +241,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
 
         // Write and truncate blob
         let buf_len = buf.len() as u64;
-        next_blob.0.write_at(&buf, 0).await?;
+        next_blob.0.write_at(buf, 0).await?;
         next_blob.0.truncate(buf_len).await?;
         next_blob.0.sync().await?;
         next_blob.1 = buf_len;

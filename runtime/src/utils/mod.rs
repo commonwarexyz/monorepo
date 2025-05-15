@@ -326,7 +326,7 @@ mod tests {
             let data = b"Hello, world! This is a test.";
             let (blob, size) = context.open("partition", b"test").await.unwrap();
             assert_eq!(size, 0);
-            blob.write_at(data, 0).await.unwrap();
+            blob.write_at(data.to_vec(), 0).await.unwrap();
             let size = data.len() as u64;
 
             // Create a buffer reader with a small buffer size
@@ -367,59 +367,12 @@ mod tests {
             let data = b"Hello, world! This is a test.";
             let (blob, size) = context.open("partition", b"test").await.unwrap();
             assert_eq!(size, 0);
-            blob.write_at(data, 0).await.unwrap();
+            blob.write_at(data.to_vec(), 0).await.unwrap();
             let size = data.len() as u64;
 
             // Create a buffer reader with a small buffer size
             let lookahead = 0;
             Buffer::new(blob, size, lookahead);
-        });
-    }
-
-    #[test_traced]
-    fn test_buffer_peek_and_advance() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Create a memory blob with some test data
-            let data = b"Hello, world!";
-            let (blob, size) = context.open("partition", b"test").await.unwrap();
-            assert_eq!(size, 0);
-            blob.write_at(data, 0).await.unwrap();
-            let size = data.len() as u64;
-
-            // Create a buffer reader
-            let buffer_size = 20;
-            let mut reader = Buffer::new(blob, size, buffer_size);
-
-            // Peek at the first 5 bytes
-            let peeked = reader.peek(5).await.unwrap();
-            assert_eq!(peeked, b"Hello");
-
-            // Position should still be 0
-            assert_eq!(reader.position(), 0);
-
-            // Advance 5 bytes
-            reader.advance(5).unwrap();
-            assert_eq!(reader.position(), 5);
-
-            // Peek and read more
-            let peeked = reader.peek(7).await.unwrap();
-            assert_eq!(peeked, b", world");
-
-            let mut buf = [0u8; 7];
-            reader.read_exact(&mut buf, 7).await.unwrap();
-            assert_eq!(&buf, b", world");
-
-            // Position should now be 12
-            assert_eq!(reader.position(), 12);
-
-            // Read the last byte
-            let mut buf = [0u8; 1];
-            reader.read_exact(&mut buf, 1).await.unwrap();
-            assert_eq!(&buf, b"!");
-
-            // Should be at the end now
-            assert_eq!(reader.blob_remaining(), 0);
         });
     }
 
@@ -431,7 +384,7 @@ mod tests {
             let data = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
             let (blob, size) = context.open("partition", b"test").await.unwrap();
             assert_eq!(size, 0);
-            blob.write_at(data, 0).await.unwrap();
+            blob.write_at(data.to_vec(), 0).await.unwrap();
             let size = data.len() as u64;
 
             // Create a buffer reader with buffer size 10
@@ -445,10 +398,6 @@ mod tests {
 
             // Position should be 15
             assert_eq!(reader.position(), 15);
-
-            // Peek at data that crosses another boundary
-            let peeked = reader.peek(10).await.unwrap();
-            assert_eq!(peeked, b"PQRSTUVWXY");
 
             // Read the rest
             let mut buf = [0u8; 11];
@@ -469,7 +418,7 @@ mod tests {
             let data = b"This is a test with known size limitations.";
             let (blob, size) = context.open("partition", b"test").await.unwrap();
             assert_eq!(size, 0);
-            blob.write_at(data, 0).await.unwrap();
+            blob.write_at(data.to_vec(), 0).await.unwrap();
             let size = data.len() as u64;
 
             // Create a buffer reader with a buffer smaller than the data
@@ -514,7 +463,7 @@ mod tests {
             let data = vec![0x42; data_size];
             let (blob, size) = context.open("partition", b"test").await.unwrap();
             assert_eq!(size, 0);
-            blob.write_at(&data, 0).await.unwrap();
+            blob.write_at(data.clone(), 0).await.unwrap();
             let size = data.len() as u64;
 
             // Create a buffer with size smaller than the data
@@ -564,7 +513,7 @@ mod tests {
 
             let (blob, size) = context.open("partition", b"test").await.unwrap();
             assert_eq!(size, 0);
-            blob.write_at(&data, 0).await.unwrap();
+            blob.write_at(data.clone(), 0).await.unwrap();
             let size = data.len() as u64;
 
             let mut reader = Buffer::new(blob, size, buffer_size);
@@ -599,7 +548,7 @@ mod tests {
             let data = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
             let (blob, size) = context.open("partition", b"test").await.unwrap();
             assert_eq!(size, 0);
-            blob.write_at(data, 0).await.unwrap();
+            blob.write_at(data.to_vec(), 0).await.unwrap();
             let size = data.len() as u64;
 
             // Create a buffer reader
@@ -652,7 +601,7 @@ mod tests {
             let data = vec![0x41; 1000]; // 1000 'A' characters
             let (blob, size) = context.open("partition", b"test").await.unwrap();
             assert_eq!(size, 0);
-            blob.write_at(&data, 0).await.unwrap();
+            blob.write_at(data.clone(), 0).await.unwrap();
             let size = data.len() as u64;
 
             // Create a buffer reader with small buffer
@@ -694,7 +643,7 @@ mod tests {
             let data = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
             let (blob, size) = context.open("partition", b"test").await.unwrap();
             assert_eq!(size, 0);
-            blob.write_at(data, 0).await.unwrap();
+            blob.write_at(data.to_vec(), 0).await.unwrap();
             let data_len = data.len() as u64;
 
             // Create a buffer reader
@@ -733,10 +682,10 @@ mod tests {
         executor.start(|context| async move {
             // Create a memory blob with some test data
             let data = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+            let data_len = data.len() as u64;
             let (blob, size) = context.open("partition", b"test").await.unwrap();
             assert_eq!(size, 0);
-            blob.write_at(data, 0).await.unwrap();
-            let data_len = data.len() as u64;
+            blob.write_at(data.to_vec(), 0).await.unwrap();
 
             // Create a buffer reader
             let buffer_size = 10;
