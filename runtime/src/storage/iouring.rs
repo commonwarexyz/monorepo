@@ -282,12 +282,10 @@ impl crate::Blob for Blob {
             let bytes_read = receiver.await.map_err(|_| Error::ReadFailed)?;
 
             // A non-positive return value indicates an error.
-
             let bytes_read: usize = bytes_read.try_into().map_err(|_| Error::ReadFailed)?;
             if bytes_read == 0 {
                 // A return value of 0 indicates EOF, which shouldn't happen because we
-                // aren't done reading into `buf`.
-                // See `man pread`.
+                // aren't done reading into `buf`. See `man pread`.
                 return Err(Error::BlobInsufficientLength);
             }
             total_read += bytes_read;
