@@ -221,7 +221,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         buf.put_u32(checksum);
 
         let item_pos = (*len / Self::CHUNK_SIZE_U64) + self.cfg.items_per_blob * newest_blob_index;
-        newest_blob.write_at(&buf, *len).await?;
+        newest_blob.write_at(buf, *len).await?;
         trace!(blob = newest_blob_index, pos = item_pos, "appended item");
         *len += Self::CHUNK_SIZE_U64;
 
@@ -317,9 +317,8 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
 
         let item_index = item_pos % self.cfg.items_per_blob;
         let offset = item_index * Self::CHUNK_SIZE_U64;
-        let mut buf = vec![0u8; Self::CHUNK_SIZE];
-        blob.read_at(&mut buf, offset).await?;
-        Self::verify_integrity(&buf)
+        let read = blob.read_at(vec![0u8; Self::CHUNK_SIZE], offset).await?;
+        Self::verify_integrity(&read)
     }
 
     /// Verify the integrity of the Array + checksum in `buf`, returning the array if it is valid.
@@ -703,7 +702,7 @@ mod tests {
                 .expect("Failed to open blob");
             // Write incorrect checksum
             let bad_checksum = 123456789u32;
-            blob.write_at(&bad_checksum.to_be_bytes(), checksum_offset)
+            blob.write_at(bad_checksum.to_be_bytes().to_vec(), checksum_offset)
                 .await
                 .expect("Failed to write incorrect checksum");
             let corrupted_item_pos = 40 * ITEMS_PER_BLOB + ITEMS_PER_BLOB / 2;

@@ -1,4 +1,5 @@
 use crate::{deterministic::Auditor, Error};
+use commonware_utils::{StableBuf, StableBufMut};
 use sha2::digest::Update;
 use std::sync::Arc;
 
@@ -62,21 +63,21 @@ pub struct Blob<B: crate::Blob> {
 }
 
 impl<B: crate::Blob> crate::Blob for Blob<B> {
-    async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
+    async fn read_at<S: StableBufMut>(&self, buf: S, offset: u64) -> Result<S, Error> {
         self.auditor.event(b"read_at", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
-            hasher.update(buf);
+            hasher.update(buf.as_ref());
             hasher.update(&offset.to_be_bytes());
         });
         self.inner.read_at(buf, offset).await
     }
 
-    async fn write_at(&self, buf: &[u8], offset: u64) -> Result<(), Error> {
+    async fn write_at<S: StableBuf>(&self, buf: S, offset: u64) -> Result<(), Error> {
         self.auditor.event(b"write_at", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
-            hasher.update(buf);
+            hasher.update(buf.as_ref());
             hasher.update(&offset.to_be_bytes());
         });
         self.inner.write_at(buf, offset).await
@@ -147,8 +148,8 @@ mod tests {
         let (blob2, _) = storage2.open("partition", b"test_blob").await.unwrap();
 
         // Write data to the blobs
-        blob1.write_at(b"hello world", 0).await.unwrap();
-        blob2.write_at(b"hello world", 0).await.unwrap();
+        blob1.write_at(b"hello world".to_vec(), 0).await.unwrap();
+        blob2.write_at(b"hello world".to_vec(), 0).await.unwrap();
         assert_eq!(
             auditor1.state(),
             auditor2.state(),
@@ -156,12 +157,10 @@ mod tests {
         );
 
         // Read data from the blobs
-        let mut buffer1 = vec![0; 11];
-        let mut buffer2 = vec![0; 11];
-        blob1.read_at(&mut buffer1, 0).await.unwrap();
-        blob2.read_at(&mut buffer2, 0).await.unwrap();
-        assert_eq!(buffer1, b"hello world", "Blob1 content does not match");
-        assert_eq!(buffer2, b"hello world", "Blob2 content does not match");
+        let read = blob1.read_at(vec![0; 11], 0).await.unwrap();
+        assert_eq!(read, b"hello world", "Blob1 content does not match");
+        let read: Vec<u8> = blob2.read_at(vec![0; 11], 0).await.unwrap();
+        assert_eq!(read, b"hello world", "Blob2 content does not match");
         assert_eq!(
             auditor1.state(),
             auditor2.state(),

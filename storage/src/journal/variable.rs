@@ -223,22 +223,19 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     ) -> Result<(u32, u32, V), Error> {
         // Read item size
         let offset = offset as u64 * ITEM_ALIGNMENT;
-        let mut size = [0u8; 4];
-        blob.read_at(&mut size, offset).await?;
-        let size = u32::from_be_bytes(size);
+        let size = blob.read_at(vec![0; 4], offset).await?;
+        let size = u32::from_be_bytes(size.try_into().unwrap());
         let offset = offset.checked_add(4).ok_or(Error::OffsetOverflow)?;
 
         // Read item
-        let mut item = vec![0u8; size as usize];
-        blob.read_at(&mut item, offset).await?;
+        let item = blob.read_at(vec![0u8; size as usize], offset).await?;
         let offset = offset
             .checked_add(size as u64)
             .ok_or(Error::OffsetOverflow)?;
 
         // Read checksum
-        let mut stored_checksum = [0u8; 4];
-        blob.read_at(&mut stored_checksum, offset).await?;
-        let stored_checksum = u32::from_be_bytes(stored_checksum);
+        let stored_checksum = blob.read_at(vec![0; 4], offset).await?;
+        let stored_checksum = u32::from_be_bytes(stored_checksum.try_into().unwrap());
         let checksum = crc32fast::hash(&item);
         if checksum != stored_checksum {
             return Err(Error::ChecksumMismatch(stored_checksum, checksum));
@@ -332,8 +329,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         // Read buffer
         let offset = offset as u64 * ITEM_ALIGNMENT;
         let entry_size = 4 + size as usize + 4;
-        let mut buf = vec![0u8; entry_size];
-        blob.read_at(&mut buf, offset).await?;
+        let buf = blob.read_at(vec![0u8; entry_size], offset).await?;
 
         // Check size
         let disk_size = u32::from_be_bytes(buf[..4].try_into().unwrap());
@@ -529,7 +525,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         let cursor = blob.1;
         let offset = compute_next_offset(cursor)?;
         let aligned_cursor = offset as u64 * ITEM_ALIGNMENT;
-        blob.0.write_at(&buf, aligned_cursor).await?;
+        blob.0.write_at(buf, aligned_cursor).await?;
         blob.1 = aligned_cursor + entry_len as u64;
         trace!(blob = section, offset, "appended item");
         Ok((offset, item_len))
@@ -650,6 +646,7 @@ mod tests {
     use bytes::BufMut;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Error as RError, Runner, Storage};
+    use commonware_utils::{StableBuf, StableBufMut};
     use futures::{pin_mut, StreamExt};
     use prometheus_client::registry::Metric;
 
@@ -943,7 +940,7 @@ mod tests {
 
             // Write incomplete size data (less than 4 bytes)
             let incomplete_data = vec![0x00, 0x01]; // Less than 4 bytes
-            blob.write_at(&incomplete_data, 0)
+            blob.write_at(incomplete_data, 0)
                 .await
                 .expect("Failed to write incomplete data");
             blob.close().await.expect("Failed to close blob");
@@ -997,8 +994,8 @@ mod tests {
             let mut buf = Vec::new();
             buf.put_u32(item_size);
             let data = [2u8; 5];
-            buf.put_slice(&data);
-            blob.write_at(&buf, 0)
+            BufMut::put_slice(&mut buf, &data);
+            blob.write_at(buf, 0)
                 .await
                 .expect("Failed to write item size");
             blob.close().await.expect("Failed to close blob");
@@ -1053,13 +1050,13 @@ mod tests {
 
             // Write size
             let mut offset = 0;
-            blob.write_at(&item_size.to_be_bytes(), offset)
+            blob.write_at(item_size.to_be_bytes().to_vec(), offset)
                 .await
                 .expect("Failed to write item size");
             offset += 4;
 
             // Write item data
-            blob.write_at(item_data, offset)
+            blob.write_at(item_data.to_vec(), offset)
                 .await
                 .expect("Failed to write item data");
             // Do not write checksum (omit it)
@@ -1119,19 +1116,19 @@ mod tests {
 
             // Write size
             let mut offset = 0;
-            blob.write_at(&item_size.to_be_bytes(), offset)
+            blob.write_at(item_size.to_be_bytes().to_vec(), offset)
                 .await
                 .expect("Failed to write item size");
             offset += 4;
 
             // Write item data
-            blob.write_at(item_data, offset)
+            blob.write_at(item_data.to_vec(), offset)
                 .await
                 .expect("Failed to write item data");
             offset += item_data.len() as u64;
 
             // Write incorrect checksum
-            blob.write_at(&incorrect_checksum.to_be_bytes(), offset)
+            blob.write_at(incorrect_checksum.to_be_bytes().to_vec(), offset)
                 .await
                 .expect("Failed to write incorrect checksum");
 
@@ -1245,11 +1242,11 @@ mod tests {
     struct MockBlob {}
 
     impl Blob for MockBlob {
-        async fn read_at(&self, _buf: &mut [u8], _offset: u64) -> Result<(), RError> {
-            Ok(())
+        async fn read_at<B: StableBufMut>(&self, buf: B, _offset: u64) -> Result<B, RError> {
+            Ok(buf)
         }
 
-        async fn write_at(&self, _buf: &[u8], _offset: u64) -> Result<(), RError> {
+        async fn write_at<B: StableBuf>(&self, _buf: B, _offset: u64) -> Result<(), RError> {
             Ok(())
         }
 

@@ -1174,7 +1174,7 @@ mod tests {
         // Run some tasks, sync storage, and recover the runtime
         let (context, state) = executor1.start(|context| async move {
             let (blob, _) = context.open(partition, name).await.unwrap();
-            blob.write_at(data, 0).await.unwrap();
+            blob.write_at(Vec::from(data), 0).await.unwrap();
             blob.sync().await.unwrap();
             let state = context.auditor().state();
             (context, state)
@@ -1189,9 +1189,8 @@ mod tests {
         executor.start(|context| async move {
             let (blob, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, data.len() as u64);
-            let mut buf = vec![0; data.len()];
-            blob.read_at(&mut buf, 0).await.unwrap();
-            assert_eq!(buf, data);
+            let read = blob.read_at(vec![0; data.len()], 0).await.unwrap();
+            assert_eq!(read, data);
         });
     }
 
@@ -1201,13 +1200,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         let partition = "test_partition";
         let name = b"test_blob";
-        let data = b"Hello, world!".to_vec();
+        let data = Vec::from("Hello, world!");
 
         // Run some tasks without syncing storage
         let context = executor.start(|context| async move {
             let context = context.clone();
             let (blob, _) = context.open(partition, name).await.unwrap();
-            blob.write_at(&data, 0).await.unwrap();
+            blob.write_at(data, 0).await.unwrap();
             // Intentionally do not call sync() here
             context
         });
