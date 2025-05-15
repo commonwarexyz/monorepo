@@ -149,7 +149,7 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// Blocking tasks cannot be aborted.
     fn spawn_blocking<F, T>(self, f: F) -> Handle<T>
     where
-        F: FnOnce() -> T + Send + 'static,
+        F: FnOnce(Self) -> T + Send + 'static,
         T: Send + 'static;
 
     /// Enqueue a blocking task on a dedicated thread.
@@ -165,7 +165,7 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// Dedicated tasks cannot be aborted.
     fn spawn_dedicated<F, T>(self, f: F) -> Handle<T>
     where
-        F: FnOnce() -> T + Send + 'static,
+        F: FnOnce(Self) -> T + Send + 'static,
         T: Send + 'static;
 
     /// Signals the runtime to stop execution and that all outstanding tasks

@@ -824,15 +824,16 @@ impl crate::Spawner for Context {
 
     fn spawn_blocking<F, T>(self, f: F) -> Handle<T>
     where
-        F: FnOnce() -> T + Send + 'static,
+        F: FnOnce(Self) -> T + Send + 'static,
         T: Send + 'static,
     {
         // Ensure a context only spawns one task
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
+        let label = self.label.clone();
         let work = Work {
-            label: self.label.clone(),
+            label: label.clone(),
         };
         self.executor
             .metrics
@@ -847,25 +848,27 @@ impl crate::Spawner for Context {
             .clone();
 
         // Initialize the blocking task
-        let (f, handle) = Handle::init_blocking(f, gauge, false);
+        let executor = self.executor.clone();
+        let (f, handle) = Handle::init_blocking(|| f(self), gauge, false);
 
         // Spawn the task
         let f = async move { f() };
-        Tasks::register_work(&self.executor.tasks, &self.label, Box::pin(f));
+        Tasks::register_work(&executor.tasks, &label, Box::pin(f));
         handle
     }
 
     fn spawn_dedicated<F, T>(self, f: F) -> Handle<T>
     where
-        F: FnOnce() -> T + Send + 'static,
+        F: FnOnce(Self) -> T + Send + 'static,
         T: Send + 'static,
     {
         // Ensure a context only spawns one task
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
+        let label = self.label.clone();
         let work = Work {
-            label: self.label.clone(),
+            label: label.clone(),
         };
         self.executor
             .metrics
@@ -880,11 +883,12 @@ impl crate::Spawner for Context {
             .clone();
 
         // Initialize the dedicated task
-        let (f, handle) = Handle::init_blocking(f, gauge, false);
+        let executor = self.executor.clone();
+        let (f, handle) = Handle::init_blocking(|| f(self), gauge, false);
 
         // Spawn the task
         let f = async move { f() };
-        Tasks::register_work(&self.executor.tasks, &self.label, Box::pin(f));
+        Tasks::register_work(&executor.tasks, &label, Box::pin(f));
         handle
     }
 
