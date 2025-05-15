@@ -1,11 +1,11 @@
-use crate::Error;
+use crate::{iouring, Error};
 use commonware_utils::{from_hex, hex, StableBuf, StableBufMut};
 use futures::{
     channel::{mpsc, oneshot},
     executor::block_on,
-    SinkExt as _, StreamExt as _,
+    SinkExt as _,
 };
-use io_uring::{opcode, squeue::Entry as SqueueEntry, types, IoUring};
+use io_uring::{opcode, squeue::Entry as SqueueEntry, types};
 use std::fs::{self, File};
 use std::io::{Error as IoError, ErrorKind};
 use std::os::fd::AsRawFd;
@@ -13,116 +13,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
-/// Configuration for an iouring instance.
-/// See `man io_uring`.
-pub struct IoUringConfig {
-    /// Size of the ring.
-    pub size: u32,
-    /// If true, use IOPOLL mode.
-    pub iopoll: bool,
-    /// If true, use single issuer mode.
-    pub single_issuer: bool,
-}
-
-impl Default for IoUringConfig {
-    fn default() -> Self {
-        Self {
-            size: 128,
-            iopoll: false,
-            single_issuer: true,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
 /// Configuration for a [Storage].
 pub struct Config {
     /// Where to store blobs.
     pub storage_directory: PathBuf,
     /// Configuration for the io_uring instance.
-    pub ring_config: IoUringConfig,
-}
-
-fn new_ring(cfg: &IoUringConfig) -> Result<IoUring, std::io::Error> {
-    let mut builder = &mut IoUring::builder();
-    if cfg.iopoll {
-        builder = builder.setup_iopoll();
-    }
-    if cfg.single_issuer {
-        builder = builder.setup_single_issuer();
-    }
-    builder.build(cfg.size)
-}
-
-/// Background task that polls for completed work and notifies waiters on completion.
-/// The user data field of all operations received on `receiver` will be ignored.
-async fn run(
-    cfg: IoUringConfig,
-    mut receiver: mpsc::Receiver<(SqueueEntry, oneshot::Sender<i32>)>,
-) {
-    let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
-    let mut next_work_id: u64 = 0;
-    // Maps a work ID to the sender that we will send the result to.
-    let mut waiters: std::collections::HashMap<_, oneshot::Sender<i32>> =
-        std::collections::HashMap::with_capacity(cfg.size as usize);
-
-    loop {
-        // Try to get a completion
-        if let Some(cqe) = ring.completion().next() {
-            let work_id = cqe.user_data();
-            let result = cqe.result();
-            let sender = waiters.remove(&work_id).expect("work is missing");
-            // Notify with the result of this operation
-            let _ = sender.send(result);
-            continue;
-        }
-
-        // Try to fill the submission queue with incoming work.
-        // Stop if we are at the max number of processing work.
-        while waiters.len() < cfg.size as usize {
-            // Wait for more work
-            let (mut work, sender) = if waiters.is_empty() {
-                // Block until there is something to do
-                match receiver.next().await {
-                    Some(work) => work,
-                    None => return,
-                }
-            } else {
-                // Handle incoming work
-                match receiver.try_next() {
-                    // Got work without blocking
-                    Ok(Some(work_item)) => work_item,
-                    // Channel closed, shut down
-                    Ok(None) => return,
-                    // No new work available, wait for a completion
-                    Err(_) => break,
-                }
-            };
-
-            // Assign a unique id
-            let work_id = next_work_id;
-            work = work.user_data(work_id);
-            // Use wrapping add in case we overflow
-            next_work_id = next_work_id.wrapping_add(1);
-
-            // We'll send the result of this operation to `sender`.
-            waiters.insert(work_id, sender);
-
-            // Submit the operation to the ring
-            unsafe {
-                ring.submission()
-                    .push(&work)
-                    .expect("unable to push to queue");
-            }
-        }
-
-        // Wait for at least 1 item to be in the completion queue.
-        // Note that we block until anything is in the completion queue,
-        // even if it's there before this call. That is, a completion
-        // that arrived before this call will be counted and cause this
-        // call to return. Note that waiters.len() > 0 here.
-        ring.submit_and_wait(1).expect("unable to submit to ring");
-    }
+    pub ring_config: iouring::Config,
 }
 
 #[derive(Clone)]
@@ -141,7 +37,7 @@ impl Storage {
             storage_directory: cfg.storage_directory.clone(),
             io_sender,
         };
-        std::thread::spawn(|| block_on(run(cfg.ring_config, receiver)));
+        std::thread::spawn(|| block_on(iouring::run(cfg.ring_config, receiver)));
         storage
     }
 }
