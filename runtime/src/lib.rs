@@ -140,16 +140,25 @@ pub trait Spawner: Clone + Send + Sync + 'static {
 
     /// Enqueue a blocking task to be executed.
     ///
-    /// This method is designed for synchronous, potentially long-running operations that should
-    /// not block the asynchronous event loop. The task starts executing immediately, and the
-    /// returned handle can be awaited to retrieve the result.
+    /// This method is designed for synchronous, potentially long-running operations. Tasks can either
+    /// be executed in a shared thread (tasks that are expected to finish on their own) or a dedicated
+    /// thread (tasks that are expected to run indefinitely).
+    ///
+    /// The task starts executing immediately, and the returned handle can be awaited to retrieve the
+    /// result.
+    ///
+    /// # Motivation
+    ///
+    /// Most runtimes allocate a limited number of threads for executing async tasks, running whatever
+    /// isn't waiting. If blocking tasks are spawned this way, they can dramatically reduce the efficiency
+    /// of said runtimes.
     ///
     /// # Warning
     ///
     /// Blocking tasks cannot be aborted.
-    fn spawn_blocking<F, T>(self, f: F) -> Handle<T>
+    fn spawn_blocking<F, T>(self, dedicated: bool, f: F) -> Handle<T>
     where
-        F: FnOnce() -> T + Send + 'static,
+        F: FnOnce(Self) -> T + Send + 'static,
         T: Send + 'static;
 
     /// Signals the runtime to stop execution and that all outstanding tasks
@@ -913,25 +922,25 @@ mod tests {
         });
     }
 
-    fn test_spawn_blocking<R: Runner>(runner: R)
+    fn test_spawn_blocking<R: Runner>(runner: R, dedicated: bool)
     where
         R::Context: Spawner,
     {
         runner.start(|context| async move {
-            let handle = context.spawn_blocking(|| 42);
+            let handle = context.spawn_blocking(dedicated, |_| 42);
             let result = handle.await;
             assert!(matches!(result, Ok(42)));
         });
     }
 
-    fn test_spawn_blocking_abort<R: Runner>(runner: R)
+    fn test_spawn_blocking_abort<R: Runner>(runner: R, dedicated: bool)
     where
         R::Context: Spawner,
     {
         runner.start(|context| async move {
             // Create task
             let (sender, mut receiver) = oneshot::channel();
-            let handle = context.spawn_blocking(move || {
+            let handle = context.spawn_blocking(dedicated, move |_| {
                 // Wait for abort to be called
                 loop {
                     if receiver.try_recv().is_ok() {
@@ -1120,26 +1129,32 @@ mod tests {
 
     #[test]
     fn test_deterministic_spawn_blocking() {
-        let executor = deterministic::Runner::default();
-        test_spawn_blocking(executor);
+        for dedicated in [false, true] {
+            let executor = deterministic::Runner::default();
+            test_spawn_blocking(executor, dedicated);
+        }
     }
 
     #[test]
     #[should_panic(expected = "blocking task panicked")]
     fn test_deterministic_spawn_blocking_panic() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let handle = context.spawn_blocking(|| {
-                panic!("blocking task panicked");
+        for dedicated in [false, true] {
+            let executor = deterministic::Runner::default();
+            executor.start(|context| async move {
+                let handle = context.spawn_blocking(dedicated, |_| {
+                    panic!("blocking task panicked");
+                });
+                handle.await.unwrap();
             });
-            handle.await.unwrap();
-        });
+        }
     }
 
     #[test]
     fn test_deterministic_spawn_blocking_abort() {
-        let executor = deterministic::Runner::default();
-        test_spawn_blocking_abort(executor);
+        for dedicated in [false, true] {
+            let executor = deterministic::Runner::default();
+            test_spawn_blocking_abort(executor, dedicated);
+        }
     }
 
     #[test]
@@ -1268,26 +1283,32 @@ mod tests {
 
     #[test]
     fn test_tokio_spawn_blocking() {
-        let executor = tokio::Runner::default();
-        test_spawn_blocking(executor);
+        for dedicated in [false, true] {
+            let executor = tokio::Runner::default();
+            test_spawn_blocking(executor, dedicated);
+        }
     }
 
     #[test]
     fn test_tokio_spawn_blocking_panic() {
-        let executor = tokio::Runner::default();
-        executor.start(|context| async move {
-            let handle = context.spawn_blocking(|| {
-                panic!("blocking task panicked");
+        for dedicated in [false, true] {
+            let executor = tokio::Runner::default();
+            executor.start(|context| async move {
+                let handle = context.spawn_blocking(dedicated, |_| {
+                    panic!("blocking task panicked");
+                });
+                let result = handle.await;
+                assert!(matches!(result, Err(Error::Exited)));
             });
-            let result = handle.await;
-            assert!(matches!(result, Err(Error::Exited)));
-        });
+        }
     }
 
     #[test]
     fn test_tokio_spawn_blocking_abort() {
-        let executor = tokio::Runner::default();
-        test_spawn_blocking_abort(executor);
+        for dedicated in [false, true] {
+            let executor = tokio::Runner::default();
+            test_spawn_blocking_abort(executor, dedicated);
+        }
     }
 
     #[test]
