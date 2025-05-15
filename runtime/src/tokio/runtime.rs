@@ -1,9 +1,14 @@
+#[cfg(feature = "iouring")]
+use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage};
+
+#[cfg(not(feature = "iouring"))]
+use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
+
 use crate::network::metered::{Listener as MeteredListener, Network as MeteredNetwork};
 use crate::network::tokio::{
     Config as TokioNetworkConfig, Listener as TokioListener, Network as TokioNetwork,
 };
-use crate::storage::metered::Storage;
-use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
+use crate::storage::metered::Storage as MeteredStorage;
 use crate::{utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
 use crate::{SinkOf, StreamOf};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
@@ -249,7 +254,17 @@ impl crate::Runner for Runner {
             .expect("failed to create Tokio runtime");
         let (signaler, signal) = Signaler::new();
 
-        let storage = Storage::new(
+        #[cfg(feature = "iouring")]
+        let storage = MeteredStorage::new(
+            IoUringStorage::start(IoUringConfig {
+                storage_directory: self.cfg.storage_directory.clone(),
+                ring_config: Default::default(),
+            }),
+            runtime_registry,
+        );
+
+        #[cfg(not(feature = "iouring"))]
+        let storage = MeteredStorage::new(
             TokioStorage::new(TokioStorageConfig::new(
                 self.cfg.storage_directory.clone(),
                 self.cfg.maximum_buffer_size,
@@ -281,6 +296,12 @@ impl crate::Runner for Runner {
     }
 }
 
+#[cfg(feature = "iouring")]
+type Storage = MeteredStorage<IoUringStorage>;
+
+#[cfg(not(feature = "iouring"))]
+type Storage = MeteredStorage<TokioStorage>;
+
 /// Implementation of [crate::Spawner], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `tokio`
 /// runtime.
@@ -288,7 +309,7 @@ pub struct Context {
     label: String,
     spawned: bool,
     executor: Arc<Executor>,
-    storage: Storage<TokioStorage>,
+    storage: Storage,
     network: MeteredNetwork<TokioNetwork>,
 }
 
@@ -532,7 +553,7 @@ impl RngCore for Context {
 impl CryptoRng for Context {}
 
 impl crate::Storage for Context {
-    type Blob = <Storage<TokioStorage> as crate::Storage>::Blob;
+    type Blob = <Storage as crate::Storage>::Blob;
 
     async fn open(&self, partition: &str, name: &[u8]) -> Result<(Self::Blob, u64), Error> {
         self.storage.open(partition, name).await
