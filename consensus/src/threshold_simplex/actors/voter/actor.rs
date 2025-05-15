@@ -918,7 +918,7 @@ impl<
 
         // Handle the nullify
         if matches!(self.reserve_nullify(&nullify).await, Action::Process) {
-            verifier.untrusted(Voter::Nullify(nullify.clone())).await;
+            verifier.trusted(Voter::Nullify(nullify.clone())).await;
             self.handle_nullify(nullify.clone()).await;
 
             // Sync the journal
@@ -2165,7 +2165,7 @@ impl<
                         continue;
                     }
 
-                    // Handle backfill
+                    // Handle verifier and backfiller
                     match msg {
                         Voter::Notarize(notarize) => {
                             self.handle_notarize(notarize).await;
