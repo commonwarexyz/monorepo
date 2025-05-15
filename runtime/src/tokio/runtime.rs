@@ -30,15 +30,15 @@ use std::{
 use tokio::runtime::{Builder, Runtime};
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-struct Work {
-    label: String,
+struct Label {
+    name: String,
     task: Task,
 }
 
 #[derive(Debug)]
 struct Metrics {
-    tasks_spawned: Family<Work, Counter>,
-    tasks_running: Family<Work, Gauge>,
+    tasks_spawned: Family<Label, Counter>,
+    tasks_running: Family<Label, Gauge>,
 }
 
 impl Metrics {
@@ -275,17 +275,17 @@ impl crate::Runner for Runner {
         });
 
         // Get metrics
-        let work = Work {
-            label: String::new(),
+        let label = Label {
+            name: String::new(),
             task: Task::Root,
         };
-        executor.metrics.tasks_spawned.get_or_create(&work).inc();
-        let gauge = executor.metrics.tasks_running.get_or_create(&work).clone();
+        executor.metrics.tasks_spawned.get_or_create(&label).inc();
+        let gauge = executor.metrics.tasks_running.get_or_create(&label).clone();
 
         // Run the future
         let context = Context {
             storage,
-            label: work.label.clone(),
+            name: label.name.clone(),
             spawned: false,
             executor: executor.clone(),
             network,
@@ -307,7 +307,7 @@ type Storage = MeteredStorage<TokioStorage>;
 /// [crate::Network], and [crate::Storage] for the `tokio`
 /// runtime.
 pub struct Context {
-    label: String,
+    name: String,
     spawned: bool,
     executor: Arc<Executor>,
     storage: Storage,
@@ -317,7 +317,7 @@ pub struct Context {
 impl Clone for Context {
     fn clone(&self) -> Self {
         Self {
-            label: self.label.clone(),
+            name: self.name.clone(),
             spawned: false,
             executor: self.executor.clone(),
             storage: self.storage.clone(),
@@ -337,20 +337,20 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
-        let work = Work {
-            label: self.label.clone(),
+        let label = Label {
+            name: self.name.clone(),
             task: Task::Async,
         };
         self.executor
             .metrics
             .tasks_spawned
-            .get_or_create(&work)
+            .get_or_create(&label)
             .inc();
         let gauge = self
             .executor
             .metrics
             .tasks_running
-            .get_or_create(&work)
+            .get_or_create(&label)
             .clone();
 
         // Set up the task
@@ -374,20 +374,20 @@ impl crate::Spawner for Context {
         self.spawned = true;
 
         // Get metrics
-        let work = Work {
-            label: self.label.clone(),
+        let label = Label {
+            name: self.name.clone(),
             task: Task::Async,
         };
         self.executor
             .metrics
             .tasks_spawned
-            .get_or_create(&work)
+            .get_or_create(&label)
             .inc();
         let gauge = self
             .executor
             .metrics
             .tasks_running
-            .get_or_create(&work)
+            .get_or_create(&label)
             .clone();
 
         // Set up the task
@@ -410,8 +410,8 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
-        let work = Work {
-            label: self.label.clone(),
+        let label = Label {
+            name: self.name.clone(),
             task: if dedicated {
                 Task::BlockingDedicated
             } else {
@@ -421,13 +421,13 @@ impl crate::Spawner for Context {
         self.executor
             .metrics
             .tasks_spawned
-            .get_or_create(&work)
+            .get_or_create(&label)
             .inc();
         let gauge = self
             .executor
             .metrics
             .tasks_running
-            .get_or_create(&work)
+            .get_or_create(&label)
             .clone();
 
         // Initialize the blocking task using the new function
@@ -454,8 +454,8 @@ impl crate::Spawner for Context {
 
 impl crate::Metrics for Context {
     fn with_label(&self, label: &str) -> Self {
-        let label = {
-            let prefix = self.label.clone();
+        let name = {
+            let prefix = self.name.clone();
             if prefix.is_empty() {
                 label.to_string()
             } else {
@@ -463,11 +463,11 @@ impl crate::Metrics for Context {
             }
         };
         assert!(
-            !label.starts_with(METRICS_PREFIX),
+            !name.starts_with(METRICS_PREFIX),
             "using runtime label is not allowed"
         );
         Self {
-            label,
+            name,
             spawned: false,
             executor: self.executor.clone(),
             storage: self.storage.clone(),
@@ -476,13 +476,13 @@ impl crate::Metrics for Context {
     }
 
     fn label(&self) -> String {
-        self.label.clone()
+        self.name.clone()
     }
 
     fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
         let name = name.into();
         let prefixed_name = {
-            let prefix = &self.label;
+            let prefix = &self.name;
             if prefix.is_empty() {
                 name
             } else {

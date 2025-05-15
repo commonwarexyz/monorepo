@@ -63,16 +63,16 @@ use tracing::trace;
 pub type Partition = HashMap<Vec<u8>, Vec<u8>>;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-struct Work {
-    label: String,
+struct Label {
+    name: String,
     task: TTask,
 }
 
 #[derive(Debug)]
 struct Metrics {
-    tasks_spawned: Family<Work, Counter>,
-    tasks_running: Family<Work, Gauge>,
-    task_polls: Family<Work, Counter>,
+    tasks_spawned: Family<Label, Counter>,
+    tasks_running: Family<Label, Gauge>,
+    task_polls: Family<Label, Counter>,
 
     network_bandwidth: Counter,
 }
@@ -352,12 +352,12 @@ impl crate::Runner for Runner {
                 // Record task for auditing
                 executor.auditor.event(b"process_task", |hasher| {
                     hasher.update(task.id.to_be_bytes());
-                    hasher.update(task.work.label.as_bytes());
+                    hasher.update(task.label.name.as_bytes());
                 });
                 trace!(id = task.id, "processing task");
 
                 // Record task poll
-                executor.metrics.task_polls.get_or_create(&task.work).inc();
+                executor.metrics.task_polls.get_or_create(&task.label).inc();
 
                 // Prepare task for polling
                 let waker = waker_ref(&task);
@@ -471,7 +471,7 @@ enum Operation {
 /// A task that is being executed by the runtime.
 struct Task {
     id: u128,
-    work: Work,
+    label: Label,
     tasks: Arc<Tasks>,
 
     operation: Operation,
@@ -524,8 +524,8 @@ impl Tasks {
         let mut queue = arc_self.queue.lock().unwrap();
         queue.push(Arc::new(Task {
             id,
-            work: Work {
-                label: String::new(),
+            label: Label {
+                name: String::new(),
                 task: TTask::Root,
             },
             tasks: arc_self.clone(),
@@ -536,14 +536,14 @@ impl Tasks {
     /// Register a new task to be executed.
     fn register_work(
         arc_self: &Arc<Self>,
-        work: Work,
+        label: Label,
         future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
     ) {
         let id = arc_self.increment();
         let mut queue = arc_self.queue.lock().unwrap();
         queue.push(Arc::new(Task {
             id,
-            work,
+            label,
             tasks: arc_self.clone(),
             operation: Operation::Work {
                 future: Mutex::new(future),
@@ -730,20 +730,20 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
-        let work = Work {
-            label: self.label.clone(),
+        let label = Label {
+            name: self.label.clone(),
             task: TTask::Async,
         };
         self.executor
             .metrics
             .tasks_spawned
-            .get_or_create(&work)
+            .get_or_create(&label)
             .inc();
         let gauge = self
             .executor
             .metrics
             .tasks_running
-            .get_or_create(&work)
+            .get_or_create(&label)
             .clone();
 
         // Set up the task
@@ -752,7 +752,7 @@ impl crate::Spawner for Context {
         let (f, handle) = Handle::init_future(future, gauge, false);
 
         // Spawn the task
-        Tasks::register_work(&executor.tasks, work, Box::pin(f));
+        Tasks::register_work(&executor.tasks, label, Box::pin(f));
         handle
     }
 
@@ -766,20 +766,20 @@ impl crate::Spawner for Context {
         self.spawned = true;
 
         // Get metrics
-        let work = Work {
-            label: self.label.clone(),
+        let label = Label {
+            name: self.label.clone(),
             task: TTask::Async,
         };
         self.executor
             .metrics
             .tasks_spawned
-            .get_or_create(&work)
+            .get_or_create(&label)
             .inc();
         let gauge = self
             .executor
             .metrics
             .tasks_running
-            .get_or_create(&work)
+            .get_or_create(&label)
             .clone();
 
         // Set up the task
@@ -788,7 +788,7 @@ impl crate::Spawner for Context {
             let (f, handle) = Handle::init_future(f, gauge, false);
 
             // Spawn the task
-            Tasks::register_work(&executor.tasks, work, Box::pin(f));
+            Tasks::register_work(&executor.tasks, label, Box::pin(f));
             handle
         }
     }
@@ -802,8 +802,8 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
-        let work = Work {
-            label: self.label.clone(),
+        let label = Label {
+            name: self.label.clone(),
             task: if dedicated {
                 TTask::BlockingDedicated
             } else {
@@ -813,13 +813,13 @@ impl crate::Spawner for Context {
         self.executor
             .metrics
             .tasks_spawned
-            .get_or_create(&work)
+            .get_or_create(&label)
             .inc();
         let gauge = self
             .executor
             .metrics
             .tasks_running
-            .get_or_create(&work)
+            .get_or_create(&label)
             .clone();
 
         // Initialize the blocking task
@@ -828,7 +828,7 @@ impl crate::Spawner for Context {
 
         // Spawn the task
         let f = async move { f() };
-        Tasks::register_work(&executor.tasks, work, Box::pin(f));
+        Tasks::register_work(&executor.tasks, label, Box::pin(f));
         handle
     }
 
