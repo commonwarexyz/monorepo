@@ -1,35 +1,30 @@
-use crate::authenticated::actors::tracker;
-use commonware_cryptography::Verifier;
+use crate::authenticated::actors::tracker::Reservation;
 use commonware_runtime::{Clock, Metrics, Sink, Spawner, Stream};
 use commonware_stream::public_key::Connection;
+use commonware_utils::Array;
 use futures::{channel::mpsc, SinkExt};
 
-pub enum Message<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, C: Verifier> {
+pub enum Message<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: Array> {
     Spawn {
-        peer: C::PublicKey,
+        peer: P,
         connection: Connection<Si, St>,
-        reservation: tracker::Reservation<E, C>,
+        reservation: Reservation<E, P>,
     },
 }
 
-pub struct Mailbox<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, C: Verifier> {
-    sender: mpsc::Sender<Message<E, Si, St, C>>,
+pub struct Mailbox<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: Array> {
+    sender: mpsc::Sender<Message<E, Si, St, P>>,
 }
 
-impl<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, C: Verifier> Mailbox<E, Si, St, C> {
-    pub fn new(sender: mpsc::Sender<Message<E, Si, St, C>>) -> Self {
+impl<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: Array> Mailbox<E, Si, St, P> {
+    pub fn new(sender: mpsc::Sender<Message<E, Si, St, P>>) -> Self {
         Self { sender }
     }
 
-    pub async fn spawn(
-        &mut self,
-        peer: C::PublicKey,
-        connection: Connection<Si, St>,
-        reservation: tracker::Reservation<E, C>,
-    ) {
+    pub async fn spawn(&mut self, connection: Connection<Si, St>, reservation: Reservation<E, P>) {
         self.sender
             .send(Message::Spawn {
-                peer,
+                peer: reservation.metadata().public_key().clone(),
                 connection,
                 reservation,
             })
@@ -38,9 +33,7 @@ impl<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, C: Verifier> Mailbox<E,
     }
 }
 
-impl<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, C: Verifier> Clone
-    for Mailbox<E, Si, St, C>
-{
+impl<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: Array> Clone for Mailbox<E, Si, St, P> {
     /// Clone the mailbox.
     ///
     /// We manually implement `clone` because the auto-generated `derive` would

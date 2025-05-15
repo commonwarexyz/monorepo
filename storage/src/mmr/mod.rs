@@ -22,8 +22,8 @@
 //!
 //! The "height" of a node is 0 for a leaf, 1 for the parent of 2 leaves, and so on.
 //!
-//! The "root hash" of an MMR is the result of hashing together the size of the MMR and the hashes
-//! of every peak in decreasing order of height.
+//! The "root digest" (or just "root") of an MMR is the result of hashing together the size of the
+//! MMR and the digests of every peak in decreasing order of height.
 //!
 //! # Examples
 //!
@@ -67,15 +67,42 @@
 //! )
 //! ```
 
+use crate::mmr::hasher::Hasher;
+use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_utils::array::prefixed_u64::U64;
+use std::future::Future;
 use thiserror::Error;
 
 pub mod bitmap;
-mod hasher;
+pub mod hasher;
 pub mod iterator;
 pub mod journaled;
 pub mod mem;
+#[cfg(test)]
+mod tests;
 pub mod verification;
+
+/// A trait for accessing MMR digests from storage.
+pub trait Storage<D: Digest>: Send + Sync {
+    /// Return the number of elements in the MMR.
+    fn size(&self) -> u64;
+
+    /// Return the specified node of the MMR if it exists & hasn't been pruned.
+    fn get_node(&self, position: u64) -> impl Future<Output = Result<Option<D>, Error>> + Send;
+}
+
+/// A trait for building an MMR and computing the root.
+pub trait Builder<H: CHasher>: Send + Sync {
+    /// Add an element to the MMR.
+    fn add(
+        &mut self,
+        hasher: &mut impl Hasher<H>,
+        element: &[u8],
+    ) -> impl Future<Output = Result<u64, Error>>;
+
+    /// Return the root hash of the MMR.
+    fn root(&self, hasher: &mut impl Hasher<H>) -> H::Digest;
+}
 
 /// Errors that can occur when interacting with an MMR.
 #[derive(Error, Debug)]

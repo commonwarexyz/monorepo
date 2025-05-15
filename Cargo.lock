@@ -1234,6 +1234,7 @@ dependencies = [
  "bytes",
  "commonware-codec",
  "futures",
+ "getrandom 0.2.15",
  "num-bigint",
  "rand",
  "thiserror 2.0.12",

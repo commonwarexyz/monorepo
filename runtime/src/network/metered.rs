@@ -1,4 +1,5 @@
 use crate::{SinkOf, StreamOf};
+use commonware_utils::{StableBuf, StableBufMut};
 use prometheus_client::{metrics::counter::Counter, registry::Registry};
 use std::{net::SocketAddr, sync::Arc};
 
@@ -54,9 +55,10 @@ pub struct Sink<S: crate::Sink> {
 }
 
 impl<S: crate::Sink> crate::Sink for Sink<S> {
-    async fn send(&mut self, data: &[u8]) -> Result<(), crate::Error> {
+    async fn send<B: StableBuf>(&mut self, data: B) -> Result<(), crate::Error> {
+        let len = data.len();
         self.inner.send(data).await?;
-        self.metrics.outbound_bandwidth.inc_by(data.len() as u64);
+        self.metrics.outbound_bandwidth.inc_by(len as u64);
         Ok(())
     }
 }
@@ -68,10 +70,10 @@ pub struct Stream<S: crate::Stream> {
 }
 
 impl<S: crate::Stream> crate::Stream for Stream<S> {
-    async fn recv(&mut self, buf: &mut [u8]) -> Result<(), crate::Error> {
-        self.inner.recv(buf).await?;
+    async fn recv<B: StableBufMut>(&mut self, buf: B) -> Result<B, crate::Error> {
+        let buf = self.inner.recv(buf).await?;
         self.metrics.inbound_bandwidth.inc_by(buf.len() as u64);
-        Ok(())
+        Ok(buf)
     }
 }
 
@@ -198,20 +200,23 @@ mod tests {
         // Create a server task that accepts one connection and echoes data
         let server = tokio::spawn(async move {
             let (_, mut sink, mut stream) = listener.accept().await.unwrap();
-            let mut buf = [0u8; MSG_SIZE as usize];
-            stream.recv(&mut buf).await.unwrap();
-            sink.send(&buf).await.unwrap();
+            let buf = stream.recv(vec![0; MSG_SIZE as usize]).await.unwrap();
+            sink.send(buf).await.unwrap();
         });
 
         // Send and receive data as client
         let (mut client_sink, mut client_stream) = network.dial(addr).await.unwrap();
 
         // Send fixed-size data and receive response
-        let test_data = [42u8; MSG_SIZE as usize];
-        client_sink.send(&test_data).await.unwrap();
+        let msg = vec![42u8; MSG_SIZE as usize];
+        client_sink.send(msg.clone()).await.unwrap();
 
-        let mut response = [0u8; MSG_SIZE as usize];
-        client_stream.recv(&mut response).await.unwrap();
+        let response = client_stream
+            .recv(vec![0; MSG_SIZE as usize])
+            .await
+            .unwrap();
+        assert_eq!(response.len(), MSG_SIZE as usize);
+        assert_eq!(response, msg);
 
         // Wait for server to complete
         server.await.unwrap();
