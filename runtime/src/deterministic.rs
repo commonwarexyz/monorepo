@@ -31,7 +31,7 @@ use crate::{
         audited::Storage as AuditedStorage, memory::Storage as MemStorage,
         metered::Storage as MeteredStorage,
     },
-    telemetry::metrics::status::Task as TTask,
+    telemetry::metrics::task::Label,
     utils::Signaler,
     Clock, Error, Handle, ListenerOf, Signal, METRICS_PREFIX,
 };
@@ -42,7 +42,7 @@ use futures::{
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
-    encoding::{text::encode, EncodeLabelSet},
+    encoding::text::encode,
     metrics::{counter::Counter, family::Family, gauge::Gauge},
     registry::{Metric, Registry},
 };
@@ -61,12 +61,6 @@ use tracing::trace;
 
 /// Map of names to blob contents.
 pub type Partition = HashMap<Vec<u8>, Vec<u8>>;
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-struct Label {
-    name: String,
-    task: TTask,
-}
 
 #[derive(Debug)]
 struct Metrics {
@@ -352,7 +346,7 @@ impl crate::Runner for Runner {
                 // Record task for auditing
                 executor.auditor.event(b"process_task", |hasher| {
                     hasher.update(task.id.to_be_bytes());
-                    hasher.update(task.label.name.as_bytes());
+                    hasher.update(task.label.name().as_bytes());
                 });
                 trace!(id = task.id, "processing task");
 
@@ -524,10 +518,7 @@ impl Tasks {
         let mut queue = arc_self.queue.lock().unwrap();
         queue.push(Arc::new(Task {
             id,
-            label: Label {
-                name: String::new(),
-                task: TTask::Root,
-            },
+            label: Label::root(String::new()),
             tasks: arc_self.clone(),
             operation: Operation::Root,
         }));
@@ -577,7 +568,7 @@ type Network = MeteredNetwork<AuditedNetwork<DeterministicNetwork>>;
 /// [crate::Network], and [crate::Storage] for the `deterministic`
 /// runtime.
 pub struct Context {
-    label: String,
+    name: String,
     spawned: bool,
     executor: Arc<Executor>,
     network: Arc<Network>,
@@ -629,7 +620,7 @@ impl Context {
         });
 
         Context {
-            label: String::new(),
+            name: String::new(),
             spawned: false,
             executor: executor.clone(),
             network: Arc::new(network),
@@ -694,7 +685,7 @@ impl Context {
             recovered: Mutex::new(false),
         });
         Self {
-            label: String::new(),
+            name: String::new(),
             spawned: false,
             executor,
             network: Arc::new(network),
@@ -710,7 +701,7 @@ impl Context {
 impl Clone for Context {
     fn clone(&self) -> Self {
         Self {
-            label: self.label.clone(),
+            name: self.name.clone(),
             spawned: false,
             executor: self.executor.clone(),
             network: self.network.clone(),
@@ -730,10 +721,7 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
-        let label = Label {
-            name: self.label.clone(),
-            task: TTask::Async,
-        };
+        let label = Label::future(self.name.clone());
         self.executor
             .metrics
             .tasks_spawned
@@ -766,10 +754,7 @@ impl crate::Spawner for Context {
         self.spawned = true;
 
         // Get metrics
-        let label = Label {
-            name: self.label.clone(),
-            task: TTask::Async,
-        };
+        let label = Label::future(self.name.clone());
         self.executor
             .metrics
             .tasks_spawned
@@ -802,13 +787,10 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
-        let label = Label {
-            name: self.label.clone(),
-            task: if dedicated {
-                TTask::BlockingDedicated
-            } else {
-                TTask::BlockingShared
-            },
+        let label = if dedicated {
+            Label::blocking_dedicated(self.name.clone())
+        } else {
+            Label::blocking_shared(self.name.clone())
         };
         self.executor
             .metrics
@@ -847,8 +829,8 @@ impl crate::Spawner for Context {
 
 impl crate::Metrics for Context {
     fn with_label(&self, label: &str) -> Self {
-        let label = {
-            let prefix = self.label.clone();
+        let name = {
+            let prefix = self.name.clone();
             if prefix.is_empty() {
                 label.to_string()
             } else {
@@ -856,11 +838,11 @@ impl crate::Metrics for Context {
             }
         };
         assert!(
-            !label.starts_with(METRICS_PREFIX),
+            !name.starts_with(METRICS_PREFIX),
             "using runtime label is not allowed"
         );
         Self {
-            label,
+            name,
             spawned: false,
             executor: self.executor.clone(),
             network: self.network.clone(),
@@ -869,7 +851,7 @@ impl crate::Metrics for Context {
     }
 
     fn label(&self) -> String {
-        self.label.clone()
+        self.name.clone()
     }
 
     fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
@@ -883,7 +865,7 @@ impl crate::Metrics for Context {
             hasher.update(help.as_bytes());
         });
         let prefixed_name = {
-            let prefix = &self.label;
+            let prefix = &self.name;
             if prefix.is_empty() {
                 name
             } else {

@@ -9,12 +9,12 @@ use crate::network::tokio::{
     Config as TokioNetworkConfig, Listener as TokioListener, Network as TokioNetwork,
 };
 use crate::storage::metered::Storage as MeteredStorage;
-use crate::telemetry::metrics::status::Task;
+use crate::telemetry::metrics::task::Label;
 use crate::{utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
 use crate::{SinkOf, StreamOf};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
-    encoding::{text::encode, EncodeLabelSet},
+    encoding::text::encode,
     metrics::{counter::Counter, family::Family, gauge::Gauge},
     registry::{Metric, Registry},
 };
@@ -28,12 +28,6 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tokio::runtime::{Builder, Runtime};
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-struct Label {
-    name: String,
-    task: Task,
-}
 
 #[derive(Debug)]
 struct Metrics {
@@ -275,17 +269,14 @@ impl crate::Runner for Runner {
         });
 
         // Get metrics
-        let label = Label {
-            name: String::new(),
-            task: Task::Root,
-        };
+        let label = Label::root(String::new());
         executor.metrics.tasks_spawned.get_or_create(&label).inc();
         let gauge = executor.metrics.tasks_running.get_or_create(&label).clone();
 
         // Run the future
         let context = Context {
             storage,
-            name: label.name.clone(),
+            name: label.name(),
             spawned: false,
             executor: executor.clone(),
             network,
@@ -337,10 +328,7 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
-        let label = Label {
-            name: self.name.clone(),
-            task: Task::Async,
-        };
+        let label = Label::future(self.name.clone());
         self.executor
             .metrics
             .tasks_spawned
@@ -374,10 +362,7 @@ impl crate::Spawner for Context {
         self.spawned = true;
 
         // Get metrics
-        let label = Label {
-            name: self.name.clone(),
-            task: Task::Async,
-        };
+        let label = Label::future(self.name.clone());
         self.executor
             .metrics
             .tasks_spawned
@@ -410,13 +395,10 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
-        let label = Label {
-            name: self.name.clone(),
-            task: if dedicated {
-                Task::BlockingDedicated
-            } else {
-                Task::BlockingShared
-            },
+        let label = if dedicated {
+            Label::blocking_dedicated(self.name.clone())
+        } else {
+            Label::blocking_shared(self.name.clone())
         };
         self.executor
             .metrics
