@@ -160,9 +160,11 @@ pub fn create_pool<S: Spawner + Metrics>(
     ThreadPoolBuilder::new()
         .num_threads(concurrency)
         .spawn_handler(move |thread| {
+            // Tasks spawned in a thread pool are expected to run longer than any single
+            // task and thus should be provisioned as a dedicated thread.
             context
                 .with_label("rayon-thread")
-                .spawn_blocking(false, move |_| thread.run());
+                .spawn_blocking(true, move |_| thread.run());
             Ok(())
         })
         .build()
