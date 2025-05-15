@@ -25,7 +25,7 @@ impl Network {
     /// The thread will run until the work submission channel is closed or
     /// the event loop errors.
     pub(crate) fn start(cfg: iouring::Config) -> Result<Self, crate::Error> {
-        let (tx, rx) = mpsc::channel(128);
+        let (tx, rx) = mpsc::channel(cfg.size as usize);
         std::thread::spawn(|| block_on(iouring::run(cfg, rx)));
         Ok(Self {
             submitter: tx.clone(),
