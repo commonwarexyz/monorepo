@@ -979,6 +979,27 @@ mod tests {
         });
     }
 
+    fn test_spawn_dedicated<R: Runner>(runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
+            let handle = context.spawn_dedicated(|| 42);
+            let result = handle.await;
+            assert!(matches!(result, Ok(42)));
+        });
+    }
+
+    fn test_spawn_dedicated_abort<R: Runner>(runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
+            let handle = context.spawn_dedicated(|| 42);
+            handle.abort();
+        });
+    }
+
     fn test_metrics<R: Runner>(runner: R)
     where
         R::Context: Metrics,
@@ -1159,6 +1180,30 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_spawn_dedicated() {
+        let executor = deterministic::Runner::default();
+        test_spawn_dedicated(executor);
+    }
+
+    #[test]
+    #[should_panic(expected = "dedicated task panicked")]
+    fn test_deterministic_spawn_dedicated_panic() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let handle = context.spawn_dedicated(|| {
+                panic!("dedicated task panicked");
+            });
+            handle.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_deterministic_spawn_dedicated_abort() {
+        let executor = deterministic::Runner::default();
+        test_spawn_dedicated_abort(executor);
+    }
+
+    #[test]
     fn test_deterministic_metrics() {
         let executor = deterministic::Runner::default();
         test_metrics(executor);
@@ -1304,6 +1349,30 @@ mod tests {
     fn test_tokio_spawn_blocking_abort() {
         let executor = tokio::Runner::default();
         test_spawn_blocking_abort(executor);
+    }
+
+    #[test]
+    fn test_tokio_spawn_dedicated() {
+        let executor = tokio::Runner::default();
+        test_spawn_dedicated(executor);
+    }
+
+    #[test]
+    #[should_panic(expected = "dedicated task panicked")]
+    fn test_tokio_spawn_dedicated_panic() {
+        let executor = tokio::Runner::default();
+        executor.start(|context| async move {
+            let handle = context.spawn_dedicated(|| {
+                panic!("dedicated task panicked");
+            });
+            handle.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_tokio_spawn_dedicated_abort() {
+        let executor = tokio::Runner::default();
+        test_spawn_dedicated_abort(executor);
     }
 
     #[test]
