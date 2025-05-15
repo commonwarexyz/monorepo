@@ -13,6 +13,8 @@ use std::{
 use tokio::net::{TcpListener, TcpStream};
 
 #[derive(Clone, Debug)]
+/// Configuration for an iouring instance.
+/// See `man io_uring`.
 pub struct IoUringConfig {
     /// Size of the ring.
     pub size: u32,
@@ -43,26 +45,9 @@ fn new_ring(cfg: &IoUringConfig) -> Result<IoUring, std::io::Error> {
     builder.build(cfg.size)
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct Network {
-    submitter: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
-}
-
-impl Network {
-    pub(crate) fn start(cfg: IoUringConfig) -> Result<Self, crate::Error> {
-        let (tx, rx) = mpsc::channel(128);
-
-        std::thread::spawn(|| block_on(run_network(cfg, rx)));
-
-        Ok(Self {
-            submitter: tx.clone(),
-        })
-    }
-}
-
 /// Background task that polls for completed work and notifies waiters on completion.
 /// The user data field of all operations received on `receiver` will be ignored.
-async fn run_network(
+async fn run(
     cfg: IoUringConfig,
     mut receiver: mpsc::Receiver<(SqueueEntry, oneshot::Sender<i32>)>,
 ) {
@@ -128,6 +113,23 @@ async fn run_network(
         // that arrived before this call will be counted and cause this
         // call to return. Note that waiters.len() > 0 here.
         ring.submit_and_wait(1).expect("unable to submit to ring");
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Network {
+    submitter: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
+}
+
+impl Network {
+    pub(crate) fn start(cfg: IoUringConfig) -> Result<Self, crate::Error> {
+        let (tx, rx) = mpsc::channel(128);
+
+        std::thread::spawn(|| block_on(run(cfg, rx)));
+
+        Ok(Self {
+            submitter: tx.clone(),
+        })
     }
 }
 
