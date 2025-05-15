@@ -40,6 +40,8 @@ mod storage;
 pub mod telemetry;
 mod utils;
 pub use utils::*;
+#[cfg(feature = "iouring")]
+mod iouring;
 
 /// Prefix for runtime metrics.
 const METRICS_PREFIX: &str = "runtime";
