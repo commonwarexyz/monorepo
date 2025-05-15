@@ -30,7 +30,7 @@ impl<T> Handle<T>
 where
     T: Send + 'static,
 {
-    pub(crate) fn init<F>(
+    pub(crate) fn init_future<F>(
         f: F,
         running: Gauge,
         catch_panic: bool,
@@ -121,7 +121,7 @@ where
                             resume_unwind(err);
                         }
                         let err = extract_panic_message(&*err);
-                        error!(?err, "blocking task panicked");
+                        error!(?err, "task panicked");
                         Err(Error::Exited)
                     }
                 };

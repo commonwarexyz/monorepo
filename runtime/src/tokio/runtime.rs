@@ -13,11 +13,12 @@ use crate::{
 use crate::network::metered::Network as MeteredNetwork;
 use crate::network::tokio::Config as TokioNetworkConfig;
 use crate::storage::metered::Storage as MeteredStorage;
+use crate::telemetry::metrics::task::Label;
 use crate::{utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
 use crate::{SinkOf, StreamOf};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
-    encoding::{text::encode, EncodeLabelSet},
+    encoding::text::encode,
     metrics::{counter::Counter, family::Family, gauge::Gauge},
     registry::{Metric, Registry},
 };
@@ -32,17 +33,10 @@ use std::{
 };
 use tokio::runtime::{Builder, Runtime};
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-struct Work {
-    label: String,
-}
-
 #[derive(Debug)]
 struct Metrics {
-    tasks_spawned: Family<Work, Counter>,
-    tasks_running: Family<Work, Gauge>,
-    blocking_tasks_spawned: Family<Work, Counter>,
-    blocking_tasks_running: Family<Work, Gauge>,
+    tasks_spawned: Family<Label, Counter>,
+    tasks_running: Family<Label, Gauge>,
 }
 
 impl Metrics {
@@ -50,8 +44,6 @@ impl Metrics {
         let metrics = Self {
             tasks_spawned: Family::default(),
             tasks_running: Family::default(),
-            blocking_tasks_spawned: Family::default(),
-            blocking_tasks_running: Family::default(),
         };
         registry.register(
             "tasks_spawned",
@@ -62,16 +54,6 @@ impl Metrics {
             "tasks_running",
             "Number of tasks currently running",
             metrics.tasks_running.clone(),
-        );
-        registry.register(
-            "blocking_tasks_spawned",
-            "Total number of blocking tasks spawned",
-            metrics.blocking_tasks_spawned.clone(),
-        );
-        registry.register(
-            "blocking_tasks_running",
-            "Number of blocking tasks currently running",
-            metrics.blocking_tasks_running.clone(),
         );
         metrics
     }
@@ -289,6 +271,7 @@ impl crate::Runner for Runner {
             }
         };
 
+        // Initialize executor
         let executor = Arc::new(Executor {
             cfg: self.cfg,
             registry: Mutex::new(registry),
@@ -298,15 +281,23 @@ impl crate::Runner for Runner {
             signal,
         });
 
+        // Get metrics
+        let label = Label::root();
+        executor.metrics.tasks_spawned.get_or_create(&label).inc();
+        let gauge = executor.metrics.tasks_running.get_or_create(&label).clone();
+
+        // Run the future
         let context = Context {
             storage,
-            label: String::new(),
+            name: label.name(),
             spawned: false,
             executor: executor.clone(),
             network,
         };
+        let output = executor.runtime.block_on(f(context));
+        gauge.dec();
 
-        executor.runtime.block_on(f(context))
+        output
     }
 }
 
@@ -324,7 +315,7 @@ cfg_if::cfg_if! {
 /// [crate::Network], and [crate::Storage] for the `tokio`
 /// runtime.
 pub struct Context {
-    label: String,
+    name: String,
     spawned: bool,
     executor: Arc<Executor>,
     storage: Storage,
@@ -334,7 +325,7 @@ pub struct Context {
 impl Clone for Context {
     fn clone(&self) -> Self {
         Self {
-            label: self.label.clone(),
+            name: self.name.clone(),
             spawned: false,
             executor: self.executor.clone(),
             storage: self.storage.clone(),
@@ -354,26 +345,24 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
-        let work = Work {
-            label: self.label.clone(),
-        };
+        let label = Label::future(self.name.clone());
         self.executor
             .metrics
             .tasks_spawned
-            .get_or_create(&work)
+            .get_or_create(&label)
             .inc();
         let gauge = self
             .executor
             .metrics
             .tasks_running
-            .get_or_create(&work)
+            .get_or_create(&label)
             .clone();
 
         // Set up the task
         let catch_panics = self.executor.cfg.catch_panics;
         let executor = self.executor.clone();
         let future = f(self);
-        let (f, handle) = Handle::init(future, gauge, catch_panics);
+        let (f, handle) = Handle::init_future(future, gauge, catch_panics);
 
         // Spawn the task
         executor.runtime.spawn(f);
@@ -390,25 +379,23 @@ impl crate::Spawner for Context {
         self.spawned = true;
 
         // Get metrics
-        let work = Work {
-            label: self.label.clone(),
-        };
+        let label = Label::future(self.name.clone());
         self.executor
             .metrics
             .tasks_spawned
-            .get_or_create(&work)
+            .get_or_create(&label)
             .inc();
         let gauge = self
             .executor
             .metrics
             .tasks_running
-            .get_or_create(&work)
+            .get_or_create(&label)
             .clone();
 
         // Set up the task
         let executor = self.executor.clone();
         move |f: F| {
-            let (f, handle) = Handle::init(f, gauge, executor.cfg.catch_panics);
+            let (f, handle) = Handle::init_future(f, gauge, executor.cfg.catch_panics);
 
             // Spawn the task
             executor.runtime.spawn(f);
@@ -416,35 +403,42 @@ impl crate::Spawner for Context {
         }
     }
 
-    fn spawn_blocking<F, T>(self, f: F) -> Handle<T>
+    fn spawn_blocking<F, T>(self, dedicated: bool, f: F) -> Handle<T>
     where
-        F: FnOnce() -> T + Send + 'static,
+        F: FnOnce(Self) -> T + Send + 'static,
         T: Send + 'static,
     {
         // Ensure a context only spawns one task
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
-        let work = Work {
-            label: self.label.clone(),
+        let label = if dedicated {
+            Label::blocking_dedicated(self.name.clone())
+        } else {
+            Label::blocking_shared(self.name.clone())
         };
         self.executor
             .metrics
-            .blocking_tasks_spawned
-            .get_or_create(&work)
+            .tasks_spawned
+            .get_or_create(&label)
             .inc();
         let gauge = self
             .executor
             .metrics
-            .blocking_tasks_running
-            .get_or_create(&work)
+            .tasks_running
+            .get_or_create(&label)
             .clone();
 
         // Initialize the blocking task using the new function
-        let (f, handle) = Handle::init_blocking(f, gauge, self.executor.cfg.catch_panics);
+        let executor = self.executor.clone();
+        let (f, handle) = Handle::init_blocking(|| f(self), gauge, executor.cfg.catch_panics);
 
         // Spawn the blocking task
-        self.executor.runtime.spawn_blocking(f);
+        if dedicated {
+            std::thread::spawn(f);
+        } else {
+            executor.runtime.spawn_blocking(f);
+        }
         handle
     }
 
@@ -459,8 +453,8 @@ impl crate::Spawner for Context {
 
 impl crate::Metrics for Context {
     fn with_label(&self, label: &str) -> Self {
-        let label = {
-            let prefix = self.label.clone();
+        let name = {
+            let prefix = self.name.clone();
             if prefix.is_empty() {
                 label.to_string()
             } else {
@@ -468,11 +462,11 @@ impl crate::Metrics for Context {
             }
         };
         assert!(
-            !label.starts_with(METRICS_PREFIX),
+            !name.starts_with(METRICS_PREFIX),
             "using runtime label is not allowed"
         );
         Self {
-            label,
+            name,
             spawned: false,
             executor: self.executor.clone(),
             storage: self.storage.clone(),
@@ -481,13 +475,13 @@ impl crate::Metrics for Context {
     }
 
     fn label(&self) -> String {
-        self.label.clone()
+        self.name.clone()
     }
 
     fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
         let name = name.into();
         let prefixed_name = {
-            let prefix = &self.label;
+            let prefix = &self.name;
             if prefix.is_empty() {
                 name
             } else {
