@@ -12,9 +12,9 @@ pub struct Label {
 }
 
 impl Label {
-    pub fn root(name: String) -> Self {
+    pub fn root() -> Self {
         Self {
-            name,
+            name: String::new(),
             task: Task::Root,
         }
     }

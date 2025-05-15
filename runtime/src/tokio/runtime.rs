@@ -269,7 +269,7 @@ impl crate::Runner for Runner {
         });
 
         // Get metrics
-        let label = Label::root(String::new());
+        let label = Label::root();
         executor.metrics.tasks_spawned.get_or_create(&label).inc();
         let gauge = executor.metrics.tasks_running.get_or_create(&label).clone();
 

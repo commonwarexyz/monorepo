@@ -518,7 +518,7 @@ impl Tasks {
         let mut queue = arc_self.queue.lock().unwrap();
         queue.push(Arc::new(Task {
             id,
-            label: Label::root(String::new()),
+            label: Label::root(),
             tasks: arc_self.clone(),
             operation: Operation::Root,
         }));
