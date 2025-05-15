@@ -11,20 +11,22 @@ use std::{
     sync::Arc,
 };
 use tokio::net::{TcpListener, TcpStream};
-
 use crate::iouring;
 
 #[derive(Clone, Debug)]
+/// [crate::Network] implementation that uses io_uring to do async I/O.
 pub struct Network {
     submitter: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
 }
 
 impl Network {
+    /// Returns a new [Network] instance.
+    /// This function starts a new thread to run the io_uring event loop.
+    /// The thread will run until the work submission channel is closed or
+    /// the event loop errors.
     pub(crate) fn start(cfg: iouring::Config) -> Result<Self, crate::Error> {
         let (tx, rx) = mpsc::channel(128);
-
         std::thread::spawn(|| block_on(iouring::run(cfg, rx)));
-
         Ok(Self {
             submitter: tx.clone(),
         })
@@ -71,6 +73,7 @@ impl crate::Network for Network {
     }
 }
 
+/// Implementation of [crate::Listener] for an io-uring [Network].
 pub struct Listener {
     inner: TcpListener,
     submitter: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
@@ -111,6 +114,7 @@ impl crate::Listener for Listener {
     }
 }
 
+/// Implementation of [crate::Sink] for an io-uring [Network].
 pub struct Sink {
     fd: Arc<OwnedFd>,
     submitter: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
@@ -152,6 +156,7 @@ impl crate::Sink for Sink {
     }
 }
 
+/// Implementation of [crate::Stream] for an io-uring [Network].
 pub struct Stream {
     fd: Arc<OwnedFd>,
     submitter: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
