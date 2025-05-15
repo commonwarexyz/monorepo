@@ -8,8 +8,6 @@ use crate::{
     storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage},
     network::{
     tokio::Network as TokioNetwork,
-    // metered::Listener as MeteredListener,
-    // tokio::Listener as TokioListener,
 }};
 
 use crate::network::metered::Network as MeteredNetwork;
@@ -285,7 +283,6 @@ impl crate::Runner for Runner {
                     )),
                     runtime_registry,
                 );
-
                 let network = TokioNetwork::from(self.cfg.network_cfg.clone());
                 let network = MeteredNetwork::new(network, runtime_registry);
                 (storage, network)
