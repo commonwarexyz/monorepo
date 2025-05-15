@@ -36,15 +36,19 @@ jobs:
           - package: commonware-cryptography
             cargo_flags: ""
             file_suffix: ""
+            benchmark_name: "commonware-cryptography"
           - package: commonware-storage
             cargo_flags: ""
             file_suffix: ""
+            benchmark_name: "commonware-storage"
           - package: commonware-storage
             cargo_flags: "--features iouring" # Additional features can be added here
             file_suffix: "-features"
+            benchmark_name: "commonware-storage --features"
           - package: commonware-stream
             cargo_flags: ""
             file_suffix: ""
+            benchmark_name: "commonware-stream"
     steps:
       - uses: actions/checkout@v4
       - name: Install nightly Rust toolchain
@@ -62,7 +66,7 @@ jobs:
       - name: Publish benchmark result
         uses: benchmark-action/github-action-benchmark@v1
         with:
-          name: "${{ matrix.package }}${{ matrix.file_suffix }}"
+          name: ${{ matrix.benchmark_name }}
           tool: 'cargo'
           output-file-path: "${{ matrix.package }}${{ matrix.file_suffix }}.txt"
           github-token: ${{ secrets.BENCHMARKS_SECRET }}
