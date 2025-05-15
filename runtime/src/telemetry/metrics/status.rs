@@ -5,23 +5,6 @@ use prometheus_client::{
     metrics::{counter::Counter as DefaultCounter, family::Family},
 };
 
-/// Metric label that indicates whether something is true or false.
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
-pub enum Bool {
-    False,
-    True,
-}
-
-impl From<bool> for Bool {
-    fn from(value: bool) -> Self {
-        if value {
-            Bool::True
-        } else {
-            Bool::False
-        }
-    }
-}
-
 /// Metric label that indicates the type of task spawned.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub enum Task {
