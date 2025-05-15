@@ -125,7 +125,7 @@ pub struct PartialVerifier<V: Variant, D: Digest> {
 impl<V: Variant, D: Digest> PartialVerifier<V, D> {
     pub fn new(quorum: Option<u32>) -> Self {
         Self {
-            quorum: quorum.map(|q| q.saturating_sub(1) as usize), // don't count self
+            quorum: quorum.map(|q| q as usize),
 
             leader: None,
             leader_proposal: None,
@@ -142,7 +142,19 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
         }
     }
 
-    pub fn add(&mut self, msg: Voter<V, D>) {
+    fn set_leader_proposal(&mut self, proposal: Proposal<D>) {
+        // Drop all notarizes/finalizes that aren't for the leader proposal
+        self.notarizes.retain(|n| n.proposal == proposal);
+        self.finalizes.retain(|f| f.proposal == proposal);
+
+        // Set the leader proposal
+        self.leader_proposal = Some(proposal);
+
+        // Force the notarizes to be verified
+        self.notarizes_force = true;
+    }
+
+    pub fn add(&mut self, msg: Voter<V, D>, verified: bool) {
         match msg {
             Voter::Notarize(notarize) => {
                 if let Some(ref leader_proposal) = self.leader_proposal {
@@ -154,21 +166,24 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
                     // If leader is set but leader proposal is not, set it
                     if leader == notarize.signer() {
                         // Set the leader proposal
-                        self.leader_proposal = Some(notarize.proposal.clone());
-
-                        // Drop all notarizes/finalizes that aren't for the leader proposal
-                        self.notarizes.retain(|n| n.proposal == notarize.proposal);
-                        self.finalizes.retain(|f| f.proposal == notarize.proposal);
-
-                        // Force the notarizes to be verified
-                        self.notarizes_force = true;
+                        self.set_leader_proposal(notarize.proposal.clone());
                     }
                 }
 
                 // If we've made it this far, add the notarize
-                self.notarizes.push(notarize);
+                if verified {
+                    self.notarizes_verified += 1;
+                } else {
+                    self.notarizes.push(notarize);
+                }
             }
-            Voter::Nullify(nullify) => self.nullifies.push(nullify),
+            Voter::Nullify(nullify) => {
+                if verified {
+                    self.nullifies_verified += 1;
+                } else {
+                    self.nullifies.push(nullify);
+                }
+            }
             Voter::Finalize(finalize) => {
                 // If leader proposal is set and the message is not for it, drop it
                 if let Some(ref leader_proposal) = self.leader_proposal {
@@ -178,7 +193,11 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
                 }
 
                 // If we've made it this far, add the finalize
-                self.finalizes.push(finalize);
+                if verified {
+                    self.finalizes_verified += 1;
+                } else {
+                    self.finalizes.push(finalize);
+                }
             }
             Voter::Notarization(_) | Voter::Nullification(_) | Voter::Finalization(_) => {
                 unreachable!("should not be adding recovered messages to partial verifier");
@@ -186,7 +205,7 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
         }
     }
 
-    pub fn mark(&mut self, leader: u32) {
+    pub fn set_leader(&mut self, leader: u32) {
         // Set the leader
         assert!(self.leader.is_none());
         self.leader = Some(leader);
@@ -196,14 +215,8 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
             return;
         };
 
-        // Drop all notarizes/finalizes that aren't for the leader proposal
-        let proposal = notarize.proposal.clone();
-        self.notarizes.retain(|n| n.proposal == proposal);
-        self.finalizes.retain(|f| f.proposal == proposal);
-
-        // If we find one, set the leader proposal
-        self.leader_proposal = Some(proposal);
-        self.notarizes_force = true;
+        // Set the leader proposal
+        self.set_leader_proposal(notarize.proposal.clone());
     }
 
     pub fn verify_notarizes(

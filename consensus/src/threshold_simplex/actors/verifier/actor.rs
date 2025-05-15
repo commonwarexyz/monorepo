@@ -154,9 +154,9 @@ impl<
                         };
                         work.entry(current)
                             .or_insert(PartialVerifier::new(quorum))
-                            .mark(leader);
+                            .set_leader(leader);
                     }
-                    Message::Message(message) => {
+                    Message::Untrusted(message) => {
                         self.added.inc();
 
                         // Only add messages if the view matters to us
@@ -166,7 +166,18 @@ impl<
                             let quorum = Some(self.supervisor.identity(view).unwrap().required());
                             work.entry(view)
                                 .or_insert(PartialVerifier::new(quorum))
-                                .add(message);
+                                .add(message, false);
+                        }
+                    }
+                    Message::Trusted(message) => {
+                        // Only add messages if the view matters to us
+                        if message.view() >= finalized {
+                            assert!(initialized);
+                            let view = message.view();
+                            let quorum = Some(self.supervisor.identity(view).unwrap().required());
+                            work.entry(message.view())
+                                .or_insert(PartialVerifier::new(quorum))
+                                .add(message, true);
                         }
                     }
                 }

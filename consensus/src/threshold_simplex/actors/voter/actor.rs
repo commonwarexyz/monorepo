@@ -868,7 +868,11 @@ impl<
         null_retry
     }
 
-    async fn timeout<Sr: Sender>(&mut self, sender: &mut WrappedSender<Sr, Voter<V, D>>) {
+    async fn timeout<Sr: Sender>(
+        &mut self,
+        verifier: &mut verifier::Mailbox<V, D>,
+        sender: &mut WrappedSender<Sr, Voter<V, D>>,
+    ) {
         // Set timeout fired
         let round = self.views.get_mut(&self.view).unwrap();
         let mut retry = false;
@@ -914,6 +918,7 @@ impl<
 
         // Handle the nullify
         if matches!(self.reserve_nullify(&nullify).await, Action::Process) {
+            verifier.untrusted(Voter::Nullify(nullify.clone())).await;
             self.handle_nullify(nullify.clone()).await;
 
             // Sync the journal
@@ -1653,6 +1658,7 @@ impl<
 
     async fn notify<Sr: Sender>(
         &mut self,
+        verifier: &mut verifier::Mailbox<V, D>,
         backfiller: &mut resolver::Mailbox<V, D>,
         sender: &mut WrappedSender<Sr, Voter<V, D>>,
         view: u64,
@@ -1664,6 +1670,7 @@ impl<
                 self.reserve_notarize(&notarize).await,
                 Action::Process
             ));
+            verifier.trusted(Voter::Notarize(notarize.clone())).await;
             self.handle_notarize(notarize.clone()).await;
 
             // Sync the journal
@@ -1808,6 +1815,7 @@ impl<
                 self.reserve_finalize(&finalize).await,
                 Action::Process
             ));
+            verifier.trusted(Voter::Finalize(finalize.clone())).await;
             self.handle_finalize(finalize.clone()).await;
 
             // Sync the journal
@@ -2075,7 +2083,7 @@ impl<
                 },
                 _ = self.context.sleep_until(timeout) => {
                     // Trigger the timeout
-                    self.timeout(&mut sender).await;
+                    self.timeout(&mut verifier, &mut sender).await;
                     view = self.view;
                 },
                 proposed = propose_wait => {
@@ -2203,7 +2211,7 @@ impl<
                             self.received_messages.get_or_create(&metrics::PeerMessage::notarize(&s)).inc();
                             let action = self.notarize(&s, &notarize).await;
                             if matches!(action, Action::Process) {
-                                verifier.message(Voter::Notarize(notarize)).await;
+                                verifier.untrusted(Voter::Notarize(notarize)).await;
                             }
                             action
                         }
@@ -2215,7 +2223,7 @@ impl<
                             self.received_messages.get_or_create(&metrics::PeerMessage::nullify(&s)).inc();
                             let action = self.nullify(&s, &nullify).await;
                             if matches!(action, Action::Process) {
-                                verifier.message(Voter::Nullify(nullify)).await;
+                                verifier.untrusted(Voter::Nullify(nullify)).await;
                             }
                             action
                         }
@@ -2227,7 +2235,7 @@ impl<
                             self.received_messages.get_or_create(&metrics::PeerMessage::finalize(&s)).inc();
                             let action = self.finalize(&s, &finalize).await;
                             if matches!(action, Action::Process) {
-                                verifier.message(Voter::Finalize(finalize)).await;
+                                verifier.untrusted(Voter::Finalize(finalize)).await;
                             }
                             action
                         }
@@ -2243,7 +2251,7 @@ impl<
                             continue;
                         }
                         Action::Block => {
-                            trace!(sender=?s, view, "blocking peer");
+                            warn!(sender=?s, view, "blocking peer");
                             self.blocker.block(s).await;
                             continue;
                         }
@@ -2252,7 +2260,8 @@ impl<
             };
 
             // Attempt to send any new view messages
-            self.notify(&mut backfiller, &mut sender, view).await;
+            self.notify(&mut verifier, &mut backfiller, &mut sender, view)
+                .await;
 
             // After sending all required messages, prune any views
             // we no longer need
