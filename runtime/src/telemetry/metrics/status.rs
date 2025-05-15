@@ -22,7 +22,7 @@ impl From<bool> for Bool {
     }
 }
 
-/// Type of task that can be spawned.
+/// Metric label that indicates the type of task spawned.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub enum Task {
     Root,
