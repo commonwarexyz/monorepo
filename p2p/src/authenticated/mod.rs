@@ -26,6 +26,11 @@
 //! - `bits`: The bit vector itself, where a '1' signifies knowledge of the corresponding
 //!   peer's address in the sorted list for that index.
 //!
+//! Even if a peer has some knowledge of the address of a peer in the set, if they fail to dial that
+//! peer a (configurable) number of times, they will assume that information is stale and mark it as
+//! '0' (unknown) in the bit vector. This is done to prevent peers from being "stuck" with outdated
+//! information about other peers.
+//!
 //! _Warning: If peers are not synchronized on the peer set composition at a given index,
 //! discovery messages can be misinterpreted. A peer might associate a bit vector index with the
 //! wrong peer or fail to parse the vector if its length doesn't match the expected set size. The
@@ -42,8 +47,9 @@
 //! Upon receiving a `BitVec` message, a peer compares it against its own knowledge for the same
 //! index. If the receiving peer knows addresses that the sender marked as '0' (unknown), it
 //! selects a random subset of these known `PeerInfo` structures (up to `peer_gossip_max_count`)
-//! and sends them back in a `Payload::Peers` message. Each `PeerInfo` structure verifies a peer's
-//! address claim and contains:
+//! and sends them back in a `Payload::Peers` message. To save bandwidth, peers will only gossip
+//! `PeerInfo` for peers that they currently have a connection with. This prevents them from
+//! repeatedly sending `PeerInfo` that they cannot verify is still valid. Each `PeerInfo` contains:
 //! - `socket`: The [`SocketAddr`](std::net::SocketAddr) of the peer.
 //! - `timestamp`: A `u64` timestamp indicating when the address was attested.
 //! - `public_key`: The peer's public key.

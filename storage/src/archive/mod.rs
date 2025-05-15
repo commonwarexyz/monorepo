@@ -407,7 +407,7 @@ mod tests {
                 .await
                 .unwrap();
             let value_location = 4 /* journal size */ + UInt(1u64).encode_size() as u64 /* index */ + 64 + 4 /* value length */;
-            blob.write_at(b"testdaty", value_location).await.unwrap();
+            blob.write_at(b"testdaty".to_vec(), value_location).await.unwrap();
             blob.close().await.unwrap();
 
             // Initialize the archive again

@@ -22,7 +22,7 @@
 
 use crate::Hasher;
 use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{DecodeExt, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_utils::{hex, Array};
 use rand::{CryptoRng, Rng};
 use sha2::{Digest as _, Sha256 as ISha256};
@@ -55,6 +55,14 @@ impl Clone for Sha256 {
     fn clone(&self) -> Self {
         // We manually implement `Clone` to avoid cloning the hasher state.
         Self::default()
+    }
+}
+
+impl Sha256 {
+    /// Convenience function for testing that creates an easily recognizable digest by repeating a
+    /// single byte.
+    pub fn fill(b: u8) -> <Self as Hasher>::Digest {
+        <Self as Hasher>::Digest::decode(vec![b; DIGEST_LENGTH].as_ref()).unwrap()
     }
 }
 

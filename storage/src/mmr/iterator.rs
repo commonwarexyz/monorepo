@@ -264,32 +264,37 @@ impl Iterator for PathIterator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::mem::Mmr;
+    use crate::mmr::{hasher::Standard, mem::Mmr};
     use commonware_cryptography::{sha256::hash, Sha256};
+    use commonware_runtime::{deterministic, Runner};
 
     #[test]
     fn test_leaf_num_calculation() {
         let digest = hash(b"testing");
 
-        // Build MMR with 1000 leaves and make sure we can correctly convert each leaf position to
-        // its number and back again.
-        let mut mmr = Mmr::<Sha256>::new();
-        let mut hasher = Sha256::default();
-        let mut num_to_pos = Vec::new();
-        for _ in 0u64..1000 {
-            num_to_pos.push(mmr.add(&mut hasher, &digest));
-        }
-
-        let mut last_leaf_pos = 0;
-        for (leaf_num_expected, leaf_pos) in num_to_pos.iter().enumerate() {
-            let leaf_num_got = leaf_pos_to_num(*leaf_pos).unwrap();
-            assert_eq!(leaf_num_got, leaf_num_expected as u64);
-            let leaf_pos_got = leaf_num_to_pos(leaf_num_got);
-            assert_eq!(leaf_pos_got, *leaf_pos);
-            for i in last_leaf_pos + 1..*leaf_pos {
-                assert!(leaf_pos_to_num(i).is_none());
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            // Build MMR with 1000 leaves and make sure we can correctly convert each leaf position to
+            // its number and back again.
+            let mut mmr = Mmr::new();
+            let mut hasher = Sha256::default();
+            let mut hasher = Standard::new(&mut hasher);
+            let mut num_to_pos = Vec::new();
+            for _ in 0u64..1000 {
+                num_to_pos.push(mmr.add(&mut hasher, &digest).await.unwrap());
             }
-            last_leaf_pos = *leaf_pos;
-        }
+
+            let mut last_leaf_pos = 0;
+            for (leaf_num_expected, leaf_pos) in num_to_pos.iter().enumerate() {
+                let leaf_num_got = leaf_pos_to_num(*leaf_pos).unwrap();
+                assert_eq!(leaf_num_got, leaf_num_expected as u64);
+                let leaf_pos_got = leaf_num_to_pos(leaf_num_got);
+                assert_eq!(leaf_pos_got, *leaf_pos);
+                for i in last_leaf_pos + 1..*leaf_pos {
+                    assert!(leaf_pos_to_num(i).is_none());
+                }
+                last_leaf_pos = *leaf_pos;
+            }
+        });
     }
 }

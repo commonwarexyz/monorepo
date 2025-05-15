@@ -22,20 +22,20 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
     info!(tag = tag.as_str(), "loaded configuration");
 
     // Ensure created file exists
-    let temp_dir = deployer_directory(tag);
-    let created_file = temp_dir.join(CREATED_FILE_NAME);
+    let tag_directory = deployer_directory(tag);
+    let created_file = tag_directory.join(CREATED_FILE_NAME);
     if !created_file.exists() {
         return Err(Error::DeploymentNotComplete(tag.clone()));
     }
 
     // Ensure destroyed file does not exist
-    let destroyed_file = temp_dir.join(DESTROYED_FILE_NAME);
+    let destroyed_file = tag_directory.join(DESTROYED_FILE_NAME);
     if destroyed_file.exists() {
         return Err(Error::DeploymentAlreadyDestroyed(tag.clone()));
     }
 
     // Construct private key path (assumes it exists from create command)
-    let private_key_path = temp_dir.join(format!("id_rsa_{}", tag));
+    let private_key_path = tag_directory.join(format!("id_rsa_{}", tag));
     if !private_key_path.exists() {
         return Err(Error::PrivateKeyNotFound);
     }

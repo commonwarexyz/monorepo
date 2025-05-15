@@ -12,6 +12,10 @@ pub use time::SystemTimeExt;
 mod priority_set;
 pub use priority_set::PrioritySet;
 pub mod futures;
+mod stable_buf;
+pub use stable_buf::StableBuf;
+mod stable_buf_mut;
+pub use stable_buf_mut::StableBufMut;
 
 /// Converts bytes to a hexadecimal string.
 pub fn hex(bytes: &[u8]) -> String {
@@ -75,8 +79,8 @@ pub fn union_unique(namespace: &[u8], msg: &[u8]) -> Vec<u8> {
     let len_prefix = namespace.len();
     let mut buf = BytesMut::with_capacity(len_prefix.encode_size() + namespace.len() + msg.len());
     len_prefix.write(&mut buf);
-    buf.put_slice(namespace);
-    buf.put_slice(msg);
+    BufMut::put_slice(&mut buf, namespace);
+    BufMut::put_slice(&mut buf, msg);
     buf.into()
 }
 
