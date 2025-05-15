@@ -18,6 +18,7 @@ use futures::{
 };
 use std::collections::{HashMap, VecDeque};
 use tracing::{debug, error, trace, warn};
+use prometheus_client::metrics::counter;
 
 /// A responder waiting for a message.
 struct Waiter<P, Dd, M> {
@@ -111,6 +112,8 @@ pub struct Engine<
     ////////////////////////////////////////
     /// Metrics
     metrics: metrics::Metrics,
+    /// Cache for peer counters to avoid repeated get_or_create calls
+    peer_counters: HashMap<SequencerLabel, counter::Counter>,
 }
 
 impl<
@@ -140,6 +143,7 @@ impl<
             items: HashMap::new(),
             counts: HashMap::new(),
             metrics,
+            peer_counters: HashMap::new(),
         };
 
         (result, mailbox)
@@ -213,7 +217,7 @@ impl<
                     };
 
                     trace!(?peer, "network");
-                    self.metrics.peer.get_or_create(&SequencerLabel::from(&peer)).inc();
+                    self.peer_counter(&peer).inc();
                     self.handle_network(peer, msg).await;
                 },
             }
@@ -483,5 +487,13 @@ impl<
             Ok(_) => Status::Failure,
             Err(_) => Status::Dropped,
         });
+    }
+
+    /// Helper to get or insert a peer counter from the cache
+    fn peer_counter(&mut self, peer: &P) -> &mut counter::Counter {
+        let label = SequencerLabel::from(peer);
+        self.peer_counters.entry(label.clone()).or_insert_with(|| {
+            self.metrics.peer.get_or_create(&label)
+        })
     }
 }
