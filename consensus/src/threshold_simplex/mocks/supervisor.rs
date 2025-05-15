@@ -48,6 +48,7 @@ pub struct Supervisor<P: Array, V: Variant, D: Digest> {
     pub finalizes: Arc<Mutex<Participation<P, D>>>,
     pub finalizations: Arc<Mutex<HashMap<View, Finalization<V, D>>>>,
     pub faults: Arc<Mutex<Faults<P, V, D>>>,
+    pub invalid: Arc<Mutex<usize>>,
 
     latest: Arc<Mutex<View>>,
     subscribers: Arc<Mutex<Vec<Sender<View>>>>,
@@ -84,6 +85,7 @@ impl<P: Array, V: Variant, D: Digest> Supervisor<P, V, D> {
             finalizes: Arc::new(Mutex::new(HashMap::new())),
             finalizations: Arc::new(Mutex::new(HashMap::new())),
             faults: Arc::new(Mutex::new(HashMap::new())),
+            invalid: Arc::new(Mutex::new(0)),
             latest: Arc::new(Mutex::new(0)),
             subscribers: Arc::new(Mutex::new(Vec::new())),
         }
@@ -185,7 +187,8 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     }
                 };
                 if !notarize.verify(&self.namespace, identity) {
-                    panic!("signature verification failed");
+                    *self.invalid.lock().unwrap() += 1;
+                    return;
                 }
                 let encoded = notarize.encode();
                 Notarize::<V, D>::decode(encoded).unwrap();
@@ -204,7 +207,8 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                 let view = notarization.view();
                 let seed = notarization.seed();
                 if !notarization.verify(&self.namespace, &self.public_key) {
-                    panic!("signature verification failed");
+                    *self.invalid.lock().unwrap() += 1;
+                    return;
                 }
                 let encoded = notarization.encode();
                 Notarization::<V, D>::decode(encoded).unwrap();
@@ -215,7 +219,8 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
 
                 // Verify seed
                 if !seed.verify(&self.namespace, &self.public_key) {
-                    panic!("signature verification failed");
+                    *self.invalid.lock().unwrap() += 1;
+                    return;
                 }
                 let encoded = seed.encode();
                 Seed::<V>::decode(encoded).unwrap();
@@ -230,7 +235,8 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     }
                 };
                 if !nullify.verify(&self.namespace, identity) {
-                    panic!("signature verification failed");
+                    *self.invalid.lock().unwrap() += 1;
+                    return;
                 }
                 let encoded = nullify.encode();
                 Nullify::<V>::decode(encoded).unwrap();
@@ -247,7 +253,8 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                 let view = nullification.view();
                 let seed = nullification.seed();
                 if !nullification.verify(&self.namespace, &self.public_key) {
-                    panic!("signature verification failed");
+                    *self.invalid.lock().unwrap() += 1;
+                    return;
                 }
                 let encoded = nullification.encode();
                 Nullification::<V>::decode(encoded).unwrap();
@@ -258,7 +265,8 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
 
                 // Verify seed
                 if !seed.verify(&self.namespace, &self.public_key) {
-                    panic!("signature verification failed");
+                    *self.invalid.lock().unwrap() += 1;
+                    return;
                 }
                 let encoded = seed.encode();
                 Seed::<V>::decode(encoded).unwrap();
@@ -273,7 +281,8 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     }
                 };
                 if !finalize.verify(&self.namespace, identity) {
-                    panic!("signature verification failed");
+                    *self.invalid.lock().unwrap() += 1;
+                    return;
                 }
                 let encoded = finalize.encode();
                 Finalize::<V, D>::decode(encoded).unwrap();
@@ -292,7 +301,8 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                 let view = finalization.view();
                 let seed = finalization.seed();
                 if !finalization.verify(&self.namespace, &self.public_key) {
-                    panic!("signature verification failed");
+                    *self.invalid.lock().unwrap() += 1;
+                    return;
                 }
                 let encoded = finalization.encode();
                 Finalization::<V, D>::decode(encoded).unwrap();
@@ -303,7 +313,8 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
 
                 // Verify seed
                 if !seed.verify(&self.namespace, &self.public_key) {
-                    panic!("signature verification failed");
+                    *self.invalid.lock().unwrap() += 1;
+                    return;
                 }
                 let encoded = seed.encode();
                 Seed::<V>::decode(encoded).unwrap();
@@ -325,7 +336,8 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     }
                 };
                 if !conflicting.verify(&self.namespace, identity) {
-                    panic!("signature verification failed");
+                    *self.invalid.lock().unwrap() += 1;
+                    return;
                 }
                 let encoded = conflicting.encode();
                 ConflictingNotarize::<V, D>::decode(encoded).unwrap();
@@ -348,7 +360,8 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     }
                 };
                 if !conflicting.verify(&self.namespace, identity) {
-                    panic!("signature verification failed");
+                    *self.invalid.lock().unwrap() += 1;
+                    return;
                 }
                 let encoded = conflicting.encode();
                 ConflictingFinalize::<V, D>::decode(encoded).unwrap();
@@ -371,7 +384,8 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     }
                 };
                 if !nullify_finalize.verify(&self.namespace, identity) {
-                    panic!("signature verification failed");
+                    *self.invalid.lock().unwrap() += 1;
+                    return;
                 }
                 let encoded = nullify_finalize.encode();
                 NullifyFinalize::<V, D>::decode(encoded).unwrap();
