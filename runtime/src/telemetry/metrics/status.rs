@@ -8,9 +8,13 @@ use prometheus_client::{
 /// Metric label that indicates the type of task spawned.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub enum Task {
+    /// The root task.
     Root,
+    /// An async task.
     Async,
+    /// A blocking task spawned in a shared thread pool.
     BlockingShared,
+    /// A blocking task spawned on a dedicated thread.
     BlockingDedicated,
 }
 
