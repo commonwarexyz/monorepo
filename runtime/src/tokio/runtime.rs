@@ -447,7 +447,7 @@ impl crate::Spawner for Context {
             .get_or_create(&work)
             .clone();
 
-        // Initialize the blocking task using the new function
+        // Initialize the dedicated task using the new function
         let (f, handle) = Handle::init(f, gauge, self.executor.cfg.catch_panics);
 
         // Spawn the dedicated task as a thread (rather than consuming a shared thread from the runtime)
