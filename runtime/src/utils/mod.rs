@@ -162,7 +162,7 @@ pub fn create_pool<S: Spawner + Metrics>(
         .spawn_handler(move |thread| {
             context
                 .with_label("rayon-thread")
-                .spawn_blocking(move || thread.run());
+                .spawn_blocking(move |_| thread.run());
             Ok(())
         })
         .build()
