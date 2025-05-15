@@ -133,7 +133,6 @@ pub struct Storage {
 
 impl Storage {
     /// Returns a new `Storage` instance.
-    /// The `Spawner` is used to spawn the background task that handles IO operations.
     pub fn start(cfg: Config) -> Self {
         let (io_sender, receiver) =
             mpsc::channel::<(SqueueEntry, oneshot::Sender<i32>)>(cfg.ring_config.size as usize);
