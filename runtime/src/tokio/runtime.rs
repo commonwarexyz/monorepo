@@ -391,7 +391,7 @@ impl crate::Spawner for Context {
         }
     }
 
-    fn spawn_blocking<F, T>(self, f: F) -> Handle<T>
+    fn spawn_blocking<F, T>(self, dedicated: bool, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> T + Send + 'static,
         T: Send + 'static,
@@ -403,57 +403,40 @@ impl crate::Spawner for Context {
         let work = Work {
             label: self.label.clone(),
         };
-        self.executor
-            .metrics
-            .blocking_tasks_spawned
-            .get_or_create(&work)
-            .inc();
-        let gauge = self
-            .executor
-            .metrics
-            .blocking_tasks_running
-            .get_or_create(&work)
-            .clone();
+        let gauge = if dedicated {
+            self.executor
+                .metrics
+                .dedicated_tasks_spawned
+                .get_or_create(&work)
+                .inc();
+            self.executor
+                .metrics
+                .dedicated_tasks_running
+                .get_or_create(&work)
+                .clone()
+        } else {
+            self.executor
+                .metrics
+                .blocking_tasks_spawned
+                .get_or_create(&work)
+                .inc();
+            self.executor
+                .metrics
+                .blocking_tasks_running
+                .get_or_create(&work)
+                .clone()
+        };
 
         // Initialize the blocking task using the new function
         let executor = self.executor.clone();
         let (f, handle) = Handle::init_blocking(|| f(self), gauge, executor.cfg.catch_panics);
 
         // Spawn the blocking task
-        executor.runtime.spawn_blocking(f);
-        handle
-    }
-
-    fn spawn_dedicated<F, T>(self, f: F) -> Handle<T>
-    where
-        F: FnOnce(Self) -> T + Send + 'static,
-        T: Send + 'static,
-    {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-
-        // Get metrics
-        let work = Work {
-            label: self.label.clone(),
-        };
-        self.executor
-            .metrics
-            .dedicated_tasks_spawned
-            .get_or_create(&work)
-            .inc();
-        let gauge = self
-            .executor
-            .metrics
-            .dedicated_tasks_running
-            .get_or_create(&work)
-            .clone();
-
-        // Initialize the dedicated task using the new function
-        let catch_panics = self.executor.cfg.catch_panics;
-        let (f, handle) = Handle::init_blocking(|| f(self), gauge, catch_panics);
-
-        // Spawn the dedicated task as a thread (rather than consuming a shared thread from the runtime)
-        std::thread::spawn(f);
+        if dedicated {
+            std::thread::spawn(f);
+        } else {
+            executor.runtime.spawn_blocking(f);
+        }
         handle
     }
 

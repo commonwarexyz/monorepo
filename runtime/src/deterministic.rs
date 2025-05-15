@@ -822,7 +822,7 @@ impl crate::Spawner for Context {
         }
     }
 
-    fn spawn_blocking<F, T>(self, f: F) -> Handle<T>
+    fn spawn_blocking<F, T>(self, dedicated: bool, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> T + Send + 'static,
         T: Send + 'static,
@@ -835,54 +835,31 @@ impl crate::Spawner for Context {
         let work = Work {
             label: label.clone(),
         };
-        self.executor
-            .metrics
-            .blocking_tasks_spawned
-            .get_or_create(&work)
-            .inc();
-        let gauge = self
-            .executor
-            .metrics
-            .blocking_tasks_running
-            .get_or_create(&work)
-            .clone();
+        let gauge = if dedicated {
+            self.executor
+                .metrics
+                .dedicated_tasks_spawned
+                .get_or_create(&work)
+                .inc();
+            self.executor
+                .metrics
+                .dedicated_tasks_running
+                .get_or_create(&work)
+                .clone()
+        } else {
+            self.executor
+                .metrics
+                .blocking_tasks_spawned
+                .get_or_create(&work)
+                .inc();
+            self.executor
+                .metrics
+                .blocking_tasks_running
+                .get_or_create(&work)
+                .clone()
+        };
 
         // Initialize the blocking task
-        let executor = self.executor.clone();
-        let (f, handle) = Handle::init_blocking(|| f(self), gauge, false);
-
-        // Spawn the task
-        let f = async move { f() };
-        Tasks::register_work(&executor.tasks, &label, Box::pin(f));
-        handle
-    }
-
-    fn spawn_dedicated<F, T>(self, f: F) -> Handle<T>
-    where
-        F: FnOnce(Self) -> T + Send + 'static,
-        T: Send + 'static,
-    {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-
-        // Get metrics
-        let label = self.label.clone();
-        let work = Work {
-            label: label.clone(),
-        };
-        self.executor
-            .metrics
-            .dedicated_tasks_spawned
-            .get_or_create(&work)
-            .inc();
-        let gauge = self
-            .executor
-            .metrics
-            .dedicated_tasks_running
-            .get_or_create(&work)
-            .clone();
-
-        // Initialize the dedicated task
         let executor = self.executor.clone();
         let (f, handle) = Handle::init_blocking(|| f(self), gauge, false);
 
