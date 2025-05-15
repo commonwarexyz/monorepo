@@ -290,7 +290,6 @@ impl crate::Blob for Blob {
             }
             total_read += bytes_read;
         }
-
         Ok(buf)
     }
 
