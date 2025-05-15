@@ -1,3 +1,4 @@
+use commonware_utils::{StableBuf, StableBufMut};
 use futures::{
     channel::{mpsc, oneshot},
     executor::block_on,
@@ -222,8 +223,9 @@ impl Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, msg: &[u8]) -> Result<(), crate::Error> {
+    async fn send<B: StableBuf>(&mut self, msg: B) -> Result<(), crate::Error> {
         let mut bytes_sent = 0;
+        let msg = msg.as_ref();
         while bytes_sent < msg.len() {
             let remaining = &msg[bytes_sent..];
 
@@ -262,10 +264,12 @@ impl Stream {
 }
 
 impl crate::Stream for Stream {
-    async fn recv(&mut self, buf: &mut [u8]) -> Result<(), crate::Error> {
+    async fn recv<B: StableBufMut>(&mut self, mut buf: B) -> Result<B, crate::Error> {
         let mut bytes_received = 0;
-        while bytes_received < buf.len() {
-            let remaining = &mut buf[bytes_received..];
+        let buf_len = buf.len();
+        let buf_ref = buf.deref_mut();
+        while bytes_received < buf_len {
+            let remaining = &mut buf_ref[bytes_received..];
 
             let op = io_uring::opcode::Recv::new(
                 self.as_raw_fd(),
@@ -286,6 +290,6 @@ impl crate::Stream for Stream {
             }
             bytes_received += result as usize;
         }
-        Ok(())
+        Ok(buf)
     }
 }
