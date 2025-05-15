@@ -150,6 +150,12 @@ pub trait Spawner: Clone + Send + Sync + 'static {
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static;
 
+    /// Create a long-running task that is not expected to finish.
+    fn spawn_dedicated<F, T>(self, f: F) -> Handle<T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static;
+
     /// Signals the runtime to stop execution and that all outstanding tasks
     /// should perform any required cleanup and exit. This method is idempotent and
     /// can be called multiple times.

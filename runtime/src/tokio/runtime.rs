@@ -34,6 +34,8 @@ struct Metrics {
     tasks_running: Family<Work, Gauge>,
     blocking_tasks_spawned: Family<Work, Counter>,
     blocking_tasks_running: Family<Work, Gauge>,
+    dedicated_tasks_spawned: Family<Work, Counter>,
+    dedicated_tasks_running: Family<Work, Gauge>,
 }
 
 impl Metrics {
@@ -43,6 +45,8 @@ impl Metrics {
             tasks_running: Family::default(),
             blocking_tasks_spawned: Family::default(),
             blocking_tasks_running: Family::default(),
+            dedicated_tasks_spawned: Family::default(),
+            dedicated_tasks_running: Family::default(),
         };
         registry.register(
             "tasks_spawned",
@@ -63,6 +67,16 @@ impl Metrics {
             "blocking_tasks_running",
             "Number of blocking tasks currently running",
             metrics.blocking_tasks_running.clone(),
+        );
+        registry.register(
+            "dedicated_tasks_spawned",
+            "Total number of dedicated tasks spawned",
+            metrics.dedicated_tasks_spawned.clone(),
+        );
+        registry.register(
+            "dedicated_tasks_running",
+            "Number of dedicated tasks currently running",
+            metrics.dedicated_tasks_running.clone(),
         );
         metrics
     }
@@ -406,6 +420,38 @@ impl crate::Spawner for Context {
 
         // Spawn the blocking task
         self.executor.runtime.spawn_blocking(f);
+        handle
+    }
+
+    fn spawn_dedicated<F, T>(self, f: F) -> Handle<T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        // Ensure a context only spawns one task
+        assert!(!self.spawned, "already spawned");
+
+        // Get metrics
+        let work = Work {
+            label: self.label.clone(),
+        };
+        self.executor
+            .metrics
+            .dedicated_tasks_spawned
+            .get_or_create(&work)
+            .inc();
+        let gauge = self
+            .executor
+            .metrics
+            .dedicated_tasks_running
+            .get_or_create(&work)
+            .clone();
+
+        // Initialize the blocking task using the new function
+        let (f, handle) = Handle::init_blocking(f, gauge, self.executor.cfg.catch_panics);
+
+        // Spawn the dedicated task
+        std::thread::spawn(f);
         handle
     }
 
