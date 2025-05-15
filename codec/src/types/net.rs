@@ -7,7 +7,7 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 impl Write for Ipv4Addr {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
-        self.to_bits().to_be().write(buf);
+        self.to_bits().write(buf);
     }
 }
 
@@ -16,8 +16,7 @@ impl Read for Ipv4Addr {
 
     #[inline]
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let bits = <u32>::read(buf)?;
-        Ok(Ipv4Addr::from_bits(u32::from_be(bits)))
+        Ok(Ipv4Addr::from_bits(u32::read(buf)?))
     }
 }
 
@@ -28,7 +27,7 @@ impl FixedSize for Ipv4Addr {
 impl Write for Ipv6Addr {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
-        self.to_bits().to_be().write(buf);
+        self.to_bits().write(buf);
     }
 }
 
@@ -37,8 +36,7 @@ impl Read for Ipv6Addr {
 
     #[inline]
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let bits = <u128>::read(buf)?;
-        Ok(Ipv6Addr::from_bits(u128::from_be(bits)))
+        Ok(Ipv6Addr::from_bits(u128::read(buf)?))
     }
 }
 
@@ -266,5 +264,59 @@ mod test {
         let mut insufficient_v6 = vec![6]; // Version byte
         insufficient_v6.extend_from_slice(&[0; 17]); // 17 bytes instead of 18
         assert!(SocketAddr::decode(&insufficient_v6[..]).is_err());
+    }
+
+    #[test]
+    fn test_conformity() {
+        assert_eq!(Ipv4Addr::new(0, 0, 0, 0).encode(), &[0, 0, 0, 0][..]);
+        assert_eq!(Ipv4Addr::new(127, 0, 0, 1).encode(), &[127, 0, 0, 1][..]);
+        assert_eq!(
+            Ipv4Addr::new(192, 168, 1, 100).encode(),
+            &[192, 168, 1, 100][..]
+        );
+        assert_eq!(
+            Ipv4Addr::new(255, 255, 255, 255).encode(),
+            &[255, 255, 255, 255][..]
+        );
+
+        assert_eq!(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0).encode(), &[0; 16][..]);
+        assert_eq!(
+            Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1).encode(),
+            &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1][..]
+        );
+        let ipv6_test: Ipv6Addr = "2001:db8::ff00:42:8329".parse().unwrap();
+        assert_eq!(
+            ipv6_test.encode(),
+            &[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0xff, 0x00, 0, 0x42, 0x83, 0x29][..]
+        );
+        assert_eq!(
+            Ipv6Addr::new(0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff).encode(),
+            &[0xff; 16][..]
+        );
+
+        let sock_v4_1 = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 80);
+        assert_eq!(sock_v4_1.encode(), &[10, 0, 0, 1, 0x00, 0x50][..]);
+        let sock_v4_2 = SocketAddrV4::new(Ipv4Addr::new(192, 168, 20, 30), 65535);
+        assert_eq!(sock_v4_2.encode(), &[192, 168, 20, 30, 0xFF, 0xFF][..]);
+
+        let sock_v6_1 =
+            SocketAddrV6::new(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1), 8080, 0, 0);
+        assert_eq!(
+            sock_v6_1.encode(),
+            &[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x1F, 0x90][..]
+        );
+
+        let sa_v4 = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 8080));
+        assert_eq!(sa_v4.encode(), &[0x04, 127, 0, 0, 1, 0x1F, 0x90][..]);
+        let sa_v6 = SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1),
+            443,
+            0,
+            0,
+        ));
+        assert_eq!(
+            sa_v6.encode(),
+            &[0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x01, 0xBB][..]
+        );
     }
 }

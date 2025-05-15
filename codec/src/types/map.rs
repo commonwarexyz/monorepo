@@ -264,4 +264,50 @@ mod tests {
         assert_eq!(decoded_map.len(), 1);
         assert_eq!(decoded_map.get(&1u32), Some(&100u64));
     }
+
+    #[test]
+    fn test_conformity() {
+        let mut map1 = HashMap::<u8, u16>::new();
+        assert_eq!(map1.encode(), &[0x00][..]); // Empty map
+
+        map1.insert(1u8, 0xAAAAu16);
+        map1.insert(2u8, 0xBBBBu16);
+        // Expected: len=2 (0x02)
+        // Key 1 (0x01), Value 0xAAAA (0xAA, 0xAA)
+        // Key 2 (0x02), Value 0xBBBB (0xBB, 0xBB)
+        // Keys are sorted for encoding.
+        assert_eq!(
+            map1.encode(),
+            &[0x02, 0x01, 0xAA, 0xAA, 0x02, 0xBB, 0xBB][..]
+        );
+
+        let mut map2 = HashMap::<u16, bool>::new();
+        map2.insert(0x0303u16, true);
+        map2.insert(0x0101u16, false);
+        map2.insert(0x0202u16, true);
+        // Expected: len=3 (0x03)
+        // Key 0x0101, Value false (0x00)
+        // Key 0x0202, Value true (0x01)
+        // Key 0x0303, Value true (0x01)
+        assert_eq!(
+            map2.encode(),
+            &[0x03, 0x01, 0x01, 0x00, 0x02, 0x02, 0x01, 0x03, 0x03, 0x01][..]
+        );
+
+        // Map with Bytes as key and Vec<u8> as value
+        let mut map3 = HashMap::<Bytes, Vec<u8>>::new();
+        map3.insert(Bytes::from_static(b"b"), vec![20u8, 21u8]);
+        map3.insert(Bytes::from_static(b"a"), vec![10u8]);
+        // Expected: len=2 (0x02)
+        // Key "a": len=1 (0x01), 'a' (0x61)
+        // Value vec![10u8]: len=1 (0x01), 10u8 (0x0A)
+        // Key "b": len=1 (0x01), 'b' (0x62)
+        // Value vec![20u8, 21u8]: len=2 (0x02), 20u8 (0x14), 21u8 (0x15)
+        let mut expected_map3 = vec![0x02]; // Map length
+        expected_map3.extend_from_slice(&[0x01, 0x61]); // Key "a"
+        expected_map3.extend_from_slice(&[0x01, 0x0A]); // Value vec![10u8]
+        expected_map3.extend_from_slice(&[0x01, 0x62]); // Key "b"
+        expected_map3.extend_from_slice(&[0x02, 0x14, 0x15]); // Value vec![20u8, 21u8]
+        assert_eq!(map3.encode(), expected_map3.as_slice());
+    }
 }
