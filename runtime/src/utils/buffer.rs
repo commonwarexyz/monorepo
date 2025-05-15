@@ -1,5 +1,4 @@
 use crate::{Blob, Error};
-use bytes::BytesMut;
 
 /// A reader that buffers content from a [Blob] to optimize the performance
 /// of a full scan of contents.
@@ -46,7 +45,7 @@ pub struct Buffer<B: Blob> {
     /// The underlying blob to read from.
     blob: B,
     /// The buffer storing the data read from the blob.
-    buffer: BytesMut,
+    buffer: Option<Vec<u8>>,
     /// The current position in the blob from where the buffer was filled.
     blob_position: u64,
     /// The size of the blob.
@@ -67,11 +66,9 @@ impl<B: Blob> Buffer<B> {
     /// Panics if `buffer_size` is zero.
     pub fn new(blob: B, blob_size: u64, buffer_size: usize) -> Self {
         assert!(buffer_size > 0, "Buffer size must be greater than zero");
-        let mut buffer = BytesMut::with_capacity(buffer_size);
-        buffer.resize(buffer_size, 0);
         Self {
             blob,
-            buffer,
+            buffer: Some(vec![0; buffer_size]),
             blob_position: 0,
             blob_size,
             buffer_position: 0,
@@ -111,15 +108,21 @@ impl<B: Blob> Buffer<B> {
         // Read the data - we only need a single read operation since we know exactly how much data is available
         // Note that the last refill may cause `self.buffer` to have length < `self.buffer_size`
         // because `bytes_to_read` < `self.buffer_size`.
-        self.buffer = self
-            .blob
-            .read_at(
-                BytesMut::from(&self.buffer[..bytes_to_read]),
-                self.blob_position,
-            )
-            .await?;
-        self.buffer_valid_len = bytes_to_read;
-        Ok(bytes_to_read)
+        let mut buffer = self.buffer.take().unwrap();
+        buffer.truncate(bytes_to_read);
+        let result = self.blob.read_at(buffer, self.blob_position).await;
+
+        match result {
+            Ok(buffer) => {
+                self.buffer = Some(buffer);
+                self.buffer_valid_len = bytes_to_read;
+                Ok(bytes_to_read)
+            }
+            Err(e) => {
+                self.buffer = Some(Vec::new());
+                Err(e)
+            }
+        }
     }
 
     /// Reads exactly `size` bytes into the provided buffer.
@@ -145,8 +148,9 @@ impl<B: Blob> Buffer<B> {
             );
 
             // Copy bytes from buffer to output
+            let self_buf = self.buffer.as_ref().unwrap();
             buf[bytes_read..(bytes_read + bytes_to_copy)].copy_from_slice(
-                &self.buffer[self.buffer_position..(self.buffer_position + bytes_to_copy)],
+                &self_buf[self.buffer_position..(self.buffer_position + bytes_to_copy)],
             );
 
             self.buffer_position += bytes_to_copy;
