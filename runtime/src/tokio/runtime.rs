@@ -4,6 +4,7 @@ use crate::network::tokio::{
 };
 use crate::storage::metered::Storage;
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
+use crate::telemetry::metrics::status::Bool;
 use crate::{utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
 use crate::{SinkOf, StreamOf};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
@@ -26,16 +27,15 @@ use tokio::runtime::{Builder, Runtime};
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct Work {
     label: String,
+    root: Bool,
+    blocking: Bool,
+    dedicated: Bool,
 }
 
 #[derive(Debug)]
 struct Metrics {
     tasks_spawned: Family<Work, Counter>,
     tasks_running: Family<Work, Gauge>,
-    blocking_tasks_spawned: Family<Work, Counter>,
-    blocking_tasks_running: Family<Work, Gauge>,
-    dedicated_tasks_spawned: Family<Work, Counter>,
-    dedicated_tasks_running: Family<Work, Gauge>,
 }
 
 impl Metrics {
@@ -43,10 +43,6 @@ impl Metrics {
         let metrics = Self {
             tasks_spawned: Family::default(),
             tasks_running: Family::default(),
-            blocking_tasks_spawned: Family::default(),
-            blocking_tasks_running: Family::default(),
-            dedicated_tasks_spawned: Family::default(),
-            dedicated_tasks_running: Family::default(),
         };
         registry.register(
             "tasks_spawned",
@@ -57,26 +53,6 @@ impl Metrics {
             "tasks_running",
             "Number of tasks currently running",
             metrics.tasks_running.clone(),
-        );
-        registry.register(
-            "blocking_tasks_spawned",
-            "Total number of blocking tasks spawned",
-            metrics.blocking_tasks_spawned.clone(),
-        );
-        registry.register(
-            "blocking_tasks_running",
-            "Number of blocking tasks currently running",
-            metrics.blocking_tasks_running.clone(),
-        );
-        registry.register(
-            "dedicated_tasks_spawned",
-            "Total number of dedicated tasks spawned",
-            metrics.dedicated_tasks_spawned.clone(),
-        );
-        registry.register(
-            "dedicated_tasks_running",
-            "Number of dedicated tasks currently running",
-            metrics.dedicated_tasks_running.clone(),
         );
         metrics
     }
@@ -331,6 +307,9 @@ impl crate::Spawner for Context {
         // Get metrics
         let work = Work {
             label: self.label.clone(),
+            root: Bool::False,
+            blocking: Bool::False,
+            dedicated: Bool::False,
         };
         self.executor
             .metrics
@@ -367,6 +346,9 @@ impl crate::Spawner for Context {
         // Get metrics
         let work = Work {
             label: self.label.clone(),
+            root: Bool::False,
+            blocking: Bool::False,
+            dedicated: Bool::False,
         };
         self.executor
             .metrics
@@ -402,30 +384,21 @@ impl crate::Spawner for Context {
         // Get metrics
         let work = Work {
             label: self.label.clone(),
+            root: Bool::False,
+            blocking: Bool::True,
+            dedicated: dedicated.into(),
         };
-        let gauge = if dedicated {
-            self.executor
-                .metrics
-                .dedicated_tasks_spawned
-                .get_or_create(&work)
-                .inc();
-            self.executor
-                .metrics
-                .dedicated_tasks_running
-                .get_or_create(&work)
-                .clone()
-        } else {
-            self.executor
-                .metrics
-                .blocking_tasks_spawned
-                .get_or_create(&work)
-                .inc();
-            self.executor
-                .metrics
-                .blocking_tasks_running
-                .get_or_create(&work)
-                .clone()
-        };
+        self.executor
+            .metrics
+            .tasks_spawned
+            .get_or_create(&work)
+            .inc();
+        let gauge = self
+            .executor
+            .metrics
+            .tasks_running
+            .get_or_create(&work)
+            .clone();
 
         // Initialize the blocking task using the new function
         let executor = self.executor.clone();
