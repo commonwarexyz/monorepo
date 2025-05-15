@@ -393,7 +393,7 @@ impl crate::Spawner for Context {
 
     fn spawn_blocking<F, T>(self, f: F) -> Handle<T>
     where
-        F: FnOnce() -> T + Send + 'static,
+        F: FnOnce(Self) -> T + Send + 'static,
         T: Send + 'static,
     {
         // Ensure a context only spawns one task
@@ -416,16 +416,17 @@ impl crate::Spawner for Context {
             .clone();
 
         // Initialize the blocking task using the new function
-        let (f, handle) = Handle::init_blocking(f, gauge, self.executor.cfg.catch_panics);
+        let executor = self.executor.clone();
+        let (f, handle) = Handle::init_blocking(|| f(self), gauge, executor.cfg.catch_panics);
 
         // Spawn the blocking task
-        self.executor.runtime.spawn_blocking(f);
+        executor.runtime.spawn_blocking(f);
         handle
     }
 
     fn spawn_dedicated<F, T>(self, f: F) -> Handle<T>
     where
-        F: FnOnce() -> T + Send + 'static,
+        F: FnOnce(Self) -> T + Send + 'static,
         T: Send + 'static,
     {
         // Ensure a context only spawns one task
@@ -448,7 +449,8 @@ impl crate::Spawner for Context {
             .clone();
 
         // Initialize the dedicated task using the new function
-        let (f, handle) = Handle::init_blocking(f, gauge, self.executor.cfg.catch_panics);
+        let catch_panics = self.executor.cfg.catch_panics;
+        let (f, handle) = Handle::init_blocking(|| f(self), gauge, catch_panics);
 
         // Spawn the dedicated task as a thread (rather than consuming a shared thread from the runtime)
         std::thread::spawn(f);
