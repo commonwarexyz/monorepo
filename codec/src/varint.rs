@@ -50,6 +50,8 @@ const DATA_BITS_MASK: u8 = 0x7F;
 const CONTINUATION_BIT_MASK: u8 = 0x80;
 
 // ---------- Traits ----------
+
+#[doc(hidden)]
 mod sealed {
     use super::*;
     use std::ops::{BitOrAssign, Shl, ShrAssign};
@@ -171,6 +173,7 @@ impl<U: UPrim> Write for UInt<U> {
 }
 
 impl<U: UPrim> Read for UInt<U> {
+    type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         read(buf).map(UInt)
     }
@@ -209,6 +212,7 @@ impl<S: SPrim> Write for SInt<S> {
 }
 
 impl<S: SPrim> Read for SInt<S> {
+    type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         read_signed::<S>(buf).map(SInt)
     }
@@ -495,5 +499,21 @@ mod tests {
         let s64: i64 = 987_654_321;
         let out64: i64 = SInt(s64).into();
         assert_eq!(s64, out64);
+    }
+
+    #[test]
+    fn test_conformity() {
+        assert_eq!(0usize.encode(), &[0x00][..]);
+        assert_eq!(1usize.encode(), &[0x01][..]);
+        assert_eq!(127usize.encode(), &[0x7F][..]);
+        assert_eq!(128usize.encode(), &[0x80, 0x01][..]);
+        assert_eq!(16383usize.encode(), &[0xFF, 0x7F][..]);
+        assert_eq!(16384usize.encode(), &[0x80, 0x80, 0x01][..]);
+        assert_eq!(2097151usize.encode(), &[0xFF, 0xFF, 0x7F][..]);
+        assert_eq!(2097152usize.encode(), &[0x80, 0x80, 0x80, 0x01][..]);
+        assert_eq!(
+            (u32::MAX as usize).encode(),
+            &[0xFF, 0xFF, 0xFF, 0xFF, 0x0F][..]
+        );
     }
 }

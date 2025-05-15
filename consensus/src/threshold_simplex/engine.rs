@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{Automaton, Relay, Reporter, ThresholdSupervisor};
 use commonware_cryptography::{
-    bls12381::primitives::{group, poly},
+    bls12381::primitives::{group, poly, variant::Variant},
     Digest, Scheme,
 };
 use commonware_macros::select;
@@ -19,44 +19,46 @@ use tracing::debug;
 pub struct Engine<
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
     C: Scheme,
+    V: Variant,
     D: Digest,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
-    F: Reporter<Activity = Activity<D>>,
+    F: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<
-        Seed = group::Signature,
+        Seed = V::Signature,
         Index = View,
         Share = group::Share,
-        Identity = poly::Public,
+        Identity = poly::Public<V>,
         PublicKey = C::PublicKey,
     >,
 > {
     context: E,
 
-    voter: voter::Actor<E, C, D, A, R, F, S>,
-    voter_mailbox: voter::Mailbox<D>,
-    resolver: resolver::Actor<E, C, D, S>,
-    resolver_mailbox: resolver::Mailbox<D>,
+    voter: voter::Actor<E, C, V, D, A, R, F, S>,
+    voter_mailbox: voter::Mailbox<V, D>,
+    resolver: resolver::Actor<E, C, V, D, S>,
+    resolver_mailbox: resolver::Mailbox<V, D>,
 }
 
 impl<
         E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
         C: Scheme,
+        V: Variant,
         D: Digest,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
-        F: Reporter<Activity = Activity<D>>,
+        F: Reporter<Activity = Activity<V, D>>,
         S: ThresholdSupervisor<
-            Seed = group::Signature,
+            Seed = V::Signature,
             Index = View,
             Share = group::Share,
-            Identity = poly::Public,
+            Identity = poly::Public<V>,
             PublicKey = C::PublicKey,
         >,
-    > Engine<E, C, D, A, R, F, S>
+    > Engine<E, C, V, D, A, R, F, S>
 {
     /// Create a new `threshold-simplex` consensus engine.
-    pub fn new(context: E, cfg: Config<C, D, A, R, F, S>) -> Self {
+    pub fn new(context: E, cfg: Config<C, V, D, A, R, F, S>) -> Self {
         // Ensure configuration is valid
         cfg.assert();
 
@@ -79,6 +81,7 @@ impl<
                 activity_timeout: cfg.activity_timeout,
                 skip_timeout: cfg.skip_timeout,
                 replay_concurrency: cfg.replay_concurrency,
+                replay_buffer: cfg.replay_buffer,
             },
         );
 

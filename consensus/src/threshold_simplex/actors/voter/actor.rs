@@ -14,8 +14,9 @@ use crate::{
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
-        ops::threshold_signature_recover,
+        ops::{threshold_signature_recover, threshold_signature_recover_pair},
         poly,
+        variant::Variant,
     },
     Digest, Scheme,
 };
@@ -47,10 +48,11 @@ const GENESIS_VIEW: View = 0;
 
 struct Round<
     C: Scheme,
+    V: Variant,
     D: Digest,
-    R: Reporter<Activity = Activity<D>>,
+    R: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<
-        Seed = group::Signature,
+        Seed = V::Signature,
         Index = View,
         Share = group::Share,
         PublicKey = C::PublicKey,
@@ -75,36 +77,37 @@ struct Round<
 
     // Track notarizes for all proposals (ensuring any participant only has one recorded notarize)
     notarized_proposals: HashMap<Proposal<D>, Vec<u32>>,
-    notarizes: Vec<Option<Notarize<D>>>,
-    notarization: Option<Notarization<D>>,
+    notarizes: Vec<Option<Notarize<V, D>>>,
+    notarization: Option<Notarization<V, D>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
 
     // Track nullifies (ensuring any participant only has one recorded nullify)
-    nullifies: HashMap<u32, Nullify>,
-    nullification: Option<Nullification>,
+    nullifies: HashMap<u32, Nullify<V>>,
+    nullification: Option<Nullification<V>>,
     broadcast_nullify: bool,
     broadcast_nullification: bool,
 
     // Track finalizes for all proposals (ensuring any participant only has one recorded finalize)
     finalized_proposals: HashMap<Proposal<D>, Vec<u32>>,
-    finalizes: Vec<Option<Finalize<D>>>,
-    finalization: Option<Finalization<D>>,
+    finalizes: Vec<Option<Finalize<V, D>>>,
+    finalization: Option<Finalization<V, D>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
 }
 
 impl<
         C: Scheme,
+        V: Variant,
         D: Digest,
-        R: Reporter<Activity = Activity<D>>,
+        R: Reporter<Activity = Activity<V, D>>,
         S: ThresholdSupervisor<
-            Seed = group::Signature,
+            Seed = V::Signature,
             Index = View,
             Share = group::Share,
             PublicKey = C::PublicKey,
         >,
-    > Round<C, D, R, S>
+    > Round<C, V, D, R, S>
 {
     pub fn new(clock: &impl Clock, reporter: R, supervisor: S, view: View) -> Self {
         let participants = supervisor.participants(view).unwrap().len();
@@ -144,7 +147,7 @@ impl<
         }
     }
 
-    pub fn set_leader(&mut self, seed: group::Signature) {
+    pub fn set_leader(&mut self, seed: V::Signature) {
         let leader = ThresholdSupervisor::leader(&self.supervisor, self.view, seed).unwrap();
         self.leader = Some(leader);
     }
@@ -167,7 +170,7 @@ impl<
     async fn add_verified_notarize(
         &mut self,
         public_key_index: u32,
-        notarize: Notarize<D>,
+        notarize: Notarize<V, D>,
     ) -> bool {
         // Check if already notarized
         if let Some(previous) = self.notarizes[public_key_index as usize].as_ref() {
@@ -201,7 +204,7 @@ impl<
         true
     }
 
-    async fn add_verified_nullify(&mut self, public_key_index: u32, nullify: Nullify) -> bool {
+    async fn add_verified_nullify(&mut self, public_key_index: u32, nullify: Nullify<V>) -> bool {
         // Check if already issued finalize
         let Some(finalize) = self.finalizes[public_key_index as usize].as_ref() else {
             // Store the nullify
@@ -232,7 +235,7 @@ impl<
     async fn add_verified_finalize(
         &mut self,
         public_key_index: u32,
-        finalize: Finalize<D>,
+        finalize: Finalize<V, D>,
     ) -> bool {
         // Check if also issued nullify
         if let Some(previous) = self.nullifies.get(&public_key_index) {
@@ -281,7 +284,7 @@ impl<
         true
     }
 
-    fn add_verified_notarization(&mut self, notarization: Notarization<D>) -> bool {
+    fn add_verified_notarization(&mut self, notarization: Notarization<V, D>) -> bool {
         // If already have notarization, ignore
         if self.notarization.is_some() {
             return false;
@@ -299,7 +302,7 @@ impl<
         true
     }
 
-    fn add_verified_nullification(&mut self, nullification: Nullification) -> bool {
+    fn add_verified_nullification(&mut self, nullification: Nullification<V>) -> bool {
         // If already have nullification, ignore
         if self.nullification.is_some() {
             return false;
@@ -314,7 +317,7 @@ impl<
         true
     }
 
-    fn add_verified_finalization(&mut self, finalization: Finalization<D>) -> bool {
+    fn add_verified_finalization(&mut self, finalization: Finalization<V, D>) -> bool {
         // If already have finalization, ignore
         if self.finalization.is_some() {
             return false;
@@ -332,7 +335,7 @@ impl<
         true
     }
 
-    async fn notarizable(&mut self, threshold: u32, force: bool) -> Option<Notarization<D>> {
+    async fn notarizable(&mut self, threshold: u32, force: bool) -> Option<Notarization<V, D>> {
         // Ensure we haven't already broadcast
         if !force && (self.broadcast_notarization || self.broadcast_nullification) {
             // We want to broadcast a notarization, even if we haven't yet verified a proposal.
@@ -365,12 +368,14 @@ impl<
                 .filter_map(|x| self.notarizes[*x as usize].as_ref());
 
             // Recover threshold signature
-            let proposals = notarizes.clone().map(|x| &x.proposal_signature);
-            let proposal_signature = threshold_signature_recover(threshold, proposals)
-                .expect("failed to recover threshold signature");
-            let seeds = notarizes.map(|x| &x.seed_signature);
-            let seed_signature = threshold_signature_recover(threshold, seeds)
-                .expect("failed to recover threshold signature");
+            let proposals = notarizes
+                .clone()
+                .map(|x| &x.proposal_signature)
+                .collect::<Vec<_>>();
+            let seeds = notarizes.map(|x| &x.seed_signature).collect::<Vec<_>>();
+            let (proposal_signature, seed_signature) =
+                threshold_signature_recover_pair::<V, _>(threshold, proposals, seeds)
+                    .expect("failed to recover threshold signature");
 
             // Construct notarization
             let notarization =
@@ -381,7 +386,7 @@ impl<
         None
     }
 
-    async fn nullifiable(&mut self, threshold: u32, force: bool) -> Option<Nullification> {
+    async fn nullifiable(&mut self, threshold: u32, force: bool) -> Option<Nullification<V>> {
         // Ensure we haven't already broadcast
         if !force && (self.broadcast_nullification || self.broadcast_notarization) {
             return None;
@@ -401,12 +406,14 @@ impl<
 
         // Recover threshold signature
         let nullifies = self.nullifies.values();
-        let views = nullifies.clone().map(|x| &x.view_signature);
-        let view_signature = threshold_signature_recover(threshold, views)
-            .expect("failed to recover threshold signature");
-        let seeds = nullifies.map(|x| &x.seed_signature);
-        let seed_signature = threshold_signature_recover(threshold, seeds)
-            .expect("failed to recover threshold signature");
+        let views = nullifies
+            .clone()
+            .map(|x| &x.view_signature)
+            .collect::<Vec<_>>();
+        let seeds = nullifies.map(|x| &x.seed_signature).collect::<Vec<_>>();
+        let (view_signature, seed_signature) =
+            threshold_signature_recover_pair::<V, _>(threshold, views, seeds)
+                .expect("failed to recover threshold signature");
 
         // Construct nullification
         let nullification = Nullification::new(self.view, view_signature, seed_signature);
@@ -414,7 +421,7 @@ impl<
         Some(nullification)
     }
 
-    async fn finalizable(&mut self, threshold: u32, force: bool) -> Option<Finalization<D>> {
+    async fn finalizable(&mut self, threshold: u32, force: bool) -> Option<Finalization<V, D>> {
         // Ensure we haven't already broadcast
         if !force && self.broadcast_finalization {
             // We want to broadcast a finalization, even if we haven't yet verified a proposal.
@@ -463,7 +470,7 @@ impl<
 
             // Recover threshold signature
             let proposals = finalizes.map(|x| &x.proposal_signature);
-            let proposal_signature = threshold_signature_recover(threshold, proposals)
+            let proposal_signature = threshold_signature_recover::<V, _>(threshold, proposals)
                 .expect("failed to recover threshold signature");
 
             // Construct finalization
@@ -492,13 +499,14 @@ impl<
 pub struct Actor<
     E: Clock + Rng + Spawner + Storage + Metrics,
     C: Scheme,
+    V: Variant,
     D: Digest,
     A: Automaton<Digest = D, Context = Context<D>>,
     R: Relay,
-    F: Reporter<Activity = Activity<D>>,
+    F: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<
-        Identity = poly::Poly<group::Public>,
-        Seed = group::Signature,
+        Identity = poly::Public<V>,
+        Seed = V::Signature,
         Index = View,
         Share = group::Share,
         PublicKey = C::PublicKey,
@@ -514,7 +522,8 @@ pub struct Actor<
     partition: String,
     compression: Option<u8>,
     replay_concurrency: usize,
-    journal: Option<Journal<E, (), Voter<D>>>,
+    replay_buffer: usize,
+    journal: Option<Journal<E, Voter<V, D>>>,
 
     genesis: Option<D>,
 
@@ -526,11 +535,11 @@ pub struct Actor<
     activity_timeout: View,
     skip_timeout: View,
 
-    mailbox_receiver: mpsc::Receiver<Message<D>>,
+    mailbox_receiver: mpsc::Receiver<Message<V, D>>,
 
     last_finalized: View,
     view: View,
-    views: BTreeMap<View, Round<C, D, F, S>>,
+    views: BTreeMap<View, Round<C, V, D, F, S>>,
 
     current_view: Gauge,
     tracked_views: Gauge,
@@ -544,20 +553,21 @@ pub struct Actor<
 impl<
         E: Clock + Rng + Spawner + Storage + Metrics,
         C: Scheme,
+        V: Variant,
         D: Digest,
         A: Automaton<Digest = D, Context = Context<D>>,
         R: Relay<Digest = D>,
-        F: Reporter<Activity = Activity<D>>,
+        F: Reporter<Activity = Activity<V, D>>,
         S: ThresholdSupervisor<
-            Identity = poly::Poly<group::Public>,
-            Seed = group::Signature,
+            Identity = poly::Public<V>,
+            Seed = V::Signature,
             Index = View,
             Share = group::Share,
             PublicKey = C::PublicKey,
         >,
-    > Actor<E, C, D, A, R, F, S>
+    > Actor<E, C, V, D, A, R, F, S>
 {
-    pub fn new(context: E, cfg: Config<C, D, A, R, F, S>) -> (Self, Mailbox<D>) {
+    pub fn new(context: E, cfg: Config<C, V, D, A, R, F, S>) -> (Self, Mailbox<V, D>) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -610,6 +620,7 @@ impl<
                 partition: cfg.partition,
                 compression: cfg.compression,
                 replay_concurrency: cfg.replay_concurrency,
+                replay_buffer: cfg.replay_buffer,
                 journal: None,
 
                 genesis: None,
@@ -729,7 +740,7 @@ impl<
     #[allow(clippy::question_mark)]
     async fn propose(
         &mut self,
-        backfiller: &mut resolver::Mailbox<D>,
+        backfiller: &mut resolver::Mailbox<V, D>,
     ) -> Option<(Context<D>, oneshot::Receiver<D>)> {
         // Check if we are leader
         {
@@ -801,7 +812,7 @@ impl<
         null_retry
     }
 
-    async fn timeout<Sr: Sender>(&mut self, sender: &mut WrappedSender<Sr, (), Voter<D>>) {
+    async fn timeout<Sr: Sender>(&mut self, sender: &mut WrappedSender<Sr, Voter<V, D>>) {
         // Set timeout fired
         let round = self.views.get_mut(&self.view).unwrap();
         let mut retry = false;
@@ -865,7 +876,7 @@ impl<
         debug!(view = self.view, "broadcasted nullify");
     }
 
-    async fn nullify(&mut self, sender: &C::PublicKey, nullify: Nullify) -> bool {
+    async fn nullify(&mut self, sender: &C::PublicKey, nullify: Nullify<V>) -> bool {
         // Ensure we are in the right view to process this message
         if !self.interesting(nullify.view, false) {
             return false;
@@ -892,7 +903,7 @@ impl<
         true
     }
 
-    async fn handle_nullify(&mut self, public_key_index: u32, nullify: Nullify) {
+    async fn handle_nullify(&mut self, public_key_index: u32, nullify: Nullify<V>) {
         // Check to see if nullify is for proposal in view
         let view = nullify.view;
         let round = self.views.entry(view).or_insert_with(|| {
@@ -1084,7 +1095,7 @@ impl<
         Some((*leader == self.crypto.public_key(), elapsed.as_secs_f64()))
     }
 
-    fn enter_view(&mut self, view: u64, seed: group::Signature) {
+    fn enter_view(&mut self, view: u64, seed: V::Signature) {
         // Ensure view is valid
         if view <= self.view {
             trace!(
@@ -1201,7 +1212,7 @@ impl<
         self.tracked_views.set(self.views.len() as i64);
     }
 
-    async fn notarize(&mut self, sender: &C::PublicKey, notarize: Notarize<D>) -> bool {
+    async fn notarize(&mut self, sender: &C::PublicKey, notarize: Notarize<V, D>) -> bool {
         // Ensure we are in the right view to process this message
         let view = notarize.view();
         if !self.interesting(view, false) {
@@ -1229,7 +1240,7 @@ impl<
         true
     }
 
-    async fn handle_notarize(&mut self, public_key_index: u32, notarize: Notarize<D>) {
+    async fn handle_notarize(&mut self, public_key_index: u32, notarize: Notarize<V, D>) {
         // Check to see if notarize is for proposal in view
         let view = notarize.view();
         let round = self.views.entry(view).or_insert_with(|| {
@@ -1257,7 +1268,7 @@ impl<
         }
     }
 
-    async fn notarization(&mut self, notarization: Notarization<D>) -> bool {
+    async fn notarization(&mut self, notarization: Notarization<V, D>) -> bool {
         // Check if we are still in a view where this notarization could help
         let view = notarization.view();
         if !self.interesting(view, true) {
@@ -1276,7 +1287,7 @@ impl<
         let Some(identity) = self.supervisor.identity(view) else {
             return false;
         };
-        let public_key = poly::public(identity);
+        let public_key = poly::public::<V>(identity);
         if !notarization.verify(&self.namespace, public_key) {
             return false;
         }
@@ -1286,7 +1297,7 @@ impl<
         true
     }
 
-    async fn handle_notarization(&mut self, notarization: Notarization<D>) {
+    async fn handle_notarization(&mut self, notarization: Notarization<V, D>) {
         // Create round (if it doesn't exist)
         let view = notarization.view();
         let round = self.views.entry(view).or_insert_with(|| {
@@ -1314,7 +1325,7 @@ impl<
         self.enter_view(view + 1, seed);
     }
 
-    async fn nullification(&mut self, nullification: Nullification) -> bool {
+    async fn nullification(&mut self, nullification: Nullification<V>) -> bool {
         // Check if we are still in a view where this notarization could help
         if !self.interesting(nullification.view, true) {
             return false;
@@ -1332,7 +1343,7 @@ impl<
         let Some(identity) = self.supervisor.identity(nullification.view) else {
             return false;
         };
-        let public_key = poly::public(identity);
+        let public_key = poly::public::<V>(identity);
         if !nullification.verify(&self.namespace, public_key) {
             return false;
         }
@@ -1342,7 +1353,7 @@ impl<
         true
     }
 
-    async fn handle_nullification(&mut self, nullification: Nullification) {
+    async fn handle_nullification(&mut self, nullification: Nullification<V>) {
         // Create round (if it doesn't exist)
         let view = nullification.view;
         let round = self.views.entry(view).or_insert_with(|| {
@@ -1370,7 +1381,7 @@ impl<
         self.enter_view(view + 1, seed);
     }
 
-    async fn finalize(&mut self, sender: &C::PublicKey, finalize: Finalize<D>) -> bool {
+    async fn finalize(&mut self, sender: &C::PublicKey, finalize: Finalize<V, D>) -> bool {
         // Ensure we are in the right view to process this message
         let view = finalize.view();
         if !self.interesting(view, false) {
@@ -1398,7 +1409,7 @@ impl<
         true
     }
 
-    async fn handle_finalize(&mut self, public_key_index: u32, finalize: Finalize<D>) {
+    async fn handle_finalize(&mut self, public_key_index: u32, finalize: Finalize<V, D>) {
         // Get view for finalize
         let view = finalize.view();
         let round = self.views.entry(view).or_insert_with(|| {
@@ -1426,7 +1437,7 @@ impl<
         }
     }
 
-    async fn finalization(&mut self, finalization: Finalization<D>) -> bool {
+    async fn finalization(&mut self, finalization: Finalization<V, D>) -> bool {
         // Check if we are still in a view where this finalization could help
         let view = finalization.view();
         if !self.interesting(view, true) {
@@ -1445,7 +1456,7 @@ impl<
         let Some(identity) = self.supervisor.identity(view) else {
             return false;
         };
-        let public_key = poly::public(identity);
+        let public_key = poly::public::<V>(identity);
         if !finalization.verify(&self.namespace, public_key) {
             return false;
         }
@@ -1455,7 +1466,7 @@ impl<
         true
     }
 
-    async fn handle_finalization(&mut self, finalization: Finalization<D>) {
+    async fn handle_finalization(&mut self, finalization: Finalization<V, D>) {
         // Create round (if it doesn't exist)
         let view = finalization.view();
         let round = self.views.entry(view).or_insert_with(|| {
@@ -1488,7 +1499,7 @@ impl<
         self.enter_view(view + 1, seed);
     }
 
-    fn construct_notarize(&mut self, view: u64) -> Option<Notarize<D>> {
+    fn construct_notarize(&mut self, view: u64) -> Option<Notarize<V, D>> {
         let round = self.views.get_mut(&view)?;
         if round.broadcast_notarize {
             return None;
@@ -1507,7 +1518,11 @@ impl<
         Some(Notarize::sign(&self.namespace, share, proposal.clone()))
     }
 
-    async fn construct_notarization(&mut self, view: u64, force: bool) -> Option<Notarization<D>> {
+    async fn construct_notarization(
+        &mut self,
+        view: u64,
+        force: bool,
+    ) -> Option<Notarization<V, D>> {
         // Get requested view
         let round = self.views.get_mut(&view)?;
 
@@ -1517,7 +1532,11 @@ impl<
         round.notarizable(threshold, force).await
     }
 
-    async fn construct_nullification(&mut self, view: u64, force: bool) -> Option<Nullification> {
+    async fn construct_nullification(
+        &mut self,
+        view: u64,
+        force: bool,
+    ) -> Option<Nullification<V>> {
         // Get requested view
         let round = self.views.get_mut(&view)?;
 
@@ -1527,7 +1546,7 @@ impl<
         round.nullifiable(threshold, force).await
     }
 
-    fn construct_finalize(&mut self, view: u64) -> Option<Finalize<D>> {
+    fn construct_finalize(&mut self, view: u64) -> Option<Finalize<V, D>> {
         let round = self.views.get_mut(&view)?;
         if round.broadcast_nullify {
             return None;
@@ -1551,7 +1570,11 @@ impl<
         Some(Finalize::sign(&self.namespace, share, proposal.clone()))
     }
 
-    async fn construct_finalization(&mut self, view: u64, force: bool) -> Option<Finalization<D>> {
+    async fn construct_finalization(
+        &mut self,
+        view: u64,
+        force: bool,
+    ) -> Option<Finalization<V, D>> {
         let round = self.views.get_mut(&view)?;
 
         // Attempt to construct finalization
@@ -1562,8 +1585,8 @@ impl<
 
     async fn notify<Sr: Sender>(
         &mut self,
-        backfiller: &mut resolver::Mailbox<D>,
-        sender: &mut WrappedSender<Sr, (), Voter<D>>,
+        backfiller: &mut resolver::Mailbox<V, D>,
+        sender: &mut WrappedSender<Sr, Voter<V, D>>,
         view: u64,
     ) {
         // Get public key index
@@ -1771,7 +1794,7 @@ impl<
 
     pub fn start(
         self,
-        backfiller: resolver::Mailbox<D>,
+        backfiller: resolver::Mailbox<V, D>,
         sender: impl Sender<PublicKey = C::PublicKey>,
         receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) -> Handle<()> {
@@ -1782,7 +1805,7 @@ impl<
 
     async fn run(
         mut self,
-        mut backfiller: resolver::Mailbox<D>,
+        mut backfiller: resolver::Mailbox<V, D>,
         sender: impl Sender<PublicKey = C::PublicKey>,
         receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) {
@@ -1796,10 +1819,10 @@ impl<
         // Add initial view
         //
         // We start on view 1 because the genesis container occupies view 0/height 0.
-        self.enter_view(1, group::Signature::zero());
+        self.enter_view(1, V::Signature::zero());
 
         // Initialize journal
-        let mut journal = Journal::<_, _, Voter<D>>::init(
+        let journal = Journal::<_, Voter<V, D>>::init(
             self.context.with_label("journal"),
             JConfig {
                 partition: self.partition.clone(),
@@ -1813,7 +1836,7 @@ impl<
         // Rebuild from journal
         {
             let stream = journal
-                .replay(self.replay_concurrency)
+                .replay(self.replay_concurrency, self.replay_buffer)
                 .await
                 .expect("unable to replay journal");
             pin_mut!(stream);

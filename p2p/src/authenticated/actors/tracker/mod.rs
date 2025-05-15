@@ -9,13 +9,20 @@ use std::time::Duration;
 use thiserror::Error;
 
 mod actor;
+mod directory;
 mod ingress;
+mod metadata;
+mod metrics;
 mod record;
+mod reservation;
 mod set;
 
 pub use actor::Actor;
-pub use ingress::{Mailbox, Oracle, Reservation};
+pub use ingress::{Mailbox, Oracle};
+pub use metadata::Metadata;
+pub use reservation::Reservation;
 
+#[derive(Clone, Debug)]
 pub struct Config<C: Scheme> {
     pub crypto: C,
     pub namespace: Vec<u8>,
@@ -28,6 +35,7 @@ pub struct Config<C: Scheme> {
     pub max_peer_set_size: usize,
     pub allowed_connection_rate_per_peer: Quota,
     pub peer_gossip_max_count: usize,
+    pub dial_fail_limit: usize,
 }
 
 #[derive(Error, Debug)]
@@ -40,8 +48,6 @@ pub enum Error {
     ReceivedSelf,
     #[error("invalid signature")]
     InvalidSignature,
-    #[error("peervec length mismatch: expected {0} bytes, got {1}")]
-    BitVecLengthMismatch(usize, usize),
-    #[error("peervec has extra bit")]
-    BitVecExtraBit,
+    #[error("synchrony bound violated")]
+    SynchronyBound,
 }

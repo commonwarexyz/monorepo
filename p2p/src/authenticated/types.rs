@@ -1,8 +1,8 @@
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
-    varint::UInt, Encode, EncodeSize, Error, RangeConfig, Read, ReadExt, ReadRangeExt, Write,
+    varint::UInt, Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, ReadRangeExt, Write,
 };
-use commonware_cryptography::Verifier;
+use commonware_cryptography::{Signer, Verifier};
 use commonware_utils::BitVec as UtilsBitVec;
 use std::net::SocketAddr;
 
@@ -23,11 +23,11 @@ pub struct Config {
     pub max_peers: usize,
 
     /// The maximum number of bits that can be sent in a `BitVec` message.
-    pub max_bitvec: usize,
+    pub max_bit_vec: usize,
 }
 
 /// Payload is the only allowed message format that can be sent between peers.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum Payload<C: Verifier> {
     /// Bit vector that represents the peers a peer knows about.
     ///
@@ -44,7 +44,7 @@ pub enum Payload<C: Verifier> {
 impl<C: Verifier> EncodeSize for Payload<C> {
     fn encode_size(&self) -> usize {
         (match self {
-            Payload::BitVec(bitvec) => bitvec.encode_size(),
+            Payload::BitVec(bit_vec) => bit_vec.encode_size(),
             Payload::Peers(peers) => peers.encode_size(),
             Payload::Data(data) => data.encode_size(),
         }) + 1
@@ -54,9 +54,9 @@ impl<C: Verifier> EncodeSize for Payload<C> {
 impl<C: Verifier> Write for Payload<C> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Payload::BitVec(bitvec) => {
+            Payload::BitVec(bit_vec) => {
                 0u8.write(buf);
-                bitvec.write(buf);
+                bit_vec.write(buf);
             }
             Payload::Peers(peers) => {
                 1u8.write(buf);
@@ -70,13 +70,15 @@ impl<C: Verifier> Write for Payload<C> {
     }
 }
 
-impl<C: Verifier> Read<Config> for Payload<C> {
-    fn read_cfg(buf: &mut impl Buf, cfg: &Config) -> Result<Self, Error> {
+impl<C: Verifier> Read for Payload<C> {
+    type Cfg = Config;
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let payload_type = <u8>::read(buf)?;
         match payload_type {
             0 => {
-                let bitvec = BitVec::read_cfg(buf, &cfg.max_bitvec)?;
-                Ok(Payload::BitVec(bitvec))
+                let bit_vec = BitVec::read_cfg(buf, &cfg.max_bit_vec)?;
+                Ok(Payload::BitVec(bit_vec))
             }
             1 => {
                 let peers = Vec::<PeerInfo<C>>::read_range(buf, ..=cfg.max_peers)?;
@@ -85,7 +87,7 @@ impl<C: Verifier> Read<Config> for Payload<C> {
             2 => {
                 // Don't limit the size of the data to be read.
                 // The max message size should already be limited by the p2p layer.
-                let data = Data::read_cfg(buf, &(..))?;
+                let data = Data::read_cfg(buf, &(..).into())?;
                 Ok(Payload::Data(data))
             }
             _ => Err(Error::Invalid(
@@ -121,10 +123,12 @@ impl Write for BitVec {
     }
 }
 
-impl Read<usize> for BitVec {
+impl Read for BitVec {
+    type Cfg = usize;
+
     fn read_cfg(buf: &mut impl Buf, max_bits: &usize) -> Result<Self, Error> {
         let index = UInt::read(buf)?.into();
-        let bits = UtilsBitVec::read_cfg(buf, &..=*max_bits)?;
+        let bits = UtilsBitVec::read_cfg(buf, &(..=*max_bits).into())?;
         Ok(Self { index, bits })
     }
 }
@@ -133,7 +137,7 @@ impl Read<usize> for BitVec {
 ///
 /// This is used to share the peer's socket address and public key with other peers in a verified
 /// manner.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct PeerInfo<C: Verifier> {
     /// The socket address of the peer.
     pub socket: SocketAddr,
@@ -158,6 +162,21 @@ impl<C: Verifier> PeerInfo<C> {
             &self.signature,
         )
     }
+
+    pub fn sign<S: Signer<PublicKey = C::PublicKey, Signature = C::Signature>>(
+        signer: &mut S,
+        namespace: &[u8],
+        socket: SocketAddr,
+        timestamp: u64,
+    ) -> Self {
+        let signature = signer.sign(Some(namespace), &(socket, timestamp).encode());
+        PeerInfo {
+            socket,
+            timestamp,
+            public_key: signer.public_key(),
+            signature,
+        }
+    }
 }
 
 impl<C: Verifier> EncodeSize for PeerInfo<C> {
@@ -179,6 +198,8 @@ impl<C: Verifier> Write for PeerInfo<C> {
 }
 
 impl<C: Verifier> Read for PeerInfo<C> {
+    type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let socket = SocketAddr::read(buf)?;
         let timestamp = UInt::read(buf)?.into();
@@ -218,8 +239,10 @@ impl Write for Data {
     }
 }
 
-impl<R: RangeConfig> Read<R> for Data {
-    fn read_cfg(buf: &mut impl Buf, range: &R) -> Result<Self, Error> {
+impl Read for Data {
+    type Cfg = RangeCfg;
+
+    fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
         let channel = UInt::read(buf)?.into();
         let message = Bytes::read_cfg(buf, range)?;
         Ok(Data { channel, message })
@@ -245,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bitvec_codec() {
+    fn test_bit_vec_codec() {
         let original = BitVec {
             index: 1234,
             bits: UtilsBitVec::ones(71),
@@ -283,13 +306,13 @@ mod tests {
             message: Bytes::from("Hello, world!"),
         };
         let encoded = original.encode();
-        let decoded = Data::decode_cfg(encoded, &(13..=13)).unwrap();
+        let decoded = Data::decode_cfg(encoded, &(13..=13).into()).unwrap();
         assert_eq!(original, decoded);
 
-        let too_short = Data::decode_cfg(original.encode(), &(0..13));
+        let too_short = Data::decode_cfg(original.encode(), &(0..13).into());
         assert!(matches!(too_short, Err(Error::InvalidLength(13))));
 
-        let too_long = Data::decode_cfg(original.encode(), &(14..));
+        let too_long = Data::decode_cfg(original.encode(), &(14..).into());
         assert!(matches!(too_long, Err(Error::InvalidLength(13))));
     }
 
@@ -298,7 +321,7 @@ mod tests {
         // Config for the codec
         let cfg = Config {
             max_peers: 10,
-            max_bitvec: 1024,
+            max_bit_vec: 1024,
         };
 
         // Test BitVec
@@ -344,7 +367,7 @@ mod tests {
     fn test_payload_decode_invalid_type() {
         let cfg = Config {
             max_peers: 10,
-            max_bitvec: 1024,
+            max_bit_vec: 1024,
         };
         let invalid_payload = [3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
         let result = Payload::<Secp256r1>::decode_cfg(&invalid_payload[..], &cfg);

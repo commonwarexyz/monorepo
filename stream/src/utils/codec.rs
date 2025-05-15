@@ -1,5 +1,5 @@
 use crate::Error;
-use bytes::Bytes;
+use bytes::{BufMut as _, Bytes, BytesMut};
 use commonware_runtime::{Sink, Stream};
 
 /// Sends data to the sink with a 4-byte length prefix.
@@ -17,16 +17,15 @@ pub async fn send_frame<S: Sink>(
     if n > max_message_size {
         return Err(Error::SendTooLarge(n));
     }
+
+    // Prefix `buf` with its length and send it
+    let mut prefixed_buf = BytesMut::with_capacity(4 + buf.len());
     let len: u32 = n.try_into().map_err(|_| Error::SendTooLarge(n))?;
-
-    // Send the length of the message
-    let f: [u8; 4] = len.to_be_bytes();
-    sink.send(&f).await.map_err(Error::SendFailed)?;
-
-    // Send the rest of the message
-    sink.send(buf).await.map_err(Error::SendFailed)?;
-
-    Ok(())
+    prefixed_buf.put_u32(len);
+    prefixed_buf.extend_from_slice(buf);
+    sink.send(prefixed_buf.freeze())
+        .await
+        .map_err(Error::SendFailed)
 }
 
 /// Receives data from the stream with a 4-byte length prefix.
@@ -36,11 +35,10 @@ pub async fn recv_frame<T: Stream>(
     max_message_size: usize,
 ) -> Result<Bytes, Error> {
     // Read the first 4 bytes to get the length of the message
-    let mut buf = [0u8; 4];
-    stream.recv(&mut buf).await.map_err(Error::RecvFailed)?;
+    let len_buf = stream.recv(vec![0; 4]).await.map_err(Error::RecvFailed)?;
 
     // Validate frame size
-    let len = u32::from_be_bytes(buf) as usize;
+    let len = u32::from_be_bytes(len_buf[..4].try_into().unwrap()) as usize;
     if len > max_message_size {
         return Err(Error::RecvTooLarge(len));
     }
@@ -49,10 +47,8 @@ pub async fn recv_frame<T: Stream>(
     }
 
     // Read the rest of the message
-    let mut buf = vec![0u8; len];
-    stream.recv(&mut buf).await.map_err(Error::RecvFailed)?;
-
-    Ok(Bytes::from(buf))
+    let read = stream.recv(vec![0; len]).await.map_err(Error::RecvFailed)?;
+    Ok(read.into())
 }
 
 #[cfg(test)]
@@ -121,12 +117,10 @@ mod tests {
             assert!(result.is_ok());
 
             // Do the reading manually without using recv_frame
-            let mut b = [0u8; 4];
-            stream.recv(&mut b).await.unwrap();
-            assert_eq!(b, (buf.len() as u32).to_be_bytes());
-            let mut b = [0u8; MAX_MESSAGE_SIZE];
-            stream.recv(&mut b).await.unwrap();
-            assert_eq!(b, buf);
+            let read = stream.recv(vec![0; 4]).await.unwrap();
+            assert_eq!(read, (buf.len() as u32).to_be_bytes());
+            let read = stream.recv(vec![0; MAX_MESSAGE_SIZE]).await.unwrap();
+            assert_eq!(read, buf);
         });
     }
 
@@ -164,16 +158,17 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Do the writing manually without using send_frame
-            let mut buf = [0u8; MAX_MESSAGE_SIZE];
-            context.fill(&mut buf);
-            sink.send(&(MAX_MESSAGE_SIZE as u32).to_be_bytes())
-                .await
-                .unwrap();
-            sink.send(&buf).await.unwrap();
+            let mut msg = [0u8; MAX_MESSAGE_SIZE];
+            context.fill(&mut msg);
+
+            let mut buf = BytesMut::with_capacity(4 + msg.len());
+            buf.put_u32(MAX_MESSAGE_SIZE as u32);
+            buf.extend_from_slice(&msg);
+            sink.send(buf.freeze()).await.unwrap();
 
             let data = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await.unwrap();
-            assert_eq!(data.len(), buf.len());
-            assert_eq!(data, Bytes::from(buf.to_vec()));
+            assert_eq!(data.len(), MAX_MESSAGE_SIZE);
+            assert_eq!(data, msg.as_ref());
         });
     }
 
@@ -184,9 +179,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Manually insert a frame that gives MAX_MESSAGE_SIZE as the size
-            sink.send(&(MAX_MESSAGE_SIZE as u32).to_be_bytes())
-                .await
-                .unwrap();
+            let mut buf = BytesMut::with_capacity(4);
+            buf.put_u32(MAX_MESSAGE_SIZE as u32);
+            sink.send(buf.freeze()).await.unwrap();
 
             let result = recv_frame(&mut stream, MAX_MESSAGE_SIZE - 1).await;
             assert!(matches!(&result, Err(Error::RecvTooLarge(n)) if *n == MAX_MESSAGE_SIZE));
@@ -200,7 +195,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Manually insert a frame that gives zero as the size
-            sink.send(&(0u32).to_be_bytes()).await.unwrap();
+            let mut buf = BytesMut::with_capacity(4);
+            buf.put_u32(0);
+            sink.send(buf.freeze()).await.unwrap();
 
             let result = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await;
             assert!(matches!(&result, Err(Error::StreamClosed)));

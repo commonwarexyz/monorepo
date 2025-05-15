@@ -4,13 +4,16 @@
 use crate::{
     bls12381::{
         dkg::{ops, Error},
-        primitives::{group::Share, poly},
+        primitives::{group::Share, poly, variant::Variant},
     },
     Array,
 };
 use commonware_utils::quorum;
 use rand::RngCore;
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    marker::PhantomData,
+};
 
 /// Dealer output of a DKG/Resharing procedure.
 #[derive(Clone)]
@@ -24,20 +27,22 @@ pub struct Output {
 }
 
 /// Track acknowledgements from players.
-pub struct Dealer<P: Array> {
+pub struct Dealer<P: Array, V: Variant> {
     threshold: u32,
     players: HashMap<P, u32>,
 
     acks: HashSet<u32>,
+
+    _phantom: PhantomData<V>,
 }
 
-impl<P: Array> Dealer<P> {
+impl<P: Array, V: Variant> Dealer<P, V> {
     /// Create a new dealer for a DKG/Resharing procedure.
     pub fn new<R: RngCore>(
         rng: &mut R,
         share: Option<Share>,
         mut players: Vec<P>,
-    ) -> (Self, poly::Public, Vec<Share>) {
+    ) -> (Self, poly::Public<V>, Vec<Share>) {
         // Order players
         players.sort();
         let players_ordered = players
@@ -49,12 +54,14 @@ impl<P: Array> Dealer<P> {
         // Generate shares and commitment
         let players_len = players.len() as u32;
         let threshold = quorum(players_len);
-        let (commitment, shares) = ops::generate_shares(rng, share, players_len, threshold);
+        let (commitment, shares) = ops::generate_shares::<_, V>(rng, share, players_len, threshold);
         (
             Self {
                 threshold,
                 players: players_ordered,
                 acks: HashSet::new(),
+
+                _phantom: PhantomData,
             },
             commitment,
             shares,

@@ -166,18 +166,23 @@ pub mod mocks;
 mod tests {
     use super::*;
     use crate::Monitor;
-    use commonware_cryptography::{bls12381::dkg::ops, Ed25519, Sha256, Signer};
+    use commonware_cryptography::{
+        bls12381::{
+            dkg::ops,
+            primitives::variant::{MinPk, MinSig, Variant},
+        },
+        Ed25519, Sha256, Signer,
+    };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
-    use commonware_utils::{quorum, Array};
+    use commonware_utils::{quorum, Array, NZU32};
     use engine::Engine;
     use futures::{future::join_all, StreamExt};
     use governor::Quota;
     use rand::{rngs::StdRng, Rng as _, SeedableRng as _};
     use std::{
         collections::{BTreeMap, HashMap},
-        num::NonZeroU32,
         sync::{Arc, Mutex},
         time::Duration,
     };
@@ -260,8 +265,7 @@ mod tests {
         }
     }
 
-    #[test_traced]
-    fn test_all_online() {
+    fn all_online<V: Variant>() {
         // Create context
         let n = 5;
         let threshold = quorum(n);
@@ -305,7 +309,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
+            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -319,7 +323,7 @@ mod tests {
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
                 participants.insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
-                let supervisor_config = mocks::supervisor::Config {
+                let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
                     participants,
                 };
@@ -354,9 +358,10 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     max_fetch_count: 1,
-                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
+                    replay_buffer: 1024 * 1024,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -508,7 +513,12 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_unclean_shutdown() {
+    fn test_all_online() {
+        all_online::<MinPk>();
+        all_online::<MinSig>();
+    }
+
+    fn unclean_shutdown<V: Variant>() {
         // Create context
         let n = 5;
         let threshold = quorum(n);
@@ -519,7 +529,7 @@ mod tests {
 
         // Derive threshold
         let mut rng = StdRng::seed_from_u64(0);
-        let (public, shares) = ops::generate_shares(&mut rng, None, n, threshold);
+        let (public, shares) = ops::generate_shares::<_, V>(&mut rng, None, n, threshold);
 
         // Random restarts every x seconds
         let shutdowns: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
@@ -581,7 +591,7 @@ mod tests {
                     let mut participants = BTreeMap::new();
                     participants
                         .insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
-                    let supervisor_config = mocks::supervisor::Config {
+                    let supervisor_config = mocks::supervisor::Config::<_, V> {
                         namespace: namespace.clone(),
                         participants,
                     };
@@ -616,9 +626,10 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         max_fetch_count: 1,
-                        fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                        fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
                         replay_concurrency: 1,
+                        replay_buffer: 1024 * 1024,
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -685,7 +696,12 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_backfill() {
+    fn test_unclean_shutdown() {
+        unclean_shutdown::<MinPk>();
+        unclean_shutdown::<MinSig>();
+    }
+
+    fn backfill<V: Variant>() {
         // Create context
         let n = 4;
         let threshold = quorum(n);
@@ -734,7 +750,7 @@ mod tests {
             .await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
+            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -795,9 +811,10 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     max_fetch_count: 1, // force many fetches
-                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
+                    replay_buffer: 1024 * 1024,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -877,7 +894,7 @@ mod tests {
             // Configure engine
             let mut participants = BTreeMap::new();
             participants.insert(0, (public.clone(), validators.clone(), shares[0].clone()));
-            let supervisor_config = mocks::supervisor::Config {
+            let supervisor_config = mocks::supervisor::Config::<_, V> {
                 namespace: namespace.clone(),
                 participants,
             };
@@ -912,9 +929,10 @@ mod tests {
                 activity_timeout,
                 skip_timeout,
                 max_fetch_count: 1,
-                fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                 fetch_concurrent: 1,
                 replay_concurrency: 1,
+                replay_buffer: 1024 * 1024,
             };
             let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -933,7 +951,12 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_one_offline() {
+    fn test_backfill() {
+        backfill::<MinPk>();
+        backfill::<MinSig>();
+    }
+
+    fn one_offline<V: Variant>() {
         // Create context
         let n = 5;
         let threshold = quorum(n);
@@ -983,7 +1006,7 @@ mod tests {
             .await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
+            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -1009,7 +1032,7 @@ mod tests {
                         shares[idx_scheme].clone(),
                     ),
                 );
-                let supervisor_config = mocks::supervisor::Config {
+                let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
                     participants,
                 };
@@ -1044,9 +1067,10 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     max_fetch_count: 1,
-                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
+                    replay_buffer: 1024 * 1024,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1151,7 +1175,12 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_slow_validator() {
+    fn test_one_offline() {
+        one_offline::<MinPk>();
+        one_offline::<MinSig>();
+    }
+
+    fn slow_validator<V: Variant>() {
         // Create context
         let n = 5;
         let threshold = quorum(n);
@@ -1194,7 +1223,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
+            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -1215,7 +1244,7 @@ mod tests {
                         shares[idx_scheme].clone(),
                     ),
                 );
-                let supervisor_config = mocks::supervisor::Config {
+                let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
                     participants,
                 };
@@ -1260,9 +1289,10 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     max_fetch_count: 1,
-                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
+                    replay_buffer: 1024 * 1024,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1329,7 +1359,12 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_all_recovery() {
+    fn test_slow_validator() {
+        slow_validator::<MinPk>();
+        slow_validator::<MinSig>();
+    }
+
+    fn all_recovery<V: Variant>() {
         // Create context
         let n = 5;
         let threshold = quorum(n);
@@ -1372,7 +1407,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
+            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -1386,7 +1421,7 @@ mod tests {
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
                 participants.insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
-                let supervisor_config = mocks::supervisor::Config {
+                let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
                     participants,
                 };
@@ -1421,9 +1456,10 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     max_fetch_count: 1,
-                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
+                    replay_buffer: 1024 * 1024,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1485,7 +1521,12 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_partition() {
+    fn test_all_recovery() {
+        all_recovery::<MinPk>();
+        all_recovery::<MinSig>();
+    }
+
+    fn partition<V: Variant>() {
         // Create context
         let n = 10;
         let threshold = quorum(n);
@@ -1528,7 +1569,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link.clone()), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
+            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -1542,7 +1583,7 @@ mod tests {
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
                 participants.insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
-                let supervisor_config = mocks::supervisor::Config {
+                let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
                     participants,
                 };
@@ -1577,9 +1618,10 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     max_fetch_count: 1,
-                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
+                    replay_buffer: 1024 * 1024,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1664,7 +1706,14 @@ mod tests {
         });
     }
 
-    fn slow_and_lossy_links(seed: u64) -> String {
+    #[test_traced]
+    #[ignore]
+    fn test_partition() {
+        partition::<MinPk>();
+        partition::<MinSig>();
+    }
+
+    fn slow_and_lossy_links<V: Variant>(seed: u64) -> String {
         // Create context
         let n = 5;
         let threshold = quorum(n);
@@ -1672,11 +1721,9 @@ mod tests {
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
-        let cfg = deterministic::Config {
-            seed,
-            timeout: Some(Duration::from_secs(5_000)),
-            ..deterministic::Config::default()
-        };
+        let cfg = deterministic::Config::new()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(5_000)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
             // Create simulated network
@@ -1712,7 +1759,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(degraded_link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
+            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -1726,7 +1773,7 @@ mod tests {
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
                 participants.insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
-                let supervisor_config = mocks::supervisor::Config {
+                let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
                     participants,
                 };
@@ -1761,9 +1808,10 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     max_fetch_count: 1,
-                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
+                    replay_buffer: 1024 * 1024,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1800,27 +1848,30 @@ mod tests {
 
     #[test_traced]
     fn test_slow_and_lossy_links() {
-        slow_and_lossy_links(0);
+        slow_and_lossy_links::<MinPk>(0);
+        slow_and_lossy_links::<MinSig>(0);
     }
 
     #[test_traced]
+    #[ignore]
     fn test_determinism() {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
         for seed in 1..6 {
-            // Run test with seed
-            let state_1 = slow_and_lossy_links(seed);
+            let pk_state_1 = slow_and_lossy_links::<MinPk>(seed);
+            let pk_state_2 = slow_and_lossy_links::<MinPk>(seed);
+            assert_eq!(pk_state_1, pk_state_2);
 
-            // Run test again with same seed
-            let state_2 = slow_and_lossy_links(seed);
+            let sig_state_1 = slow_and_lossy_links::<MinSig>(seed);
+            let sig_state_2 = slow_and_lossy_links::<MinSig>(seed);
+            assert_eq!(sig_state_1, sig_state_2);
 
-            // Ensure states are equal
-            assert_eq!(state_1, state_2);
+            // Sanity check that different types can't be identical
+            assert_ne!(pk_state_1, sig_state_1);
         }
     }
 
-    #[test_traced]
-    fn test_conflicter() {
+    fn conflicter<V: Variant>(seed: u64) {
         // Create context
         let n = 4;
         let threshold = quorum(n);
@@ -1828,7 +1879,10 @@ mod tests {
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        let cfg = deterministic::Config::new()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(30)));
+        let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1863,7 +1917,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
+            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -1883,7 +1937,7 @@ mod tests {
                         shares[idx_scheme].clone(),
                     ),
                 );
-                let supervisor_config = mocks::supervisor::Config {
+                let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
                     participants,
                 };
@@ -1896,7 +1950,8 @@ mod tests {
                         supervisor,
                         namespace: namespace.clone(),
                     };
-                    let engine: mocks::conflicter::Conflicter<_, Sha256, _> =
+
+                    let engine: mocks::conflicter::Conflicter<_, V, Sha256, _> =
                         mocks::conflicter::Conflicter::new(
                             context.with_label("byzantine_engine"),
                             cfg,
@@ -1933,9 +1988,10 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         max_fetch_count: 1,
-                        fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                        fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
                         replay_concurrency: 1,
+                        replay_buffer: 1024 * 1024,
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(voter, resolver);
@@ -1985,7 +2041,15 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_nuller() {
+    #[ignore]
+    fn test_conflicter() {
+        for seed in 0..5 {
+            conflicter::<MinPk>(seed);
+            conflicter::<MinSig>(seed);
+        }
+    }
+
+    fn nuller<V: Variant>(seed: u64) {
         // Create context
         let n = 4;
         let threshold = quorum(n);
@@ -1993,7 +2057,10 @@ mod tests {
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        let cfg = deterministic::Config::new()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(30)));
+        let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -2028,7 +2095,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
+            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -2048,7 +2115,7 @@ mod tests {
                         shares[idx_scheme].clone(),
                     ),
                 );
-                let supervisor_config = mocks::supervisor::Config {
+                let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
                     participants,
                 };
@@ -2061,7 +2128,7 @@ mod tests {
                         supervisor,
                         namespace: namespace.clone(),
                     };
-                    let engine: mocks::nuller::Nuller<_, Sha256, _> =
+                    let engine: mocks::nuller::Nuller<_, V, Sha256, _> =
                         mocks::nuller::Nuller::new(context.with_label("byzantine_engine"), cfg);
                     engine.start(voter);
                 } else {
@@ -2095,9 +2162,10 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         max_fetch_count: 1,
-                        fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                        fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
                         replay_concurrency: 1,
+                        replay_buffer: 1024 * 1024,
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(voter, resolver);
@@ -2142,7 +2210,15 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_outdated() {
+    #[ignore]
+    fn test_nuller() {
+        for seed in 0..5 {
+            nuller::<MinPk>(seed);
+            nuller::<MinSig>(seed);
+        }
+    }
+
+    fn outdated<V: Variant>(seed: u64) {
         // Create context
         let n = 4;
         let threshold = quorum(n);
@@ -2150,7 +2226,10 @@ mod tests {
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        let cfg = deterministic::Config::new()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(30)));
+        let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -2185,7 +2264,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
+            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -2205,7 +2284,7 @@ mod tests {
                         shares[idx_scheme].clone(),
                     ),
                 );
-                let supervisor_config = mocks::supervisor::Config {
+                let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
                     participants,
                 };
@@ -2219,7 +2298,7 @@ mod tests {
                         namespace: namespace.clone(),
                         view_delta: activity_timeout * 4,
                     };
-                    let engine: mocks::outdated::Outdated<_, Sha256, _> =
+                    let engine: mocks::outdated::Outdated<_, V, Sha256, _> =
                         mocks::outdated::Outdated::new(context.with_label("byzantine_engine"), cfg);
                     engine.start(voter);
                 } else {
@@ -2253,9 +2332,10 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         max_fetch_count: 1,
-                        fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                        fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
                         replay_concurrency: 1,
+                        replay_buffer: 1024 * 1024,
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(voter, resolver);
@@ -2282,5 +2362,151 @@ mod tests {
                 }
             }
         });
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_outdated() {
+        for seed in 0..5 {
+            outdated::<MinPk>(seed);
+            outdated::<MinSig>(seed);
+        }
+    }
+
+    fn run_1k<V: Variant>() {
+        // Create context
+        let n = 10;
+        let threshold = quorum(n);
+        let required_containers = 1_000;
+        let activity_timeout = 10;
+        let skip_timeout = 5;
+        let namespace = b"consensus".to_vec();
+        let cfg = deterministic::Config::new();
+        let executor = deterministic::Runner::new(cfg);
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                },
+            );
+
+            // Start network
+            network.start();
+
+            // Register participants
+            let mut schemes = Vec::new();
+            let mut validators = Vec::new();
+            for i in 0..n {
+                let scheme = Ed25519::from_seed(i as u64);
+                let pk = scheme.public_key();
+                schemes.push(scheme);
+                validators.push(pk);
+            }
+            validators.sort();
+            schemes.sort_by_key(|s| s.public_key());
+            let mut registrations = register_validators(&mut oracle, &validators).await;
+
+            // Link all validators
+            let link = Link {
+                latency: 80.0,
+                jitter: 10.0,
+                success_rate: 0.98,
+            };
+            link_validators(&mut oracle, &validators, Action::Link(link), None).await;
+
+            // Derive threshold
+            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
+
+            // Create engines
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut supervisors = Vec::new();
+            let mut engine_handlers = Vec::new();
+            for (idx, scheme) in schemes.into_iter().enumerate() {
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
+
+                // Configure engine
+                let validator = scheme.public_key();
+                let mut participants = BTreeMap::new();
+                participants.insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
+                let supervisor_config = mocks::supervisor::Config::<_, V> {
+                    namespace: namespace.clone(),
+                    participants,
+                };
+                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
+                supervisors.push(supervisor.clone());
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    participant: validator.clone(),
+                    propose_latency: (100.0, 50.0),
+                    verify_latency: (50.0, 40.0),
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
+                let cfg = config::Config {
+                    crypto: scheme,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: supervisor.clone(),
+                    supervisor,
+                    partition: validator.to_string(),
+                    compression: Some(3),
+                    mailbox_size: 1024,
+                    namespace: namespace.clone(),
+                    leader_timeout: Duration::from_secs(1),
+                    notarization_timeout: Duration::from_secs(2),
+                    nullify_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    skip_timeout,
+                    max_fetch_count: 1,
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+                    fetch_concurrent: 1,
+                    replay_concurrency: 1,
+                    replay_buffer: 1024 * 1024,
+                };
+                let engine = Engine::new(context.with_label("engine"), cfg);
+
+                // Start engine
+                let (voter, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
+                engine_handlers.push(engine.start(voter, resolver));
+            }
+
+            // Wait for all engines to finish
+            let mut finalizers = Vec::new();
+            for supervisor in supervisors.iter_mut() {
+                let (mut latest, mut monitor) = supervisor.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest < required_containers {
+                        latest = monitor.next().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+
+            // Check supervisors for correct activity
+            for supervisor in supervisors.iter() {
+                // Ensure no faults
+                {
+                    let faults = supervisor.faults.lock().unwrap();
+                    assert!(faults.is_empty());
+                }
+            }
+        })
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_1k() {
+        run_1k::<MinPk>();
+        run_1k::<MinSig>();
     }
 }

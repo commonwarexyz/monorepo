@@ -9,7 +9,10 @@ use crate::{
     },
     ThresholdSupervisor,
 };
-use commonware_cryptography::{bls12381::primitives::poly, Digest, Scheme};
+use commonware_cryptography::{
+    bls12381::primitives::{poly, variant::Variant},
+    Digest, Scheme,
+};
 use commonware_macros::select;
 use commonware_p2p::{
     utils::{
@@ -100,23 +103,24 @@ impl Inflight {
 pub struct Actor<
     E: Clock + GClock + Rng + Metrics + Spawner,
     C: Scheme,
+    V: Variant,
     D: Digest,
-    S: ThresholdSupervisor<Index = View, Identity = poly::Public, PublicKey = C::PublicKey>,
+    S: ThresholdSupervisor<Index = View, Identity = poly::Public<V>, PublicKey = C::PublicKey>,
 > {
     context: E,
     supervisor: S,
 
     namespace: Vec<u8>,
 
-    notarizations: BTreeMap<View, Notarization<D>>,
-    nullifications: BTreeMap<View, Nullification>,
+    notarizations: BTreeMap<View, Notarization<V, D>>,
+    nullifications: BTreeMap<View, Nullification<V>>,
     activity_timeout: u64,
 
     required: BTreeSet<Entry>,
     inflight: Inflight,
     retry: Option<SystemTime>,
 
-    mailbox_receiver: mpsc::Receiver<Message<D>>,
+    mailbox_receiver: mpsc::Receiver<Message<V, D>>,
 
     fetch_timeout: Duration,
     max_fetch_count: usize,
@@ -131,11 +135,12 @@ pub struct Actor<
 impl<
         E: Clock + GClock + Rng + Metrics + Spawner,
         C: Scheme,
+        V: Variant,
         D: Digest,
-        S: ThresholdSupervisor<Index = View, Identity = poly::Public, PublicKey = C::PublicKey>,
-    > Actor<E, C, D, S>
+        S: ThresholdSupervisor<Index = View, Identity = poly::Public<V>, PublicKey = C::PublicKey>,
+    > Actor<E, C, V, D, S>
 {
-    pub fn new(context: E, cfg: Config<C, S>) -> (Self, Mailbox<D>) {
+    pub fn new(context: E, cfg: Config<C, S>) -> (Self, Mailbox<V, D>) {
         // Initialize requester
         let config = requester::Config {
             public_key: cfg.crypto.public_key(),
@@ -197,7 +202,7 @@ impl<
     async fn send<Sr: Sender<PublicKey = C::PublicKey>>(
         &mut self,
         shuffle: bool,
-        sender: &mut WrappedSender<Sr, usize, Backfiller<D>>,
+        sender: &mut WrappedSender<Sr, Backfiller<V, D>>,
     ) {
         // Clear retry
         self.retry = None;
@@ -262,7 +267,7 @@ impl<
 
                 // Create new message
                 msg.id = request;
-                let encoded = Backfiller::<D>::Request(msg.clone());
+                let encoded = Backfiller::<V, D>::Request(msg.clone());
 
                 // Try to send
                 if sender
@@ -293,7 +298,7 @@ impl<
 
     pub fn start(
         self,
-        voter: voter::Mailbox<D>,
+        voter: voter::Mailbox<V, D>,
         sender: impl Sender<PublicKey = C::PublicKey>,
         receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) -> Handle<()> {
@@ -304,7 +309,7 @@ impl<
 
     async fn run(
         mut self,
-        mut voter: voter::Mailbox<D>,
+        mut voter: voter::Mailbox<V, D>,
         sender: impl Sender<PublicKey = C::PublicKey>,
         receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) {
@@ -511,7 +516,7 @@ impl<
                                     warn!(view, sender = ?s, "missing identity");
                                     continue;
                                 };
-                                let public_key = poly::public(identity);
+                                let public_key = poly::public::<V>(identity);
                                 if !notarization.verify(&self.namespace, public_key) {
                                     warn!(view, sender = ?s, "invalid notarization");
                                     self.requester.block(s.clone());
@@ -535,7 +540,7 @@ impl<
                                     warn!(view, sender = ?s, "missing identity");
                                     continue;
                                 };
-                                let public_key = poly::public(identity);
+                                let public_key = poly::public::<V>(identity);
                                 if !nullification.verify(&self.namespace, public_key) {
                                     warn!(view, sender = ?s, "invalid nullification");
                                     self.requester.block(s.clone());

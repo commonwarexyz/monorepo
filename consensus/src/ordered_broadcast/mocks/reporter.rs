@@ -3,7 +3,7 @@ use crate::{
     Reporter as Z,
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{bls12381::primitives::group, Digest, Verifier};
+use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, Verifier};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -11,22 +11,22 @@ use futures::{
 use std::collections::{btree_map::Entry, BTreeMap, HashMap, HashSet};
 
 #[allow(clippy::large_enum_variant)]
-enum Message<C: Verifier, D: Digest> {
+enum Message<C: Verifier, V: Variant, D: Digest> {
     Proposal(Proposal<C, D>),
-    Locked(Lock<C::PublicKey, D>),
+    Locked(Lock<C::PublicKey, V, D>),
     GetTip(C::PublicKey, oneshot::Sender<Option<(u64, Epoch)>>),
     GetContiguousTip(C::PublicKey, oneshot::Sender<Option<u64>>),
     Get(C::PublicKey, u64, oneshot::Sender<Option<(D, Epoch)>>),
 }
 
-pub struct Reporter<C: Verifier, D: Digest> {
-    mailbox: mpsc::Receiver<Message<C, D>>,
+pub struct Reporter<C: Verifier, V: Variant, D: Digest> {
+    mailbox: mpsc::Receiver<Message<C, V, D>>,
 
     // Application namespace
     namespace: Vec<u8>,
 
     // Public key of the group
-    public: group::Public,
+    public: V::Public,
 
     // Notified proposals
     proposals: HashSet<Chunk<C::PublicKey, D>>,
@@ -42,12 +42,12 @@ pub struct Reporter<C: Verifier, D: Digest> {
     highest: HashMap<C::PublicKey, (u64, Epoch)>,
 }
 
-impl<C: Verifier, D: Digest> Reporter<C, D> {
+impl<C: Verifier, V: Variant, D: Digest> Reporter<C, V, D> {
     pub fn new(
         namespace: &[u8],
-        public: group::Public,
+        public: V::Public,
         limit_misses: Option<usize>,
-    ) -> (Self, Mailbox<C, D>) {
+    ) -> (Self, Mailbox<C, V, D>) {
         let (sender, receiver) = mpsc::channel(1024);
         (
             Reporter {
@@ -89,7 +89,7 @@ impl<C: Verifier, D: Digest> Reporter<C, D> {
 
                     // Test encoding/decoding
                     let encoded = lock.encode();
-                    Lock::<C::PublicKey, D>::decode(encoded).unwrap();
+                    Lock::<C::PublicKey, V, D>::decode(encoded).unwrap();
 
                     // Check if the proposal is known
                     if let Some(misses_allowed) = self.limit_misses {
@@ -166,12 +166,12 @@ impl<C: Verifier, D: Digest> Reporter<C, D> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<C: Verifier, D: Digest> {
-    sender: mpsc::Sender<Message<C, D>>,
+pub struct Mailbox<C: Verifier, V: Variant, D: Digest> {
+    sender: mpsc::Sender<Message<C, V, D>>,
 }
 
-impl<C: Verifier, D: Digest> Z for Mailbox<C, D> {
-    type Activity = Activity<C, D>;
+impl<C: Verifier, V: Variant, D: Digest> Z for Mailbox<C, V, D> {
+    type Activity = Activity<C, V, D>;
 
     async fn report(&mut self, activity: Self::Activity) {
         match activity {
@@ -191,7 +191,7 @@ impl<C: Verifier, D: Digest> Z for Mailbox<C, D> {
     }
 }
 
-impl<C: Verifier, D: Digest> Mailbox<C, D> {
+impl<C: Verifier, V: Variant, D: Digest> Mailbox<C, V, D> {
     pub async fn get_tip(&mut self, sequencer: C::PublicKey) -> Option<(u64, Epoch)> {
         let (sender, receiver) = oneshot::channel();
         self.sender

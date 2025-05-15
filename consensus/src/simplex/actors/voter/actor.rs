@@ -327,7 +327,8 @@ pub struct Actor<
     partition: String,
     compression: Option<u8>,
     replay_concurrency: usize,
-    journal: Option<Journal<E, usize, Voter<C::Signature, D>>>,
+    replay_buffer: usize,
+    journal: Option<Journal<E, Voter<C::Signature, D>>>,
 
     genesis: Option<D>,
 
@@ -418,6 +419,7 @@ impl<
                 partition: cfg.partition,
                 compression: cfg.compression,
                 replay_concurrency: cfg.replay_concurrency,
+                replay_buffer: cfg.replay_buffer,
                 journal: None,
 
                 genesis: None,
@@ -602,7 +604,7 @@ impl<
 
     async fn timeout<Sr: Sender>(
         &mut self,
-        sender: &mut WrappedSender<Sr, usize, Voter<C::Signature, D>>,
+        sender: &mut WrappedSender<Sr, Voter<C::Signature, D>>,
     ) {
         // Set timeout fired
         let round = self.views.get_mut(&self.view).unwrap();
@@ -1450,7 +1452,7 @@ impl<
     async fn notify<Sr: Sender>(
         &mut self,
         backfiller: &mut resolver::Mailbox<C::Signature, D>,
-        sender: &mut WrappedSender<Sr, usize, Voter<C::Signature, D>>,
+        sender: &mut WrappedSender<Sr, Voter<C::Signature, D>>,
         view: u64,
     ) {
         // Attempt to notarize
@@ -1678,7 +1680,7 @@ impl<
         self.enter_view(1);
 
         // Initialize journal
-        let mut journal = Journal::<_, _, Voter<C::Signature, D>>::init(
+        let journal = Journal::<_, Voter<C::Signature, D>>::init(
             self.context.with_label("journal"),
             JConfig {
                 partition: self.partition.clone(),
@@ -1693,7 +1695,7 @@ impl<
         let mut observed_view = 1;
         {
             let stream = journal
-                .replay(self.replay_concurrency)
+                .replay(self.replay_concurrency, self.replay_buffer)
                 .await
                 .expect("unable to replay journal");
             pin_mut!(stream);

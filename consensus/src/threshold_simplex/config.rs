@@ -1,17 +1,21 @@
 use super::types::{Activity, Context, View};
 use crate::{Automaton, Relay, Reporter, ThresholdSupervisor};
-use commonware_cryptography::{bls12381::primitives::group, Digest, Scheme};
+use commonware_cryptography::{
+    bls12381::primitives::{group, variant::Variant},
+    Digest, Scheme,
+};
 use governor::Quota;
 use std::time::Duration;
 
 /// Configuration for the consensus engine.
 pub struct Config<
     C: Scheme,
+    V: Variant,
     D: Digest,
     A: Automaton<Context = Context<D>>,
     R: Relay,
-    F: Reporter<Activity = Activity<D>>,
-    S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
+    F: Reporter<Activity = Activity<V, D>>,
+    S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
 > {
     /// Cryptographic primitives.
     pub crypto: C,
@@ -43,6 +47,9 @@ pub struct Config<
 
     /// Number of views to replay concurrently during startup.
     pub replay_concurrency: usize,
+
+    /// Number of bytes to buffer when replaying during startup.
+    pub replay_buffer: usize,
 
     /// Amount of time to wait for a leader to propose a payload
     /// in a view.
@@ -84,12 +91,13 @@ pub struct Config<
 
 impl<
         C: Scheme,
+        V: Variant,
         D: Digest,
         A: Automaton<Context = Context<D>>,
         R: Relay,
-        F: Reporter<Activity = Activity<D>>,
-        S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
-    > Config<C, D, A, R, F, S>
+        F: Reporter<Activity = Activity<V, D>>,
+        S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
+    > Config<C, V, D, A, R, F, S>
 {
     /// Assert enforces that all configuration values are valid.
     pub fn assert(&self) {

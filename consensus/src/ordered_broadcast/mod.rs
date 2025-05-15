@@ -58,7 +58,11 @@ mod tests {
     use commonware_cryptography::{
         bls12381::{
             dkg::ops,
-            primitives::{group::Share, poly},
+            primitives::{
+                group::Share,
+                poly,
+                variant::{MinPk, MinSig, Variant},
+            },
         },
         ed25519::PublicKey,
         sha256::Digest as Sha256Digest,
@@ -179,14 +183,15 @@ mod tests {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn spawn_validator_engines(
+    fn spawn_validator_engines<V: Variant>(
         context: Context,
-        identity: poly::Public,
-        pks: &[PublicKey],
+        identity: poly::Public<V>,
+        sequencer_pks: &[PublicKey],
+        validator_pks: &[PublicKey],
         validators: &[(PublicKey, Ed25519, Share)],
         registrations: &mut Registrations<PublicKey>,
         automatons: &mut BTreeMap<PublicKey, mocks::Automaton<PublicKey>>,
-        reporters: &mut BTreeMap<PublicKey, mocks::ReporterMailbox<Ed25519, Sha256Digest>>,
+        reporters: &mut BTreeMap<PublicKey, mocks::ReporterMailbox<Ed25519, V, Sha256Digest>>,
         rebroadcast_timeout: Duration,
         invalid_when: fn(u64) -> bool,
         misses_allowed: Option<usize>,
@@ -197,19 +202,19 @@ mod tests {
             let context = context.with_label(&validator.to_string());
             let monitor = mocks::Monitor::new(111);
             monitors.insert(validator.clone(), monitor.clone());
-            let sequencers = mocks::Sequencers::<PublicKey>::new(pks.to_vec());
-            let validators = mocks::Validators::<PublicKey>::new(
+            let sequencers = mocks::Sequencers::<PublicKey>::new(sequencer_pks.to_vec());
+            let validators = mocks::Validators::<PublicKey, V>::new(
                 identity.clone(),
-                pks.to_vec(),
+                validator_pks.to_vec(),
                 Some(share.clone()),
             );
 
             let automaton = mocks::Automaton::<PublicKey>::new(invalid_when);
             automatons.insert(validator.clone(), automaton.clone());
 
-            let (reporter, reporter_mailbox) = mocks::Reporter::<Ed25519, Sha256Digest>::new(
+            let (reporter, reporter_mailbox) = mocks::Reporter::<Ed25519, V, Sha256Digest>::new(
                 namespace,
-                *poly::public(&identity),
+                *poly::public::<V>(&identity),
                 misses_allowed,
             );
             context.with_label("reporter").spawn(|_| reporter.run());
@@ -233,6 +238,7 @@ mod tests {
                     priority_proposals: false,
                     journal_heights_per_section: 10,
                     journal_replay_concurrency: 1,
+                    journal_replay_buffer: 4096,
                     journal_name_prefix: format!("ordered-broadcast-seq/{}/", validator),
                     journal_compression: Some(3),
                 },
@@ -244,10 +250,10 @@ mod tests {
         monitors
     }
 
-    async fn await_reporters(
+    async fn await_reporters<V: Variant>(
         context: Context,
         sequencers: Vec<PublicKey>,
-        reporters: &BTreeMap<PublicKey, mocks::ReporterMailbox<Ed25519, Sha256Digest>>,
+        reporters: &BTreeMap<PublicKey, mocks::ReporterMailbox<Ed25519, V, Sha256Digest>>,
         threshold: (u64, Epoch, bool),
     ) {
         let mut receivers = Vec::new();
@@ -295,8 +301,8 @@ mod tests {
         }
     }
 
-    async fn get_max_height(
-        reporters: &mut BTreeMap<PublicKey, mocks::ReporterMailbox<Ed25519, Sha256Digest>>,
+    async fn get_max_height<V: Variant>(
+        reporters: &mut BTreeMap<PublicKey, mocks::ReporterMailbox<Ed25519, V, Sha256Digest>>,
     ) -> u64 {
         let mut max_height = 0;
         for (sequencer, mailbox) in reporters.iter_mut() {
@@ -308,15 +314,14 @@ mod tests {
         max_height
     }
 
-    #[test_traced]
-    fn test_all_online() {
+    fn all_online<V: Variant>() {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
         runner.start(|mut context| async move {
             let (identity, mut shares_vec) =
-                ops::generate_shares(&mut context, None, num_validators, quorum);
+                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             let (_oracle, validators, pks, mut registrations) = initialize_simulation(
@@ -329,10 +334,11 @@ mod tests {
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
             ));
             let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, Sha256Digest>>::new();
-            spawn_validator_engines(
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, V, Sha256Digest>>::new();
+            spawn_validator_engines::<V>(
                 context.with_label("validator"),
                 identity.clone(),
+                &pks,
                 &pks,
                 &validators,
                 &mut registrations,
@@ -353,12 +359,17 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_unclean_shutdown() {
+    fn test_all_online() {
+        all_online::<MinPk>();
+        all_online::<MinSig>();
+    }
+
+    fn unclean_shutdown<V: Variant>() {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
         let mut rng = StdRng::seed_from_u64(0);
         let (identity, mut shares_vec) =
-            ops::generate_shares(&mut rng, None, num_validators, quorum);
+            ops::generate_shares::<_, V>(&mut rng, None, num_validators, quorum);
         shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
         let completed = Arc::new(Mutex::new(HashSet::new()));
         let shutdowns = Arc::new(Mutex::new(0u64));
@@ -406,10 +417,11 @@ mod tests {
                     mocks::Automaton<PublicKey>,
                 >::new()));
                 let mut reporters =
-                    BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, Sha256Digest>>::new();
+                    BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, V, Sha256Digest>>::new();
                 spawn_validator_engines(
                     context.with_label("validator"),
                     identity.clone(),
+                    &pks,
                     &pks,
                     &validators,
                     &mut registrations,
@@ -422,7 +434,7 @@ mod tests {
 
                 let reporter_pairs: Vec<(
                     PublicKey,
-                    mocks::ReporterMailbox<Ed25519, Sha256Digest>,
+                    mocks::ReporterMailbox<Ed25519, V, Sha256Digest>,
                 )> = reporters
                     .iter()
                     .map(|(v, m)| (v.clone(), m.clone()))
@@ -461,14 +473,19 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_network_partition() {
+    fn test_unclean_shutdown() {
+        unclean_shutdown::<MinPk>();
+        unclean_shutdown::<MinSig>();
+    }
+
+    fn network_partition<V: Variant>() {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
 
         runner.start(|mut context| async move {
             let (identity, mut shares_vec) =
-                ops::generate_shares(&mut context, None, num_validators, quorum);
+                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             // Configure the network
@@ -482,10 +499,11 @@ mod tests {
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
             ));
             let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, Sha256Digest>>::new();
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, V, Sha256Digest>>::new();
             spawn_validator_engines(
                 context.with_label("validator"),
                 identity.clone(),
+                &pks,
                 &pks,
                 &validators,
                 &mut registrations,
@@ -520,19 +538,24 @@ mod tests {
         });
     }
 
-    fn slow_and_lossy_links(seed: u64) -> String {
+    #[test_traced]
+    #[ignore]
+    fn test_network_partition() {
+        network_partition::<MinPk>();
+        network_partition::<MinSig>();
+    }
+
+    fn slow_and_lossy_links<V: Variant>(seed: u64) -> String {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
-        let cfg = deterministic::Config {
-            seed,
-            timeout: Some(Duration::from_secs(40)),
-            ..deterministic::Config::default()
-        };
+        let cfg = deterministic::Config::new()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(40)));
         let runner = deterministic::Runner::new(cfg);
 
         runner.start(|mut context| async move {
             let (identity, mut shares_vec) =
-                ops::generate_shares(&mut context, None, num_validators, quorum);
+                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             let (oracle, validators, pks, mut registrations) = initialize_simulation(
@@ -553,10 +576,11 @@ mod tests {
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
             ));
             let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, Sha256Digest>>::new();
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, V, Sha256Digest>>::new();
             spawn_validator_engines(
                 context.with_label("validator"),
                 identity.clone(),
+                &pks,
                 &pks,
                 &validators,
                 &mut registrations,
@@ -581,29 +605,37 @@ mod tests {
 
     #[test_traced]
     fn test_slow_and_lossy_links() {
-        slow_and_lossy_links(0);
+        slow_and_lossy_links::<MinPk>(0);
+        slow_and_lossy_links::<MinSig>(0);
     }
 
     #[test_traced]
+    #[ignore]
     fn test_determinism() {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
         for seed in 1..6 {
-            let state_1 = slow_and_lossy_links(seed);
-            let state_2 = slow_and_lossy_links(seed);
-            assert_eq!(state_1, state_2);
+            let pk_state_1 = slow_and_lossy_links::<MinPk>(seed);
+            let pk_state_2 = slow_and_lossy_links::<MinPk>(seed);
+            assert_eq!(pk_state_1, pk_state_2);
+
+            let sig_state_1 = slow_and_lossy_links::<MinSig>(seed);
+            let sig_state_2 = slow_and_lossy_links::<MinSig>(seed);
+            assert_eq!(sig_state_1, sig_state_2);
+
+            // Sanity check that different types can't be identical.
+            assert_ne!(pk_state_1, sig_state_1);
         }
     }
 
-    #[test_traced]
-    fn test_invalid_signature_injection() {
+    fn invalid_signature_injection<V: Variant>() {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
         runner.start(|mut context| async move {
             let (identity, mut shares_vec) =
-                ops::generate_shares(&mut context, None, num_validators, quorum);
+                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             let (_oracle, validators, pks, mut registrations) = initialize_simulation(
@@ -616,10 +648,11 @@ mod tests {
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
             ));
             let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, Sha256Digest>>::new();
-            spawn_validator_engines(
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, V, Sha256Digest>>::new();
+            spawn_validator_engines::<V>(
                 context.with_label("validator"),
                 identity.clone(),
+                &pks,
                 &pks,
                 &validators,
                 &mut registrations,
@@ -641,14 +674,19 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_updated_epoch() {
+    fn test_invalid_signature_injection() {
+        invalid_signature_injection::<MinPk>();
+        invalid_signature_injection::<MinSig>();
+    }
+
+    fn updated_epoch<V: Variant>() {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
 
         runner.start(|mut context| async move {
             let (identity, mut shares_vec) =
-                ops::generate_shares(&mut context, None, num_validators, quorum);
+                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             // Setup network
@@ -662,10 +700,11 @@ mod tests {
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
             ));
             let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, Sha256Digest>>::new();
-            let monitors = spawn_validator_engines(
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, V, Sha256Digest>>::new();
+            let monitors = spawn_validator_engines::<V>(
                 context.with_label("validator"),
                 identity.clone(),
+                &pks,
                 &pks,
                 &validators,
                 &mut registrations,
@@ -715,14 +754,19 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_external_sequencer() {
+    fn test_updated_epoch() {
+        updated_epoch::<MinPk>();
+        updated_epoch::<MinSig>();
+    }
+
+    fn external_sequencer<V: Variant>() {
         let num_validators: u32 = 4;
         let quorum: u32 = quorum(3);
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             // Generate validator shares
             let (identity, shares) =
-                ops::generate_shares(&mut context, None, num_validators, quorum);
+                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
 
             // Generate validator schemes
             let mut schemes = (0..num_validators)
@@ -774,7 +818,7 @@ mod tests {
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
             ));
             let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, Sha256Digest>>::new();
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, V, Sha256Digest>>::new();
             let mut monitors = HashMap::new();
             let namespace = b"my testing namespace";
 
@@ -784,7 +828,7 @@ mod tests {
                 let monitor = mocks::Monitor::new(111);
                 monitors.insert(validator.clone(), monitor.clone());
                 let sequencers = mocks::Sequencers::<PublicKey>::new(vec![sequencer.public_key()]);
-                let validators = mocks::Validators::<PublicKey>::new(
+                let validators = mocks::Validators::<PublicKey, V>::new(
                     identity.clone(),
                     validator_pks.clone(),
                     Some(share.clone()),
@@ -796,9 +840,9 @@ mod tests {
                     .unwrap()
                     .insert(validator.clone(), automaton.clone());
 
-                let (reporter, reporter_mailbox) = mocks::Reporter::<Ed25519, Sha256Digest>::new(
+                let (reporter, reporter_mailbox) = mocks::Reporter::<Ed25519, V, Sha256Digest>::new(
                     namespace,
-                    *poly::public(&identity),
+                    *poly::public::<V>(&identity),
                     Some(5),
                 );
                 context.with_label("reporter").spawn(|_| reporter.run());
@@ -822,6 +866,7 @@ mod tests {
                         priority_proposals: false,
                         journal_heights_per_section: 10,
                         journal_replay_concurrency: 1,
+                        journal_replay_buffer: 4096,
                         journal_name_prefix: format!("ordered-broadcast-seq/{}/", validator),
                         journal_compression: Some(3),
                     },
@@ -839,9 +884,9 @@ mod tests {
                     .lock()
                     .unwrap()
                     .insert(sequencer.public_key(), automaton.clone());
-                let (reporter, reporter_mailbox) = mocks::Reporter::<Ed25519, Sha256Digest>::new(
+                let (reporter, reporter_mailbox) = mocks::Reporter::<Ed25519, V, Sha256Digest>::new(
                     namespace,
-                    *poly::public(&identity),
+                    *poly::public::<V>(&identity),
                     Some(5),
                 );
                 context.with_label("reporter").spawn(|_| reporter.run());
@@ -857,7 +902,7 @@ mod tests {
                         sequencers: mocks::Sequencers::<PublicKey>::new(vec![
                             sequencer.public_key()
                         ]),
-                        validators: mocks::Validators::<PublicKey>::new(
+                        validators: mocks::Validators::<PublicKey, V>::new(
                             identity.clone(),
                             validator_pks,
                             None,
@@ -870,6 +915,7 @@ mod tests {
                         priority_proposals: false,
                         journal_heights_per_section: 10,
                         journal_replay_concurrency: 1,
+                        journal_replay_buffer: 4096,
                         journal_name_prefix: format!(
                             "ordered-broadcast-seq/{}/",
                             sequencer.public_key()
@@ -891,5 +937,73 @@ mod tests {
             )
             .await;
         });
+    }
+
+    #[test_traced]
+    fn test_external_sequencer() {
+        external_sequencer::<MinPk>();
+        external_sequencer::<MinSig>();
+    }
+
+    fn run_1k<V: Variant>() {
+        let num_validators: u32 = 10;
+        let quorum: u32 = 3;
+        let cfg = deterministic::Config::new();
+        let runner = deterministic::Runner::new(cfg);
+
+        runner.start(|mut context| async move {
+            let (identity, mut shares_vec) =
+                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+            shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+
+            let (oracle, validators, pks, mut registrations) = initialize_simulation(
+                context.with_label("simulation"),
+                num_validators,
+                &mut shares_vec,
+            )
+            .await;
+            let delayed_link = Link {
+                latency: 80.0,
+                jitter: 10.0,
+                success_rate: 0.98,
+            };
+            let mut oracle_clone = oracle.clone();
+            link_participants(&mut oracle_clone, &pks, Action::Update(delayed_link), None).await;
+
+            let automatons = Arc::new(Mutex::new(
+                BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
+            ));
+            let mut reporters =
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, V, Sha256Digest>>::new();
+            let sequencers = &pks[0..pks.len() / 2];
+            spawn_validator_engines::<V>(
+                context.with_label("validator"),
+                identity.clone(),
+                sequencers,
+                &pks,
+                &validators,
+                &mut registrations,
+                &mut automatons.lock().unwrap(),
+                &mut reporters,
+                Duration::from_millis(150),
+                |_| false,
+                None,
+            );
+
+            await_reporters(
+                context.with_label("reporter"),
+                sequencers.to_vec(),
+                &reporters,
+                (1_000, 111, false),
+            )
+            .await;
+        })
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_1k() {
+        run_1k::<MinPk>();
+        run_1k::<MinSig>();
     }
 }

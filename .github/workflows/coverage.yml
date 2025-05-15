@@ -1,4 +1,4 @@
-name: Coverage 
+name: Coverage
 
 on:
   push:
@@ -14,13 +14,8 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-    - name: Get Rust version
-      id: rust-version
-      run: echo "rust_version=$(rustc --version)" >> "$GITHUB_OUTPUT"
     - name: Run setup
       uses: ./.github/actions/setup
-      with:
-        rust-version: ${{ steps.rust-version.outputs.rust_version}}
     - name: Remove examples
       # Reduces compilation time on code we exclude from coverage
       run: rm -rf examples
@@ -30,9 +25,9 @@ jobs:
     - name: Install cargo-llvm-cov
       uses: taiki-e/install-action@cargo-llvm-cov
     - name: Generate coverage report
-      run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+      run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info -- --include-ignored
     - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v4
+      uses: codecov/codecov-action@v5
       with:
         files: lcov.info
         fail_ci_if_error: true

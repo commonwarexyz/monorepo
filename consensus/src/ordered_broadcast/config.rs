@@ -1,15 +1,16 @@
 use super::types::{Activity, Context, Epoch};
 use crate::{Automaton, Monitor, Relay, Reporter, Supervisor, ThresholdSupervisor};
-use commonware_cryptography::{Digest, Scheme};
+use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, Scheme};
 use std::time::Duration;
 
 /// Configuration for the [`Engine`](super::Engine).
 pub struct Config<
     C: Scheme,
+    V: Variant,
     D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D>,
     R: Relay<Digest = D>,
-    Z: Reporter<Activity = Activity<C, D>>,
+    Z: Reporter<Activity = Activity<C, V, D>>,
     M: Monitor<Index = Epoch>,
     Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
     TSu: ThresholdSupervisor<Index = Epoch, PublicKey = C::PublicKey>,
@@ -75,6 +76,9 @@ pub struct Config<
 
     /// Upon replaying a journal, the number of entries to replay concurrently.
     pub journal_replay_concurrency: usize,
+
+    /// The number of bytes to buffer when replaying a journal.
+    pub journal_replay_buffer: usize,
 
     /// Compression level for the journal.
     pub journal_compression: Option<u8>,
