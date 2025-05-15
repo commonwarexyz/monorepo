@@ -1,5 +1,5 @@
 use crate::Error;
-use commonware_utils::{from_hex, hex};
+use commonware_utils::{from_hex, hex, StableBuf, StableBufMut};
 use futures::{
     channel::{mpsc, oneshot},
     executor::block_on,
@@ -254,14 +254,16 @@ impl Blob {
 }
 
 impl crate::Blob for Blob {
-    async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
+    async fn read_at<B: StableBufMut>(&self, mut buf: B, offset: u64) -> Result<B, Error> {
         let fd = types::Fd(self.file.as_raw_fd());
         let mut total_read = 0;
+        let len = buf.len();
+        let buf_ref = buf.deref_mut();
 
         let mut io_sender = self.io_sender.clone();
-        while total_read < buf.len() {
+        while total_read < len {
             // Figure out how much is left to read and where to read into
-            let remaining = &mut buf[total_read..];
+            let remaining = &mut buf_ref[total_read..];
             let offset = offset + total_read as u64;
 
             // Create an operation to do the read
@@ -291,17 +293,18 @@ impl crate::Blob for Blob {
             total_read += bytes_read;
         }
 
-        Ok(())
+        Ok(buf)
     }
 
-    async fn write_at(&self, buf: &[u8], offset: u64) -> Result<(), Error> {
+    async fn write_at<B: StableBuf>(&self, buf: B, offset: u64) -> Result<(), Error> {
         let fd = types::Fd(self.file.as_raw_fd());
         let mut total_written = 0;
+        let buf_ref = buf.as_ref();
 
         let mut io_sender = self.io_sender.clone();
         while total_written < buf.len() {
             // Figure out how much is left to write and where to write from
-            let remaining = &buf[total_written..];
+            let remaining = &buf_ref[total_written..];
             let offset = offset + total_written as u64;
 
             // Create an operation to do the write
