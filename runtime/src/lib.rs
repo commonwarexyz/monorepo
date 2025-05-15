@@ -136,14 +136,20 @@ pub trait Spawner: Clone + Send + Sync + 'static {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static;
 
-    /// TODO: fix
-    /// Enqueue a blocking task shared thread.
+    /// Enqueue a blocking task to be executed.
     ///
-    /// This method runs synchronous operations in a shared thread pool. Tasks spawned using this method
-    /// should eventually finish on their own (to avoid blocking the thread pool).
+    /// This method is designed for synchronous, potentially long-running operations. Tasks can either
+    /// be executed in a shared thread (tasks that are expected to finish on their own) or a dedicated
+    /// thread (tasks that are expected to run indefinitely).
     ///
     /// The task starts executing immediately, and the returned handle can be awaited to retrieve the
     /// result.
+    ///
+    /// # Motivation
+    ///
+    /// Most runtimes allocate a limited number of threads for executing async tasks, running whatever
+    /// isn't waiting. If blocking tasks are spawned this way, they can dramatically reduce the efficiency
+    /// of said runtimes.
     ///
     /// # Warning
     ///
