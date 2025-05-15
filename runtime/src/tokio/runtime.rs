@@ -239,6 +239,7 @@ impl crate::Runner for Runner {
             .expect("failed to create Tokio runtime");
         let (signaler, signal) = Signaler::new();
 
+        // Initialize storage
         let storage = Storage::new(
             TokioStorage::new(TokioStorageConfig::new(
                 self.cfg.storage_directory.clone(),
@@ -247,9 +248,11 @@ impl crate::Runner for Runner {
             runtime_registry,
         );
 
+        // Initialize network
         let network = TokioNetwork::from(self.cfg.network_cfg.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
 
+        // Initialize executor
         let executor = Arc::new(Executor {
             cfg: self.cfg,
             registry: Mutex::new(registry),
@@ -259,15 +262,28 @@ impl crate::Runner for Runner {
             signal,
         });
 
+        // Get metrics
+        let work = Work {
+            label: String::new(),
+            root: Bool::True,
+            blocking: Bool::False,
+            dedicated: Bool::False,
+        };
+        executor.metrics.tasks_spawned.get_or_create(&work).inc();
+        let gauge = executor.metrics.tasks_running.get_or_create(&work).clone();
+
+        // Run the future
         let context = Context {
             storage,
-            label: String::new(),
+            label: work.label.clone(),
             spawned: false,
             executor: executor.clone(),
             network,
         };
+        let output = executor.runtime.block_on(f(context));
+        gauge.dec();
 
-        executor.runtime.block_on(f(context))
+        output
     }
 }
 
