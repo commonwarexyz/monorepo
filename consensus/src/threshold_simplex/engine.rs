@@ -9,7 +9,7 @@ use commonware_cryptography::{
     Digest, Scheme,
 };
 use commonware_macros::select;
-use commonware_p2p::{Receiver, Sender};
+use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
@@ -19,6 +19,7 @@ use tracing::debug;
 pub struct Engine<
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
     C: Scheme,
+    B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     D: Digest,
     A: Automaton<Context = Context<D>, Digest = D>,
@@ -35,19 +36,20 @@ pub struct Engine<
 > {
     context: E,
 
-    voter: voter::Actor<E, C, V, D, A, R, F, S>,
+    voter: voter::Actor<E, C, B, V, D, A, R, F, S>,
     voter_mailbox: voter::Mailbox<V, D>,
 
-    verifier: verifier::Actor<E, C, V, D, S>,
+    verifier: verifier::Actor<E, C, B, V, D, S>,
     verifier_mailbox: verifier::Mailbox<V, D>,
 
-    resolver: resolver::Actor<E, C, V, D, S>,
+    resolver: resolver::Actor<E, C, B, V, D, S>,
     resolver_mailbox: resolver::Mailbox<V, D>,
 }
 
 impl<
         E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
         C: Scheme,
+        B: Blocker<PublicKey = C::PublicKey>,
         V: Variant,
         D: Digest,
         A: Automaton<Context = Context<D>, Digest = D>,
@@ -61,10 +63,10 @@ impl<
             Public = V::Public,
             PublicKey = C::PublicKey,
         >,
-    > Engine<E, C, V, D, A, R, F, S>
+    > Engine<E, C, B, V, D, A, R, F, S>
 {
     /// Create a new `threshold-simplex` consensus engine.
-    pub fn new(context: E, cfg: Config<C, V, D, A, R, F, S>) -> Self {
+    pub fn new(context: E, cfg: Config<C, B, V, D, A, R, F, S>) -> Self {
         // Ensure configuration is valid
         cfg.assert();
 
@@ -73,6 +75,7 @@ impl<
             context.with_label("voter"),
             voter::Config {
                 crypto: cfg.crypto.clone(),
+                blocker: cfg.blocker.clone(),
                 automaton: cfg.automaton,
                 relay: cfg.relay,
                 reporter: cfg.reporter,
@@ -92,9 +95,10 @@ impl<
         );
 
         // Create verifier
-        let (verifier, verifier_mailbox) = verifier::Actor::<E, C, V, D, S>::new(
+        let (verifier, verifier_mailbox) = verifier::Actor::<E, C, B, V, D, S>::new(
             context.with_label("verifier"),
             verifier::Config {
+                blocker: cfg.blocker.clone(),
                 supervisor: cfg.supervisor.clone(),
                 namespace: cfg.namespace.clone(),
                 mailbox_size: cfg.mailbox_size,
@@ -105,6 +109,7 @@ impl<
         let (resolver, resolver_mailbox) = resolver::Actor::new(
             context.with_label("resolver"),
             resolver::Config {
+                blocker: cfg.blocker,
                 crypto: cfg.crypto,
                 supervisor: cfg.supervisor,
                 mailbox_size: cfg.mailbox_size,

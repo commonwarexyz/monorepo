@@ -19,7 +19,7 @@ use commonware_p2p::{
         codec::{wrap, WrappedSender},
         requester,
     },
-    Receiver, Recipients, Sender,
+    Blocker, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{Clock, Handle, Metrics, Spawner};
 use futures::{channel::mpsc, future::Either, StreamExt};
@@ -103,6 +103,7 @@ impl Inflight {
 pub struct Actor<
     E: Clock + GClock + Rng + Metrics + Spawner,
     C: Scheme,
+    B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     D: Digest,
     S: ThresholdSupervisor<
@@ -113,6 +114,7 @@ pub struct Actor<
     >,
 > {
     context: E,
+    blocker: B,
     supervisor: S,
 
     namespace: Vec<u8>,
@@ -140,6 +142,7 @@ pub struct Actor<
 impl<
         E: Clock + GClock + Rng + Metrics + Spawner,
         C: Scheme,
+        B: Blocker<PublicKey = C::PublicKey>,
         V: Variant,
         D: Digest,
         S: ThresholdSupervisor<
@@ -148,9 +151,9 @@ impl<
             PublicKey = C::PublicKey,
             Public = V::Public,
         >,
-    > Actor<E, C, V, D, S>
+    > Actor<E, C, B, V, D, S>
 {
-    pub fn new(context: E, cfg: Config<C, S>) -> (Self, Mailbox<V, D>) {
+    pub fn new(context: E, cfg: Config<C, B, S>) -> (Self, Mailbox<V, D>) {
         // Initialize requester
         let config = requester::Config {
             public_key: cfg.crypto.public_key(),
@@ -181,6 +184,7 @@ impl<
         (
             Self {
                 context,
+                blocker: cfg.blocker,
                 supervisor: cfg.supervisor,
 
                 namespace: cfg.namespace,
@@ -458,8 +462,9 @@ impl<
                     let msg = match msg {
                         Ok(msg) => msg,
                         Err(err) => {
-                            warn!(?err, sender = ?s, "failed to decode message");
-                            self.requester.block(s);
+                            warn!(?err, sender = ?s, "blocking peer");
+                            self.requester.block(s.clone());
+                            self.blocker.block(s).await;
                             continue;
                         },
                     };
@@ -513,8 +518,9 @@ impl<
 
                             // Verify message
                             if !response.verify(&self.namespace, &public_key) {
-                                warn!(sender = ?s, "invalid message");
-                                self.requester.block(s);
+                                warn!(sender = ?s, "blocking peer");
+                                self.requester.block(s.clone());
+                                self.blocker.block(s).await;
                                 continue;
                             }
 

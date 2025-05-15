@@ -4,12 +4,14 @@ use commonware_cryptography::{
     bls12381::primitives::{group, variant::Variant},
     Digest, Scheme,
 };
+use commonware_p2p::Blocker;
 use governor::Quota;
 use std::time::Duration;
 
 /// Configuration for the consensus engine.
 pub struct Config<
     C: Scheme,
+    B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     D: Digest,
     A: Automaton<Context = Context<D>>,
@@ -25,6 +27,11 @@ pub struct Config<
 > {
     /// Cryptographic primitives.
     pub crypto: C,
+
+    /// Blocker for the network.
+    ///
+    /// Blocking is handled by [commonware_p2p].
+    pub blocker: B,
 
     /// Automaton for the consensus engine.
     pub automaton: A,
@@ -88,7 +95,7 @@ pub struct Config<
 
     /// Maximum rate of requests to send to a given peer.
     ///
-    /// Inbound rate limiting is handled by `commonware-p2p`.
+    /// Inbound rate limiting is handled by [commonware_p2p].
     pub fetch_rate_per_peer: Quota,
 
     /// Number of concurrent requests to make at once.
@@ -97,6 +104,7 @@ pub struct Config<
 
 impl<
         C: Scheme,
+        B: Blocker<PublicKey = C::PublicKey>,
         V: Variant,
         D: Digest,
         A: Automaton<Context = Context<D>>,
@@ -109,7 +117,7 @@ impl<
             Public = V::Public,
             PublicKey = C::PublicKey,
         >,
-    > Config<C, V, D, A, R, F, S>
+    > Config<C, B, V, D, A, R, F, S>
 {
     /// Assert enforces that all configuration values are valid.
     pub fn assert(&self) {
