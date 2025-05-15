@@ -155,7 +155,7 @@ impl Default for Config {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct Network {
+pub struct Network {
     cfg: Config,
 }
 
