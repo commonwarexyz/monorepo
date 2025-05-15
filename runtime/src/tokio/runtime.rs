@@ -27,24 +27,9 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
-<<<<<<< HEAD
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{tcp::OwnedReadHalf, tcp::OwnedWriteHalf, TcpListener, TcpStream},
-    runtime::{Builder, Runtime},
-    time::timeout,
-};
-use tracing::warn;
+use tokio::runtime::{Builder, Runtime};
 
 const COMMONWARE_STORAGE_DIRECTORY: &str = "COMMONWARE_STORAGE_DIRECTORY";
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-struct Work {
-    label: String,
-}
-=======
-use tokio::runtime::{Builder, Runtime};
->>>>>>> origin/main
 
 #[derive(Debug)]
 struct Metrics {
@@ -93,27 +78,6 @@ pub struct Config {
 
     /// Whether or not to catch panics.
     catch_panics: bool,
-<<<<<<< HEAD
-
-    /// Duration after which to close the connection if no message is read.
-    read_timeout: Duration,
-
-    /// Duration after which to close the connection if a message cannot be written.
-    write_timeout: Duration,
-
-    /// Whether or not to disable Nagle's algorithm.
-    ///
-    /// The algorithm combines a series of small network packets into a single packet
-    /// before sending to reduce overhead of sending multiple small packets which might not
-    /// be efficient on slow, congested networks. However, to do so the algorithm introduces
-    /// a slight delay as it waits to accumulate more data. Latency-sensitive networks should
-    /// consider disabling it to send the packets as soon as possible to reduce latency.
-    ///
-    /// Note: Make sure that your compile target has and allows this configuration otherwise
-    /// panics or unexpected behaviours are possible.
-    tcp_nodelay: Option<bool>,
-=======
->>>>>>> origin/main
 
     /// Base directory for all storage operations.
     storage_directory: PathBuf,
@@ -122,11 +86,8 @@ pub struct Config {
     ///
     /// Tokio sets the default value to 2MB.
     maximum_buffer_size: usize,
-<<<<<<< HEAD
-=======
 
     network_cfg: TokioNetworkConfig,
->>>>>>> origin/main
 }
 
 impl Config {
@@ -144,52 +105,22 @@ impl Config {
         }
     }
 
-<<<<<<< HEAD
-    /// Number of threads to use for handling async tasks.
-=======
     // Setters
     /// See [Config]
->>>>>>> origin/main
     pub fn with_worker_threads(mut self, n: usize) -> Self {
         self.worker_threads = n;
         self
     }
-<<<<<<< HEAD
-    /// Maximum number of threads to use for blocking tasks.
-=======
     /// See [Config]
->>>>>>> origin/main
     pub fn with_max_blocking_threads(mut self, n: usize) -> Self {
         self.max_blocking_threads = n;
         self
     }
-<<<<<<< HEAD
-    /// Whether or not to catch panics.
-=======
     /// See [Config]
->>>>>>> origin/main
     pub fn with_catch_panics(mut self, b: bool) -> Self {
         self.catch_panics = b;
         self
     }
-<<<<<<< HEAD
-    /// Duration after which to close the connection if no message is read.
-    pub fn with_read_timeout(mut self, d: Duration) -> Self {
-        self.read_timeout = d;
-        self
-    }
-    /// Duration after which to close the connection if a message cannot be written.
-    pub fn with_write_timeout(mut self, d: Duration) -> Self {
-        self.write_timeout = d;
-        self
-    }
-    /// Whether or not to disable Nagle's algorithm.
-    pub fn with_tcp_nodelay(mut self, n: Option<bool>) -> Self {
-        self.tcp_nodelay = n;
-        self
-    }
-    /// Base directory for all storage operations.
-=======
     /// See [Config]
     pub fn with_read_timeout(mut self, d: Duration) -> Self {
         self.network_cfg = self.network_cfg.with_read_timeout(d);
@@ -206,21 +137,15 @@ impl Config {
         self
     }
     /// See [Config]
->>>>>>> origin/main
     pub fn with_storage_directory(mut self, p: impl Into<PathBuf>) -> Self {
         self.storage_directory = p.into();
         self
     }
-<<<<<<< HEAD
-    /// Maximum buffer size for operations on blobs.
-=======
     /// See [Config]
->>>>>>> origin/main
     pub fn with_maximum_buffer_size(mut self, n: usize) -> Self {
         self.maximum_buffer_size = n;
         self
     }
-<<<<<<< HEAD
     /// Set the storage directory from the environment variable
     /// COMMONWARE_STORAGE_DIRECTORY. Panics if it's unset.
     pub fn with_storage_directory_from_env(mut self) -> Self {
@@ -240,30 +165,6 @@ impl Config {
         }
         self
     }
-
-    // Getters
-    pub fn worker_threads(&self) -> usize {
-        self.worker_threads
-    }
-    pub fn max_blocking_threads(&self) -> usize {
-        self.max_blocking_threads
-    }
-    pub fn catch_panics(&self) -> bool {
-        self.catch_panics
-    }
-    pub fn read_timeout(&self) -> Duration {
-        self.read_timeout
-    }
-    pub fn write_timeout(&self) -> Duration {
-        self.write_timeout
-    }
-    pub fn tcp_nodelay(&self) -> Option<bool> {
-        self.tcp_nodelay
-    }
-    pub fn storage_directory(&self) -> &PathBuf {
-        &self.storage_directory
-    }
-=======
 
     // Getters
     /// See [Config]
@@ -295,7 +196,6 @@ impl Config {
         &self.storage_directory
     }
     /// See [Config]
->>>>>>> origin/main
     pub fn maximum_buffer_size(&self) -> usize {
         self.maximum_buffer_size
     }

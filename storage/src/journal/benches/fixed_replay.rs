@@ -1,13 +1,8 @@
 use super::{append_random_data, get_journal};
 use commonware_runtime::{
-<<<<<<< HEAD
     benchmarks::{context, tokio::Runner as TokioBenchRunner},
-    tokio::{self, Context},
-=======
-    benchmarks::{context, tokio},
     tokio::{Config, Context, Runner},
     Runner as _,
->>>>>>> origin/main
 };
 use commonware_storage::journal::fixed::Journal;
 use commonware_utils::array::FixedBytes;
@@ -49,15 +44,10 @@ async fn bench_run(
 /// Benchmark the replaying of items from a journal containing exactly that
 /// number of items.
 fn bench_fixed_replay(c: &mut Criterion) {
-<<<<<<< HEAD
-    let cfg = tokio::Config::new().with_storage_directory_from_env();
-    let runner = TokioBenchRunner::new(cfg);
-=======
->>>>>>> origin/main
     for items in [1_000, 10_000, 100_000, 500_000] {
         // Create a config we can use across all benchmarks (with a fixed `storage_directory`), allowing the
         // same test file to be re-used.
-        let cfg = Config::default();
+        let cfg = Config::default().with_storage_directory_from_env();
 
         // Generate a large temp journal with random data.
         let runner = Runner::new(cfg.clone());
@@ -69,7 +59,7 @@ fn bench_fixed_replay(c: &mut Criterion) {
         });
 
         // Run the benchmarks
-        let runner = tokio::Runner::new(cfg.clone());
+        let runner = TokioBenchRunner::new(cfg.clone());
         for buffer in [128, 16_384, 65_536, 1_048_576] {
             c.bench_function(
                 &format!(
