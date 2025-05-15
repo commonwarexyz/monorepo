@@ -22,6 +22,15 @@ impl From<bool> for Bool {
     }
 }
 
+/// Type of task that can be spawned.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
+pub enum Task {
+    Root,
+    Async,
+    BlockingShared,
+    BlockingDedicated,
+}
+
 /// Metric label that indicates status.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct Label {

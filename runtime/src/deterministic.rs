@@ -31,7 +31,7 @@ use crate::{
         audited::Storage as AuditedStorage, memory::Storage as MemStorage,
         metered::Storage as MeteredStorage,
     },
-    telemetry::metrics::status::Bool,
+    telemetry::metrics::status::Task as TTask,
     utils::Signaler,
     Clock, Error, Handle, ListenerOf, Signal, METRICS_PREFIX,
 };
@@ -65,9 +65,7 @@ pub type Partition = HashMap<Vec<u8>, Vec<u8>>;
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct Work {
     label: String,
-    root: Bool,
-    blocking: Bool,
-    dedicated: Bool,
+    task: TTask,
 }
 
 #[derive(Debug)]
@@ -528,9 +526,7 @@ impl Tasks {
             id,
             work: Work {
                 label: String::new(),
-                root: Bool::True,
-                blocking: Bool::False,
-                dedicated: Bool::False,
+                task: TTask::Root,
             },
             tasks: arc_self.clone(),
             operation: Operation::Root,
@@ -736,9 +732,7 @@ impl crate::Spawner for Context {
         // Get metrics
         let work = Work {
             label: self.label.clone(),
-            root: Bool::False,
-            blocking: Bool::False,
-            dedicated: Bool::False,
+            task: TTask::Async,
         };
         self.executor
             .metrics
@@ -774,9 +768,7 @@ impl crate::Spawner for Context {
         // Get metrics
         let work = Work {
             label: self.label.clone(),
-            root: Bool::False,
-            blocking: Bool::False,
-            dedicated: Bool::False,
+            task: TTask::Async,
         };
         self.executor
             .metrics
@@ -812,9 +804,11 @@ impl crate::Spawner for Context {
         // Get metrics
         let work = Work {
             label: self.label.clone(),
-            root: Bool::False,
-            blocking: Bool::True,
-            dedicated: dedicated.into(),
+            task: if dedicated {
+                TTask::BlockingDedicated
+            } else {
+                TTask::BlockingShared
+            },
         };
         self.executor
             .metrics

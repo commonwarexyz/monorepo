@@ -9,7 +9,7 @@ use crate::network::tokio::{
     Config as TokioNetworkConfig, Listener as TokioListener, Network as TokioNetwork,
 };
 use crate::storage::metered::Storage as MeteredStorage;
-use crate::telemetry::metrics::status::Bool;
+use crate::telemetry::metrics::status::Task;
 use crate::{utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
 use crate::{SinkOf, StreamOf};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
@@ -32,9 +32,7 @@ use tokio::runtime::{Builder, Runtime};
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct Work {
     label: String,
-    root: Bool,
-    blocking: Bool,
-    dedicated: Bool,
+    task: Task,
 }
 
 #[derive(Debug)]
@@ -279,9 +277,7 @@ impl crate::Runner for Runner {
         // Get metrics
         let work = Work {
             label: String::new(),
-            root: Bool::True,
-            blocking: Bool::False,
-            dedicated: Bool::False,
+            task: Task::Root,
         };
         executor.metrics.tasks_spawned.get_or_create(&work).inc();
         let gauge = executor.metrics.tasks_running.get_or_create(&work).clone();
@@ -343,9 +339,7 @@ impl crate::Spawner for Context {
         // Get metrics
         let work = Work {
             label: self.label.clone(),
-            root: Bool::False,
-            blocking: Bool::False,
-            dedicated: Bool::False,
+            task: Task::Async,
         };
         self.executor
             .metrics
@@ -382,9 +376,7 @@ impl crate::Spawner for Context {
         // Get metrics
         let work = Work {
             label: self.label.clone(),
-            root: Bool::False,
-            blocking: Bool::False,
-            dedicated: Bool::False,
+            task: Task::Async,
         };
         self.executor
             .metrics
@@ -420,9 +412,11 @@ impl crate::Spawner for Context {
         // Get metrics
         let work = Work {
             label: self.label.clone(),
-            root: Bool::False,
-            blocking: Bool::True,
-            dedicated: dedicated.into(),
+            task: if dedicated {
+                Task::BlockingDedicated
+            } else {
+                Task::BlockingShared
+            },
         };
         self.executor
             .metrics
