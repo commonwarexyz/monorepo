@@ -1,8 +1,10 @@
 //! Implementations of the `Storage` trait that can be used by the runtime.
 pub mod audited;
+#[cfg(feature = "iouring")]
+pub mod iouring;
 pub mod memory;
 pub mod metered;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "iouring")))]
 pub mod tokio;
 
 #[cfg(test)]
@@ -98,6 +100,12 @@ pub(crate) mod tests {
     {
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
 
+        // Initialize blob with data of sufficient length first
+        blob.write_at(b"concurrent write".to_vec(), 0)
+            .await
+            .unwrap();
+
+        // Read and write concurrently
         let write_task = tokio::spawn({
             let blob = blob.clone();
             async move {
