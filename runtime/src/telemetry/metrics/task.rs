@@ -12,6 +12,7 @@ pub struct Label {
 }
 
 impl Label {
+    /// Create a new label for the root task.
     pub fn root() -> Self {
         Self {
             name: String::new(),
@@ -19,6 +20,7 @@ impl Label {
         }
     }
 
+    /// Create a new label for a future task.
     pub fn future(name: String) -> Self {
         Self {
             name,
@@ -26,6 +28,7 @@ impl Label {
         }
     }
 
+    /// Create a new label for a blocking task spawned in a shared thread pool.
     pub fn blocking_shared(name: String) -> Self {
         Self {
             name,
@@ -33,6 +36,7 @@ impl Label {
         }
     }
 
+    /// Create a new label for a blocking task spawned on a dedicated thread.
     pub fn blocking_dedicated(name: String) -> Self {
         Self {
             name,
@@ -40,6 +44,7 @@ impl Label {
         }
     }
 
+    /// Get the name of the task.
     pub fn name(&self) -> String {
         self.name.clone()
     }
