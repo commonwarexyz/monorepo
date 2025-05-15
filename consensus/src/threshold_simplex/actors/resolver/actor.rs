@@ -5,7 +5,9 @@ use super::{
 use crate::{
     threshold_simplex::{
         actors::voter,
-        types::{Backfiller, Notarization, Nullification, Request, Response, View, Viewable},
+        types::{
+            Backfiller, Notarization, Nullification, Request, Response, View, Viewable, Voter,
+        },
     },
     ThresholdSupervisor,
 };
@@ -525,6 +527,7 @@ impl<
                             }
 
                             // Update cache
+                            let mut voters = Vec::with_capacity(response.notarizations.len() + response.nullifications.len());
                             let mut notarizations_found = BTreeSet::new();
                             for notarization in response.notarizations {
                                 let view = notarization.view();
@@ -534,7 +537,7 @@ impl<
                                     continue;
                                 }
                                 self.notarizations.insert(view, notarization.clone());
-                                voter.notarization(notarization).await;
+                                voters.push(Voter::Notarization(notarization));
                                 notarizations_found.insert(view);
                             }
                             let mut nullifications_found = BTreeSet::new();
@@ -546,9 +549,12 @@ impl<
                                     continue;
                                 }
                                 self.nullifications.insert(view, nullification.clone());
-                                voter.nullification(nullification).await;
+                                voters.push(Voter::Nullification(nullification));
                                 nullifications_found.insert(view);
                             }
+
+                            // Send voters
+                            voter.verified(voters).await;
 
                             // Update performance
                             let mut shuffle = false;

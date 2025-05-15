@@ -255,7 +255,9 @@ mod tests {
             let seed_signature =
                 threshold_signature_recover::<V, _>(threshold, seed_partials).unwrap();
             let notarization = Notarization::new(proposal, proposal_signature, seed_signature);
-            mailbox.notarization(notarization).await;
+            mailbox
+                .verified(vec![Voter::Notarization(notarization)])
+                .await;
 
             // Send new finalization (view 300)
             let payload = hash(b"test3");

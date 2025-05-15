@@ -2148,12 +2148,17 @@ impl<
                     }
                 },
                 mailbox = self.mailbox_receiver.next() => {
+                    // Extract message
+                    let Some(msg) = mailbox else {
+                        break;
+                    };
+                    let Message::Verified(msg) = msg;
+
                     // Ensure view is still useful
                     //
                     // It is possible that we make a request to the backfiller and prune the view
                     // before we receive the response. In this case, we should ignore the response (not
                     // doing so may result in attempting to store before the prune boundary).
-                    let msg = mailbox.unwrap();
                     view = msg.view();
                     if !self.interesting(view, false) {
                         debug!(view, "backfilled message is not interesting");
@@ -2162,30 +2167,26 @@ impl<
 
                     // Handle backfill
                     match msg {
-                        Message::Voter(voter) => {
-                            match voter{
-                                Voter::Notarize(notarize) => {
-                                    self.handle_notarize(notarize).await;
-                                }
-                                Voter::Nullify(nullify) => {
-                                    self.handle_nullify(nullify).await;
-                                }
-                                Voter::Finalize(finalize) => {
-                                    self.handle_finalize(finalize).await;
-                                }
-                                Voter::Notarization(_)| Voter::Nullification(_) | Voter::Finalization(_) => {
-                                    unreachable!("we should not receive these messages from the verifier")
-                                }
-                            };
-                        },
-                        Message::Notarization(notarization)  => {
-                            debug!(view, "received notarization from backfiller");
+                        Voter::Notarize(notarize) => {
+                            self.handle_notarize(notarize).await;
+                        }
+                        Voter::Nullify(nullify) => {
+                            self.handle_nullify(nullify).await;
+                        }
+                        Voter::Finalize(finalize) => {
+                            self.handle_finalize(finalize).await;
+                        }
+                        Voter::Notarization(notarization)  => {
+                            trace!(view, "received notarization from backfiller");
                             self.handle_notarization(notarization).await;
                         },
-                        Message::Nullification(nullification) => {
-                            debug!(view, "received nullification from backfiller");
+                        Voter::Nullification(nullification) => {
+                            trace!(view, "received nullification from backfiller");
                             self.handle_nullification(nullification).await;
                         },
+                        Voter::Finalization(_) => {
+                            unreachable!("unexpected message type");
+                        }
                     }
                 },
                 msg = receiver.recv() => {
