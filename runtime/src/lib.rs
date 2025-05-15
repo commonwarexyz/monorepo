@@ -136,11 +136,13 @@ pub trait Spawner: Clone + Send + Sync + 'static {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static;
 
-    /// Enqueue a blocking task to be executed.
+    /// Enqueue a blocking task on a shared thread.
     ///
-    /// This method is designed for synchronous, potentially long-running operations that should
-    /// not block the asynchronous event loop. The task starts executing immediately, and the
-    /// returned handle can be awaited to retrieve the result.
+    /// This method runs synchronous operations in a shared thread pool. Tasks spawned using this method
+    /// should eventually finish on their own (to avoid blocking the thread pool).
+    ///
+    /// The task starts executing immediately, and the returned handle can be awaited to retrieve the
+    /// result.
     ///
     /// # Warning
     ///
@@ -150,7 +152,17 @@ pub trait Spawner: Clone + Send + Sync + 'static {
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static;
 
-    /// Create a long-running task that is not expected to finish.
+    /// Enqueue a blocking task on a dedicated thread.
+    ///
+    /// This method runs synchronous operations in a dedicated thread. Tasks spawned using this method
+    /// are only expected to finish when there is an error or when `stop` is called.
+    ///
+    /// The task starts executing immediately, and the returned handle can be awaited to retrieve the
+    /// result.
+    ///
+    /// # Warning
+    ///
+    /// Dedicated tasks cannot be aborted.
     fn spawn_dedicated<F, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce() -> T + Send + 'static,
