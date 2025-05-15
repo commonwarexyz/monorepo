@@ -30,7 +30,60 @@ impl<T> Handle<T>
 where
     T: Send + 'static,
 {
-    pub(crate) fn init<F>(
+    pub(crate) fn init<F>(f: F, running: Gauge, catch_panic: bool) -> (impl FnOnce(), Self)
+    where
+        F: FnOnce() -> T + Send + 'static,
+    {
+        // Increment the running tasks gauge
+        running.inc();
+
+        // Initialize channel to handle result
+        let once = Arc::new(Once::new());
+        let (sender, receiver) = oneshot::channel();
+
+        // Wrap the closure with panic handling
+        let f = {
+            let once = once.clone();
+            let running = running.clone();
+            move || {
+                // Run blocking task
+                let result = catch_unwind(AssertUnwindSafe(f));
+
+                // Decrement running counter
+                once.call_once(|| {
+                    running.dec();
+                });
+
+                // Handle result
+                let result = match result {
+                    Ok(value) => Ok(value),
+                    Err(err) => {
+                        if !catch_panic {
+                            resume_unwind(err);
+                        }
+                        let err = extract_panic_message(&*err);
+                        error!(?err, "blocking task panicked");
+                        Err(Error::Exited)
+                    }
+                };
+                let _ = sender.send(result);
+            }
+        };
+
+        // Return the task and handle
+        (
+            f,
+            Self {
+                aborter: None,
+                receiver,
+
+                running,
+                once,
+            },
+        )
+    }
+
+    pub(crate) fn init_future<F>(
         f: F,
         running: Gauge,
         catch_panic: bool,
@@ -81,59 +134,6 @@ where
             abortable.map(|_| ()),
             Self {
                 aborter: Some(aborter),
-                receiver,
-
-                running,
-                once,
-            },
-        )
-    }
-
-    pub(crate) fn init_blocking<F>(f: F, running: Gauge, catch_panic: bool) -> (impl FnOnce(), Self)
-    where
-        F: FnOnce() -> T + Send + 'static,
-    {
-        // Increment the running tasks gauge
-        running.inc();
-
-        // Initialize channel to handle result
-        let once = Arc::new(Once::new());
-        let (sender, receiver) = oneshot::channel();
-
-        // Wrap the closure with panic handling
-        let f = {
-            let once = once.clone();
-            let running = running.clone();
-            move || {
-                // Run blocking task
-                let result = catch_unwind(AssertUnwindSafe(f));
-
-                // Decrement running counter
-                once.call_once(|| {
-                    running.dec();
-                });
-
-                // Handle result
-                let result = match result {
-                    Ok(value) => Ok(value),
-                    Err(err) => {
-                        if !catch_panic {
-                            resume_unwind(err);
-                        }
-                        let err = extract_panic_message(&*err);
-                        error!(?err, "blocking task panicked");
-                        Err(Error::Exited)
-                    }
-                };
-                let _ = sender.send(result);
-            }
-        };
-
-        // Return the task and handle
-        (
-            f,
-            Self {
-                aborter: None,
                 receiver,
 
                 running,

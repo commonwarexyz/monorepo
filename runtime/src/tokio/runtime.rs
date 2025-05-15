@@ -348,7 +348,7 @@ impl crate::Spawner for Context {
         let catch_panics = self.executor.cfg.catch_panics;
         let executor = self.executor.clone();
         let future = f(self);
-        let (f, handle) = Handle::init(future, gauge, catch_panics);
+        let (f, handle) = Handle::init_future(future, gauge, catch_panics);
 
         // Spawn the task
         executor.runtime.spawn(f);
@@ -383,7 +383,7 @@ impl crate::Spawner for Context {
         // Set up the task
         let executor = self.executor.clone();
         move |f: F| {
-            let (f, handle) = Handle::init(f, gauge, executor.cfg.catch_panics);
+            let (f, handle) = Handle::init_future(f, gauge, executor.cfg.catch_panics);
 
             // Spawn the task
             executor.runtime.spawn(f);
@@ -416,7 +416,7 @@ impl crate::Spawner for Context {
             .clone();
 
         // Initialize the blocking task using the new function
-        let (f, handle) = Handle::init_blocking(f, gauge, self.executor.cfg.catch_panics);
+        let (f, handle) = Handle::init(f, gauge, self.executor.cfg.catch_panics);
 
         // Spawn the blocking task
         self.executor.runtime.spawn_blocking(f);
@@ -448,9 +448,9 @@ impl crate::Spawner for Context {
             .clone();
 
         // Initialize the blocking task using the new function
-        let (f, handle) = Handle::init_blocking(f, gauge, self.executor.cfg.catch_panics);
+        let (f, handle) = Handle::init(f, gauge, self.executor.cfg.catch_panics);
 
-        // Spawn the dedicated task
+        // Spawn the dedicated task as a thread (rather than consuming a shared thread from the runtime)
         std::thread::spawn(f);
         handle
     }
