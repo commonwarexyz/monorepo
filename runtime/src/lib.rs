@@ -1358,14 +1358,16 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "dedicated task panicked")]
     fn test_tokio_spawn_dedicated_panic() {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
             let handle = context.spawn_dedicated(|| {
                 panic!("dedicated task panicked");
             });
-            handle.await.unwrap();
+
+            // Because the task panics in a dedicated thread, the `should_panic` attribute will not
+            // catch the panic.
+            assert!(matches!(handle.await, Err(Error::Exited)));
         });
     }
 
