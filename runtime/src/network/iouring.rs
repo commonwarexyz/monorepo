@@ -147,10 +147,10 @@ impl crate::Sink for Sink {
                 .send((op, tx))
                 .await
                 .map_err(|_| crate::Error::SendFailed)?;
-            
+
             // Wait for the operation to complete
             let result = rx.await.map_err(|_| crate::Error::SendFailed)?;
-            
+
             // Negative result indicates an error
             let result: usize = result.try_into().map_err(|_| crate::Error::SendFailed)?;
             bytes_sent += result;
