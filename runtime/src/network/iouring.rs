@@ -1,3 +1,4 @@
+use crate::iouring;
 use commonware_utils::{StableBuf, StableBufMut};
 use futures::{
     channel::{mpsc, oneshot},
@@ -11,7 +12,6 @@ use std::{
     sync::Arc,
 };
 use tokio::net::{TcpListener, TcpStream};
-use crate::iouring;
 
 #[derive(Clone, Debug)]
 /// [crate::Network] implementation that uses io_uring to do async I/O.

@@ -1,14 +1,14 @@
 #[cfg(feature = "iouring")]
 use crate::{
     network::iouring::Network as IoUringNetwork,
-    storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage}};
+    storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage},
+};
 
 #[cfg(not(feature = "iouring"))]
 use crate::{
+    network::tokio::Network as TokioNetwork,
     storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage},
-    network::{
-    tokio::Network as TokioNetwork,
-}};
+};
 
 use crate::network::metered::Network as MeteredNetwork;
 use crate::network::tokio::Config as TokioNetworkConfig;
