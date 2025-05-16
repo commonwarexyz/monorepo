@@ -81,6 +81,12 @@ fn main() {
                 .value_parser(value_parser!(String)),
         )
         .arg(
+            Arg::new("profiling")
+                .long("profiling")
+                .required(true)
+                .value_parser(value_parser!(bool)),
+        )
+        .arg(
             Arg::new("output")
                 .long("output")
                 .required(true)
@@ -162,7 +168,7 @@ fn main() {
             storage_class: storage_class.clone(),
             binary: BINARY_NAME.to_string(),
             config: peer_config_file,
-            profiling: true,
+            profiling: *matches.get_one::<bool>("profiling").unwrap(),
         };
         instance_configs.push(instance);
     }
