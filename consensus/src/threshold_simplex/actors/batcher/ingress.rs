@@ -8,8 +8,7 @@ pub enum Message<V: Variant, D: Digest> {
         leader: u32,
         finalized: View,
     },
-    Untrusted(Voter<V, D>),
-    Trusted(Voter<V, D>),
+    Verified(Voter<V, D>),
 }
 
 #[derive(Clone)]
@@ -33,16 +32,9 @@ impl<V: Variant, D: Digest> Mailbox<V, D> {
             .expect("Failed to send update");
     }
 
-    pub async fn untrusted(&mut self, message: Voter<V, D>) {
+    pub async fn verified(&mut self, message: Voter<V, D>) {
         self.sender
-            .send(Message::Untrusted(message))
-            .await
-            .expect("Failed to send message");
-    }
-
-    pub async fn trusted(&mut self, message: Voter<V, D>) {
-        self.sender
-            .send(Message::Trusted(message))
+            .send(Message::Verified(message))
             .await
             .expect("Failed to send message");
     }

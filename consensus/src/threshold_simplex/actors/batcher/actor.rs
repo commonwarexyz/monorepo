@@ -13,6 +13,7 @@ use commonware_cryptography::{
     bls12381::primitives::{poly, variant::Variant},
     Digest, Scheme, Verifier,
 };
+use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_runtime::{Handle, Metrics, Spawner};
 use commonware_utils::quorum;
@@ -229,7 +230,28 @@ impl<
     }
 
     fn add_verified(&mut self, message: Voter<V, D>) {
+        match &message {
+            Voter::Notarize(notarize) => {
+                let signer = notarize.signer() as usize;
+                self.notarizes[signer] = Some(notarize.clone());
+            }
+            Voter::Nullify(nullify) => {
+                let signer = nullify.signer() as usize;
+                self.nullifies[signer] = Some(nullify.clone());
+            }
+            Voter::Finalize(finalize) => {
+                let signer = finalize.signer() as usize;
+                self.finalizes[signer] = Some(finalize.clone());
+            }
+            Voter::Notarization(_) | Voter::Finalization(_) | Voter::Nullification(_) => {
+                unreachable!("recovered messages should be sent to batcher");
+            }
+        }
         self.verifier.add(message, true);
+    }
+
+    fn set_leader(&mut self, leader: u32) {
+        self.verifier.set_leader(leader);
     }
 }
 
@@ -335,6 +357,10 @@ impl<
         let mut work: BTreeMap<u64, Round<C, B, V, D, R, S>> = BTreeMap::new();
         let mut blocking = true;
         let mut initialized = false;
+
+        loop {
+            select! {}
+        }
 
         loop {
             // Read at least one message (if there doesn't already exist a backlog)
