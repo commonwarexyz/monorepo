@@ -211,7 +211,7 @@ mod tests {
     use super::*;
     use crate::{Receiver, Recipients, Sender};
     use commonware_cryptography::{Ed25519, Signer};
-    use commonware_macros::{select, test_traced};
+    use commonware_macros::test_traced;
     use commonware_runtime::{
         deterministic, tokio, Clock, Listener, Metrics, Network as RNetwork, Runner, Sink as _,
         Spawner, Stream,
