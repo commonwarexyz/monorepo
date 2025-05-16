@@ -114,6 +114,7 @@ impl crate::Listener for Listener {
         let stream = stream
             .into_std()
             .map_err(|_| crate::Error::ConnectionFailed)?;
+
         // Explicitly set non-blocking mode to true
         stream
             .set_nonblocking(true)
