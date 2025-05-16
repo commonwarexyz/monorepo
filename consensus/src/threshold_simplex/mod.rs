@@ -192,17 +192,27 @@ mod tests {
     async fn register_validators<P: Array>(
         oracle: &mut Oracle<P>,
         validators: &[P],
-    ) -> HashMap<P, ((Sender<P>, Receiver<P>), (Sender<P>, Receiver<P>))> {
+    ) -> HashMap<
+        P,
+        (
+            (Sender<P>, Receiver<P>),
+            (Sender<P>, Receiver<P>),
+            (Sender<P>, Receiver<P>),
+        ),
+    > {
         let mut registrations = HashMap::new();
         for validator in validators.iter() {
-            let (voter_sender, voter_receiver) =
+            let (pending_sender, pending_receiver) =
                 oracle.register(validator.clone(), 0).await.unwrap();
-            let (resolver_sender, resolver_receiver) =
+            let (recovered_sender, recovered_receiver) =
                 oracle.register(validator.clone(), 1).await.unwrap();
+            let (resolver_sender, resolver_receiver) =
+                oracle.register(validator.clone(), 2).await.unwrap();
             registrations.insert(
                 validator.clone(),
                 (
-                    (voter_sender, voter_receiver),
+                    (pending_sender, pending_receiver),
+                    (recovered_sender, recovered_receiver),
                     (resolver_sender, resolver_receiver),
                 ),
             );
@@ -366,10 +376,10 @@ mod tests {
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
                 // Start engine
-                let (voter, resolver) = registrations
+                let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                engine_handlers.push(engine.start(voter, resolver));
+                engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
             // Wait for all engines to finish
@@ -630,10 +640,10 @@ mod tests {
                     let engine = Engine::new(context.with_label("engine"), cfg);
 
                     // Start engine
-                    let (voter, resolver) = registrations
+                    let (pending, recovered, resolver) = registrations
                         .remove(&validator)
                         .expect("validator should be registered");
-                    engine_handlers.push(engine.start(voter, resolver));
+                    engine_handlers.push(engine.start(pending, recovered, resolver));
                 }
 
                 // Store all finalizer handles
@@ -823,10 +833,10 @@ mod tests {
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
                 // Start engine
-                let (voter, resolver) = registrations
+                let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                engine_handlers.push(engine.start(voter, resolver));
+                engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
             // Wait for all engines to finish
@@ -943,10 +953,10 @@ mod tests {
             let engine = Engine::new(context.with_label("engine"), cfg);
 
             // Start engine
-            let (voter, resolver) = registrations
+            let (pending, recovered, resolver) = registrations
                 .remove(&validator)
                 .expect("validator should be registered");
-            engine_handlers.push(engine.start(voter, resolver));
+            engine_handlers.push(engine.start(pending, recovered, resolver));
 
             // Wait for new engine to finalize required
             let (mut latest, mut monitor) = supervisor.subscribe().await;
@@ -1087,10 +1097,10 @@ mod tests {
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
                 // Start engine
-                let (voter, resolver) = registrations
+                let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                engine_handlers.push(engine.start(voter, resolver));
+                engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
             // Wait for all engines to finish
@@ -1321,10 +1331,10 @@ mod tests {
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
                 // Start engine
-                let (voter, resolver) = registrations
+                let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                engine_handlers.push(engine.start(voter, resolver));
+                engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
             // Wait for all engines to finish
@@ -1500,10 +1510,10 @@ mod tests {
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
                 // Start engine
-                let (voter, resolver) = registrations
+                let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                engine_handlers.push(engine.start(voter, resolver));
+                engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
             // Wait for a few virtual minutes (shouldn't finalize anything)
@@ -1674,10 +1684,10 @@ mod tests {
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
                 // Start engine
-                let (voter, resolver) = registrations
+                let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                engine_handlers.push(engine.start(voter, resolver));
+                engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
             // Wait for all engines to finish
@@ -1876,10 +1886,10 @@ mod tests {
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
                 // Start engine
-                let (voter, resolver) = registrations
+                let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                engine_handlers.push(engine.start(voter, resolver));
+                engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
             // Wait for all engines to finish
@@ -2013,7 +2023,7 @@ mod tests {
                     participants,
                 };
                 let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
-                let (voter, resolver) = registrations
+                let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
                 if idx_scheme == 0 {
@@ -2027,7 +2037,7 @@ mod tests {
                             context.with_label("byzantine_engine"),
                             cfg,
                         );
-                    engine.start(voter);
+                    engine.start(pending);
                 } else {
                     supervisors.push(supervisor.clone());
                     let application_cfg = mocks::application::Config {
@@ -2067,7 +2077,7 @@ mod tests {
                         replay_buffer: 1024 * 1024,
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
-                    engine.start(voter, resolver);
+                    engine.start(pending, recovered, resolver);
                 }
             }
 
@@ -2205,7 +2215,7 @@ mod tests {
                     participants,
                 };
                 let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
-                let (voter, resolver) = registrations
+                let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
                 if idx_scheme == 0 {
@@ -2216,7 +2226,7 @@ mod tests {
 
                     let engine: mocks::invalid::Invalid<_, V, Sha256, _> =
                         mocks::invalid::Invalid::new(context.with_label("byzantine_engine"), cfg);
-                    engine.start(voter);
+                    engine.start(pending);
                 } else {
                     supervisors.push(supervisor.clone());
                     let application_cfg = mocks::application::Config {
@@ -2256,7 +2266,7 @@ mod tests {
                         replay_buffer: 1024 * 1024,
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
-                    engine.start(voter, resolver);
+                    engine.start(pending, recovered, resolver);
                 }
             }
 
@@ -2382,7 +2392,7 @@ mod tests {
                     participants,
                 };
                 let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
-                let (voter, resolver) = registrations
+                let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
                 if idx_scheme == 0 {
@@ -2396,7 +2406,7 @@ mod tests {
                             context.with_label("byzantine_engine"),
                             cfg,
                         );
-                    engine.start(voter);
+                    engine.start(pending);
                 } else {
                     supervisors.push(supervisor.clone());
                     let application_cfg = mocks::application::Config {
@@ -2436,7 +2446,7 @@ mod tests {
                         replay_buffer: 1024 * 1024,
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
-                    engine.start(voter, resolver);
+                    engine.start(pending, recovered, resolver);
                 }
             }
 
@@ -2558,7 +2568,7 @@ mod tests {
                     participants,
                 };
                 let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
-                let (voter, resolver) = registrations
+                let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
                 if idx_scheme == 0 {
@@ -2568,7 +2578,7 @@ mod tests {
                     };
                     let engine: mocks::nuller::Nuller<_, V, Sha256, _> =
                         mocks::nuller::Nuller::new(context.with_label("byzantine_engine"), cfg);
-                    engine.start(voter);
+                    engine.start(pending);
                 } else {
                     supervisors.push(supervisor.clone());
                     let application_cfg = mocks::application::Config {
@@ -2608,7 +2618,7 @@ mod tests {
                         replay_buffer: 1024 * 1024,
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
-                    engine.start(voter, resolver);
+                    engine.start(pending, recovered, resolver);
                 }
             }
 
@@ -2743,7 +2753,7 @@ mod tests {
                     participants,
                 };
                 let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
-                let (voter, resolver) = registrations
+                let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
                 if idx_scheme == 0 {
@@ -2754,7 +2764,7 @@ mod tests {
                     };
                     let engine: mocks::outdated::Outdated<_, V, Sha256, _> =
                         mocks::outdated::Outdated::new(context.with_label("byzantine_engine"), cfg);
-                    engine.start(voter);
+                    engine.start(pending);
                 } else {
                     supervisors.push(supervisor.clone());
                     let application_cfg = mocks::application::Config {
@@ -2794,7 +2804,7 @@ mod tests {
                         replay_buffer: 1024 * 1024,
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
-                    engine.start(voter, resolver);
+                    engine.start(pending, recovered, resolver);
                 }
             }
 
@@ -2943,10 +2953,10 @@ mod tests {
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
                 // Start engine
-                let (voter, resolver) = registrations
+                let (pending, recovered, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                engine_handlers.push(engine.start(voter, resolver));
+                engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
             // Wait for all engines to finish
