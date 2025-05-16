@@ -1217,8 +1217,8 @@ mod tests {
         let n = 5;
         let threshold = quorum(n);
         let required_containers = 50;
-        let activity_timeout = 20;
-        let skip_timeout = 20;
+        let activity_timeout = 10;
+        let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {

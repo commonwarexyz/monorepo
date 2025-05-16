@@ -13,6 +13,7 @@ pub struct Config<B: Blocker, R: Reporter, S: ThresholdSupervisor> {
     pub supervisor: S,
 
     pub activity_timeout: View,
+    pub skip_timeout: View,
     pub namespace: Vec<u8>,
     pub mailbox_size: usize,
 }

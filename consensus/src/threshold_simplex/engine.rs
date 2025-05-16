@@ -40,7 +40,7 @@ pub struct Engine<
     voter_mailbox: voter::Mailbox<V, D>,
 
     batcher: batcher::Actor<E, C, B, V, D, F, S>,
-    batcher_mailbox: batcher::Mailbox<V, D>,
+    batcher_mailbox: batcher::Mailbox<C::PublicKey, V, D>,
 
     resolver: resolver::Actor<E, C, B, V, D, S>,
     resolver_mailbox: resolver::Mailbox<V, D>,
@@ -88,7 +88,6 @@ impl<
                 notarization_timeout: cfg.notarization_timeout,
                 nullify_retry: cfg.nullify_retry,
                 activity_timeout: cfg.activity_timeout,
-                skip_timeout: cfg.skip_timeout,
                 replay_concurrency: cfg.replay_concurrency,
                 replay_buffer: cfg.replay_buffer,
             },
@@ -104,6 +103,7 @@ impl<
                 namespace: cfg.namespace.clone(),
                 mailbox_size: cfg.mailbox_size,
                 activity_timeout: cfg.activity_timeout,
+                skip_timeout: cfg.skip_timeout,
             },
         );
 

@@ -1,35 +1,44 @@
 use crate::threshold_simplex::types::{View, Voter};
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
-use futures::{channel::mpsc, SinkExt};
+use commonware_utils::Array;
+use futures::{
+    channel::{mpsc, oneshot},
+    SinkExt,
+};
 
-pub enum Message<V: Variant, D: Digest> {
+pub enum Message<P: Array, V: Variant, D: Digest> {
     Update {
         current: View,
-        leader: u32,
+        leader: P,
         finalized: View,
+
+        active: oneshot::Sender<bool>,
     },
     Verified(Voter<V, D>),
 }
 
 #[derive(Clone)]
-pub struct Mailbox<V: Variant, D: Digest> {
-    sender: mpsc::Sender<Message<V, D>>,
+pub struct Mailbox<P: Array, V: Variant, D: Digest> {
+    sender: mpsc::Sender<Message<P, V, D>>,
 }
 
-impl<V: Variant, D: Digest> Mailbox<V, D> {
-    pub fn new(sender: mpsc::Sender<Message<V, D>>) -> Self {
+impl<P: Array, V: Variant, D: Digest> Mailbox<P, V, D> {
+    pub fn new(sender: mpsc::Sender<Message<P, V, D>>) -> Self {
         Self { sender }
     }
 
-    pub async fn update(&mut self, current: View, leader: u32, finalized: View) {
+    pub async fn update(&mut self, current: View, leader: P, finalized: View) -> bool {
+        let (active, active_receiver) = oneshot::channel();
         self.sender
             .send(Message::Update {
                 current,
                 leader,
                 finalized,
+                active,
             })
             .await
             .expect("Failed to send update");
+        active_receiver.await.unwrap()
     }
 
     pub async fn verified(&mut self, message: Voter<V, D>) {

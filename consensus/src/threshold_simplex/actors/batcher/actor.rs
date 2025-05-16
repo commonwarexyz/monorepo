@@ -277,6 +277,14 @@ impl<
         let identity = self.supervisor.identity(self.view).unwrap();
         self.verifier.verify_finalizes(namespace, identity)
     }
+
+    fn is_active(&self, leader: &C::PublicKey) -> Option<bool> {
+        let leader_index = self.supervisor.is_participant(self.view, leader)?;
+        Some(
+            self.notarizes[leader_index as usize].is_some()
+                || self.finalizes[leader_index as usize].is_some(),
+        )
+    }
 }
 
 fn interesting(activity_timeout: View, last_finalized: View, current: View, view: View) -> bool {
@@ -309,9 +317,10 @@ pub struct Actor<
     supervisor: S,
 
     activity_timeout: View,
+    skip_timeout: View,
     namespace: Vec<u8>,
 
-    mailbox_receiver: mpsc::Receiver<Message<V, D>>,
+    mailbox_receiver: mpsc::Receiver<Message<C::PublicKey, V, D>>,
 
     added: Counter,
     verified: Counter,
@@ -335,7 +344,7 @@ impl<
         >,
     > Actor<E, C, B, V, D, R, S>
 {
-    pub fn new(context: E, cfg: Config<B, R, S>) -> (Self, Mailbox<V, D>) {
+    pub fn new(context: E, cfg: Config<B, R, S>) -> (Self, Mailbox<C::PublicKey, V, D>) {
         let added = Counter::default();
         let verified = Counter::default();
         let batch_size =
@@ -360,6 +369,7 @@ impl<
                 supervisor: cfg.supervisor,
 
                 activity_timeout: cfg.activity_timeout,
+                skip_timeout: cfg.skip_timeout,
                 namespace: cfg.namespace,
 
                 mailbox_receiver: receiver,
@@ -405,13 +415,44 @@ impl<
                             current: new_current,
                             leader,
                             finalized: new_finalized,
+                            active,
                         }) => {
                             current = new_current;
                             finalized = new_finalized;
+                            let leader_index = self.supervisor.is_participant(current, &leader).unwrap();
                             work.entry(current)
                                 .or_insert(Round::new(self.blocker.clone(), self.reporter.clone(), self.supervisor.clone(), current, initialized))
-                                .set_leader(leader);
+                                .set_leader(leader_index);
                             initialized = true;
+
+                            // If we haven't seen enough rounds yet, assume active
+                            if current < self.skip_timeout || (work.len() as u64) < self.skip_timeout {
+                                active.send(true).unwrap();
+                                continue;
+                            }
+                            let min_view = current.saturating_sub(self.skip_timeout);
+
+                            // Check if the leader is active within the views we know about
+                            let mut is_active = false;
+                            for (view, round) in work.iter().rev() {
+                                // If we haven't seen activity within the skip timeout, break
+                                if *view < min_view {
+                                    break;
+                                }
+
+                                // Don't penalize leader for not being a participant
+                                let Some(active) = round.is_active(&leader) else {
+                                    is_active = true;
+                                    break;
+                                };
+
+                                // If the leader is explicitly active, we can stop
+                                if active {
+                                    is_active = true;
+                                    break;
+                                }
+                            }
+                            active.send(is_active).unwrap();
                         }
                         Some(Message::Verified(message)) => {
                             // If the view isn't interesting, we can skip

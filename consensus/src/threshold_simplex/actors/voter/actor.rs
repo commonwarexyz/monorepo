@@ -428,7 +428,6 @@ pub struct Actor<
     notarization_timeout: Duration,
     nullify_retry: Duration,
     activity_timeout: View,
-    skip_timeout: View,
 
     mailbox_receiver: mpsc::Receiver<Message<V, D>>,
 
@@ -516,7 +515,6 @@ impl<
                 nullify_retry: cfg.nullify_retry,
 
                 activity_timeout: cfg.activity_timeout,
-                skip_timeout: cfg.skip_timeout,
 
                 mailbox_receiver,
 
@@ -698,7 +696,7 @@ impl<
 
     async fn timeout<Sp: Sender, Sr: Sender>(
         &mut self,
-        batcher: &mut batcher::Mailbox<V, D>,
+        batcher: &mut batcher::Mailbox<C::PublicKey, V, D>,
         pending_sender: &mut WrappedSender<Sp, Voter<V, D>>,
         recovered_sender: &mut WrappedSender<Sr, Voter<V, D>>,
     ) {
@@ -993,53 +991,6 @@ impl<
 
         // Update metrics
         self.current_view.set(view as i64);
-
-        // If we are backfilling, exit early
-        if self.journal.is_none() {
-            return;
-        }
-
-        // Check if we should skip this view
-        let (leader, _) = round.leader.as_ref().unwrap().clone();
-        if view < self.skip_timeout || leader == self.crypto.public_key() {
-            // Don't skip the view
-            return;
-        }
-        let mut next = view - 1;
-        let mut saw_leader = false;
-        while next > view - self.skip_timeout {
-            let round = match self.views.get(&next) {
-                Some(round) => round,
-                None => {
-                    return;
-                }
-            };
-
-            // TODO: this approach doesn't make sense...once you miss once, you'll never be able to propose again
-            //
-            // TODO: is it ever safe to skip now (as we no longer capture all participation here)?
-            if let Some((round_leader, _)) = &round.leader {
-                if round_leader == &leader {
-                    saw_leader = true;
-
-                    // If we voted notarize before the timeout, we consider the leader active
-                    if round.broadcast_notarize {
-                        return;
-                    }
-                }
-            }
-            next -= 1;
-        }
-
-        // If we couldn't observe whether the leader broadcasted or not, skip
-        if !saw_leader {
-            return;
-        }
-
-        // Reduce leader deadline to now
-        debug!(view, ?leader, "skipping leader timeout due to inactivity");
-        self.skipped_views.inc();
-        self.views.get_mut(&view).unwrap().leader_deadline = Some(self.context.current());
     }
 
     fn interesting(&self, view: View, allow_future: bool) -> bool {
@@ -1371,7 +1322,7 @@ impl<
 
     async fn notify<Sp: Sender, Sr: Sender>(
         &mut self,
-        batcher: &mut batcher::Mailbox<V, D>,
+        batcher: &mut batcher::Mailbox<C::PublicKey, V, D>,
         resolver: &mut resolver::Mailbox<V, D>,
         pending_sender: &mut WrappedSender<Sp, Voter<V, D>>,
         recovered_sender: &mut WrappedSender<Sr, Voter<V, D>>,
@@ -1576,7 +1527,7 @@ impl<
 
     pub fn start(
         mut self,
-        batcher: batcher::Mailbox<V, D>,
+        batcher: batcher::Mailbox<C::PublicKey, V, D>,
         resolver: resolver::Mailbox<V, D>,
         pending_sender: impl Sender<PublicKey = C::PublicKey>,
         recovered_sender: impl Sender<PublicKey = C::PublicKey>,
@@ -1593,7 +1544,7 @@ impl<
 
     async fn run(
         mut self,
-        mut batcher: batcher::Mailbox<V, D>,
+        mut batcher: batcher::Mailbox<C::PublicKey, V, D>,
         mut resolver: resolver::Mailbox<V, D>,
         pending_sender: impl Sender<PublicKey = C::PublicKey>,
         recovered_sender: impl Sender<PublicKey = C::PublicKey>,
@@ -1725,9 +1676,9 @@ impl<
 
         // Initialize verifier with leader
         let round = self.views.get_mut(&observed_view).expect("missing round");
-        let (_, leader_index) = round.leader.as_ref().unwrap();
+        let (leader, _) = round.leader.as_ref().unwrap();
         batcher
-            .update(observed_view, *leader_index, self.last_finalized)
+            .update(observed_view, leader.clone(), self.last_finalized)
             .await;
 
         // Create shutdown tracker
@@ -1962,10 +1913,17 @@ impl<
             // Update the verifier if we have moved to a new view
             if self.view > start {
                 let round = self.views.get_mut(&self.view).expect("missing round");
-                let (_, leader_index) = round.leader.as_ref().unwrap();
-                batcher
-                    .update(self.view, *leader_index, self.last_finalized)
+                let (leader, _) = round.leader.as_ref().unwrap();
+                let is_active = batcher
+                    .update(self.view, leader.clone(), self.last_finalized)
                     .await;
+
+                // If the leader is not active (and not us), we should reduce leader timeout to now
+                if !is_active && leader != &self.crypto.public_key() {
+                    debug!(view, ?leader, "skipping leader timeout due to inactivity");
+                    self.skipped_views.inc();
+                    round.leader_deadline = Some(self.context.current());
+                }
             }
         }
     }
