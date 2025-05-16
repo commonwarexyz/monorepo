@@ -67,21 +67,22 @@ struct Round<
     view: View,
     quorum: u32,
 
+    // Leader is set as soon as we know the seed for the view.
     leader: Option<(C::PublicKey, u32)>,
+
+    requested_proposal_build: bool,
+    requested_proposal_verify: bool,
+    verified_proposal: bool,
+
+    proposal: Option<Proposal<D>>,
 
     leader_deadline: Option<SystemTime>,
     advance_deadline: Option<SystemTime>,
     nullify_retry: Option<SystemTime>,
 
-    // Track one proposal per view (only matters prior to notarization)
-    proposal: Option<Proposal<D>>,
-    requested_proposal: bool,
-    verified_proposal: bool,
-
     // We only receive verified notarizes for the leader's proposal, so we don't
     // need to track multiple proposals here.
     notarizes: Vec<Notarize<V, D>>,
-    notarizes_selected: Option<Proposal<D>>,
     notarization: Option<Notarization<V, D>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
@@ -95,7 +96,6 @@ struct Round<
     // We only receive verified finalizes for the leader's proposal, so we don't
     // need to track multiple proposals here.
     finalizes: Vec<Finalize<V, D>>,
-    finalizes_selected: Option<Proposal<D>>,
     finalization: Option<Finalization<V, D>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
@@ -126,16 +126,17 @@ impl<
 
             leader: None,
 
+            requested_proposal_build: false,
+            requested_proposal_verify: false,
+            verified_proposal: false,
+
+            proposal: None,
+
             leader_deadline: None,
             advance_deadline: None,
             nullify_retry: None,
 
-            requested_proposal: false,
-            proposal: None,
-            verified_proposal: false,
-
             notarizes: Vec::with_capacity(participants),
-            notarizes_selected: None,
             notarization: None,
             broadcast_notarize: false,
             broadcast_notarization: false,
@@ -146,7 +147,6 @@ impl<
             broadcast_nullification: false,
 
             finalizes: Vec::with_capacity(participants),
-            finalizes_selected: None,
             finalization: None,
             broadcast_finalize: false,
             broadcast_finalization: false,
@@ -161,22 +161,18 @@ impl<
 
     fn add_verified_proposal(&mut self, proposal: Proposal<D>) {
         if self.proposal.is_none() {
-            debug!(?proposal, "setting unverified proposal in notarization");
+            debug!(?proposal, "setting verified proposal");
             self.proposal = Some(proposal);
+            self.verified_proposal = true;
         } else if let Some(previous) = &self.proposal {
-            if proposal != *previous {
-                warn!(
-                    ?proposal,
-                    ?previous,
-                    "proposal in notarization does not match stored proposal"
-                );
-            }
+            assert_eq!(proposal, *previous);
+            self.verified_proposal = true;
         }
     }
 
     async fn add_verified_notarize(&mut self, notarize: Notarize<V, D>) {
-        if self.notarizes_selected.is_none() {
-            self.notarizes_selected = Some(notarize.proposal.clone());
+        if self.proposal.is_none() {
+            self.proposal = Some(notarize.proposal.clone());
         }
         self.notarizes.push(notarize);
     }
@@ -187,8 +183,8 @@ impl<
     }
 
     async fn add_verified_finalize(&mut self, finalize: Finalize<V, D>) {
-        if self.finalizes_selected.is_none() {
-            self.finalizes_selected = Some(finalize.proposal.clone());
+        if self.proposal.is_none() {
+            self.proposal = Some(finalize.proposal.clone());
         }
         self.finalizes.push(finalize);
     }
@@ -261,7 +257,7 @@ impl<
         if self.notarizes.len() < threshold as usize {
             return None;
         }
-        let proposal = self.notarizes_selected.as_ref().unwrap().clone();
+        let proposal = self.proposal.as_ref().unwrap().clone();
         debug!(
             ?proposal,
             verified = self.verified_proposal,
@@ -335,7 +331,7 @@ impl<
         if self.finalizes.len() < threshold as usize {
             return None;
         }
-        let proposal = self.finalizes_selected.as_ref().unwrap().clone();
+        let proposal = self.proposal.as_ref().unwrap().clone();
 
         // Ensure we have a notarization
         let Some(notarization) = &self.notarization else {
@@ -382,7 +378,7 @@ impl<
         if self.notarizes.len() < at_least_one_honest as usize {
             return None;
         }
-        let proposal = self.notarizes_selected.as_ref().unwrap().clone();
+        let proposal = self.proposal.as_ref().unwrap().clone();
         Some(proposal.parent)
     }
 }
@@ -538,8 +534,6 @@ impl<
             return Some(&notarization.proposal.payload);
         }
         let proposal = round.proposal.as_ref()?;
-        let notarize_proposal = round.notarizes_selected.as_ref()?;
-        assert_eq!(proposal, notarize_proposal);
         let identity = self.supervisor.identity(view)?;
         let threshold = identity.required();
         if round.notarizes.len() >= threshold as usize {
@@ -567,8 +561,6 @@ impl<
             return Some(&finalization.proposal.payload);
         }
         let proposal = round.proposal.as_ref()?;
-        let finalize_proposal = round.finalizes_selected.as_ref()?;
-        assert_eq!(proposal, finalize_proposal);
         let identity = self.supervisor.identity(view)?;
         let threshold = identity.required();
         if round.finalizes.len() >= threshold as usize {
@@ -635,7 +627,7 @@ impl<
             }
 
             // Check if we have already requested a proposal
-            if round.requested_proposal {
+            if round.requested_proposal_build {
                 return None;
             }
 
@@ -646,7 +638,7 @@ impl<
 
             // Set that we requested a proposal even if we don't end up finding a parent
             // to prevent frequent scans.
-            round.requested_proposal = true;
+            round.requested_proposal_build = true;
         }
 
         // Find best parent
@@ -817,8 +809,9 @@ impl<
 
         // Store the proposal
         debug!(?proposal, "generated proposal");
-        round.proposal = Some(proposal);
         round.verified_proposal = true;
+        assert!(round.proposal.is_none());
+        round.proposal = Some(proposal);
         round.leader_deadline = None;
         true
     }
@@ -847,12 +840,12 @@ impl<
             if round.broadcast_nullify {
                 return None;
             }
-            if round.proposal.is_some() {
+            if round.requested_proposal_verify {
                 return None;
             }
 
             // Check if leader has signed a digest
-            let Some(ref proposal) = round.notarizes_selected else {
+            let Some(ref proposal) = round.proposal else {
                 return None;
             };
 
@@ -924,7 +917,7 @@ impl<
         let proposal = proposal.clone();
         let payload = proposal.payload;
         let round = self.views.get_mut(&context.view).unwrap();
-        round.proposal = Some(proposal);
+        round.requested_proposal_verify = true;
         Some((
             context.clone(),
             self.automaton.verify(context, payload).await,
