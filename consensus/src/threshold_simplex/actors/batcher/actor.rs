@@ -141,7 +141,8 @@ impl<
                         self.reporter
                             .report(Activity::Notarize(notarize.clone()))
                             .await;
-                        self.notarizes[index as usize] = Some(notarize);
+                        self.notarizes[index as usize] = Some(notarize.clone());
+                        self.verifier.add(Voter::Notarize(notarize), false);
                     }
                 }
             }
@@ -176,7 +177,8 @@ impl<
                         self.reporter
                             .report(Activity::Nullify(nullify.clone()))
                             .await;
-                        self.nullifies[index as usize] = Some(nullify);
+                        self.nullifies[index as usize] = Some(nullify.clone());
+                        self.verifier.add(Voter::Nullify(nullify), false);
                     }
                 }
             }
@@ -215,7 +217,8 @@ impl<
                         self.reporter
                             .report(Activity::Finalize(finalize.clone()))
                             .await;
-                        self.finalizes[index as usize] = Some(finalize);
+                        self.finalizes[index as usize] = Some(finalize.clone());
+                        self.verifier.add(Voter::Finalize(finalize), false);
                     }
                 }
             }
@@ -225,7 +228,9 @@ impl<
         }
     }
 
-    fn add_verified(&mut self, message: Voter<V, D>) {}
+    fn add_verified(&mut self, message: Voter<V, D>) {
+        self.verifier.add(message, true);
+    }
 }
 
 pub struct Actor<
