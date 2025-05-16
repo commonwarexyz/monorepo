@@ -47,19 +47,6 @@ use tracing::{debug, trace, warn};
 
 const GENESIS_VIEW: View = 0;
 
-#[derive(Clone)]
-enum Status<O> {
-    None,
-    Pending(O),
-    Verified(O),
-}
-
-enum Action {
-    Skip,
-    Block,
-    Process,
-}
-
 struct Round<
     C: Scheme,
     V: Variant,
@@ -93,24 +80,21 @@ struct Round<
 
     // We only receive verified notarizes for the leader's proposal, so we don't
     // need to track multiple proposals here.
-    notarizes: Vec<Status<Notarize<V, D>>>,
-    notarizes_verified: usize,
+    notarizes: Vec<Notarize<V, D>>,
     notarizes_selected: Option<Proposal<D>>,
     notarization: Option<Notarization<V, D>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
 
     // Track nullifies (ensuring any participant only has one recorded nullify)
-    nullifies: Vec<Status<Nullify<V>>>,
-    nullifies_verified: usize,
+    nullifies: Vec<Nullify<V>>,
     nullification: Option<Nullification<V>>,
     broadcast_nullify: bool,
     broadcast_nullification: bool,
 
     // We only receive verified finalizes for the leader's proposal, so we don't
     // need to track multiple proposals here.
-    finalizes: Vec<Status<Finalize<V, D>>>,
-    finalizes_verified: usize,
+    finalizes: Vec<Finalize<V, D>>,
     finalizes_selected: Option<Proposal<D>>,
     finalization: Option<Finalization<V, D>>,
     broadcast_finalize: bool,
@@ -151,21 +135,18 @@ impl<
             proposal: None,
             verified_proposal: false,
 
-            notarizes: vec![Status::None; participants],
-            notarizes_verified: 0,
+            notarizes: Vec::with_capacity(participants),
             notarizes_selected: None,
             notarization: None,
             broadcast_notarize: false,
             broadcast_notarization: false,
 
-            nullifies: vec![Status::None; participants],
-            nullifies_verified: 0,
+            nullifies: Vec::with_capacity(participants),
             nullification: None,
             broadcast_nullify: false,
             broadcast_nullification: false,
 
-            finalizes: vec![Status::None; participants],
-            finalizes_verified: 0,
+            finalizes: Vec::with_capacity(participants),
             finalizes_selected: None,
             finalization: None,
             broadcast_finalize: false,
@@ -193,148 +174,22 @@ impl<
         }
     }
 
-    async fn add_reserved_notarize(&mut self, notarize: &Notarize<V, D>) -> Action {
-        // Check if already notarized
-        let public_key_index = notarize.signer();
-        match self.notarizes[public_key_index as usize] {
-            Status::None => {
-                self.reporter
-                    .report(Activity::Notarize(notarize.clone()))
-                    .await;
-                self.notarizes[public_key_index as usize] = Status::Pending(notarize.clone());
-                Action::Process
-            }
-            Status::Pending(ref previous) | Status::Verified(ref previous) => {
-                if previous != notarize {
-                    // Create fault
-                    let activity = ConflictingNotarize::new(previous.clone(), notarize.clone());
-                    self.reporter
-                        .report(Activity::ConflictingNotarize(activity))
-                        .await;
-                    warn!(
-                        view = self.view,
-                        signer = public_key_index,
-                        "recorded fault"
-                    );
-                    Action::Block
-                } else {
-                    Action::Skip
-                }
-            }
-        }
-    }
-
     async fn add_verified_notarize(&mut self, notarize: Notarize<V, D>) {
-        self.notarizes_verified += 1;
         if self.notarizes_selected.is_none() {
             self.notarizes_selected = Some(notarize.proposal.clone());
         }
-        let public_key_index = notarize.signer();
-        self.notarizes[public_key_index as usize] = Status::Verified(notarize.clone());
-    }
-
-    async fn add_reserved_nullify(&mut self, nullify: &Nullify<V>) -> Action {
-        // Check if finalized
-        let public_key_index = nullify.signer();
-        match self.finalizes[public_key_index as usize] {
-            Status::None => {}
-            Status::Pending(ref previous) | Status::Verified(ref previous) => {
-                // Create fault
-                let activity = NullifyFinalize::new(nullify.clone(), previous.clone());
-                self.reporter
-                    .report(Activity::NullifyFinalize(activity))
-                    .await;
-                warn!(
-                    view = self.view,
-                    signer = public_key_index,
-                    "recorded fault"
-                );
-                return Action::Block;
-            }
-        }
-
-        // Check if already nullified
-        match self.nullifies[public_key_index as usize] {
-            Status::None => {
-                self.reporter
-                    .report(Activity::Nullify(nullify.clone()))
-                    .await;
-                self.nullifies[public_key_index as usize] = Status::Pending(nullify.clone());
-                Action::Process
-            }
-            Status::Pending(ref previous) | Status::Verified(ref previous) => {
-                if previous != nullify {
-                    Action::Block
-                } else {
-                    Action::Skip
-                }
-            }
-        }
+        self.notarizes.push(notarize);
     }
 
     async fn add_verified_nullify(&mut self, nullify: Nullify<V>) {
-        let public_key_index = nullify.signer();
-        self.nullifies_verified += 1;
-        self.nullifies[public_key_index as usize] = Status::Verified(nullify);
-    }
-
-    async fn add_reserved_finalize(&mut self, finalize: &Finalize<V, D>) -> Action {
-        // Check if already nullified
-        let public_key_index = finalize.signer();
-        match self.nullifies[public_key_index as usize] {
-            Status::None => {}
-            Status::Pending(ref previous) | Status::Verified(ref previous) => {
-                // Create fault
-                let activity = NullifyFinalize::new(previous.clone(), finalize.clone());
-                self.reporter
-                    .report(Activity::NullifyFinalize(activity))
-                    .await;
-                warn!(
-                    view = self.view,
-                    signer = public_key_index,
-                    "recorded fault"
-                );
-                return Action::Block;
-            }
-        }
-
-        // Check if already finalized
-        let public_key_index = finalize.signer();
-        match self.finalizes[public_key_index as usize] {
-            Status::None => {
-                self.reporter
-                    .report(Activity::Finalize(finalize.clone()))
-                    .await;
-                self.finalizes[public_key_index as usize] = Status::Pending(finalize.clone());
-                Action::Process
-            }
-            Status::Pending(ref previous) | Status::Verified(ref previous) => {
-                if previous != finalize {
-                    // Create fault
-                    let activity = ConflictingFinalize::new(previous.clone(), finalize.clone());
-                    self.reporter
-                        .report(Activity::ConflictingFinalize(activity))
-                        .await;
-                    warn!(
-                        view = self.view,
-                        signer = public_key_index,
-                        "recorded fault"
-                    );
-                    Action::Block
-                } else {
-                    Action::Skip
-                }
-            }
-        }
+        self.nullifies.push(nullify);
     }
 
     async fn add_verified_finalize(&mut self, finalize: Finalize<V, D>) {
-        let public_key_index = finalize.signer();
-        self.finalizes_verified += 1;
         if self.finalizes_selected.is_none() {
             self.finalizes_selected = Some(finalize.proposal.clone());
         }
-        self.finalizes[public_key_index as usize] = Status::Verified(finalize);
+        self.finalizes.push(finalize);
     }
 
     fn add_verified_notarization(&mut self, notarization: Notarization<V, D>) -> bool {
@@ -402,7 +257,7 @@ impl<
         }
 
         // Attempt to construct notarization
-        if self.notarizes_verified < threshold as usize {
+        if self.notarizes.len() < threshold as usize {
             return None;
         }
         let proposal = self.notarizes_selected.as_ref().unwrap().clone();
@@ -416,12 +271,7 @@ impl<
         let (proposals, seeds): (Vec<_>, Vec<_>) = self
             .notarizes
             .iter()
-            .filter_map(|status| {
-                let Status::Verified(ref notarize) = status else {
-                    return None;
-                };
-                Some((&notarize.proposal_signature, &notarize.seed_signature))
-            })
+            .map(|notarize| (&notarize.proposal_signature, &notarize.seed_signature))
             .unzip();
         let (proposal_signature, seed_signature) =
             threshold_signature_recover_pair::<V, _>(threshold, proposals, seeds)
@@ -446,7 +296,7 @@ impl<
         }
 
         // Attempt to construct nullification
-        if self.nullifies_verified < threshold as usize {
+        if self.nullifies.len() < threshold as usize {
             return None;
         }
         debug!(view = self.view, "broadcasting nullification");
@@ -455,12 +305,7 @@ impl<
         let (views, seeds): (Vec<_>, Vec<_>) = self
             .nullifies
             .iter()
-            .filter_map(|status| {
-                let Status::Verified(ref nullify) = status else {
-                    return None;
-                };
-                Some((&nullify.view_signature, &nullify.seed_signature))
-            })
+            .map(|nullify| (&nullify.view_signature, &nullify.seed_signature))
             .unzip();
         let (view_signature, seed_signature) =
             threshold_signature_recover_pair::<V, _>(threshold, views, seeds)
@@ -486,7 +331,7 @@ impl<
         }
 
         // Attempt to construct finalization
-        if self.finalizes_verified < threshold as usize {
+        if self.finalizes.len() < threshold as usize {
             return None;
         }
         let proposal = self.finalizes_selected.as_ref().unwrap().clone();
@@ -515,12 +360,10 @@ impl<
         );
 
         // Only select verified finalizes
-        let proposals = self.finalizes.iter().filter_map(|status| {
-            let Status::Verified(ref finalize) = status else {
-                return None;
-            };
-            Some(&finalize.proposal_signature)
-        });
+        let proposals = self
+            .finalizes
+            .iter()
+            .map(|finalize| &finalize.proposal_signature);
 
         // Recover threshold signature
         let proposal_signature = threshold_signature_recover::<V, _>(threshold, proposals)
@@ -535,7 +378,7 @@ impl<
     /// Returns whether at least one honest participant has notarized a proposal.
     pub fn at_least_one_honest(&self) -> Option<View> {
         let at_least_one_honest = (self.quorum - 1) / 2 + 1;
-        if self.notarizes_verified < at_least_one_honest as usize {
+        if self.notarizes.len() < at_least_one_honest as usize {
             return None;
         }
         let proposal = self.notarizes_selected.as_ref().unwrap().clone();
@@ -716,7 +559,7 @@ impl<
         assert_eq!(proposal, notarize_proposal);
         let identity = self.supervisor.identity(view)?;
         let threshold = identity.required();
-        if round.notarizes_verified >= threshold as usize {
+        if round.notarizes.len() >= threshold as usize {
             return Some(&proposal.payload);
         }
         None
