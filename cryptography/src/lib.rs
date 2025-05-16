@@ -45,7 +45,7 @@ pub trait Verifier: Specification + Clone + Send + Sync + 'static {
 /// Implementation that can sign a message with a `PrivateKey`.
 pub trait Signer: Specification + Clone + Send + Sync + 'static {
     /// Private key used for signing.
-    type PrivateKey: Array;
+    type PrivateKey;
 
     /// Returns a new instance of the scheme.
     fn new<R: Rng + CryptoRng>(rng: &mut R) -> Self;
