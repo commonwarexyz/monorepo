@@ -27,6 +27,10 @@ impl Network {
     /// This function creates two io_uring instances, one for sending and one for receiving.
     /// This function spawns two threads to run the io_uring event loops.
     /// The threads run until the work submission channel is closed or an error occurs.
+    /// The caller should take special care to ensure the io_uring `size` given in `cfg` is
+    /// large enough, given the number of connections that will be maintained.
+    /// Each ongoing send/recv to/from each connection will consume a slot in the io_uring.
+    /// The io_uring `size` should be a multiple of the number of expected connections.
     pub(crate) fn start(cfg: iouring::Config) -> Result<Self, crate::Error> {
         // Create an io_uring instance to handle send operations.
         let (send_submitter, rx) = mpsc::channel(cfg.size as usize);
