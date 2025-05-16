@@ -166,6 +166,7 @@ impl crate::Blob for Blob {
 
             // Create an operation to do the read
             let op = opcode::Read::new(fd, remaining.as_mut_ptr(), remaining.len() as _)
+                .flags(libc::MSG_WAITALL as _)
                 .offset(offset as _)
                 .build();
 
@@ -207,6 +208,7 @@ impl crate::Blob for Blob {
 
             // Create an operation to do the write
             let op = opcode::Write::new(fd, remaining.as_ptr(), remaining.len() as _)
+                .flags(libc::MSG_WAITALL as _)
                 .offset(offset as _)
                 .build();
 
