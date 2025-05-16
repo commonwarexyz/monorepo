@@ -396,24 +396,30 @@ impl<
                                 // If this is our first item, we may have some previous work completed
                                 // from before restart. We should just verify everything (may just be
                                 // nullifies) as soon as we can.
-                                if initialized {
-                                    let quorum = Some(self.supervisor.identity(current).unwrap().required());
-                                    work.entry(current)
-                                        .or_insert(PartialVerifier::new(quorum))
-                                        .set_leader(leader);
-                                }
+                                work.entry(current)
+                                    .or_insert(Round::new(self.blocker, self.reporter, self.supervisor, current, initialized))
+                                    .set_leader(leader);
+                                initialized = true;
                             }
                             Some(Message::Verified(message)) => {
+                                // If the view isn't interesting, we can skip
+                                let view = message.view();
+                                if !interesting(self.activity_timeout, finalized, view) {
+                                    continue;
+                                }
+
+                                // Get the interesting round
+                                let round = work.entry(view).or_insert(
+                                    Round::new(self.blocker, self.reporter, self.supervisor, view, true)
+                                );
+
+                                // Add the message to the verifier
                                 self.added.inc();
-
-                                // Only add messages if the view matters to us
-                                if message.view() >= finalized {
-
+                                round.add_verified(message);
                             }
-                        },
-                        None => {
-                            break;
-                        }
+                            None => {
+                                break;
+                            }
                     }
                 },
                 message = receiver.recv() => {
@@ -428,6 +434,11 @@ impl<
                         continue;
                     };
 
+                    // If we aren't initialized yet, skip
+                    if !initialized {
+                        continue;
+                    }
+
                     // If the view isn't interesting, we can skip
                     let view = message.view();
                     if !interesting(self.activity_timeout, finalized, view) {
@@ -435,9 +446,9 @@ impl<
                     }
 
                     // Get the interesting round
-                    let round = work.entry(view).or_insert_with(|| {
+                    let round = work.entry(view).or_insert(
                         Round::new(self.blocker, self.reporter, self.supervisor, view, true)
-                    });
+                    );
 
                     // Add the message to the verifier
                     if round.add(sender, message).await {
