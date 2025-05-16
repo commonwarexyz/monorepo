@@ -64,6 +64,15 @@ fn main() {
     // Start runtime
     executor.start(|context| async move {
         // Configure telemetry
+        let tracing = if config.profiling {
+            Some(tokio::tracing::Config {
+                endpoint: format!("http://{}:4318/v1/traces", hosts.monitoring),
+                name: public_key.to_string(),
+                rate: 1.0,
+            })
+        } else {
+            None
+        };
         tokio::telemetry::init(
             context.with_label("telemetry"),
             tokio::telemetry::Logging {
@@ -74,11 +83,7 @@ fn main() {
                 IpAddr::V4(Ipv4Addr::UNSPECIFIED),
                 METRICS_PORT,
             )),
-            Some(tokio::tracing::Config {
-                endpoint: format!("http://{}:4318/v1/traces", hosts.monitoring),
-                name: public_key.to_string(),
-                rate: 1.0,
-            }),
+            tracing,
         );
 
         // Log configuration
