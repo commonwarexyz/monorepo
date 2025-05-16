@@ -118,11 +118,8 @@ pub(crate) async fn run(
 /// Returns whether some result should be retried due to a transient error.
 ///
 /// Errors considered transient:
-/// * EAGAIN: Operation would block.
+/// * EAGAIN: There is no data ready. Try again later.
 /// * EWOULDBLOCK: Operation would block.
-/// * EINTR: Operation was interrupted by a signal.
 pub fn should_retry(return_value: i32) -> bool {
-    return_value == -libc::EAGAIN
-        || return_value == -libc::EWOULDBLOCK
-        || return_value == -libc::EINTR
+    return_value == -libc::EAGAIN || return_value == -libc::EWOULDBLOCK
 }

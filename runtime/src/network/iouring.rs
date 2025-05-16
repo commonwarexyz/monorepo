@@ -57,9 +57,6 @@ impl crate::Network for Network {
         let stream = stream
             .into_std()
             .map_err(|_| crate::Error::ConnectionFailed)?;
-        stream
-            .set_nonblocking(false)
-            .map_err(|_| crate::Error::ConnectionFailed)?;
 
         let fd = Arc::new(OwnedFd::from(stream));
 
@@ -95,9 +92,6 @@ impl crate::Listener for Listener {
 
         let stream = stream
             .into_std()
-            .map_err(|_| crate::Error::ConnectionFailed)?;
-        stream
-            .set_nonblocking(false)
             .map_err(|_| crate::Error::ConnectionFailed)?;
 
         let fd = Arc::new(OwnedFd::from(stream));
