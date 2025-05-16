@@ -4,7 +4,7 @@ use crate::{
         actors::voter,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalize, Notarize,
-            Nullify, NullifyFinalize, PartialVerifier, View, Viewable, Viewable, Voter,
+            Nullify, NullifyFinalize, PartialVerifier, View, Viewable, Voter,
         },
     },
     Reporter, ThresholdSupervisor,
@@ -371,7 +371,7 @@ impl<
         receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) {
         // Wrap channel
-        let mut receiver = WrappedReceiver::new((), receiver);
+        let mut receiver: WrappedReceiver<_, Voter<V, D>> = WrappedReceiver::new((), receiver);
 
         // Initialize view data structures
         let mut current: View = 0;
