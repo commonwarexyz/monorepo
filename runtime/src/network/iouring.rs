@@ -1,4 +1,4 @@
-use crate::iouring;
+use crate::iouring::{self, should_retry};
 use commonware_utils::{StableBuf, StableBufMut};
 use futures::{
     channel::{mpsc, oneshot},
@@ -57,6 +57,9 @@ impl crate::Network for Network {
         let stream = stream
             .into_std()
             .map_err(|_| crate::Error::ConnectionFailed)?;
+        stream
+            .set_nonblocking(true)
+            .map_err(|_| crate::Error::ConnectionFailed)?;
 
         let fd = Arc::new(OwnedFd::from(stream));
 
@@ -92,6 +95,9 @@ impl crate::Listener for Listener {
 
         let stream = stream
             .into_std()
+            .map_err(|_| crate::Error::ConnectionFailed)?;
+        stream
+            .set_nonblocking(true)
             .map_err(|_| crate::Error::ConnectionFailed)?;
 
         let fd = Arc::new(OwnedFd::from(stream));
@@ -150,10 +156,17 @@ impl crate::Sink for Sink {
 
             // Wait for the operation to complete
             let result = rx.await.map_err(|_| crate::Error::SendFailed)?;
+            if should_retry(result) {
+                continue;
+            }
 
-            // Negative result indicates an error
-            let result: usize = result.try_into().map_err(|_| crate::Error::SendFailed)?;
-            bytes_sent += result;
+            // Non-positive result indicates an error or EOF.
+            if result <= 0 {
+                return Err(crate::Error::SendFailed);
+            }
+
+            // Mark bytes as sent.
+            bytes_sent += result as usize;
         }
         Ok(())
     }
@@ -196,8 +209,12 @@ impl crate::Stream for Stream {
 
             // Wait for the operation to complete
             let result = rx.await.map_err(|_| crate::Error::RecvFailed)?;
+            if should_retry(result) {
+                continue;
+            }
+
+            // Non-positive result indicates an error or EOF.
             if result <= 0 {
-                // Non-positive result indicates an error or EOF.
                 return Err(crate::Error::RecvFailed);
             }
             bytes_received += result as usize;

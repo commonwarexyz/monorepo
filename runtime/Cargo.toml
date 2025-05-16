@@ -28,6 +28,7 @@ tracing-opentelemetry = { workspace = true }
 rayon = { workspace = true }
 async-lock = { workspace = true }
 io-uring = { workspace = true, optional = true }
+libc = { workspace = true }
 
 [features]
 default = []
