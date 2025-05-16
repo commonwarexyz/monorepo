@@ -16,19 +16,30 @@ use tokio::net::{TcpListener, TcpStream};
 #[derive(Clone, Debug)]
 /// [crate::Network] implementation that uses io_uring to do async I/O.
 pub struct Network {
-    submitter: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
+    /// Sends send operations to the send io_uring event loop.
+    send_submitter: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
+    /// Sends recv operations to the recv io_uring event loop.
+    recv_submitter: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
 }
 
 impl Network {
     /// Returns a new [Network] instance.
-    /// This function starts a new thread to run the io_uring event loop.
-    /// The thread will run until the work submission channel is closed or
-    /// the event loop errors.
+    /// This function creates two io_uring instances, one for sending and one for receiving.
+    /// This function spawns two threads to run the io_uring event loops.
+    /// The threads run until the work submission channel is closed or an error occurs.
     pub(crate) fn start(cfg: iouring::Config) -> Result<Self, crate::Error> {
-        let (tx, rx) = mpsc::channel(cfg.size as usize);
+        // Create an io_uring instance to handle send operations.
+        let (send_submitter, rx) = mpsc::channel(cfg.size as usize);
+        let cfg_clone = cfg.clone();
+        std::thread::spawn(move || block_on(iouring::run(cfg_clone, rx)));
+
+        // Create an io_uring instance to handle receive operations.
+        let (recv_submitter, rx) = mpsc::channel(cfg.size as usize);
         std::thread::spawn(|| block_on(iouring::run(cfg, rx)));
+
         Ok(Self {
-            submitter: tx.clone(),
+            send_submitter: send_submitter.clone(),
+            recv_submitter: recv_submitter.clone(),
         })
     }
 }
@@ -42,7 +53,8 @@ impl crate::Network for Network {
             .map_err(|_| crate::Error::BindFailed)?;
         Ok(Listener {
             inner: listener,
-            submitter: self.submitter.clone(),
+            send_submitter: self.send_submitter.clone(),
+            recv_submitter: self.recv_submitter.clone(),
         })
     }
 
@@ -52,22 +64,19 @@ impl crate::Network for Network {
     ) -> Result<(crate::SinkOf<Self>, crate::StreamOf<Self>), crate::Error> {
         let stream = TcpStream::connect(socket)
             .await
-            .map_err(|_| crate::Error::ConnectionFailed)?;
-
-        let stream = stream
+            .map_err(|_| crate::Error::ConnectionFailed)?
             .into_std()
             .map_err(|_| crate::Error::ConnectionFailed)?;
 
         let fd = Arc::new(OwnedFd::from(stream));
-
         Ok((
             Sink {
                 fd: fd.clone(),
-                submitter: self.submitter.clone(),
+                submitter: self.send_submitter.clone(),
             },
             Stream {
                 fd,
-                submitter: self.submitter.clone(),
+                submitter: self.recv_submitter.clone(),
             },
         ))
     }
@@ -76,7 +85,8 @@ impl crate::Network for Network {
 /// Implementation of [crate::Listener] for an io-uring [Network].
 pub struct Listener {
     inner: TcpListener,
-    submitter: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
+    send_submitter: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
+    recv_submitter: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
 }
 
 impl crate::Listener for Listener {
@@ -100,11 +110,11 @@ impl crate::Listener for Listener {
             remote_addr,
             Sink {
                 fd: fd.clone(),
-                submitter: self.submitter.clone(),
+                submitter: self.send_submitter.clone(),
             },
             Stream {
                 fd,
-                submitter: self.submitter.clone(),
+                submitter: self.recv_submitter.clone(),
             },
         ))
     }
