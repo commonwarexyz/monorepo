@@ -386,43 +386,43 @@ impl<
         loop {
             // Handle next message
             select! {
-                    message = self.mailbox_receiver.next() => {
-                        match message {
-                            Some(Message::Update {
-                                current: new_current,
-                                leader,
-                                finalized: new_finalized,
-                            }) => {
-                                current = new_current;
-                                finalized = new_finalized;
+                message = self.mailbox_receiver.next() => {
+                    match message {
+                        Some(Message::Update {
+                            current: new_current,
+                            leader,
+                            finalized: new_finalized,
+                        }) => {
+                            current = new_current;
+                            finalized = new_finalized;
 
-                                // If this is our first item, we may have some previous work completed
-                                // from before restart. We should just verify everything (may just be
-                                // nullifies) as soon as we can.
-                                work.entry(current)
-                                    .or_insert(Round::new(self.blocker.clone(), self.reporter.clone(), self.supervisor.clone(), current, initialized))
-                                    .set_leader(leader);
-                                initialized = true;
+                            // If this is our first item, we may have some previous work completed
+                            // from before restart. We should just verify everything (may just be
+                            // nullifies) as soon as we can.
+                            work.entry(current)
+                                .or_insert(Round::new(self.blocker.clone(), self.reporter.clone(), self.supervisor.clone(), current, initialized))
+                                .set_leader(leader);
+                            initialized = true;
+                        }
+                        Some(Message::Verified(message)) => {
+                            // If the view isn't interesting, we can skip
+                            let view = message.view();
+                            if !interesting(self.activity_timeout, finalized, view) {
+                                continue;
                             }
-                            Some(Message::Verified(message)) => {
-                                // If the view isn't interesting, we can skip
-                                let view = message.view();
-                                if !interesting(self.activity_timeout, finalized, view) {
-                                    continue;
-                                }
 
-                                // Get the interesting round
-                                let round = work.entry(view).or_insert(
-                                    Round::new(self.blocker.clone(), self.reporter.clone(), self.supervisor.clone(), view, true)
-                                );
+                            // Get the interesting round
+                            let round = work.entry(view).or_insert(
+                                Round::new(self.blocker.clone(), self.reporter.clone(), self.supervisor.clone(), view, true)
+                            );
 
-                                // Add the message to the verifier
-                                self.added.inc();
-                                round.add_verified(message);
-                            }
-                            None => {
-                                break;
-                            }
+                            // Add the message to the verifier
+                            self.added.inc();
+                            round.add_verified(message);
+                        }
+                        None => {
+                            break;
+                        }
                     }
                 },
                 message = receiver.recv() => {
