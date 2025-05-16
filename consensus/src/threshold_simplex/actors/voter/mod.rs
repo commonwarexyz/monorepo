@@ -65,9 +65,9 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_p2p::{
         simulated::{Config as NConfig, Link, Network},
-        Receiver, Recipients, Sender,
+        Recipients, Sender,
     };
-    use commonware_runtime::{deterministic, Metrics, Runner, Spawner};
+    use commonware_runtime::{deterministic, Metrics, Runner};
     use commonware_utils::quorum;
     use futures::{channel::mpsc, StreamExt};
     use std::time::Duration;
@@ -151,16 +151,20 @@ mod tests {
             let (backfiller_sender, mut backfiller_receiver) = mpsc::channel(1);
             let backfiller = resolver::Mailbox::new(backfiller_sender);
 
-            // Create a dummy verifier mailbox
-            let (verifier_sender, mut _verifier_receiver) = mpsc::channel(1024);
-            let verifier = verifier::Mailbox::new(verifier_sender);
+            // Create a dummy batcher mailbox
+            let (batcher_sender, mut _batcher_receiver) = mpsc::channel(1024);
+            let batcher = batcher::Mailbox::new(batcher_sender);
 
             // Create a dummy network mailbox
             let peer = schemes[1].public_key();
-            let (voter_sender, voter_receiver) =
+            let (pending_sender, _pending_receiver) =
                 oracle.register(validator.clone(), 0).await.unwrap();
-            let (mut peer_sender, mut peer_receiver) =
+            let (recovered_sender, recovered_receiver) =
+                oracle.register(validator.clone(), 1).await.unwrap();
+            let (mut _peer_pending_sender, mut _peer_pending_receiver) =
                 oracle.register(peer.clone(), 0).await.unwrap();
+            let (mut peer_recovered_sender, mut _peer_recovered_receiver) =
+                oracle.register(peer.clone(), 1).await.unwrap();
             oracle
                 .add_link(
                     validator.clone(),
@@ -186,15 +190,14 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Drain peer receiver
-            context.with_label("peer_receiver").spawn(|_| async move {
-                loop {
-                    peer_receiver.recv().await.unwrap();
-                }
-            });
-
             // Run the actor
-            actor.start(verifier, backfiller, voter_sender, voter_receiver);
+            actor.start(
+                batcher,
+                backfiller,
+                pending_sender,
+                recovered_sender,
+                recovered_receiver,
+            );
 
             // Send finalization over network (view 100)
             let payload = hash(b"test");
@@ -218,7 +221,7 @@ mod tests {
             let finalization =
                 Finalization::<V, _>::new(proposal, proposal_signature, seed_signature);
             let msg = Voter::Finalization(finalization).encode().into();
-            peer_sender
+            peer_recovered_sender
                 .send(Recipients::All, msg, true)
                 .await
                 .expect("failed to send finalization");
@@ -281,7 +284,7 @@ mod tests {
             let finalization =
                 Finalization::<V, _>::new(proposal, proposal_signature, seed_signature);
             let msg = Voter::Finalization(finalization).encode().into();
-            peer_sender
+            peer_recovered_sender
                 .send(Recipients::All, msg, true)
                 .await
                 .expect("failed to send finalization");
