@@ -359,63 +359,48 @@ impl<
         let mut initialized = false;
 
         loop {
-            select! {}
-        }
+            // Handle next message
+            select! {
+                    message = self.mailbox_receiver.next() => {
+                        match message {
+                            Some(Message::Update {
+                                current: new_current,
+                                leader,
+                                finalized: new_finalized,
+                            }) => {
+                                current = new_current;
+                                finalized = new_finalized;
 
-        loop {
-            // Read at least one message (if there doesn't already exist a backlog)
-            if !recv_batch(&mut self.mailbox_receiver, blocking, |message| {
-                match message {
-                    Message::Update {
-                        current: new_current,
-                        leader,
-                        finalized: new_finalized,
-                    } => {
-                        current = new_current;
-                        finalized = new_finalized;
+                                // If this is our first item, we may have some previous work completed
+                                // from before restart. We should just verify everything (may just be
+                                // nullifies) as soon as we can.
+                                if initialized {
+                                    let quorum = Some(self.supervisor.identity(current).unwrap().required());
+                                    work.entry(current)
+                                        .or_insert(PartialVerifier::new(quorum))
+                                        .set_leader(leader);
+                                }
+                            }
+                            Some(Message::Verified(message)) => {
+                                self.added.inc();
 
-                        // If this is our first item, we may have some previous work completed
-                        // from before restart. We should just verify everything (may just be
-                        // nullifies) as soon as we can.
-                        let quorum = if initialized {
-                            Some(self.supervisor.identity(current).unwrap().required())
-                        } else {
-                            initialized = true;
-                            None
-                        };
-                        work.entry(current)
-                            .or_insert(PartialVerifier::new(quorum))
-                            .set_leader(leader);
-                    }
-                    Message::Untrusted(message) => {
-                        self.added.inc();
+                                // Only add messages if the view matters to us
+                                if message.view() >= finalized {
 
-                        // Only add messages if the view matters to us
-                        if message.view() >= finalized {
-                            assert!(initialized);
-                            let view = message.view();
-                            let quorum = Some(self.supervisor.identity(view).unwrap().required());
-                            work.entry(view)
-                                .or_insert(PartialVerifier::new(quorum))
-                                .add(message, false);
+                            }
+                        },
+                        None => {
+                            break;
                         }
                     }
-                    Message::Trusted(message) => {
-                        // Only add messages if the view matters to us
-                        if message.view() >= finalized {
-                            assert!(initialized);
-                            let view = message.view();
-                            let quorum = Some(self.supervisor.identity(view).unwrap().required());
-                            work.entry(message.view())
-                                .or_insert(PartialVerifier::new(quorum))
-                                .add(message, true);
+                },
+                message = receiver.next() => {
+                    match message {
+                        Some(message) => {
+
                         }
                     }
-                }
-            })
-            .await
-            {
-                return;
+                },
             }
 
             // Look for a ready verifier (prioritizing the current view)
@@ -435,7 +420,9 @@ impl<
                 let potential = work
                     .iter_mut()
                     .rev()
-                    .find(|(view, verifier)| *view != &current && verifier.ready_finalizes())
+                    .find(|(view, verifier)| {
+                        *view != &current && *view >= finalized && verifier.ready_finalizes()
+                    })
                     .map(|(view, verifier)| (*view, verifier));
                 if let Some((view, verifier)) = potential {
                     let identity = self.supervisor.identity(view).unwrap();
@@ -472,7 +459,7 @@ impl<
                 }
             }
 
-            // Drop any verifiers lower than the last finalized view
+            // TODO: Drop any rounds that are no longer interesting
             work.retain(|view, _| *view >= finalized);
         }
     }
