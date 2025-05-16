@@ -64,9 +64,9 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_p2p::{
         simulated::{Config as NConfig, Link, Network},
-        Recipients, Sender,
+        Receiver, Recipients, Sender,
     };
-    use commonware_runtime::{deterministic, Metrics, Runner};
+    use commonware_runtime::{deterministic, Metrics, Runner, Spawner};
     use commonware_utils::quorum;
     use futures::{channel::mpsc, StreamExt};
     use std::time::Duration;
@@ -145,12 +145,12 @@ mod tests {
             };
             let (actor, mut mailbox) = Actor::new(context.clone(), cfg);
 
-            // Create a dummy backfiller mailbox
-            let (backfiller_sender, mut backfiller_receiver) = mpsc::channel(1);
-            let backfiller = resolver::Mailbox::new(backfiller_sender);
+            // Create a dummy resolver mailbox
+            let (resolver_sender, mut resolver_receiver) = mpsc::channel(1);
+            let resolver = resolver::Mailbox::new(resolver_sender);
 
             // Create a dummy batcher mailbox
-            let (batcher_sender, mut _batcher_receiver) = mpsc::channel(1024);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(1024);
             let batcher = batcher::Mailbox::new(batcher_sender);
 
             // Create a dummy network mailbox
@@ -161,7 +161,7 @@ mod tests {
                 oracle.register(validator.clone(), 1).await.unwrap();
             let (mut _peer_pending_sender, mut _peer_pending_receiver) =
                 oracle.register(peer.clone(), 0).await.unwrap();
-            let (mut peer_recovered_sender, mut _peer_recovered_receiver) =
+            let (mut peer_recovered_sender, mut peer_recovered_receiver) =
                 oracle.register(peer.clone(), 1).await.unwrap();
             oracle
                 .add_link(
@@ -191,11 +191,36 @@ mod tests {
             // Run the actor
             actor.start(
                 batcher,
-                backfiller,
+                resolver,
                 pending_sender,
                 recovered_sender,
                 recovered_receiver,
             );
+
+            // Wait for batcher to be notified
+            let message = batcher_receiver.next().await.unwrap();
+            match message {
+                batcher::Message::Update {
+                    current,
+                    leader: _,
+                    finalized,
+                    active,
+                } => {
+                    assert_eq!(current, 1);
+                    assert_eq!(finalized, 0);
+                    active.send(true).unwrap();
+                }
+                _ => panic!("unexpected batcher message"),
+            }
+
+            // Drain the peer_recovered_receiver
+            context
+                .with_label("peer_recovered_receiver")
+                .spawn(|_| async move {
+                    loop {
+                        peer_recovered_receiver.recv().await.unwrap();
+                    }
+                });
 
             // Send finalization over network (view 100)
             let payload = hash(b"test");
@@ -224,19 +249,40 @@ mod tests {
                 .await
                 .expect("failed to send finalization");
 
-            // Wait for backfiller to be notified
-            let msg = backfiller_receiver
+            // Wait for batcher to be notified
+            loop {
+                let message = batcher_receiver.next().await.unwrap();
+                match message {
+                    batcher::Message::Update {
+                        current,
+                        leader: _,
+                        finalized,
+                        active,
+                    } => {
+                        assert_eq!(current, 101);
+                        assert_eq!(finalized, 100);
+                        active.send(true).unwrap();
+                        break;
+                    }
+                    _ => {
+                        continue;
+                    }
+                }
+            }
+
+            // Wait for resolver to be notified
+            let msg = resolver_receiver
                 .next()
                 .await
-                .expect("failed to receive backfiller message");
+                .expect("failed to receive resolver message");
             match msg {
                 resolver::Message::Finalized { view } => {
                     assert_eq!(view, 100);
                 }
-                _ => panic!("unexpected backfiller message"),
+                _ => panic!("unexpected resolver message"),
             }
 
-            // Send old notarization from backfiller that should be ignored (view 50)
+            // Send old notarization from resolver that should be ignored (view 50)
             let payload = hash(b"test2");
             let proposal = Proposal::new(50, 49, payload);
             let partials: Vec<_> = shares
@@ -287,11 +333,32 @@ mod tests {
                 .await
                 .expect("failed to send finalization");
 
-            // Wait for backfiller to be notified
-            let msg = backfiller_receiver
+            // Wait for batcher to be notified
+            loop {
+                let message = batcher_receiver.next().await.unwrap();
+                match message {
+                    batcher::Message::Update {
+                        current,
+                        leader: _,
+                        finalized,
+                        active,
+                    } => {
+                        assert_eq!(current, 301);
+                        assert_eq!(finalized, 300);
+                        active.send(true).unwrap();
+                        break;
+                    }
+                    _ => {
+                        continue;
+                    }
+                }
+            }
+
+            // Wait for resolver to be notified
+            let msg = resolver_receiver
                 .next()
                 .await
-                .expect("failed to receive backfiller message");
+                .expect("failed to receive resolver message");
             match msg {
                 resolver::Message::Finalized { view } => {
                     assert_eq!(view, 300);
