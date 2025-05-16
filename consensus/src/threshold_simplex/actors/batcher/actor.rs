@@ -134,16 +134,13 @@ impl<
                 }
 
                 // Check if finalized
-                match self.finalizes[index as usize] {
-                    None => {}
-                    Some(ref previous) => {
-                        let activity = NullifyFinalize::new(nullify, previous.clone());
-                        self.reporter
-                            .report(Activity::NullifyFinalize(activity))
-                            .await;
-                        self.blocker.block(sender).await;
-                        return false;
-                    }
+                if let Some(ref previous) = self.finalizes[index as usize] {
+                    let activity = NullifyFinalize::new(nullify, previous.clone());
+                    self.reporter
+                        .report(Activity::NullifyFinalize(activity))
+                        .await;
+                    self.blocker.block(sender).await;
+                    return false;
                 }
 
                 // Try to reserve
@@ -172,16 +169,13 @@ impl<
                 }
 
                 // Check if nullified
-                match self.nullifies[index as usize] {
-                    Some(ref previous) => {
-                        let activity = NullifyFinalize::new(previous.clone(), finalize);
-                        self.reporter
-                            .report(Activity::NullifyFinalize(activity))
-                            .await;
-                        self.blocker.block(sender).await;
-                        return false;
-                    }
-                    None => {}
+                if let Some(ref previous) = self.nullifies[index as usize] {
+                    let activity = NullifyFinalize::new(previous.clone(), finalize);
+                    self.reporter
+                        .report(Activity::NullifyFinalize(activity))
+                        .await;
+                    self.blocker.block(sender).await;
+                    return false;
                 }
 
                 // Try to reserve
@@ -266,11 +260,11 @@ impl<
     }
 }
 
-fn interesting(activity_timeout: View, last_finalized: View, view: View) -> bool {
+fn interesting(activity_timeout: View, last_finalized: View, current: View, view: View) -> bool {
     if view + activity_timeout < last_finalized {
         return false;
     }
-    if view > view + 1 {
+    if view > current + 1 {
         return false;
     }
     true
@@ -403,7 +397,7 @@ impl<
                         Some(Message::Verified(message)) => {
                             // If the view isn't interesting, we can skip
                             let view = message.view();
-                            if !interesting(self.activity_timeout, finalized, view) {
+                            if !interesting(self.activity_timeout, finalized, current, view) {
                                 continue;
                             }
 
@@ -437,7 +431,7 @@ impl<
 
                     // If the view isn't interesting, we can skip
                     let view = message.view();
-                    if !interesting(self.activity_timeout, finalized, view) {
+                    if !interesting(self.activity_timeout, finalized, current, view) {
                         continue;
                     }
 
@@ -508,7 +502,7 @@ impl<
                     break;
                 };
                 let view = *view;
-                if interesting(self.activity_timeout, finalized, view) {
+                if interesting(self.activity_timeout, finalized, current, view) {
                     break;
                 }
                 work.remove(&view);
