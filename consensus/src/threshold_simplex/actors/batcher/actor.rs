@@ -395,10 +395,6 @@ impl<
                         }) => {
                             current = new_current;
                             finalized = new_finalized;
-
-                            // If this is our first item, we may have some previous work completed
-                            // from before restart. We should just verify everything (may just be
-                            // nullifies) as soon as we can.
                             work.entry(current)
                                 .or_insert(Round::new(self.blocker.clone(), self.reporter.clone(), self.supervisor.clone(), current, initialized))
                                 .set_leader(leader);
@@ -411,14 +407,11 @@ impl<
                                 continue;
                             }
 
-                            // Get the interesting round
-                            let round = work.entry(view).or_insert(
-                                Round::new(self.blocker.clone(), self.reporter.clone(), self.supervisor.clone(), view, true)
-                            );
-
                             // Add the message to the verifier
+                            work.entry(view).or_insert(
+                                Round::new(self.blocker.clone(), self.reporter.clone(), self.supervisor.clone(), view, true)
+                            ).add_verified(message);
                             self.added.inc();
-                            round.add_verified(message);
                         }
                         None => {
                             break;
@@ -448,13 +441,11 @@ impl<
                         continue;
                     }
 
-                    // Get the interesting round
-                    let round = work.entry(view).or_insert(
-                        Round::new(self.blocker.clone(), self.reporter.clone(), self.supervisor.clone(), view, true)
-                    );
-
                     // Add the message to the verifier
-                    if round.add(sender, message).await {
+                    let added = work.entry(view).or_insert(
+                        Round::new(self.blocker.clone(), self.reporter.clone(), self.supervisor.clone(), view, true)
+                    ).add(sender, message).await;
+                    if added {
                         self.added.inc();
                     }
                 }
