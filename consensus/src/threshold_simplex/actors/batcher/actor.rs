@@ -2,9 +2,12 @@ use super::{Config, Mailbox, Message};
 use crate::{
     threshold_simplex::{
         actors::voter,
-        types::{Finalize, Notarize, Nullify, PartialVerifier, View, Viewable, Voter},
+        types::{
+            Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalize, Notarize,
+            Nullify, NullifyFinalize, PartialVerifier, View, Viewable, Voter,
+        },
     },
-    ThresholdSupervisor,
+    Reporter, ThresholdSupervisor,
 };
 use commonware_cryptography::{
     bls12381::primitives::{poly, variant::Variant},
@@ -46,6 +49,7 @@ struct Round<
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     D: Digest,
+    R: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<
         Index = View,
         Identity = poly::Public<V>,
@@ -56,9 +60,9 @@ struct Round<
     view: View,
 
     blocker: B,
+    reporter: R,
     supervisor: S,
     verifier: PartialVerifier<V, D>,
-
     notarizes: Vec<Option<Notarize<V, D>>>,
     nullifies: Vec<Option<Nullify<V>>>,
     finalizes: Vec<Option<Finalize<V, D>>>,
@@ -71,15 +75,16 @@ impl<
         B: Blocker<PublicKey = C::PublicKey>,
         V: Variant,
         D: Digest,
+        R: Reporter<Activity = Activity<V, D>>,
         S: ThresholdSupervisor<
             Index = View,
             Identity = poly::Public<V>,
             PublicKey = C::PublicKey,
             Public = V::Public,
         >,
-    > Round<C, B, V, D, S>
+    > Round<C, B, V, D, R, S>
 {
-    fn new(blocker: B, supervisor: S, view: View, batch: bool) -> Self {
+    fn new(blocker: B, reporter: R, supervisor: S, view: View, batch: bool) -> Self {
         // Configure quorum params
         let participants = supervisor.participants(view).unwrap().len();
         let quorum = if batch {
@@ -93,6 +98,7 @@ impl<
             view,
 
             blocker,
+            reporter,
             supervisor,
             verifier: PartialVerifier::new(quorum),
 
@@ -104,26 +110,117 @@ impl<
         }
     }
 
-    async fn add(&mut self, sender: &C::PublicKey, message: Voter<V, D>) {
+    async fn add(&mut self, sender: C::PublicKey, message: Voter<V, D>) {
         // Check if sender is a participant
-        let Some(index) = self.supervisor.is_participant(self.view, sender) else {
+        let Some(index) = self.supervisor.is_participant(self.view, &sender) else {
             self.blocker.block(sender).await;
             return;
         };
 
-        // Verify sender is signer
-        if index != message.signer() {
-            return Action::Block;
-        }
-
         // Attempt to reserve
         match message {
             Voter::Notarize(notarize) => {
-                let index = notarize.signer() as usize;
-                self.notarizes[index] = Some(notarize);
+                // Verify sender is signer
+                if index != notarize.signer() {
+                    self.blocker.block(sender).await;
+                    return;
+                }
+
+                // Try to reserve
+                match self.notarizes[index as usize] {
+                    Some(ref previous) => {
+                        if previous != &notarize {
+                            let activity = ConflictingNotarize::new(previous.clone(), notarize);
+                            self.reporter
+                                .report(Activity::ConflictingNotarize(activity))
+                                .await;
+                            self.blocker.block(sender).await;
+                        }
+                    }
+                    None => {
+                        self.reporter
+                            .report(Activity::Notarize(notarize.clone()))
+                            .await;
+                        self.notarizes[index as usize] = Some(notarize);
+                    }
+                }
+            }
+            Voter::Nullify(nullify) => {
+                // Verify sender is signer
+                if index != nullify.signer() {
+                    self.blocker.block(sender).await;
+                    return;
+                }
+
+                // Check if finalized
+                match self.finalizes[index as usize] {
+                    None => {}
+                    Some(ref previous) => {
+                        let activity = NullifyFinalize::new(nullify, previous.clone());
+                        self.reporter
+                            .report(Activity::NullifyFinalize(activity))
+                            .await;
+                        self.blocker.block(sender).await;
+                        return;
+                    }
+                }
+
+                // Try to reserve
+                match self.nullifies[index as usize] {
+                    Some(ref previous) => {
+                        if previous != &nullify {
+                            self.blocker.block(sender).await;
+                        }
+                    }
+                    None => {
+                        self.reporter
+                            .report(Activity::Nullify(nullify.clone()))
+                            .await;
+                        self.nullifies[index as usize] = Some(nullify);
+                    }
+                }
+            }
+            Voter::Finalize(finalize) => {
+                // Verify sender is signer
+                if index != finalize.signer() {
+                    self.blocker.block(sender).await;
+                    return;
+                }
+
+                // Check if nullified
+                match self.nullifies[index as usize] {
+                    Some(ref previous) => {
+                        let activity = NullifyFinalize::new(previous.clone(), finalize);
+                        self.reporter
+                            .report(Activity::NullifyFinalize(activity))
+                            .await;
+                        self.blocker.block(sender).await;
+                        return;
+                    }
+                    None => {}
+                }
+
+                // Try to reserve
+                match self.finalizes[index as usize] {
+                    Some(ref previous) => {
+                        if previous != &finalize {
+                            let activity = ConflictingFinalize::new(previous.clone(), finalize);
+                            self.reporter
+                                .report(Activity::ConflictingFinalize(activity))
+                                .await;
+                            self.blocker.block(sender).await;
+                        }
+                    }
+                    None => {
+                        self.reporter
+                            .report(Activity::Finalize(finalize.clone()))
+                            .await;
+                        self.finalizes[index as usize] = Some(finalize);
+                    }
+                }
             }
             Voter::Notarization(_) | Voter::Finalization(_) | Voter::Nullification(_) => {
-                Action::Block
+                self.blocker.block(sender).await;
             }
         }
     }
