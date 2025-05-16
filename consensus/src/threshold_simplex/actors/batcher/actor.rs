@@ -11,39 +11,16 @@ use crate::{
 };
 use commonware_cryptography::{
     bls12381::primitives::{poly, variant::Variant},
-    Digest, Scheme, Verifier,
+    Digest, Verifier,
 };
 use commonware_macros::select;
-use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver, Sender};
+use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver};
 use commonware_runtime::{Handle, Metrics, Spawner};
 use commonware_utils::quorum;
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
 use std::{collections::BTreeMap, marker::PhantomData};
 use tracing::{trace, warn};
-
-async fn recv_batch<T, F>(rx: &mut mpsc::Receiver<T>, block: bool, mut f: F) -> bool
-where
-    F: FnMut(T),
-{
-    if block {
-        match rx.next().await {
-            Some(first) => {
-                f(first);
-                while let Ok(Some(item)) = rx.try_next() {
-                    f(item);
-                }
-                true // processed at least one item
-            }
-            None => false, // channel closed
-        }
-    } else {
-        while let Ok(Some(item)) = rx.try_next() {
-            f(item);
-        }
-        true
-    }
-}
 
 struct Round<
     C: Verifier,
@@ -260,6 +237,33 @@ impl<
     fn set_leader(&mut self, leader: u32) {
         self.verifier.set_leader(leader);
     }
+
+    fn ready_notarizes(&self) -> bool {
+        self.verifier.ready_notarizes()
+    }
+
+    fn verify_notarizes(&mut self, namespace: &[u8]) -> (Vec<Voter<V, D>>, Vec<u32>) {
+        let identity = self.supervisor.identity(self.view).unwrap();
+        self.verifier.verify_notarizes(namespace, identity)
+    }
+
+    fn ready_nullifies(&self) -> bool {
+        self.verifier.ready_nullifies()
+    }
+
+    fn verify_nullifies(&mut self, namespace: &[u8]) -> (Vec<Voter<V, D>>, Vec<u32>) {
+        let identity = self.supervisor.identity(self.view).unwrap();
+        self.verifier.verify_nullifies(namespace, identity)
+    }
+
+    fn ready_finalizes(&self) -> bool {
+        self.verifier.ready_finalizes()
+    }
+
+    fn verify_finalizes(&mut self, namespace: &[u8]) -> (Vec<Voter<V, D>>, Vec<u32>) {
+        let identity = self.supervisor.identity(self.view).unwrap();
+        self.verifier.verify_finalizes(namespace, identity)
+    }
 }
 
 fn interesting(activity_timeout: View, last_finalized: View, view: View) -> bool {
@@ -377,7 +381,6 @@ impl<
         let mut current: View = 0;
         let mut finalized: View = 0;
         let mut work: BTreeMap<u64, Round<C, B, V, D, R, S>> = BTreeMap::new();
-        let mut blocking = true;
         let mut initialized = false;
 
         loop {
@@ -397,7 +400,7 @@ impl<
                                 // from before restart. We should just verify everything (may just be
                                 // nullifies) as soon as we can.
                                 work.entry(current)
-                                    .or_insert(Round::new(self.blocker, self.reporter, self.supervisor, current, initialized))
+                                    .or_insert(Round::new(self.blocker.clone(), self.reporter.clone(), self.supervisor.clone(), current, initialized))
                                     .set_leader(leader);
                                 initialized = true;
                             }
@@ -410,7 +413,7 @@ impl<
 
                                 // Get the interesting round
                                 let round = work.entry(view).or_insert(
-                                    Round::new(self.blocker, self.reporter, self.supervisor, view, true)
+                                    Round::new(self.blocker.clone(), self.reporter.clone(), self.supervisor.clone(), view, true)
                                 );
 
                                 // Add the message to the verifier
@@ -447,7 +450,7 @@ impl<
 
                     // Get the interesting round
                     let round = work.entry(view).or_insert(
-                        Round::new(self.blocker, self.reporter, self.supervisor, view, true)
+                        Round::new(self.blocker.clone(), self.reporter.clone(), self.supervisor.clone(), view, true)
                     );
 
                     // Add the message to the verifier
@@ -461,12 +464,10 @@ impl<
             let mut selected = None;
             if let Some(verifier) = work.get_mut(&current) {
                 if verifier.ready_notarizes() {
-                    let identity = self.supervisor.identity(current).unwrap();
-                    let (voters, failed) = verifier.verify_notarizes(&self.namespace, identity);
+                    let (voters, failed) = verifier.verify_notarizes(&self.namespace);
                     selected = Some((current, voters, failed));
                 } else if verifier.ready_nullifies() {
-                    let identity = self.supervisor.identity(current).unwrap();
-                    let (voters, failed) = verifier.verify_nullifies(&self.namespace, identity);
+                    let (voters, failed) = verifier.verify_nullifies(&self.namespace);
                     selected = Some((current, voters, failed));
                 }
             }
@@ -475,17 +476,15 @@ impl<
                     .iter_mut()
                     .rev()
                     .find(|(view, verifier)| {
-                        *view != &current && *view >= finalized && verifier.ready_finalizes()
+                        **view != current && **view >= finalized && verifier.ready_finalizes()
                     })
                     .map(|(view, verifier)| (*view, verifier));
                 if let Some((view, verifier)) = potential {
-                    let identity = self.supervisor.identity(view).unwrap();
-                    let (voters, failed) = verifier.verify_finalizes(&self.namespace, identity);
+                    let (voters, failed) = verifier.verify_finalizes(&self.namespace);
                     selected = Some((view, voters, failed));
                 }
             }
             let Some((view, voters, failed)) = selected else {
-                blocking = true;
                 trace!(
                     current,
                     finalized,
@@ -494,7 +493,6 @@ impl<
                 );
                 continue;
             };
-            blocking = false;
 
             // Send messages
             let batch = voters.len() + failed.len();
@@ -513,8 +511,17 @@ impl<
                 }
             }
 
-            // TODO: Drop any rounds that are no longer interesting
-            work.retain(|view, _| *view >= finalized);
+            // Drop any rounds that are no longer interesting
+            loop {
+                let Some((view, _)) = work.first_key_value() else {
+                    break;
+                };
+                let view = *view;
+                if interesting(self.activity_timeout, finalized, view) {
+                    break;
+                }
+                work.remove(&view);
+            }
         }
     }
 }
