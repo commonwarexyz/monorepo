@@ -5,6 +5,7 @@ use crate::{
     Supervisor,
 };
 use commonware_codec::{Decode, Encode};
+use commonware_cryptography::Digest;
 use commonware_cryptography::{Hasher, Scheme};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
@@ -77,7 +78,7 @@ impl<
                         .unwrap();
 
                     // Notarize random digest
-                    let payload = H::random(&mut self.context);
+                    let payload = H::Digest::random(&mut self.context);
                     let proposal = Proposal::new(view, notarize.proposal.parent, payload);
                     let msg = Notarize::sign(
                         &self.namespace,
@@ -106,7 +107,7 @@ impl<
                         .unwrap();
 
                     // Finalize random digest
-                    let payload = H::random(&mut self.context);
+                    let payload = H::Digest::random(&mut self.context);
                     let proposal = Proposal::new(view, finalize.proposal.parent, payload);
                     let msg = Finalize::sign(
                         &self.namespace,

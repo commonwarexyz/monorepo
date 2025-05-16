@@ -1,4 +1,4 @@
-use commonware_cryptography::{Hasher, Sha256};
+use commonware_cryptography::{sha256, Digest as _, Hasher, Sha256};
 use commonware_storage::mmr::{hasher::Standard, mem::Mmr};
 use criterion::{criterion_group, Criterion};
 use futures::executor::block_on;
@@ -16,7 +16,7 @@ fn bench_prove_single_element(c: &mut Criterion) {
         let mut hasher = Standard::new(&mut hasher);
         block_on(async {
             for _ in 0..n {
-                let element = Sha256::random(&mut sampler);
+                let element = sha256::Digest::random(&mut sampler);
                 let pos = mmr.add(&mut hasher, &element).await.unwrap();
                 elements.push((pos, element));
             }

@@ -129,7 +129,15 @@ pub trait BatchScheme: Specification {
 
 /// Specializes the [commonware_utils::Array] trait with the Copy trait for cryptographic digests
 /// (which should be cheap to clone).
-pub trait Digest: Array + Copy {}
+pub trait Digest: Array + Copy {
+    /// Generate a random digest.
+    ///
+    /// # Warning
+    ///
+    /// This function is typically used for testing and is not recommended
+    /// for production use.
+    fn random<R: RngCore + CryptoRng>(rng: &mut R) -> Self;
+}
 
 /// An object that can be uniquely represented as a [Digest].
 pub trait Digestible<D: Digest>: Clone + Sized + Send + Sync + 'static {
@@ -187,14 +195,6 @@ pub trait Hasher: Clone + Send + Sync + 'static {
     ///
     /// This function does not need to be called after `finalize`.
     fn reset(&mut self);
-
-    /// Generate a random digest.
-    ///
-    /// # Warning
-    ///
-    /// This function is typically used for testing and is not recommended
-    /// for production use.
-    fn random<R: Rng + CryptoRng>(rng: &mut R) -> Self::Digest;
 }
 
 #[cfg(test)]

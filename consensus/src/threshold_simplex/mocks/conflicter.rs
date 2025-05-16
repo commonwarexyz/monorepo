@@ -5,6 +5,7 @@ use crate::{
     ThresholdSupervisor,
 };
 use commonware_codec::{DecodeExt, Encode};
+use commonware_cryptography::Digest;
 use commonware_cryptography::{
     bls12381::primitives::{group, variant::Variant},
     Hasher,
@@ -76,7 +77,7 @@ impl<
                     // Notarize random digest
                     let view = notarize.view();
                     let share = self.supervisor.share(view).unwrap();
-                    let payload = H::random(&mut self.context);
+                    let payload = H::Digest::random(&mut self.context);
                     let proposal = Proposal::new(view, notarize.proposal.parent, payload);
                     let n = Notarize::<V, _>::sign(&self.namespace, share, proposal);
                     let msg = Voter::Notarize(n).encode().into();
@@ -91,7 +92,7 @@ impl<
                     // Finalize random digest
                     let view = finalize.view();
                     let share = self.supervisor.share(view).unwrap();
-                    let payload = H::random(&mut self.context);
+                    let payload = H::Digest::random(&mut self.context);
                     let proposal = Proposal::new(view, finalize.proposal.parent, payload);
                     let f = Finalize::<V, _>::sign(&self.namespace, share, proposal);
                     let msg = Voter::Finalize(f).encode().into();
