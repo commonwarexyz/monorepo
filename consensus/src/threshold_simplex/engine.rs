@@ -142,7 +142,11 @@ impl<
     /// This will also rebuild the state of the engine from provided `Journal`.
     pub fn start(
         self,
-        voter_network: (
+        pending_network: (
+            impl Sender<PublicKey = C::PublicKey>,
+            impl Receiver<PublicKey = C::PublicKey>,
+        ),
+        recovered_network: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
@@ -153,12 +157,16 @@ impl<
     ) -> Handle<()> {
         self.context
             .clone()
-            .spawn(|_| self.run(voter_network, resolver_network))
+            .spawn(|_| self.run(pending_network, recovered_network, resolver_network))
     }
 
     async fn run(
         self,
-        voter_network: (
+        pending_network: (
+            impl Sender<PublicKey = C::PublicKey>,
+            impl Receiver<PublicKey = C::PublicKey>,
+        ),
+        recovered_network: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
@@ -167,6 +175,9 @@ impl<
             impl Receiver<PublicKey = C::PublicKey>,
         ),
     ) {
+        // Start the verifier
+        let mut verifier_task = self.verifier.start(self.voter_mailbox.clone());
+
         // Start the voter
         let (voter_sender, voter_receiver) = voter_network;
         let mut voter_task = self.voter.start(
@@ -175,9 +186,6 @@ impl<
             voter_sender,
             voter_receiver,
         );
-
-        // Start the verifier
-        let mut verifier_task = self.verifier.start(self.voter_mailbox.clone());
 
         // Start the resolver
         let (resolver_sender, resolver_receiver) = resolver_network;
