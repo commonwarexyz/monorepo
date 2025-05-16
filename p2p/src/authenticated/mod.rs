@@ -213,9 +213,12 @@ mod tests {
     use commonware_cryptography::{Ed25519, Signer};
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{
-        deterministic, tokio, Clock, Metrics, Network as RNetwork, Runner, Spawner,
+        deterministic, tokio, Clock, Listener, Metrics, Network as RNetwork, Runner, Sink as _,
+        Spawner, Stream,
     };
     use commonware_utils::NZU32;
+    use futures::channel::mpsc;
+    use futures::{SinkExt, StreamExt as _};
     use governor::{clock::ReasonablyRealtime, Quota};
     use rand::{CryptoRng, Rng};
     use std::collections::HashSet;
@@ -468,20 +471,43 @@ mod tests {
 
     #[test_traced]
     fn test_tokio_connectivity() {
+        let msg = b"hello world";
+        let (mut tx, mut rx) = mpsc::channel(1);
+
+        // Start one runtime, accept a connection, and echo the message
+        std::thread::spawn(move || {
+            let cfg = tokio::Config::default();
+            let executor = tokio::Runner::new(cfg.clone());
+            executor.start(|context| async move {
+                let mut listener = context
+                    .bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+                    .await
+                    .unwrap();
+
+                let addr = listener.local_addr().unwrap();
+                tx.send(addr).await.unwrap();
+
+                let (_, mut sink, mut stream) = listener.accept().await.unwrap();
+
+                // Echo the message
+                let read = stream.recv(vec![0; msg.len()]).await.unwrap();
+                assert_eq!(read, msg);
+                sink.send(msg.to_vec()).await.unwrap();
+            });
+        });
+
+        // Start another runtime, connect to the first one, and send the message
         let cfg = tokio::Config::default();
         let executor = tokio::Runner::new(cfg.clone());
         executor.start(|context| async move {
-            const MAX_MESSAGE_SIZE: usize = 1_024 * 1_024; // 1MB
-            let base_port = 3000;
-            let n = 10;
+            let addr = rx.next().await.unwrap();
+            let (mut stream, mut sink) = context.dial(addr).await.unwrap();
 
-            // Run network or timeout
-            select! {
-                _ = run_network(context.clone(), MAX_MESSAGE_SIZE, base_port, n, Mode::One) => {},
-                _ = context.sleep(Duration::from_secs(10)) => {
-                    panic!("timeout");
-                }
-            }
+            // Send the message
+            stream.send(msg.to_vec()).await.unwrap();
+            // Receive the echoed message
+            let read = sink.recv(vec![0; msg.len()]).await.unwrap();
+            assert_eq!(read, msg);
         });
     }
 
