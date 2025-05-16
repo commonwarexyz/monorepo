@@ -1016,6 +1016,8 @@ impl<
             };
 
             // TODO: this approach doesn't make sense...once you miss once, you'll never be able to propose again
+            //
+            // TODO: is it ever safe to skip now (as we no longer capture all participation here)?
             if let Some((round_leader, _)) = &round.leader {
                 if round_leader == &leader {
                     saw_leader = true;
