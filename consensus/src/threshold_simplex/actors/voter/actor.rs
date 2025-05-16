@@ -2,11 +2,9 @@ use super::{Config, Mailbox, Message};
 use crate::{
     threshold_simplex::{
         actors::{batcher, resolver},
-        metrics,
         types::{
-            Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Context,
-            Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
-            NullifyFinalize, Proposal, View, Viewable, Voter,
+            Activity, Attributable, Context, Finalization, Finalize, Notarization, Notarize,
+            Nullification, Nullify, Proposal, View, Viewable, Voter,
         },
     },
     Automaton, Relay, Reporter, ThresholdSupervisor, LATENCY,
@@ -34,9 +32,7 @@ use futures::{
     future::Either,
     pin_mut, StreamExt,
 };
-use prometheus_client::metrics::{
-    counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
-};
+use prometheus_client::metrics::{counter::Counter, gauge::Gauge, histogram::Histogram};
 use rand::Rng;
 use std::sync::atomic::AtomicI64;
 use std::{
@@ -463,8 +459,6 @@ pub struct Actor<
     current_view: Gauge,
     tracked_views: Gauge,
     skipped_views: Counter,
-    received_messages: Family<metrics::PeerMessage, Counter>,
-    broadcast_messages: Family<metrics::Message, Counter>,
     notarization_latency: Histogram,
     finalization_latency: Histogram,
 }
@@ -498,23 +492,11 @@ impl<
         let current_view = Gauge::<i64, AtomicI64>::default();
         let tracked_views = Gauge::<i64, AtomicI64>::default();
         let skipped_views = Counter::default();
-        let received_messages = Family::<metrics::PeerMessage, Counter>::default();
-        let broadcast_messages = Family::<metrics::Message, Counter>::default();
         let notarization_latency = Histogram::new(LATENCY.into_iter());
         let finalization_latency = Histogram::new(LATENCY.into_iter());
         context.register("current_view", "current view", current_view.clone());
         context.register("tracked_views", "tracked views", tracked_views.clone());
         context.register("skipped_views", "skipped views", skipped_views.clone());
-        context.register(
-            "received_messages",
-            "received messages",
-            received_messages.clone(),
-        );
-        context.register(
-            "broadcast_messages",
-            "broadcast messages",
-            broadcast_messages.clone(),
-        );
         context.register(
             "notarization_latency",
             "notarization latency",
@@ -565,8 +547,6 @@ impl<
                 current_view,
                 tracked_views,
                 skipped_views,
-                received_messages,
-                broadcast_messages,
                 notarization_latency,
                 finalization_latency,
             },
@@ -760,17 +740,11 @@ impl<
             if let Some(notarization) = self.construct_notarization(past_view, true).await {
                 let msg = Voter::Notarization(notarization);
                 sender.send(Recipients::All, msg, true).await.unwrap();
-                self.broadcast_messages
-                    .get_or_create(&metrics::NOTARIZATION)
-                    .inc();
                 debug!(view = past_view, "rebroadcast entry notarization");
             } else if let Some(nullification) = self.construct_nullification(past_view, true).await
             {
                 let msg = Voter::Nullification(nullification);
                 sender.send(Recipients::All, msg, true).await.unwrap();
-                self.broadcast_messages
-                    .get_or_create(&metrics::NULLIFICATION)
-                    .inc();
                 debug!(view = past_view, "rebroadcast entry nullification");
             } else {
                 warn!(
@@ -801,9 +775,6 @@ impl<
         // Broadcast nullify
         let msg = Voter::Nullify(nullify);
         sender.send(Recipients::All, msg, true).await.unwrap();
-        self.broadcast_messages
-            .get_or_create(&metrics::NULLIFY)
-            .inc();
         debug!(view = self.view, "broadcasted nullify");
     }
 
@@ -1407,11 +1378,12 @@ impl<
         round.finalizable(threshold, force).await
     }
 
-    async fn notify<Sr: Sender>(
+    async fn notify<Sp: Sender, Sr: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<V, D>,
         backfiller: &mut resolver::Mailbox<V, D>,
-        sender: &mut WrappedSender<Sr, Voter<V, D>>,
+        pending_sender: &mut WrappedSender<Sp, Voter<V, D>>,
+        recovered_sender: &mut WrappedSender<Sr, Voter<V, D>>,
         view: u64,
     ) {
         // Attempt to notarize
@@ -1430,10 +1402,10 @@ impl<
 
             // Broadcast the notarize
             let msg = Voter::Notarize(notarize);
-            sender.send(Recipients::All, msg, true).await.unwrap();
-            self.broadcast_messages
-                .get_or_create(&metrics::NOTARIZE)
-                .inc();
+            pending_sender
+                .send(Recipients::All, msg, true)
+                .await
+                .unwrap();
         };
 
         // Attempt to notarization
@@ -1466,10 +1438,10 @@ impl<
 
             // Broadcast the notarization
             let msg = Voter::Notarization(notarization.clone());
-            sender.send(Recipients::All, msg, true).await.unwrap();
-            self.broadcast_messages
-                .get_or_create(&metrics::NOTARIZATION)
-                .inc();
+            recovered_sender
+                .send(Recipients::All, msg, true)
+                .await
+                .unwrap();
         };
 
         // Attempt to nullification
@@ -1497,10 +1469,10 @@ impl<
 
             // Broadcast the nullification
             let msg = Voter::Nullification(nullification.clone());
-            sender.send(Recipients::All, msg, true).await.unwrap();
-            self.broadcast_messages
-                .get_or_create(&metrics::NULLIFICATION)
-                .inc();
+            recovered_sender
+                .send(Recipients::All, msg, true)
+                .await
+                .unwrap();
 
             // If `>= f+1` notarized a given proposal, then we should backfill missing
             // notarizations
@@ -1538,13 +1510,10 @@ impl<
                         self.construct_finalization(self.last_finalized, true).await
                     {
                         let msg = Voter::Finalization(finalization.clone());
-                        sender
+                        recovered_sender
                             .send(Recipients::All, msg, true)
                             .await
                             .expect("unable to broadcast finalization");
-                        self.broadcast_messages
-                            .get_or_create(&metrics::FINALIZATION)
-                            .inc();
                     } else {
                         warn!(
                             last_finalized = self.last_finalized,
@@ -1571,10 +1540,10 @@ impl<
 
             // Broadcast the finalize
             let msg = Voter::Finalize(finalize.clone());
-            sender.send(Recipients::All, msg, true).await.unwrap();
-            self.broadcast_messages
-                .get_or_create(&metrics::FINALIZE)
-                .inc();
+            pending_sender
+                .send(Recipients::All, msg, true)
+                .await
+                .unwrap();
         };
 
         // Attempt to finalization
@@ -1607,10 +1576,10 @@ impl<
 
             // Broadcast the finalization
             let msg = Voter::Finalization(finalization.clone());
-            sender.send(Recipients::All, msg, true).await.unwrap();
-            self.broadcast_messages
-                .get_or_create(&metrics::FINALIZATION)
-                .inc();
+            recovered_sender
+                .send(Recipients::All, msg, true)
+                .await
+                .unwrap();
         };
     }
 
@@ -1618,21 +1587,31 @@ impl<
         mut self,
         batcher: batcher::Mailbox<V, D>,
         backfiller: resolver::Mailbox<V, D>,
-        sender: impl Sender<PublicKey = C::PublicKey>,
-        receiver: impl Receiver<PublicKey = C::PublicKey>,
+        pending_sender: impl Sender<PublicKey = C::PublicKey>,
+        recovered_sender: impl Sender<PublicKey = C::PublicKey>,
+        recovered_receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(batcher, backfiller, sender, receiver))
+        self.context.spawn_ref()(self.run(
+            batcher,
+            backfiller,
+            pending_sender,
+            recovered_sender,
+            recovered_receiver,
+        ))
     }
 
     async fn run(
         mut self,
         mut batcher: batcher::Mailbox<V, D>,
         mut backfiller: resolver::Mailbox<V, D>,
-        sender: impl Sender<PublicKey = C::PublicKey>,
-        receiver: impl Receiver<PublicKey = C::PublicKey>,
+        pending_sender: impl Sender<PublicKey = C::PublicKey>,
+        recovered_sender: impl Sender<PublicKey = C::PublicKey>,
+        recovered_receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) {
         // Wrap channel
-        let (mut sender, mut receiver) = wrap((), sender, receiver);
+        let mut pending_sender = WrappedSender::new(pending_sender);
+        let (mut recovered_sender, mut recovered_receiver) =
+            wrap::<_, _, Voter<V, D>>((), recovered_sender, recovered_receiver);
 
         // Compute genesis
         let genesis = self.automaton.genesis().await;
@@ -1820,7 +1799,7 @@ impl<
                 },
                 _ = self.context.sleep_until(timeout) => {
                     // Trigger the timeout
-                    self.timeout(&mut batcher, &mut sender).await;
+                    self.timeout(&mut batcher, &mut pending_sender).await;
                     view = self.view;
                 },
                 proposed = propose_wait => {
@@ -1926,7 +1905,7 @@ impl<
                         }
                     }
                 },
-                msg = receiver.recv() => {
+                msg = recovered_receiver.recv() => {
                     // Break if there is an internal error
                     let Ok((s, msg)) = msg else {
                         break;
@@ -1945,41 +1924,19 @@ impl<
                     // configuration for handling `future` messages.
                     view = msg.view();
                     let action = match msg {
-                        Voter::Notarize(notarize) => {
-                            self.received_messages.get_or_create(&metrics::PeerMessage::notarize(&s)).inc();
-                            let action = self.notarize(&s, &notarize).await;
-                            if matches!(action, Action::Process) {
-                                verifier.untrusted(Voter::Notarize(notarize)).await;
-                            }
-                            action
-                        }
                         Voter::Notarization(notarization) => {
-                            self.received_messages.get_or_create(&metrics::PeerMessage::notarization(&s)).inc();
                             self.notarization(notarization).await
                         }
-                        Voter::Nullify(nullify) => {
-                            self.received_messages.get_or_create(&metrics::PeerMessage::nullify(&s)).inc();
-                            let action = self.nullify(&s, &nullify).await;
-                            if matches!(action, Action::Process) {
-                                verifier.untrusted(Voter::Nullify(nullify)).await;
-                            }
-                            action
-                        }
                         Voter::Nullification(nullification) => {
-                            self.received_messages.get_or_create(&metrics::PeerMessage::nullification(&s)).inc();
                             self.nullification(nullification).await
                         }
-                        Voter::Finalize(finalize) => {
-                            self.received_messages.get_or_create(&metrics::PeerMessage::finalize(&s)).inc();
-                            let action = self.finalize(&s, &finalize).await;
-                            if matches!(action, Action::Process) {
-                                verifier.untrusted(Voter::Finalize(finalize)).await;
-                            }
-                            action
-                        }
                         Voter::Finalization(finalization) => {
-                            self.received_messages.get_or_create(&metrics::PeerMessage::finalization(&s)).inc();
                             self.finalization(finalization).await
+                        }
+                        Voter::Notarize(_) | Voter::Nullify(_) | Voter::Finalize(_) => {
+                            warn!(sender=?s, "blocking peer");
+                            self.blocker.block(s).await;
+                            continue;
                         }
                     };
                     match action {
@@ -1998,8 +1955,14 @@ impl<
             };
 
             // Attempt to send any new view messages
-            self.notify(&mut batcher, &mut backfiller, &mut sender, view)
-                .await;
+            self.notify(
+                &mut batcher,
+                &mut backfiller,
+                &mut pending_sender,
+                &mut recovered_sender,
+                view,
+            )
+            .await;
 
             // After sending all required messages, prune any views
             // we no longer need

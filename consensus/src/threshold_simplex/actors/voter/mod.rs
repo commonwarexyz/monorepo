@@ -47,7 +47,7 @@ pub struct Config<
 mod tests {
     use super::*;
     use crate::threshold_simplex::{
-        actors::{resolver, verifier},
+        actors::{batcher, resolver},
         mocks,
         types::{Finalization, Finalize, Notarization, Notarize, Proposal, Voter},
     };
