@@ -4,7 +4,7 @@ use crate::{
         actors::voter,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalize, Notarize,
-            Nullify, NullifyFinalize, PartialVerifier, View, Viewable, Voter,
+            Nullify, NullifyFinalize, PartialVerifier, View, Viewable, Viewable, Voter,
         },
     },
     Reporter, ThresholdSupervisor,
@@ -14,7 +14,7 @@ use commonware_cryptography::{
     Digest, Scheme, Verifier,
 };
 use commonware_macros::select;
-use commonware_p2p::{Blocker, Receiver, Sender};
+use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver, Sender};
 use commonware_runtime::{Handle, Metrics, Spawner};
 use commonware_utils::quorum;
 use futures::{channel::mpsc, StreamExt};
@@ -111,11 +111,11 @@ impl<
         }
     }
 
-    async fn add(&mut self, sender: C::PublicKey, message: Voter<V, D>) {
+    async fn add(&mut self, sender: C::PublicKey, message: Voter<V, D>) -> bool {
         // Check if sender is a participant
         let Some(index) = self.supervisor.is_participant(self.view, &sender) else {
             self.blocker.block(sender).await;
-            return;
+            return false;
         };
 
         // Attempt to reserve
@@ -124,7 +124,7 @@ impl<
                 // Verify sender is signer
                 if index != notarize.signer() {
                     self.blocker.block(sender).await;
-                    return;
+                    return false;
                 }
 
                 // Try to reserve
@@ -137,6 +137,7 @@ impl<
                                 .await;
                             self.blocker.block(sender).await;
                         }
+                        false
                     }
                     None => {
                         self.reporter
@@ -144,6 +145,7 @@ impl<
                             .await;
                         self.notarizes[index as usize] = Some(notarize.clone());
                         self.verifier.add(Voter::Notarize(notarize), false);
+                        true
                     }
                 }
             }
@@ -151,7 +153,7 @@ impl<
                 // Verify sender is signer
                 if index != nullify.signer() {
                     self.blocker.block(sender).await;
-                    return;
+                    return false;
                 }
 
                 // Check if finalized
@@ -163,7 +165,7 @@ impl<
                             .report(Activity::NullifyFinalize(activity))
                             .await;
                         self.blocker.block(sender).await;
-                        return;
+                        return false;
                     }
                 }
 
@@ -173,6 +175,7 @@ impl<
                         if previous != &nullify {
                             self.blocker.block(sender).await;
                         }
+                        false
                     }
                     None => {
                         self.reporter
@@ -180,6 +183,7 @@ impl<
                             .await;
                         self.nullifies[index as usize] = Some(nullify.clone());
                         self.verifier.add(Voter::Nullify(nullify), false);
+                        true
                     }
                 }
             }
@@ -187,7 +191,7 @@ impl<
                 // Verify sender is signer
                 if index != finalize.signer() {
                     self.blocker.block(sender).await;
-                    return;
+                    return false;
                 }
 
                 // Check if nullified
@@ -198,7 +202,7 @@ impl<
                             .report(Activity::NullifyFinalize(activity))
                             .await;
                         self.blocker.block(sender).await;
-                        return;
+                        return false;
                     }
                     None => {}
                 }
@@ -213,6 +217,7 @@ impl<
                                 .await;
                             self.blocker.block(sender).await;
                         }
+                        false
                     }
                     None => {
                         self.reporter
@@ -220,11 +225,13 @@ impl<
                             .await;
                         self.finalizes[index as usize] = Some(finalize.clone());
                         self.verifier.add(Voter::Finalize(finalize), false);
+                        true
                     }
                 }
             }
             Voter::Notarization(_) | Voter::Finalization(_) | Voter::Nullification(_) => {
                 self.blocker.block(sender).await;
+                false
             }
         }
     }
@@ -255,6 +262,16 @@ impl<
     }
 }
 
+fn interesting(activity_timeout: View, last_finalized: View, view: View) -> bool {
+    if view + activity_timeout < last_finalized {
+        return false;
+    }
+    if view > view + 1 {
+        return false;
+    }
+    true
+}
+
 pub struct Actor<
     E: Spawner + Metrics,
     C: Verifier,
@@ -271,8 +288,10 @@ pub struct Actor<
 > {
     context: E,
     blocker: B,
+    reporter: R,
     supervisor: S,
 
+    activity_timeout: View,
     namespace: Vec<u8>,
 
     mailbox_receiver: mpsc::Receiver<Message<V, D>>,
@@ -281,8 +300,7 @@ pub struct Actor<
     verified: Counter,
     batch_size: Histogram,
 
-    _phantom_verifier: PhantomData<C>,
-    _phantom_reporter: PhantomData<R>,
+    _phantom: PhantomData<C>,
 }
 
 impl<
@@ -300,7 +318,7 @@ impl<
         >,
     > Actor<E, C, B, V, D, R, S>
 {
-    pub fn new(context: E, cfg: Config<B, S>) -> (Self, Mailbox<V, D>) {
+    pub fn new(context: E, cfg: Config<B, R, S>) -> (Self, Mailbox<V, D>) {
         let added = Counter::default();
         let verified = Counter::default();
         let batch_size =
@@ -321,8 +339,10 @@ impl<
             Self {
                 context,
                 blocker: cfg.blocker,
+                reporter: cfg.reporter,
                 supervisor: cfg.supervisor,
 
+                activity_timeout: cfg.activity_timeout,
                 namespace: cfg.namespace,
 
                 mailbox_receiver: receiver,
@@ -331,8 +351,7 @@ impl<
                 verified,
                 batch_size,
 
-                _phantom_verifier: PhantomData,
-                _phantom_reporter: PhantomData,
+                _phantom: PhantomData,
             },
             Mailbox::new(sender),
         )
@@ -351,6 +370,9 @@ impl<
         mut consensus: voter::Mailbox<V, D>,
         receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) {
+        // Wrap channel
+        let mut receiver = WrappedReceiver::new((), receiver);
+
         // Initialize view data structures
         let mut current: View = 0;
         let mut finalized: View = 0;
@@ -394,13 +416,34 @@ impl<
                         }
                     }
                 },
-                message = receiver.next() => {
-                    match message {
-                        Some(message) => {
+                message = receiver.recv() => {
+                    // If the channel is closed, we should exit
+                    let Ok((sender, message)) = message else {
+                        break;
+                    };
 
-                        }
+                    // If there is a decoding error, block
+                    let Ok(message) = message else {
+                        self.blocker.block(sender).await;
+                        continue;
+                    };
+
+                    // If the view isn't interesting, we can skip
+                    let view = message.view();
+                    if !interesting(self.activity_timeout, finalized, view) {
+                        continue;
                     }
-                },
+
+                    // Get the interesting round
+                    let round = work.entry(view).or_insert_with(|| {
+                        Round::new(self.blocker, self.reporter, self.supervisor, view, true)
+                    });
+
+                    // Add the message to the verifier
+                    if round.add(sender, message).await {
+                        self.added.inc();
+                    }
+                }
             }
 
             // Look for a ready verifier (prioritizing the current view)
