@@ -145,7 +145,6 @@ impl crate::Sink for Sink {
                 remaining.as_ptr(),
                 remaining.len() as u32,
             )
-            .flags(libc::MSG_WAITALL as _)
             .build();
 
             // Submit the operation to the io_uring event loop
@@ -199,7 +198,6 @@ impl crate::Stream for Stream {
                 remaining.as_mut_ptr(),
                 remaining.len() as u32,
             )
-            .flags(libc::MSG_WAITALL as _)
             .build();
 
             // Submit the operation to the io_uring event loop
