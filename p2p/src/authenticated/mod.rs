@@ -478,7 +478,7 @@ mod tests {
             // Run network or timeout
             select! {
                 _ = run_network(context.clone(), MAX_MESSAGE_SIZE, base_port, n, Mode::One) => {},
-                _ = context.sleep(Duration::from_secs(30)) => {
+                _ = context.sleep(Duration::from_secs(10)) => {
                     panic!("timeout");
                 }
             }
