@@ -217,18 +217,27 @@ impl<
         }
     }
 
-    fn add_verified(&mut self, message: Voter<V, D>) {
+    async fn add_verified(&mut self, message: Voter<V, D>) {
         match &message {
             Voter::Notarize(notarize) => {
                 let signer = notarize.signer() as usize;
+                self.reporter
+                    .report(Activity::Notarize(notarize.clone()))
+                    .await;
                 self.notarizes[signer] = Some(notarize.clone());
             }
             Voter::Nullify(nullify) => {
                 let signer = nullify.signer() as usize;
+                self.reporter
+                    .report(Activity::Nullify(nullify.clone()))
+                    .await;
                 self.nullifies[signer] = Some(nullify.clone());
             }
             Voter::Finalize(finalize) => {
                 let signer = finalize.signer() as usize;
+                self.reporter
+                    .report(Activity::Finalize(finalize.clone()))
+                    .await;
                 self.finalizes[signer] = Some(finalize.clone());
             }
             Voter::Notarization(_) | Voter::Finalization(_) | Voter::Nullification(_) => {
@@ -414,7 +423,7 @@ impl<
                             // Add the message to the verifier
                             work.entry(view).or_insert(
                                 Round::new(self.blocker.clone(), self.reporter.clone(), self.supervisor.clone(), view, initialized)
-                            ).add_verified(message);
+                            ).add_verified(message).await;
                             self.added.inc();
                         }
                         None => {
