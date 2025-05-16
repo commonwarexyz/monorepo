@@ -160,13 +160,12 @@ impl<
     }
 
     fn add_verified_proposal(&mut self, proposal: Proposal<D>) {
+        self.verified_proposal = true;
         if self.proposal.is_none() {
             debug!(?proposal, "setting verified proposal");
             self.proposal = Some(proposal);
-            self.verified_proposal = true;
         } else if let Some(previous) = &self.proposal {
             assert_eq!(proposal, *previous);
-            self.verified_proposal = true;
         }
     }
 
@@ -694,11 +693,6 @@ impl<
     ) {
         // Set timeout fired
         let round = self.views.get_mut(&self.view).unwrap();
-        let leader = if let Some((leader, _)) = &round.leader {
-            Some(leader.clone())
-        } else {
-            None
-        };
         let mut retry = false;
         if round.broadcast_nullify {
             retry = true;
@@ -742,14 +736,6 @@ impl<
 
         // Handle the nullify
         if !retry {
-            // Log if we are the leader
-            if let Some(leader) = leader {
-                if self.crypto.public_key() == leader {
-                    warn!(view = self.view, "nullifying as leader");
-                }
-            }
-
-            // Pass on nullify
             batcher.verified(Voter::Nullify(nullify.clone())).await;
             self.handle_nullify(nullify.clone()).await;
 
@@ -809,9 +795,9 @@ impl<
 
         // Store the proposal
         debug!(?proposal, "generated proposal");
-        round.verified_proposal = true;
         assert!(round.proposal.is_none());
         round.proposal = Some(proposal);
+        round.verified_proposal = true;
         round.leader_deadline = None;
         true
     }
