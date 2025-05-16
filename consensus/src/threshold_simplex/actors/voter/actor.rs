@@ -712,10 +712,11 @@ impl<
         null_retry
     }
 
-    async fn timeout<Sr: Sender>(
+    async fn timeout<Sp: Sender, Sr: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<V, D>,
-        sender: &mut WrappedSender<Sr, Voter<V, D>>,
+        pending_sender: &mut WrappedSender<Sp, Voter<V, D>>,
+        recovered_sender: &mut WrappedSender<Sr, Voter<V, D>>,
     ) {
         // Set timeout fired
         let round = self.views.get_mut(&self.view).unwrap();
@@ -735,12 +736,18 @@ impl<
         if retry && past_view > 0 {
             if let Some(notarization) = self.construct_notarization(past_view, true).await {
                 let msg = Voter::Notarization(notarization);
-                sender.send(Recipients::All, msg, true).await.unwrap();
+                recovered_sender
+                    .send(Recipients::All, msg, true)
+                    .await
+                    .unwrap();
                 debug!(view = past_view, "rebroadcast entry notarization");
             } else if let Some(nullification) = self.construct_nullification(past_view, true).await
             {
                 let msg = Voter::Nullification(nullification);
-                sender.send(Recipients::All, msg, true).await.unwrap();
+                recovered_sender
+                    .send(Recipients::All, msg, true)
+                    .await
+                    .unwrap();
                 debug!(view = past_view, "rebroadcast entry nullification");
             } else {
                 warn!(
@@ -770,7 +777,10 @@ impl<
 
         // Broadcast nullify
         let msg = Voter::Nullify(nullify);
-        sender.send(Recipients::All, msg, true).await.unwrap();
+        pending_sender
+            .send(Recipients::All, msg, true)
+            .await
+            .unwrap();
         debug!(view = self.view, "broadcasted nullify");
     }
 
@@ -1766,7 +1776,7 @@ impl<
                 },
                 _ = self.context.sleep_until(timeout) => {
                     // Trigger the timeout
-                    self.timeout(&mut batcher, &mut pending_sender).await;
+                    self.timeout(&mut batcher, &mut pending_sender, &mut recovered_sender).await;
                     view = self.view;
                 },
                 proposed = propose_wait => {

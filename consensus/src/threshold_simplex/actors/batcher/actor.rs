@@ -100,6 +100,7 @@ impl<
             Voter::Notarize(notarize) => {
                 // Verify sender is signer
                 if index != notarize.signer() {
+                    warn!(?sender, "blocking peer");
                     self.blocker.block(sender).await;
                     return false;
                 }
@@ -112,6 +113,7 @@ impl<
                             self.reporter
                                 .report(Activity::ConflictingNotarize(activity))
                                 .await;
+                            warn!(?sender, "blocking peer");
                             self.blocker.block(sender).await;
                         }
                         false
@@ -129,6 +131,7 @@ impl<
             Voter::Nullify(nullify) => {
                 // Verify sender is signer
                 if index != nullify.signer() {
+                    warn!(?sender, "blocking peer");
                     self.blocker.block(sender).await;
                     return false;
                 }
@@ -139,6 +142,7 @@ impl<
                     self.reporter
                         .report(Activity::NullifyFinalize(activity))
                         .await;
+                    warn!(?sender, "blocking peer");
                     self.blocker.block(sender).await;
                     return false;
                 }
@@ -147,6 +151,7 @@ impl<
                 match self.nullifies[index as usize] {
                     Some(ref previous) => {
                         if previous != &nullify {
+                            warn!(?sender, "blocking peer");
                             self.blocker.block(sender).await;
                         }
                         false
@@ -164,6 +169,7 @@ impl<
             Voter::Finalize(finalize) => {
                 // Verify sender is signer
                 if index != finalize.signer() {
+                    warn!(?sender, "blocking peer");
                     self.blocker.block(sender).await;
                     return false;
                 }
@@ -174,6 +180,7 @@ impl<
                     self.reporter
                         .report(Activity::NullifyFinalize(activity))
                         .await;
+                    warn!(?sender, "blocking peer");
                     self.blocker.block(sender).await;
                     return false;
                 }
@@ -186,6 +193,7 @@ impl<
                             self.reporter
                                 .report(Activity::ConflictingFinalize(activity))
                                 .await;
+                            warn!(?sender, "blocking peer");
                             self.blocker.block(sender).await;
                         }
                         false
@@ -201,6 +209,7 @@ impl<
                 }
             }
             Voter::Notarization(_) | Voter::Finalization(_) | Voter::Nullification(_) => {
+                warn!(?sender, "blocking peer");
                 self.blocker.block(sender).await;
                 false
             }
