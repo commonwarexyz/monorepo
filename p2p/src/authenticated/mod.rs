@@ -211,7 +211,7 @@ mod tests {
     use super::*;
     use crate::{Receiver, Recipients, Sender};
     use commonware_cryptography::{Ed25519, Signer};
-    use commonware_macros::test_traced;
+    use commonware_macros::{select, test_traced};
     use commonware_runtime::{
         deterministic, tokio, Clock, Metrics, Network as RNetwork, Runner, Spawner,
     };
@@ -298,20 +298,17 @@ mod tests {
                 let addresses = addresses.clone();
                 move |context| async move {
                     // Wait for all peers to send their identity
-                    let acker = context
-                        .clone()
-                        .with_label("receiver")
-                        .spawn(move |_| async move {
-                            let mut received = HashSet::new();
-                            while received.len() < n - 1 {
-                                // Ensure message equals sender identity
-                                let (sender, message) = receiver.recv().await.unwrap();
-                                assert_eq!(sender.as_ref(), message.as_ref());
+                    let acker = context.with_label("receiver").spawn(move |_| async move {
+                        let mut received = HashSet::new();
+                        while received.len() < n - 1 {
+                            // Ensure message equals sender identity
+                            let (sender, message) = receiver.recv().await.unwrap();
+                            assert_eq!(sender.as_ref(), message.as_ref());
 
-                                // Add to received set
-                                received.insert(sender);
-                            }
-                        });
+                            // Add to received set
+                            received.insert(sender);
+                        }
+                    });
 
                     // Send identity to all peers
                     let msg = signer.public_key();
@@ -477,7 +474,14 @@ mod tests {
             const MAX_MESSAGE_SIZE: usize = 1_024 * 1_024; // 1MB
             let base_port = 3000;
             let n = 10;
-            run_network(context, MAX_MESSAGE_SIZE, base_port, n, Mode::One).await;
+
+            // Run network or timeout
+            select! {
+                _ = run_network(context.clone(), MAX_MESSAGE_SIZE, base_port, n, Mode::One) => {},
+                _ = context.sleep(Duration::from_secs(30)) => {
+                    panic!("timeout");
+                }
+            }
         });
     }
 
