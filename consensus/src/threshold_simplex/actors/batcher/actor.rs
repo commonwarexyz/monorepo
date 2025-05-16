@@ -2,13 +2,13 @@ use super::{Config, Mailbox, Message};
 use crate::{
     threshold_simplex::{
         actors::voter,
-        types::{Finalize, Notarize, Nullify, PartialVerifier, View, Viewable},
+        types::{Finalize, Notarize, Nullify, PartialVerifier, View, Viewable, Voter},
     },
     ThresholdSupervisor,
 };
 use commonware_cryptography::{
     bls12381::primitives::{poly, variant::Variant},
-    Digest, Scheme,
+    Digest, Scheme, Verifier,
 };
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_runtime::{Handle, Metrics, Spawner};
@@ -41,20 +41,45 @@ where
     }
 }
 
-struct Round<V: Variant, D: Digest> {
+struct Round<
+    C: Verifier,
+    B: Blocker<PublicKey = C::PublicKey>,
+    V: Variant,
+    D: Digest,
+    S: ThresholdSupervisor<
+        Index = View,
+        Identity = poly::Public<V>,
+        PublicKey = C::PublicKey,
+        Public = V::Public,
+    >,
+> {
+    view: View,
+
+    blocker: B,
+    supervisor: S,
     verifier: PartialVerifier<V, D>,
 
     notarizes: Vec<Option<Notarize<V, D>>>,
     nullifies: Vec<Option<Nullify<V>>>,
     finalizes: Vec<Option<Finalize<V, D>>>,
+
+    _phantom: PhantomData<C>,
 }
 
-impl<V: Variant, D: Digest> Round<V, D> {
-    fn new<S: ThresholdSupervisor<Index = View, Identity = poly::Public<V>>>(
-        supervisor: &S,
-        view: View,
-        batch: bool,
-    ) -> Self {
+impl<
+        C: Verifier,
+        B: Blocker<PublicKey = C::PublicKey>,
+        V: Variant,
+        D: Digest,
+        S: ThresholdSupervisor<
+            Index = View,
+            Identity = poly::Public<V>,
+            PublicKey = C::PublicKey,
+            Public = V::Public,
+        >,
+    > Round<C, B, V, D, S>
+{
+    fn new(blocker: B, supervisor: S, view: View, batch: bool) -> Self {
         // Configure quorum params
         let participants = supervisor.participants(view).unwrap().len();
         let quorum = if batch {
@@ -65,18 +90,50 @@ impl<V: Variant, D: Digest> Round<V, D> {
 
         // Initialize data structures
         Self {
+            view,
+
+            blocker,
+            supervisor,
             verifier: PartialVerifier::new(quorum),
 
             notarizes: vec![None; participants],
             nullifies: vec![None; participants],
             finalizes: vec![None; participants],
+
+            _phantom: PhantomData,
         }
     }
+
+    async fn add(&mut self, sender: &C::PublicKey, message: Voter<V, D>) {
+        // Check if sender is a participant
+        let Some(index) = self.supervisor.is_participant(self.view, sender) else {
+            self.blocker.block(sender).await;
+            return;
+        };
+
+        // Verify sender is signer
+        if index != message.signer() {
+            return Action::Block;
+        }
+
+        // Attempt to reserve
+        match message {
+            Voter::Notarize(notarize) => {
+                let index = notarize.signer() as usize;
+                self.notarizes[index] = Some(notarize);
+            }
+            Voter::Notarization(_) | Voter::Finalization(_) | Voter::Nullification(_) => {
+                Action::Block
+            }
+        }
+    }
+
+    fn add_verified(&mut self, message: Voter<V, D>) {}
 }
 
 pub struct Actor<
     E: Spawner + Metrics,
-    C: Scheme,
+    C: Verifier,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     D: Digest,
