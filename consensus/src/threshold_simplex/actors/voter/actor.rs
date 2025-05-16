@@ -1854,14 +1854,13 @@ impl<
                     // doing so may result in attempting to store before the prune boundary).
                     view = msg.view();
                     if !self.interesting(view, false) {
-                        debug!(view, "backfilled message is not interesting");
+                        debug!(view, "verified message is not interesting");
                         continue;
                     }
 
                     // Handle verifier and resolver
                     match msg {
                         Voter::Notarize(notarize) => {
-                            warn!(view, "received notarize from batcher");
                             self.handle_notarize(notarize).await;
                         }
                         Voter::Nullify(nullify) => {

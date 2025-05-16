@@ -20,7 +20,7 @@ use commonware_utils::quorum;
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
 use std::{collections::BTreeMap, marker::PhantomData};
-use tracing::{debug, trace, warn};
+use tracing::{trace, warn};
 
 struct Round<
     C: Verifier,
@@ -476,7 +476,7 @@ impl<
                 }
             }
             let Some((view, voters, failed)) = selected else {
-                debug!(
+                trace!(
                     current,
                     finalized,
                     waiting = work.len(),
@@ -487,7 +487,7 @@ impl<
 
             // Send messages
             let batch = voters.len() + failed.len();
-            debug!(view, batch, "batch verified messages");
+            trace!(view, batch, "batch verified messages");
             self.verified.inc_by(batch as u64);
             self.batch_size.observe(batch as f64);
             consensus.verified(voters).await;
