@@ -640,7 +640,7 @@ impl<
     #[allow(clippy::question_mark)]
     async fn propose(
         &mut self,
-        backfiller: &mut resolver::Mailbox<V, D>,
+        resolver: &mut resolver::Mailbox<V, D>,
     ) -> Option<(Context<D>, oneshot::Receiver<D>)> {
         // Check if we are leader
         {
@@ -676,7 +676,7 @@ impl<
                     missing = view,
                     "skipping proposal opportunity"
                 );
-                backfiller.fetch(vec![view], vec![view]).await;
+                resolver.fetch(vec![view], vec![view]).await;
                 return None;
             }
         };
@@ -1348,7 +1348,7 @@ impl<
     async fn notify<Sp: Sender, Sr: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<V, D>,
-        backfiller: &mut resolver::Mailbox<V, D>,
+        resolver: &mut resolver::Mailbox<V, D>,
         pending_sender: &mut WrappedSender<Sp, Voter<V, D>>,
         recovered_sender: &mut WrappedSender<Sr, Voter<V, D>>,
         view: u64,
@@ -1384,8 +1384,8 @@ impl<
                 }
             }
 
-            // Update backfiller
-            backfiller.notarized(notarization.clone()).await;
+            // Update resolver
+            resolver.notarized(notarization.clone()).await;
 
             // Handle the notarization
             self.handle_notarization(notarization.clone()).await;
@@ -1415,8 +1415,8 @@ impl<
         //
         // We handle broadcast of nullify in `timeout`.
         if let Some(nullification) = self.construct_nullification(view, false).await {
-            // Update backfiller
-            backfiller.nullified(nullification.clone()).await;
+            // Update resolver
+            resolver.nullified(nullification.clone()).await;
 
             // Handle the nullification
             self.handle_nullification(nullification.clone()).await;
@@ -1462,7 +1462,7 @@ impl<
                             ?missing_nullifications,
                             ">= 1 honest notarize for nullified parent"
                         );
-                        backfiller
+                        resolver
                             .fetch(missing_notarizations, missing_nullifications)
                             .await;
                     }
@@ -1522,8 +1522,8 @@ impl<
                 }
             }
 
-            // Update backfiller
-            backfiller.finalized(view).await;
+            // Update resolver
+            resolver.finalized(view).await;
 
             // Handle the finalization
             self.handle_finalization(finalization.clone()).await;
@@ -1553,14 +1553,14 @@ impl<
     pub fn start(
         mut self,
         batcher: batcher::Mailbox<V, D>,
-        backfiller: resolver::Mailbox<V, D>,
+        resolver: resolver::Mailbox<V, D>,
         pending_sender: impl Sender<PublicKey = C::PublicKey>,
         recovered_sender: impl Sender<PublicKey = C::PublicKey>,
         recovered_receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) -> Handle<()> {
         self.context.spawn_ref()(self.run(
             batcher,
-            backfiller,
+            resolver,
             pending_sender,
             recovered_sender,
             recovered_receiver,
@@ -1570,7 +1570,7 @@ impl<
     async fn run(
         mut self,
         mut batcher: batcher::Mailbox<V, D>,
-        mut backfiller: resolver::Mailbox<V, D>,
+        mut resolver: resolver::Mailbox<V, D>,
         pending_sender: impl Sender<PublicKey = C::PublicKey>,
         recovered_sender: impl Sender<PublicKey = C::PublicKey>,
         recovered_receiver: impl Receiver<PublicKey = C::PublicKey>,
@@ -1728,7 +1728,7 @@ impl<
             }
 
             // Attempt to propose a container
-            if let Some((context, new_propose)) = self.propose(&mut backfiller).await {
+            if let Some((context, new_propose)) = self.propose(&mut resolver).await {
                 pending_set = Some(self.view);
                 pending_propose_context = Some(context);
                 pending_propose = Some(new_propose);
@@ -1839,7 +1839,7 @@ impl<
 
                     // Ensure view is still useful
                     //
-                    // It is possible that we make a request to the backfiller and prune the view
+                    // It is possible that we make a request to the resolver and prune the view
                     // before we receive the response. In this case, we should ignore the response (not
                     // doing so may result in attempting to store before the prune boundary).
                     view = msg.view();
@@ -1848,7 +1848,7 @@ impl<
                         continue;
                     }
 
-                    // Handle verifier and backfiller
+                    // Handle verifier and resolver
                     match msg {
                         Voter::Notarize(notarize) => {
                             self.handle_notarize(notarize).await;
@@ -1860,11 +1860,11 @@ impl<
                             self.handle_finalize(finalize).await;
                         }
                         Voter::Notarization(notarization)  => {
-                            trace!(view, "received notarization from backfiller");
+                            trace!(view, "received notarization from resolver");
                             self.handle_notarization(notarization).await;
                         },
                         Voter::Nullification(nullification) => {
-                            trace!(view, "received nullification from backfiller");
+                            trace!(view, "received nullification from resolver");
                             self.handle_nullification(nullification).await;
                         },
                         Voter::Finalization(_) => {
@@ -1924,7 +1924,7 @@ impl<
             // Attempt to send any new view messages
             self.notify(
                 &mut batcher,
-                &mut backfiller,
+                &mut resolver,
                 &mut pending_sender,
                 &mut recovered_sender,
                 view,
