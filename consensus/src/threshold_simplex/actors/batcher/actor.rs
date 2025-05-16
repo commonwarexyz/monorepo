@@ -239,6 +239,7 @@ pub struct Actor<
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     D: Digest,
+    R: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<
         Index = View,
         Identity = poly::Public<V>,
@@ -258,22 +259,24 @@ pub struct Actor<
     verified: Counter,
     batch_size: Histogram,
 
-    _phantom: PhantomData<C>,
+    _phantom_verifier: PhantomData<C>,
+    _phantom_reporter: PhantomData<R>,
 }
 
 impl<
         E: Spawner + Metrics,
-        C: Scheme,
+        C: Verifier,
         B: Blocker<PublicKey = C::PublicKey>,
         V: Variant,
         D: Digest,
+        R: Reporter<Activity = Activity<V, D>>,
         S: ThresholdSupervisor<
             Index = View,
             Identity = poly::Public<V>,
             PublicKey = C::PublicKey,
             Public = V::Public,
         >,
-    > Actor<E, C, B, V, D, S>
+    > Actor<E, C, B, V, D, R, S>
 {
     pub fn new(context: E, cfg: Config<B, S>) -> (Self, Mailbox<V, D>) {
         let added = Counter::default();
@@ -306,7 +309,8 @@ impl<
                 verified,
                 batch_size,
 
-                _phantom: PhantomData,
+                _phantom_verifier: PhantomData,
+                _phantom_reporter: PhantomData,
             },
             Mailbox::new(sender),
         )
@@ -328,7 +332,7 @@ impl<
         // Initialize view data structures
         let mut current: View = 0;
         let mut finalized: View = 0;
-        let mut work: BTreeMap<u64, PartialVerifier<V, D>> = BTreeMap::new();
+        let mut work: BTreeMap<u64, Round<C, B, V, D, R, S>> = BTreeMap::new();
         let mut blocking = true;
         let mut initialized = false;
 
