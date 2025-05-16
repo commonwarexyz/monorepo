@@ -12,7 +12,7 @@ use commonware_utils::{from_hex_formatted, union, NZU32};
 use futures::future::try_join_all;
 use governor::Quota;
 use prometheus_client::metrics::counter::Counter;
-use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
+use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -138,12 +138,6 @@ fn main() {
         // Create network
         let p2p = network.start();
 
-        // Remove self from valid recipients
-        let valid_recipients: Vec<PublicKey> = peer_keys
-            .into_iter()
-            .filter(|key| *key != public_key)
-            .collect();
-
         // Create flood
         let flood_sender = context
             .with_label("flood_sender")
@@ -157,9 +151,7 @@ fn main() {
                     rng.fill_bytes(&mut msg);
 
                     // Send to all peers
-                    let recipient_index = rng.gen_range(0..valid_recipients.len());
-                    let recipient = Recipients::One(valid_recipients[recipient_index].clone());
-                    if let Err(e) = flood_sender.send(recipient, msg.into(), false).await {
+                    if let Err(e) = flood_sender.send(Recipients::All, msg.into(), true).await {
                         error!(?e, "could not send flood message");
                     }
                     messages.inc();
