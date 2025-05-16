@@ -856,7 +856,7 @@ impl<
             }
 
             // Check if leader has signed a digest
-            let Some(ref proposal) = round.proposal else {
+            let Some(ref proposal) = round.notarizes_selected else {
                 return None;
             };
 
@@ -1861,6 +1861,7 @@ impl<
                     // Handle verifier and resolver
                     match msg {
                         Voter::Notarize(notarize) => {
+                            warn!(view, "received notarize from batcher");
                             self.handle_notarize(notarize).await;
                         }
                         Voter::Nullify(nullify) => {

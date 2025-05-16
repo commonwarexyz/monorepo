@@ -20,7 +20,7 @@ use commonware_utils::quorum;
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
 use std::{collections::BTreeMap, marker::PhantomData};
-use tracing::{trace, warn};
+use tracing::{debug, trace, warn};
 
 struct Round<
     C: Verifier,
@@ -91,6 +91,7 @@ impl<
     async fn add(&mut self, sender: C::PublicKey, message: Voter<V, D>) -> bool {
         // Check if sender is a participant
         let Some(index) = self.supervisor.is_participant(self.view, &sender) else {
+            warn!(?sender, "blocking peer");
             self.blocker.block(sender).await;
             return false;
         };
@@ -412,7 +413,7 @@ impl<
 
                             // Add the message to the verifier
                             work.entry(view).or_insert(
-                                Round::new(self.blocker.clone(), self.reporter.clone(), self.supervisor.clone(), view, true)
+                                Round::new(self.blocker.clone(), self.reporter.clone(), self.supervisor.clone(), view, initialized)
                             ).add_verified(message);
                             self.added.inc();
                         }
@@ -429,14 +430,10 @@ impl<
 
                     // If there is a decoding error, block
                     let Ok(message) = message else {
+                        warn!(?sender, "blocking peer");
                         self.blocker.block(sender).await;
                         continue;
                     };
-
-                    // If we aren't initialized yet, skip
-                    if !initialized {
-                        continue;
-                    }
 
                     // If the view isn't interesting, we can skip
                     let view = message.view();
@@ -446,7 +443,7 @@ impl<
 
                     // Add the message to the verifier
                     let added = work.entry(view).or_insert(
-                        Round::new(self.blocker.clone(), self.reporter.clone(), self.supervisor.clone(), view, true)
+                        Round::new(self.blocker.clone(), self.reporter.clone(), self.supervisor.clone(), view, initialized)
                     ).add(sender, message).await;
                     if added {
                         self.added.inc();
@@ -479,7 +476,7 @@ impl<
                 }
             }
             let Some((view, voters, failed)) = selected else {
-                trace!(
+                debug!(
                     current,
                     finalized,
                     waiting = work.len(),
@@ -490,7 +487,7 @@ impl<
 
             // Send messages
             let batch = voters.len() + failed.len();
-            trace!(view, batch, "batch verified messages");
+            debug!(view, batch, "batch verified messages");
             self.verified.inc_by(batch as u64);
             self.batch_size.observe(batch as f64);
             consensus.verified(voters).await;

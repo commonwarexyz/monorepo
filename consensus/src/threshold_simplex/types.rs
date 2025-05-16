@@ -22,6 +22,7 @@ use std::{
     collections::{BTreeSet, HashMap, HashSet},
     hash::Hash,
 };
+use tracing::warn;
 
 /// View is a monotonically increasing counter that represents the current focus of consensus.
 /// Each View corresponds to a round in the consensus protocol where validators attempt to agree
@@ -148,6 +149,7 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
         self.finalizes.retain(|f| f.proposal == proposal);
 
         // Set the leader proposal
+        warn!(view = proposal.view, "set leader proposal");
         self.leader_proposal = Some(proposal);
 
         // Force the notarizes to be verified
@@ -160,6 +162,7 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
                 if let Some(ref leader_proposal) = self.leader_proposal {
                     // If leader proposal is set and the message is not for it, drop it
                     if leader_proposal != &notarize.proposal {
+                        warn!("dropping notarize for wrong proposal");
                         return;
                     }
                 } else if let Some(leader) = self.leader {
@@ -174,6 +177,11 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
                 if verified {
                     self.notarizes_verified += 1;
                 } else {
+                    warn!(
+                        view = notarize.view(),
+                        pending = self.notarizes.len(),
+                        "adding notarize"
+                    );
                     self.notarizes.push(notarize);
                 }
             }
@@ -224,6 +232,7 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
         namespace: &[u8],
         identity: &Poly<V::Public>,
     ) -> (Vec<Voter<V, D>>, Vec<u32>) {
+        warn!(pending = self.notarizes.len(), "verifying notarizes");
         self.notarizes_force = false;
         let (notarizes, failed) =
             Notarize::verify_multiple(namespace, identity, std::mem::take(&mut self.notarizes));
@@ -235,12 +244,14 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
         // If we have the leader's notarize, we should verify immediately to start
         // block verification.
         if self.notarizes_force {
+            warn!(pending = self.notarizes.len(), "notarizes force");
             return true;
         }
 
         // If we don't yet know the leader, notarizes may contain messages for
         // a number of different proposals.
         if self.leader.is_none() || self.leader_proposal.is_none() {
+            warn!(pending = self.notarizes.len(), "no notarize from leader");
             return false;
         }
         if let Some(quorum) = self.quorum {
@@ -252,6 +263,10 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
 
             // If we don't have enough to reach the quorum, there is nothing to do yet.
             if self.notarizes_verified + self.notarizes.len() < quorum {
+                warn!(
+                    pending = self.notarizes.len(),
+                    "not enough notarizes to reach quorum"
+                );
                 return false;
             }
         }
