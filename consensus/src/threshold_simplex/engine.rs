@@ -1,5 +1,5 @@
 use super::{
-    actors::{resolver, verifier, voter},
+    actors::{batcher, resolver, voter},
     config::Config,
     types::{Activity, Context, View},
 };
@@ -39,8 +39,8 @@ pub struct Engine<
     voter: voter::Actor<E, C, B, V, D, A, R, F, S>,
     voter_mailbox: voter::Mailbox<V, D>,
 
-    verifier: verifier::Actor<E, C, B, V, D, S>,
-    verifier_mailbox: verifier::Mailbox<V, D>,
+    batcher: batcher::Actor<E, C, B, V, D, S>,
+    batcher_mailbox: batcher::Mailbox<V, D>,
 
     resolver: resolver::Actor<E, C, B, V, D, S>,
     resolver_mailbox: resolver::Mailbox<V, D>,
@@ -94,10 +94,10 @@ impl<
             },
         );
 
-        // Create verifier
-        let (verifier, verifier_mailbox) = verifier::Actor::<E, C, B, V, D, S>::new(
-            context.with_label("verifier"),
-            verifier::Config {
+        // Create batcher
+        let (batcher, batcher_mailbox) = batcher::Actor::new(
+            context.with_label("batcher"),
+            batcher::Config {
                 blocker: cfg.blocker.clone(),
                 supervisor: cfg.supervisor.clone(),
                 namespace: cfg.namespace.clone(),
@@ -129,8 +129,8 @@ impl<
             voter,
             voter_mailbox,
 
-            verifier,
-            verifier_mailbox,
+            batcher,
+            batcher_mailbox,
 
             resolver,
             resolver_mailbox,
@@ -175,23 +175,27 @@ impl<
             impl Receiver<PublicKey = C::PublicKey>,
         ),
     ) {
-        // Start the verifier
-        let mut verifier_task = self.verifier.start(self.voter_mailbox.clone());
-
-        // Start the voter
-        let (voter_sender, voter_receiver) = voter_network;
-        let mut voter_task = self.voter.start(
-            self.verifier_mailbox,
-            self.resolver_mailbox,
-            voter_sender,
-            voter_receiver,
-        );
+        // Start the batcher
+        let (pending_sender, pending_receiver) = pending_network;
+        let mut batcher_task = self
+            .batcher
+            .start(self.voter_mailbox.clone(), pending_receiver);
 
         // Start the resolver
         let (resolver_sender, resolver_receiver) = resolver_network;
         let mut resolver_task =
             self.resolver
                 .start(self.voter_mailbox, resolver_sender, resolver_receiver);
+
+        // Start the voter
+        let (recovered_sender, recovered_receiver) = recovered_network;
+        let mut voter_task = self.voter.start(
+            self.batcher_mailbox,
+            self.resolver_mailbox,
+            pending_sender,
+            recovered_sender,
+            recovered_receiver,
+        );
 
         // Wait for the resolver or voter to finish
         select! {

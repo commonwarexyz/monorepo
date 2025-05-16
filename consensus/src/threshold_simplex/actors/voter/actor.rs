@@ -1,7 +1,7 @@
 use super::{Config, Mailbox, Message};
 use crate::{
     threshold_simplex::{
-        actors::{resolver, verifier},
+        actors::{batcher, resolver, verifier},
         metrics,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Context,
@@ -1873,17 +1873,17 @@ impl<
 
     pub fn start(
         mut self,
-        verifier: verifier::Mailbox<V, D>,
+        batcher: batcher::Mailbox<V, D>,
         backfiller: resolver::Mailbox<V, D>,
         sender: impl Sender<PublicKey = C::PublicKey>,
         receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(verifier, backfiller, sender, receiver))
+        self.context.spawn_ref()(self.run(batcher, backfiller, sender, receiver))
     }
 
     async fn run(
         mut self,
-        mut verifier: verifier::Mailbox<V, D>,
+        mut batcher: batcher::Mailbox<V, D>,
         mut backfiller: resolver::Mailbox<V, D>,
         sender: impl Sender<PublicKey = C::PublicKey>,
         receiver: impl Receiver<PublicKey = C::PublicKey>,

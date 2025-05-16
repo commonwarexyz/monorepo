@@ -2,7 +2,7 @@ use super::{Config, Mailbox, Message};
 use crate::{
     threshold_simplex::{
         actors::voter,
-        types::{PartialVerifier, View, Viewable},
+        types::{Finalize, Notarize, Nullify, PartialVerifier, View, Viewable},
     },
     ThresholdSupervisor,
 };
@@ -10,8 +10,9 @@ use commonware_cryptography::{
     bls12381::primitives::{poly, variant::Variant},
     Digest, Scheme,
 };
-use commonware_p2p::Blocker;
+use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_runtime::{Handle, Metrics, Spawner};
+use commonware_utils::quorum;
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
 use std::{collections::BTreeMap, marker::PhantomData};
@@ -37,6 +38,39 @@ where
             f(item);
         }
         true
+    }
+}
+
+struct Round<V: Variant, D: Digest> {
+    verifier: PartialVerifier<V, D>,
+
+    notarizes: Vec<Option<Notarize<V, D>>>,
+    nullifies: Vec<Option<Nullify<V>>>,
+    finalizes: Vec<Option<Finalize<V, D>>>,
+}
+
+impl<V: Variant, D: Digest> Round<V, D> {
+    fn new<S: ThresholdSupervisor<Index = View, Identity = poly::Public<V>>>(
+        supervisor: &S,
+        view: View,
+        batch: bool,
+    ) -> Self {
+        // Configure quorum params
+        let participants = supervisor.participants(view).unwrap().len();
+        let quorum = if batch {
+            Some(quorum(participants as u32))
+        } else {
+            None
+        };
+
+        // Initialize data structures
+        Self {
+            verifier: PartialVerifier::new(quorum),
+
+            notarizes: vec![None; participants],
+            nullifies: vec![None; participants],
+            finalizes: vec![None; participants],
+        }
     }
 }
 
@@ -119,11 +153,19 @@ impl<
         )
     }
 
-    pub fn start(mut self, consensus: voter::Mailbox<V, D>) -> Handle<()> {
-        self.context.spawn_ref()(self.run(consensus))
+    pub fn start(
+        mut self,
+        consensus: voter::Mailbox<V, D>,
+        receiver: impl Receiver<PublicKey = C::PublicKey>,
+    ) -> Handle<()> {
+        self.context.spawn_ref()(self.run(consensus, receiver))
     }
 
-    pub async fn run(mut self, mut consensus: voter::Mailbox<V, D>) {
+    pub async fn run(
+        mut self,
+        mut consensus: voter::Mailbox<V, D>,
+        receiver: impl Receiver<PublicKey = C::PublicKey>,
+    ) {
         // Initialize view data structures
         let mut current: View = 0;
         let mut finalized: View = 0;
