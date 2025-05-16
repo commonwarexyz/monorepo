@@ -1364,12 +1364,22 @@ mod tests {
                     assert_eq!(*invalid, 0);
                 }
 
-                // Ensure slow node is never active
+                // Ensure slow node never emits a notarize or finalize (will never finish verification in a timely manner)
                 {
                     let notarizes = supervisor.notarizes.lock().unwrap();
                     for (view, payloads) in notarizes.iter() {
                         for (_, participants) in payloads.iter() {
                             if participants.contains(slow) {
+                                panic!("view: {}", view);
+                            }
+                        }
+                    }
+                }
+                {
+                    let finalizes = supervisor.finalizes.lock().unwrap();
+                    for (view, payloads) in finalizes.iter() {
+                        for (_, finalizers) in payloads.iter() {
+                            if finalizers.contains(slow) {
                                 panic!("view: {}", view);
                             }
                         }

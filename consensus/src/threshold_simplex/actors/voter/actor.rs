@@ -159,8 +159,7 @@ impl<
         self.leader = Some((leader, leader_index));
     }
 
-    fn add_verified_proposal(&mut self, proposal: Proposal<D>) {
-        self.verified_proposal = true;
+    fn add_recovered_proposal(&mut self, proposal: Proposal<D>) {
         if self.proposal.is_none() {
             debug!(?proposal, "setting verified proposal");
             self.proposal = Some(proposal);
@@ -199,7 +198,7 @@ impl<
         self.advance_deadline = None;
 
         // If proposal is missing, set it
-        self.add_verified_proposal(notarization.proposal.clone());
+        self.add_recovered_proposal(notarization.proposal.clone());
 
         // Store the notarization
         self.notarization = Some(notarization);
@@ -232,7 +231,7 @@ impl<
         self.advance_deadline = None;
 
         // If proposal is missing, set it
-        self.add_verified_proposal(finalization.proposal.clone());
+        self.add_recovered_proposal(finalization.proposal.clone());
 
         // Store the finalization
         self.finalization = Some(finalization);
@@ -797,6 +796,7 @@ impl<
         debug!(?proposal, "generated proposal");
         assert!(round.proposal.is_none());
         round.proposal = Some(proposal);
+        round.requested_proposal_verify = true;
         round.verified_proposal = true;
         round.leader_deadline = None;
         true
@@ -1224,6 +1224,7 @@ impl<
     }
 
     fn construct_notarize(&mut self, view: u64) -> Option<Notarize<V, D>> {
+        // Determine if it makes sense to broadcast a notarize
         let round = self.views.get_mut(&view)?;
         if round.broadcast_notarize {
             return None;
@@ -1271,6 +1272,7 @@ impl<
     }
 
     fn construct_finalize(&mut self, view: u64) -> Option<Finalize<V, D>> {
+        // Determine if it makes sense to broadcast a finalize
         let round = self.views.get_mut(&view)?;
         if round.broadcast_nullify {
             return None;
@@ -1587,6 +1589,8 @@ impl<
                         if me {
                             let round = self.views.get_mut(&view).expect("missing round");
                             round.proposal = Some(proposal);
+                            round.requested_proposal_build = true;
+                            round.requested_proposal_verify = true;
                             round.verified_proposal = true;
                             round.broadcast_notarize = true;
                         }
