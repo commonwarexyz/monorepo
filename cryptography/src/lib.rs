@@ -143,7 +143,7 @@ pub trait Digestible: Clone + Sized + Send + Sync + 'static {
 
 /// An object that shares a (commitment) [Digest] with other, related values.
 pub trait Committable: Clone + Sized + Send + Sync + 'static {
-    type D: Digest;
+    type C: Digest;
 
     /// Returns the unique commitment of the object as a [Digest].
     ///
@@ -157,7 +157,7 @@ pub trait Committable: Clone + Sized + Send + Sync + 'static {
     /// to different commitments. Primitives assume there is a one-to-one
     /// relation between digest and commitment and a one-to-many relation
     /// between commitment and digest.
-    fn commitment(&self) -> Self::D;
+    fn commitment(&self) -> Self::C;
 }
 
 /// Interface that commonware crates rely on for hashing.

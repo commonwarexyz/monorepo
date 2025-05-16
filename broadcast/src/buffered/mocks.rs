@@ -36,7 +36,7 @@ impl Digestible for TestMessage {
 }
 
 impl Committable for TestMessage {
-    type D = Digest;
+    type C = Digest;
     fn commitment(&self) -> Digest {
         hash(&self.commitment)
     }

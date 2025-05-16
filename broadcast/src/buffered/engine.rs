@@ -76,7 +76,7 @@ pub struct Engine<E: Clock + Spawner + Metrics, P: Array, M: Committable + Diges
     mailbox_receiver: mpsc::Receiver<Message<P, M>>,
 
     /// Pending requests from the application.
-    waiters: HashMap<<M as Committable>::D, Vec<Waiter<P, <M as Digestible>::D, M>>>,
+    waiters: HashMap<<M as Committable>::C, Vec<Waiter<P, <M as Digestible>::D, M>>>,
 
     ////////////////////////////////////////
     // Cache
@@ -85,14 +85,14 @@ pub struct Engine<E: Clock + Spawner + Metrics, P: Array, M: Committable + Diges
     ///
     /// We store messages outside of the deques to minimize memory usage
     /// when receiving duplicate messages.
-    items: HashMap<<M as Committable>::D, HashMap<<M as Digestible>::D, M>>,
+    items: HashMap<<M as Committable>::C, HashMap<<M as Digestible>::D, M>>,
 
     /// A LRU cache of the latest received identities and digests from each peer.
     ///
     /// This is used to limit the number of digests stored per peer.
     /// At most `deque_size` digests are stored per peer. This value is expected to be small, so
     /// membership checks are done in linear time.
-    deques: HashMap<P, VecDeque<Pair<<M as Committable>::D, <M as Digestible>::D>>>,
+    deques: HashMap<P, VecDeque<Pair<<M as Committable>::C, <M as Digestible>::D>>>,
 
     /// The number of times each digest (globally unique) exists in one of the deques.
     ///
@@ -237,7 +237,7 @@ impl<E: Clock + Spawner + Metrics, P: Array, M: Committable + Digestible + Codec
     fn find_messages(
         &mut self,
         peer: &Option<P>,
-        commitment: <M as Committable>::D,
+        commitment: <M as Committable>::C,
         digest: Option<<M as Digestible>::D>,
         all: bool,
     ) -> Vec<M> {
@@ -282,7 +282,7 @@ impl<E: Clock + Spawner + Metrics, P: Array, M: Committable + Digestible + Codec
     async fn handle_subscribe(
         &mut self,
         peer: Option<P>,
-        commitment: <M as Committable>::D,
+        commitment: <M as Committable>::C,
         digest: Option<<M as Digestible>::D>,
         responder: oneshot::Sender<M>,
     ) {
@@ -305,7 +305,7 @@ impl<E: Clock + Spawner + Metrics, P: Array, M: Committable + Digestible + Codec
     async fn handle_get(
         &mut self,
         peer: Option<P>,
-        commitment: <M as Committable>::D,
+        commitment: <M as Committable>::C,
         digest: Option<<M as Digestible>::D>,
         responder: oneshot::Sender<Vec<M>>,
     ) {
