@@ -68,7 +68,6 @@ struct Round<
     quorum: u32,
 
     leader: Option<(C::PublicKey, u32)>,
-    leader_active: bool,
 
     leader_deadline: Option<SystemTime>,
     advance_deadline: Option<SystemTime>,
@@ -126,7 +125,6 @@ impl<
             quorum,
 
             leader: None,
-            leader_active: false,
 
             leader_deadline: None,
             advance_deadline: None,
@@ -180,12 +178,6 @@ impl<
         if self.notarizes_selected.is_none() {
             self.notarizes_selected = Some(notarize.proposal.clone());
         }
-        if let Some((_, leader_index)) = &self.leader {
-            if *leader_index == notarize.signer() {
-                self.leader_active = true;
-                debug!(view = self.view, "leader notarize");
-            }
-        }
         self.notarizes.push(notarize);
     }
 
@@ -197,12 +189,6 @@ impl<
     async fn add_verified_finalize(&mut self, finalize: Finalize<V, D>) {
         if self.finalizes_selected.is_none() {
             self.finalizes_selected = Some(finalize.proposal.clone());
-        }
-        if let Some((_, leader_index)) = &self.leader {
-            if *leader_index == finalize.signer() {
-                self.leader_active = true;
-                debug!(view = self.view, "leader finalize");
-            }
         }
         self.finalizes.push(finalize);
     }
@@ -1020,6 +1006,7 @@ impl<
             return;
         }
         let mut next = view - 1;
+        let mut saw_leader = false;
         while next > view - self.skip_timeout {
             let round = match self.views.get(&next) {
                 Some(round) => round,
@@ -1027,10 +1014,24 @@ impl<
                     return;
                 }
             };
-            if round.leader_active {
-                return;
+
+            // TODO: this approach doesn't make sense...once you miss once, you'll never be able to propose again
+            if let Some((round_leader, _)) = &round.leader {
+                if round_leader == &leader {
+                    saw_leader = true;
+
+                    // If we voted notarize before the timeout, we consider the leader active
+                    if round.broadcast_notarize {
+                        return;
+                    }
+                }
             }
             next -= 1;
+        }
+
+        // If we couldn't observe whether the leader broadcasted or not, skip
+        if !saw_leader {
+            return;
         }
 
         // Reduce leader deadline to now

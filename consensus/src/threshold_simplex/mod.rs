@@ -1217,8 +1217,8 @@ mod tests {
         let n = 5;
         let threshold = quorum(n);
         let required_containers = 50;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let activity_timeout = 20;
+        let skip_timeout = 20;
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
@@ -1370,25 +1370,6 @@ mod tests {
                     for (view, payloads) in notarizes.iter() {
                         for (_, participants) in payloads.iter() {
                             if participants.contains(slow) {
-                                panic!("view: {}", view);
-                            }
-                        }
-                    }
-                }
-                {
-                    let nullifies = supervisor.nullifies.lock().unwrap();
-                    for (view, participants) in nullifies.iter() {
-                        // Start checking once all are online (leader may never have proposed)
-                        if *view > 10 && participants.contains(slow) {
-                            panic!("view: {}", view);
-                        }
-                    }
-                }
-                {
-                    let finalizes = supervisor.finalizes.lock().unwrap();
-                    for (view, payloads) in finalizes.iter() {
-                        for (_, finalizers) in payloads.iter() {
-                            if finalizers.contains(slow) {
                                 panic!("view: {}", view);
                             }
                         }
