@@ -1,7 +1,7 @@
 use super::{Config, Mailbox, Message};
 use crate::{
     threshold_simplex::{
-        actors::{batcher, resolver, verifier},
+        actors::{batcher, resolver},
         metrics,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Context,
@@ -47,6 +47,12 @@ use tracing::{debug, trace, warn};
 
 const GENESIS_VIEW: View = 0;
 
+enum Action {
+    Skip,
+    Block,
+    Process,
+}
+
 struct Round<
     C: Scheme,
     V: Variant,
@@ -67,7 +73,8 @@ struct Round<
     view: View,
     quorum: u32,
 
-    leader: Option<C::PublicKey>,
+    leader: Option<(C::PublicKey, u32)>,
+    leader_active: bool,
 
     leader_deadline: Option<SystemTime>,
     advance_deadline: Option<SystemTime>,
@@ -127,6 +134,8 @@ impl<
             quorum,
 
             leader: None,
+            leader_active: false,
+
             leader_deadline: None,
             advance_deadline: None,
             nullify_retry: None,
@@ -156,7 +165,8 @@ impl<
 
     pub fn set_leader(&mut self, seed: V::Signature) {
         let leader = ThresholdSupervisor::leader(&self.supervisor, self.view, seed).unwrap();
-        self.leader = Some(leader);
+        let leader_index = self.supervisor.is_participant(self.view, &leader).unwrap();
+        self.leader = Some((leader, leader_index));
     }
 
     fn add_verified_proposal(&mut self, proposal: Proposal<D>) {
@@ -178,16 +188,31 @@ impl<
         if self.notarizes_selected.is_none() {
             self.notarizes_selected = Some(notarize.proposal.clone());
         }
+        if let Some((_, leader_index)) = &self.leader {
+            if *leader_index == notarize.signer() {
+                self.leader_active = true;
+            }
+        }
         self.notarizes.push(notarize);
     }
 
     async fn add_verified_nullify(&mut self, nullify: Nullify<V>) {
+        if let Some((_, leader_index)) = &self.leader {
+            if *leader_index == nullify.signer() {
+                self.leader_active = true;
+            }
+        }
         self.nullifies.push(nullify);
     }
 
     async fn add_verified_finalize(&mut self, finalize: Finalize<V, D>) {
         if self.finalizes_selected.is_none() {
             self.finalizes_selected = Some(finalize.proposal.clone());
+        }
+        if let Some((_, leader_index)) = &self.leader {
+            if *leader_index == finalize.signer() {
+                self.leader_active = true;
+            }
         }
         self.finalizes.push(finalize);
     }
@@ -575,7 +600,7 @@ impl<
             None => return false,
         };
         let threshold = identity.required();
-        round.nullification.is_some() || round.nullifies_verified >= threshold as usize
+        round.nullification.is_some() || round.nullifies.len() >= threshold as usize
     }
 
     fn is_finalized(&self, view: View) -> Option<&D> {
@@ -588,7 +613,7 @@ impl<
         assert_eq!(proposal, finalize_proposal);
         let identity = self.supervisor.identity(view)?;
         let threshold = identity.required();
-        if round.finalizes_verified >= threshold as usize {
+        if round.finalizes.len() >= threshold as usize {
             return Some(&proposal.payload);
         }
         None
@@ -644,7 +669,7 @@ impl<
         // Check if we are leader
         {
             let round = self.views.get_mut(&self.view).unwrap();
-            let Some(leader) = &round.leader else {
+            let Some((leader, _)) = &round.leader else {
                 return None;
             };
             if *leader != self.crypto.public_key() {
@@ -713,7 +738,7 @@ impl<
 
     async fn timeout<Sr: Sender>(
         &mut self,
-        verifier: &mut verifier::Mailbox<V, D>,
+        batcher: &mut batcher::Mailbox<V, D>,
         sender: &mut WrappedSender<Sr, Voter<V, D>>,
     ) {
         // Set timeout fired
@@ -760,8 +785,8 @@ impl<
         let nullify = Nullify::sign(&self.namespace, share, self.view);
 
         // Handle the nullify
-        if matches!(self.reserve_nullify(&nullify).await, Action::Process) {
-            verifier.trusted(Voter::Nullify(nullify.clone())).await;
+        if !retry {
+            batcher.verified(Voter::Nullify(nullify.clone())).await;
             self.handle_nullify(nullify.clone()).await;
 
             // Sync the journal
@@ -780,40 +805,6 @@ impl<
             .get_or_create(&metrics::NULLIFY)
             .inc();
         debug!(view = self.view, "broadcasted nullify");
-    }
-
-    async fn nullify(&mut self, sender: &C::PublicKey, nullify: &Nullify<V>) -> Action {
-        // Ensure we are in the right view to process this message
-        if !self.interesting(nullify.view, false) {
-            return Action::Skip;
-        }
-
-        // Verify that signer is a validator
-        let Some(public_key_index) = self.supervisor.is_participant(nullify.view, sender) else {
-            return Action::Block;
-        };
-
-        // Verify sender is signer
-        if public_key_index != nullify.signer() {
-            return Action::Block;
-        }
-        self.reserve_nullify(nullify).await
-    }
-
-    async fn reserve_nullify(&mut self, nullify: &Nullify<V>) -> Action {
-        // Check to see if nullify is for proposal in view
-        let view = nullify.view;
-        let round = self.views.entry(view).or_insert_with(|| {
-            Round::new(
-                &self.context,
-                self.reporter.clone(),
-                self.supervisor.clone(),
-                view,
-            )
-        });
-
-        // Try to reserve
-        round.add_reserved_nullify(nullify).await
     }
 
     async fn handle_nullify(&mut self, nullify: Nullify<V>) {
@@ -872,7 +863,7 @@ impl<
             let round = self.views.get(&self.view)?;
 
             // If we are the leader, drop peer proposals
-            let Some(leader) = &round.leader else {
+            let Some((leader, _)) = &round.leader else {
                 debug!(
                     view = self.view,
                     "dropping peer proposal because leader is not set"
@@ -882,7 +873,6 @@ impl<
             if *leader == self.crypto.public_key() {
                 return None;
             }
-            let leader_index = self.supervisor.is_participant(self.view, leader)?;
 
             // If we already broadcast nullify or set proposal, do nothing
             if round.broadcast_nullify {
@@ -893,10 +883,9 @@ impl<
             }
 
             // Check if leader has signed a digest
-            let Status::Verified(ref notarize) = round.notarizes[leader_index as usize] else {
+            let Some(ref proposal) = round.proposal else {
                 return None;
             };
-            let proposal = &notarize.proposal;
 
             // Check parent validity
             if proposal.view <= proposal.parent {
@@ -1004,7 +993,7 @@ impl<
 
     fn since_view_start(&self, view: u64) -> Option<(bool, f64)> {
         let round = self.views.get(&view)?;
-        let leader = round.leader.as_ref()?;
+        let (leader, _) = round.leader.as_ref()?;
         let Ok(elapsed) = self.context.current().duration_since(round.start) else {
             return None;
         };
@@ -1045,30 +1034,20 @@ impl<
         }
 
         // Check if we should skip this view
-        let leader = round.leader.as_ref().unwrap().clone();
+        let (leader, _) = round.leader.as_ref().unwrap().clone();
         if view < self.skip_timeout || leader == self.crypto.public_key() {
             // Don't skip the view
             return;
         }
         let mut next = view - 1;
         while next > view - self.skip_timeout {
-            let leader_index = match self.supervisor.is_participant(next, &leader) {
-                Some(index) => index,
-                None => {
-                    // Don't punish a participant if they weren't online at any point during
-                    // the lookback window.
-                    return;
-                }
-            };
             let round = match self.views.get(&next) {
                 Some(round) => round,
                 None => {
                     return;
                 }
             };
-            if matches!(round.notarizes[leader_index as usize], Status::Verified(_))
-                || matches!(round.nullifies[leader_index as usize], Status::Verified(_))
-            {
+            if round.leader_active {
                 return;
             }
             next -= 1;
@@ -1126,41 +1105,6 @@ impl<
 
         // Update metrics
         self.tracked_views.set(self.views.len() as i64);
-    }
-
-    async fn notarize(&mut self, sender: &C::PublicKey, notarize: &Notarize<V, D>) -> Action {
-        // Ensure we are in the right view to process this message
-        let view = notarize.view();
-        if !self.interesting(view, false) {
-            return Action::Skip;
-        }
-
-        // Verify that sender is a validator
-        let Some(public_key_index) = self.supervisor.is_participant(view, sender) else {
-            return Action::Block;
-        };
-
-        // Verify sender is signer
-        if public_key_index != notarize.signer() {
-            return Action::Block;
-        }
-        self.reserve_notarize(notarize).await
-    }
-
-    async fn reserve_notarize(&mut self, notarize: &Notarize<V, D>) -> Action {
-        // Check to see if notarize is for proposal in view
-        let view = notarize.view();
-        let round = self.views.entry(view).or_insert_with(|| {
-            Round::new(
-                &self.context,
-                self.reporter.clone(),
-                self.supervisor.clone(),
-                view,
-            )
-        });
-
-        // Try to reserve
-        round.add_reserved_notarize(notarize).await
     }
 
     async fn handle_notarize(&mut self, notarize: Notarize<V, D>) {
@@ -1293,42 +1237,6 @@ impl<
 
         // Enter next view
         self.enter_view(view + 1, seed);
-    }
-
-    async fn finalize(&mut self, sender: &C::PublicKey, finalize: &Finalize<V, D>) -> Action {
-        // Ensure we are in the right view to process this message
-        let view = finalize.view();
-        if !self.interesting(view, false) {
-            return Action::Skip;
-        }
-
-        // Verify that signer is a validator
-        let Some(public_key_index) = self.supervisor.is_participant(view, sender) else {
-            return Action::Block;
-        };
-
-        // Verify sender is signer
-        if public_key_index != finalize.signer() {
-            return Action::Block;
-        }
-
-        self.reserve_finalize(finalize).await
-    }
-
-    async fn reserve_finalize(&mut self, finalize: &Finalize<V, D>) -> Action {
-        // Check to see if finalize is for proposal in view
-        let view = finalize.view();
-        let round = self.views.entry(view).or_insert_with(|| {
-            Round::new(
-                &self.context,
-                self.reporter.clone(),
-                self.supervisor.clone(),
-                view,
-            )
-        });
-
-        // Try to reserve
-        round.add_reserved_finalize(finalize).await
     }
 
     async fn handle_finalize(&mut self, finalize: Finalize<V, D>) {
@@ -1501,7 +1409,7 @@ impl<
 
     async fn notify<Sr: Sender>(
         &mut self,
-        verifier: &mut verifier::Mailbox<V, D>,
+        batcher: &mut batcher::Mailbox<V, D>,
         backfiller: &mut resolver::Mailbox<V, D>,
         sender: &mut WrappedSender<Sr, Voter<V, D>>,
         view: u64,
@@ -1509,11 +1417,7 @@ impl<
         // Attempt to notarize
         if let Some(notarize) = self.construct_notarize(view) {
             // Handle the notarize
-            assert!(matches!(
-                self.reserve_notarize(&notarize).await,
-                Action::Process
-            ));
-            verifier.trusted(Voter::Notarize(notarize.clone())).await;
+            batcher.verified(Voter::Notarize(notarize.clone())).await;
             self.handle_notarize(notarize.clone()).await;
 
             // Sync the journal
@@ -1654,11 +1558,7 @@ impl<
         // Attempt to finalize
         if let Some(finalize) = self.construct_finalize(view) {
             // Handle the finalize
-            assert!(matches!(
-                self.reserve_finalize(&finalize).await,
-                Action::Process
-            ));
-            verifier.trusted(Voter::Finalize(finalize.clone())).await;
+            batcher.verified(Voter::Finalize(finalize.clone())).await;
             self.handle_finalize(finalize.clone()).await;
 
             // Sync the journal
@@ -1855,15 +1755,9 @@ impl<
 
         // Initialize verifier with leader
         let round = self.views.get_mut(&observed_view).expect("missing round");
-        let leader = self
-            .supervisor
-            .is_participant(
-                observed_view,
-                round.leader.as_ref().expect("missing leader"),
-            )
-            .unwrap();
-        verifier
-            .update(observed_view, leader, self.last_finalized)
+        let (_, leader_index) = round.leader.as_ref().unwrap();
+        batcher
+            .update(observed_view, *leader_index, self.last_finalized)
             .await;
 
         // Create shutdown tracker
@@ -1926,7 +1820,7 @@ impl<
                 },
                 _ = self.context.sleep_until(timeout) => {
                     // Trigger the timeout
-                    self.timeout(&mut verifier, &mut sender).await;
+                    self.timeout(&mut batcher, &mut sender).await;
                     view = self.view;
                 },
                 proposed = propose_wait => {
@@ -2104,7 +1998,7 @@ impl<
             };
 
             // Attempt to send any new view messages
-            self.notify(&mut verifier, &mut backfiller, &mut sender, view)
+            self.notify(&mut batcher, &mut backfiller, &mut sender, view)
                 .await;
 
             // After sending all required messages, prune any views
@@ -2114,12 +2008,9 @@ impl<
             // Update the verifier if we have moved to a new view
             if self.view > start {
                 let round = self.views.get_mut(&self.view).expect("missing round");
-                let leader = self
-                    .supervisor
-                    .is_participant(self.view, round.leader.as_ref().expect("missing leader"))
-                    .expect("missing participant");
-                verifier
-                    .update(self.view, leader, self.last_finalized)
+                let (_, leader_index) = round.leader.as_ref().unwrap();
+                batcher
+                    .update(self.view, *leader_index, self.last_finalized)
                     .await;
             }
         }
