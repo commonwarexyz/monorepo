@@ -271,7 +271,7 @@ impl<V: Variant, D: Digest> PartialVerifier<V, D> {
         (nullifies.into_iter().map(Voter::Nullify).collect(), failed)
     }
 
-    pub fn ready_nullifies(&mut self) -> bool {
+    pub fn ready_nullifies(&self) -> bool {
         if let Some(quorum) = self.quorum {
             // If we have already performed sufficient verifications, there is nothing more
             // to do.
