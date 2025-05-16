@@ -74,6 +74,11 @@ impl crate::Network for Network {
             .into_std()
             .map_err(|_| crate::Error::ConnectionFailed)?;
 
+        // Explicitly set non-blocking mode to true
+        stream
+            .set_nonblocking(true)
+            .map_err(|_| crate::Error::ConnectionFailed)?;
+
         let fd = Arc::new(OwnedFd::from(stream));
         Ok((
             Sink {
@@ -108,6 +113,10 @@ impl crate::Listener for Listener {
 
         let stream = stream
             .into_std()
+            .map_err(|_| crate::Error::ConnectionFailed)?;
+        // Explicitly set non-blocking mode to true
+        stream
+            .set_nonblocking(true)
             .map_err(|_| crate::Error::ConnectionFailed)?;
 
         let fd = Arc::new(OwnedFd::from(stream));
