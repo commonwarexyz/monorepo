@@ -76,7 +76,7 @@ pub struct Engine<E: Clock + Spawner + Metrics, P: Array, M: Committable + Diges
     mailbox_receiver: mpsc::Receiver<Message<P, M>>,
 
     /// Pending requests from the application.
-    waiters: HashMap<<M as Committable>::C, Vec<Waiter<P, <M as Digestible>::D, M>>>,
+    waiters: HashMap<M::Commitment, Vec<Waiter<P, M::Digest, M>>>,
 
     ////////////////////////////////////////
     // Cache
@@ -85,20 +85,20 @@ pub struct Engine<E: Clock + Spawner + Metrics, P: Array, M: Committable + Diges
     ///
     /// We store messages outside of the deques to minimize memory usage
     /// when receiving duplicate messages.
-    items: HashMap<<M as Committable>::C, HashMap<<M as Digestible>::D, M>>,
+    items: HashMap<M::Commitment, HashMap<M::Digest, M>>,
 
     /// A LRU cache of the latest received identities and digests from each peer.
     ///
     /// This is used to limit the number of digests stored per peer.
     /// At most `deque_size` digests are stored per peer. This value is expected to be small, so
     /// membership checks are done in linear time.
-    deques: HashMap<P, VecDeque<Pair<<M as Committable>::C, <M as Digestible>::D>>>,
+    deques: HashMap<P, VecDeque<Pair<M::Commitment, M::Digest>>>,
 
     /// The number of times each digest (globally unique) exists in one of the deques.
     ///
     /// Multiple peers can send the same message and we only want to store
     /// the message once.
-    counts: HashMap<<M as Digestible>::D, usize>,
+    counts: HashMap<M::Digest, usize>,
 
     ////////////////////////////////////////
     // Metrics
@@ -237,8 +237,8 @@ impl<E: Clock + Spawner + Metrics, P: Array, M: Committable + Digestible + Codec
     fn find_messages(
         &mut self,
         peer: &Option<P>,
-        commitment: <M as Committable>::C,
-        digest: Option<<M as Digestible>::D>,
+        commitment: M::Commitment,
+        digest: Option<M::Digest>,
         all: bool,
     ) -> Vec<M> {
         match peer {
@@ -282,8 +282,8 @@ impl<E: Clock + Spawner + Metrics, P: Array, M: Committable + Digestible + Codec
     async fn handle_subscribe(
         &mut self,
         peer: Option<P>,
-        commitment: <M as Committable>::C,
-        digest: Option<<M as Digestible>::D>,
+        commitment: M::Commitment,
+        digest: Option<M::Digest>,
         responder: oneshot::Sender<M>,
     ) {
         // Check if the message is already in the cache
@@ -305,8 +305,8 @@ impl<E: Clock + Spawner + Metrics, P: Array, M: Committable + Digestible + Codec
     async fn handle_get(
         &mut self,
         peer: Option<P>,
-        commitment: <M as Committable>::C,
-        digest: Option<<M as Digestible>::D>,
+        commitment: M::Commitment,
+        digest: Option<M::Digest>,
         responder: oneshot::Sender<Vec<M>>,
     ) {
         let items = self.find_messages(&peer, commitment, digest, true);

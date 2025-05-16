@@ -26,16 +26,16 @@ pub enum Message<P: Array, M: Committable + Digestible> {
     /// by dropping the responder.
     Subscribe {
         peer: Option<P>,
-        commitment: <M as Committable>::C,
-        digest: Option<<M as Digestible>::D>,
+        commitment: M::Commitment,
+        digest: Option<M::Digest>,
         responder: oneshot::Sender<M>,
     },
 
     /// Get all messages for an commitment.
     Get {
         peer: Option<P>,
-        commitment: <M as Committable>::C,
-        digest: Option<<M as Digestible>::D>,
+        commitment: M::Commitment,
+        digest: Option<M::Digest>,
         responder: oneshot::Sender<Vec<M>>,
     },
 }
@@ -61,8 +61,8 @@ impl<P: Array, M: Committable + Digestible + Codec> Mailbox<P, M> {
     pub async fn subscribe(
         &mut self,
         peer: Option<P>,
-        commitment: <M as Committable>::C,
-        digest: Option<<M as Digestible>::D>,
+        commitment: M::Commitment,
+        digest: Option<M::Digest>,
     ) -> oneshot::Receiver<M> {
         let (responder, receiver) = oneshot::channel();
         self.sender
@@ -86,8 +86,8 @@ impl<P: Array, M: Committable + Digestible + Codec> Mailbox<P, M> {
     pub async fn subscribe_prepared(
         &mut self,
         peer: Option<P>,
-        commitment: <M as Committable>::C,
-        digest: Option<<M as Digestible>::D>,
+        commitment: M::Commitment,
+        digest: Option<M::Digest>,
         responder: oneshot::Sender<M>,
     ) {
         self.sender
@@ -105,8 +105,8 @@ impl<P: Array, M: Committable + Digestible + Codec> Mailbox<P, M> {
     pub async fn get(
         &mut self,
         peer: Option<P>,
-        commitment: <M as Committable>::C,
-        digest: Option<<M as Digestible>::D>,
+        commitment: M::Commitment,
+        digest: Option<M::Digest>,
     ) -> Vec<M> {
         let (responder, receiver) = oneshot::channel();
         self.sender

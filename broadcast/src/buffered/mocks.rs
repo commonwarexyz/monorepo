@@ -29,14 +29,14 @@ impl TestMessage {
 }
 
 impl Digestible for TestMessage {
-    type D = Digest;
+    type Digest = Digest;
     fn digest(&self) -> Digest {
         hash(&self.content)
     }
 }
 
 impl Committable for TestMessage {
-    type C = Digest;
+    type Commitment = Digest;
     fn commitment(&self) -> Digest {
         hash(&self.commitment)
     }
