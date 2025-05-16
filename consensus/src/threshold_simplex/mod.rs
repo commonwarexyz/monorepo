@@ -1287,8 +1287,8 @@ mod tests {
                         hasher: Sha256::default(),
                         relay: relay.clone(),
                         participant: validator.clone(),
-                        propose_latency: (3_000.0, 0.0),
-                        verify_latency: (3_000.0, 5.0),
+                        propose_latency: (10_000.0, 0.0),
+                        verify_latency: (10_000.0, 5.0),
                     }
                 } else {
                     mocks::application::Config {
@@ -1364,7 +1364,7 @@ mod tests {
                     assert_eq!(*invalid, 0);
                 }
 
-                // Ensure slow node is never active (will never process anything fast enough to nullify)
+                // Ensure slow node is never active
                 {
                     let notarizes = supervisor.notarizes.lock().unwrap();
                     for (view, payloads) in notarizes.iter() {

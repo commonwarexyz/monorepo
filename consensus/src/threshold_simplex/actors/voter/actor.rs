@@ -183,17 +183,14 @@ impl<
         if let Some((_, leader_index)) = &self.leader {
             if *leader_index == notarize.signer() {
                 self.leader_active = true;
+                debug!(view = self.view, "leader notarize");
             }
         }
         self.notarizes.push(notarize);
     }
 
     async fn add_verified_nullify(&mut self, nullify: Nullify<V>) {
-        if let Some((_, leader_index)) = &self.leader {
-            if *leader_index == nullify.signer() {
-                self.leader_active = true;
-            }
-        }
+        // We don't consider a nullify vote as being active.
         self.nullifies.push(nullify);
     }
 
@@ -204,6 +201,7 @@ impl<
         if let Some((_, leader_index)) = &self.leader {
             if *leader_index == finalize.signer() {
                 self.leader_active = true;
+                debug!(view = self.view, "leader finalize");
             }
         }
         self.finalizes.push(finalize);
@@ -720,6 +718,11 @@ impl<
     ) {
         // Set timeout fired
         let round = self.views.get_mut(&self.view).unwrap();
+        let leader = if let Some((leader, _)) = &round.leader {
+            Some(leader.clone())
+        } else {
+            None
+        };
         let mut retry = false;
         if round.broadcast_nullify {
             retry = true;
@@ -763,6 +766,14 @@ impl<
 
         // Handle the nullify
         if !retry {
+            // Log if we are the leader
+            if let Some(leader) = leader {
+                if self.crypto.public_key() == leader {
+                    warn!(view = self.view, "nullifying as leader");
+                }
+            }
+
+            // Pass on nullify
             batcher.verified(Voter::Nullify(nullify.clone())).await;
             self.handle_nullify(nullify.clone()).await;
 
