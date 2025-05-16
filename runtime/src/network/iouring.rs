@@ -30,8 +30,10 @@ impl Network {
     pub(crate) fn start(cfg: iouring::Config) -> Result<Self, crate::Error> {
         // Create an io_uring instance to handle send operations.
         let (send_submitter, rx) = mpsc::channel(cfg.size as usize);
-        let cfg_clone = cfg.clone();
-        std::thread::spawn(move || block_on(iouring::run(cfg_clone, rx)));
+        std::thread::spawn({
+            let cfg = cfg.clone();
+            move || block_on(iouring::run(cfg, rx))
+        });
 
         // Create an io_uring instance to handle receive operations.
         let (recv_submitter, rx) = mpsc::channel(cfg.size as usize);
