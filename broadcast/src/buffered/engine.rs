@@ -76,6 +76,7 @@ pub struct Engine<E: Clock + Spawner + Metrics, P: Array, M: Committable + Diges
     mailbox_receiver: mpsc::Receiver<Message<P, M>>,
 
     /// Pending requests from the application.
+    #[allow(clippy::type_complexity)]
     waiters: HashMap<M::Commitment, Vec<Waiter<P, M::Digest, M>>>,
 
     ////////////////////////////////////////
@@ -92,6 +93,7 @@ pub struct Engine<E: Clock + Spawner + Metrics, P: Array, M: Committable + Diges
     /// This is used to limit the number of digests stored per peer.
     /// At most `deque_size` digests are stored per peer. This value is expected to be small, so
     /// membership checks are done in linear time.
+    #[allow(clippy::type_complexity)]
     deques: HashMap<P, VecDeque<Pair<M::Commitment, M::Digest>>>,
 
     /// The number of times each digest (globally unique) exists in one of the deques.
