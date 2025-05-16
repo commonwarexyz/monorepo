@@ -217,7 +217,7 @@ impl<
         }
     }
 
-    async fn add_verified(&mut self, message: Voter<V, D>) {
+    async fn add_constructed(&mut self, message: Voter<V, D>) {
         match &message {
             Voter::Notarize(notarize) => {
                 let signer = notarize.signer() as usize;
@@ -454,7 +454,7 @@ impl<
                             }
                             active.send(is_active).unwrap();
                         }
-                        Some(Message::Verified(message)) => {
+                        Some(Message::Constructed(message)) => {
                             // If the view isn't interesting, we can skip
                             let view = message.view();
                             if !interesting(self.activity_timeout, finalized, current, view) {
@@ -464,7 +464,7 @@ impl<
                             // Add the message to the verifier
                             work.entry(view).or_insert(
                                 Round::new(self.blocker.clone(), self.reporter.clone(), self.supervisor.clone(), view, initialized)
-                            ).add_verified(message).await;
+                            ).add_constructed(message).await;
                             self.added.inc();
                         }
                         None => {

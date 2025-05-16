@@ -14,7 +14,7 @@ pub enum Message<P: Array, V: Variant, D: Digest> {
 
         active: oneshot::Sender<bool>,
     },
-    Verified(Voter<V, D>),
+    Constructed(Voter<V, D>),
 }
 
 #[derive(Clone)]
@@ -41,9 +41,9 @@ impl<P: Array, V: Variant, D: Digest> Mailbox<P, V, D> {
         active_receiver.await.unwrap()
     }
 
-    pub async fn verified(&mut self, message: Voter<V, D>) {
+    pub async fn constructed(&mut self, message: Voter<V, D>) {
         self.sender
-            .send(Message::Verified(message))
+            .send(Message::Constructed(message))
             .await
             .expect("Failed to send message");
     }

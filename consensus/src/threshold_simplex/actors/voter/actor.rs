@@ -735,7 +735,7 @@ impl<
 
         // Handle the nullify
         if !retry {
-            batcher.verified(Voter::Nullify(nullify.clone())).await;
+            batcher.constructed(Voter::Nullify(nullify.clone())).await;
             self.handle_nullify(nullify.clone()).await;
 
             // Sync the journal
@@ -1320,7 +1320,7 @@ impl<
         // Attempt to notarize
         if let Some(notarize) = self.construct_notarize(view) {
             // Handle the notarize
-            batcher.verified(Voter::Notarize(notarize.clone())).await;
+            batcher.constructed(Voter::Notarize(notarize.clone())).await;
             self.handle_notarize(notarize.clone()).await;
 
             // Sync the journal
@@ -1458,7 +1458,7 @@ impl<
         // Attempt to finalize
         if let Some(finalize) = self.construct_finalize(view) {
             // Handle the finalize
-            batcher.verified(Voter::Finalize(finalize.clone())).await;
+            batcher.constructed(Voter::Finalize(finalize.clone())).await;
             self.handle_finalize(finalize.clone()).await;
 
             // Sync the journal
