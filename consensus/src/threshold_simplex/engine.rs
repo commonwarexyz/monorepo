@@ -39,7 +39,7 @@ pub struct Engine<
     voter: voter::Actor<E, C, B, V, D, A, R, F, S>,
     voter_mailbox: voter::Mailbox<V, D>,
 
-    batcher: batcher::Actor<E, C, B, V, D, S>,
+    batcher: batcher::Actor<E, C, B, V, D, F, S>,
     batcher_mailbox: batcher::Mailbox<V, D>,
 
     resolver: resolver::Actor<E, C, B, V, D, S>,
@@ -78,7 +78,7 @@ impl<
                 blocker: cfg.blocker.clone(),
                 automaton: cfg.automaton,
                 relay: cfg.relay,
-                reporter: cfg.reporter,
+                reporter: cfg.reporter.clone(),
                 supervisor: cfg.supervisor.clone(),
                 partition: cfg.partition,
                 compression: cfg.compression,
@@ -99,9 +99,11 @@ impl<
             context.with_label("batcher"),
             batcher::Config {
                 blocker: cfg.blocker.clone(),
+                reporter: cfg.reporter,
                 supervisor: cfg.supervisor.clone(),
                 namespace: cfg.namespace.clone(),
                 mailbox_size: cfg.mailbox_size,
+                activity_timeout: cfg.activity_timeout,
             },
         );
 
@@ -202,17 +204,17 @@ impl<
             _ = &mut voter_task => {
                 debug!("voter finished");
                 resolver_task.abort();
-                verifier_task.abort();
+                batcher_task.abort();
             },
-            _ = &mut verifier_task => {
-                debug!("verifier finished");
+            _ = &mut batcher_task => {
+                debug!("batcher finished");
                 voter_task.abort();
                 resolver_task.abort();
             },
             _ = &mut resolver_task => {
                 debug!("resolver finished");
                 voter_task.abort();
-                verifier_task.abort();
+                batcher_task.abort();
             },
         }
     }

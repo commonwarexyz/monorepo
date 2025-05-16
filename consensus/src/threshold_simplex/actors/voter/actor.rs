@@ -53,7 +53,6 @@ struct Round<
     C: Scheme,
     V: Variant,
     D: Digest,
-    R: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<
         Seed = V::Signature,
         Index = View,
@@ -63,7 +62,6 @@ struct Round<
     >,
 > {
     start: SystemTime,
-    reporter: R,
     supervisor: S,
 
     view: View,
@@ -108,7 +106,6 @@ impl<
         C: Scheme,
         V: Variant,
         D: Digest,
-        R: Reporter<Activity = Activity<V, D>>,
         S: ThresholdSupervisor<
             Seed = V::Signature,
             Index = View,
@@ -116,14 +113,13 @@ impl<
             PublicKey = C::PublicKey,
             Public = V::Public,
         >,
-    > Round<C, V, D, R, S>
+    > Round<C, V, D, S>
 {
-    pub fn new(clock: &impl Clock, reporter: R, supervisor: S, view: View) -> Self {
+    pub fn new(clock: &impl Clock, supervisor: S, view: View) -> Self {
         let participants = supervisor.participants(view).unwrap().len();
         let quorum = quorum(participants as u32);
         Self {
             start: clock.current(),
-            reporter,
             supervisor,
 
             view,
@@ -453,7 +449,7 @@ pub struct Actor<
     mailbox_receiver: mpsc::Receiver<Message<V, D>>,
 
     view: View,
-    views: BTreeMap<View, Round<C, V, D, F, S>>,
+    views: BTreeMap<View, Round<C, V, D, S>>,
     last_finalized: View,
 
     current_view: Gauge,
@@ -781,14 +777,10 @@ impl<
     async fn handle_nullify(&mut self, nullify: Nullify<V>) {
         // Check to see if nullify is for proposal in view
         let view = nullify.view;
-        let round = self.views.entry(view).or_insert_with(|| {
-            Round::new(
-                &self.context,
-                self.reporter.clone(),
-                self.supervisor.clone(),
-                view,
-            )
-        });
+        let round = self
+            .views
+            .entry(view)
+            .or_insert_with(|| Round::new(&self.context, self.supervisor.clone(), view));
 
         // Handle nullify
         if self.journal.is_some() {
@@ -983,14 +975,10 @@ impl<
         }
 
         // Setup new view
-        let round = self.views.entry(view).or_insert_with(|| {
-            Round::new(
-                &self.context,
-                self.reporter.clone(),
-                self.supervisor.clone(),
-                view,
-            )
-        });
+        let round = self
+            .views
+            .entry(view)
+            .or_insert_with(|| Round::new(&self.context, self.supervisor.clone(), view));
         round.leader_deadline = Some(self.context.current() + self.leader_timeout);
         round.advance_deadline = Some(self.context.current() + self.notarization_timeout);
         round.set_leader(seed);
@@ -1081,14 +1069,10 @@ impl<
     async fn handle_notarize(&mut self, notarize: Notarize<V, D>) {
         // Check to see if notarize is for proposal in view
         let view = notarize.view();
-        let round = self.views.entry(view).or_insert_with(|| {
-            Round::new(
-                &self.context,
-                self.reporter.clone(),
-                self.supervisor.clone(),
-                view,
-            )
-        });
+        let round = self
+            .views
+            .entry(view)
+            .or_insert_with(|| Round::new(&self.context, self.supervisor.clone(), view));
 
         // Handle notarize
         if self.journal.is_some() {
@@ -1132,14 +1116,10 @@ impl<
     async fn handle_notarization(&mut self, notarization: Notarization<V, D>) {
         // Create round (if it doesn't exist)
         let view = notarization.view();
-        let round = self.views.entry(view).or_insert_with(|| {
-            Round::new(
-                &self.context,
-                self.reporter.clone(),
-                self.supervisor.clone(),
-                view,
-            )
-        });
+        let round = self
+            .views
+            .entry(view)
+            .or_insert_with(|| Round::new(&self.context, self.supervisor.clone(), view));
 
         // Store notarization
         let msg = Voter::Notarization(notarization.clone());
@@ -1186,12 +1166,7 @@ impl<
         // Create round (if it doesn't exist)
         let view = nullification.view;
         let round = self.views.entry(view).or_insert_with(|| {
-            Round::new(
-                &self.context,
-                self.reporter.clone(),
-                self.supervisor.clone(),
-                nullification.view,
-            )
+            Round::new(&self.context, self.supervisor.clone(), nullification.view)
         });
 
         // Store nullification
@@ -1213,14 +1188,10 @@ impl<
     async fn handle_finalize(&mut self, finalize: Finalize<V, D>) {
         // Get view for finalize
         let view = finalize.view();
-        let round = self.views.entry(view).or_insert_with(|| {
-            Round::new(
-                &self.context,
-                self.reporter.clone(),
-                self.supervisor.clone(),
-                view,
-            )
-        });
+        let round = self
+            .views
+            .entry(view)
+            .or_insert_with(|| Round::new(&self.context, self.supervisor.clone(), view));
 
         // Handle finalize
         if self.journal.is_some() {
@@ -1264,14 +1235,10 @@ impl<
     async fn handle_finalization(&mut self, finalization: Finalization<V, D>) {
         // Create round (if it doesn't exist)
         let view = finalization.view();
-        let round = self.views.entry(view).or_insert_with(|| {
-            Round::new(
-                &self.context,
-                self.reporter.clone(),
-                self.supervisor.clone(),
-                view,
-            )
-        });
+        let round = self
+            .views
+            .entry(view)
+            .or_insert_with(|| Round::new(&self.context, self.supervisor.clone(), view));
 
         // Store finalization
         let msg = Voter::Finalization(finalization.clone());
