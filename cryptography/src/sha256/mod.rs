@@ -88,12 +88,6 @@ impl Hasher for Sha256 {
     fn reset(&mut self) {
         self.hasher = ISha256::new();
     }
-
-    fn random<R: Rng + CryptoRng>(rng: &mut R) -> Self::Digest {
-        let mut digest = [0u8; DIGEST_LENGTH];
-        rng.fill_bytes(&mut digest);
-        Self::Digest::from(digest)
-    }
 }
 
 /// Digest of a SHA-256 hashing operation.
@@ -153,7 +147,13 @@ impl Display for Digest {
     }
 }
 
-impl crate::Digest for Digest {}
+impl crate::Digest for Digest {
+    fn random<R: Rng + CryptoRng>(rng: &mut R) -> Self {
+        let mut array = [0u8; DIGEST_LENGTH];
+        rng.fill_bytes(&mut array);
+        Self(array)
+    }
+}
 
 #[cfg(test)]
 mod tests {

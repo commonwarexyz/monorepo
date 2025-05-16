@@ -1,4 +1,4 @@
-use commonware_cryptography::{Hasher, Sha256};
+use commonware_cryptography::{sha256, Digest as _, Sha256};
 use commonware_storage::bmt::Builder;
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
@@ -9,7 +9,7 @@ fn bench_new(c: &mut Criterion) {
         let mut elements = Vec::with_capacity(n);
         let mut sampler = StdRng::seed_from_u64(0);
         for _ in 0..n {
-            let element = Sha256::random(&mut sampler);
+            let element = sha256::Digest::random(&mut sampler);
             elements.push(element);
         }
 
