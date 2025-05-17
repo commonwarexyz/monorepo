@@ -429,7 +429,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         let chunk = self.get_chunk(bit_offset);
 
         if self.next_bit == 0 {
-            let proof = Proof::<H>::range_proof(&self.mmr, leaf_pos, leaf_pos).await?;
+            let proof = Proof::<H>::range_proof(&self.mmr, leaf_pos, leaf_pos, None).await?;
             return Ok((proof, *chunk));
         }
 
@@ -441,7 +441,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
             mmr: &self.mmr,
             last_chunk_mmr: &mmr,
         };
-        let proof = Proof::<H>::range_proof(&storage, leaf_pos, leaf_pos).await?;
+        let proof = Proof::<H>::range_proof(&storage, leaf_pos, leaf_pos, None).await?;
 
         Ok((proof, *chunk))
     }

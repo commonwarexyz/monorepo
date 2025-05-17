@@ -244,7 +244,7 @@ impl<H: CHasher> Mmr<H> {
             }
 
             // We have found the mountain containing the path we need to update.
-            let path: Vec<_> = PathIterator::new(pos, peak_pos, height).collect();
+            let path: Vec<_> = PathIterator::new(pos, peak_pos, height, None).collect();
             for (parent_pos, sibling_pos) in path.into_iter().rev() {
                 if parent_pos == pos {
                     panic!("pos was not for a leaf");
@@ -274,6 +274,17 @@ impl<H: CHasher> Mmr<H> {
         hasher.root_digest(size, peaks)
     }
 
+    /// Computes a root digest that only includes peaks whose height are no greater than
+    /// `max_height`. This root is useful when another tree is being grafted onto this one.
+    pub fn filtered_root(&self, hasher: &mut impl Hasher<H>, max_height: u32) -> H::Digest {
+        let peaks = self
+            .peak_iterator()
+            .filter(|(_, height)| *height <= max_height)
+            .map(|(peak_pos, _)| self.get_node_unchecked(peak_pos));
+        let size = self.size();
+        hasher.root_digest(size, peaks)
+    }
+
     /// Return an inclusion proof for the specified element.
     ///
     /// Returns ElementPruned error if some element needed to generate the proof has been pruned.
@@ -292,7 +303,7 @@ impl<H: CHasher> Mmr<H> {
         if start_element_pos < self.pruned_to_pos {
             return Err(ElementPruned(start_element_pos));
         }
-        Proof::<H>::range_proof(self, start_element_pos, end_element_pos).await
+        Proof::<H>::range_proof(self, start_element_pos, end_element_pos, None).await
     }
 
     /// Prune all nodes and pin the O(log2(n)) number of them required for proof generation going

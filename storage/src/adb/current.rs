@@ -12,16 +12,18 @@ use crate::{
     index::{Index, Translator},
     mmr::{
         bitmap::Bitmap,
-        hasher::{Grafting, Standard},
+        hasher::{Grafting, Hasher, Standard},
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
         journaled::Mmr,
+        verification::Proof,
+        Error::*,
     },
 };
 use commonware_codec::FixedSize;
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
-use tracing::warn;
+use tracing::{debug, warn};
 
 /// Configuration for a [Current] authenticated db.
 #[derive(Clone)]
@@ -47,6 +49,30 @@ pub struct Config {
 
 /// A hasher type used with the status bitmap of the [Current] database.
 type Grafter<'a, E, H> = Grafting<'a, H, Mmr<E, H>>;
+
+/// A proof of inclusion for a range of operations in the [Current] database.
+pub struct RangeProof<H: CHasher> {
+    /// The proof from the underlying [Any] db.
+    any_proof: Proof<H>,
+
+    /// The root digest of the status tree.
+    status_root: H::Digest,
+}
+
+/// A proof of the active value for a key in the [Current] database.
+pub struct CurrentValueProof<H: CHasher, const N: usize> {
+    /// The inclusion proof of the activity bit for the operation.
+    status_proof: Proof<H>,
+
+    /// The bitmap chunk containing the activity status of the operation.
+    status_chunk: [u8; N],
+
+    /// The (partial, due to grafting) inclusion proof for the operation in the MMR.
+    base_mmr_proof: Proof<H>,
+
+    /// The location of the active operation for the key in the log.
+    loc: u64,
+}
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of whether
 /// a key ever had a specific value, and whether the key currently has that value.
@@ -212,7 +238,7 @@ impl<
     ///
     /// This value is log2 of the chunk size in bits. Since we assume the chunk size is a power of
     /// 2, we compute this from trailing_zeros.
-    fn grafting_height() -> u32 {
+    const fn grafting_height() -> u32 {
         Bitmap::<H, N>::CHUNK_SIZE_BITS.trailing_zeros()
     }
 
@@ -324,18 +350,63 @@ impl<
 
     /// Return the root of the db.
     ///
-    /// Current implementation just hashes the roots of the [Any] and [Bitmap] databases together.
+    /// The root is computed by hashing the bitmap's root with a a filtered root of the any db's
+    /// operations MMR. (Because of grafting, we only require peaks from the operations MMR that
+    /// fall below the grafting height.)
     pub async fn root(&self, hasher: &mut H) -> Result<H::Digest, Error> {
-        let mut b_hasher = Standard::new(hasher);
-        let any_root = self.any.root(&mut b_hasher);
+        let ops = &self.any.ops;
 
-        let mut grafter = Grafter::new(hasher, Self::grafting_height(), &self.any.ops);
+        let grafting_height = Self::grafting_height();
+        let mut grafter = Grafter::new(hasher, grafting_height, ops);
+        let any_root = ops.filtered_root(grafter.standard(), grafting_height - 1);
         let bitmap_root = self.status.root(&mut grafter).await?;
 
-        hasher.update(any_root.as_ref());
-        hasher.update(bitmap_root.as_ref());
+        hasher.update(&any_root);
+        hasher.update(&bitmap_root);
 
         Ok(hasher.finalize())
+    }
+
+    /// Generate and return a proof of the current value of `key`, along with the current value
+    /// itself. Returns KeyNotFound error if the key is not currently assigned any value.
+    pub async fn current_value_proof(
+        &self,
+        hasher: &mut H,
+        key: &K,
+    ) -> Result<(CurrentValueProof<H, N>, V), Error> {
+        let op = self.any.get_with_loc(key).await?;
+        let Some(op) = op else {
+            return Err(Error::KeyNotFound());
+        };
+        let pos = leaf_num_to_pos(op.1);
+        let height = Self::grafting_height();
+        let mut grafter = Grafter::new(hasher, height, &self.any.ops);
+        let (proof, chunk) = self.status.proof(&mut grafter, pos).await?;
+
+        let base_mmr_proof = self.any.ops.filtered_proof(pos, height).await?;
+
+        Ok((
+            CurrentValueProof {
+                status_proof: proof,
+                status_chunk: chunk,
+                base_mmr_proof,
+                loc: op.1,
+            },
+            op.0,
+        ))
+    }
+
+    /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
+    /// the log with the provided root.
+    pub async fn verify_current_value_proof(
+        hasher: &mut H,
+        proof: &Proof<H>,
+        start_loc: u64,
+        ops: &[Operation<K, V>],
+        root_digest: &H::Digest,
+    ) -> Result<bool, Error> {
+        // TODO
+        Ok(true)
     }
 
     /// Close the db. Operations that have not been committed will be lost.
@@ -502,6 +573,42 @@ pub mod test {
 
         Ok(())
     }
+
+    /*   #[test_traced("WARN")]
+    pub fn test_current_db_range_proofs() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let partition = "range_proofs";
+            let mut hasher = Sha256::new();
+            let mut db = open_db(context.clone(), partition).await;
+            apply_random_ops(100, true, context.next_u64(), &mut db)
+                .await
+                .unwrap();
+            let root = db.root(&mut hasher).await.unwrap();
+
+            // Make sure size-constrained batches of operations are provable from the oldest
+            // retained op to tip.
+            let max_ops = 4;
+            let end_loc = db.op_count();
+            let start_pos = db.any.ops.pruned_to_pos();
+            let start_loc = leaf_pos_to_num(start_pos).unwrap();
+
+            for i in start_loc..end_loc {
+                let (proof, log) = db.range_proof(&mut hasher, i, max_ops).await.unwrap();
+                assert!(
+                    Current::<deterministic::Context, _, _, _, TwoCap, 64>::verify_range_proof(
+                        &mut hasher,
+                        &proof,
+                        i,
+                        &log,
+                        &root
+                    )
+                    .await
+                    .unwrap()
+                );
+            }
+        });
+    }*/
 
     /// This test builds a random database, and makes sure that its state is correctly restored
     /// after closing and re-opening.

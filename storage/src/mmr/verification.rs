@@ -13,20 +13,21 @@ use commonware_cryptography::Hasher as CHasher;
 use futures::future::try_join_all;
 use tracing::debug;
 
-/// Contains the information necessary for proving the inclusion of an element, or some range of elements, in the MMR
-/// from its root hash.
+/// Contains the information necessary for proving the inclusion of an element, or some range of
+/// elements, in the MMR from its root hash.
 ///
 /// The `hashes` vector contains:
 ///
-/// 1: the hashes of each peak corresponding to a mountain containing no elements from the element range being proven
-/// in decreasing order of height, followed by:
+/// 1: the hashes of each peak corresponding to a mountain containing no elements from the element
+/// range being proven in decreasing order of height, followed by:
 ///
-/// 2: the nodes in the remaining mountains necessary for reconstructing their peak hashes from the elements within
-/// the range, ordered by the position of their parent.
+/// 2: the nodes in the remaining mountains necessary for reconstructing their peak hashes from the
+/// elements within the range, ordered by the position of their parent.
 #[derive(Clone, Debug, Eq)]
 pub struct Proof<H: CHasher> {
     /// The total number of nodes in the MMR.
     pub size: u64,
+
     /// The hashes necessary for proving the inclusion of an element, or range of elements, in the
     /// MMR.
     pub hashes: Vec<H::Digest>,
@@ -39,8 +40,8 @@ impl<H: CHasher> PartialEq for Proof<H> {
 }
 
 impl<H: CHasher> Proof<H> {
-    /// Return true if `proof` proves that `element` appears at position `element_pos` within the MMR
-    /// with root `root_digest`.
+    /// Return true if `proof` proves that `element` appears at position `element_pos` within the
+    /// MMR with root `root_digest`.
     pub async fn verify_element_inclusion<M: Hasher<H>>(
         &self,
         hasher: &mut M,
@@ -88,7 +89,7 @@ impl<H: CHasher> Proof<H> {
     /// Reconstruct the peak hashes of the MMR that produced this proof, returning `MissingHashes`
     /// error if there are not enough proof hashes, or `ExtraHashes` error if not all proof hashes
     /// were used in the reconstruction.
-    async fn reconstruct_peak_digests<T>(
+    pub async fn reconstruct_peak_digests<T>(
         &self,
         hasher: &mut impl Hasher<H>,
         elements: T,
@@ -216,6 +217,7 @@ impl<H: CHasher> Proof<H> {
         size: u64,
         start_element_pos: u64,
         end_element_pos: u64,
+        max_height: Option<u32>,
     ) -> Vec<u64> {
         let mut positions = Vec::new();
 
@@ -224,25 +226,25 @@ impl<H: CHasher> Proof<H> {
         let mut start_tree_with_element = (u64::MAX, 0);
         let mut end_tree_with_element = (u64::MAX, 0);
         let mut peak_iterator = PeakIterator::new(size);
-        while let Some(item) = peak_iterator.next() {
-            if start_tree_with_element.0 == u64::MAX && item.0 >= start_element_pos {
+        while let Some(peak) = peak_iterator.next() {
+            if start_tree_with_element.0 == u64::MAX && peak.0 >= start_element_pos {
                 // Found the first tree to contain an element in the range
-                start_tree_with_element = item;
-                if item.0 >= end_element_pos {
+                start_tree_with_element = peak;
+                if peak.0 >= end_element_pos {
                     // Start and end tree are the same
-                    end_tree_with_element = item;
+                    end_tree_with_element = peak;
                     continue;
                 }
-                for item in peak_iterator.by_ref() {
-                    if item.0 >= end_element_pos {
+                for peak in peak_iterator.by_ref() {
+                    if peak.0 >= end_element_pos {
                         // Found the last tree to contain an element in the range
-                        end_tree_with_element = item;
+                        end_tree_with_element = peak;
                         break;
                     }
                 }
-            } else {
+            } else if max_height.is_none() || peak.1 <= max_height.unwrap() {
                 // Tree is outside the range, its peak is thus required.
-                positions.push(item.0);
+                positions.push(peak.0);
             }
         }
         assert!(start_tree_with_element.0 != u64::MAX);
@@ -255,6 +257,7 @@ impl<H: CHasher> Proof<H> {
             start_element_pos,
             start_tree_with_element.0,
             start_tree_with_element.1,
+            max_height,
         );
 
         let mut siblings = Vec::new();
@@ -267,6 +270,7 @@ impl<H: CHasher> Proof<H> {
                 end_element_pos,
                 end_tree_with_element.0,
                 end_tree_with_element.1,
+                max_height,
             );
             // filter the right path for right siblings only
             siblings.extend(right_path_iter.filter(|(parent_pos, pos)| *parent_pos == *pos + 1));
@@ -284,16 +288,21 @@ impl<H: CHasher> Proof<H> {
     }
 
     /// Return an inclusion proof for the specified range of elements, inclusive of both endpoints.
-    ///
-    /// Returns ElementPruned error if some element needed to generate the proof has been pruned.
+    /// Nodes whose height are above `max_height` are filtered. Returns ElementPruned error if some
+    /// element needed to generate the proof has been pruned.
     pub async fn range_proof<S: Storage<H::Digest>>(
         mmr: &S,
         start_element_pos: u64,
         end_element_pos: u64,
+        max_height: Option<u32>,
     ) -> Result<Proof<H>, Error> {
         let mut hashes: Vec<H::Digest> = Vec::new();
-        let positions =
-            Self::nodes_required_for_range_proof(mmr.size(), start_element_pos, end_element_pos);
+        let positions = Self::nodes_required_for_range_proof(
+            mmr.size(),
+            start_element_pos,
+            end_element_pos,
+            max_height,
+        );
 
         let node_futures = positions.iter().map(|pos| mmr.get_node(*pos));
         let hash_results = try_join_all(node_futures).await?;
@@ -386,7 +395,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::Proof;
-    use crate::mmr::{hasher::Standard, mem::Mmr};
+    use crate::mmr::{
+        hasher::{Grafting, GraftingVerifier, Standard},
+        mem::Mmr,
+    };
     use commonware_cryptography::{hash, sha256::Digest, Hasher, Sha256};
     use commonware_runtime::{deterministic, Runner};
 
@@ -898,5 +910,86 @@ mod tests {
                 }
             }
         });
+    }
+
+    #[test]
+    fn test_verification_grafted() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            // Create an 11 element MMR over which we'll test single-element inclusion proofs.
+            let mut base_mmr = Mmr::new();
+            let mut peak_tree = Mmr::new();
+            let mut leaves: Vec<u64> = Vec::new();
+            let mut base_digests: Vec<Digest> = Vec::new();
+            let mut hasher1 = Sha256::new();
+            let mut hasher2 = Sha256::new();
+            let mut hasher = Standard::new(&mut hasher1);
+
+            for i in 0u8..11 {
+                let element = Sha256::fill(i);
+                // Add 2 elements to the base for every 1 added to the peak.
+                base_mmr.add(&mut hasher, &element).await.unwrap();
+                let pos = base_mmr.add(&mut hasher, &element).await.unwrap();
+                // Record the digest of the parent of these 2 added elements.
+                base_digests.push(*base_mmr.get_node_unchecked(pos + 1));
+
+                let mut grafter = Grafting::new(&mut hasher2, 1, &base_mmr);
+                leaves.push(peak_tree.add(&mut grafter, &element).await.unwrap());
+            }
+
+            let mut grafter = Grafting::new(&mut hasher2, 1, &base_mmr);
+            let mut root_digest = peak_tree.root(&mut grafter);
+
+            // Confirm the proof of inclusion for each leaf successfully verifies.
+            for (i, leaf) in leaves.iter().by_ref().enumerate() {
+                let proof = peak_tree.proof(*leaf).await.unwrap();
+                let element = Sha256::fill(i as u8);
+                let mut grafter = GraftingVerifier::new(&mut hasher2, &base_digests[i]);
+                assert!(
+                    proof
+                        .verify_element_inclusion(&mut grafter, &element, *leaf, &root_digest)
+                        .await
+                        .unwrap(),
+                    "valid proof should verify successfully",
+                );
+                assert!(
+                    !proof
+                        .verify_element_inclusion(&mut hasher, &element, *leaf, &root_digest)
+                        .await
+                        .unwrap(),
+                    "valid proof should fail to verify with wrong hasher",
+                );
+                let mut grafter = GraftingVerifier::new(
+                    &mut hasher2,
+                    &base_digests[(i + 1) % base_digests.len()],
+                );
+                assert!(
+                    !proof
+                        .verify_element_inclusion(&mut grafter, &element, *leaf, &root_digest)
+                        .await
+                        .unwrap(),
+                    "valid proof should fail to verify with wrong grafted digest",
+                );
+
+                // Do a non-MMR update to the peak tree to confirm we can still create & verify
+                // proofs after updates.
+                let element = Sha256::fill(i as u8 + 11);
+                peak_tree
+                    .update_leaf(&mut hasher, *leaf, &element)
+                    .await
+                    .unwrap();
+                let new_root = peak_tree.root(&mut hasher);
+                assert!(new_root != root_digest);
+                root_digest = new_root;
+
+                assert!(
+                    !proof
+                        .verify_element_inclusion(&mut grafter, &element, *leaf, &root_digest)
+                        .await
+                        .unwrap(),
+                    "valid proof should fail to verify against changed root",
+                );
+            }
+        })
     }
 }

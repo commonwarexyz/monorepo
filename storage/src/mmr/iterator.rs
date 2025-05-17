@@ -201,6 +201,24 @@ pub(crate) const fn leaf_num_to_pos(leaf_num: u64) -> u64 {
     pos
 }
 
+/// Returns the height of the node at position `pos` in an MMR.
+#[allow(dead_code)]
+pub(crate) const fn pos_to_height(mut pos: u64) -> u32 {
+    if pos == 0 {
+        return 0;
+    }
+
+    let mut size = u64::MAX >> pos.leading_zeros();
+    while size != 0 {
+        if pos >= size {
+            pos -= size;
+        }
+        size >>= 1;
+    }
+
+    pos as u32
+}
+
 /// A PathIterator returns a (parent_pos, sibling_pos) tuple for the sibling of each node along the
 /// path from a given perfect binary tree peak to a designated leaf, not including the peak itself.
 ///
@@ -228,8 +246,27 @@ pub(crate) struct PathIterator {
 impl PathIterator {
     /// Return a PathIterator over the siblings of nodes along the path from peak to leaf in the
     /// perfect binary tree with peak `peak_pos` and having height `height`, not including the peak
-    /// itself.
-    pub(crate) fn new(leaf_pos: u64, peak_pos: u64, height: u32) -> PathIterator {
+    /// itself. The path will include only those nodes whose parents have height no greater than `max_height`.
+    pub(crate) fn new(
+        leaf_pos: u64,
+        mut peak_pos: u64,
+        mut height: u32,
+        max_height: Option<u32>,
+    ) -> PathIterator {
+        if let Some(max_height) = max_height {
+            while height > max_height {
+                let left_pos = peak_pos - (1 << height);
+                let right_pos = peak_pos - 1;
+                height -= 1;
+
+                if left_pos < leaf_pos {
+                    peak_pos = right_pos;
+                    continue;
+                }
+                peak_pos = left_pos;
+            }
+        }
+
         PathIterator {
             leaf_pos,
             node_pos: peak_pos,
@@ -247,7 +284,7 @@ impl Iterator for PathIterator {
         }
 
         let left_pos = self.node_pos - self.two_h;
-        let right_pos = left_pos + self.two_h - 1;
+        let right_pos = self.node_pos - 1;
         self.two_h >>= 1;
 
         if left_pos < self.leaf_pos {
@@ -267,6 +304,47 @@ mod tests {
     use crate::mmr::{hasher::Standard, mem::Mmr};
     use commonware_cryptography::{sha256::hash, Sha256};
     use commonware_runtime::{deterministic, Runner};
+
+    #[test]
+    fn test_pos_to_height() {
+        assert_eq!(pos_to_height(0), 0);
+        assert_eq!(pos_to_height(1), 0);
+        assert_eq!(pos_to_height(2), 1);
+        assert_eq!(pos_to_height(3), 0);
+        assert_eq!(pos_to_height(4), 0);
+        assert_eq!(pos_to_height(5), 1);
+        assert_eq!(pos_to_height(6), 2);
+        assert_eq!(pos_to_height(7), 0);
+        assert_eq!(pos_to_height(14), 3);
+        assert_eq!(pos_to_height(17), 1);
+        assert_eq!(pos_to_height(18), 0);
+    }
+
+    #[test]
+    fn test_path_iterator_max_height_filter() {
+        // Iterate from peak 14 to leaf 3. (The example MMR depicted in crate::mmr::mod.rs contains
+        // this path.)
+        let iter = PathIterator::new(3, 14, 3, None);
+        let r = iter.collect::<Vec<_>>();
+        assert_eq!(r, vec![(14, 13), (6, 2), (5, 4)]);
+
+        let iter = PathIterator::new(3, 14, 3, Some(3));
+        let r = iter.collect::<Vec<_>>();
+        assert_eq!(r, vec![(14, 13), (6, 2), (5, 4)]);
+
+        let iter = PathIterator::new(3, 14, 3, Some(2));
+        let r = iter.collect::<Vec<_>>();
+        assert_eq!(r, vec![(6, 2), (5, 4)]);
+
+        let iter = PathIterator::new(3, 14, 3, Some(1));
+        let r = iter.collect::<Vec<_>>();
+        assert_eq!(r, vec![(5, 4)]);
+
+        // Max height of 0 always filters all nodes, since a parent always has height > 0.
+        let iter = PathIterator::new(3, 14, 3, Some(0));
+        let r = iter.collect::<Vec<_>>();
+        assert_eq!(r, vec![]);
+    }
 
     #[test]
     fn test_leaf_num_calculation() {
