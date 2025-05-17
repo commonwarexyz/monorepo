@@ -15,7 +15,8 @@ use std::{
 };
 
 mod buffer;
-pub use buffer::Buffer;
+pub use buffer::{Read, Write};
+
 mod handle;
 pub use handle::Handle;
 
@@ -333,7 +334,7 @@ mod tests {
 
             // Create a buffer reader with a small buffer size
             let lookahead = 10;
-            let mut reader = Buffer::new(blob, size, lookahead);
+            let mut reader = Read::new(blob, size, lookahead);
 
             // Read some data
             let mut buf = [0u8; 5];
@@ -374,7 +375,7 @@ mod tests {
 
             // Create a buffer reader with a small buffer size
             let lookahead = 0;
-            Buffer::new(blob, size, lookahead);
+            Read::new(blob, size, lookahead);
         });
     }
 
@@ -391,7 +392,7 @@ mod tests {
 
             // Create a buffer reader with buffer size 10
             let buffer_size = 10;
-            let mut reader = Buffer::new(blob, size, buffer_size);
+            let mut reader = Read::new(blob, size, buffer_size);
 
             // Read data that crosses a buffer boundary
             let mut buf = [0u8; 15];
@@ -425,7 +426,7 @@ mod tests {
 
             // Create a buffer reader with a buffer smaller than the data
             let buffer_size = 10;
-            let mut reader = Buffer::new(blob, size, buffer_size);
+            let mut reader = Read::new(blob, size, buffer_size);
 
             // Check remaining bytes in the blob
             assert_eq!(reader.blob_remaining(), size);
@@ -470,7 +471,7 @@ mod tests {
 
             // Create a buffer with size smaller than the data
             let buffer_size = 64 * 1024; // 64KB
-            let mut reader = Buffer::new(blob, size, buffer_size);
+            let mut reader = Read::new(blob, size, buffer_size);
 
             // Read all the data in chunks
             let mut total_read = 0;
@@ -518,7 +519,7 @@ mod tests {
             blob.write_at(data.clone(), 0).await.unwrap();
             let size = data.len() as u64;
 
-            let mut reader = Buffer::new(blob, size, buffer_size);
+            let mut reader = Read::new(blob, size, buffer_size);
 
             // Read exactly one buffer size
             let mut buf1 = vec![0u8; buffer_size];
@@ -555,7 +556,7 @@ mod tests {
 
             // Create a buffer reader
             let buffer_size = 10;
-            let mut reader = Buffer::new(blob, size, buffer_size);
+            let mut reader = Read::new(blob, size, buffer_size);
 
             // Read some data to advance the position
             let mut buf = [0u8; 5];
@@ -608,7 +609,7 @@ mod tests {
 
             // Create a buffer reader with small buffer
             let buffer_size = 10;
-            let mut reader = Buffer::new(blob, size, buffer_size);
+            let mut reader = Read::new(blob, size, buffer_size);
 
             // Read some data
             let mut buf = [0u8; 5];
@@ -650,7 +651,7 @@ mod tests {
 
             // Create a buffer reader
             let buffer_size = 10;
-            let reader = Buffer::new(blob.clone(), data_len, buffer_size);
+            let reader = Read::new(blob.clone(), data_len, buffer_size);
 
             // Truncate the blob to half its size
             let truncate_len = data_len / 2;
@@ -661,7 +662,7 @@ mod tests {
             assert_eq!(size, truncate_len, "Blob should be truncated to half size");
 
             // Create a new buffer and read to verify truncation
-            let mut new_reader = Buffer::new(blob, size, buffer_size);
+            let mut new_reader = Read::new(blob, size, buffer_size);
 
             // Read the content
             let mut buf = vec![0u8; size as usize];
@@ -691,7 +692,7 @@ mod tests {
 
             // Create a buffer reader
             let buffer_size = 10;
-            let reader = Buffer::new(blob.clone(), data_len, buffer_size);
+            let reader = Read::new(blob.clone(), data_len, buffer_size);
 
             // Truncate the blob to zero
             reader.truncate(0).await.unwrap();
@@ -701,12 +702,86 @@ mod tests {
             assert_eq!(size, 0, "Blob should be truncated to zero");
 
             // Create a new buffer and try to read (should fail)
-            let mut new_reader = Buffer::new(blob, size, buffer_size);
+            let mut new_reader = Read::new(blob, size, buffer_size);
 
             // Reading from truncated blob should fail
             let mut buf = [0u8; 1];
             let result = new_reader.read_exact(&mut buf, 1).await;
             assert!(matches!(result, Err(Error::BlobInsufficientLength)));
+        });
+    }
+
+    #[test_traced]
+    fn test_write_basic() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (blob, size) = context.open("partition", b"write_basic").await.unwrap();
+            assert_eq!(size, 0);
+
+            let mut writer = Write::new(blob.clone(), 0, 8);
+            writer.write(b"hello");
+            assert_eq!(writer.position(), 5);
+            writer.sync().await.unwrap();
+
+            let (blob, size) = context.open("partition", b"write_basic").await.unwrap();
+            assert_eq!(size, 5);
+            let mut reader = Read::new(blob, size, 8);
+            let mut buf = [0u8; 5];
+            reader.read_exact(&mut buf, 5).await.unwrap();
+            assert_eq!(&buf, b"hello");
+        });
+    }
+
+    #[test_traced]
+    fn test_write_multiple_flushes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (blob, size) = context.open("partition", b"write_multi").await.unwrap();
+            assert_eq!(size, 0);
+
+            let mut writer = Write::new(blob.clone(), 0, 4);
+            writer.write(b"abc");
+            writer.sync().await.unwrap();
+            writer.write(b"defg");
+            writer.sync().await.unwrap();
+
+            let (blob, size) = context.open("partition", b"write_multi").await.unwrap();
+            assert_eq!(size, 7);
+            let mut reader = Read::new(blob, size, 4);
+            let mut buf = [0u8; 7];
+            reader.read_exact(&mut buf, 7).await.unwrap();
+            assert_eq!(&buf, b"abcdefg");
+        });
+    }
+
+    #[test_traced]
+    fn test_write_truncate() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (blob, size) = context.open("partition", b"write_trunc").await.unwrap();
+            assert_eq!(size, 0);
+
+            let mut writer = Write::new(blob.clone(), 0, 8);
+            writer.write(b"abcdefgh");
+            writer.truncate(4).await.unwrap();
+
+            let (blob, size) = context.open("partition", b"write_trunc").await.unwrap();
+            assert_eq!(size, 4);
+            let mut reader = Read::new(blob, size, 4);
+            let mut buf = [0u8; 4];
+            reader.read_exact(&mut buf, 4).await.unwrap();
+            assert_eq!(&buf, b"abcd");
+        });
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "buffer capacity must be greater than zero")]
+    fn test_write_empty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (blob, size) = context.open("partition", b"write_empty").await.unwrap();
+            assert_eq!(size, 0);
+            Write::new(blob, 0, 0);
         });
     }
 }

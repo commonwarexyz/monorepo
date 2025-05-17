@@ -18,7 +18,7 @@ use crate::{Blob, Error};
 /// # Example
 ///
 /// ```
-/// use commonware_runtime::{Runner, Buffer, Blob, Error, Storage, deterministic};
+/// use commonware_runtime::{Runner, Read, Blob, Error, Storage, deterministic};
 ///
 /// let executor = deterministic::Runner::default();
 /// executor.start(|context| async move {
@@ -30,7 +30,7 @@ use crate::{Blob, Error};
 ///
 ///     // Create a buffer
 ///     let buffer = 64 * 1024;
-///     let mut reader = Buffer::new(blob, size, buffer);
+///     let mut reader = Read::new(blob, size, buffer);
 ///
 ///     // Read data sequentially
 ///     let mut header = [0u8; 16];
@@ -41,7 +41,7 @@ use crate::{Blob, Error};
 ///     assert_eq!(reader.position(), 16);
 /// });
 /// ```
-pub struct Buffer<B: Blob> {
+pub struct Read<B: Blob> {
     /// The underlying blob to read from.
     blob: B,
     /// The buffer storing the data read from the blob.
@@ -58,8 +58,8 @@ pub struct Buffer<B: Blob> {
     buffer_size: usize,
 }
 
-impl<B: Blob> Buffer<B> {
-    /// Creates a new `Buffer` that reads from the given blob with the specified buffer size.
+impl<B: Blob> Read<B> {
+    /// Creates a new `Read` that reads from the given blob with the specified buffer size.
     ///
     /// # Panics
     ///
