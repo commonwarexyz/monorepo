@@ -114,3 +114,12 @@ pub(crate) async fn run(
         ring.submit_and_wait(1).expect("unable to submit to ring");
     }
 }
+
+/// Returns whether some result should be retried due to a transient error.
+///
+/// Errors considered transient:
+/// * EAGAIN: There is no data ready. Try again later.
+/// * EWOULDBLOCK: Operation would block.
+pub fn should_retry(return_value: i32) -> bool {
+    return_value == -libc::EAGAIN || return_value == -libc::EWOULDBLOCK
+}

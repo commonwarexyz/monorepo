@@ -1,13 +1,17 @@
 #[cfg(feature = "iouring")]
-use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage};
+use crate::{
+    network::iouring::Network as IoUringNetwork,
+    storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage},
+};
 
 #[cfg(not(feature = "iouring"))]
-use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
-
-use crate::network::metered::{Listener as MeteredListener, Network as MeteredNetwork};
-use crate::network::tokio::{
-    Config as TokioNetworkConfig, Listener as TokioListener, Network as TokioNetwork,
+use crate::{
+    network::tokio::Network as TokioNetwork,
+    storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage},
 };
+
+use crate::network::metered::Network as MeteredNetwork;
+use crate::network::tokio::Config as TokioNetworkConfig;
 use crate::storage::metered::Storage as MeteredStorage;
 use crate::telemetry::metrics::task::Label;
 use crate::{utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
@@ -236,27 +240,36 @@ impl crate::Runner for Runner {
             .expect("failed to create Tokio runtime");
         let (signaler, signal) = Signaler::new();
 
-        // Initialize storage
-        #[cfg(feature = "iouring")]
-        let storage = MeteredStorage::new(
-            IoUringStorage::start(IoUringConfig {
-                storage_directory: self.cfg.storage_directory.clone(),
-                ring_config: Default::default(),
-            }),
-            runtime_registry,
-        );
-        #[cfg(not(feature = "iouring"))]
-        let storage = MeteredStorage::new(
-            TokioStorage::new(TokioStorageConfig::new(
-                self.cfg.storage_directory.clone(),
-                self.cfg.maximum_buffer_size,
-            )),
-            runtime_registry,
-        );
-
-        // Initialize network
-        let network = TokioNetwork::from(self.cfg.network_cfg.clone());
-        let network = MeteredNetwork::new(network, runtime_registry);
+        let (storage, network) = {
+            #[cfg(feature = "iouring")]
+            {
+                let storage = MeteredStorage::new(
+                    IoUringStorage::start(IoUringConfig {
+                        storage_directory: self.cfg.storage_directory.clone(),
+                        ring_config: Default::default(),
+                    }),
+                    runtime_registry,
+                );
+                let network = MeteredNetwork::new(
+                    IoUringNetwork::start(crate::iouring::Config::default()).unwrap(),
+                    runtime_registry,
+                );
+                (storage, network)
+            }
+            #[cfg(not(feature = "iouring"))]
+            {
+                let storage = MeteredStorage::new(
+                    TokioStorage::new(TokioStorageConfig::new(
+                        self.cfg.storage_directory.clone(),
+                        self.cfg.maximum_buffer_size,
+                    )),
+                    runtime_registry,
+                );
+                let network = TokioNetwork::from(self.cfg.network_cfg.clone());
+                let network = MeteredNetwork::new(network, runtime_registry);
+                (storage, network)
+            }
+        };
 
         // Initialize executor
         let executor = Arc::new(Executor {
@@ -288,11 +301,15 @@ impl crate::Runner for Runner {
     }
 }
 
-#[cfg(feature = "iouring")]
-type Storage = MeteredStorage<IoUringStorage>;
-
-#[cfg(not(feature = "iouring"))]
-type Storage = MeteredStorage<TokioStorage>;
+cfg_if::cfg_if! {
+    if #[cfg(feature = "iouring")] {
+        type Storage = MeteredStorage<IoUringStorage>;
+        type Network = MeteredNetwork<IoUringNetwork>;
+    } else {
+        type Storage = MeteredStorage<TokioStorage>;
+        type Network = MeteredNetwork<TokioNetwork>;
+    }
+}
 
 /// Implementation of [crate::Spawner], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `tokio`
@@ -302,7 +319,7 @@ pub struct Context {
     spawned: bool,
     executor: Arc<Executor>,
     storage: Storage,
-    network: MeteredNetwork<TokioNetwork>,
+    network: Network,
 }
 
 impl Clone for Context {
@@ -516,7 +533,7 @@ impl GClock for Context {
 impl ReasonablyRealtime for Context {}
 
 impl crate::Network for Context {
-    type Listener = MeteredListener<TokioListener>;
+    type Listener = <Network as crate::Network>::Listener;
 
     async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, Error> {
         self.network.bind(socket).await
