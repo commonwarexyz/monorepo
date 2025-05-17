@@ -41,7 +41,7 @@ impl<B: Blob> Write<B> {
         if self.buffer.is_empty() {
             return Ok(());
         }
-        let mut buf = std::mem::take(&mut self.buffer);
+        let buf = std::mem::take(&mut self.buffer);
         let len = buf.len() as u64;
         self.blob.write_at(buf, self.position).await?;
         self.position += len;
@@ -53,18 +53,5 @@ impl<B: Blob> Write<B> {
     pub async fn sync(&mut self) -> Result<(), Error> {
         self.flush().await?;
         self.blob.sync().await
-    }
-
-    /// Truncate the underlying blob to the given length.
-    pub async fn truncate(mut self, size: u64) -> Result<(), Error> {
-        self.flush().await?;
-        self.blob.truncate(size).await?;
-        self.blob.sync().await
-    }
-
-    /// Consume the buffer and return the inner blob.
-    pub fn into_inner(mut self) -> B {
-        self.buffer.clear();
-        self.blob
     }
 }
