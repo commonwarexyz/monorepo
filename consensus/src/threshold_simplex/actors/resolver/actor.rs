@@ -5,7 +5,9 @@ use super::{
 use crate::{
     threshold_simplex::{
         actors::voter,
-        types::{Backfiller, Notarization, Nullification, Request, Response, View, Viewable},
+        types::{
+            Backfiller, Notarization, Nullification, Request, Response, View, Viewable, Voter,
+        },
     },
     ThresholdSupervisor,
 };
@@ -19,7 +21,7 @@ use commonware_p2p::{
         codec::{wrap, WrappedSender},
         requester,
     },
-    Receiver, Recipients, Sender,
+    Blocker, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{Clock, Handle, Metrics, Spawner};
 use futures::{channel::mpsc, future::Either, StreamExt};
@@ -103,11 +105,18 @@ impl Inflight {
 pub struct Actor<
     E: Clock + GClock + Rng + Metrics + Spawner,
     C: Scheme,
+    B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     D: Digest,
-    S: ThresholdSupervisor<Index = View, Identity = poly::Public<V>, PublicKey = C::PublicKey>,
+    S: ThresholdSupervisor<
+        Index = View,
+        Identity = poly::Public<V>,
+        PublicKey = C::PublicKey,
+        Public = V::Public,
+    >,
 > {
     context: E,
+    blocker: B,
     supervisor: S,
 
     namespace: Vec<u8>,
@@ -135,12 +144,18 @@ pub struct Actor<
 impl<
         E: Clock + GClock + Rng + Metrics + Spawner,
         C: Scheme,
+        B: Blocker<PublicKey = C::PublicKey>,
         V: Variant,
         D: Digest,
-        S: ThresholdSupervisor<Index = View, Identity = poly::Public<V>, PublicKey = C::PublicKey>,
-    > Actor<E, C, V, D, S>
+        S: ThresholdSupervisor<
+            Index = View,
+            Identity = poly::Public<V>,
+            PublicKey = C::PublicKey,
+            Public = V::Public,
+        >,
+    > Actor<E, C, B, V, D, S>
 {
-    pub fn new(context: E, cfg: Config<C, S>) -> (Self, Mailbox<V, D>) {
+    pub fn new(context: E, cfg: Config<C, B, S>) -> (Self, Mailbox<V, D>) {
         // Initialize requester
         let config = requester::Config {
             public_key: cfg.crypto.public_key(),
@@ -171,6 +186,7 @@ impl<
         (
             Self {
                 context,
+                blocker: cfg.blocker,
                 supervisor: cfg.supervisor,
 
                 namespace: cfg.namespace,
@@ -297,14 +313,12 @@ impl<
     }
 
     pub fn start(
-        self,
+        mut self,
         voter: voter::Mailbox<V, D>,
         sender: impl Sender<PublicKey = C::PublicKey>,
         receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) -> Handle<()> {
-        self.context
-            .clone()
-            .spawn(|_| self.run(voter, sender, receiver))
+        self.context.spawn_ref()(self.run(voter, sender, receiver))
     }
 
     async fn run(
@@ -319,6 +333,7 @@ impl<
         // Wait for an event
         let mut current_view = 0;
         let mut finalized_view = 0;
+        let public_key = *self.supervisor.public();
         loop {
             // Record outstanding metric
             self.unfulfilled.set(self.required.len() as i64);
@@ -449,8 +464,9 @@ impl<
                     let msg = match msg {
                         Ok(msg) => msg,
                         Err(err) => {
-                            warn!(?err, sender = ?s, "failed to decode message");
-                            self.requester.block(s);
+                            warn!(?err, sender = ?s, "blocking peer");
+                            self.requester.block(s.clone());
+                            self.blocker.block(s).await;
                             continue;
                         },
                     };
@@ -502,55 +518,43 @@ impl<
                             };
                             self.inflight.clear(request.id);
 
-                            // Parse notarizations
+                            // Verify message
+                            if !response.verify(&self.namespace, &public_key) {
+                                warn!(sender = ?s, "blocking peer");
+                                self.requester.block(s.clone());
+                                self.blocker.block(s).await;
+                                continue;
+                            }
+
+                            // Update cache
+                            let mut voters = Vec::with_capacity(response.notarizations.len() + response.nullifications.len());
                             let mut notarizations_found = BTreeSet::new();
-                            let mut nullifications_found = BTreeSet::new();
                             for notarization in response.notarizations {
                                 let view = notarization.view();
                                 let entry = Entry { task: Task::Notarization, view };
-                                if !self.required.contains(&entry) {
+                                if !self.required.remove(&entry) {
                                     debug!(view, sender = ?s, "unnecessary notarization");
                                     continue;
                                 }
-                                let Some(identity) = self.supervisor.identity(view) else {
-                                    warn!(view, sender = ?s, "missing identity");
-                                    continue;
-                                };
-                                let public_key = poly::public::<V>(identity);
-                                if !notarization.verify(&self.namespace, public_key) {
-                                    warn!(view, sender = ?s, "invalid notarization");
-                                    self.requester.block(s.clone());
-                                    continue;
-                                }
-                                self.required.remove(&entry);
                                 self.notarizations.insert(view, notarization.clone());
-                                voter.notarization(notarization).await;
+                                voters.push(Voter::Notarization(notarization));
                                 notarizations_found.insert(view);
                             }
-
-                            // Parse nullifications
+                            let mut nullifications_found = BTreeSet::new();
                             for nullification in response.nullifications {
                                 let view = nullification.view;
                                 let entry = Entry { task: Task::Nullification, view };
-                                if !self.required.contains(&entry) {
+                                if !self.required.remove(&entry) {
                                     debug!(view, sender = ?s, "unnecessary nullification");
                                     continue;
                                 }
-                                let Some(identity) = self.supervisor.identity(view) else {
-                                    warn!(view, sender = ?s, "missing identity");
-                                    continue;
-                                };
-                                let public_key = poly::public::<V>(identity);
-                                if !nullification.verify(&self.namespace, public_key) {
-                                    warn!(view, sender = ?s, "invalid nullification");
-                                    self.requester.block(s.clone());
-                                    continue;
-                                }
-                                self.required.remove(&entry);
                                 self.nullifications.insert(view, nullification.clone());
-                                voter.nullification(nullification).await;
+                                voters.push(Voter::Nullification(nullification));
                                 nullifications_found.insert(view);
                             }
+
+                            // Send voters
+                            voter.verified(voters).await;
 
                             // Update performance
                             let mut shuffle = false;

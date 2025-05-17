@@ -32,6 +32,9 @@ pub enum Message<P: Array> {
         /// The public key of the peer to block.
         to: P,
     },
+    Blocked {
+        result: oneshot::Sender<Result<Vec<(P, P)>, Error>>,
+    },
 }
 
 /// Describes a connection between two peers.
@@ -71,6 +74,16 @@ impl<P: Array> Oracle<P> {
             me,
             sender: self.sender.clone(),
         }
+    }
+
+    /// Return a list of all blocked peers.
+    pub async fn blocked(&mut self) -> Result<Vec<(P, P)>, Error> {
+        let (s, r) = oneshot::channel();
+        self.sender
+            .send(Message::Blocked { result: s })
+            .await
+            .map_err(|_| Error::NetworkClosed)?;
+        r.await.map_err(|_| Error::NetworkClosed)?
     }
 
     /// Register a new peer with the network that can interact over a given channel.

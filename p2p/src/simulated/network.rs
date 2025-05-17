@@ -232,6 +232,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: Array> Network<E, P> {
             ingress::Message::Block { from, to } => {
                 self.blocks.insert((from, to));
             }
+            ingress::Message::Blocked { result } => {
+                send_result(result, Ok(self.blocks.iter().cloned().collect()))
+            }
         }
     }
 

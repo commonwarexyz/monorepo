@@ -61,12 +61,12 @@ impl<
         }
     }
 
-    pub fn start(mut self, voter_network: (impl Sender, impl Receiver)) -> Handle<()> {
-        self.context.spawn_ref()(self.run(voter_network))
+    pub fn start(mut self, pending_network: (impl Sender, impl Receiver)) -> Handle<()> {
+        self.context.spawn_ref()(self.run(pending_network))
     }
 
-    async fn run(mut self, voter_network: (impl Sender, impl Receiver)) {
-        let (mut sender, mut receiver) = voter_network;
+    async fn run(mut self, pending_network: (impl Sender, impl Receiver)) {
+        let (mut sender, mut receiver) = pending_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message
             let msg = match Voter::<V, H::Digest>::decode(msg) {

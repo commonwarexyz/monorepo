@@ -1,16 +1,20 @@
-//! Byzantine participant that sends nullify and finalize messages for the same view.
+//! Byzantine participant that sends invalid notarize/finalize messages.
 
 use crate::{
-    threshold_simplex::types::{Finalize, Nullify, View, Viewable, Voter},
+    threshold_simplex::types::{Finalize, Notarize, View, Viewable, Voter},
     ThresholdSupervisor,
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
-    bls12381::primitives::{group, variant::Variant},
+    bls12381::primitives::{
+        group::{self, Element},
+        variant::Variant,
+    },
     Hasher,
 };
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Handle, Spawner};
+use commonware_runtime::{Clock, Handle, Spawner};
+use rand::{CryptoRng, Rng};
 use std::marker::PhantomData;
 use tracing::debug;
 
@@ -19,8 +23,8 @@ pub struct Config<S: ThresholdSupervisor<Index = View, Share = group::Share>> {
     pub namespace: Vec<u8>,
 }
 
-pub struct Nuller<
-    E: Spawner,
+pub struct Invalid<
+    E: Clock + Rng + CryptoRng + Spawner,
     V: Variant,
     H: Hasher,
     S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
@@ -35,11 +39,11 @@ pub struct Nuller<
 }
 
 impl<
-        E: Spawner,
+        E: Clock + Rng + CryptoRng + Spawner,
         V: Variant,
         H: Hasher,
         S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
-    > Nuller<E, V, H, S>
+    > Invalid<E, V, H, S>
 {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
@@ -72,16 +76,26 @@ impl<
             // Process message
             match msg {
                 Voter::Notarize(notarize) => {
-                    // Nullify
-                    let view = notarize.view();
-                    let share = self.supervisor.share(view).unwrap();
-                    let n = Nullify::sign(&self.namespace, share, view);
-                    let msg = Voter::<V, H::Digest>::Nullify(n).encode().into();
-                    sender.send(Recipients::All, msg, true).await.unwrap();
+                    // Notarize received digest
+                    let share = self.supervisor.share(notarize.view()).unwrap();
+                    let mut n = Notarize::<V, _>::sign(&self.namespace, share, notarize.proposal);
 
-                    // Finalize digest
-                    let proposal = notarize.proposal;
-                    let f = Finalize::<V, _>::sign(&self.namespace, share, proposal);
+                    // Manipulate signature
+                    n.seed_signature.value.add(&V::Signature::one());
+
+                    // Send invalid message
+                    let msg = Voter::Notarize(n).encode().into();
+                    sender.send(Recipients::All, msg, true).await.unwrap();
+                }
+                Voter::Finalize(finalize) => {
+                    // Finalize provided digest
+                    let share = self.supervisor.share(finalize.view()).unwrap();
+                    let mut f = Finalize::<V, _>::sign(&self.namespace, share, finalize.proposal);
+
+                    // Manipulate signature
+                    f.proposal_signature.value.add(&V::Signature::one());
+
+                    // Send invalid message
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
