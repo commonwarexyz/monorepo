@@ -51,7 +51,7 @@
 use super::Error;
 use bytes::BufMut;
 use commonware_codec::{Codec, DecodeExt, FixedSize};
-use commonware_runtime::{Blob, Buffer, Error as RError, Metrics, Storage};
+use commonware_runtime::{buffer::Read, Blob, Error as RError, Metrics, Storage};
 use commonware_utils::hex;
 use futures::stream::{self, Stream, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -370,7 +370,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         Ok(stream::iter(blobs)
             .map(move |(index, blob, size)| async move {
                 // Create buffered reader
-                let reader = Buffer::new(blob, size, buffer);
+                let reader = Read::new(blob, size, buffer);
 
                 // Read over the blob in chunks of `CHUNK_SIZE` bytes
                 stream::unfold(

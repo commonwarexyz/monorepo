@@ -99,7 +99,7 @@
 use super::Error;
 use bytes::BufMut;
 use commonware_codec::Codec;
-use commonware_runtime::{Blob, Buffer, Error as RError, Metrics, Storage};
+use commonware_runtime::{buffer::Read, Blob, Error as RError, Metrics, Storage};
 use commonware_utils::hex;
 use futures::stream::{self, Stream, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -257,9 +257,9 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         Ok((aligned_offset, size, item))
     }
 
-    /// Helper function to read an item from a [Buffer].
+    /// Helper function to read an item from a [Read].
     async fn read_buffered(
-        reader: &mut Buffer<E::Blob>,
+        reader: &mut Read<E::Blob>,
         offset: u32,
         cfg: &V::Cfg,
         compressed: bool,
@@ -399,7 +399,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             .map(
                 move |(section, blob, aligned_len, size, codec_config, compressed)| async move {
                     // Created buffered reader
-                    let reader = Buffer::new(blob, size, buffer);
+                    let reader = Read::new(blob, size, buffer);
 
                     // Read over the blob
                     stream::unfold(
