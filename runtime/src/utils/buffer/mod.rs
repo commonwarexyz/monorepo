@@ -469,7 +469,7 @@ mod tests {
     }
 
     #[test_traced]
-    #[should_panic(expected = "buffer capacity must be greater than zero")]
+    #[should_panic(expected = "Buffer capacity must be greater than zero")]
     fn test_write_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
