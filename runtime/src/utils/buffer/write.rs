@@ -92,7 +92,8 @@ impl<B: Blob> Write<B> {
 
     /// Flushes buffered data to the underlying blob. Does nothing if the buffer is empty.
     ///
-    /// Returns an error if the underlying blob write fails.
+    /// If the write to the underlying blob fails, the buffer will be reset (and any pending data not yet
+    /// written will be lost).
     async fn flush(&mut self) -> Result<(), Error> {
         if self.buffer.is_empty() {
             return Ok(());
