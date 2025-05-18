@@ -13,12 +13,12 @@ use crate::{Blob, Error};
 /// - For sequential reading, let the buffer's automatic refilling handle data loading
 /// - For random access patterns, use `seek_to` followed by `refill` for best performance
 /// - Use `peek` when you need to examine data without committing to consuming it
-/// - Check `blob_remaining()` to avoid attempting to read past the end of the blob
+/// - Check `blob_remaining` to avoid attempting to read past the end of the blob
 ///
 /// # Example
 ///
 /// ```
-/// use commonware_runtime::{Runner, Read, Blob, Error, Storage, deterministic};
+/// use commonware_runtime::{Runner, buffer::Read, Blob, Error, Storage, deterministic};
 ///
 /// let executor = deterministic::Runner::default();
 /// executor.start(|context| async move {
