@@ -1,5 +1,7 @@
-pub mod read;
-pub mod write;
+//! Buffers for reading and writing to [crate::Blob]s.
+
+mod read;
+mod write;
 
 pub use read::Read;
 pub use write::Write;

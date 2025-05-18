@@ -14,8 +14,7 @@ use std::{
     task::{Context, Poll},
 };
 
-mod buffer;
-pub use buffer::{Read, Write};
+pub mod buffer;
 
 mod handle;
 pub use handle::Handle;

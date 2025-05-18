@@ -99,7 +99,7 @@
 use super::Error;
 use bytes::BufMut;
 use commonware_codec::Codec;
-use commonware_runtime::{Blob, Read, Error as RError, Metrics, Storage};
+use commonware_runtime::{buffer::Read, Blob, Error as RError, Metrics, Storage};
 use commonware_utils::hex;
 use futures::stream::{self, Stream, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
