@@ -410,7 +410,7 @@ mod tests {
             assert_eq!(size, 0);
 
             let mut writer = Write::new(blob.clone(), 0, 8);
-            writer.write(b"hello");
+            writer.write(b"hello").await.unwrap();
             assert_eq!(writer.position(), 5);
             writer.sync().await.unwrap();
 
@@ -431,9 +431,8 @@ mod tests {
             assert_eq!(size, 0);
 
             let mut writer = Write::new(blob.clone(), 0, 4);
-            writer.write(b"abc");
-            writer.sync().await.unwrap();
-            writer.write(b"defg");
+            writer.write(b"abc").await.unwrap();
+            writer.write(b"defg").await.unwrap();
             writer.sync().await.unwrap();
 
             let (blob, size) = context.open("partition", b"write_multi").await.unwrap();

@@ -16,14 +16,13 @@ use crate::{Blob, Error};
 ///
 ///     // Create a buffered writer with 8-byte buffer
 ///     let mut writer = Write::new(blob.clone(), 0, 8);
-///     writer.write(b"hello");
+///     writer.write(b"hello").await.expect("write failed");
 ///     assert_eq!(writer.position(), 5);
 ///     writer.sync().await.expect("sync failed");
 ///
 ///     // Write more data in multiple flushes
-///     writer.write(b" world");
-///     writer.flush().await.expect("flush failed");
-///     writer.write(b"!");
+///     writer.write(b" world").await.expect("write failed");
+///     writer.write(b"!").await.expect("write failed");
 ///     writer.sync().await.expect("sync failed");
 ///
 ///     // Read back the data to verify
@@ -67,14 +66,18 @@ impl<B: Blob> Write<B> {
     }
 
     /// Appends bytes to the internal buffer. Data is not written to the blob until [`flush`] or [`sync`] is called.
-    pub fn write(&mut self, bytes: &[u8]) {
+    pub async fn write(&mut self, bytes: &[u8]) -> Result<(), Error> {
         self.buffer.extend_from_slice(bytes);
+        if self.buffer.len() > self.capacity {
+            self.flush().await?;
+        }
+        Ok(())
     }
 
     /// Flushes buffered data to the underlying blob. Does nothing if the buffer is empty.
     ///
     /// Returns an error if the underlying blob write fails.
-    pub async fn flush(&mut self) -> Result<(), Error> {
+    async fn flush(&mut self) -> Result<(), Error> {
         if self.buffer.is_empty() {
             return Ok(());
         }
