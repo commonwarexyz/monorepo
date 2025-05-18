@@ -51,7 +51,7 @@ impl<B: Blob> Write<B> {
     ///
     /// Panics if `capacity` is zero.
     pub fn new(blob: B, position: u64, capacity: usize) -> Self {
-        assert!(capacity > 0, "buffer capacity must be greater than zero");
+        assert!(capacity > 0, "Buffer capacity must be greater than zero");
         Self {
             blob,
             buffer: Vec::with_capacity(capacity),
