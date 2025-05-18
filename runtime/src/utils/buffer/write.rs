@@ -65,7 +65,8 @@ impl<B: Blob> Write<B> {
         self.position + self.buffer.len() as u64
     }
 
-    /// Appends bytes to the internal buffer. Data is not written to the blob until [`flush`] or [`sync`] is called.
+    /// Appends bytes to the internal buffer. If the buffer capacity is exceeded, it will be flushed to the
+    /// underlying [Blob].
     pub async fn write(&mut self, bytes: &[u8]) -> Result<(), Error> {
         self.buffer.extend_from_slice(bytes);
         if self.buffer.len() > self.capacity {

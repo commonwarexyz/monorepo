@@ -3,18 +3,6 @@ use crate::{Blob, Error};
 /// A reader that buffers content from a [Blob] to optimize the performance
 /// of a full scan of contents.
 ///
-/// # Performance Considerations
-///
-/// - Choose an appropriate buffer size based on your access patterns:
-///   - Larger buffers (e.g., 1 MB) for sequential scanning of large files
-///   - Medium buffers (e.g., 64 KB) for general purpose usage
-///   - Smaller buffers (e.g., 4 KB) for random access patterns or memory-constrained environments
-///
-/// - For sequential reading, let the buffer's automatic refilling handle data loading
-/// - For random access patterns, use `seek_to` followed by `refill` for best performance
-/// - Use `peek` when you need to examine data without committing to consuming it
-/// - Check `blob_remaining` to avoid attempting to read past the end of the blob
-///
 /// # Example
 ///
 /// ```
