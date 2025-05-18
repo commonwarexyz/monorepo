@@ -410,7 +410,7 @@ mod tests {
             assert_eq!(size, 0);
 
             let mut writer = Write::new(blob.clone(), 0, 8);
-            writer.write(b"hello").await.unwrap();
+            writer.write("hello".as_bytes()).await.unwrap();
             assert_eq!(writer.position(), 5);
             writer.sync().await.unwrap();
 
@@ -431,8 +431,8 @@ mod tests {
             assert_eq!(size, 0);
 
             let mut writer = Write::new(blob.clone(), 0, 4);
-            writer.write(b"abc").await.unwrap();
-            writer.write(b"defg").await.unwrap();
+            writer.write("abc".as_bytes()).await.unwrap();
+            writer.write("defg".as_bytes()).await.unwrap();
             writer.sync().await.unwrap();
 
             let (blob, size) = context.open("partition", b"write_multi").await.unwrap();
@@ -441,6 +441,30 @@ mod tests {
             let mut buf = [0u8; 7];
             reader.read_exact(&mut buf, 7).await.unwrap();
             assert_eq!(&buf, b"abcdefg");
+        });
+    }
+
+    #[test_traced]
+    fn test_write_large_data() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (blob, size) = context.open("partition", b"write_multi").await.unwrap();
+            assert_eq!(size, 0);
+
+            let mut writer = Write::new(blob.clone(), 0, 4);
+            writer.write("abc".as_bytes()).await.unwrap();
+            writer
+                .write("defghijklmnopqrstuvwxyz".as_bytes())
+                .await
+                .unwrap();
+            writer.sync().await.unwrap();
+
+            let (blob, size) = context.open("partition", b"write_multi").await.unwrap();
+            assert_eq!(size, 26);
+            let mut reader = Read::new(blob, size, 4);
+            let mut buf = [0u8; 26];
+            reader.read_exact(&mut buf, 26).await.unwrap();
+            assert_eq!(&buf, b"abcdefghijklmnopqrstuvwxyz");
         });
     }
 

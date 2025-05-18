@@ -1,3 +1,5 @@
+use commonware_utils::StableBuf;
+
 use crate::{Blob, Error};
 
 /// A writer that buffers content to a [Blob] to optimize the performance
@@ -16,13 +18,13 @@ use crate::{Blob, Error};
 ///
 ///     // Create a buffered writer with 8-byte buffer
 ///     let mut writer = Write::new(blob.clone(), 0, 8);
-///     writer.write(b"hello").await.expect("write failed");
+///     writer.write("hello".as_bytes()).await.expect("write failed");
 ///     assert_eq!(writer.position(), 5);
 ///     writer.sync().await.expect("sync failed");
 ///
 ///     // Write more data in multiple flushes
-///     writer.write(b" world").await.expect("write failed");
-///     writer.write(b"!").await.expect("write failed");
+///     writer.write(" world".as_bytes()).await.expect("write failed");
+///     writer.write("!".as_bytes()).await.expect("write failed");
 ///     writer.sync().await.expect("sync failed");
 ///
 ///     // Read back the data to verify
@@ -67,10 +69,23 @@ impl<B: Blob> Write<B> {
 
     /// Appends bytes to the internal buffer. If the buffer capacity is exceeded, it will be flushed to the
     /// underlying [Blob].
-    pub async fn write(&mut self, bytes: &[u8]) -> Result<(), Error> {
-        self.buffer.extend_from_slice(bytes);
-        if self.buffer.len() > self.capacity {
+    ///
+    /// If the size of the provided bytes is larger than the buffer capacity, the bytes will be written
+    /// directly to the underlying [Blob]. If this occurs regularly, the buffer capacity should be increased (or
+    /// the buffer will not be effective).
+    pub async fn write<Buf: StableBuf>(&mut self, buf: Buf) -> Result<(), Error> {
+        // If the buffer capacity will be exceeded, flush the buffer first
+        let buf_len = buf.len();
+        if self.buffer.len() + buf_len > self.capacity {
             self.flush().await?;
+        }
+
+        // Append the bytes to the buffer
+        if buf_len > self.capacity {
+            self.blob.write_at(buf, self.position).await?;
+            self.position += buf_len as u64;
+        } else {
+            self.buffer.extend_from_slice(buf.as_ref());
         }
         Ok(())
     }
