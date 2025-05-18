@@ -80,7 +80,7 @@ impl<B: Blob> Write<B> {
             self.flush().await?;
         }
 
-        // Append the bytes to the buffer
+        // Write directly to the blob (if the buffer is too small) or append to the buffer
         if buf_len > self.capacity {
             self.blob.write_at(buf, self.position).await?;
             self.position += buf_len as u64;
