@@ -1407,7 +1407,7 @@ mod tests {
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(120));
+        let executor = deterministic::Runner::timed(Duration::from_secs(180));
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1526,13 +1526,29 @@ mod tests {
             }
             join_all(finalizers).await;
 
+            // Unlink all validators to get latest view
+            link_validators(&mut oracle, &validators, Action::Unlink, None).await;
+
+            // Wait for a virtual minute (nothing should happen)
+            context.sleep(Duration::from_secs(60)).await;
+
+            // Get latest view
+            let mut latest = 0;
+            for supervisor in supervisors.iter() {
+                let nullifies = supervisor.nullifies.lock().unwrap();
+                let max = nullifies.keys().max().unwrap();
+                if *max > latest {
+                    latest = *max;
+                }
+            }
+
             // Update links
             let link = Link {
                 latency: 10.0,
                 jitter: 1.0,
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &validators, Action::Update(link), None).await;
+            link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
@@ -1558,6 +1574,21 @@ mod tests {
                 {
                     let invalid = supervisor.invalid.lock().unwrap();
                     assert_eq!(*invalid, 0);
+                }
+
+                // Ensure quick recovery.
+                //
+                // If the skip timeout isn't implemented correctly, we may go many views before participants
+                // start to consider a validator's proposal.
+                {
+                    let mut found = 0;
+                    let finalizations = supervisor.finalizations.lock().unwrap();
+                    for i in latest..latest + activity_timeout {
+                        if finalizations.contains_key(&i) {
+                            found += 1;
+                        }
+                    }
+                    assert_eq!(found, activity_timeout, "found: {}", found);
                 }
             }
 
