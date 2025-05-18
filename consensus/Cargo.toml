@@ -16,6 +16,7 @@ commonware-cryptography = { workspace = true }
 commonware-utils = { workspace = true }
 bytes = { workspace = true }
 cfg-if = { workspace = true }
+rayon = { workspace = true }
 thiserror = { workspace = true }
 futures = { workspace = true }
 

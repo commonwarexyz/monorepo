@@ -10,7 +10,7 @@ use crate::bls12381::{
     },
 };
 use rand::RngCore;
-use rayon::{prelude::*, ThreadPoolBuilder};
+use rayon::{prelude::*, ThreadPool};
 use std::collections::BTreeMap;
 
 /// Generate shares and a commitment.
@@ -106,23 +106,17 @@ pub fn construct_public<V: Variant>(
 ///
 /// It is assumed that the required number of commitments are provided.
 pub fn recover_public_with_weights<V: Variant>(
+    pool: &ThreadPool,
     previous: &poly::Public<V>,
     commitments: BTreeMap<u32, poly::Public<V>>,
     weights: &BTreeMap<u32, poly::Weight>,
     threshold: u32,
-    concurrency: usize,
 ) -> Result<poly::Public<V>, Error> {
     // Ensure we have enough commitments to interpolate
     let required = previous.required();
     if commitments.len() < required as usize {
         return Err(Error::InsufficientDealings);
     }
-
-    // Construct pool to perform interpolation
-    let pool = ThreadPoolBuilder::new()
-        .num_threads(concurrency)
-        .build()
-        .expect("unable to build thread pool");
 
     // Perform interpolation over each coefficient using the precomputed weights
     let new = match pool.install(|| {
@@ -159,10 +153,10 @@ pub fn recover_public_with_weights<V: Variant>(
 ///
 /// It is assumed that the required number of commitments are provided.
 pub fn recover_public<V: Variant>(
+    pool: &ThreadPool,
     previous: &poly::Public<V>,
     commitments: BTreeMap<u32, poly::Public<V>>,
     threshold: u32,
-    concurrency: usize,
 ) -> Result<poly::Public<V>, Error> {
     // Ensure we have enough commitments to interpolate
     let required = previous.required();
@@ -175,5 +169,5 @@ pub fn recover_public<V: Variant>(
     let weights = compute_weights(indices).map_err(|_| Error::PublicKeyInterpolationFailed)?;
 
     // Perform interpolation over each coefficient using the precomputed weights
-    recover_public_with_weights::<V>(previous, commitments, &weights, threshold, concurrency)
+    recover_public_with_weights::<V>(pool, previous, commitments, &weights, threshold)
 }

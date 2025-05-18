@@ -17,6 +17,7 @@ use commonware_cryptography::{
     Digest,
 };
 use commonware_utils::union;
+use rayon::ThreadPoolBuilder;
 
 /// View is a monotonically increasing counter that represents the current focus of consensus.
 /// Each View corresponds to a round in the consensus protocol where validators attempt to agree
@@ -424,11 +425,12 @@ impl<V: Variant, D: Digest> Notarization<V, D> {
         let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
         let signature =
             aggregate_signatures::<V, _>(&[self.proposal_signature, self.seed_signature]);
+        let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
         aggregate_verify_multiple_messages::<V, _>(
+            &pool,
             public_key,
             &[notarize_message, seed_message],
             &signature,
-            1,
         )
         .is_ok()
     }
@@ -622,11 +624,12 @@ impl<V: Variant> Nullification<V> {
         let seed_namespace = seed_namespace(namespace);
         let seed_message = (Some(seed_namespace.as_ref()), view_message.as_ref());
         let signature = aggregate_signatures::<V, _>(&[self.view_signature, self.seed_signature]);
+        let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
         aggregate_verify_multiple_messages::<V, _>(
+            &pool,
             public_key,
             &[nullify_message, seed_message],
             &signature,
-            1,
         )
         .is_ok()
     }
@@ -799,11 +802,12 @@ impl<V: Variant, D: Digest> Finalization<V, D> {
         let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
         let signature =
             aggregate_signatures::<V, _>(&[self.proposal_signature, self.seed_signature]);
+        let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
         aggregate_verify_multiple_messages::<V, _>(
+            &pool,
             public_key,
             &[finalize_message, seed_message],
             &signature,
-            1,
         )
         .is_ok()
     }

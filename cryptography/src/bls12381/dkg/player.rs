@@ -13,6 +13,7 @@ use crate::{
     Array,
 };
 use commonware_utils::quorum;
+use rayon::ThreadPoolBuilder;
 use std::collections::{BTreeMap, HashMap};
 
 /// Output of a DKG/Resharing procedure.
@@ -204,12 +205,16 @@ impl<P: Array, V: Variant> Player<P, V> {
                     .iter()
                     .map(|(dealer, (commitment, _))| (*dealer, commitment.clone()))
                     .collect();
+                let pool = ThreadPoolBuilder::new()
+                    .num_threads(self.concurrency)
+                    .build()
+                    .expect("unable to build thread pool");
                 public = ops::recover_public_with_weights::<V>(
+                    &pool,
                     &previous,
                     commitments,
                     &weights,
                     self.player_threshold,
-                    self.concurrency,
                 )?;
 
                 // Recover share via interpolation

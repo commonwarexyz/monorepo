@@ -44,6 +44,7 @@ use crate::{
     Array,
 };
 use commonware_utils::{max_faults, quorum};
+use rayon::ThreadPoolBuilder;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Output of the DKG/Resharing procedure.
@@ -250,12 +251,12 @@ impl<P: Array, V: Variant> Arbiter<P, V> {
                 for (dealer_idx, (commitment, _, _)) in &selected {
                     commitments.insert(*dealer_idx, commitment.clone());
                 }
-                match ops::recover_public::<V>(
-                    &previous,
-                    commitments,
-                    self.player_threshold,
-                    self.concurrency,
-                ) {
+                let pool = ThreadPoolBuilder::new()
+                    .num_threads(self.concurrency)
+                    .build()
+                    .expect("unable to build thread pool");
+                match ops::recover_public::<V>(&pool, &previous, commitments, self.player_threshold)
+                {
                     Ok(public) => public,
                     Err(e) => return (Err(e), self.disqualified),
                 }

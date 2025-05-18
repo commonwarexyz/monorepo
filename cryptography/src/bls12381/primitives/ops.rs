@@ -17,7 +17,9 @@ use crate::bls12381::primitives::poly::{compute_weights, prepare_evaluations};
 use commonware_codec::Encode;
 use commonware_utils::union_unique;
 use rand::RngCore;
-use rayon::{prelude::*, ThreadPoolBuilder};
+#[cfg(test)]
+use rayon::ThreadPoolBuilder;
+use rayon::{prelude::*, ThreadPool};
 use std::{borrow::Cow, collections::BTreeMap};
 
 /// Computes the public key from the private key.
@@ -588,10 +590,10 @@ where
 /// hashed message and public key). If the public key itself is an aggregate of multiple public keys, an attacker can exploit
 /// this optimization to cause this function to return that an aggregate signature is valid when it really isn't.
 pub fn aggregate_verify_multiple_messages<'a, V, I>(
+    pool: &ThreadPool,
     public: &V::Public,
     messages: I,
     signature: &V::Signature,
-    concurrency: usize,
 ) -> Result<(), Error>
 where
     V: Variant,
@@ -600,43 +602,22 @@ where
         + Send
         + Sync,
 {
-    let hm_sum = if concurrency == 1 {
-        // Avoid pool overhead when concurrency is 1
-        let mut hm_sum = V::Signature::zero();
-        for (namespace, msg) in messages {
-            let mut hm = V::Signature::zero();
-            match namespace {
-                Some(namespace) => hm.map(V::MESSAGE, &union_unique(namespace, msg)),
-                None => hm.map(V::MESSAGE, msg),
-            };
-            hm_sum.add(&hm);
-        }
-        hm_sum
-    } else {
-        // Build a thread pool with the specified concurrency
-        let pool = ThreadPoolBuilder::new()
-            .num_threads(concurrency)
-            .build()
-            .expect("Unable to build thread pool");
-
-        // Perform hashing to curve and summation of messages in parallel
-        pool.install(move || {
-            messages
-                .into_par_iter()
-                .map(|(namespace, msg)| {
-                    let mut hm = V::Signature::zero();
-                    match namespace {
-                        Some(namespace) => hm.map(V::MESSAGE, &union_unique(namespace, msg)),
-                        None => hm.map(V::MESSAGE, msg),
-                    };
-                    hm
-                })
-                .reduce(V::Signature::zero, |mut sum, hm| {
-                    sum.add(&hm);
-                    sum
-                })
-        })
-    };
+    let hm_sum = pool.install(move || {
+        messages
+            .into_par_iter()
+            .map(|(namespace, msg)| {
+                let mut hm = V::Signature::zero();
+                match namespace {
+                    Some(namespace) => hm.map(V::MESSAGE, &union_unique(namespace, msg)),
+                    None => hm.map(V::MESSAGE, msg),
+                };
+                hm
+            })
+            .reduce(V::Signature::zero, |mut sum, hm| {
+                sum.add(&hm);
+                sum
+            })
+    });
 
     // Verify the signature
     V::verify(public, &hm_sum, signature)
@@ -1061,11 +1042,13 @@ mod tests {
         let aggregate_sig = aggregate_signatures::<V, _>(&signatures);
 
         // Verify the aggregated signature without parallelism
-        aggregate_verify_multiple_messages::<V, _>(&public, &messages, &aggregate_sig, 1)
+        let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        aggregate_verify_multiple_messages::<V, _>(&pool, &public, &messages, &aggregate_sig)
             .expect("Aggregated signature should be valid");
 
         // Verify the aggregated signature with parallelism
-        aggregate_verify_multiple_messages::<V, _>(&public, &messages, &aggregate_sig, 4)
+        let pool = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+        aggregate_verify_multiple_messages::<V, _>(&pool, &public, &messages, &aggregate_sig)
             .expect("Aggregated signature should be valid");
 
         // Verify the aggregated signature using blst
@@ -1112,13 +1095,23 @@ mod tests {
         ];
 
         // Verify the aggregated signature without parallelism
-        let result =
-            aggregate_verify_multiple_messages::<V, _>(&public, &wrong_messages, &aggregate_sig, 1);
+        let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let result = aggregate_verify_multiple_messages::<V, _>(
+            &pool,
+            &public,
+            &wrong_messages,
+            &aggregate_sig,
+        );
         assert!(matches!(result, Err(Error::InvalidSignature)));
 
         // Verify the aggregated signature with parallelism
-        let result =
-            aggregate_verify_multiple_messages::<V, _>(&public, &wrong_messages, &aggregate_sig, 4);
+        let pool = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+        let result = aggregate_verify_multiple_messages::<V, _>(
+            &pool,
+            &public,
+            &wrong_messages,
+            &aggregate_sig,
+        );
         assert!(matches!(result, Err(Error::InvalidSignature)));
     }
 
@@ -1150,13 +1143,23 @@ mod tests {
             vec![(namespace, b"Message 1"), (namespace, b"Message 2")];
 
         // Verify the aggregated signature without parallelism
-        let result =
-            aggregate_verify_multiple_messages::<V, _>(&public, &wrong_messages, &aggregate_sig, 1);
+        let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let result = aggregate_verify_multiple_messages::<V, _>(
+            &pool,
+            &public,
+            &wrong_messages,
+            &aggregate_sig,
+        );
         assert!(matches!(result, Err(Error::InvalidSignature)));
 
         // Verify the aggregated signature with parallelism
-        let result =
-            aggregate_verify_multiple_messages::<V, _>(&public, &wrong_messages, &aggregate_sig, 4);
+        let pool = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+        let result = aggregate_verify_multiple_messages::<V, _>(
+            &pool,
+            &public,
+            &wrong_messages,
+            &aggregate_sig,
+        );
         assert!(matches!(result, Err(Error::InvalidSignature)));
     }
 

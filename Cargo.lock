@@ -1009,6 +1009,7 @@ dependencies = [
  "prometheus-client",
  "rand",
  "rand_distr",
+ "rayon",
  "thiserror 2.0.12",
  "tracing",
  "tracing-subscriber",
