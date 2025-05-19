@@ -213,6 +213,10 @@ mod tests {
     use std::collections::BTreeMap;
 
     const DEFAULT_SECTION_MASK: u64 = 0xffff_ffff_ffff_0000u64;
+    const DEFAULT_PENDING_WRITES: usize = 10;
+    const DEFAULT_WRITE_BUFFER: usize = 1024;
+    const DEFAULT_REPLAY_CONCURRENCY: usize = 4;
+    const DEFAULT_REPLAY_BUFFER: usize = 4096;
 
     fn test_key(key: &str) -> FixedBytes<64> {
         let mut buf = [0u8; 64];
@@ -232,10 +236,10 @@ mod tests {
                 translator: FourCap,
                 compression,
                 codec_config: (),
-                pending_writes: 10,
-                write_buffer: 1024,
-                replay_concurrency: 4,
-                replay_buffer: 4096,
+                pending_writes: DEFAULT_PENDING_WRITES,
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -332,10 +336,10 @@ mod tests {
                 translator: FourCap,
                 codec_config: (),
                 compression: Some(3),
-                pending_writes: 10,
-                write_buffer: 1024,
-                replay_concurrency: 4,
-                replay_buffer: 4096,
+                pending_writes: DEFAULT_PENDING_WRITES,
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -385,10 +389,10 @@ mod tests {
                 translator: FourCap,
                 codec_config: (),
                 compression: None,
-                pending_writes: 10,
-                write_buffer: 1024,
-                replay_concurrency: 4,
-                replay_buffer: 4096,
+                pending_writes: DEFAULT_PENDING_WRITES,
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -426,10 +430,10 @@ mod tests {
                     translator: FourCap,
                     codec_config: (),
                     compression: None,
-                    pending_writes: 10,
-                    write_buffer: 1024,
-                    replay_concurrency: 4,
-                    replay_buffer: 4096,
+                    pending_writes: DEFAULT_PENDING_WRITES,
+                    write_buffer: DEFAULT_WRITE_BUFFER,
+                    replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
+                    replay_buffer: DEFAULT_REPLAY_BUFFER,
                     section_mask: DEFAULT_SECTION_MASK,
                 },
             )
@@ -452,10 +456,10 @@ mod tests {
                 translator: FourCap,
                 codec_config: (),
                 compression: None,
-                pending_writes: 10,
-                write_buffer: 1024,
-                replay_concurrency: 4,
-                replay_buffer: 4096,
+                pending_writes: DEFAULT_PENDING_WRITES,
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -512,10 +516,10 @@ mod tests {
                 translator: FourCap,
                 codec_config: (),
                 compression: None,
-                pending_writes: 10,
-                write_buffer: 1024,
-                replay_concurrency: 4,
-                replay_buffer: 4096,
+                pending_writes: DEFAULT_PENDING_WRITES,
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let archive = Archive::init(context.clone(), cfg.clone())
@@ -557,10 +561,10 @@ mod tests {
                 translator: FourCap,
                 codec_config: (),
                 compression: None,
-                pending_writes: 10,
-                write_buffer: 1024,
-                replay_concurrency: 4,
-                replay_buffer: 4096,
+                pending_writes: DEFAULT_PENDING_WRITES,
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -621,10 +625,10 @@ mod tests {
                 translator: FourCap,
                 codec_config: (),
                 compression: None,
-                pending_writes: 10,
-                write_buffer: 1024,
-                replay_concurrency: 4,
-                replay_buffer: 4096,
+                pending_writes: DEFAULT_PENDING_WRITES,
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -679,10 +683,10 @@ mod tests {
                 translator: FourCap,
                 codec_config: (),
                 compression: None,
-                pending_writes: 10,
-                write_buffer: 1024,
-                replay_concurrency: 4,
-                replay_buffer: 4096,
+                pending_writes: DEFAULT_PENDING_WRITES,
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: 0xffff_ffff_ffff_ffffu64, // no mask
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -766,10 +770,10 @@ mod tests {
                 translator: TwoCap,
                 codec_config: (),
                 compression: None,
-                pending_writes: 10,
-                write_buffer: 1024,
-                replay_concurrency: 4,
-                replay_buffer: 4096,
+                pending_writes: DEFAULT_PENDING_WRITES,
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -825,10 +829,10 @@ mod tests {
                 translator: TwoCap,
                 codec_config: (),
                 compression: None,
-                pending_writes: 10,
-                write_buffer: 1024,
-                replay_concurrency: 4,
-                replay_buffer: 4096,
+                pending_writes: DEFAULT_PENDING_WRITES,
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask,
             };
             let mut archive =
@@ -924,10 +928,10 @@ mod tests {
                 translator: FourCap,
                 codec_config: (),
                 compression: None,
-                pending_writes: 10,
-                write_buffer: 1024,
-                replay_concurrency: 4,
-                replay_buffer: 4096,
+                pending_writes: DEFAULT_PENDING_WRITES,
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
