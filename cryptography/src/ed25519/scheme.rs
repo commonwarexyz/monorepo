@@ -727,4 +727,41 @@ mod tests {
         ));
         assert!(!batch.verify(&mut rand::thread_rng()));
     }
+
+    #[test]
+    fn test_zero_signature_fails() {
+        let (_, public_key, message, _) = vector_1();
+        let zero_sig = Signature::decode(vec![0u8; Signature::SIZE].as_ref()).unwrap();
+        assert!(!Ed25519::verify(None, &message, &public_key, &zero_sig));
+    }
+
+    #[test]
+    fn test_high_s_fails() {
+        let (_, public_key, message, signature) = vector_1();
+        let mut bad_signature = signature.to_vec();
+        bad_signature[63] |= 0x80; // make S non-canonical
+        let bad_signature = Signature::decode(bad_signature.as_ref()).unwrap();
+        assert!(!Ed25519::verify(
+            None,
+            &message,
+            &public_key,
+            &bad_signature
+        ));
+    }
+
+    #[test]
+    fn test_invalid_r_fails() {
+        let (_, public_key, message, signature) = vector_1();
+        let mut bad_signature = signature.to_vec();
+        for b in bad_signature.iter_mut().take(32) {
+            *b = 0xff; // invalid R component
+        }
+        let bad_signature = Signature::decode(bad_signature.as_ref()).unwrap();
+        assert!(!Ed25519::verify(
+            None,
+            &message,
+            &public_key,
+            &bad_signature
+        ));
+    }
 }
