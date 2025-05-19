@@ -157,11 +157,11 @@ impl<B: Blob> Read<B> {
         Ok(())
     }
 
-    /// Truncates the blob to the specified size.
+    /// Truncates the blob to the specified len.
     ///
     /// This may be useful if reading some blob after unclean shutdown.
-    pub async fn truncate(self, size: u64) -> Result<(), Error> {
-        self.blob.truncate(size).await?;
+    pub async fn truncate(self, len: u64) -> Result<(), Error> {
+        self.blob.truncate(len).await?;
         self.blob.sync().await
     }
 }
