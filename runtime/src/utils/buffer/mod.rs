@@ -406,6 +406,7 @@ mod tests {
     fn test_write_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Test basic write_at and sync functionality.
             let (blob, size) = context.open("partition", b"write_basic").await.unwrap();
             assert_eq!(size, 0);
 
@@ -426,6 +427,7 @@ mod tests {
     fn test_write_multiple_flushes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Test writing data that causes multiple buffer flushes.
             let (blob, size) = context.open("partition", b"write_multi").await.unwrap();
             assert_eq!(size, 0);
 
@@ -447,6 +449,7 @@ mod tests {
     fn test_write_large_data() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Test writing data significantly larger than the buffer capacity.
             let (blob, size) = context.open("partition", b"write_multi").await.unwrap();
             assert_eq!(size, 0);
 
@@ -472,6 +475,7 @@ mod tests {
     fn test_write_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Test creating a writer with zero buffer capacity.
             let (blob, size) = context.open("partition", b"write_empty").await.unwrap();
             assert_eq!(size, 0);
             Write::new(blob, 0, 0);
@@ -482,6 +486,7 @@ mod tests {
     fn test_write_append_to_buffer() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Test appending data that partially fits and then exceeds buffer capacity, causing a flush.
             let (blob, _) = context.open("partition", b"append_buf").await.unwrap();
             let writer = Write::new(blob.clone(), 0, 10);
 
@@ -505,6 +510,7 @@ mod tests {
     fn test_write_into_middle_of_buffer() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Test writing data into the middle of an existing, partially filled buffer.
             let (blob, _) = context.open("partition", b"middle_buf").await.unwrap();
             let writer = Write::new(blob.clone(), 0, 20);
 
@@ -540,6 +546,7 @@ mod tests {
     fn test_write_before_buffer() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Test writing data at an offset that precedes the current buffered data range.
             let (blob, _) = context.open("partition", b"before_buf").await.unwrap();
             let writer = Write::new(blob.clone(), 10, 10); // Buffer starts at blob offset 10
 
@@ -589,6 +596,7 @@ mod tests {
     fn test_write_truncate() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Test truncating the blob via the writer and subsequent write behaviors.
             let (blob, _) = context.open("partition", b"truncate_write").await.unwrap();
             let writer = Write::new(blob, 0, 10);
 
@@ -667,6 +675,7 @@ mod tests {
     fn test_write_read_at_on_writer() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Test reading data through the writer's read_at method, covering buffer and blob reads.
             let (blob, _) = context.open("partition", b"read_at_writer").await.unwrap();
             let writer = Write::new(blob.clone(), 0, 10); // Buffer capacity 10, starts at blob offset 0
 
@@ -759,6 +768,7 @@ mod tests {
     fn test_write_straddling_non_mergable() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Test write operations that are non-contiguous with the current buffer, forcing flushes.
             let (blob, _) = context.open("partition", b"write_straddle").await.unwrap();
             let writer = Write::new(blob.clone(), 0, 10); // buffer capacity 10
 
@@ -826,6 +836,7 @@ mod tests {
     fn test_write_close() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Test that closing the writer flushes any pending data in the buffer.
             let (blob_orig, _) = context.open("partition", b"write_close").await.unwrap();
             let writer = Write::new(blob_orig.clone(), 0, 8);
             writer.write_at("pending".as_bytes(), 0).await.unwrap(); // 7 bytes, buffered
