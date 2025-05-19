@@ -704,20 +704,20 @@ mod tests {
             read_buf_vec_2 = writer.read_at(read_buf_vec_2, 0).await.unwrap();
             assert_eq!(&read_buf_vec_2, b"buff");
 
-            // Read from underlying blob: "flushed" at offset 12
+            // Read from underlying blob: "flushed" at offset 13
             let mut read_buf_7_vec = vec![0u8; 7];
-            read_buf_7_vec = writer.read_at(read_buf_7_vec, 12).await.unwrap();
+            read_buf_7_vec = writer.read_at(read_buf_7_vec, 13).await.unwrap();
             assert_eq!(&read_buf_7_vec, b"flushed");
 
             // 3. Buffer new data without flushing previous
             // Writer inner.position = 20. Buffer is empty.
-            // Write "more data" (9 bytes) at offset 20. This fits in buffer.
-            writer.write_at("more data".as_bytes(), 20).await.unwrap();
+            // Write " more data" (9 bytes) at offset 20. This fits in buffer.
+            writer.write_at(" more data".as_bytes(), 20).await.unwrap();
 
             // Read the newly buffered data: "more"
-            let mut read_buf_vec_3 = vec![0u8; 4];
+            let mut read_buf_vec_3 = vec![0u8; 5];
             read_buf_vec_3 = writer.read_at(read_buf_vec_3, 20).await.unwrap();
-            assert_eq!(&read_buf_vec_3, b"more");
+            assert_eq!(&read_buf_vec_3, b" more");
 
             // Read part from blob, part from buffer (not directly supported by current read_at logic, it seems)
             // `read_at` logic:
@@ -727,9 +727,9 @@ mod tests {
 
             // Current state:
             // Blob: "buffered and flushed" (0-19)
-            // Buffer: "more data" (starts at blob offset 20, covers 20-28)
-            // writer.inner.position = 20 (start of buffered data "more data")
-            // writer.inner.buffer = "more data"
+            // Buffer: " more data" (starts at blob offset 20, covers 20-29)
+            // writer.inner.position = 20 (start of buffered data " more data")
+            // writer.inner.buffer = " more data"
 
             // Try to read "flushedmore " (12 bytes: ("shed " - 5) from blob, ("more da" - 7) from buffer) starting at offset 15
             // offset = 15, data_len = 12. data_end = 27.
@@ -740,21 +740,21 @@ mod tests {
             // buf_bytes = data_len - blob_bytes = 12 - 5 = 7. (reads "more da" from "more data")
             // Expected: "shed more da"
             let mut combo_read_buf_vec = vec![0u8; 12];
-            combo_read_buf_vec = writer.read_at(combo_read_buf_vec, 15).await.unwrap();
+            combo_read_buf_vec = writer.read_at(combo_read_buf_vec, 16).await.unwrap();
             assert_eq!(&combo_read_buf_vec, b"shed more da");
 
             // Verify full content by reopening and reading
             writer.sync().await.unwrap(); // Flush "more data"
             let (final_blob, final_size) =
                 context.open("partition", b"read_at_writer").await.unwrap();
-            assert_eq!(final_size, 29); // "buffered and flushedmore data"
+            assert_eq!(final_size, 30); // "buffered and flushed more data"
             let mut final_reader = Read::new(final_blob, final_size, 30);
-            let mut full_content = vec![0u8; 29];
+            let mut full_content = vec![0u8; 30];
             final_reader
-                .read_exact(&mut full_content, 29)
+                .read_exact(&mut full_content, 30)
                 .await
                 .unwrap();
-            assert_eq!(&full_content, b"buffered and flushedmore data");
+            assert_eq!(&full_content, b"buffered and flushed more data");
         });
     }
 
