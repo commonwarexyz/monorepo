@@ -814,6 +814,44 @@ impl crate::Spawner for Context {
         handle
     }
 
+    fn spawn_blocking_ref<F, T>(&mut self, dedicated: bool) -> impl FnOnce(F) -> Handle<T> + 'static
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        // Ensure a context only spawns one task
+        assert!(!self.spawned, "already spawned");
+        self.spawned = true;
+
+        // Get metrics
+        let label = if dedicated {
+            Label::blocking_dedicated(self.name.clone())
+        } else {
+            Label::blocking_shared(self.name.clone())
+        };
+        self.executor
+            .metrics
+            .tasks_spawned
+            .get_or_create(&label)
+            .inc();
+        let gauge = self
+            .executor
+            .metrics
+            .tasks_running
+            .get_or_create(&label)
+            .clone();
+
+        // Set up the task
+        let executor = self.executor.clone();
+        move |f: F| {
+            let (f, handle) = Handle::init_blocking(f, gauge, false);
+
+            let f = async move { f() };
+            Tasks::register_work(&executor.tasks, label, Box::pin(f));
+            handle
+        }
+    }
+
     fn stop(&self, value: i32) {
         self.executor.auditor.event(b"stop", |hasher| {
             hasher.update(value.to_be_bytes());
