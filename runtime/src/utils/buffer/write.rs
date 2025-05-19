@@ -119,10 +119,49 @@ impl<B: Blob> Write<B> {
 }
 
 impl<B: Blob> Blob for Write<B> {
-    async fn read_at<T: StableBufMut>(&self, buf: T, offset: u64) -> Result<T, Error> {
-        let mut inner = self.inner.write().await;
-        Self::flush(&mut *inner).await?;
-        inner.blob.read_at(buf, offset).await
+    async fn read_at<T: StableBufMut>(&self, mut buf: T, offset: u64) -> Result<T, Error> {
+        // Acquire a read lock on the inner state.
+        let inner = self.inner.read().await;
+
+        // Ensure offset read is valid
+        let len = buf.len();
+        let end = offset
+            .checked_add(len as u64)
+            .ok_or(Error::OffsetOverflow)?;
+
+        // If the data required doesn't involve the buffer, read from the blob
+        let buffer_start = inner.position;
+        let buffer_end = inner.position + inner.buffer.len() as u64;
+        if end <= buffer_start {
+            return inner.blob.read_at(buf, offset).await;
+        }
+
+        // If the data required is outside the buffer, return an error
+        if offset >= buffer_end {
+            return Err(Error::BlobInsufficientLength);
+        }
+
+        // If the data is entirely within the buffer, read it
+        if offset >= buffer_start {
+            let start = (offset - buffer_start) as usize;
+            if start + len > inner.buffer.len() {
+                return Err(Error::BlobInsufficientLength);
+            }
+            buf.put_slice(&inner.buffer[start..start + len]);
+            return Ok(buf);
+        }
+
+        // If the data is a combination of blob and buffer, populate accordingly
+        let blob_bytes = (buffer_start - offset) as usize;
+        let blob_part = vec![0u8; blob_bytes];
+        let blob_part = inner.blob.read_at(blob_part, offset).await?;
+        let buf_bytes = len - blob_bytes;
+        if buf_bytes > inner.buffer.len() {
+            return Err(Error::BlobInsufficientLength);
+        }
+        buf.deref_mut()[..blob_bytes].copy_from_slice(&blob_part);
+        buf.deref_mut()[blob_bytes..].copy_from_slice(&inner.buffer[..buf_bytes]);
+        Ok(buf)
     }
 
     async fn write_at<T: StableBuf>(&self, buf: T, offset: u64) -> Result<(), Error> {
