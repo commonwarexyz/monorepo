@@ -590,7 +590,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (blob, _) = context.open("partition", b"truncate_write").await.unwrap();
-            let writer = Write::new(blob.clone(), 0, 10);
+            let writer = Write::new(blob, 0, 10);
 
             writer.write_at("hello world".as_bytes(), 0).await.unwrap(); // 11 bytes
             writer.sync().await.unwrap();
@@ -602,6 +602,7 @@ mod tests {
 
             // Truncate to 5 bytes ("hello")
             writer.truncate(5).await.unwrap();
+            writer.sync().await.unwrap();
 
             let (blob, size) = context.open("partition", b"truncate_write").await.unwrap();
             assert_eq!(size, 5);
@@ -640,11 +641,11 @@ mod tests {
             writer.sync().await.unwrap();
 
             let (blob, size) = context.open("partition", b"truncate_write").await.unwrap();
-            assert_eq!(size, 1); // Blob was "hello", truncated to 5, now overwritten at 0 with "X", size becomes 1.
+            assert_eq!(size, 5); // Blob was "hello", truncated to 5, now overwritten at 0 with "X", size remains 5.
             let mut reader = Read::new(blob, size, 5);
-            let mut buf = vec![0u8; 1];
-            reader.read_exact(&mut buf, 1).await.unwrap();
-            assert_eq!(&buf, b"X");
+            let mut buf = vec![0u8; 5];
+            reader.read_exact(&mut buf, 5).await.unwrap();
+            assert_eq!(&buf, b"Xello");
 
             // Test truncate to 0
             let (blob_zero, _) = context.open("partition", b"truncate_zero").await.unwrap();
