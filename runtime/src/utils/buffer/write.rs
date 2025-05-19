@@ -1,6 +1,8 @@
+use std::sync::Arc;
+
 use commonware_utils::StableBuf;
 
-use crate::{Blob, Error};
+use crate::{Blob, Error, RwLock};
 
 /// A writer that buffers content to a [Blob] to optimize the performance
 /// of appending or updating data.
@@ -35,7 +37,12 @@ use crate::{Blob, Error};
 ///     assert_eq!(&buf, b"hello world!");
 /// });
 /// ```
+#[derive(Clone)]
 pub struct Write<B: Blob> {
+    inner: Arc<RwLock<Inner<B>>>,
+}
+
+struct Inner<B: Blob> {
     /// The underlying blob to write to.
     blob: B,
     /// The buffer storing data to be written to the blob.
@@ -54,17 +61,13 @@ impl<B: Blob> Write<B> {
     /// Panics if `capacity` is zero.
     pub fn new(blob: B, position: u64, capacity: usize) -> Self {
         assert!(capacity > 0, "Buffer capacity must be greater than zero");
-        Self {
+        let inner = Arc::new(RwLock::new(Inner {
             blob,
             buffer: Vec::with_capacity(capacity),
             position,
             capacity,
-        }
-    }
-
-    /// Returns the current position in the blob, including buffered but not-yet-flushed bytes.
-    pub fn position(&self) -> u64 {
-        self.position + self.buffer.len() as u64
+        }));
+        Self { inner }
     }
 
     /// Appends bytes to the internal buffer. If the buffer capacity is exceeded, it will be flushed to the
@@ -74,18 +77,21 @@ impl<B: Blob> Write<B> {
     /// directly to the underlying [Blob]. If this occurs regularly, the buffer capacity should be increased (or
     /// the buffer will not be effective).
     pub async fn write<Buf: StableBuf>(&mut self, buf: Buf) -> Result<(), Error> {
+        // Acquire a write lock on the inner
+        let mut inner = self.inner.write().await;
+
         // If the buffer capacity will be exceeded, flush the buffer first
         let buf_len = buf.len();
-        if self.buffer.len() + buf_len > self.capacity {
-            self.flush().await?;
+        if inner.buffer.len() + buf_len > inner.capacity {
+            Self::flush(&mut inner).await?;
         }
 
         // Write directly to the blob (if the buffer is too small) or append to the buffer
-        if buf_len > self.capacity {
-            self.blob.write_at(buf, self.position).await?;
-            self.position += buf_len as u64;
+        if buf_len > inner.capacity {
+            inner.blob.write_at(buf, inner.position).await?;
+            inner.position += buf_len as u64;
         } else {
-            self.buffer.extend_from_slice(buf.as_ref());
+            inner.buffer.extend_from_slice(buf.as_ref());
         }
         Ok(())
     }
@@ -94,15 +100,15 @@ impl<B: Blob> Write<B> {
     ///
     /// If the write to the underlying blob fails, the buffer will be reset (and any pending data not yet
     /// written will be lost).
-    async fn flush(&mut self) -> Result<(), Error> {
-        if self.buffer.is_empty() {
+    async fn flush(inner: &mut Inner<B>) -> Result<(), Error> {
+        if inner.buffer.is_empty() {
             return Ok(());
         }
-        let buf = std::mem::take(&mut self.buffer);
+        let buf = std::mem::take(&mut inner.buffer);
         let len = buf.len() as u64;
-        self.blob.write_at(buf, self.position).await?;
-        self.position += len;
-        self.buffer = Vec::with_capacity(self.capacity);
+        inner.blob.write_at(buf, inner.position).await?;
+        inner.position += len;
+        inner.buffer = Vec::with_capacity(inner.capacity);
         Ok(())
     }
 
@@ -110,7 +116,8 @@ impl<B: Blob> Write<B> {
     ///
     /// Returns an error if either the flush or sync operation fails.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        self.flush().await?;
-        self.blob.sync().await
+        let mut inner = self.inner.write().await;
+        Self::flush(&mut inner).await?;
+        inner.blob.sync().await
     }
 }
