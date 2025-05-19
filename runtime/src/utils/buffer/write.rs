@@ -198,21 +198,18 @@ impl<B: Blob> Blob for Write<B> {
         let buffer_start = inner.position;
         let buffer_end = buffer_start + inner.buffer.len() as u64;
 
-        // Proposed write operation boundaries
-        let write_start = offset;
-
         // Simple append to the current buffered data
-        if write_start == buffer_end {
+        if offset == buffer_end {
             return inner.write(buf).await;
         }
 
         // Write operation can be merged into the existing buffer if:
         // a) Write starts at or after the buffer's starting position in the blob.
         // b) The end of the write, relative to the buffer's start, fits within buffer's capacity.
-        let can_write_into_buffer = write_start >= buffer_start
-            && (write_start - buffer_start) + data_len as u64 <= inner.capacity as u64;
+        let can_write_into_buffer = offset >= buffer_start
+            && (offset - buffer_start) + data_len as u64 <= inner.capacity as u64;
         if can_write_into_buffer {
-            let buffer_internal_offset = (write_start - buffer_start) as usize;
+            let buffer_internal_offset = (offset - buffer_start) as usize;
             let required_buffer_len = buffer_internal_offset + data_len;
             if required_buffer_len > inner.buffer.len() {
                 inner.buffer.resize(required_buffer_len, 0u8);
@@ -225,8 +222,8 @@ impl<B: Blob> Blob for Write<B> {
         if !inner.buffer.is_empty() {
             inner.flush().await?;
         }
-        inner.blob.write_at(buf, write_start).await?;
-        inner.position = write_start + data_len as u64;
+        inner.blob.write_at(buf, offset).await?;
+        inner.position = offset + data_len as u64;
         Ok(())
     }
 
