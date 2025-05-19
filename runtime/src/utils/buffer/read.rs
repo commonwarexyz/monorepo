@@ -53,7 +53,7 @@ impl<B: Blob> Read<B> {
     ///
     /// Panics if `buffer_size` is zero.
     pub fn new(blob: B, blob_size: u64, buffer_size: usize) -> Self {
-        assert!(buffer_size > 0, "Buffer size must be greater than zero");
+        assert!(buffer_size > 0, "buffer size must be greater than zero");
         Self {
             blob,
             buffer: vec![0; buffer_size],

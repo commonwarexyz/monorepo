@@ -53,7 +53,7 @@ mod tests {
     }
 
     #[test_traced]
-    #[should_panic(expected = "Buffer size must be greater than zero")]
+    #[should_panic(expected = "buffer size must be greater than zero")]
     fn test_read_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -410,8 +410,7 @@ mod tests {
             assert_eq!(size, 0);
 
             let writer = Write::new(blob.clone(), 0, 8);
-            writer.write("hello".as_bytes()).await.unwrap();
-            assert_eq!(writer.position().await, 5);
+            writer.write_at("hello".as_bytes(), 0).await.unwrap();
             writer.sync().await.unwrap();
 
             let (blob, size) = context.open("partition", b"write_basic").await.unwrap();
@@ -430,9 +429,9 @@ mod tests {
             let (blob, size) = context.open("partition", b"write_multi").await.unwrap();
             assert_eq!(size, 0);
 
-            let mut writer = Write::new(blob.clone(), 0, 4);
-            writer.write("abc".as_bytes()).await.unwrap();
-            writer.write("defg".as_bytes()).await.unwrap();
+            let writer = Write::new(blob.clone(), 0, 4);
+            writer.write_at("abc".as_bytes(), 0).await.unwrap();
+            writer.write_at("defg".as_bytes(), 3).await.unwrap();
             writer.sync().await.unwrap();
 
             let (blob, size) = context.open("partition", b"write_multi").await.unwrap();
@@ -451,10 +450,10 @@ mod tests {
             let (blob, size) = context.open("partition", b"write_multi").await.unwrap();
             assert_eq!(size, 0);
 
-            let mut writer = Write::new(blob.clone(), 0, 4);
-            writer.write("abc".as_bytes()).await.unwrap();
+            let writer = Write::new(blob.clone(), 0, 4);
+            writer.write_at("abc".as_bytes(), 0).await.unwrap();
             writer
-                .write("defghijklmnopqrstuvwxyz".as_bytes())
+                .write_at("defghijklmnopqrstuvwxyz".as_bytes(), 3)
                 .await
                 .unwrap();
             writer.sync().await.unwrap();
@@ -469,7 +468,7 @@ mod tests {
     }
 
     #[test_traced]
-    #[should_panic(expected = "Buffer capacity must be greater than zero")]
+    #[should_panic(expected = "buffer capacity must be greater than zero")]
     fn test_write_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
