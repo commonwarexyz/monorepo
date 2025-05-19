@@ -1,14 +1,14 @@
-#[cfg(feature = "iouring")]
-use crate::{
-    network::iouring::Network as IoUringNetwork,
-    storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage},
-};
+#[cfg(feature = "iouring-storage")]
+use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage};
 
-#[cfg(not(feature = "iouring"))]
-use crate::{
-    network::tokio::Network as TokioNetwork,
-    storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage},
-};
+#[cfg(feature = "iouring-network")]
+use crate::network::iouring::Network as IoUringNetwork;
+
+#[cfg(not(feature = "iouring-network"))]
+use crate::network::tokio::Network as TokioNetwork;
+
+#[cfg(not(feature = "iouring-storage"))]
+use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 
 use crate::network::metered::Network as MeteredNetwork;
 use crate::network::tokio::Config as TokioNetworkConfig;
@@ -240,9 +240,8 @@ impl crate::Runner for Runner {
             .expect("failed to create Tokio runtime");
         let (signaler, signal) = Signaler::new();
 
-        let (storage, network) = {
-            #[cfg(feature = "iouring")]
-            {
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "iouring-storage")] {
                 let storage = MeteredStorage::new(
                     IoUringStorage::start(IoUringConfig {
                         storage_directory: self.cfg.storage_directory.clone(),
@@ -250,14 +249,7 @@ impl crate::Runner for Runner {
                     }),
                     runtime_registry,
                 );
-                let network = MeteredNetwork::new(
-                    IoUringNetwork::start(crate::iouring::Config::default()).unwrap(),
-                    runtime_registry,
-                );
-                (storage, network)
-            }
-            #[cfg(not(feature = "iouring"))]
-            {
+            } else {
                 let storage = MeteredStorage::new(
                     TokioStorage::new(TokioStorageConfig::new(
                         self.cfg.storage_directory.clone(),
@@ -265,11 +257,22 @@ impl crate::Runner for Runner {
                     )),
                     runtime_registry,
                 );
-                let network = TokioNetwork::from(self.cfg.network_cfg.clone());
-                let network = MeteredNetwork::new(network, runtime_registry);
-                (storage, network)
             }
-        };
+        }
+
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "iouring-network")] {
+                let network = MeteredNetwork::new(
+                    IoUringNetwork::start(crate::iouring::Config::default()).unwrap(),
+                    runtime_registry,
+                );
+            } else {
+                let network = MeteredNetwork::new(
+                    TokioNetwork::from(self.cfg.network_cfg.clone()),
+                    runtime_registry,
+                );
+            }
+        }
 
         // Initialize executor
         let executor = Arc::new(Executor {
@@ -302,11 +305,17 @@ impl crate::Runner for Runner {
 }
 
 cfg_if::cfg_if! {
-    if #[cfg(feature = "iouring")] {
+    if #[cfg(feature = "iouring-storage")] {
         type Storage = MeteredStorage<IoUringStorage>;
-        type Network = MeteredNetwork<IoUringNetwork>;
     } else {
         type Storage = MeteredStorage<TokioStorage>;
+    }
+}
+
+cfg_if::cfg_if! {
+    if #[cfg(feature = "iouring-network")] {
+        type Network = MeteredNetwork<IoUringNetwork>;
+    } else {
         type Network = MeteredNetwork<TokioNetwork>;
     }
 }
