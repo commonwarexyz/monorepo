@@ -124,7 +124,7 @@ impl<B: Blob> Write<B> {
     ///
     /// Panics if `capacity` is zero.
     pub fn new(blob: B, position: u64, capacity: usize) -> Self {
-        assert!(capacity > 0, "Buffer capacity must be greater than zero");
+        assert!(capacity > 0, "buffer capacity must be greater than zero");
         let inner = Arc::new(RwLock::new(Inner {
             blob,
             buffer: Vec::with_capacity(capacity),
@@ -137,68 +137,69 @@ impl<B: Blob> Write<B> {
 
 impl<B: Blob> Blob for Write<B> {
     async fn read_at<T: StableBufMut>(&self, mut buf: T, offset: u64) -> Result<T, Error> {
-        // Acquire a read lock on the inner state.
+        // Acquire a read lock on the inner state
         let inner = self.inner.read().await;
 
-        // Ensure offset read is valid
-        let len = buf.len();
-        let end = offset
-            .checked_add(len as u64)
+        // Ensure offset read doesn't overflow
+        let data_len = buf.len();
+        let data_end = offset
+            .checked_add(data_len as u64)
             .ok_or(Error::OffsetOverflow)?;
 
-        // If the data required doesn't involve the buffer, read from the blob
+        // If the data required is beyond the buffer end, return an error
         let buffer_start = inner.position;
         let buffer_end = inner.position + inner.buffer.len() as u64;
-        if end <= buffer_start {
-            return inner.blob.read_at(buf, offset).await;
+        if data_end > buffer_end {
+            return Err(Error::BlobInsufficientLength);
         }
 
-        // If the data required is outside the buffer, return an error
-        if offset >= buffer_end {
-            return Err(Error::BlobInsufficientLength);
+        // If the data required is before the buffer start, read directly from the blob
+        if data_end <= buffer_start {
+            return inner.blob.read_at(buf, offset).await;
         }
 
         // If the data is entirely within the buffer, read it
         if offset >= buffer_start {
             let start = (offset - buffer_start) as usize;
-            if start + len > inner.buffer.len() {
+            if start + data_len > inner.buffer.len() {
                 return Err(Error::BlobInsufficientLength);
             }
-            buf.put_slice(&inner.buffer[start..start + len]);
+            buf.put_slice(&inner.buffer[start..start + data_len]);
             return Ok(buf);
         }
 
-        // If the data is a combination of blob and buffer, populate accordingly
+        // If the data is a combination of blob and buffer, read the blob first
         let blob_bytes = (buffer_start - offset) as usize;
         let blob_part = vec![0u8; blob_bytes];
         let blob_part = inner.blob.read_at(blob_part, offset).await?;
-        let buf_bytes = len - blob_bytes;
+        buf.deref_mut()[..blob_bytes].copy_from_slice(&blob_part);
+
+        // If there is remaining data, read it from the buffer
+        let buf_bytes = data_len - blob_bytes;
         if buf_bytes > inner.buffer.len() {
             return Err(Error::BlobInsufficientLength);
         }
-        buf.deref_mut()[..blob_bytes].copy_from_slice(&blob_part);
         buf.deref_mut()[blob_bytes..].copy_from_slice(&inner.buffer[..buf_bytes]);
         Ok(buf)
     }
 
     async fn write_at<T: StableBuf>(&self, buf: T, offset: u64) -> Result<(), Error> {
-        // Acquire a write lock on the inner state.
+        // Acquire a write lock on the inner state
         let mut inner = self.inner.write().await;
 
-        // Prepare the data to be written
-        let data_as_slice = buf.as_ref();
-        let data_len = data_as_slice.len() as u64;
+        // Prepare the buf to be written
+        let data = buf.as_ref();
+        let data_len = data.len();
 
         // Current state of the buffer in the blob
-        let buffer_blob_start_offset = inner.position;
-        let buffer_current_len = inner.buffer.len() as u64;
-        let buffer_blob_end_offset = buffer_blob_start_offset + buffer_current_len;
+        let buffer_start = inner.position;
+        let buffer_end = buffer_start + inner.buffer.len() as u64;
 
         // Proposed write operation boundaries
-        let write_start_offset = offset;
+        let write_start = offset;
 
         // Scenario 1: Pure append to the current buffered data.
-        if write_start_offset == buffer_blob_end_offset {
+        if write_start == buffer_end {
             return inner.write(buf).await;
         }
 
@@ -206,33 +207,24 @@ impl<B: Blob> Blob for Write<B> {
         // Conditions:
         // a) Write starts at or after the buffer's starting position in the blob.
         // b) The end of the write, relative to the buffer's start, fits within buffer's capacity.
-        let can_write_into_buffer = write_start_offset >= buffer_blob_start_offset
-            && (write_start_offset - buffer_blob_start_offset) + data_len <= inner.capacity as u64;
+        let can_write_into_buffer = write_start >= buffer_start
+            && (write_start - buffer_start) + data_len as u64 <= inner.capacity as u64;
         if can_write_into_buffer {
-            let buffer_internal_offset = (write_start_offset - buffer_blob_start_offset) as usize;
-            let required_buffer_len = buffer_internal_offset + data_as_slice.len();
+            let buffer_internal_offset = (write_start - buffer_start) as usize;
+            let required_buffer_len = buffer_internal_offset + data_len;
             if required_buffer_len > inner.buffer.len() {
                 inner.buffer.resize(required_buffer_len, 0u8);
             }
-            inner.buffer[buffer_internal_offset..required_buffer_len]
-                .copy_from_slice(data_as_slice);
+            inner.buffer[buffer_internal_offset..required_buffer_len].copy_from_slice(data);
             return Ok(());
         }
 
         // Scenario 3: All other cases (e.g., write is before buffer, straddles non-mergably, or would overflow capacity).
-        // Action: Flush existing buffer (if any), then perform direct blob write, then update inner state.
         if !inner.buffer.is_empty() {
             inner.flush().await?;
-            // After flush: inner.position is at the end of flushed data, inner.buffer is empty & has correct capacity.
         }
-
-        // Perform the direct write to the blob using the original `buf`.
-        inner.blob.write_at(buf, write_start_offset).await?;
-
-        // Update inner.position to reflect the end of this direct write.
-        // inner.buffer is already empty (either from flush or was initially empty).
-        inner.position = write_start_offset + data_len;
-
+        inner.blob.write_at(buf, write_start).await?;
+        inner.position = write_start + data_len as u64;
         Ok(())
     }
 
