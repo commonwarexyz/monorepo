@@ -411,13 +411,14 @@ impl<
     }
 
     /// Generate and return a proof of the current value of `key`, along with the current value
-    /// itself and the location of its last-active update operation. Returns KeyNotFound error if
-    /// the key is not currently assigned any value.
+    /// itself, the location of its last-active update operation, and the bitmap chunk corresponding
+    /// to that location (all of which is required to verify the proof). Returns KeyNotFound error
+    /// if the key is not currently assigned any value.
     pub async fn current_value_proof(
         &self,
         hasher: &mut H,
         key: &K,
-    ) -> Result<(Proof<H>, V, u64), Error> {
+    ) -> Result<(Proof<H>, V, u64, [u8; N]), Error> {
         let op = self.any.get_with_loc(key).await?;
         let Some(op) = op else {
             return Err(Error::KeyNotFound());
@@ -430,8 +431,9 @@ impl<
         let grafted_mmr = GraftedStorage::new(&bitmap_storage, &self.any.ops, height);
 
         let proof = Proof::<H>::range_proof(&grafted_mmr, pos, pos).await?;
+        let chunk = *self.status.get_chunk(op.1);
 
-        Ok((proof, op.0, op.1))
+        Ok((proof, op.0, op.1, chunk))
     }
 
     /// Return true if the proof authenticates that `key` currently has value `value` in the db with the given root.
@@ -441,16 +443,27 @@ impl<
         key: K,
         value: V,
         loc: u64,
+        chunk: &[u8; N],
         root_digest: &H::Digest,
     ) -> Result<bool, Error> {
         let pos = leaf_num_to_pos(loc);
         let mut hasher = Standard::new(hasher);
         let digest = Any::<E, _, _, _, T>::op_digest(&mut hasher, &Operation::Update(key, value));
 
-        proof
+        if !proof
             .verify_element_inclusion(&mut hasher, &digest, pos, root_digest)
-            .await
-            .map_err(Error::MmrError)
+            .await?
+        {
+            return Ok(false);
+        }
+
+        // We must still make sure that (1) the bit in the bitmap chunk is actually a 1 (indicating the operation is
+        // indeed active) and (2) the digest in the proof is as derived from this chunk.
+        if !Bitmap::<H, N>::get_bit_from_chunk(chunk, loc) {
+            return Ok(false);
+        }
+
+        Ok(true)
     }
 
     /// Close the db. Operations that have not been committed will be lost.
@@ -684,7 +697,7 @@ pub mod test {
                 // Found an active operation! Create a proof for its active current key/value.
                 let op = db.any.log.read(i).await.unwrap();
                 let key = op.to_key().unwrap();
-                let (proof, val, loc) = db
+                let (proof, val, loc, chunk) = db
                     .current_value_proof(&mut hasher, op.to_key().unwrap())
                     .await
                     .unwrap();
@@ -697,6 +710,7 @@ pub mod test {
                         *key,
                         val,
                         loc,
+                        &chunk,
                         &root
                     )
                     .await
@@ -711,6 +725,7 @@ pub mod test {
                         *key,
                         wrong_val,
                         loc,
+                        &chunk,
                         &root
                     )
                     .await
@@ -725,6 +740,7 @@ pub mod test {
                         wrong_key,
                         val,
                         loc,
+                        &chunk,
                         &root
                     )
                     .await
@@ -739,6 +755,7 @@ pub mod test {
                         wrong_key,
                         val,
                         loc,
+                        &chunk,
                         &wrong_root,
                     )
                     .await

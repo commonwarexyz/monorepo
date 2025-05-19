@@ -220,7 +220,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     /// Returns the bitmap chunk containing the specified bit. Panics if the bit doesn't exist or
     /// has been pruned.
     #[inline]
-    fn get_chunk(&self, bit_offset: u64) -> &[u8; N] {
+    pub fn get_chunk(&self, bit_offset: u64) -> &[u8; N] {
         &self.bitmap[self.chunk_index(bit_offset)]
     }
 
@@ -332,14 +332,19 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         (bit_offset / Self::CHUNK_SIZE_BITS) as usize
     }
 
-    /// Get the value of a bit. Panics if the bit doesn't exist or has been pruned.
     #[inline]
-    pub fn get_bit(&self, bit_offset: u64) -> bool {
+    pub fn get_bit_from_chunk(chunk: &[u8; N], bit_offset: u64) -> bool {
         let byte_offset = Self::chunk_byte_offset(bit_offset);
-        let byte = self.get_chunk(bit_offset)[byte_offset];
+        let byte = chunk[byte_offset];
         let mask = Self::chunk_byte_bitmask(bit_offset);
 
         (byte & mask) != 0
+    }
+
+    /// Get the value of a bit. Panics if the bit doesn't exist or has been pruned.
+    #[inline]
+    pub fn get_bit(&self, bit_offset: u64) -> bool {
+        Self::get_bit_from_chunk(self.get_chunk(bit_offset), bit_offset)
     }
 
     /// Set the value of the referenced bit. Panics if the bit doesn't exist or has been pruned.
