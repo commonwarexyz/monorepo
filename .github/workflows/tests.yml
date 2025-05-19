@@ -33,6 +33,7 @@ jobs:
 
   Fast:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       matrix:
         features:
@@ -48,6 +49,7 @@ jobs:
 
   Slow:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     strategy:
       matrix:
         features:
