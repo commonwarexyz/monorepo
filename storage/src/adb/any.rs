@@ -43,7 +43,7 @@ pub struct Config {
     pub mmr_items_per_blob: u64,
 
     /// The size of the write buffer to use for each blob in the MMR journal.
-    pub mmr_write_buffer_size: usize,
+    pub mmr_write_buffer: usize,
 
     /// The name of the [RStorage] partition used for the MMR's metadata.
     pub mmr_metadata_partition: String,
@@ -55,7 +55,7 @@ pub struct Config {
     pub log_items_per_blob: u64,
 
     /// The size of the write buffer to use for each blob in the log journal.
-    pub log_write_buffer_size: usize,
+    pub log_write_buffer: usize,
 }
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
@@ -153,7 +153,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 journal_partition: cfg.mmr_journal_partition,
                 metadata_partition: cfg.mmr_metadata_partition,
                 items_per_blob: cfg.mmr_items_per_blob,
-                write_buffer_size: cfg.mmr_write_buffer_size,
+                write_buffer: cfg.mmr_write_buffer,
             },
         )
         .await?;
@@ -163,7 +163,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             JConfig {
                 partition: cfg.log_journal_partition,
                 items_per_blob: cfg.log_items_per_blob,
-                write_buffer_size: cfg.log_write_buffer_size,
+                write_buffer: cfg.log_write_buffer,
             },
         )
         .await?;
@@ -706,10 +706,10 @@ mod test {
             mmr_journal_partition: "journal_partition".into(),
             mmr_metadata_partition: "metadata_partition".into(),
             mmr_items_per_blob: 11,
-            mmr_write_buffer_size: 1024,
+            mmr_write_buffer: 1024,
             log_journal_partition: "log_journal_partition".into(),
             log_items_per_blob: 7,
-            log_write_buffer_size: 1024,
+            log_write_buffer: 1024,
         }
     }
 

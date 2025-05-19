@@ -974,7 +974,7 @@ impl<
             partition: format!("{}{}", &self.journal_name_prefix, sequencer),
             compression: self.journal_compression,
             codec_config: (),
-            write_buffer_size: self.journal_write_buffer,
+            write_buffer: self.journal_write_buffer,
         };
         let journal = Journal::<_, Node<C, V, D>>::init(self.context.with_label("journal"), cfg)
             .await

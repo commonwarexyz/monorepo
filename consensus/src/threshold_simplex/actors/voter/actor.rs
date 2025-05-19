@@ -1830,7 +1830,7 @@ impl<
                 partition: self.partition.clone(),
                 compression: self.compression,
                 codec_config: (),
-                write_buffer_size: self.write_buffer,
+                write_buffer: self.write_buffer,
             },
         )
         .await

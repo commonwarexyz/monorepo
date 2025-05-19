@@ -36,7 +36,7 @@ pub struct Config {
     pub items_per_blob: u64,
 
     /// The size of the write buffer to use for each blob in the backing journal.
-    pub write_buffer_size: usize,
+    pub write_buffer: usize,
 }
 
 /// A MMR backed by a fixed-item-length journal.
@@ -101,7 +101,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         let journal_cfg = JConfig {
             partition: cfg.journal_partition,
             items_per_blob: cfg.items_per_blob,
-            write_buffer_size: cfg.write_buffer_size,
+            write_buffer: cfg.write_buffer,
         };
         let mut journal =
             Journal::<E, H::Digest>::init(context.with_label("mmr_journal"), journal_cfg).await?;
@@ -509,7 +509,7 @@ mod tests {
                 journal_partition: "journal_partition".into(),
                 metadata_partition: "metadata_partition".into(),
                 items_per_blob: 7,
-                write_buffer_size: 1024,
+                write_buffer: 1024,
             };
             let mut hasher = Sha256::new();
             let mut mmr = Mmr::init(
@@ -531,7 +531,7 @@ mod tests {
                 journal_partition: "journal_partition".into(),
                 metadata_partition: "metadata_partition".into(),
                 items_per_blob: 7,
-                write_buffer_size: 1024,
+                write_buffer: 1024,
             };
             let mut hasher = Sha256::new();
             let mut hasher = Standard::new(&mut hasher);
@@ -557,7 +557,7 @@ mod tests {
                 journal_partition: "journal_partition".into(),
                 metadata_partition: "metadata_partition".into(),
                 items_per_blob: 7,
-                write_buffer_size: 1024,
+                write_buffer: 1024,
             };
 
             let mut hasher = Sha256::new();
@@ -628,7 +628,7 @@ mod tests {
                 journal_partition: "journal_partition".into(),
                 metadata_partition: "metadata_partition".into(),
                 items_per_blob: 7,
-                write_buffer_size: 1024,
+                write_buffer: 1024,
             };
             let mut hasher = Sha256::new();
             let mut hasher = Standard::new(&mut hasher);
@@ -704,7 +704,7 @@ mod tests {
                 journal_partition: "journal_partition".into(),
                 metadata_partition: "metadata_partition".into(),
                 items_per_blob: 7,
-                write_buffer_size: 1024,
+                write_buffer: 1024,
             };
             let mut hasher = Sha256::new();
             let mut hasher = Standard::new(&mut hasher);
@@ -795,7 +795,7 @@ mod tests {
                 journal_partition: "journal_partition".into(),
                 metadata_partition: "metadata_partition".into(),
                 items_per_blob: 7,
-                write_buffer_size: 1024,
+                write_buffer: 1024,
             };
 
             let mut hasher = Sha256::new();
@@ -809,7 +809,7 @@ mod tests {
                 journal_partition: "unpruned_journal_partition".into(),
                 metadata_partition: "unpruned_metadata_partition".into(),
                 items_per_blob: 7,
-                write_buffer_size: 1024,
+                write_buffer: 1024,
             };
             let mut mmr = Mmr::init(context.clone(), &mut hasher, cfg_unpruned)
                 .await
@@ -901,7 +901,7 @@ mod tests {
                 journal_partition: "journal_partition".into(),
                 metadata_partition: "metadata_partition".into(),
                 items_per_blob: 7,
-                write_buffer_size: 1024,
+                write_buffer: 1024,
             };
             let mut hasher = Sha256::new();
             let mut hasher = Standard::new(&mut hasher);

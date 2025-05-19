@@ -75,7 +75,7 @@ pub struct Config {
     pub items_per_blob: u64,
 
     /// The size of the write buffer to use for each blob.
-    pub write_buffer_size: usize,
+    pub write_buffer: usize,
 }
 
 /// Implementation of `Journal` storage.
@@ -123,7 +123,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                 Err(nm) => return Err(Error::InvalidBlobName(hex(&nm))),
             };
             debug!(blob = index, "loaded blob");
-            let blob = Write::new(blob, size, cfg.write_buffer_size);
+            let blob = Write::new(blob, size, cfg.write_buffer);
             blobs.insert(index, (blob, size));
         }
         if !blobs.is_empty() {
@@ -140,7 +140,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             debug!("no blobs found");
             let (blob, size) = context.open(&cfg.partition, &0u64.to_be_bytes()).await?;
             assert_eq!(size, 0);
-            let blob = Write::new(blob, size, cfg.write_buffer_size);
+            let blob = Write::new(blob, size, cfg.write_buffer);
             blobs.insert(0, (blob, size));
         }
 
@@ -177,7 +177,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             let (next_blob, size) = context
                 .open(&cfg.partition, &next_blob_index.to_be_bytes())
                 .await?;
-            let next_blob = Write::new(next_blob, size, cfg.write_buffer_size);
+            let next_blob = Write::new(next_blob, size, cfg.write_buffer);
             blobs.insert(next_blob_index, (next_blob, size));
             tracked.inc();
         }
@@ -246,7 +246,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                 .context
                 .open(&self.cfg.partition, &next_blob_index.to_be_bytes())
                 .await?;
-            let next_blob = Write::new(next_blob, size, self.cfg.write_buffer_size);
+            let next_blob = Write::new(next_blob, size, self.cfg.write_buffer);
             assert!(self
                 .blobs
                 .insert(next_blob_index, (next_blob, size))
@@ -506,7 +506,7 @@ mod tests {
             let cfg = Config {
                 partition: "test_partition".into(),
                 items_per_blob: 2,
-                write_buffer_size: 1024,
+                write_buffer: 1024,
             };
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -529,7 +529,7 @@ mod tests {
             let cfg = Config {
                 partition: "test_partition".into(),
                 items_per_blob: 2,
-                write_buffer_size: 1024,
+                write_buffer: 1024,
             };
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -662,7 +662,7 @@ mod tests {
             let cfg = Config {
                 partition: "test_partition".into(),
                 items_per_blob: ITEMS_PER_BLOB,
-                write_buffer_size: 1024,
+                write_buffer: 1024,
             };
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -832,7 +832,7 @@ mod tests {
             let cfg = Config {
                 partition: "test_partition".into(),
                 items_per_blob: 3,
-                write_buffer_size: 1024,
+                write_buffer: 1024,
             };
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -892,7 +892,7 @@ mod tests {
             let cfg = Config {
                 partition: "test_partition".into(),
                 items_per_blob: 10,
-                write_buffer_size: 1024,
+                write_buffer: 1024,
             };
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -942,7 +942,7 @@ mod tests {
             let cfg = Config {
                 partition: "test_partition".into(),
                 items_per_blob: 2,
-                write_buffer_size: 1024,
+                write_buffer: 1024,
             };
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -1009,7 +1009,7 @@ mod tests {
             let cfg = Config {
                 partition: "test_partition_2".into(),
                 items_per_blob: 3,
-                write_buffer_size: 1024,
+                write_buffer: 1024,
             };
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
