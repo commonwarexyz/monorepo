@@ -409,9 +409,9 @@ mod tests {
             let (blob, size) = context.open("partition", b"write_basic").await.unwrap();
             assert_eq!(size, 0);
 
-            let mut writer = Write::new(blob.clone(), 0, 8);
+            let writer = Write::new(blob.clone(), 0, 8);
             writer.write("hello".as_bytes()).await.unwrap();
-            assert_eq!(writer.position(), 5);
+            assert_eq!(writer.position().await, 5);
             writer.sync().await.unwrap();
 
             let (blob, size) = context.open("partition", b"write_basic").await.unwrap();
