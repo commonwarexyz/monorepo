@@ -123,11 +123,7 @@ pub trait Spawner: Clone + Send + Sync + 'static {
 
     /// Enqueue a task to be executed (without consuming the context).
     ///
-    /// Unlike a future, a spawned task will start executing immediately (even if the caller
-    /// does not await the handle).
-    ///
-    /// In some cases, it may be useful to spawn a task without consuming the context (e.g. starting
-    /// an actor that already has a reference to context).
+    /// The semantics are the same as [Spawner::spawn].
     ///
     /// # Warning
     ///
@@ -163,9 +159,7 @@ pub trait Spawner: Clone + Send + Sync + 'static {
 
     /// Enqueue a blocking task to be executed (without consuming the context).
     ///
-    /// The semantics are identical to [`spawn_blocking`], but the provided
-    /// closure does not receive the context as a parameter. This is useful when
-    /// the task already owns a clone of the context or does not need one.
+    /// The semantics are the same as [Spawner::spawn_blocking].
     ///
     /// # Warning
     ///
