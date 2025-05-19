@@ -93,16 +93,15 @@ impl<B: Blob> Inner<B> {
 ///     let (blob, size) = context.open("my_partition", b"my_data").await.expect("unable to open blob");
 ///     assert_eq!(size, 0);
 ///
-///     // Create a buffered writer with 8-byte buffer
-///     let mut writer = Write::new(blob.clone(), 0, 8);
-///     writer.write("hello".as_bytes()).await.expect("write failed");
-///     assert_eq!(writer.position(), 5);
-///     writer.sync().await.expect("sync failed");
+///     // Create a buffered writer with 16-byte buffer
+///     let mut blob = Write::new(blob, 0, 16);
+///     blob.write_at("hello".as_bytes(), 0).await.expect("write failed");
+///     blob.sync().await.expect("sync failed");
 ///
 ///     // Write more data in multiple flushes
-///     writer.write(" world".as_bytes()).await.expect("write failed");
-///     writer.write("!".as_bytes()).await.expect("write failed");
-///     writer.sync().await.expect("sync failed");
+///     blob.write_at(" world".as_bytes(), 5).await.expect("write failed");
+///     blob.write_at("!".as_bytes(), 11).await.expect("write failed");
+///     blob.sync().await.expect("sync failed");
 ///
 ///     // Read back the data to verify
 ///     let (blob, size) = context.open("my_partition", b"my_data").await.expect("unable to reopen blob");
