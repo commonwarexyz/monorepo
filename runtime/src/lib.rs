@@ -27,6 +27,9 @@ use std::{
 };
 use thiserror::Error;
 
+#[macro_use]
+mod macros;
+
 pub mod deterministic;
 pub mod mocks;
 cfg_if::cfg_if! {

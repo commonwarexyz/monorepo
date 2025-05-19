@@ -345,18 +345,7 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
-        let label = Label::future(self.name.clone());
-        self.executor
-            .metrics
-            .tasks_spawned
-            .get_or_create(&label)
-            .inc();
-        let gauge = self
-            .executor
-            .metrics
-            .tasks_running
-            .get_or_create(&label)
-            .clone();
+        let (_, gauge) = spawn_metrics!(self, future);
 
         // Set up the task
         let catch_panics = self.executor.cfg.catch_panics;
@@ -379,18 +368,7 @@ impl crate::Spawner for Context {
         self.spawned = true;
 
         // Get metrics
-        let label = Label::future(self.name.clone());
-        self.executor
-            .metrics
-            .tasks_spawned
-            .get_or_create(&label)
-            .inc();
-        let gauge = self
-            .executor
-            .metrics
-            .tasks_running
-            .get_or_create(&label)
-            .clone();
+        let (_, gauge) = spawn_metrics!(self, future);
 
         // Set up the task
         let executor = self.executor.clone();
@@ -412,22 +390,7 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
-        let label = if dedicated {
-            Label::blocking_dedicated(self.name.clone())
-        } else {
-            Label::blocking_shared(self.name.clone())
-        };
-        self.executor
-            .metrics
-            .tasks_spawned
-            .get_or_create(&label)
-            .inc();
-        let gauge = self
-            .executor
-            .metrics
-            .tasks_running
-            .get_or_create(&label)
-            .clone();
+        let (_, gauge) = spawn_metrics!(self, blocking, dedicated);
 
         // Set up the task
         let executor = self.executor.clone();
@@ -452,22 +415,7 @@ impl crate::Spawner for Context {
         self.spawned = true;
 
         // Get metrics
-        let label = if dedicated {
-            Label::blocking_dedicated(self.name.clone())
-        } else {
-            Label::blocking_shared(self.name.clone())
-        };
-        self.executor
-            .metrics
-            .tasks_spawned
-            .get_or_create(&label)
-            .inc();
-        let gauge = self
-            .executor
-            .metrics
-            .tasks_running
-            .get_or_create(&label)
-            .clone();
+        let (_, gauge) = spawn_metrics!(self, blocking, dedicated);
 
         // Set up the task
         let executor = self.executor.clone();
