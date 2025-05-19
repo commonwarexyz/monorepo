@@ -35,5 +35,4 @@ macro_rules! spawn_metrics {
         let gauge = metrics.tasks_running.get_or_create(&label).clone();
         (label, gauge)
     }};
-
 }
