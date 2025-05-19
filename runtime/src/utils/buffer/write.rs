@@ -8,7 +8,7 @@ struct Inner<B: Blob> {
     blob: B,
     /// The buffer storing data to be written to the blob.
     buffer: Vec<u8>,
-    /// The current position in the blob where the data in `buffer` starts.
+    /// The offset in the blob where the data in `buffer` starts.
     /// If `buffer` is empty, this is the position where the next appended byte would conceptually begin in the blob.
     position: u64,
     /// The maximum size of the buffer.
@@ -21,7 +21,7 @@ impl<B: Blob> Inner<B> {
     ///
     /// If the size of the provided bytes is larger than the buffer capacity, the bytes will be written
     /// directly to the underlying [Blob]. If this occurs regularly, the buffer capacity should be increased (as
-    /// the buffer will provide any benefit).
+    /// the buffer will not provide any benefit).
     ///
     /// Returns an error if the write to the underlying [Blob] fails (may be due to a `flush` of data not
     /// related to the data being written).
@@ -133,13 +133,14 @@ impl<B: Blob> Write<B> {
     /// Panics if `capacity` is zero.
     pub fn new(blob: B, position: u64, capacity: usize) -> Self {
         assert!(capacity > 0, "buffer capacity must be greater than zero");
-        let inner = Arc::new(RwLock::new(Inner {
-            blob,
-            buffer: Vec::with_capacity(capacity),
-            position,
-            capacity,
-        }));
-        Self { inner }
+        Self {
+            inner: Arc::new(RwLock::new(Inner {
+                blob,
+                buffer: Vec::with_capacity(capacity),
+                position,
+                capacity,
+            })),
+        }
     }
 }
 
