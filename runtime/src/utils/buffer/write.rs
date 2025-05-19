@@ -70,17 +70,32 @@ impl<B: Blob> Write<B> {
         Self { inner }
     }
 
+    /// Returns the current position of the writer, including buffered but not-yet-flushed bytes.
+    pub async fn position(&self) -> u64 {
+        let inner = self.inner.read().await;
+        Self::inner_position(&inner).await
+    }
+
+    async fn inner_position(inner: &Inner<B>) -> u64 {
+        inner.position + inner.buffer.len() as u64
+    }
+
     /// Appends bytes to the internal buffer. If the buffer capacity is exceeded, it will be flushed to the
     /// underlying [Blob].
     ///
     /// If the size of the provided bytes is larger than the buffer capacity, the bytes will be written
     /// directly to the underlying [Blob]. If this occurs regularly, the buffer capacity should be increased (or
     /// the buffer will not be effective).
-    async fn write<Buf: StableBuf>(inner: &mut Inner<B>, buf: Buf) -> Result<(), Error> {
+    pub async fn write<Buf: StableBuf>(&self, buf: Buf) -> Result<(), Error> {
+        let mut inner = self.inner.write().await;
+        Self::inner_write(&mut *inner, buf).await
+    }
+
+    async fn inner_write<Buf: StableBuf>(inner: &mut Inner<B>, buf: Buf) -> Result<(), Error> {
         // If the buffer capacity will be exceeded, flush the buffer first
         let buf_len = buf.len();
         if inner.buffer.len() + buf_len > inner.capacity {
-            Self::flush(inner).await?;
+            Self::inner_flush(inner).await?;
         }
 
         // Write directly to the blob (if the buffer is too small) or append to the buffer
@@ -97,7 +112,12 @@ impl<B: Blob> Write<B> {
     ///
     /// If the write to the underlying blob fails, the buffer will be reset (and any pending data not yet
     /// written will be lost).
-    async fn flush(inner: &mut Inner<B>) -> Result<(), Error> {
+    pub async fn flush(&self) -> Result<(), Error> {
+        let mut inner = self.inner.write().await;
+        Self::inner_flush(&mut *inner).await
+    }
+
+    async fn inner_flush(inner: &mut Inner<B>) -> Result<(), Error> {
         if inner.buffer.is_empty() {
             return Ok(());
         }
@@ -112,8 +132,13 @@ impl<B: Blob> Write<B> {
     /// Flushes buffered data and ensures it is durably persisted to the underlying blob.
     ///
     /// Returns an error if either the flush or sync operation fails.
-    async fn sync(inner: &mut Inner<B>) -> Result<(), Error> {
-        Self::flush(inner).await?;
+    pub async fn sync(&self) -> Result<(), Error> {
+        let mut inner = self.inner.write().await;
+        Self::inner_sync(&mut *inner).await
+    }
+
+    async fn inner_sync(inner: &mut Inner<B>) -> Result<(), Error> {
+        Self::inner_flush(inner).await?;
         inner.blob.sync().await
     }
 }
@@ -166,28 +191,28 @@ impl<B: Blob> Blob for Write<B> {
 
     async fn write_at<T: StableBuf>(&self, buf: T, offset: u64) -> Result<(), Error> {
         let mut inner = self.inner.write().await;
-        if offset != inner.position {
-            Self::flush(&mut *inner).await?;
+        if offset != Self::inner_position(&*inner).await {
+            Self::inner_flush(&mut *inner).await?;
             inner.blob.write_at(buf, offset).await
         } else {
-            Self::write(&mut *inner, buf).await
+            Self::inner_write(&mut *inner, buf).await
         }
     }
 
     async fn truncate(&self, len: u64) -> Result<(), Error> {
         let mut inner = self.inner.write().await;
-        Self::flush(&mut *inner).await?;
+        Self::inner_flush(&mut *inner).await?;
         inner.blob.truncate(len).await
     }
 
     async fn sync(&self) -> Result<(), Error> {
         let mut inner = self.inner.write().await;
-        Self::sync(&mut *inner).await
+        Self::inner_sync(&mut *inner).await
     }
 
     async fn close(self) -> Result<(), Error> {
         let mut inner = self.inner.write().await;
-        Self::sync(&mut inner).await?;
+        Self::inner_sync(&mut *inner).await?;
 
         // TODO: compiles but terrible
         inner.blob.clone().close().await
