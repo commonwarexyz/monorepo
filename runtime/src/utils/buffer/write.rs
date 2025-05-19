@@ -37,7 +37,7 @@ use crate::{Blob, Error, RwLock};
 ///     assert_eq!(&buf, b"hello world!");
 /// });
 /// ```
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Write<B: Blob> {
     inner: Arc<RwLock<Inner<B>>>,
 }
@@ -146,8 +146,7 @@ impl<B: Blob> Write<B> {
     ///
     /// Returns an error if the close operation fails.
     pub async fn close(self) -> Result<(), Error> {
-        let inner = Arc::try_unwrap(self.inner).unwrap();
-        let mut inner = inner.into_inner().await;
+        let mut inner = Arc::into_inner(self.inner).unwrap().into_inner();
         Self::inner_sync(&mut inner).await?;
         inner.blob.close().await
     }
@@ -221,8 +220,6 @@ impl<B: Blob> Blob for Write<B> {
     }
 
     async fn close(self) -> Result<(), Error> {
-        let mut inner = Arc::into_inner(self.inner).unwrap().into_inner();
-        Self::inner_sync(&mut inner).await?;
-        inner.blob.close().await
+        self.close().await
     }
 }
