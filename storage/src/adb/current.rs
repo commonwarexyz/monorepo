@@ -12,11 +12,11 @@ use crate::{
     index::{Index, Translator},
     mmr::{
         bitmap::Bitmap,
-        hasher::{GraftedStorage, Grafting, Hasher, Standard},
-        iterator::{leaf_num_to_pos, leaf_pos_to_num, PeakIterator},
+        hasher::{GraftedStorage, Grafting, GraftingVerifier, Hasher, Standard},
+        iterator::{leaf_num_to_pos, leaf_pos_to_num},
         journaled::Mmr,
         verification::Proof,
-        Storage,
+        Error::*,
     },
 };
 use commonware_codec::FixedSize;
@@ -24,7 +24,7 @@ use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use futures::future::try_join_all;
-use tracing::warn;
+use tracing::{debug, warn};
 
 /// Configuration for a [Current] authenticated db.
 #[derive(Clone)]
@@ -82,6 +82,22 @@ pub struct Current<
     context: E,
 
     bitmap_metadata_partition: String,
+}
+
+/// The information required to verify a key value proof.
+#[derive(Clone)]
+pub struct KeyValueProofInfo<K, V, const N: usize> {
+    /// The key whose value is being proven.
+    pub key: K,
+
+    /// The value of the key.
+    pub value: V,
+
+    /// The location of the operation that assigned this value to the key.
+    pub loc: u64,
+
+    /// The status bitmap chunk that contains the bit corresponding the operation's location.
+    pub chunk: [u8; N],
 }
 
 impl<
@@ -339,24 +355,39 @@ impl<
     pub async fn root(&self, hasher: &mut H) -> Result<H::Digest, Error> {
         let ops = &self.any.ops;
         let height = Self::grafting_height();
-        let mut grafter = Grafter::new(hasher, height, ops);
-        let bitmap_storage = self.status.get_storage(&mut grafter).await?;
-        let grafted_mmr = GraftedStorage::new(&bitmap_storage, ops, height);
-        let peak_futures =
-            PeakIterator::new(ops.size()).map(|(peak_pos, _)| grafted_mmr.get_node(peak_pos));
-        let peaks = try_join_all(peak_futures).await?;
-        let unwrapped_peaks = peaks.iter().map(|p| p.as_ref().unwrap());
-        let digest = grafter.root_digest(ops.size(), unwrapped_peaks);
+        let grafted_mmr = GraftedStorage::<'_, H, _, _>::new(&self.status, ops, height);
+        let mmr_root = grafted_mmr.root(hasher).await?;
 
-        Ok(digest)
+        // The digest contains all information from the base mmr, and all information from the peak
+        // tree except for the partial chunk, if any.
+        let last_chunk = self.status.last_chunk();
+        if last_chunk.1 == 0 {
+            return Ok(mmr_root);
+        }
+
+        // There are bits in an uncommitted (partial) chunk, so we need to incorporate that
+        // information into the root digest.
+        hasher.update(last_chunk.0);
+        let last_chunk_digest = hasher.finalize();
+
+        Ok(Bitmap::<H, N>::partial_chunk_root(
+            hasher,
+            &mmr_root,
+            last_chunk.1,
+            &last_chunk_digest,
+        ))
     }
 
+    /// Returns a proof that the specified range of operations are part of the database, along with
+    /// the operations from the range. A truncated range (from hitting the max) can be detected by
+    /// looking at the length of the returned operations vector. Also returns the bitmap chunks
+    /// required to verify the proof.
     pub async fn range_proof(
         &self,
         hasher: &mut H,
         start_loc: u64,
         max_ops: u64,
-    ) -> Result<(Proof<H>, Vec<Operation<K, V>>), Error> {
+    ) -> Result<(Proof<H>, Vec<Operation<K, V>>, Vec<[u8; N]>), Error> {
         let mmr = &self.any.ops;
         let start_pos = leaf_num_to_pos(start_loc);
         let end_pos_last = mmr.last_leaf_pos().unwrap();
@@ -367,11 +398,9 @@ impl<
             (end_pos_max, start_loc + max_ops - 1)
         };
         let height = Self::grafting_height();
-        let mut grafter = Grafter::new(hasher, Self::grafting_height(), &self.any.ops);
-        let bitmap_storage = self.status.get_storage(&mut grafter).await?;
-        let grafted_mmr = GraftedStorage::new(&bitmap_storage, mmr, height);
+        let grafted_mmr = GraftedStorage::<'_, H, _, _>::new(&self.status, mmr, height);
 
-        let proof = Proof::<H>::range_proof(&grafted_mmr, start_pos, end_pos).await?;
+        let mut proof = Proof::<H>::range_proof(&grafted_mmr, start_pos, end_pos).await?;
 
         let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
         let futures = (start_loc..=end_loc)
@@ -382,7 +411,26 @@ impl<
             .into_iter()
             .for_each(|op| ops.push(op));
 
-        Ok((proof, ops))
+        // Gather the chunks necessary to verify the proof.
+        let chunk_bits = Bitmap::<H, N>::CHUNK_SIZE_BITS;
+        let start = start_loc / chunk_bits;
+        let end = end_loc / chunk_bits;
+        let mut chunks = Vec::with_capacity((end - start + 1) as usize);
+        for i in start..=end {
+            let bit_offset = i * chunk_bits;
+            let chunk = *self.status.get_chunk(bit_offset);
+            chunks.push(chunk);
+        }
+
+        let last_chunk = self.status.last_chunk();
+        if last_chunk.1 == 0 {
+            return Ok((proof, ops, chunks));
+        }
+
+        hasher.update(last_chunk.0);
+        proof.digests.push(hasher.finalize());
+
+        Ok((proof, ops, chunks))
     }
 
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
@@ -392,10 +440,24 @@ impl<
         proof: &Proof<H>,
         start_loc: u64,
         ops: &[Operation<K, V>],
+        chunks: &[[u8; N]],
         root_digest: &H::Digest,
     ) -> Result<bool, Error> {
-        let start_pos = leaf_num_to_pos(start_loc);
+        let op_count = leaf_pos_to_num(proof.size);
+        let Some(op_count) = op_count else {
+            debug!("verification failed, invalid proof size");
+            return Ok(false);
+        };
         let end_loc = start_loc + ops.len() as u64 - 1;
+        if end_loc >= op_count {
+            debug!(
+                loc = end_loc,
+                op_count, "proof verification failed, invalid range"
+            );
+            return Ok(false);
+        }
+
+        let start_pos = leaf_num_to_pos(start_loc);
         let end_pos = leaf_num_to_pos(end_loc);
 
         let mut hasher = Standard::new(hasher);
@@ -404,71 +466,207 @@ impl<
             .map(|op| Any::<E, _, _, _, T>::op_digest(&mut hasher, op))
             .collect::<Vec<_>>();
 
-        proof
-            .verify_range_inclusion(&mut hasher, digests, start_pos, end_pos, root_digest)
+        let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
+        let mut verifier = GraftingVerifier::new(
+            hasher.inner(),
+            Self::grafting_height(),
+            start_loc / Bitmap::<H, N>::CHUNK_SIZE_BITS,
+            chunk_vec,
+        );
+
+        if op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS == 0 {
+            return proof
+                .verify_range_inclusion(&mut verifier, digests, start_pos, end_pos, root_digest)
+                .await
+                .map_err(Error::MmrError);
+        }
+
+        // The proof must contain the partial chunk digest as its last hash.
+        if proof.digests.is_empty() {
+            debug!("proof has no digests");
+            return Ok(false);
+        }
+        let mut proof = proof.clone();
+        let last_chunk_digest = proof.digests.pop().unwrap();
+
+        // Reconstruct the MMR root.
+        let mmr_root = match proof
+            .reconstruct_root(&mut verifier, digests, start_pos, end_pos)
             .await
-            .map_err(Error::MmrError)
+        {
+            Ok(root) => root,
+            Err(MissingDigests) => {
+                debug!("Not enough digests in proof to reconstruct root");
+                return Ok(false);
+            }
+            Err(ExtraDigests) => {
+                debug!("Not all digests in proof were used to reconstruct root");
+                return Ok(false);
+            }
+            Err(e) => return Err(Error::MmrError(e)),
+        };
+
+        let next_bit = op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS;
+        let reconstructed_root = Bitmap::<H, N>::partial_chunk_root(
+            hasher.inner(),
+            &mmr_root,
+            next_bit,
+            &last_chunk_digest,
+        );
+
+        Ok(reconstructed_root == *root_digest)
     }
 
     /// Generate and return a proof of the current value of `key`, along with the current value
     /// itself, the location of its last-active update operation, and the bitmap chunk corresponding
     /// to that location (all of which is required to verify the proof). Returns KeyNotFound error
     /// if the key is not currently assigned any value.
-    pub async fn current_value_proof(
+    pub async fn key_value_proof(
         &self,
         hasher: &mut H,
-        key: &K,
-    ) -> Result<(Proof<H>, V, u64, [u8; N]), Error> {
-        let op = self.any.get_with_loc(key).await?;
+        key: K,
+    ) -> Result<(Proof<H>, KeyValueProofInfo<K, V, N>), Error> {
+        let op = self.any.get_with_loc(&key).await?;
         let Some(op) = op else {
             return Err(Error::KeyNotFound());
         };
         let pos = leaf_num_to_pos(op.1);
         let height = Self::grafting_height();
-        let base_mmr = &self.any.ops;
-        let mut grafter = Grafter::new(hasher, height, base_mmr);
-        let bitmap_storage = self.status.get_storage(&mut grafter).await?;
-        let grafted_mmr = GraftedStorage::new(&bitmap_storage, &self.any.ops, height);
+        let grafted_mmr = GraftedStorage::<'_, H, _, _>::new(&self.status, &self.any.ops, height);
 
-        let proof = Proof::<H>::range_proof(&grafted_mmr, pos, pos).await?;
+        let mut proof = Proof::<H>::range_proof(&grafted_mmr, pos, pos).await?;
         let chunk = *self.status.get_chunk(op.1);
 
-        Ok((proof, op.0, op.1, chunk))
+        let last_chunk = self.status.last_chunk();
+        if last_chunk.1 != 0 {
+            hasher.update(last_chunk.0);
+            proof.digests.push(hasher.finalize());
+        }
+
+        Ok((
+            proof,
+            KeyValueProofInfo {
+                key,
+                value: op.0,
+                loc: op.1,
+                chunk,
+            },
+        ))
     }
 
-    /// Return true if the proof authenticates that `key` currently has value `value` in the db with the given root.
-    pub async fn verify_current_value_proof(
+    /// Return true if the proof authenticates that `key` currently has value `value` in the db with
+    /// the given root.
+    pub async fn verify_key_value_proof(
         hasher: &mut H,
         proof: &Proof<H>,
-        key: K,
-        value: V,
-        loc: u64,
-        chunk: &[u8; N],
+        info: &KeyValueProofInfo<K, V, N>,
         root_digest: &H::Digest,
     ) -> Result<bool, Error> {
-        let pos = leaf_num_to_pos(loc);
-        let mut hasher = Standard::new(hasher);
-        let digest = Any::<E, _, _, _, T>::op_digest(&mut hasher, &Operation::Update(key, value));
+        let op_count = leaf_pos_to_num(proof.size);
+        let Some(op_count) = op_count else {
+            debug!("verification failed, invalid proof size");
+            return Ok(false);
+        };
 
-        if !proof
-            .verify_element_inclusion(&mut hasher, &digest, pos, root_digest)
-            .await?
+        // We must still make sure that the bit in the bitmap chunk is actually a 1 (indicating
+        // the operation is indeed active).
+        if !Bitmap::<H, N>::get_bit_from_chunk(&info.chunk, info.loc) {
+            debug!(
+                loc = info.loc,
+                "proof verification failed, operation is inactive"
+            );
+            return Ok(false);
+        }
+
+        let pos = leaf_num_to_pos(info.loc);
+        let num = info.loc / Bitmap::<H, N>::CHUNK_SIZE_BITS;
+        let mut verifier =
+            GraftingVerifier::new(hasher, Self::grafting_height(), num, vec![&info.chunk]);
+        let digest = Any::<E, _, _, _, T>::op_digest(
+            verifier.standard(),
+            &Operation::Update(info.key.clone(), info.value.clone()),
+        );
+
+        if op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS == 0 {
+            return proof
+                .verify_element_inclusion(&mut verifier, &digest, pos, root_digest)
+                .await
+                .map_err(Error::MmrError);
+        }
+
+        // The proof must contain the partial chunk digest as its last hash.
+        if proof.digests.is_empty() {
+            debug!("proof has no digests");
+            return Ok(false);
+        }
+
+        let mut proof = proof.clone();
+        let last_chunk_digest = proof.digests.pop().unwrap();
+
+        // If the proof is over an operation in the partial chunk, we need to verify the last chunk
+        // digest from the proof matches the digest of info.chunk, since these bits are not part of
+        // the mmr.
+        if info.loc / Bitmap::<H, N>::CHUNK_SIZE_BITS == op_count / Bitmap::<H, N>::CHUNK_SIZE_BITS
         {
-            return Ok(false);
+            let expected_last_chunk_digest = verifier.digest(&info.chunk);
+            if last_chunk_digest != expected_last_chunk_digest {
+                debug!("last chunk digest does not match expected value");
+                return Ok(false);
+            }
         }
 
-        // We must still make sure that (1) the bit in the bitmap chunk is actually a 1 (indicating the operation is
-        // indeed active) and (2) the digest in the proof is as derived from this chunk.
-        if !Bitmap::<H, N>::get_bit_from_chunk(chunk, loc) {
-            return Ok(false);
-        }
+        // Reconstruct the MMR root.
+        let mmr_root = match proof
+            .reconstruct_root(&mut verifier, &[digest], pos, pos)
+            .await
+        {
+            Ok(root) => root,
+            Err(MissingDigests) => {
+                debug!("Not enough digests in proof to reconstruct root");
+                return Ok(false);
+            }
+            Err(ExtraDigests) => {
+                debug!("Not all digests in proof were used to reconstruct root");
+                return Ok(false);
+            }
+            Err(e) => return Err(Error::MmrError(e)),
+        };
 
-        Ok(true)
+        let next_bit = op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS;
+        let reconstructed_root =
+            Bitmap::<H, N>::partial_chunk_root(hasher, &mmr_root, next_bit, &last_chunk_digest);
+
+        Ok(reconstructed_root == *root_digest)
     }
 
     /// Close the db. Operations that have not been committed will be lost.
     pub async fn close(self) -> Result<(), Error> {
         self.any.close().await
+    }
+
+    #[cfg(test)]
+    /// Generate an inclusion proof for any operation regardless of its activity state.
+    async fn operation_inclusion_proof(
+        &self,
+        hasher: &mut H,
+        loc: u64,
+    ) -> Result<(Proof<H>, Operation<K, V>, u64, [u8; N]), Error> {
+        let op = self.any.log.read(loc).await?;
+
+        let pos = leaf_num_to_pos(loc);
+        let height = Self::grafting_height();
+        let grafted_mmr = GraftedStorage::<'_, H, _, _>::new(&self.status, &self.any.ops, height);
+
+        let mut proof = Proof::<H>::range_proof(&grafted_mmr, pos, pos).await?;
+        let chunk = *self.status.get_chunk(loc);
+
+        let last_chunk = self.status.last_chunk();
+        if last_chunk.1 != 0 {
+            hasher.update(last_chunk.0);
+            proof.digests.push(hasher.finalize());
+        }
+
+        Ok((proof, op, loc, chunk))
     }
 
     #[cfg(test)]
@@ -487,7 +685,8 @@ impl<
     }
 
     #[cfg(test)]
-    /// Simulate a crash that happens during commit after the bitmap has been pruned & written, but before the any db is pruned of inactive elements.
+    /// Simulate a crash that happens during commit after the bitmap has been pruned & written, but
+    /// before the any db is pruned of inactive elements.
     async fn simulate_commit_failure_after_bitmap_written(mut self) -> Result<(), Error> {
         // Only successfully complete operations (1) and (2) of the commit process.
         self.commit_ops().await?; // (1)
@@ -530,8 +729,8 @@ pub mod test {
     async fn open_db<E: RStorage + Clock + Metrics>(
         context: E,
         partition_prefix: &str,
-    ) -> Current<E, Digest, Digest, Sha256, TwoCap, 64> {
-        Current::<E, Digest, Digest, Sha256, TwoCap, 64>::init(
+    ) -> Current<E, Digest, Digest, Sha256, TwoCap, 32> {
+        Current::<E, Digest, Digest, Sha256, TwoCap, 32>::init(
             context,
             current_db_config(partition_prefix),
             TwoCap,
@@ -541,7 +740,7 @@ pub mod test {
     }
 
     /// Build a small database, then close and reopen it and ensure state is preserved.
-    #[test_traced("WARN")]
+    #[test_traced("DEBUG")]
     pub fn test_current_db_build_small_close_reopen() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -594,13 +793,138 @@ pub mod test {
         });
     }
 
+    /// Build a tiny database and make sure we can't convince the verifier that some old value of a
+    /// key is active. We specifically test over the partial chunk case, since these bits are yet to
+    /// be committed to the underlying MMR.
+    #[test_traced("DEBUG")]
+    pub fn test_current_db_verify_proof_over_bits_in_uncommitted_chunk() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Sha256::new();
+            let partition = "build_small";
+            let mut db = open_db(context.clone(), partition).await;
+
+            // Add one key.
+            let k = Sha256::fill(0x01);
+            let v1 = Sha256::fill(0xA1);
+            db.update(k, v1).await.unwrap();
+            db.commit().await.unwrap();
+
+            let op = db.any.get_with_loc(&k).await.unwrap().unwrap();
+            let proof = db
+                .operation_inclusion_proof(&mut hasher, op.1)
+                .await
+                .unwrap();
+            let info = KeyValueProofInfo {
+                key: k,
+                value: v1,
+                loc: op.1,
+                chunk: proof.3,
+            };
+            let root = db.root(&mut hasher).await.unwrap();
+            // Proof should be verifiable against current root.
+            assert!(
+                Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
+                    &mut hasher,
+                    &proof.0,
+                    &info,
+                    &root,
+                )
+                .await
+                .unwrap()
+            );
+
+            let v2 = Sha256::fill(0xA2);
+            // Proof should not verify against a different value.
+            let mut bad_info = info.clone();
+            bad_info.value = v2;
+            assert!(
+                !Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
+                    &mut hasher,
+                    &proof.0,
+                    &bad_info,
+                    &root,
+                )
+                .await
+                .unwrap()
+            );
+
+            // update the key to invalidate its previous update
+            db.update(k, v2).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Proof should not be verifiable against the new root.
+            let root = db.root(&mut hasher).await.unwrap();
+            assert!(
+                !Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
+                    &mut hasher,
+                    &proof.0,
+                    &info,
+                    &root,
+                )
+                .await
+                .unwrap()
+            );
+
+            // Create a proof of the now-inactive operation.
+            let proof_inactive = db
+                .operation_inclusion_proof(&mut hasher, op.1)
+                .await
+                .unwrap();
+            // This proof should not verify, but only because verification will see that the
+            // corresponding bit in the chunk is false.
+            let proof_inactive_info = KeyValueProofInfo {
+                key: k,
+                value: v1,
+                loc: proof_inactive.2,
+                chunk: proof_inactive.3,
+            };
+            assert!(
+                !Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
+                    &mut hasher,
+                    &proof_inactive.0,
+                    &proof_inactive_info,
+                    &root,
+                )
+                .await
+                .unwrap()
+            );
+
+            // Modify the chunk to make it look like the operation is active!
+            let mut modified_chunk = proof_inactive.3;
+            let bit_pos = proof_inactive.2;
+            let byte_idx = bit_pos / 8;
+            let bit_idx = bit_pos % 8;
+            modified_chunk[byte_idx as usize] |= 1 << bit_idx;
+
+            // This should not fool the verifier if we are correctly incorporating the partial chunk
+            // information into the process.
+            let info_with_modified_chunk = KeyValueProofInfo {
+                key: k,
+                value: v1,
+                loc: proof_inactive.2,
+                chunk: modified_chunk,
+            };
+            assert!(
+                !Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
+                    &mut hasher,
+                    &proof_inactive.0,
+                    &info_with_modified_chunk,
+                    &root,
+                )
+                .await
+                .unwrap()
+            );
+        });
+    }
+
     /// Apply random operations to the given db, committing them (randomly & at the end) only if
     /// `commit_changes` is true.
     async fn apply_random_ops<E: RStorage + Clock + Metrics>(
         num_elements: u64,
         commit_changes: bool,
         rng_seed: u64,
-        db: &mut Current<E, Digest, Digest, Sha256, TwoCap, 64>,
+        db: &mut Current<E, Digest, Digest, Sha256, TwoCap, 32>,
     ) -> Result<(), Error> {
         // Log the seed with high visibility to make failures reproducible.
         warn!("rng_seed={}", rng_seed);
@@ -634,14 +958,14 @@ pub mod test {
         Ok(())
     }
 
-    #[test_traced("WARN")]
+    #[test_traced("DEBUG")]
     pub fn test_current_db_range_proofs() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let partition = "range_proofs";
             let mut hasher = Sha256::new();
             let mut db = open_db(context.clone(), partition).await;
-            apply_random_ops(100, true, context.next_u64(), &mut db)
+            apply_random_ops(200, true, context.next_u64(), &mut db)
                 .await
                 .unwrap();
             let root = db.root(&mut hasher).await.unwrap();
@@ -654,24 +978,26 @@ pub mod test {
             let start_loc = leaf_pos_to_num(start_pos).unwrap();
 
             for i in start_loc..end_loc {
-                let (proof, log) = db.range_proof(&mut hasher, i, max_ops).await.unwrap();
+                let (proof, ops, chunks) = db.range_proof(&mut hasher, i, max_ops).await.unwrap();
                 assert!(
-                    Current::<deterministic::Context, _, _, _, TwoCap, 64>::verify_range_proof(
+                    Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_range_proof(
                         &mut hasher,
                         &proof,
                         i,
-                        &log,
+                        &ops,
+                        &chunks,
                         &root
                     )
                     .await
-                    .unwrap()
+                    .unwrap(),
+                    "failed to verify range at start_loc {start_loc}",
                 );
             }
         });
     }
 
-    #[test_traced("WARN")]
-    pub fn test_current_db_current_value_proof() {
+    #[test_traced("DEBUG")]
+    pub fn test_current_db_key_value_proof() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let partition = "range_proofs";
@@ -684,9 +1010,7 @@ pub mod test {
 
             // Confirm bad keys produce the expected error.
             let bad_key = Sha256::fill(0xAA);
-            let res = db
-                .current_value_proof(&mut hasher, &bad_key)
-                .await;
+            let res = db.key_value_proof(&mut hasher, bad_key).await;
             assert!(matches!(res, Err(Error::KeyNotFound())));
 
             let start = db.oldest_retained_loc().unwrap();
@@ -697,20 +1021,14 @@ pub mod test {
                 // Found an active operation! Create a proof for its active current key/value.
                 let op = db.any.log.read(i).await.unwrap();
                 let key = op.to_key().unwrap();
-                let (proof, val, loc, chunk) = db
-                    .current_value_proof(&mut hasher, op.to_key().unwrap())
-                    .await
-                    .unwrap();
-                assert_eq!(val, *op.to_value().unwrap());
+                let (proof, info) = db.key_value_proof(&mut hasher, *key).await.unwrap();
+                assert_eq!(info.value, *op.to_value().unwrap());
                 // Proof should validate against the current value and correct root.
                 assert!(
-                    Current::<deterministic::Context, _, _, _, TwoCap, 64>::verify_current_value_proof(
+                    Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
                         &mut hasher,
                         &proof,
-                        *key,
-                        val,
-                        loc,
-                        &chunk,
+                        &info,
                         &root
                     )
                     .await
@@ -718,14 +1036,13 @@ pub mod test {
                 );
                 // Proof should fail against the wrong value.
                 let wrong_val = Sha256::fill(0xFF);
+                let mut bad_info = info.clone();
+                bad_info.value = wrong_val;
                 assert!(
-                    !Current::<deterministic::Context, _, _, _, TwoCap, 64>::verify_current_value_proof(
+                    !Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
                         &mut hasher,
                         &proof,
-                        *key,
-                        wrong_val,
-                        loc,
-                        &chunk,
+                        &bad_info,
                         &root
                     )
                     .await
@@ -733,14 +1050,13 @@ pub mod test {
                 );
                 // Proof should fail against the wrong key.
                 let wrong_key = Sha256::fill(0xEE);
+                let mut bad_info = info.clone();
+                bad_info.key = wrong_key;
                 assert!(
-                    !Current::<deterministic::Context, _, _, _, TwoCap, 64>::verify_current_value_proof(
+                    !Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
                         &mut hasher,
                         &proof,
-                        wrong_key,
-                        val,
-                        loc,
-                        &chunk,
+                        &bad_info,
                         &root
                     )
                     .await
@@ -749,13 +1065,10 @@ pub mod test {
                 // Proof should fail against the wrong root.
                 let wrong_root = Sha256::fill(0xDD);
                 assert!(
-                    !Current::<deterministic::Context, _, _, _, TwoCap, 64>::verify_current_value_proof(
+                    !Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
                         &mut hasher,
                         &proof,
-                        wrong_key,
-                        val,
-                        loc,
-                        &chunk,
+                        &info,
                         &wrong_root,
                     )
                     .await
@@ -789,6 +1102,43 @@ pub mod test {
 
             let db = open_db(context, partition).await;
             assert_eq!(db.root(&mut hasher).await.unwrap(), root);
+        });
+    }
+
+    /// Repeatedly update the same key to a new value and ensure we can prove its current value
+    /// after each update.
+    #[test_traced("WARN")]
+    pub fn test_current_db_proving_repeated_updates() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Sha256::new();
+            let partition = "build_small";
+            let mut db = open_db(context.clone(), partition).await;
+
+            // Add one key.
+            let k = Sha256::fill(0x00);
+            for i in 1u8..=255 {
+                let v = Sha256::fill(i);
+                db.update(k, v).await.unwrap();
+                assert_eq!(db.get(&k).await.unwrap().unwrap(), v);
+                db.commit().await.unwrap();
+                let root = db.root(&mut hasher).await.unwrap();
+
+                // Create a proof for the current value of k.
+                let (proof, info) = db.key_value_proof(&mut hasher, k).await.unwrap();
+                assert_eq!(info.value, v);
+                assert!(
+                    Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
+                        &mut hasher,
+                        &proof,
+                        &info,
+                        &root
+                    )
+                    .await
+                    .unwrap(),
+                    "proof of update {i} failed to verify"
+                );
+            }
         });
     }
 

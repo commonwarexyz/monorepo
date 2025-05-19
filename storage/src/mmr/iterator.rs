@@ -202,7 +202,6 @@ pub(crate) const fn leaf_num_to_pos(leaf_num: u64) -> u64 {
 }
 
 /// Returns the height of the node at position `pos` in an MMR.
-#[allow(dead_code)] // Currently only used in testing, uncomment if this changes.
 pub(crate) const fn pos_to_height(mut pos: u64) -> u32 {
     if pos == 0 {
         return 0;
