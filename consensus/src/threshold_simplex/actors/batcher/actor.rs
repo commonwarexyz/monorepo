@@ -282,7 +282,7 @@ impl<
         let leader_index = self.supervisor.is_participant(self.view, leader)?;
         Some(
             self.notarizes[leader_index as usize].is_some()
-                || self.finalizes[leader_index as usize].is_some(),
+                || self.nullifies[leader_index as usize].is_some(),
         )
     }
 }
