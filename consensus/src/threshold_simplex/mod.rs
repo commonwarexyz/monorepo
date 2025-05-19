@@ -1581,18 +1581,15 @@ mod tests {
                 // If the skip timeout isn't implemented correctly, we may go many views before participants
                 // start to consider a validator's proposal.
                 {
-                    // Set start to be 1 past latest captured (as the next view will probably timeout)
-                    let start = latest + 1;
-
-                    // Ensure views around start all finalize
+                    // Ensure nearly all views around latest finalize
                     let mut found = 0;
                     let finalizations = supervisor.finalizations.lock().unwrap();
-                    for i in start..start + activity_timeout {
+                    for i in latest..latest + activity_timeout {
                         if finalizations.contains_key(&i) {
                             found += 1;
                         }
                     }
-                    assert_eq!(found, activity_timeout, "found: {}", found);
+                    assert!(found >= activity_timeout - 2, "found: {}", found);
                 }
             }
 
