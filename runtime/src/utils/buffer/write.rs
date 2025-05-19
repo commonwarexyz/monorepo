@@ -228,10 +228,30 @@ impl<B: Blob> Blob for Write<B> {
     }
 
     async fn truncate(&self, len: u64) -> Result<(), Error> {
+        // Acquire a write lock on the inner state
         let mut inner = self.inner.write().await;
-        inner.flush().await?;
-        inner.blob.truncate(len).await?;
-        inner.position = len;
+
+        // Prepare the buffer boundaries
+        let buffer_start = inner.position;
+        let buffer_len = inner.buffer.len() as u64;
+        let buffer_end = buffer_start + buffer_len;
+
+        // Adjust buffer content based on `len`
+        if len <= buffer_start {
+            // Truncation point is before or exactly at the start of the buffer.
+            // All buffered data is now invalid/beyond the new length.
+            inner.buffer.clear();
+            inner.blob.truncate(len).await?;
+            inner.position = len;
+        } else if len < buffer_end {
+            // Truncation point is within the buffer.
+            // `len` is > `buffer_start_blob_offset` here.
+            // New length of data *within the buffer* is `len - buffer_start_blob_offset`.
+            let new_buffer_actual_len = (len - buffer_start) as usize;
+            inner.buffer.truncate(new_buffer_actual_len);
+        } else {
+            // Truncation point is at or after the end of the buffer, so no changes are needed.
+        }
         Ok(())
     }
 
