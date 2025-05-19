@@ -76,9 +76,15 @@ impl<B: Blob> Inner<B> {
     /// Closes the writer and ensures all buffered data is durably persisted to the underlying [Blob].
     ///
     /// Returns an error if the close operation fails.
-    async fn close(mut self) -> Result<(), Error> {
+    async fn close(&mut self) -> Result<(), Error> {
+        // Ensure all buffered data is durably persisted
         self.sync().await?;
-        self.blob.close().await
+
+        // Close the underlying blob.
+        //
+        // We use clone here to ensure we retain the close semantics of the blob provided (if
+        // called multiple times, the blob determines whether to error).
+        self.blob.clone().close().await
     }
 }
 
@@ -265,7 +271,7 @@ impl<B: Blob> Blob for Write<B> {
     }
 
     async fn close(self) -> Result<(), Error> {
-        let inner = Arc::into_inner(self.inner).unwrap().into_inner();
+        let mut inner = self.inner.write().await;
         inner.close().await
     }
 }
