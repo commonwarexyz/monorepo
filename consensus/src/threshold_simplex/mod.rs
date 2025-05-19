@@ -1405,7 +1405,7 @@ mod tests {
         let threshold = quorum(n);
         let required_containers = 100;
         let activity_timeout = 10;
-        let skip_timeout = 5;
+        let skip_timeout = 2;
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(180));
         executor.start(|mut context| async move {
@@ -1581,9 +1581,13 @@ mod tests {
                 // If the skip timeout isn't implemented correctly, we may go many views before participants
                 // start to consider a validator's proposal.
                 {
+                    // Set start to be 1 past latest captured (as the next view will probably timeout)
+                    let start = latest + 1;
+
+                    // Ensure views around start all finalize
                     let mut found = 0;
                     let finalizations = supervisor.finalizations.lock().unwrap();
-                    for i in latest..latest + activity_timeout {
+                    for i in start..start + activity_timeout {
                         if finalizations.contains_key(&i) {
                             found += 1;
                         }
