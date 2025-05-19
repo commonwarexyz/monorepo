@@ -346,17 +346,7 @@ impl crate::Spawner for Context {
 
         // Get metrics
         let label = Label::future(self.name.clone());
-        self.executor
-            .metrics
-            .tasks_spawned
-            .get_or_create(&label)
-            .inc();
-        let gauge = self
-            .executor
-            .metrics
-            .tasks_running
-            .get_or_create(&label)
-            .clone();
+        let gauge = spawn_setup!(self, label);
 
         // Set up the task
         let catch_panics = self.executor.cfg.catch_panics;
@@ -380,17 +370,7 @@ impl crate::Spawner for Context {
 
         // Get metrics
         let label = Label::future(self.name.clone());
-        self.executor
-            .metrics
-            .tasks_spawned
-            .get_or_create(&label)
-            .inc();
-        let gauge = self
-            .executor
-            .metrics
-            .tasks_running
-            .get_or_create(&label)
-            .clone();
+        let gauge = spawn_setup!(self, label);
 
         // Set up the task
         let executor = self.executor.clone();
@@ -417,17 +397,7 @@ impl crate::Spawner for Context {
         } else {
             Label::blocking_shared(self.name.clone())
         };
-        self.executor
-            .metrics
-            .tasks_spawned
-            .get_or_create(&label)
-            .inc();
-        let gauge = self
-            .executor
-            .metrics
-            .tasks_running
-            .get_or_create(&label)
-            .clone();
+        let gauge = spawn_setup!(self, label);
 
         // Set up the task
         let executor = self.executor.clone();
@@ -457,17 +427,7 @@ impl crate::Spawner for Context {
         } else {
             Label::blocking_shared(self.name.clone())
         };
-        self.executor
-            .metrics
-            .tasks_spawned
-            .get_or_create(&label)
-            .inc();
-        let gauge = self
-            .executor
-            .metrics
-            .tasks_running
-            .get_or_create(&label)
-            .clone();
+        let gauge = spawn_setup!(self, label);
 
         // Set up the task
         let executor = self.executor.clone();
