@@ -20,42 +20,49 @@ impl<B: Blob> Inner<B> {
     /// underlying [Blob].
     ///
     /// If the size of the provided bytes is larger than the buffer capacity, the bytes will be written
-    /// directly to the underlying [Blob]. If this occurs regularly, the buffer capacity should be increased (or
-    /// the buffer will not be effective).
+    /// directly to the underlying [Blob]. If this occurs regularly, the buffer capacity should be increased (as
+    /// the buffer will provide any benefit).
     async fn write<Buf: StableBuf>(&mut self, buf: Buf) -> Result<(), Error> {
         // If the buffer capacity will be exceeded, flush the buffer first
         let buf_len = buf.len();
         if self.buffer.len() + buf_len > self.capacity {
-            Self::flush(self).await?;
+            self.flush().await?;
         }
 
-        // Write directly to the blob (if the buffer is too small) or append to the buffer
+        // Write directly to the blob (if the buffer is too small)
         if buf_len > self.capacity {
             self.blob.write_at(buf, self.position).await?;
             self.position += buf_len as u64;
-        } else {
-            self.buffer.extend_from_slice(buf.as_ref());
+            return Ok(());
         }
+
+        // Append to the buffer
+        self.buffer.extend_from_slice(buf.as_ref());
         Ok(())
     }
 
-    /// Flushes buffered data to the underlying blob. Does nothing if the buffer is empty.
+    /// Flushes buffered data to the underlying [Blob]. Does nothing if the buffer is empty.
     ///
-    /// If the write to the underlying blob fails, the buffer will be reset (and any pending data not yet
+    /// If the write to the underlying [Blob] fails, the buffer will be reset (and any pending data not yet
     /// written will be lost).
     async fn flush(&mut self) -> Result<(), Error> {
+        // If the buffer is empty, do nothing
         if self.buffer.is_empty() {
             return Ok(());
         }
+
+        // Take the buffer and write it to the blob
         let buf = std::mem::take(&mut self.buffer);
         let len = buf.len() as u64;
         self.blob.write_at(buf, self.position).await?;
+
+        // If successful, update the position and allocate a new buffer
         self.position += len;
         self.buffer = Vec::with_capacity(self.capacity);
         Ok(())
     }
 
-    /// Flushes buffered data and ensures it is durably persisted to the underlying blob.
+    /// Flushes buffered data and ensures it is durably persisted to the underlying [Blob].
     ///
     /// Returns an error if either the flush or sync operation fails.
     async fn sync(&mut self) -> Result<(), Error> {
@@ -63,7 +70,7 @@ impl<B: Blob> Inner<B> {
         self.blob.sync().await
     }
 
-    /// Closes the writer and ensures all buffered data is durably persisted to the underlying blob.
+    /// Closes the writer and ensures all buffered data is durably persisted to the underlying [Blob].
     ///
     /// Returns an error if the close operation fails.
     async fn close(mut self) -> Result<(), Error> {
