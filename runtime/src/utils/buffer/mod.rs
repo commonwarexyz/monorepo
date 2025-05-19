@@ -656,6 +656,7 @@ mod tests {
                 .unwrap();
             writer_zero.sync().await.unwrap();
             writer_zero.truncate(0).await.unwrap();
+            writer_zero.sync().await.unwrap();
 
             let (_, size_z) = context.open("partition", b"truncate_zero").await.unwrap();
             assert_eq!(size_z, 0);

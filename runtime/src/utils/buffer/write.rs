@@ -231,7 +231,6 @@ impl<B: Blob> Blob for Write<B> {
         let mut inner = self.inner.write().await;
         inner.flush().await?;
         inner.blob.truncate(len).await?;
-        inner.blob.sync().await?;
         inner.position = len;
         Ok(())
     }
