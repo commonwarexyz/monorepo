@@ -123,11 +123,7 @@ pub trait Spawner: Clone + Send + Sync + 'static {
 
     /// Enqueue a task to be executed (without consuming the context).
     ///
-    /// Unlike a future, a spawned task will start executing immediately (even if the caller
-    /// does not await the handle).
-    ///
-    /// In some cases, it may be useful to spawn a task without consuming the context (e.g. starting
-    /// an actor that already has a reference to context).
+    /// The semantics are the same as [Spawner::spawn].
     ///
     /// # Warning
     ///
@@ -159,6 +155,22 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     fn spawn_blocking<F, T>(self, dedicated: bool, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> T + Send + 'static,
+        T: Send + 'static;
+
+    /// Enqueue a blocking task to be executed (without consuming the context).
+    ///
+    /// The semantics are the same as [Spawner::spawn_blocking].
+    ///
+    /// # Warning
+    ///
+    /// If this function is used to spawn multiple tasks from the same context,
+    /// the runtime will panic to prevent accidental misuse.
+    fn spawn_blocking_ref<F, T>(
+        &mut self,
+        dedicated: bool,
+    ) -> impl FnOnce(F) -> Handle<T> + 'static
+    where
+        F: FnOnce() -> T + Send + 'static,
         T: Send + 'static;
 
     /// Signals the runtime to stop execution and that all outstanding tasks
@@ -933,6 +945,32 @@ mod tests {
         });
     }
 
+    fn test_spawn_blocking_ref<R: Runner>(runner: R, dedicated: bool)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|mut context| async move {
+            let spawn = context.spawn_blocking_ref(dedicated);
+            let handle = spawn(|| 42);
+            let result = handle.await;
+            assert!(matches!(result, Ok(42)));
+        });
+    }
+
+    fn test_spawn_blocking_ref_duplicate<R: Runner>(runner: R, dedicated: bool)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|mut context| async move {
+            let spawn = context.spawn_blocking_ref(dedicated);
+            let result = spawn(|| 42).await;
+            assert!(matches!(result, Ok(42)));
+
+            // Ensure context is consumed
+            context.spawn_blocking(dedicated, |_| 42);
+        });
+    }
+
     fn test_spawn_blocking_abort<R: Runner>(runner: R, dedicated: bool)
     where
         R::Context: Spawner,
@@ -1158,6 +1196,23 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_spawn_blocking_ref() {
+        for dedicated in [false, true] {
+            let executor = deterministic::Runner::default();
+            test_spawn_blocking_ref(executor, dedicated);
+        }
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_deterministic_spawn_blocking_ref_duplicate() {
+        for dedicated in [false, true] {
+            let executor = deterministic::Runner::default();
+            test_spawn_blocking_ref_duplicate(executor, dedicated);
+        }
+    }
+
+    #[test]
     fn test_deterministic_metrics() {
         let executor = deterministic::Runner::default();
         test_metrics(executor);
@@ -1308,6 +1363,23 @@ mod tests {
         for dedicated in [false, true] {
             let executor = tokio::Runner::default();
             test_spawn_blocking_abort(executor, dedicated);
+        }
+    }
+
+    #[test]
+    fn test_tokio_spawn_blocking_ref() {
+        for dedicated in [false, true] {
+            let executor = tokio::Runner::default();
+            test_spawn_blocking_ref(executor, dedicated);
+        }
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_tokio_spawn_blocking_ref_duplicate() {
+        for dedicated in [false, true] {
+            let executor = tokio::Runner::default();
+            test_spawn_blocking_ref_duplicate(executor, dedicated);
         }
     }
 
