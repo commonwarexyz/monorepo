@@ -39,6 +39,7 @@ jobs:
         features:
           - "--features commonware-runtime/iouring-storage"
           # TODO: Re-enable when issue causing flaky authenticated::tests::test_tokio_connectivity is resolved
+          # See https://github.com/commonwarexyz/monorepo/issues/954
           #- "--features commonware-runtime/iouring-network"
           - ""
     steps:
@@ -55,7 +56,9 @@ jobs:
       matrix:
         features:
           - "--features commonware-runtime/iouring-storage"
-          - "--features commonware-runtime/iouring-network"
+          # TODO: Re-enable when issue causing flaky authenticated::tests::test_tokio_connectivity is resolved
+          # See https://github.com/commonwarexyz/monorepo/issues/954
+          #- "--features commonware-runtime/iouring-network"
           - ""
     steps:
     - name: Checkout repository
