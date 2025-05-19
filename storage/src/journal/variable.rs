@@ -99,7 +99,10 @@
 use super::Error;
 use bytes::BufMut;
 use commonware_codec::Codec;
-use commonware_runtime::{buffer::Read, Blob, Error as RError, Metrics, Storage};
+use commonware_runtime::{
+    buffer::{Read, Write},
+    Blob, Error as RError, Metrics, Storage,
+};
 use commonware_utils::hex;
 use futures::stream::{self, Stream, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -122,6 +125,9 @@ pub struct Config<C> {
 
     /// The codec configuration to use for encoding and decoding items.
     pub codec_config: C,
+
+    /// The size of the write buffer to use for each blob in the journal.
+    pub write_buffer_size: usize,
 }
 
 const ITEM_ALIGNMENT: u64 = 16;
@@ -145,7 +151,7 @@ pub struct Journal<E: Storage + Metrics, V: Codec> {
 
     oldest_allowed: Option<u64>,
 
-    blobs: BTreeMap<u64, (E::Blob, u64)>,
+    blobs: BTreeMap<u64, (Write<E::Blob>, u64)>,
 
     tracked: Gauge,
     synced: Counter,
@@ -176,6 +182,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                 Err(_) => return Err(Error::InvalidBlobName(hex_name)),
             };
             debug!(section, blob = hex_name, len, "loaded section");
+            let blob = Write::new(blob, len, cfg.write_buffer_size);
             blobs.insert(section, (blob, len));
         }
 
@@ -218,7 +225,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     async fn read(
         compressed: bool,
         cfg: &V::Cfg,
-        blob: &E::Blob,
+        blob: &Write<E::Blob>,
         offset: u32,
     ) -> Result<(u32, u32, V), Error> {
         // Read item size
@@ -259,7 +266,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
     /// Helper function to read an item from a [Read].
     async fn read_buffered(
-        reader: &mut Read<E::Blob>,
+        reader: &mut Read<Write<E::Blob>>,
         offset: u32,
         cfg: &V::Cfg,
         compressed: bool,
@@ -322,7 +329,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     async fn read_exact(
         compressed: bool,
         cfg: &V::Cfg,
-        blob: &E::Blob,
+        blob: &Write<E::Blob>,
         offset: u32,
         size: u32,
     ) -> Result<V, Error> {
@@ -507,9 +514,11 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
                 let name = section.to_be_bytes();
-                let blob = self.context.open(&self.cfg.partition, &name).await?;
+                let (blob, len) = self.context.open(&self.cfg.partition, &name).await?;
+                assert_eq!(len, 0);
+                let blob = Write::new(blob, len, self.cfg.write_buffer_size);
                 self.tracked.inc();
-                entry.insert(blob)
+                entry.insert((blob, len))
             }
         };
 
@@ -662,6 +671,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                write_buffer_size: 1024,
             };
             let index = 1u64;
             let data = 10;
@@ -687,6 +697,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                write_buffer_size: 1024,
             };
             let journal = Journal::<_, i32>::init(context.clone(), cfg.clone())
                 .await
@@ -729,6 +740,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                write_buffer_size: 1024,
             };
 
             // Initialize the journal
@@ -798,6 +810,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                write_buffer_size: 1024,
             };
 
             // Initialize the journal
@@ -898,6 +911,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                write_buffer_size: 1024,
             };
 
             // Manually create a blob with an invalid name (not 8 bytes)
@@ -928,6 +942,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                write_buffer_size: 1024,
             };
 
             // Manually create a blob with incomplete size data
@@ -979,6 +994,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                write_buffer_size: 1024,
             };
 
             // Manually create a blob with missing item data
@@ -1034,6 +1050,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                write_buffer_size: 1024,
             };
 
             // Manually create a blob with missing checksum
@@ -1099,6 +1116,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                write_buffer_size: 1024,
             };
 
             // Manually create a blob with incorrect checksum
@@ -1174,6 +1192,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                write_buffer_size: 1024,
             };
 
             // Initialize the journal
@@ -1315,6 +1334,7 @@ mod tests {
                 partition: "partition".to_string(),
                 compression: None,
                 codec_config: (),
+                write_buffer_size: 1024,
             };
             let context = MockStorage {
                 len: u32::MAX as u64 * INDEX_ALIGNMENT, // can store up to u32::Max at the last offset
@@ -1341,6 +1361,7 @@ mod tests {
                 partition: "partition".to_string(),
                 compression: None,
                 codec_config: (),
+                write_buffer_size: 1024,
             };
             let context = MockStorage {
                 len: u32::MAX as u64 * INDEX_ALIGNMENT + 1,
