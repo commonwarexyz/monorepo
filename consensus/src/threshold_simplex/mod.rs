@@ -1203,6 +1203,36 @@ mod tests {
             // Ensure no blocked connections
             let blocked = oracle.blocked().await.unwrap();
             assert!(blocked.is_empty());
+
+            // Ensure we are skipping views
+            let encoded = context.encode();
+            let lines = encoded.lines();
+            let mut skipped_views = 0;
+            let mut nodes_skipping = 0;
+            for line in lines {
+                if line.contains("_engine_voter_skipped_views_total") {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if let Some(number_str) = parts.last() {
+                        if let Ok(number) = number_str.parse::<u64>() {
+                            if number > 0 {
+                                nodes_skipping += 1;
+                            }
+                            if number > skipped_views {
+                                skipped_views = number;
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(
+                skipped_views > 0,
+                "expected skipped views to be greater than 0"
+            );
+            assert_eq!(
+                nodes_skipping,
+                n - 1,
+                "expected all online nodes to be skipping views"
+            );
         });
     }
 
