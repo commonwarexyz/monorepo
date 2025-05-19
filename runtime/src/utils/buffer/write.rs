@@ -148,7 +148,9 @@ impl<B: Blob> Blob for Write<B> {
 
     async fn close(self) -> Result<(), Error> {
         let mut inner = self.inner.write().await;
-        Self::sync(&mut *inner).await?;
-        inner.blob.close().await
+        Self::sync(&mut inner).await?;
+
+        // TODO: compiles but terrible
+        inner.blob.clone().close().await
     }
 }
