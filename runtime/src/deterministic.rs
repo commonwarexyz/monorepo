@@ -846,6 +846,7 @@ impl crate::Spawner for Context {
         move |f: F| {
             let (f, handle) = Handle::init_blocking(f, gauge, false);
 
+            // Spawn the task
             let f = async move { f() };
             Tasks::register_work(&executor.tasks, label, Box::pin(f));
             handle

@@ -429,7 +429,7 @@ impl crate::Spawner for Context {
             .get_or_create(&label)
             .clone();
 
-        // Initialize the blocking task using the new function
+        // Set up the task
         let executor = self.executor.clone();
         let (f, handle) = Handle::init_blocking(|| f(self), gauge, executor.cfg.catch_panics);
 
@@ -474,6 +474,7 @@ impl crate::Spawner for Context {
         move |f: F| {
             let (f, handle) = Handle::init_blocking(f, gauge, executor.cfg.catch_panics);
 
+            // Spawn the blocking task
             if dedicated {
                 std::thread::spawn(f);
             } else {
