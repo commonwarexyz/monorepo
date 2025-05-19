@@ -93,16 +93,18 @@ impl<
         const N: usize,
     > Current<E, K, V, H, T, N>
 {
-    // A compile-time assertion that the chunk size is the expected multiple of digest size.
-    const _MULTIPLE: usize = 2; // 2 yields the smallest possible proof sizes
+    // A compile-time assertion that the chunk size is some multiple of digest size. A multiple of 1 is optimal with
+    // respect to proof size, but a higher multiple allows for a smaller (RAM resident) merkle tree over the structure.
+    const _MULTIPLE: usize = 1;
     const _CHUNK_SIZE_ASSERT: () = assert!(
         N == Self::_MULTIPLE * H::Digest::SIZE,
         "chunk size must be expected multiple of the digest size",
     );
-    const _CHUNK_SIZE_IS_POW_OF_2_ASSERT_: () = assert!(
-        N.is_power_of_two(),
-        "chunk size must be a power of 2 to allow for grafting",
-    );
+
+    // A compile-time assertion that chunk size is a power of 2, which is necessary to allow the status bitmap tree to
+    // be aligned with the underlying operations MMR.
+    const _CHUNK_SIZE_IS_POW_OF_2_ASSERT_: () =
+        assert!(N.is_power_of_two(), "chunk size must be a power of 2",);
 
     /// Initializes a [Current] authenticated database from the given `config`.
     pub async fn init(context: E, config: Config, translator: T) -> Result<Self, Error> {
