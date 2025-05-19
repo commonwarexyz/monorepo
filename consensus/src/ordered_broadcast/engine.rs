@@ -144,6 +144,9 @@ pub struct Engine<
     // The number of bytes to buffer when replaying a journal.
     journal_replay_buffer: usize,
 
+    // The size of the write buffer to use for each blob in the journal.
+    journal_write_buffer: usize,
+
     // A prefix for the journal names.
     // The rest of the name is the hex-encoded public keys of the relevant sequencer.
     journal_name_prefix: String,
@@ -238,6 +241,7 @@ impl<
             journal_heights_per_section: cfg.journal_heights_per_section,
             journal_replay_concurrency: cfg.journal_replay_concurrency,
             journal_replay_buffer: cfg.journal_replay_buffer,
+            journal_write_buffer: cfg.journal_write_buffer,
             journal_name_prefix: cfg.journal_name_prefix,
             journal_compression: cfg.journal_compression,
             journals: BTreeMap::new(),
@@ -970,6 +974,7 @@ impl<
             partition: format!("{}{}", &self.journal_name_prefix, sequencer),
             compression: self.journal_compression,
             codec_config: (),
+            write_buffer: self.journal_write_buffer,
         };
         let journal = Journal::<_, Node<C, V, D>>::init(self.context.with_label("journal"), cfg)
             .await

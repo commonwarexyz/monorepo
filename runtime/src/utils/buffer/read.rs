@@ -53,7 +53,7 @@ impl<B: Blob> Read<B> {
     ///
     /// Panics if `buffer_size` is zero.
     pub fn new(blob: B, blob_size: u64, buffer_size: usize) -> Self {
-        assert!(buffer_size > 0, "Buffer size must be greater than zero");
+        assert!(buffer_size > 0, "buffer size must be greater than zero");
         Self {
             blob,
             buffer: vec![0; buffer_size],
@@ -157,11 +157,11 @@ impl<B: Blob> Read<B> {
         Ok(())
     }
 
-    /// Truncates the blob to the specified size.
+    /// Truncates the blob to the specified len.
     ///
     /// This may be useful if reading some blob after unclean shutdown.
-    pub async fn truncate(self, size: u64) -> Result<(), Error> {
-        self.blob.truncate(size).await?;
+    pub async fn truncate(self, len: u64) -> Result<(), Error> {
+        self.blob.truncate(len).await?;
         self.blob.sync().await
     }
 }

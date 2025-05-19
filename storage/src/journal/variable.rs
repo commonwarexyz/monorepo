@@ -86,6 +86,7 @@
 //!         partition: "partition".to_string(),
 //!         compression: None,
 //!         codec_config: (),
+//!         write_buffer: 1024 * 1024,
 //!     }).await.unwrap();
 //!
 //!     // Append data to the journal
@@ -99,7 +100,10 @@
 use super::Error;
 use bytes::BufMut;
 use commonware_codec::Codec;
-use commonware_runtime::{buffer::Read, Blob, Error as RError, Metrics, Storage};
+use commonware_runtime::{
+    buffer::{Read, Write},
+    Blob, Error as RError, Metrics, Storage,
+};
 use commonware_utils::hex;
 use futures::stream::{self, Stream, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -122,6 +126,9 @@ pub struct Config<C> {
 
     /// The codec configuration to use for encoding and decoding items.
     pub codec_config: C,
+
+    /// The size of the write buffer to use for each blob.
+    pub write_buffer: usize,
 }
 
 const ITEM_ALIGNMENT: u64 = 16;
@@ -145,7 +152,7 @@ pub struct Journal<E: Storage + Metrics, V: Codec> {
 
     oldest_allowed: Option<u64>,
 
-    blobs: BTreeMap<u64, (E::Blob, u64)>,
+    blobs: BTreeMap<u64, (Write<E::Blob>, u64)>,
 
     tracked: Gauge,
     synced: Counter,
@@ -176,6 +183,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                 Err(_) => return Err(Error::InvalidBlobName(hex_name)),
             };
             debug!(section, blob = hex_name, len, "loaded section");
+            let blob = Write::new(blob, len, cfg.write_buffer);
             blobs.insert(section, (blob, len));
         }
 
@@ -218,7 +226,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     async fn read(
         compressed: bool,
         cfg: &V::Cfg,
-        blob: &E::Blob,
+        blob: &Write<E::Blob>,
         offset: u32,
     ) -> Result<(u32, u32, V), Error> {
         // Read item size
@@ -259,7 +267,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
     /// Helper function to read an item from a [Read].
     async fn read_buffered(
-        reader: &mut Read<E::Blob>,
+        reader: &mut Read<Write<E::Blob>>,
         offset: u32,
         cfg: &V::Cfg,
         compressed: bool,
@@ -322,23 +330,23 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     async fn read_exact(
         compressed: bool,
         cfg: &V::Cfg,
-        blob: &E::Blob,
+        blob: &Write<E::Blob>,
         offset: u32,
-        size: u32,
+        len: u32,
     ) -> Result<V, Error> {
         // Read buffer
         let offset = offset as u64 * ITEM_ALIGNMENT;
-        let entry_size = 4 + size as usize + 4;
+        let entry_size = 4 + len as usize + 4;
         let buf = blob.read_at(vec![0u8; entry_size], offset).await?;
 
         // Check size
         let disk_size = u32::from_be_bytes(buf[..4].try_into().unwrap());
-        if disk_size != size {
-            return Err(Error::UnexpectedSize(disk_size, size));
+        if disk_size != len {
+            return Err(Error::UnexpectedSize(disk_size, len));
         }
 
         // Get item
-        let item = &buf[4..4 + size as usize];
+        let item = &buf[4..4 + len as usize];
         let checksum = crc32fast::hash(item);
         let item = if compressed {
             decompress(item, u32::MAX as usize).map_err(|_| Error::DecompressionFailed)?
@@ -347,7 +355,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         };
 
         // Verify integrity
-        let stored_checksum = u32::from_be_bytes(buf[4 + size as usize..].try_into().unwrap());
+        let stored_checksum = u32::from_be_bytes(buf[4 + len as usize..].try_into().unwrap());
         if checksum != stored_checksum {
             return Err(Error::ChecksumMismatch(stored_checksum, checksum));
         }
@@ -381,13 +389,13 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         let codec_config = self.cfg.codec_config.clone();
         let compressed = self.cfg.compression.is_some();
         let mut blobs = Vec::with_capacity(self.blobs.len());
-        for (section, (blob, size)) in self.blobs.iter() {
-            let aligned_len = compute_next_offset(*size)?;
+        for (section, (blob, len)) in self.blobs.iter() {
+            let aligned_len = compute_next_offset(*len)?;
             blobs.push((
                 *section,
                 blob.clone(),
                 aligned_len,
-                *size,
+                *len,
                 codec_config.clone(),
                 compressed,
             ));
@@ -397,9 +405,9 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         // occupying too much memory with buffered data)
         Ok(stream::iter(blobs)
             .map(
-                move |(section, blob, aligned_len, size, codec_config, compressed)| async move {
+                move |(section, blob, aligned_len, len, codec_config, compressed)| async move {
                     // Created buffered reader
-                    let reader = Read::new(blob, size, buffer);
+                    let reader = Read::new(blob, len, buffer);
 
                     // Read over the blob
                     stream::unfold(
@@ -507,9 +515,10 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
                 let name = section.to_be_bytes();
-                let blob = self.context.open(&self.cfg.partition, &name).await?;
+                let (blob, len) = self.context.open(&self.cfg.partition, &name).await?;
+                let blob = Write::new(blob, len, self.cfg.write_buffer);
                 self.tracked.inc();
-                entry.insert(blob)
+                entry.insert((blob, len))
             }
         };
 
@@ -662,6 +671,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                write_buffer: 1024,
             };
             let index = 1u64;
             let data = 10;
@@ -687,6 +697,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                write_buffer: 1024,
             };
             let journal = Journal::<_, i32>::init(context.clone(), cfg.clone())
                 .await
@@ -729,6 +740,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                write_buffer: 1024,
             };
 
             // Initialize the journal
@@ -798,6 +810,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                write_buffer: 1024,
             };
 
             // Initialize the journal
@@ -898,6 +911,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                write_buffer: 1024,
             };
 
             // Manually create a blob with an invalid name (not 8 bytes)
@@ -928,6 +942,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                write_buffer: 1024,
             };
 
             // Manually create a blob with incomplete size data
@@ -979,6 +994,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                write_buffer: 1024,
             };
 
             // Manually create a blob with missing item data
@@ -1034,6 +1050,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                write_buffer: 1024,
             };
 
             // Manually create a blob with missing checksum
@@ -1099,6 +1116,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                write_buffer: 1024,
             };
 
             // Manually create a blob with incorrect checksum
@@ -1174,6 +1192,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                write_buffer: 1024,
             };
 
             // Initialize the journal
@@ -1315,6 +1334,7 @@ mod tests {
                 partition: "partition".to_string(),
                 compression: None,
                 codec_config: (),
+                write_buffer: 1024,
             };
             let context = MockStorage {
                 len: u32::MAX as u64 * INDEX_ALIGNMENT, // can store up to u32::Max at the last offset
@@ -1341,6 +1361,7 @@ mod tests {
                 partition: "partition".to_string(),
                 compression: None,
                 codec_config: (),
+                write_buffer: 1024,
             };
             let context = MockStorage {
                 len: u32::MAX as u64 * INDEX_ALIGNMENT + 1,

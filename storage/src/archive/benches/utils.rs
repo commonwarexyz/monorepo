@@ -14,6 +14,9 @@ pub const PARTITION: &str = "archive_bench_partition";
 /// Number of buffered writes before a forced sync.
 const PENDING_WRITES: usize = 1_000;
 
+/// Number of bytes that can be buffered in a section before being written to disk.
+const WRITE_BUFFER: usize = 1024;
+
 /// Section-mask that yields reasonably small blobs for local testing.
 const SECTION_MASK: u64 = 0xffff_ffff_ffff_ff00u64;
 
@@ -41,6 +44,7 @@ pub async fn get_archive(ctx: Context, compression: Option<u8>) -> ArchiveType {
         codec_config: (),
         section_mask: SECTION_MASK,
         pending_writes: PENDING_WRITES,
+        write_buffer: WRITE_BUFFER,
         replay_concurrency: REPLAY_CONCURRENCY,
         replay_buffer: REPLAY_BUFFER,
     };

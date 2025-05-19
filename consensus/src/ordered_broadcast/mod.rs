@@ -239,6 +239,7 @@ mod tests {
                     journal_heights_per_section: 10,
                     journal_replay_concurrency: 1,
                     journal_replay_buffer: 4096,
+                    journal_write_buffer: 4096,
                     journal_name_prefix: format!("ordered-broadcast-seq/{}/", validator),
                     journal_compression: Some(3),
                 },
@@ -867,6 +868,7 @@ mod tests {
                         journal_heights_per_section: 10,
                         journal_replay_concurrency: 1,
                         journal_replay_buffer: 4096,
+                        journal_write_buffer: 4096,
                         journal_name_prefix: format!("ordered-broadcast-seq/{}/", validator),
                         journal_compression: Some(3),
                     },
@@ -916,6 +918,7 @@ mod tests {
                         journal_heights_per_section: 10,
                         journal_replay_concurrency: 1,
                         journal_replay_buffer: 4096,
+                        journal_write_buffer: 4096,
                         journal_name_prefix: format!(
                             "ordered-broadcast-seq/{}/",
                             sequencer.public_key()
