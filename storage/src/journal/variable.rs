@@ -515,7 +515,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             Entry::Vacant(entry) => {
                 let name = section.to_be_bytes();
                 let (blob, len) = self.context.open(&self.cfg.partition, &name).await?;
-                assert_eq!(len, 0);
                 let blob = Write::new(blob, len, self.cfg.write_buffer);
                 self.tracked.inc();
                 entry.insert((blob, len))
