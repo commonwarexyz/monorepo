@@ -114,7 +114,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             Err(err) => return Err(Error::Runtime(err)),
         };
         for name in stored_blobs {
-            let (blob, size) = context
+            let (blob, len) = context
                 .open(&cfg.partition, &name)
                 .await
                 .map_err(Error::Runtime)?;
@@ -123,8 +123,8 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                 Err(nm) => return Err(Error::InvalidBlobName(hex(&nm))),
             };
             debug!(blob = index, "loaded blob");
-            let blob = Write::new(blob, size, cfg.write_buffer);
-            blobs.insert(index, (blob, size));
+            let blob = Write::new(blob, len, cfg.write_buffer);
+            blobs.insert(index, (blob, len));
         }
         if !blobs.is_empty() {
             // Check that there are no gaps in the blob numbering, which would indicate missing data.
@@ -138,10 +138,10 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             }
         } else {
             debug!("no blobs found");
-            let (blob, size) = context.open(&cfg.partition, &0u64.to_be_bytes()).await?;
-            assert_eq!(size, 0);
-            let blob = Write::new(blob, size, cfg.write_buffer);
-            blobs.insert(0, (blob, size));
+            let (blob, len) = context.open(&cfg.partition, &0u64.to_be_bytes()).await?;
+            assert_eq!(len, 0);
+            let blob = Write::new(blob, len, cfg.write_buffer);
+            blobs.insert(0, (blob, len));
         }
 
         // Initialize metrics
@@ -174,11 +174,11 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                 "blob is full, creating a new empty one"
             );
             let next_blob_index = newest_blob_index + 1;
-            let (next_blob, size) = context
+            let (next_blob, len) = context
                 .open(&cfg.partition, &next_blob_index.to_be_bytes())
                 .await?;
-            let next_blob = Write::new(next_blob, size, cfg.write_buffer);
-            blobs.insert(next_blob_index, (next_blob, size));
+            let next_blob = Write::new(next_blob, len, cfg.write_buffer);
+            blobs.insert(next_blob_index, (next_blob, len));
             tracked.inc();
         }
 
@@ -242,14 +242,14 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             // Always sync the previous blob before creating a new one
             newest_blob.sync().await?;
             debug!(blob = next_blob_index, "creating next blob");
-            let (next_blob, size) = self
+            let (next_blob, len) = self
                 .context
                 .open(&self.cfg.partition, &next_blob_index.to_be_bytes())
                 .await?;
-            let next_blob = Write::new(next_blob, size, self.cfg.write_buffer);
+            let next_blob = Write::new(next_blob, len, self.cfg.write_buffer);
             assert!(self
                 .blobs
-                .insert(next_blob_index, (next_blob, size))
+                .insert(next_blob_index, (next_blob, len))
                 .is_none());
             self.tracked.inc();
         }
@@ -364,34 +364,24 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         assert!(concurrency > 0);
         // Collect all blobs to replay
         let mut blobs = Vec::with_capacity(self.blobs.len());
-        let (newest_blob_index, _) = self.newest_blob();
-        for (index, (blob, size)) in self.blobs.iter() {
-            let len = {
-                if index == newest_blob_index {
-                    *size
-                } else {
-                    self.cfg.items_per_blob * Self::CHUNK_SIZE_U64
-                }
-            };
-            if len > 0 {
-                blobs.push((index, blob.clone(), *size));
-            }
+        for (index, (blob, len)) in self.blobs.iter() {
+            blobs.push((index, blob.clone(), *len));
         }
 
         // Replay all blobs concurrently and stream items as they are read (to avoid occupying too
         // much memory with buffered data)
         let items_per_blob = self.cfg.items_per_blob;
         Ok(stream::iter(blobs)
-            .map(move |(index, blob, size)| async move {
+            .map(move |(index, blob, len)| async move {
                 // Create buffered reader
-                let reader = Read::new(blob, size, buffer);
+                let reader = Read::new(blob, len, buffer);
 
                 // Read over the blob in chunks of `CHUNK_SIZE` bytes
                 stream::unfold(
                     (index, reader, 0u64),
                     move |(index, mut reader, offset)| async move {
                         // Check if we are at the end of the blob
-                        if offset >= size {
+                        if offset >= len {
                             return None;
                         }
 
@@ -408,7 +398,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                                     Err(err) => Some((Err(err), (index, reader, next_offset))),
                                 }
                             }
-                            Err(err) => Some((Err(Error::Runtime(err)), (index, reader, size))),
+                            Err(err) => Some((Err(Error::Runtime(err)), (index, reader, len))),
                         }
                     },
                 )
