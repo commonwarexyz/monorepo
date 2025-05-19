@@ -176,17 +176,12 @@ impl<B: Blob> Blob for Write<B> {
             return Ok(buf);
         }
 
-        // If the data is a combination of blob and buffer, read the blob first
+        // If the data is a combination of blob and buffer, read from both
         let blob_bytes = (buffer_start - offset) as usize;
         let blob_part = vec![0u8; blob_bytes];
         let blob_part = inner.blob.read_at(blob_part, offset).await?;
         buf.deref_mut()[..blob_bytes].copy_from_slice(&blob_part);
-
-        // If there is remaining data, read it from the buffer
         let buf_bytes = data_len - blob_bytes;
-        if buf_bytes > inner.buffer.len() {
-            return Err(Error::BlobInsufficientLength);
-        }
         buf.deref_mut()[blob_bytes..].copy_from_slice(&inner.buffer[..buf_bytes]);
         Ok(buf)
     }
