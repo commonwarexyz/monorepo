@@ -86,6 +86,7 @@
 //!         partition: "partition".to_string(),
 //!         compression: None,
 //!         codec_config: (),
+//!         write_buffer: 1024 * 1024,
 //!     }).await.unwrap();
 //!
 //!     // Append data to the journal

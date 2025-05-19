@@ -128,6 +128,7 @@
 //!         codec_config: (),
 //!         section_mask: 0xffff_ffff_ffff_0000u64,
 //!         pending_writes: 10,
+//!         write_buffer: 1024 * 1024,
 //!         replay_concurrency: 4,
 //!         replay_buffer: 4096,
 //!     };
