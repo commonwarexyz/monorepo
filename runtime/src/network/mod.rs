@@ -5,7 +5,7 @@ pub(crate) mod metered;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod tokio;
 
-#[cfg(feature = "iouring")]
+#[cfg(feature = "iouring-network")]
 pub(crate) mod iouring;
 
 #[cfg(test)]
