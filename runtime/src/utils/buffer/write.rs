@@ -22,6 +22,9 @@ impl<B: Blob> Inner<B> {
     /// If the size of the provided bytes is larger than the buffer capacity, the bytes will be written
     /// directly to the underlying [Blob]. If this occurs regularly, the buffer capacity should be increased (as
     /// the buffer will provide any benefit).
+    ///
+    /// Returns an error if the write to the underlying [Blob] fails (may be due to a `flush` of data not
+    /// related to the data being written).
     async fn write<Buf: StableBuf>(&mut self, buf: Buf) -> Result<(), Error> {
         // If the buffer capacity will be exceeded, flush the buffer first
         let buf_len = buf.len();
@@ -197,13 +200,12 @@ impl<B: Blob> Blob for Write<B> {
         // Proposed write operation boundaries
         let write_start = offset;
 
-        // Scenario 1: Pure append to the current buffered data.
+        // Simple append to the current buffered data
         if write_start == buffer_end {
             return inner.write(buf).await;
         }
 
-        // Scenario 2: Write operation can be merged into the existing buffer.
-        // Conditions:
+        // Write operation can be merged into the existing buffer if:
         // a) Write starts at or after the buffer's starting position in the blob.
         // b) The end of the write, relative to the buffer's start, fits within buffer's capacity.
         let can_write_into_buffer = write_start >= buffer_start
@@ -218,7 +220,7 @@ impl<B: Blob> Blob for Write<B> {
             return Ok(());
         }
 
-        // Scenario 3: All other cases (e.g., write is before buffer, straddles non-mergably, or would overflow capacity).
+        // All other cases (e.g., write is before buffer, straddles, or would overflow capacity)
         if !inner.buffer.is_empty() {
             inner.flush().await?;
         }
@@ -239,18 +241,20 @@ impl<B: Blob> Blob for Write<B> {
         // Adjust buffer content based on `len`
         if len <= buffer_start {
             // Truncation point is before or exactly at the start of the buffer.
+            //
             // All buffered data is now invalid/beyond the new length.
             inner.buffer.clear();
             inner.blob.truncate(len).await?;
             inner.position = len;
         } else if len < buffer_end {
             // Truncation point is within the buffer.
+            //
             // `len` is > `buffer_start_blob_offset` here.
             // New length of data *within the buffer* is `len - buffer_start_blob_offset`.
             let new_buffer_actual_len = (len - buffer_start) as usize;
             inner.buffer.truncate(new_buffer_actual_len);
         } else {
-            // Truncation point is at or after the end of the buffer, so no changes are needed.
+            // Truncation point is at or after the end of the buffer, so no changes are needed
         }
         Ok(())
     }
