@@ -532,7 +532,7 @@ mod tests {
             let mut reader = Read::new(blob, size, 20);
             let mut buf = vec![0u8; 20];
             reader.read_exact(&mut buf, 20).await.unwrap();
-            assert_eq!(&buf, b"ab01234hiwxyzopqrst");
+            assert_eq!(&buf, b"ab01234hiwxyznopqrst");
         });
     }
 
