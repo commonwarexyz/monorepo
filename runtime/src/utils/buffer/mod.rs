@@ -731,14 +731,11 @@ mod tests {
             // writer.inner.position = 20 (start of buffered data " more data")
             // writer.inner.buffer = " more data"
 
-            // Try to read "flushedmore " (12 bytes: ("shed " - 5) from blob, ("more da" - 7) from buffer) starting at offset 15
-            // offset = 15, data_len = 12. data_end = 27.
+            // Try to read "flushed more " (12 bytes: ("shed " - 5) from blob, ("more da" - 7) from buffer) starting at offset 16
+            // offset = 16, data_len = 12. data_end = 28.
             // buffer_start (inner.position) = 20. buffer_end = 20 + 9 = 29.
-            // data_end (27) > buffer_start (20) is true.
-            // offset (15) < buffer_start (20) is true. -> This is the combined case.
-            // blob_bytes = buffer_start - offset = 20 - 15 = 5.  (reads "shed " from "buffered and flushed")
-            // buf_bytes = data_len - blob_bytes = 12 - 5 = 7. (reads "more da" from "more data")
-            // Expected: "shed more da"
+            // data_end (28) > buffer_start (20) is true.
+            // offset (16) < buffer_start (20) is true. -> This is the combined case.
             let mut combo_read_buf_vec = vec![0u8; 12];
             combo_read_buf_vec = writer.read_at(combo_read_buf_vec, 16).await.unwrap();
             assert_eq!(&combo_read_buf_vec, b"shed more da");
