@@ -1,7 +1,8 @@
-// Macros shared across runtime implementations.
+//! Macros shared across runtime implementations.
 
+/// Prepare metrics for a spawned task.
 #[macro_export]
-macro_rules! spawn_setup {
+macro_rules! spawn_metrics {
     ($ctx:ident, future) => {{
         let label = $crate::telemetry::metrics::task::Label::future($ctx.name.clone());
         $ctx.executor
@@ -9,7 +10,8 @@ macro_rules! spawn_setup {
             .tasks_spawned
             .get_or_create(&label)
             .inc();
-        let gauge = $ctx.executor
+        let gauge = $ctx
+            .executor
             .metrics
             .tasks_running
             .get_or_create(&label)
@@ -27,7 +29,8 @@ macro_rules! spawn_setup {
             .tasks_spawned
             .get_or_create(&label)
             .inc();
-        let gauge = $ctx.executor
+        let gauge = $ctx
+            .executor
             .metrics
             .tasks_running
             .get_or_create(&label)

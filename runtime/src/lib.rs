@@ -28,7 +28,7 @@ use std::{
 use thiserror::Error;
 
 #[macro_use]
-mod spawn_macros;
+mod macros;
 
 pub mod deterministic;
 pub mod mocks;

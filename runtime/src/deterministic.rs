@@ -721,7 +721,7 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
-        let (label, gauge) = spawn_setup!(self, future);
+        let (label, gauge) = spawn_metrics!(self, future);
 
         // Set up the task
         let executor = self.executor.clone();
@@ -743,7 +743,7 @@ impl crate::Spawner for Context {
         self.spawned = true;
 
         // Get metrics
-        let (label, gauge) = spawn_setup!(self, future);
+        let (label, gauge) = spawn_metrics!(self, future);
 
         // Set up the task
         let executor = self.executor.clone();
@@ -765,7 +765,7 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
-        let (label, gauge) = spawn_setup!(self, blocking, dedicated);
+        let (label, gauge) = spawn_metrics!(self, blocking, dedicated);
 
         // Initialize the blocking task
         let executor = self.executor.clone();
@@ -787,7 +787,7 @@ impl crate::Spawner for Context {
         self.spawned = true;
 
         // Get metrics
-        let (label, gauge) = spawn_setup!(self, blocking, dedicated);
+        let (label, gauge) = spawn_metrics!(self, blocking, dedicated);
 
         // Set up the task
         let executor = self.executor.clone();

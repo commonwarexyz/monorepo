@@ -345,7 +345,7 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
-        let (_label, gauge) = spawn_setup!(self, future);
+        let (_, gauge) = spawn_metrics!(self, future);
 
         // Set up the task
         let catch_panics = self.executor.cfg.catch_panics;
@@ -368,7 +368,7 @@ impl crate::Spawner for Context {
         self.spawned = true;
 
         // Get metrics
-        let (_label, gauge) = spawn_setup!(self, future);
+        let (_, gauge) = spawn_metrics!(self, future);
 
         // Set up the task
         let executor = self.executor.clone();
@@ -390,7 +390,7 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
-        let (_label, gauge) = spawn_setup!(self, blocking, dedicated);
+        let (_, gauge) = spawn_metrics!(self, blocking, dedicated);
 
         // Set up the task
         let executor = self.executor.clone();
@@ -415,7 +415,7 @@ impl crate::Spawner for Context {
         self.spawned = true;
 
         // Get metrics
-        let (_label, gauge) = spawn_setup!(self, blocking, dedicated);
+        let (_, gauge) = spawn_metrics!(self, blocking, dedicated);
 
         // Set up the task
         let executor = self.executor.clone();
