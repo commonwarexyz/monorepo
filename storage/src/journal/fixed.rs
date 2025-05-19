@@ -51,7 +51,10 @@
 use super::Error;
 use bytes::BufMut;
 use commonware_codec::{Codec, DecodeExt, FixedSize};
-use commonware_runtime::{buffer::Read, Blob, Error as RError, Metrics, Storage};
+use commonware_runtime::{
+    buffer::{Read, Write},
+    Blob, Error as RError, Metrics, Storage,
+};
 use commonware_utils::hex;
 use futures::stream::{self, Stream, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -70,6 +73,9 @@ pub struct Config {
     /// Any unpruned historical blobs will contain exactly this number of items.
     /// Only the newest blob may contain fewer items.
     pub items_per_blob: u64,
+
+    /// The size of the write buffer to use for each blob.
+    pub write_buffer_size: usize,
 }
 
 /// Implementation of `Journal` storage.
@@ -82,7 +88,7 @@ pub struct Journal<E: Storage + Metrics, A> {
     // - Indices are consecutive and without gaps.
     // - There will always be at least one blob in the map.
     // - The most recent blob will never be completely full, but it may be empty.
-    blobs: BTreeMap<u64, (E::Blob, u64)>,
+    blobs: BTreeMap<u64, (Write<E::Blob>, u64)>,
 
     tracked: Gauge,
     synced: Counter,
@@ -108,7 +114,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             Err(err) => return Err(Error::Runtime(err)),
         };
         for name in stored_blobs {
-            let blob = context
+            let (blob, size) = context
                 .open(&cfg.partition, &name)
                 .await
                 .map_err(Error::Runtime)?;
@@ -117,7 +123,8 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                 Err(nm) => return Err(Error::InvalidBlobName(hex(&nm))),
             };
             debug!(blob = index, "loaded blob");
-            blobs.insert(index, blob);
+            let blob = Write::new(blob, size, cfg.write_buffer_size);
+            blobs.insert(index, (blob, size));
         }
         if !blobs.is_empty() {
             // Check that there are no gaps in the blob numbering, which would indicate missing data.
@@ -131,8 +138,10 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             }
         } else {
             debug!("no blobs found");
-            let blob = context.open(&cfg.partition, &0u64.to_be_bytes()).await?;
-            blobs.insert(0, blob);
+            let (blob, size) = context.open(&cfg.partition, &0u64.to_be_bytes()).await?;
+            assert_eq!(size, 0);
+            let blob = Write::new(blob, size, cfg.write_buffer_size);
+            blobs.insert(0, (blob, size));
         }
 
         // Initialize metrics
@@ -165,10 +174,11 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                 "blob is full, creating a new empty one"
             );
             let next_blob_index = newest_blob_index + 1;
-            let next_blob = context
+            let (next_blob, size) = context
                 .open(&cfg.partition, &next_blob_index.to_be_bytes())
                 .await?;
-            blobs.insert(next_blob_index, next_blob);
+            let next_blob = Write::new(next_blob, size, cfg.write_buffer_size);
+            blobs.insert(next_blob_index, (next_blob, size));
             tracked.inc();
         }
 
@@ -232,11 +242,15 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             // Always sync the previous blob before creating a new one
             newest_blob.sync().await?;
             debug!(blob = next_blob_index, "creating next blob");
-            let next_blob = self
+            let (next_blob, size) = self
                 .context
                 .open(&self.cfg.partition, &next_blob_index.to_be_bytes())
                 .await?;
-            assert!(self.blobs.insert(next_blob_index, next_blob).is_none());
+            let next_blob = Write::new(next_blob, size, self.cfg.write_buffer_size);
+            assert!(self
+                .blobs
+                .insert(next_blob_index, (next_blob, size))
+                .is_none());
             self.tracked.inc();
         }
 
@@ -404,12 +418,12 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
     }
 
     /// Return the blob containing the most recently appended items and its index.
-    fn newest_blob(&self) -> (&u64, &(E::Blob, u64)) {
+    fn newest_blob(&self) -> (&u64, &(Write<E::Blob>, u64)) {
         self.blobs.last_key_value().expect("no blobs found")
     }
 
     /// Return the blob containing the oldest retained items and its index.
-    fn oldest_blob(&self) -> (&u64, &(E::Blob, u64)) {
+    fn oldest_blob(&self) -> (&u64, &(Write<E::Blob>, u64)) {
         self.blobs.first_key_value().expect("no blobs found")
     }
 
@@ -492,6 +506,7 @@ mod tests {
             let cfg = Config {
                 partition: "test_partition".into(),
                 items_per_blob: 2,
+                write_buffer_size: 1024,
             };
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -514,6 +529,7 @@ mod tests {
             let cfg = Config {
                 partition: "test_partition".into(),
                 items_per_blob: 2,
+                write_buffer_size: 1024,
             };
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -646,6 +662,7 @@ mod tests {
             let cfg = Config {
                 partition: "test_partition".into(),
                 items_per_blob: ITEMS_PER_BLOB,
+                write_buffer_size: 1024,
             };
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -815,6 +832,7 @@ mod tests {
             let cfg = Config {
                 partition: "test_partition".into(),
                 items_per_blob: 3,
+                write_buffer_size: 1024,
             };
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -874,6 +892,7 @@ mod tests {
             let cfg = Config {
                 partition: "test_partition".into(),
                 items_per_blob: 10,
+                write_buffer_size: 1024,
             };
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -923,6 +942,7 @@ mod tests {
             let cfg = Config {
                 partition: "test_partition".into(),
                 items_per_blob: 2,
+                write_buffer_size: 1024,
             };
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -989,6 +1009,7 @@ mod tests {
             let cfg = Config {
                 partition: "test_partition_2".into(),
                 items_per_blob: 3,
+                write_buffer_size: 1024,
             };
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await

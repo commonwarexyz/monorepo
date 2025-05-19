@@ -26,6 +26,7 @@ async fn get_journal<const ITEM_SIZE: usize>(
     let journal_config = JConfig {
         partition: partition_name.to_string(),
         items_per_blob,
+        write_buffer_size: 1024,
     };
     Journal::init(context, journal_config).await.unwrap()
 }
