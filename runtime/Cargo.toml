@@ -32,7 +32,8 @@ libc = { workspace = true }
 
 [features]
 default = []
-iouring = ["io-uring"]
+iouring-storage = ["io-uring"]
+iouring-network = ["io-uring"]
 
 # Enable "js" feature when WASM is target
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]

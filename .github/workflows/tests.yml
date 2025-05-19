@@ -15,7 +15,8 @@ jobs:
     strategy:
       matrix:
         features:
-          - "--features iouring"
+          - "--features commonware-runtime/iouring-storage"
+          - "--features commonware-runtime/iouring-network"
           - ""
     steps:
     - name: Checkout repository
@@ -36,7 +37,8 @@ jobs:
     strategy:
       matrix:
         features:
-          - "--features iouring"
+          - "--features commonware-runtime/iouring-storage"
+          - "--features commonware-runtime/iouring-network"
           - ""
     steps:
     - name: Checkout repository
@@ -51,7 +53,8 @@ jobs:
     strategy:
       matrix:
         features:
-          - "--features iouring"
+          - "--features commonware-runtime/iouring-storage"
+          - "--features commonware-runtime/iouring-network"
           - ""
     steps:
     - name: Checkout repository

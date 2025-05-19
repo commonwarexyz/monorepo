@@ -1,10 +1,10 @@
 //! Implementations of the `Storage` trait that can be used by the runtime.
 pub mod audited;
-#[cfg(feature = "iouring")]
+#[cfg(feature = "iouring-storage")]
 pub mod iouring;
 pub mod memory;
 pub mod metered;
-#[cfg(all(not(target_arch = "wasm32"), not(feature = "iouring")))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "iouring-storage")))]
 pub mod tokio;
 
 #[cfg(test)]

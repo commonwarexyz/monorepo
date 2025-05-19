@@ -40,7 +40,7 @@ mod storage;
 pub mod telemetry;
 mod utils;
 pub use utils::*;
-#[cfg(feature = "iouring")]
+#[cfg(any(feature = "iouring-storage", feature = "iouring-network"))]
 mod iouring;
 
 /// Prefix for runtime metrics.
