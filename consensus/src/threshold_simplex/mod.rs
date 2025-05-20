@@ -25,16 +25,27 @@
 //!
 //! ## Architecture
 //!
-//! All logic is split into two components: the `Voter` and the `Resolver` (and the user of `threshold-simplex`
-//! provides `Application`). The `Voter` is responsible for participating in the latest view and the
-//! `Resolver` is responsible for fetching artifacts from previous views required to verify proposed
-//! blocks in the latest view.
+//! All logic is split into three components: the `Batcher`, the `Voter` and the `Resolver` (not including the
+//! user-provided `Application`). The `Batcher` is responsible for collecting messages from peers and batch
+//! verifying them when a quorum is met (the primary source of `threshold-simplex`'s efficiency). The `Voter`
+//! is responsible for directing participation in the current view. Lastly, the `Resolver` is responsible for
+//! fetching artifacts from previous views required to verify proposed blocks in the latest view.
 //!
-//! To provide great performance, all interactions between `Voter`, `Resolver`, and `Application` are
+//! To provide great performance, all interactions between `Batcher`, `Voter`, `Resolver`, and `Application` are
 //! non-blocking. This means that, for example, the `Voter` can continue processing messages while the
 //! `Application` verifies a proposed block or the `Resolver` verifies a notarization.
 //!
 //! ```txt
+//!                            +------------+          +++++++++++++++
+//!                            |            +--------->+             +
+//!                            |  Batcher   |          +    Peers    +
+//!                            |            |<---------+             +
+//!                            +-------+----+          +++++++++++++++
+//!                                |   ^
+//!                                |   |
+//!                                |   |
+//!                                |   |
+//!                                v   |
 //! +---------------+           +---------+            +++++++++++++++
 //! |               |<----------+         +----------->+             +
 //! |  Application  |           |  Voter  |            +    Peers    +
