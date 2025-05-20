@@ -253,9 +253,10 @@ where
 /// Attempts to verify multiple [PartialSignature]s over the same message as a single
 /// aggregate signature (or returns any invalid signature found).
 ///
-/// We use an "inner" function for recursion to avoid re-evaluating the public polynomial
-/// for each recursive bisection.
-fn partial_verify_multiple_public_keys_inner<'a, V, I>(
+/// Unlike `partial_verify_multiple_public_keys`, this function requires the public keys
+/// of all partial signatures to be precomputed (avoids a significant amount of compute
+/// evaluating each signer on the public polynomial).
+pub fn partial_verify_multiple_public_keys_precomputed<'a, V, I>(
     public_keys: &[V::Public],
     namespace: Option<&[u8]>,
     message: &[u8],
@@ -296,13 +297,13 @@ where
     let mid = public_keys.len() / 2;
     let (left_public_keys, right_public_keys) = public_keys.split_at(mid);
     let (left_partials, right_partials) = reclaimed.split_at(mid);
-    let result_l = partial_verify_multiple_public_keys_inner::<V, _>(
+    let result_l = partial_verify_multiple_public_keys_precomputed::<V, _>(
         left_public_keys,
         namespace,
         message,
         left_partials.iter().copied(),
     );
-    let result_r = partial_verify_multiple_public_keys_inner::<V, _>(
+    let result_r = partial_verify_multiple_public_keys_precomputed::<V, _>(
         right_public_keys,
         namespace,
         message,
@@ -347,7 +348,12 @@ where
         .unzip();
 
     // Recursively verify and find invalid signatures
-    partial_verify_multiple_public_keys_inner::<V, _>(&public_keys, namespace, message, partials)
+    partial_verify_multiple_public_keys_precomputed::<V, _>(
+        &public_keys,
+        namespace,
+        message,
+        partials,
+    )
 }
 
 /// Interpolate the value of some [Point] with precomputed Barycentric Weights
