@@ -105,7 +105,7 @@ fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, FINALIZE_SUFFIX)
 }
 
-pub struct PartialVerifier<V: Variant, D: Digest> {
+pub struct Verifier<V: Variant, D: Digest> {
     quorum: Option<usize>,
 
     leader: Option<u32>,
@@ -122,7 +122,7 @@ pub struct PartialVerifier<V: Variant, D: Digest> {
     finalizes_verified: usize,
 }
 
-impl<V: Variant, D: Digest> PartialVerifier<V, D> {
+impl<V: Variant, D: Digest> Verifier<V, D> {
     pub fn new(quorum: Option<u32>) -> Self {
         Self {
             quorum: quorum.map(|q| q as usize),

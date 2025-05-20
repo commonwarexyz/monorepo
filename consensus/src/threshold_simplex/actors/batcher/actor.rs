@@ -4,7 +4,7 @@ use crate::{
         actors::voter,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalize, Notarize,
-            Nullify, NullifyFinalize, PartialVerifier, View, Viewable, Voter,
+            Nullify, NullifyFinalize, Verifier as ViewVerifier, View, Viewable, Voter,
         },
     },
     Reporter, ThresholdSupervisor,
@@ -40,7 +40,7 @@ struct Round<
     blocker: B,
     reporter: R,
     supervisor: S,
-    verifier: PartialVerifier<V, D>,
+    verifier: ViewVerifier<V, D>,
     notarizes: Vec<Option<Notarize<V, D>>>,
     nullifies: Vec<Option<Nullify<V>>>,
     finalizes: Vec<Option<Finalize<V, D>>>,
@@ -78,7 +78,7 @@ impl<
             blocker,
             reporter,
             supervisor,
-            verifier: PartialVerifier::new(quorum),
+            verifier: ViewVerifier::new(quorum),
 
             notarizes: vec![None; participants],
             nullifies: vec![None; participants],
