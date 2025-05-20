@@ -3,8 +3,8 @@ use crate::{
     threshold_simplex::{
         actors::voter,
         types::{
-            Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalize, Notarize,
-            Nullify, NullifyFinalize, Verifier as ViewVerifier, View, Viewable, Voter,
+            Activity, Attributable, BatchVerifier, ConflictingFinalize, ConflictingNotarize,
+            Finalize, Notarize, Nullify, NullifyFinalize, View, Viewable, Voter,
         },
     },
     Reporter, ThresholdSupervisor,
@@ -40,7 +40,7 @@ struct Round<
     blocker: B,
     reporter: R,
     supervisor: S,
-    verifier: ViewVerifier<V, D>,
+    verifier: BatchVerifier<V, D>,
     notarizes: Vec<Option<Notarize<V, D>>>,
     nullifies: Vec<Option<Nullify<V>>>,
     finalizes: Vec<Option<Finalize<V, D>>>,
@@ -78,7 +78,7 @@ impl<
             blocker,
             reporter,
             supervisor,
-            verifier: ViewVerifier::new(quorum),
+            verifier: BatchVerifier::new(quorum),
 
             notarizes: vec![None; participants],
             nullifies: vec![None; participants],
