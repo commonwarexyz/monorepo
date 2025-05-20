@@ -1647,6 +1647,9 @@ impl<V: Variant, D: Digest> Read for Response<V, D> {
 
 /// Activity represents all possible activities that can occur in the consensus protocol.
 /// This includes both regular consensus messages and fault evidence.
+///
+/// Some activities issued by consensus are not verified. To determine if an activity has been verified,
+/// use the `verified` method.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub enum Activity<V: Variant, D: Digest> {
     /// A single validator notarize over a proposal
