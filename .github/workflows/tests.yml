@@ -12,6 +12,7 @@ env:
 jobs:
   Lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       matrix:
         features:
@@ -34,6 +35,7 @@ jobs:
 
   Fast:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       matrix:
         features:
@@ -52,6 +54,7 @@ jobs:
 
   Slow:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     strategy:
       matrix:
         features:
@@ -70,6 +73,7 @@ jobs:
 
   Dependencies:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
@@ -94,6 +98,7 @@ jobs:
 
   WASM:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
