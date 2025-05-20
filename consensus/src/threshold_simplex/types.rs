@@ -3411,7 +3411,6 @@ mod tests {
     fn test_verify_notarizes_empty_pending_when_forced() {
         let n_validators = 3;
         let threshold = quorum(n_validators);
-        let (poly_pub, _) = generate_test_data(n_validators as usize, threshold, 206);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         let leader_proposal = Proposal::new(1, 0, sample_digest(1));
@@ -3419,14 +3418,7 @@ mod tests {
 
         assert!(verifier.notarizes_force);
         assert!(verifier.notarizes.is_empty());
-        // ready_notarizes will be true because notarizes_force is true, even if list is empty
-        assert!(verifier.ready_notarizes());
-
-        let (verified, failed) = verifier.verify_notarizes(NAMESPACE, &poly_pub);
-        assert!(verified.is_empty());
-        assert!(failed.is_empty());
-        assert_eq!(verifier.notarizes_verified, 0);
-        assert!(!verifier.notarizes_force); // Should be reset
+        assert!(!verifier.ready_notarizes());
     }
 
     #[test]
@@ -3471,7 +3463,7 @@ mod tests {
     fn test_ready_notarizes_exact_quorum() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (_, shares) = generate_test_data(n_validators as usize, threshold, 209);
+        let (poly_pub, shares) = generate_test_data(n_validators as usize, threshold, 209);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         let leader_notarize = create_notarize(&shares[0], 1, 0, 1);
@@ -3479,12 +3471,23 @@ mod tests {
         verifier.add(Voter::Notarize(leader_notarize), true); // 1 verified
         assert_eq!(verifier.notarizes_verified, 1);
 
+        // Add next verified notarize
+        verifier.add(Voter::Notarize(create_notarize(&shares[1], 1, 0, 1)), false);
+
+        // Perform forced verification
+        assert!(verifier.ready_notarizes());
+        let (verified, failed) = verifier.verify_notarizes(NAMESPACE, &poly_pub);
+        assert_eq!(verified.len(), 1);
+        assert!(failed.is_empty());
+        assert_eq!(verifier.notarizes_verified, 1 + 1);
+
         // Add threshold - 1 pending notarizes
-        for i in 1..(threshold as usize) {
+        for i in 2..(threshold as usize) {
             assert!(!verifier.ready_notarizes());
             verifier.add(Voter::Notarize(create_notarize(&shares[i], 1, 0, 1)), false);
         }
-        // Now, notarizes_verified = 1, notarizes.len() = 3. Total = 4 == threshold
+
+        // Now, notarizes_verified = 2, notarizes.len() = 2. Total = 4 == threshold
         assert!(verifier.ready_notarizes());
     }
 
