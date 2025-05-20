@@ -3288,7 +3288,7 @@ mod tests {
         // Set leader proposal to proposal_A
         // To make set_leader_proposal get called from set_leader, a notarize from the leader must exist.
         // Or, call it directly.
-        verifier.set_leader_proposal(proposal_a.clone());
+        verifier.set_leader(shares[0].index);
 
         assert!(verifier.notarizes_force);
         assert_eq!(verifier.notarizes.len(), 1);
@@ -3399,7 +3399,7 @@ mod tests {
             "Should not be ready without leader/proposal set"
         );
 
-        // Set only leader, still not ready
+        // Set leader, still not ready
         verifier.set_leader(shares[0].index);
         assert!(
             !verifier.ready_finalizes(),
@@ -3445,12 +3445,9 @@ mod tests {
         let (poly_pub, shares) = generate_test_data(n_validators as usize, threshold, 208);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
-        let leader_proposal = Proposal::new(1, 0, sample_digest(1));
-        verifier.set_leader(shares[0].index);
-        verifier.set_leader_proposal(leader_proposal.clone());
-
-        assert!(verifier.finalizes.is_empty());
         // ready_finalizes will be false if the list is empty and quorum is Some
+        verifier.set_leader(shares[0].index);
+        assert!(verifier.finalizes.is_empty());
         assert!(!verifier.ready_finalizes());
 
         let (verified, failed) = verifier.verify_finalizes(NAMESPACE, &poly_pub);
