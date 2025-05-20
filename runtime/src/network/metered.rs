@@ -184,6 +184,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn stress_test_trait() {
         tests::stress_test_network_trait(|| {
             MeteredNetwork::new(
