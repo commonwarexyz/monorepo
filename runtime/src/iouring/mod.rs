@@ -66,9 +66,18 @@ pub(crate) async fn run(
         if let Some(cqe) = ring.completion().next() {
             let work_id = cqe.user_data();
             let result = cqe.result();
-            let sender = waiters.remove(&work_id).expect("work is missing");
-            // Notify with the result of this operation
-            let _ = sender.send(result);
+
+            // Look up the sender for this work_id
+            if let Some(sender) = waiters.remove(&work_id) {
+                // Check if this is a timeout result (-ETIME)
+                if result == -libc::ETIME {
+                    // Send a timeout error code to the caller
+                    let _ = sender.send(-libc::ETIMEDOUT);
+                } else {
+                    // Send the actual result
+                    let _ = sender.send(result);
+                }
+            }
             continue;
         }
 
