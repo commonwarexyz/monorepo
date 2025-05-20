@@ -3361,23 +3361,23 @@ mod tests {
         let (_, shares) = generate_test_data(n_validators as usize, threshold, 204);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
+        // Collect sufficient number of unverified notarizes
         for i in 0..threshold {
             verifier.add(
                 Voter::Notarize(create_notarize(&shares[i as usize], 1, 0, 1)),
                 false,
             );
         }
-
         assert!(
             !verifier.ready_notarizes(),
             "Should not be ready without leader/proposal set"
         );
 
-        // Set only leader, still not ready
+        // Set leader
         verifier.set_leader(shares[0].index);
         assert!(
-            !verifier.ready_notarizes(),
-            "Should not be ready without leader_proposal set"
+            verifier.ready_notarizes(),
+            "Should be ready once leader is set"
         );
     }
 
