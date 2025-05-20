@@ -3007,7 +3007,7 @@ mod tests {
         let notarize_s3 = Notarize::<MinSig, _>::sign(NAMESPACE, &shares[3], proposal.clone()); // Enough for quorum
 
         // Not ready - no leader/proposal (This specific check is now in test_ready_notarizes_without_leader_or_proposal)
-        // assert!(!verifier.ready_notarizes());
+        assert!(!verifier.ready_notarizes());
 
         // Set leader and add leader's notarize
         verifier.set_leader(shares[0].index);
@@ -3115,9 +3115,9 @@ mod tests {
         assert_eq!(verified_null.len(), 3);
         assert!(failed_null.is_empty());
         assert_eq!(verifier.nullifies_verified, 1 + 3);
-        assert!(verifier.nullifies.is_empty());
 
-        // Not ready, quorum met by verified (Covered by test_ready_nullifies_quorum_already_met_by_verified)
+        // Nothing to do after verify
+        assert!(verifier.nullifies.is_empty());
         assert!(!verifier.ready_nullifies());
     }
 
@@ -3180,9 +3180,7 @@ mod tests {
             Finalize::<MinSig, _>::sign(NAMESPACE, &shares[3], leader_proposal.clone());
 
         // Not ready - no leader/proposal set (Covered by test_ready_finalizes_without_leader_or_proposal)
-        // verifier.add(Voter::Finalize(finalize_s0.clone()), false);
-        // assert!(!verifier.ready_finalizes());
-        // verifier.finalizes.clear(); // Clear for next steps
+        assert!(!verifier.ready_finalizes());
 
         // Set leader and leader proposal
         verifier.set_leader(shares[0].index); // Leader is s0
