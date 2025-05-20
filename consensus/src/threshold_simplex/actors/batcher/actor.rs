@@ -17,7 +17,7 @@ use commonware_macros::select;
 use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver};
 use commonware_runtime::{Handle, Metrics, Spawner};
 use commonware_utils::quorum;
-use futures::{channel::mpsc, StreamExt};
+use futures::{channel::mpsc, executor::block_on, StreamExt};
 use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
 use std::{collections::BTreeMap, marker::PhantomData};
 use tracing::{trace, warn};
@@ -389,7 +389,11 @@ impl<
         consensus: voter::Mailbox<V, D>,
         receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(consensus, receiver))
+        self.context.spawn_blocking_ref(true)(|| {
+            block_on(async move {
+                self.run(consensus, receiver).await;
+            })
+        })
     }
 
     pub async fn run(

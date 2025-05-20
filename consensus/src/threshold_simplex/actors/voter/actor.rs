@@ -29,6 +29,7 @@ use commonware_utils::quorum;
 use core::panic;
 use futures::{
     channel::{mpsc, oneshot},
+    executor::block_on,
     future::Either,
     pin_mut, StreamExt,
 };
@@ -1528,13 +1529,18 @@ impl<
         recovered_sender: impl Sender<PublicKey = C::PublicKey>,
         recovered_receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(
-            batcher,
-            resolver,
-            pending_sender,
-            recovered_sender,
-            recovered_receiver,
-        ))
+        self.context.spawn_blocking_ref(true)(|| {
+            block_on(async move {
+                self.run(
+                    batcher,
+                    resolver,
+                    pending_sender,
+                    recovered_sender,
+                    recovered_receiver,
+                )
+                .await;
+            })
+        })
     }
 
     async fn run(
