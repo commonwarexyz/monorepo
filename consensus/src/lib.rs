@@ -119,37 +119,35 @@ cfg_if::cfg_if! {
             fn is_participant(&self, index: Self::Index, candidate: &Self::PublicKey) -> Option<u32>;
         }
 
-        /// ThresholdSupervisor is the interface responsible for managing which `identity` (typically a group polynomial with
-        /// a fixed constant factor) and `share` for a participant is active at a given time.
+        /// ThresholdSupervisor is the interface responsible for managing which `polynomial` (typically a group polynomial with
+        /// a fixed constant `identity`) and `share` for a participant is active at a given time.
         ///
         /// ## Synchronization
         ///
         /// The same considerations for [`Supervisor`](crate::Supervisor) apply here.
         pub trait ThresholdSupervisor: Supervisor {
+            /// Identity is the type against which threshold signatures are verified.
+            type Identity;
+
             /// Seed is some random value used to bias the leader selection process.
             type Seed;
 
-            /// Public is the type against which threshold signatures are verified.
-            type Public;
-
-            /// Identity is the type against which partial signatures are verified.
-            type Identity;
+            /// Polynomial is the group polynomial over which partial signatures are verified.
+            type Polynomial;
 
             /// Share is the type used to generate a partial signature that can be verified
             /// against `Identity`.
             type Share;
 
+            /// Returns the static identity of the shared secret (typically the constant term
+            /// of the group polynomial).
+            fn identity(&self) -> &Self::Identity;
+
             /// Return the leader at a given index over the provided seed.
             fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<Self::PublicKey>;
 
-            /// TODO: require public to remain constant over views (necessary for efficient aggregation
-            /// of notarization/nullification/finalization?).
-            fn public(&self) -> &Self::Public;
-
-            /// Returns the identity (typically a group polynomial with a fixed constant factor)
-            /// at the given index. This is used to verify partial signatures from participants
-            /// enumerated in `Supervisor::participants`.
-            fn identity(&self, index: Self::Index) -> Option<&Self::Identity>;
+            /// Returns the group polynomial over which partial signatures are verified at a given index.
+            fn polynomial(&self, index: Self::Index) -> Option<&Self::Polynomial>;
 
             /// Returns share to sign with at a given index. After resharing, the share
             /// may change (and old shares may be deleted).
