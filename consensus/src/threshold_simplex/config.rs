@@ -21,7 +21,7 @@ pub struct Config<
         Seed = V::Signature,
         Index = View,
         Share = group::Share,
-        Public = V::Public,
+        Identity = V::Public,
         PublicKey = C::PublicKey,
     >,
 > {
@@ -117,7 +117,7 @@ impl<
             Seed = V::Signature,
             Index = View,
             Share = group::Share,
-            Public = V::Public,
+            Identity = V::Public,
             PublicKey = C::PublicKey,
         >,
     > Config<C, B, V, D, A, R, F, S>

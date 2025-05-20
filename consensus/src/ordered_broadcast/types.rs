@@ -85,9 +85,9 @@ pub enum Error {
     ContextHeight,
 
     // Epoch Errors
-    /// No identity is known for the specified epoch
-    #[error("Unknown identity at epoch {0}")]
-    UnknownIdentity(u64),
+    /// No polynomial is known for the specified epoch
+    #[error("Unknown polynomial at epoch {0}")]
+    UnknownPolynomial(u64),
     /// No validators are known for the specified epoch
     #[error("Unknown validators at epoch {0}")]
     UnknownValidators(u64),
@@ -532,17 +532,17 @@ impl<P: Array, V: Variant, D: Digest> Ack<P, V, D> {
     /// Verify the Ack.
     ///
     /// This ensures that the partial signature is valid for the given chunk and epoch,
-    /// using the provided identity (which contains the BLS public polynomial).
+    /// using the provided polynomial (which contains the BLS public polynomial).
     ///
     /// Returns true if the signature is valid, false otherwise.
-    pub fn verify(&self, namespace: &[u8], identity: &poly::Public<V>) -> bool {
+    pub fn verify(&self, namespace: &[u8], polynomial: &poly::Public<V>) -> bool {
         // Construct signing payload
         let ack_namespace = ack_namespace(namespace);
         let message = Self::payload(&self.chunk, &self.epoch);
 
         // Verify signature
         ops::partial_verify_message::<V>(
-            identity,
+            polynomial,
             Some(ack_namespace.as_ref()),
             &message,
             &self.signature,
@@ -869,7 +869,7 @@ mod tests {
         // Generate proper BLS shares and keys
         let n = 4;
         let t = quorum(n as u32);
-        let (identity, shares) = generate_test_data::<V>(n, t, 0);
+        let (polynomial, shares) = generate_test_data::<V>(n, t, 0);
 
         // Create a chunk that would be signed
         let public_key = sample_scheme(0).public_key();
@@ -895,9 +895,9 @@ mod tests {
         assert_eq!(parent, decoded);
 
         // Verify the signature is valid
-        let public = poly::public::<V>(&identity);
+        let identity = poly::public::<V>(&polynomial);
         let lock = Lock::<_, V, _>::new(chunk, epoch, signature);
-        assert!(lock.verify(NAMESPACE, public));
+        assert!(lock.verify(NAMESPACE, identity));
     }
 
     #[test]
@@ -925,7 +925,7 @@ mod tests {
         // Test with parent - generate a proper threshold signature
         let n = 4;
         let t = quorum(n as u32);
-        let (identity, shares) = generate_test_data::<V>(n, t, 0);
+        let (polynomial, shares) = generate_test_data::<V>(n, t, 0);
 
         // Create parent chunk and signature
         let parent_chunk = Chunk::new(public_key.clone(), 0, sample_digest(0));
@@ -964,9 +964,9 @@ mod tests {
         assert_eq!(decoded2.parent, node2.parent);
 
         // Verify that the parent signature is valid
-        let public = poly::public::<V>(&identity);
+        let identity = poly::public::<V>(&polynomial);
         let lock = Lock::<_, V, _>::new(parent_chunk, parent_epoch, parent_signature);
-        assert!(lock.verify(NAMESPACE, public));
+        assert!(lock.verify(NAMESPACE, identity));
     }
 
     #[test]
@@ -978,7 +978,7 @@ mod tests {
     fn ack_encode_decode<V: Variant>() {
         let n = 4;
         let t = quorum(n as u32);
-        let (identity, shares) = generate_test_data::<V>(n, t, 0);
+        let (polynomial, shares) = generate_test_data::<V>(n, t, 0);
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
@@ -994,7 +994,7 @@ mod tests {
         assert_eq!(decoded.signature.value, ack.signature.value);
 
         // Verify signature
-        assert!(decoded.verify(NAMESPACE, &identity));
+        assert!(decoded.verify(NAMESPACE, &polynomial));
     }
 
     #[test]
@@ -1028,7 +1028,7 @@ mod tests {
         // Test Lock with proper threshold signature
         let n = 4;
         let t = quorum(n as u32);
-        let (identity, shares) = generate_test_data::<V>(n, t, 0);
+        let (polynomial, shares) = generate_test_data::<V>(n, t, 0);
 
         let epoch = 5;
         // Generate partial signatures for the chunk
@@ -1045,8 +1045,8 @@ mod tests {
 
         // Create lock and verify it
         let lock = Lock::new(chunk.clone(), epoch, bls_signature);
-        let public = poly::public::<V>(&identity);
-        assert!(lock.verify(NAMESPACE, public));
+        let identity = poly::public::<V>(&polynomial);
+        assert!(lock.verify(NAMESPACE, identity));
 
         // Test activity with the lock
         let activity = Activity::<Ed25519, V, Sha256Digest>::Lock(lock);
@@ -1058,7 +1058,7 @@ mod tests {
                 assert_eq!(l.chunk, chunk);
                 assert_eq!(l.epoch, epoch);
                 assert_eq!(l.signature, bls_signature);
-                assert!(l.verify(NAMESPACE, public));
+                assert!(l.verify(NAMESPACE, identity));
             }
             _ => panic!("Decoded activity has wrong type"),
         }
@@ -1100,7 +1100,7 @@ mod tests {
         // Generate proper BLS shares and threshold signature
         let n = 4;
         let t = quorum(n as u32);
-        let (identity, shares) = generate_test_data::<V>(n, t, 0);
+        let (polynomial, shares) = generate_test_data::<V>(n, t, 0);
 
         // Generate partial signatures for the chunk
         let message = Ack::<_, V, _>::payload(&chunk, &epoch);
@@ -1124,8 +1124,8 @@ mod tests {
         assert_eq!(decoded.signature, lock.signature);
 
         // Verify the signature in the decoded lock
-        let public = poly::public::<V>(&identity);
-        assert!(decoded.verify(NAMESPACE, public));
+        let identity = poly::public::<V>(&polynomial);
+        assert!(decoded.verify(NAMESPACE, identity));
     }
 
     #[test]
@@ -1139,8 +1139,8 @@ mod tests {
         let public_key = scheme.public_key();
         let n = 4;
         let t = quorum(n as u32);
-        let (identity, shares) = generate_test_data::<V>(n, t, 0);
-        let public = public::<V>(&identity);
+        let (polynomial, shares) = generate_test_data::<V>(n, t, 0);
+        let identity = public::<V>(&polynomial);
 
         // Test genesis node (no parent)
         let node = Node::<Ed25519, V, Sha256Digest>::sign(
@@ -1150,7 +1150,7 @@ mod tests {
             sample_digest(1),
             None,
         );
-        let result = node.verify(NAMESPACE, public);
+        let result = node.verify(NAMESPACE, identity);
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
 
@@ -1180,7 +1180,7 @@ mod tests {
             parent,
         );
 
-        let result = node.verify(NAMESPACE, public);
+        let result = node.verify(NAMESPACE, identity);
         assert!(result.is_ok());
         assert!(result.unwrap().is_some());
     }
@@ -1194,17 +1194,17 @@ mod tests {
     fn ack_sign_verify<V: Variant>() {
         let n = 4;
         let t = quorum(n as u32);
-        let (identity, shares) = generate_test_data::<V>(n, t, 0);
+        let (polynomial, shares) = generate_test_data::<V>(n, t, 0);
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
         let epoch = 5;
 
         let ack = Ack::<_, V, _>::sign(NAMESPACE, &shares[0], chunk, epoch);
-        assert!(ack.verify(NAMESPACE, &identity));
+        assert!(ack.verify(NAMESPACE, &polynomial));
 
         // Test that verification fails with wrong namespace
-        assert!(!ack.verify(b"wrong", &identity));
+        assert!(!ack.verify(b"wrong", &polynomial));
     }
 
     #[test]
@@ -1216,7 +1216,7 @@ mod tests {
     fn threshold_recovery<V: Variant>() {
         let n = 4;
         let t = quorum(n as u32);
-        let (identity, shares) = generate_test_data::<V>(n, t, 0);
+        let (polynomial, shares) = generate_test_data::<V>(n, t, 0);
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
@@ -1239,8 +1239,8 @@ mod tests {
         let lock = Lock::<_, V, _>::new(chunk, epoch, threshold);
 
         // Verify lock
-        let public = poly::public::<V>(&identity);
-        assert!(lock.verify(NAMESPACE, public));
+        let identity = poly::public::<V>(&polynomial);
+        assert!(lock.verify(NAMESPACE, identity));
     }
 
     #[test]
@@ -1252,8 +1252,8 @@ mod tests {
     fn lock_verify<V: Variant>() {
         let n = 4;
         let t = quorum(n as u32);
-        let (identity, shares) = generate_test_data::<V>(n, t, 0);
-        let public = poly::public::<V>(&identity);
+        let (polynomial, shares) = generate_test_data::<V>(n, t, 0);
+        let identity = poly::public::<V>(&polynomial);
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
@@ -1273,10 +1273,10 @@ mod tests {
         let lock = Lock::<_, V, _>::new(chunk, epoch, threshold);
 
         // Verify lock
-        assert!(lock.verify(NAMESPACE, public));
+        assert!(lock.verify(NAMESPACE, identity));
 
         // Test that verification fails with wrong namespace
-        assert!(!lock.verify(b"wrong", public));
+        assert!(!lock.verify(b"wrong", identity));
     }
 
     #[test]
@@ -1357,8 +1357,8 @@ mod tests {
         let public_key = scheme.public_key();
         let n = 4;
         let t = quorum(n as u32);
-        let (identity, _) = generate_test_data::<V>(n, t, 0);
-        let public = poly::public::<V>(&identity);
+        let (polynomial, _) = generate_test_data::<V>(n, t, 0);
+        let identity = poly::public::<V>(&polynomial);
 
         // Create a valid chunk
         let chunk = Chunk::new(public_key.clone(), 0, sample_digest(1));
@@ -1372,7 +1372,7 @@ mod tests {
         let node = Node::<Ed25519, V, Sha256Digest>::new(chunk.clone(), signature, None);
 
         // Verification should succeed
-        assert!(node.verify(NAMESPACE, public).is_ok());
+        assert!(node.verify(NAMESPACE, identity).is_ok());
 
         // Now create a node with invalid signature
         let tampered_signature = scheme.sign(Some(chunk_namespace.as_ref()), &node.encode());
@@ -1380,7 +1380,7 @@ mod tests {
 
         // Verification should fail
         assert!(matches!(
-            invalid_node.verify(NAMESPACE, public),
+            invalid_node.verify(NAMESPACE, identity),
             Err(Error::InvalidSequencerSignature)
         ));
     }
@@ -1429,10 +1429,10 @@ mod tests {
         );
 
         // Get the BLS public key from the commitment
-        let public = poly::public::<V>(&commitment);
+        let identity = poly::public::<V>(&commitment);
 
         // Verification should succeed
-        assert!(node.verify(NAMESPACE, public).is_ok());
+        assert!(node.verify(NAMESPACE, identity).is_ok());
 
         // Now create a parent with invalid threshold signature
         // Generate a different set of BLS keys/shares
@@ -1455,7 +1455,7 @@ mod tests {
 
         // Verification should fail because the parent signature doesn't verify with the correct public key
         assert!(matches!(
-            node.verify(NAMESPACE, public),
+            node.verify(NAMESPACE, identity),
             Err(Error::InvalidThresholdSignature)
         ));
     }
@@ -1469,7 +1469,7 @@ mod tests {
     fn ack_verify_invalid_signature<V: Variant>() {
         let n = 4;
         let t = quorum(n as u32);
-        let (identity, shares) = generate_test_data::<V>(n, t, 0);
+        let (polynomial, shares) = generate_test_data::<V>(n, t, 0);
 
         // Create a chunk and ack
         let public_key = sample_scheme(0).public_key();
@@ -1480,7 +1480,7 @@ mod tests {
         let ack = Ack::<_, V, _>::sign(NAMESPACE, &shares[0], chunk.clone(), epoch);
 
         // Verification should succeed
-        assert!(ack.verify(NAMESPACE, &identity));
+        assert!(ack.verify(NAMESPACE, &polynomial));
 
         // Create an ack with invalid signature
         let mut invalid_signature = ack.signature.clone();
@@ -1488,7 +1488,7 @@ mod tests {
         let invalid_ack = Ack::<_, V, _>::new(chunk, epoch, invalid_signature);
 
         // Verification should fail
-        assert!(!invalid_ack.verify(NAMESPACE, &identity));
+        assert!(!invalid_ack.verify(NAMESPACE, &polynomial));
     }
 
     #[test]
@@ -1500,10 +1500,10 @@ mod tests {
     fn ack_verify_wrong_validator<V: Variant>() {
         let n = 4;
         let t = quorum(n as u32);
-        let (identity, shares) = generate_test_data::<V>(n, t, 0);
+        let (polynomial, shares) = generate_test_data::<V>(n, t, 0);
 
         // Create another set of BLS shares with a different polynomial
-        let (wrong_identity, _) = generate_test_data::<V>(n, t, 1);
+        let (wrong_polynomial, _) = generate_test_data::<V>(n, t, 1);
 
         // Create a chunk and ack
         let public_key = sample_scheme(0).public_key();
@@ -1513,11 +1513,11 @@ mod tests {
         // Create a valid ack
         let ack = Ack::<_, V, _>::sign(NAMESPACE, &shares[0], chunk, epoch);
 
-        // Verification should succeed with correct identity
-        assert!(ack.verify(NAMESPACE, &identity));
+        // Verification should succeed with correct polynomial
+        assert!(ack.verify(NAMESPACE, &polynomial));
 
-        // Verification should fail with wrong identity
-        assert!(!ack.verify(NAMESPACE, &wrong_identity));
+        // Verification should fail with wrong polynomial
+        assert!(!ack.verify(NAMESPACE, &wrong_polynomial));
     }
 
     #[test]
@@ -1529,7 +1529,7 @@ mod tests {
     fn lock_verify_invalid_signature<V: Variant>() {
         let n = 4;
         let t = quorum(n as u32);
-        let (identity, shares) = generate_test_data::<V>(n, t, 0);
+        let (polynomial, shares) = generate_test_data::<V>(n, t, 0);
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
@@ -1549,13 +1549,13 @@ mod tests {
         let lock = Lock::<_, V, _>::new(chunk.clone(), epoch, signature);
 
         // Get the BLS public key from the commitment
-        let public = poly::public::<V>(&identity);
+        let identity = poly::public::<V>(&polynomial);
 
         // Verification should succeed
-        assert!(lock.verify(NAMESPACE, public));
+        assert!(lock.verify(NAMESPACE, identity));
 
         // Create another set of BLS shares with a different polynomial
-        let (wrong_identity, wrong_shares) = generate_test_data::<V>(n, t, 1);
+        let (wrong_polynomial, wrong_shares) = generate_test_data::<V>(n, t, 1);
 
         // Generate threshold signature with the wrong keys
         let partials: Vec<_> = wrong_shares
@@ -1569,11 +1569,11 @@ mod tests {
         let wrong_lock = Lock::<_, V, _>::new(chunk, epoch, wrong_signature);
 
         // Verification should fail with the original public key
-        assert!(!wrong_lock.verify(NAMESPACE, public));
+        assert!(!wrong_lock.verify(NAMESPACE, identity));
 
-        // But succeed with the matching wrong public key
-        let wrong_public = poly::public::<V>(&wrong_identity);
-        assert!(wrong_lock.verify(NAMESPACE, wrong_public));
+        // But succeed with the matching wrong identity
+        let wrong_identity = poly::public::<V>(&wrong_polynomial);
+        assert!(wrong_lock.verify(NAMESPACE, wrong_identity));
     }
 
     #[test]

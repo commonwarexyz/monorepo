@@ -29,8 +29,8 @@ pub struct Engine<
         Seed = V::Signature,
         Index = View,
         Share = group::Share,
-        Identity = poly::Public<V>,
-        Public = V::Public,
+        Polynomial = poly::Public<V>,
+        Identity = V::Public,
         PublicKey = C::PublicKey,
     >,
 > {
@@ -59,8 +59,8 @@ impl<
             Seed = V::Signature,
             Index = View,
             Share = group::Share,
-            Identity = poly::Public<V>,
-            Public = V::Public,
+            Polynomial = poly::Public<V>,
+            Identity = V::Public,
             PublicKey = C::PublicKey,
         >,
     > Engine<E, C, B, V, D, A, R, F, S>

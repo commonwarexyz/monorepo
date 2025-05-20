@@ -43,9 +43,13 @@ use tracing::{debug, trace, warn};
 
 const GENESIS_VIEW: View = 0;
 
+/// Action to take after processing a message.
 enum Action {
+    /// Skip processing the message.
     Skip,
+    /// Block the peer from sending any more messages.
     Block,
+    /// Process the message.
     Process,
 }
 
@@ -58,7 +62,7 @@ struct Round<
         Index = View,
         Share = group::Share,
         PublicKey = C::PublicKey,
-        Public = V::Public,
+        Identity = V::Public,
     >,
 > {
     start: SystemTime,
@@ -110,7 +114,7 @@ impl<
             Index = View,
             Share = group::Share,
             PublicKey = C::PublicKey,
-            Public = V::Public,
+            Identity = V::Public,
         >,
     > Round<C, V, D, S>
 {
@@ -391,13 +395,13 @@ pub struct Actor<
     R: Relay,
     F: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<
-        Identity = poly::Public<V>,
+        Polynomial = poly::Public<V>,
         Seed = V::Signature,
         Index = View,
         Share = group::Share,
         PublicKey = C::PublicKey,
         // TOD: Improve the naming here
-        Public = V::Public,
+        Identity = V::Public,
     >,
 > {
     context: E,
@@ -447,12 +451,12 @@ impl<
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<V, D>>,
         S: ThresholdSupervisor<
-            Identity = poly::Public<V>,
+            Polynomial = poly::Public<V>,
             Seed = V::Signature,
             Index = View,
             Share = group::Share,
             PublicKey = C::PublicKey,
-            Public = V::Public,
+            Identity = V::Public,
         >,
     > Actor<E, C, B, V, D, A, R, F, S>
 {
@@ -534,8 +538,8 @@ impl<
             return Some(&notarization.proposal.payload);
         }
         let proposal = round.proposal.as_ref()?;
-        let identity = self.supervisor.identity(view)?;
-        let threshold = identity.required();
+        let polynomial = self.supervisor.polynomial(view)?;
+        let threshold = polynomial.required();
         if round.notarizes.len() >= threshold as usize {
             return Some(&proposal.payload);
         }
@@ -547,11 +551,11 @@ impl<
             Some(round) => round,
             None => return false,
         };
-        let identity = match self.supervisor.identity(view) {
-            Some(identity) => identity,
+        let polynomial = match self.supervisor.polynomial(view) {
+            Some(polynomial) => polynomial,
             None => return false,
         };
-        let threshold = identity.required();
+        let threshold = polynomial.required();
         round.nullification.is_some() || round.nullifies.len() >= threshold as usize
     }
 
@@ -561,8 +565,8 @@ impl<
             return Some(&finalization.proposal.payload);
         }
         let proposal = round.proposal.as_ref()?;
-        let identity = self.supervisor.identity(view)?;
-        let threshold = identity.required();
+        let polynomial = self.supervisor.polynomial(view)?;
+        let threshold = polynomial.required();
         if round.finalizes.len() >= threshold as usize {
             return Some(&proposal.payload);
         }
@@ -1062,8 +1066,8 @@ impl<
         }
 
         // Verify notarization
-        let public_key = self.supervisor.public();
-        if !notarization.verify(&self.namespace, public_key) {
+        let identity = self.supervisor.identity();
+        if !notarization.verify(&self.namespace, identity) {
             return Action::Block;
         }
 
@@ -1112,8 +1116,8 @@ impl<
         }
 
         // Verify nullification
-        let public_key = self.supervisor.public();
-        if !nullification.verify(&self.namespace, public_key) {
+        let identity = self.supervisor.identity();
+        if !nullification.verify(&self.namespace, identity) {
             return Action::Block;
         }
 
@@ -1185,8 +1189,8 @@ impl<
         }
 
         // Verify finalization
-        let public_key = self.supervisor.public();
-        if !finalization.verify(&self.namespace, public_key) {
+        let identity = self.supervisor.identity();
+        if !finalization.verify(&self.namespace, identity) {
             return Action::Block;
         }
 
@@ -1254,8 +1258,8 @@ impl<
         let round = self.views.get_mut(&view)?;
 
         // Attempt to construct notarization
-        let identity = self.supervisor.identity(view)?;
-        let threshold = identity.required();
+        let polynomial = self.supervisor.polynomial(view)?;
+        let threshold = polynomial.required();
         round.notarizable(threshold, force).await
     }
 
@@ -1268,8 +1272,8 @@ impl<
         let round = self.views.get_mut(&view)?;
 
         // Attempt to construct nullification
-        let identity = self.supervisor.identity(view)?;
-        let threshold = identity.required();
+        let polynomial = self.supervisor.polynomial(view)?;
+        let threshold = polynomial.required();
         round.nullifiable(threshold, force).await
     }
 
@@ -1306,8 +1310,8 @@ impl<
         let round = self.views.get_mut(&view)?;
 
         // Attempt to construct finalization
-        let identity = self.supervisor.identity(view)?;
-        let threshold = identity.required();
+        let polynomial = self.supervisor.polynomial(view)?;
+        let threshold = polynomial.required();
         round.finalizable(threshold, force).await
     }
 

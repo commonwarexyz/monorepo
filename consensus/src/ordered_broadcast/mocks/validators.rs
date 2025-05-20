@@ -9,7 +9,7 @@ use std::{collections::HashMap, marker::PhantomData};
 
 #[derive(Clone)]
 pub struct Validators<P: Array, V: Variant> {
-    identity: Public<V>,
+    polynomial: Public<V>,
     validators: Vec<P>,
     validators_map: HashMap<P, u32>,
     share: Option<Share>,
@@ -18,7 +18,7 @@ pub struct Validators<P: Array, V: Variant> {
 }
 
 impl<P: Array, V: Variant> Validators<P, V> {
-    pub fn new(identity: Public<V>, mut validators: Vec<P>, share: Option<Share>) -> Self {
+    pub fn new(polynomial: Public<V>, mut validators: Vec<P>, share: Option<Share>) -> Self {
         // Setup validators
         validators.sort();
         let mut validators_map = HashMap::new();
@@ -27,7 +27,7 @@ impl<P: Array, V: Variant> Validators<P, V> {
         }
 
         Self {
-            identity,
+            polynomial,
             validators,
             validators_map,
             share,
@@ -55,8 +55,8 @@ impl<P: Array, V: Variant> Supervisor for Validators<P, V> {
 }
 
 impl<P: Array, V: Variant> ThresholdSupervisor for Validators<P, V> {
-    type Identity = Public<V>;
-    type Public = V::Public;
+    type Polynomial = Public<V>;
+    type Identity = V::Public;
     type Share = Share;
     type Seed = V::Signature;
 
@@ -64,12 +64,12 @@ impl<P: Array, V: Variant> ThresholdSupervisor for Validators<P, V> {
         unimplemented!()
     }
 
-    fn public(&self) -> &Self::Public {
-        public::<V>(&self.identity)
+    fn identity(&self) -> &Self::Identity {
+        public::<V>(&self.polynomial)
     }
 
-    fn identity(&self, _: Self::Index) -> Option<&Self::Identity> {
-        Some(&self.identity)
+    fn polynomial(&self, _: Self::Index) -> Option<&Self::Polynomial> {
+        Some(&self.polynomial)
     }
 
     fn share(&self, _: Self::Index) -> Option<&Self::Share> {

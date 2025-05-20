@@ -185,7 +185,7 @@ mod tests {
     #[allow(clippy::too_many_arguments)]
     fn spawn_validator_engines<V: Variant>(
         context: Context,
-        identity: poly::Public<V>,
+        polynomial: poly::Public<V>,
         sequencer_pks: &[PublicKey],
         validator_pks: &[PublicKey],
         validators: &[(PublicKey, Ed25519, Share)],
@@ -204,7 +204,7 @@ mod tests {
             monitors.insert(validator.clone(), monitor.clone());
             let sequencers = mocks::Sequencers::<PublicKey>::new(sequencer_pks.to_vec());
             let validators = mocks::Validators::<PublicKey, V>::new(
-                identity.clone(),
+                polynomial.clone(),
                 validator_pks.to_vec(),
                 Some(share.clone()),
             );
@@ -214,7 +214,7 @@ mod tests {
 
             let (reporter, reporter_mailbox) = mocks::Reporter::<Ed25519, V, Sha256Digest>::new(
                 namespace,
-                *poly::public::<V>(&identity),
+                *poly::public::<V>(&polynomial),
                 misses_allowed,
             );
             context.with_label("reporter").spawn(|_| reporter.run());
@@ -321,7 +321,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
         runner.start(|mut context| async move {
-            let (identity, mut shares_vec) =
+            let (polynomial, mut shares_vec) =
                 ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
@@ -338,7 +338,7 @@ mod tests {
                 BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, V, Sha256Digest>>::new();
             spawn_validator_engines::<V>(
                 context.with_label("validator"),
-                identity.clone(),
+                polynomial.clone(),
                 &pks,
                 &pks,
                 &validators,
@@ -369,7 +369,7 @@ mod tests {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
         let mut rng = StdRng::seed_from_u64(0);
-        let (identity, mut shares_vec) =
+        let (polynomial, mut shares_vec) =
             ops::generate_shares::<_, V>(&mut rng, None, num_validators, quorum);
         shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
         let completed = Arc::new(Mutex::new(HashSet::new()));
@@ -380,7 +380,7 @@ mod tests {
             let completed = completed.clone();
             let shares_vec = shares_vec.clone();
             let shutdowns = shutdowns.clone();
-            let identity = identity.clone();
+            let polynomial = polynomial.clone();
 
             let f = |context: deterministic::Context| async move {
                 let (network, mut oracle) = Network::new(
@@ -421,7 +421,7 @@ mod tests {
                     BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, V, Sha256Digest>>::new();
                 spawn_validator_engines(
                     context.with_label("validator"),
-                    identity.clone(),
+                    polynomial.clone(),
                     &pks,
                     &pks,
                     &validators,
@@ -485,7 +485,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
 
         runner.start(|mut context| async move {
-            let (identity, mut shares_vec) =
+            let (polynomial, mut shares_vec) =
                 ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
@@ -503,7 +503,7 @@ mod tests {
                 BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, V, Sha256Digest>>::new();
             spawn_validator_engines(
                 context.with_label("validator"),
-                identity.clone(),
+                polynomial.clone(),
                 &pks,
                 &pks,
                 &validators,
@@ -555,7 +555,7 @@ mod tests {
         let runner = deterministic::Runner::new(cfg);
 
         runner.start(|mut context| async move {
-            let (identity, mut shares_vec) =
+            let (polynomial, mut shares_vec) =
                 ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
@@ -580,7 +580,7 @@ mod tests {
                 BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, V, Sha256Digest>>::new();
             spawn_validator_engines(
                 context.with_label("validator"),
-                identity.clone(),
+                polynomial.clone(),
                 &pks,
                 &pks,
                 &validators,
@@ -635,7 +635,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
         runner.start(|mut context| async move {
-            let (identity, mut shares_vec) =
+            let (polynomial, mut shares_vec) =
                 ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
@@ -652,7 +652,7 @@ mod tests {
                 BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, V, Sha256Digest>>::new();
             spawn_validator_engines::<V>(
                 context.with_label("validator"),
-                identity.clone(),
+                polynomial.clone(),
                 &pks,
                 &pks,
                 &validators,
@@ -686,7 +686,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
 
         runner.start(|mut context| async move {
-            let (identity, mut shares_vec) =
+            let (polynomial, mut shares_vec) =
                 ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
@@ -704,7 +704,7 @@ mod tests {
                 BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, V, Sha256Digest>>::new();
             let monitors = spawn_validator_engines::<V>(
                 context.with_label("validator"),
-                identity.clone(),
+                polynomial.clone(),
                 &pks,
                 &pks,
                 &validators,
@@ -766,7 +766,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             // Generate validator shares
-            let (identity, shares) =
+            let (polynomial, shares) =
                 ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
 
             // Generate validator schemes
@@ -830,7 +830,7 @@ mod tests {
                 monitors.insert(validator.clone(), monitor.clone());
                 let sequencers = mocks::Sequencers::<PublicKey>::new(vec![sequencer.public_key()]);
                 let validators = mocks::Validators::<PublicKey, V>::new(
-                    identity.clone(),
+                    polynomial.clone(),
                     validator_pks.clone(),
                     Some(share.clone()),
                 );
@@ -843,7 +843,7 @@ mod tests {
 
                 let (reporter, reporter_mailbox) = mocks::Reporter::<Ed25519, V, Sha256Digest>::new(
                     namespace,
-                    *poly::public::<V>(&identity),
+                    *poly::public::<V>(&polynomial),
                     Some(5),
                 );
                 context.with_label("reporter").spawn(|_| reporter.run());
@@ -888,7 +888,7 @@ mod tests {
                     .insert(sequencer.public_key(), automaton.clone());
                 let (reporter, reporter_mailbox) = mocks::Reporter::<Ed25519, V, Sha256Digest>::new(
                     namespace,
-                    *poly::public::<V>(&identity),
+                    *poly::public::<V>(&polynomial),
                     Some(5),
                 );
                 context.with_label("reporter").spawn(|_| reporter.run());
@@ -905,7 +905,7 @@ mod tests {
                             sequencer.public_key()
                         ]),
                         validators: mocks::Validators::<PublicKey, V>::new(
-                            identity.clone(),
+                            polynomial.clone(),
                             validator_pks,
                             None,
                         ),
@@ -955,7 +955,7 @@ mod tests {
         let runner = deterministic::Runner::new(cfg);
 
         runner.start(|mut context| async move {
-            let (identity, mut shares_vec) =
+            let (polynomial, mut shares_vec) =
                 ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
@@ -981,7 +981,7 @@ mod tests {
             let sequencers = &pks[0..pks.len() / 2];
             spawn_validator_engines::<V>(
                 context.with_label("validator"),
-                identity.clone(),
+                polynomial.clone(),
                 sequencers,
                 &pks,
                 &validators,

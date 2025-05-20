@@ -58,9 +58,9 @@ impl<P: Array> Su for Supervisor<P> {
 
 impl<P: Array> TSu for Supervisor<P> {
     type Seed = <MinSig as Variant>::Signature;
-    type Identity = Public<MinSig>;
+    type Polynomial = Public<MinSig>;
     type Share = group::Share;
-    type Public = <MinSig as Variant>::Public;
+    type Identity = <MinSig as Variant>::Public;
 
     fn leader(&self, _: Self::Index, seed: Self::Seed) -> Option<Self::PublicKey> {
         let seed = seed.encode();
@@ -68,12 +68,12 @@ impl<P: Array> TSu for Supervisor<P> {
         Some(self.participants[index as usize].clone())
     }
 
-    fn identity(&self, _: Self::Index) -> Option<&Self::Identity> {
-        Some(&self.identity)
+    fn identity(&self) -> &Self::Identity {
+        poly::public::<MinSig>(&self.identity)
     }
 
-    fn public(&self) -> &Self::Public {
-        poly::public::<MinSig>(&self.identity)
+    fn polynomial(&self, _: Self::Index) -> Option<&Self::Polynomial> {
+        Some(&self.identity)
     }
 
     fn share(&self, _: Self::Index) -> Option<&Self::Share> {
