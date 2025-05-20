@@ -242,3 +242,19 @@ impl crate::Stream for Stream {
         Ok(buf)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        iouring::Config,
+        network::{iouring::Network, tests},
+    };
+
+    #[tokio::test]
+    async fn test_trait() {
+        tests::test_network_trait(|| {
+            Network::start(Config::default()).expect("Failed to start io_uring")
+        })
+        .await;
+    }
+}
