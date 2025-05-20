@@ -2280,7 +2280,7 @@ mod tests {
     fn test_notarize_encode_decode() {
         let n = 5;
         let t = quorum(n as u32);
-        let (commitment, shares) = generate_test_data(n, t, 0);
+        let (polynomial, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
         let notarize = Notarize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal);
@@ -2289,14 +2289,14 @@ mod tests {
         let decoded = Notarize::<MinSig, Sha256>::decode(encoded).unwrap();
 
         assert_eq!(notarize, decoded);
-        assert!(decoded.verify(NAMESPACE, &commitment));
+        assert!(decoded.verify(NAMESPACE, &polynomial));
     }
 
     #[test]
     fn test_notarization_encode_decode() {
         let n = 5;
         let t = quorum(n as u32);
-        let (commitment, shares) = generate_test_data(n, t, 0);
+        let (polynomial, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
 
@@ -2320,7 +2320,7 @@ mod tests {
         assert_eq!(notarization, decoded);
 
         // Verify the notarization
-        let identity = poly::public::<MinSig>(&commitment);
+        let identity = poly::public::<MinSig>(&polynomial);
         assert!(decoded.verify(NAMESPACE, identity));
 
         // Create seed
@@ -2337,7 +2337,7 @@ mod tests {
     fn test_nullify_encode_decode() {
         let n = 5;
         let t = quorum(n as u32);
-        let (commitment, shares) = generate_test_data(n, t, 0);
+        let (polynomial, shares) = generate_test_data(n, t, 0);
 
         let nullify = Nullify::<MinSig>::sign(NAMESPACE, &shares[0], 10);
 
@@ -2345,14 +2345,14 @@ mod tests {
         let decoded = Nullify::<MinSig>::decode(encoded).unwrap();
 
         assert_eq!(nullify, decoded);
-        assert!(decoded.verify(NAMESPACE, &commitment));
+        assert!(decoded.verify(NAMESPACE, &polynomial));
     }
 
     #[test]
     fn test_nullification_encode_decode() {
         let n = 5;
         let t = quorum(n as u32);
-        let (commitment, shares) = generate_test_data(n, t, 0);
+        let (polynomial, shares) = generate_test_data(n, t, 0);
 
         // Create nullifies
         let nullifies: Vec<_> = shares
@@ -2373,7 +2373,7 @@ mod tests {
         assert_eq!(nullification, decoded);
 
         // Verify the nullification
-        let identity = poly::public::<MinSig>(&commitment);
+        let identity = poly::public::<MinSig>(&polynomial);
         assert!(decoded.verify(NAMESPACE, identity));
 
         // Create seed
@@ -2390,7 +2390,7 @@ mod tests {
     fn test_finalize_encode_decode() {
         let n = 5;
         let t = quorum(n as u32);
-        let (commitment, shares) = generate_test_data(n, t, 0);
+        let (polynomial, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
         let finalize = Finalize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal);
@@ -2399,14 +2399,14 @@ mod tests {
         let decoded = Finalize::<MinSig, Sha256>::decode(encoded).unwrap();
 
         assert_eq!(finalize, decoded);
-        assert!(decoded.verify(NAMESPACE, &commitment));
+        assert!(decoded.verify(NAMESPACE, &polynomial));
     }
 
     #[test]
     fn test_finalization_encode_decode() {
         let n = 5;
         let t = quorum(n as u32);
-        let (commitment, shares) = generate_test_data(n, t, 0);
+        let (polynomial, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
 
@@ -2434,7 +2434,7 @@ mod tests {
         assert_eq!(finalization, decoded);
 
         // Verify the finalization
-        let identity = poly::public::<MinSig>(&commitment);
+        let identity = poly::public::<MinSig>(&polynomial);
         assert!(decoded.verify(NAMESPACE, identity));
 
         // Create seed
@@ -2552,7 +2552,7 @@ mod tests {
     fn test_conflicting_notarize_encode_decode() {
         let n = 5;
         let t = quorum(n as u32);
-        let (commitment, shares) = generate_test_data(n, t, 0);
+        let (polynomial, shares) = generate_test_data(n, t, 0);
 
         let proposal1 = Proposal::new(10, 5, sample_digest(1));
         let proposal2 = Proposal::new(10, 5, sample_digest(2));
@@ -2564,14 +2564,14 @@ mod tests {
         let decoded = ConflictingNotarize::<MinSig, Sha256>::decode(encoded).unwrap();
 
         assert_eq!(conflicting_notarize, decoded);
-        assert!(decoded.verify(NAMESPACE, &commitment));
+        assert!(decoded.verify(NAMESPACE, &polynomial));
     }
 
     #[test]
     fn test_conflicting_finalize_encode_decode() {
         let n = 5;
         let t = quorum(n as u32);
-        let (commitment, shares) = generate_test_data(n, t, 0);
+        let (polynomial, shares) = generate_test_data(n, t, 0);
 
         let proposal1 = Proposal::new(10, 5, sample_digest(1));
         let proposal2 = Proposal::new(10, 5, sample_digest(2));
@@ -2583,14 +2583,14 @@ mod tests {
         let decoded = ConflictingFinalize::<MinSig, Sha256>::decode(encoded).unwrap();
 
         assert_eq!(conflicting_finalize, decoded);
-        assert!(decoded.verify(NAMESPACE, &commitment));
+        assert!(decoded.verify(NAMESPACE, &polynomial));
     }
 
     #[test]
     fn test_nullify_finalize_encode_decode() {
         let n = 5;
         let t = quorum(n as u32);
-        let (commitment, shares) = generate_test_data(n, t, 0);
+        let (polynomial, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
         let nullify = Nullify::<MinSig>::sign(NAMESPACE, &shares[0], 10);
@@ -2601,49 +2601,49 @@ mod tests {
         let decoded = NullifyFinalize::<MinSig, Sha256>::decode(encoded).unwrap();
 
         assert_eq!(nullify_finalize, decoded);
-        assert!(decoded.verify(NAMESPACE, &commitment));
+        assert!(decoded.verify(NAMESPACE, &polynomial));
     }
 
     #[test]
     fn test_notarize_verify_wrong_namespace() {
         let n = 5;
         let t = quorum(n as u32);
-        let (commitment, shares) = generate_test_data(n, t, 0);
+        let (polynomial, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
         let notarize = Notarize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal);
 
         // Verify with correct namespace and polynomial - should pass
-        assert!(notarize.verify(NAMESPACE, &commitment));
+        assert!(notarize.verify(NAMESPACE, &polynomial));
 
         // Verify with wrong namespace - should fail
-        assert!(!notarize.verify(b"wrong_namespace", &commitment));
+        assert!(!notarize.verify(b"wrong_namespace", &polynomial));
     }
 
     #[test]
     fn test_notarize_verify_wrong_polynomial() {
         let n = 5;
         let t = quorum(n as u32);
-        let (commitment1, shares1) = generate_test_data(n, t, 0);
+        let (polynomial1, shares1) = generate_test_data(n, t, 0);
 
         // Generate a different set of BLS keys/shares
-        let (commitment2, _) = generate_test_data(n, t, 1);
+        let (polynomial2, _) = generate_test_data(n, t, 1);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
         let notarize = Notarize::<MinSig, _>::sign(NAMESPACE, &shares1[0], proposal);
 
         // Verify with correct polynomial - should pass
-        assert!(notarize.verify(NAMESPACE, &commitment1));
+        assert!(notarize.verify(NAMESPACE, &polynomial1));
 
         // Verify with wrong polynomial - should fail
-        assert!(!notarize.verify(NAMESPACE, &commitment2));
+        assert!(!notarize.verify(NAMESPACE, &polynomial2));
     }
 
     #[test]
     fn test_notarization_verify_wrong_keys() {
         let n = 5;
         let t = quorum(n as u32);
-        let (commitment, shares) = generate_test_data(n, t, 0);
+        let (polynomial, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
 
@@ -2665,12 +2665,12 @@ mod tests {
             Notarization::<MinSig, _>::new(proposal, proposal_signature, seed_signature);
 
         // Verify with correct public key - should pass
-        let identity = poly::public::<MinSig>(&commitment);
+        let identity = poly::public::<MinSig>(&polynomial);
         assert!(notarization.verify(NAMESPACE, identity));
 
         // Generate a different set of BLS keys/shares
-        let (wrong_commitment, _) = generate_test_data(n, t, 1);
-        let wrong_identity = poly::public::<MinSig>(&wrong_commitment);
+        let (wrong_polynomial, _) = generate_test_data(n, t, 1);
+        let wrong_identity = poly::public::<MinSig>(&wrong_polynomial);
 
         // Verify with wrong public key - should fail
         assert!(!notarization.verify(NAMESPACE, wrong_identity));
@@ -2680,7 +2680,7 @@ mod tests {
     fn test_notarization_verify_wrong_namespace() {
         let n = 5;
         let t = quorum(n as u32);
-        let (commitment, shares) = generate_test_data(n, t, 0);
+        let (polynomial, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
 
@@ -2702,7 +2702,7 @@ mod tests {
             Notarization::<MinSig, _>::new(proposal, proposal_signature, seed_signature);
 
         // Verify with correct namespace - should pass
-        let identity = poly::public::<MinSig>(&commitment);
+        let identity = poly::public::<MinSig>(&polynomial);
         assert!(notarization.verify(NAMESPACE, identity));
 
         // Verify with wrong namespace - should fail
@@ -2736,7 +2736,7 @@ mod tests {
     fn test_conflicting_notarize_detection() {
         let n = 5;
         let t = quorum(n as u32);
-        let (commitment, shares) = generate_test_data(n, t, 0);
+        let (polynomial, shares) = generate_test_data(n, t, 0);
 
         // Create two different proposals for the same view
         let proposal1 = Proposal::new(10, 5, sample_digest(1));
@@ -2750,7 +2750,7 @@ mod tests {
         let conflict = ConflictingNotarize::new(notarize1, notarize2.clone());
 
         // Verify the evidence is valid
-        assert!(conflict.verify(NAMESPACE, &commitment));
+        assert!(conflict.verify(NAMESPACE, &polynomial));
 
         // Now create invalid evidence using different validator keys
         let notarize3 = Notarize::<MinSig, _>::sign(NAMESPACE, &shares[1], proposal1.clone());
@@ -2768,14 +2768,14 @@ mod tests {
         };
 
         // Verification should still fail even with correct polynomial
-        assert!(!invalid_conflict.verify(NAMESPACE, &commitment));
+        assert!(!invalid_conflict.verify(NAMESPACE, &polynomial));
     }
 
     #[test]
     fn test_nullify_finalize_detection() {
         let n = 5;
         let t = quorum(n as u32);
-        let (commitment, shares) = generate_test_data(n, t, 0);
+        let (polynomial, shares) = generate_test_data(n, t, 0);
 
         let view = 10;
 
@@ -2790,10 +2790,10 @@ mod tests {
         let conflict = NullifyFinalize::new(nullify, finalize.clone());
 
         // Verify the evidence is valid
-        assert!(conflict.verify(NAMESPACE, &commitment));
+        assert!(conflict.verify(NAMESPACE, &polynomial));
 
         // Now try with wrong namespace
-        assert!(!conflict.verify(b"wrong_namespace", &commitment));
+        assert!(!conflict.verify(b"wrong_namespace", &polynomial));
 
         // Now create invalid evidence with different validators
         let nullify2 = Nullify::<MinSig>::sign(NAMESPACE, &shares[1], view);
@@ -2806,17 +2806,17 @@ mod tests {
         };
 
         // Verification should fail
-        assert!(!invalid_conflict.verify(NAMESPACE, &commitment));
+        assert!(!invalid_conflict.verify(NAMESPACE, &polynomial));
     }
 
     #[test]
     fn test_finalization_wrong_signature() {
         let n = 5;
         let t = quorum(n as u32);
-        let (commitment, shares) = generate_test_data(n, t, 0);
+        let (polynomial, shares) = generate_test_data(n, t, 0);
 
         // Create a completely different key set
-        let (wrong_commitment, _) = generate_test_data(n, t, 1);
+        let (wrong_polynomial, _) = generate_test_data(n, t, 1);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
 
@@ -2842,11 +2842,11 @@ mod tests {
             Finalization::<MinSig, _>::new(proposal, proposal_signature, seed_signature);
 
         // Verify with correct public key - should pass
-        let identity = poly::public::<MinSig>(&commitment);
+        let identity = poly::public::<MinSig>(&polynomial);
         assert!(finalization.verify(NAMESPACE, identity));
 
         // Verify with wrong public key - should fail
-        let wrong_identity = poly::public::<MinSig>(&wrong_commitment);
+        let wrong_identity = poly::public::<MinSig>(&wrong_polynomial);
         assert!(!finalization.verify(NAMESPACE, wrong_identity));
     }
 
@@ -2904,7 +2904,7 @@ mod tests {
     fn test_batch_verifier_add_notarize() {
         let n_validators = 5;
         let threshold = quorum(n_validators);
-        let (_poly, shares) = generate_test_data(n_validators as usize, threshold, 123);
+        let (_, shares) = generate_test_data(n_validators as usize, threshold, 123);
 
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
