@@ -17,6 +17,7 @@
 //! * Optimal Finalization Latency (3 Network Hops)
 //! * Externalized Uptime and Fault Proofs
 //! * Decoupled Block Broadcast and Sync
+//! * Batched Message Verification
 //! * Flexible Block Format
 //! * Embedded VRF for Leader Election and Post-Facto Execution Randomness
 //! * Succinct Consensus Certificates for Notarization, Nullification, and Finality
@@ -25,13 +26,12 @@
 //!
 //! ## Architecture
 //!
-//! All logic is split into three components: the `Batcher`, the `Voter` and the `Resolver` (not including the
-//! user-provided `Application`). The `Batcher` is responsible for collecting messages from peers and batch
-//! verifying them when a quorum is met (the primary source of `threshold-simplex`'s efficiency). The `Voter`
+//! All logic is split into four components: the `Batcher`, the `Voter`, the `Resolver`, and the `Application` (provided by the user).
+//! The `Batcher` is responsible for collecting messages from peers and batch verifying them when a quorum is met. The `Voter`
 //! is responsible for directing participation in the current view. Lastly, the `Resolver` is responsible for
 //! fetching artifacts from previous views required to verify proposed blocks in the latest view.
 //!
-//! To provide great performance, all interactions between `Batcher`, `Voter`, `Resolver`, and `Application` are
+//! To drive great performance, all interactions between `Batcher`, `Voter`, `Resolver`, and `Application` are
 //! non-blocking. This means that, for example, the `Voter` can continue processing messages while the
 //! `Application` verifies a proposed block or the `Resolver` verifies a notarization.
 //!
@@ -79,6 +79,13 @@
 //! consensus and messages it generates to a write-ahead log (WAL) implemented by [`Journal`](https://docs.rs/commonware-storage/latest/commonware_storage/journal/index.html).
 //! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
 //! on restart (especially in the case of unclean shutdown).
+//!
+//! ## Batched Verification
+//!
+//! Unlike other consensus constructions that verify all incoming messages received from peers,
+//! `threshold-simplex` lazily verifies messages (only when a quorum is met). If an invalid signature
+//! is detected, the `Batcher` will perform repeated bisections over collected messages to find the
+//! offending message (and block the peer(s) that sent it).
 //!
 //! ## Protocol Description
 //!
