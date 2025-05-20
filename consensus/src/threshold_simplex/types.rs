@@ -105,6 +105,15 @@ fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, FINALIZE_SUFFIX)
 }
 
+/// `BatchVerifier` is a utility for tracking and batch verifying consensus messages.
+///
+/// In consensus, verifying multiple signatures at the same time can be much more efficient
+/// than verifying them one by one. This struct collects messages from participants in consensus
+/// and signals they are ready to be verified when certain conditions are met (e.g., enough messages
+/// to potentially reach a quorum, or when a leader's message is received).
+///
+/// To avoid unnecessary verification, it also tracks the number of already verified messages (ensuring
+/// we no longer attempt to verify messages after a quorum of valid messages have already been verified).
 pub struct BatchVerifier<V: Variant, D: Digest> {
     quorum: Option<usize>,
 
@@ -123,6 +132,13 @@ pub struct BatchVerifier<V: Variant, D: Digest> {
 }
 
 impl<V: Variant, D: Digest> BatchVerifier<V, D> {
+    /// Creates a new `BatchVerifier`.
+    ///
+    /// # Arguments
+    ///
+    /// * `quorum` - An optional `u32` specifying the number of votes (2f+1)
+    ///   required to reach a quorum. If `None`, batch verification readiness
+    ///   checks based on quorum size are skipped.
     pub fn new(quorum: Option<u32>) -> Self {
         Self {
             quorum: quorum.map(|q| q as usize),
@@ -142,6 +158,11 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
         }
     }
 
+    /// Clears any pending messages that are not for the leader's proposal and forces
+    /// the notarizes to be verified.
+    ///
+    /// We force verification because we need to know the leader's proposal
+    /// to begin verifying it.
     fn set_leader_proposal(&mut self, proposal: Proposal<D>) {
         // Drop all notarizes/finalizes that aren't for the leader proposal
         self.notarizes.retain(|n| n.proposal == proposal);
@@ -154,6 +175,22 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
         self.notarizes_force = true;
     }
 
+    /// Adds a [Voter] message to the batch for later verification.
+    ///
+    /// If the message has already been verified (e.g., we built it), it increments
+    /// the count of verified messages directly. Otherwise, it adds the message to
+    /// the appropriate pending queue.
+    ///
+    /// If a leader is known and the message is a [Voter::Notarize] from that leader,
+    /// this method may trigger `set_leader_proposal`.
+    ///
+    /// Recovered messages (e.g., [Voter::Notarization], [Voter::Nullification], [Voter::Finalization])
+    /// are not expected here and will cause a panic.
+    ///
+    /// # Arguments
+    ///
+    /// * `msg` - The [Voter] message to add.
+    /// * `verified` - A boolean indicating if the message has already been verified.
     pub fn add(&mut self, msg: Voter<V, D>, verified: bool) {
         match msg {
             Voter::Notarize(notarize) => {
@@ -205,6 +242,15 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
         }
     }
 
+    /// Sets the leader for the current consensus view.
+    ///
+    /// If the leader is found, we may call `set_leader_proposal` to clear any pending
+    /// messages that are not for the leader's proposal and to force verification of said
+    /// proposal.
+    ///
+    /// # Arguments
+    ///
+    /// * `leader` - The `u32` identifier of the leader.
     pub fn set_leader(&mut self, leader: u32) {
         // Set the leader
         assert!(self.leader.is_none());
@@ -219,6 +265,21 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
         self.set_leader_proposal(notarize.proposal.clone());
     }
 
+    /// Verifies a batch of pending [Voter::Notarize] messages.
+    ///
+    /// It uses `Notarize::verify_multiple` for efficient batch verification against
+    /// the provided `polynomial`.
+    ///
+    /// # Arguments
+    ///
+    /// * `namespace` - The namespace for signature domain separation.
+    /// * `polynomial` - The public polynomial (`Poly<V::Public>`) of the DKG.
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing:
+    /// * A `Vec<Voter<V, D>>` of successfully verified [Voter::Notarize] messages (wrapped as [Voter]).
+    /// * A `Vec<u32>` of signer indices for whom verification failed.
     pub fn verify_notarizes(
         &mut self,
         namespace: &[u8],
@@ -231,6 +292,18 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
         (notarizes.into_iter().map(Voter::Notarize).collect(), failed)
     }
 
+    /// Checks if there are [Voter::Notarize] messages ready for batch verification.
+    ///
+    /// Verification is considered "ready" if:
+    /// 1. `notarizes_force` is true (e.g., after a leader's proposal is set).
+    /// 2. A leader and their proposal are known, and:
+    ///    a. The quorum (if set) has not yet been met by verified messages.
+    ///    b. The sum of verified and pending messages is enough to potentially reach the quorum.
+    /// 3. There are pending [Voter::Notarize] messages to verify.
+    ///
+    /// # Returns
+    ///
+    /// `true` if [Voter::Notarize] messages should be verified, `false` otherwise.
     pub fn ready_notarizes(&self) -> bool {
         // If we have the leader's notarize, we should verify immediately to start
         // block verification.
@@ -260,6 +333,21 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
         !self.notarizes.is_empty()
     }
 
+    /// Verifies a batch of pending [Voter::Nullify] messages.
+    ///
+    /// It uses `Nullify::verify_multiple` for efficient batch verification against
+    /// the provided `polynomial`.
+    ///
+    /// # Arguments
+    ///
+    /// * `namespace` - The namespace for signature domain separation.
+    /// * `polynomial` - The public polynomial (`Poly<V::Public>`) of the DKG.
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing:
+    /// * A `Vec<Voter<V, D>>` of successfully verified [Voter::Nullify] messages (wrapped as [Voter]).
+    /// * A `Vec<u32>` of signer indices for whom verification failed.
     pub fn verify_nullifies(
         &mut self,
         namespace: &[u8],
@@ -271,6 +359,16 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
         (nullifies.into_iter().map(Voter::Nullify).collect(), failed)
     }
 
+    /// Checks if there are [Voter::Nullify] messages ready for batch verification.
+    ///
+    /// Verification is considered "ready" if:
+    /// 1. The quorum (if set) has not yet been met by verified messages.
+    /// 2. The sum of verified and pending messages is enough to potentially reach the quorum.
+    /// 3. There are pending [Voter::Nullify] messages to verify.
+    ///
+    /// # Returns
+    ///
+    /// `true` if [Voter::Nullify] messages should be verified, `false` otherwise.
     pub fn ready_nullifies(&self) -> bool {
         if let Some(quorum) = self.quorum {
             // If we have already performed sufficient verifications, there is nothing more
@@ -289,6 +387,21 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
         !self.nullifies.is_empty()
     }
 
+    /// Verifies a batch of pending [Voter::Finalize] messages.
+    ///
+    /// It uses `Finalize::verify_multiple` for efficient batch verification against
+    /// the provided `polynomial`.
+    ///
+    /// # Arguments
+    ///
+    /// * `namespace` - The namespace for signature domain separation.
+    /// * `polynomial` - The public polynomial (`Poly<V::Public>`) of the DKG.
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing:
+    /// * A `Vec<Voter<V, D>>` of successfully verified [Voter::Finalize] messages (wrapped as [Voter]).
+    /// * A `Vec<u32>` of signer indices for whom verification failed.
     pub fn verify_finalizes(
         &mut self,
         namespace: &[u8],
@@ -300,6 +413,17 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
         (finalizes.into_iter().map(Voter::Finalize).collect(), failed)
     }
 
+    /// Checks if there are [Voter::Finalize] messages ready for batch verification.
+    ///
+    /// Verification is considered "ready" if:
+    /// 1. A leader and their proposal are known (finalizes are proposal-specific).
+    /// 2. The quorum (if set) has not yet been met by verified messages.
+    /// 3. The sum of verified and pending messages is enough to potentially reach the quorum.
+    /// 4. There are pending [Voter::Finalize] messages to verify.
+    ///
+    /// # Returns
+    ///
+    /// `true` if [Voter::Finalize] messages should be verified, `false` otherwise.
     pub fn ready_finalizes(&self) -> bool {
         // If we don't yet know the leader, finalizers may contain messages for
         // a number of different proposals.
