@@ -101,13 +101,17 @@ mod tests {
             schemes.sort_by_key(|s| s.public_key());
 
             // Derive threshold shares
-            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
+            let (polynomial, shares) =
+                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Initialize voter actor
             let scheme = schemes[0].clone();
             let validator = scheme.public_key();
             let mut participants = BTreeMap::new();
-            participants.insert(0, (public.clone(), validators.clone(), shares[0].clone()));
+            participants.insert(
+                0,
+                (polynomial.clone(), validators.clone(), shares[0].clone()),
+            );
             let supervisor_config = mocks::supervisor::Config::<_, V> {
                 namespace: namespace.clone(),
                 participants,
