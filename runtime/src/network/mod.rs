@@ -222,8 +222,8 @@ mod tests {
     }
 
     async fn stress_concurrent_streams<N: crate::Network>(network: N) {
-        const NUM_CLIENTS: usize = 16;
-        const NUM_MESSAGES: usize = 64;
+        const NUM_CLIENTS: usize = 96;
+        const NUM_MESSAGES: usize = 32_768;
         const MESSAGE_SIZE: usize = 4096;
 
         let mut listener = network
