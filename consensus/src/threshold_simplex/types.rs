@@ -703,7 +703,7 @@ impl<V: Variant, D: Digest> Notarization<V, D> {
     /// This ensures that:
     /// 1. The notarization signature is a valid threshold signature for the proposal
     /// 2. The seed signature is a valid threshold signature for the view
-    pub fn verify(&self, namespace: &[u8], public_key: &V::Public) -> bool {
+    pub fn verify(&self, namespace: &[u8], identity: &V::Public) -> bool {
         let notarize_namespace = notarize_namespace(namespace);
         let notarize_message = self.proposal.encode();
         let notarize_message = (Some(notarize_namespace.as_ref()), notarize_message.as_ref());
@@ -713,7 +713,7 @@ impl<V: Variant, D: Digest> Notarization<V, D> {
         let signature =
             aggregate_signatures::<V, _>(&[self.proposal_signature, self.seed_signature]);
         aggregate_verify_multiple_messages::<V, _>(
-            public_key,
+            identity,
             &[notarize_message, seed_message],
             &signature,
             1,
@@ -964,7 +964,7 @@ impl<V: Variant> Nullification<V> {
     /// This ensures that:
     /// 1. The view signature is a valid threshold signature for the view
     /// 2. The seed signature is a valid threshold signature for the view
-    pub fn verify(&self, namespace: &[u8], public_key: &V::Public) -> bool {
+    pub fn verify(&self, namespace: &[u8], identity: &V::Public) -> bool {
         let nullify_namespace = nullify_namespace(namespace);
         let view_message = view_message(self.view);
         let nullify_message = (Some(nullify_namespace.as_ref()), view_message.as_ref());
@@ -972,7 +972,7 @@ impl<V: Variant> Nullification<V> {
         let seed_message = (Some(seed_namespace.as_ref()), view_message.as_ref());
         let signature = aggregate_signatures::<V, _>(&[self.view_signature, self.seed_signature]);
         aggregate_verify_multiple_messages::<V, _>(
-            public_key,
+            identity,
             &[nullify_message, seed_message],
             &signature,
             1,
@@ -1183,7 +1183,7 @@ impl<V: Variant, D: Digest> Finalization<V, D> {
     /// This ensures that:
     /// 1. The proposal signature is a valid threshold signature for the proposal
     /// 2. The seed signature is a valid threshold signature for the view
-    pub fn verify(&self, namespace: &[u8], public_key: &V::Public) -> bool {
+    pub fn verify(&self, namespace: &[u8], identity: &V::Public) -> bool {
         let finalize_namespace = finalize_namespace(namespace);
         let finalize_message = self.proposal.encode();
         let finalize_message = (Some(finalize_namespace.as_ref()), finalize_message.as_ref());
@@ -1193,7 +1193,7 @@ impl<V: Variant, D: Digest> Finalization<V, D> {
         let signature =
             aggregate_signatures::<V, _>(&[self.proposal_signature, self.seed_signature]);
         aggregate_verify_multiple_messages::<V, _>(
-            public_key,
+            identity,
             &[finalize_message, seed_message],
             &signature,
             1,
@@ -1400,7 +1400,7 @@ impl<V: Variant, D: Digest> Response<V, D> {
         }
     }
 
-    pub fn verify(&self, namespace: &[u8], public_key: &V::Public) -> bool {
+    pub fn verify(&self, namespace: &[u8], identity: &V::Public) -> bool {
         // Prepare to verify
         if self.notarizations.is_empty() && self.nullifications.is_empty() {
             return true;
@@ -1459,7 +1459,7 @@ impl<V: Variant, D: Digest> Response<V, D> {
         // Aggregate signatures
         let signature = aggregate_signatures::<V, _>(signatures);
         aggregate_verify_multiple_messages::<V, _>(
-            public_key,
+            identity,
             &messages
                 .iter()
                 .map(|(namespace, message)| (namespace.as_deref(), message.as_ref()))
@@ -1686,10 +1686,10 @@ impl<V: Variant> Seed<V> {
     }
 
     /// Verifies the threshold signature on this seed.
-    pub fn verify(&self, namespace: &[u8], public_key: &V::Public) -> bool {
+    pub fn verify(&self, namespace: &[u8], identity: &V::Public) -> bool {
         let seed_namespace = seed_namespace(namespace);
         let message = view_message(self.view);
-        verify_message::<V>(public_key, Some(&seed_namespace), &message, &self.signature).is_ok()
+        verify_message::<V>(identity, Some(&seed_namespace), &message, &self.signature).is_ok()
     }
 }
 
@@ -2159,8 +2159,8 @@ mod tests {
         assert_eq!(notarization, decoded);
 
         // Verify the notarization
-        let public_key = poly::public::<MinSig>(&commitment);
-        assert!(decoded.verify(NAMESPACE, public_key));
+        let identity = poly::public::<MinSig>(&commitment);
+        assert!(decoded.verify(NAMESPACE, identity));
 
         // Create seed
         let seed = notarization.seed();
@@ -2169,7 +2169,7 @@ mod tests {
         assert_eq!(seed, decoded);
 
         // Verify the seed
-        assert!(decoded.verify(NAMESPACE, public_key));
+        assert!(decoded.verify(NAMESPACE, identity));
     }
 
     #[test]
@@ -2212,8 +2212,8 @@ mod tests {
         assert_eq!(nullification, decoded);
 
         // Verify the nullification
-        let public_key = poly::public::<MinSig>(&commitment);
-        assert!(decoded.verify(NAMESPACE, public_key));
+        let identity = poly::public::<MinSig>(&commitment);
+        assert!(decoded.verify(NAMESPACE, identity));
 
         // Create seed
         let seed = nullification.seed();
@@ -2222,7 +2222,7 @@ mod tests {
         assert_eq!(seed, decoded);
 
         // Verify the seed
-        assert!(decoded.verify(NAMESPACE, public_key));
+        assert!(decoded.verify(NAMESPACE, identity));
     }
 
     #[test]
@@ -2273,8 +2273,8 @@ mod tests {
         assert_eq!(finalization, decoded);
 
         // Verify the finalization
-        let public_key = poly::public::<MinSig>(&commitment);
-        assert!(decoded.verify(NAMESPACE, public_key));
+        let identity = poly::public::<MinSig>(&commitment);
+        assert!(decoded.verify(NAMESPACE, identity));
 
         // Create seed
         let seed = finalization.seed();
@@ -2283,7 +2283,7 @@ mod tests {
         assert_eq!(seed, decoded);
 
         // Verify the seed
-        assert!(decoded.verify(NAMESPACE, public_key));
+        assert!(decoded.verify(NAMESPACE, identity));
     }
 
     #[test]
@@ -2504,15 +2504,15 @@ mod tests {
             Notarization::<MinSig, _>::new(proposal, proposal_signature, seed_signature);
 
         // Verify with correct public key - should pass
-        let public_key = poly::public::<MinSig>(&commitment);
-        assert!(notarization.verify(NAMESPACE, public_key));
+        let identity = poly::public::<MinSig>(&commitment);
+        assert!(notarization.verify(NAMESPACE, identity));
 
         // Generate a different set of BLS keys/shares
         let (wrong_commitment, _) = generate_test_data(n, t, 1);
-        let wrong_public_key = poly::public::<MinSig>(&wrong_commitment);
+        let wrong_identity = poly::public::<MinSig>(&wrong_commitment);
 
         // Verify with wrong public key - should fail
-        assert!(!notarization.verify(NAMESPACE, wrong_public_key));
+        assert!(!notarization.verify(NAMESPACE, wrong_identity));
     }
 
     #[test]
@@ -2541,11 +2541,11 @@ mod tests {
             Notarization::<MinSig, _>::new(proposal, proposal_signature, seed_signature);
 
         // Verify with correct namespace - should pass
-        let public_key = poly::public::<MinSig>(&commitment);
-        assert!(notarization.verify(NAMESPACE, public_key));
+        let identity = poly::public::<MinSig>(&commitment);
+        assert!(notarization.verify(NAMESPACE, identity));
 
         // Verify with wrong namespace - should fail
-        assert!(!notarization.verify(b"wrong_namespace", public_key));
+        assert!(!notarization.verify(b"wrong_namespace", identity));
     }
 
     #[test]
@@ -2681,11 +2681,11 @@ mod tests {
             Finalization::<MinSig, _>::new(proposal, proposal_signature, seed_signature);
 
         // Verify with correct public key - should pass
-        let public_key = poly::public::<MinSig>(&commitment);
-        assert!(finalization.verify(NAMESPACE, public_key));
+        let identity = poly::public::<MinSig>(&commitment);
+        assert!(finalization.verify(NAMESPACE, identity));
 
         // Verify with wrong public key - should fail
-        let wrong_public_key = poly::public::<MinSig>(&wrong_commitment);
-        assert!(!finalization.verify(NAMESPACE, wrong_public_key));
+        let wrong_identity = poly::public::<MinSig>(&wrong_commitment);
+        assert!(!finalization.verify(NAMESPACE, wrong_identity));
     }
 }
