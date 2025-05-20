@@ -17,7 +17,7 @@
 //! * Optimal Finalization Latency (3 Network Hops)
 //! * Externalized Uptime and Fault Proofs
 //! * Decoupled Block Broadcast and Sync
-//! * Batched Message Verification
+//! * Lazy Message Verification
 //! * Flexible Block Format
 //! * Embedded VRF for Leader Election and Post-Facto Execution Randomness
 //! * Succinct Consensus Certificates for Notarization, Nullification, and Finality
@@ -27,7 +27,7 @@
 //! ## Architecture
 //!
 //! All logic is split into four components: the `Batcher`, the `Voter`, the `Resolver`, and the `Application` (provided by the user).
-//! The `Batcher` is responsible for collecting messages from peers and batch verifying them when a quorum is met. The `Voter`
+//! The `Batcher` is responsible for collecting messages from peers and lazily verifying them when a quorum is met. The `Voter`
 //! is responsible for directing participation in the current view. Lastly, the `Resolver` is responsible for
 //! fetching artifacts from previous views required to verify proposed blocks in the latest view.
 //!
