@@ -156,16 +156,16 @@ impl crate::Blob for Blob {
         let fd = types::Fd(self.file.as_raw_fd());
         let mut total_read = 0;
         let len = buf.len();
-        let buf_ref = buf.deref_mut();
 
         let mut io_sender = self.io_sender.clone();
         while total_read < len {
             // Figure out how much is left to read and where to read into
-            let remaining = &mut buf_ref[total_read..];
+            let remaining_len = len - total_read;
             let offset = offset + total_read as u64;
+            let buf_ptr = unsafe { buf.stable_mut_ptr().add(total_read) };
 
             // Create an operation to do the read
-            let op = opcode::Read::new(fd, remaining.as_mut_ptr(), remaining.len() as _)
+            let op = opcode::Read::new(fd, buf_ptr, remaining_len as _)
                 .offset(offset as _)
                 .build();
 

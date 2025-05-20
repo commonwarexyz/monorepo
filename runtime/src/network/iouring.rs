@@ -208,15 +208,15 @@ impl crate::Stream for Stream {
     async fn recv<B: StableBufMut>(&mut self, mut buf: B) -> Result<B, crate::Error> {
         let mut bytes_received = 0;
         let buf_len = buf.len();
-        let buf_ref = buf.deref_mut();
         while bytes_received < buf_len {
-            let remaining = &mut buf_ref[bytes_received..];
+            let remaining_len = buf_len - bytes_received;
+            let buf_ptr = unsafe { buf.stable_mut_ptr().add(bytes_received) };
 
             // Create the io_uring recv operation
             let op = io_uring::opcode::Recv::new(
                 self.as_raw_fd(),
-                remaining.as_mut_ptr(),
-                remaining.len() as u32,
+                buf_ptr,
+                remaining_len as u32,
             )
             .build();
 
