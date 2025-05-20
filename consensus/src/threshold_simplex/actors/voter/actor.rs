@@ -43,9 +43,13 @@ use tracing::{debug, trace, warn};
 
 const GENESIS_VIEW: View = 0;
 
+/// Action to take after processing a message.
 enum Action {
+    /// Skip processing the message.
     Skip,
+    /// Block the peer from sending any more messages.
     Block,
+    /// Process the message.
     Process,
 }
 
