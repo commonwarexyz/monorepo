@@ -257,4 +257,12 @@ mod tests {
         })
         .await;
     }
+
+    #[tokio::test]
+    async fn stress_test_trait() {
+        tests::stress_test_network_trait(|| {
+            Network::start(Config::default()).expect("Failed to start io_uring")
+        })
+        .await;
+    }
 }

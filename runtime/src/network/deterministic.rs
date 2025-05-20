@@ -151,4 +151,9 @@ mod tests {
     async fn test_trait() {
         tests::test_network_trait(DeterministicNetwork::Network::default).await;
     }
+
+    #[tokio::test]
+    async fn stress_test_trait() {
+        tests::stress_test_network_trait(DeterministicNetwork::Network::default).await;
+    }
 }

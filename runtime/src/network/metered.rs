@@ -184,6 +184,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stress_test_trait() {
+        tests::stress_test_network_trait(|| {
+            MeteredNetwork::new(
+                DeterministicNetwork::default(),
+                &mut prometheus_client::registry::Registry::default(),
+            )
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn test_metrics() {
         const MSG_SIZE: u64 = 100;
 

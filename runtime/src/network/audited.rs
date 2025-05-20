@@ -200,6 +200,17 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn stress_test_trait() {
+        tests::stress_test_network_trait(|| {
+            AuditedNetwork::new(
+                DeterministicNetwork::default(),
+                Arc::new(Auditor::default()),
+            )
+        })
+        .await;
+    }
+
     // Test that running the same network operations on two audited networks
     // produces the same audit events.
     #[tokio::test]
