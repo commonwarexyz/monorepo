@@ -1529,7 +1529,7 @@ impl<
         recovered_sender: impl Sender<PublicKey = C::PublicKey>,
         recovered_receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) -> Handle<()> {
-        self.context.spawn_blocking_ref(true)(|| {
+        self.context.spawn_blocking_ref(false)(|| {
             block_on(async move {
                 self.run(
                     batcher,

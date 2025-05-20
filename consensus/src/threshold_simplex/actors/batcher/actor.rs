@@ -389,7 +389,7 @@ impl<
         consensus: voter::Mailbox<V, D>,
         receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) -> Handle<()> {
-        self.context.spawn_blocking_ref(true)(|| {
+        self.context.spawn_blocking_ref(false)(|| {
             block_on(async move {
                 self.run(consensus, receiver).await;
             })
