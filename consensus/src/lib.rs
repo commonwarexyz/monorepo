@@ -119,8 +119,8 @@ cfg_if::cfg_if! {
             fn is_participant(&self, index: Self::Index, candidate: &Self::PublicKey) -> Option<u32>;
         }
 
-        /// ThresholdSupervisor is the interface responsible for managing which `polynomial` (typically a group polynomial with
-        /// a fixed constant `polynomial`) and `share` for a participant is active at a given time.
+        /// ThresholdSupervisor is the interface responsible for managing which `polynomial` (typically a polynomial with
+        /// a fixed constant `identity`) and `share` for a participant is active at a given time.
         ///
         /// ## Synchronization
         ///
@@ -139,18 +139,21 @@ cfg_if::cfg_if! {
             /// against `Identity`.
             type Share;
 
-            /// Returns the static polynomial of the shared secret (typically the constant term
-            /// of the group polynomial).
+            /// Returns the static identity of the shared secret (typically the constant term
+            /// of a polynomial).
             fn identity(&self) -> &Self::Identity;
 
             /// Return the leader at a given index over the provided seed.
             fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<Self::PublicKey>;
 
-            /// Returns the group polynomial over which partial signatures are verified at a given index.
+            /// Returns the polynomial over which partial signatures are verified at a given index.
             fn polynomial(&self, index: Self::Index) -> Option<&Self::Polynomial>;
 
             /// Returns share to sign with at a given index. After resharing, the share
             /// may change (and old shares may be deleted).
+            ///
+            /// This can be used to generate a partial signature that can be verified
+            /// against `polynomial`.
             fn share(&self, index: Self::Index) -> Option<&Self::Share>;
         }
 
