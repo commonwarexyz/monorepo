@@ -80,6 +80,9 @@ pub struct Config<
     /// The number of bytes to buffer when replaying a journal.
     pub journal_replay_buffer: usize,
 
+    /// The size of the write buffer to use for each blob in the journal.
+    pub journal_write_buffer: usize,
+
     /// Compression level for the journal.
     pub journal_compression: Option<u8>,
 }

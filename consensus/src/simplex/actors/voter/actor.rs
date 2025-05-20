@@ -328,6 +328,7 @@ pub struct Actor<
     compression: Option<u8>,
     replay_concurrency: usize,
     replay_buffer: usize,
+    write_buffer: usize,
     journal: Option<Journal<E, Voter<C::Signature, D>>>,
 
     genesis: Option<D>,
@@ -420,6 +421,7 @@ impl<
                 compression: cfg.compression,
                 replay_concurrency: cfg.replay_concurrency,
                 replay_buffer: cfg.replay_buffer,
+                write_buffer: cfg.write_buffer,
                 journal: None,
 
                 genesis: None,
@@ -1686,6 +1688,7 @@ impl<
                 partition: self.partition.clone(),
                 compression: self.compression,
                 codec_config: usize::MAX, // anything we read from journal is already verified
+                write_buffer: self.write_buffer,
             },
         )
         .await

@@ -721,18 +721,7 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
-        let label = Label::future(self.name.clone());
-        self.executor
-            .metrics
-            .tasks_spawned
-            .get_or_create(&label)
-            .inc();
-        let gauge = self
-            .executor
-            .metrics
-            .tasks_running
-            .get_or_create(&label)
-            .clone();
+        let (label, gauge) = spawn_metrics!(self, future);
 
         // Set up the task
         let executor = self.executor.clone();
@@ -754,18 +743,7 @@ impl crate::Spawner for Context {
         self.spawned = true;
 
         // Get metrics
-        let label = Label::future(self.name.clone());
-        self.executor
-            .metrics
-            .tasks_spawned
-            .get_or_create(&label)
-            .inc();
-        let gauge = self
-            .executor
-            .metrics
-            .tasks_running
-            .get_or_create(&label)
-            .clone();
+        let (label, gauge) = spawn_metrics!(self, future);
 
         // Set up the task
         let executor = self.executor.clone();
@@ -787,22 +765,7 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
-        let label = if dedicated {
-            Label::blocking_dedicated(self.name.clone())
-        } else {
-            Label::blocking_shared(self.name.clone())
-        };
-        self.executor
-            .metrics
-            .tasks_spawned
-            .get_or_create(&label)
-            .inc();
-        let gauge = self
-            .executor
-            .metrics
-            .tasks_running
-            .get_or_create(&label)
-            .clone();
+        let (label, gauge) = spawn_metrics!(self, blocking, dedicated);
 
         // Initialize the blocking task
         let executor = self.executor.clone();
@@ -812,6 +775,30 @@ impl crate::Spawner for Context {
         let f = async move { f() };
         Tasks::register_work(&executor.tasks, label, Box::pin(f));
         handle
+    }
+
+    fn spawn_blocking_ref<F, T>(&mut self, dedicated: bool) -> impl FnOnce(F) -> Handle<T> + 'static
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        // Ensure a context only spawns one task
+        assert!(!self.spawned, "already spawned");
+        self.spawned = true;
+
+        // Get metrics
+        let (label, gauge) = spawn_metrics!(self, blocking, dedicated);
+
+        // Set up the task
+        let executor = self.executor.clone();
+        move |f: F| {
+            let (f, handle) = Handle::init_blocking(f, gauge, false);
+
+            // Spawn the task
+            let f = async move { f() };
+            Tasks::register_work(&executor.tasks, label, Box::pin(f));
+            handle
+        }
     }
 
     fn stop(&self, value: i32) {

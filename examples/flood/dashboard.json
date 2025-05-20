@@ -793,7 +793,7 @@
                 {
                     "disableTextWrap": false,
                     "editorMode": "builder",
-                    "expr": "network_tracker_tracked_peers{deployer_name=~\"$Name\"}",
+                    "expr": "network_tracker_tracked{deployer_name=~\"$Name\"}",
                     "fullMetaSearch": false,
                     "includeNullMetadata": true,
                     "legendFormat": "{{deployer_name}} ({{deployer_ip}})",
@@ -890,7 +890,7 @@
                 {
                     "disableTextWrap": false,
                     "editorMode": "builder",
-                    "expr": "network_dialer_dial_attempts_total{deployer_name=~\"$Name\"}",
+                    "expr": "network_dialer_attempts_total{deployer_name=~\"$Name\"}",
                     "fullMetaSearch": false,
                     "includeNullMetadata": true,
                     "legendFormat": "{{deployer_name}} ({{deployer_ip}})",
@@ -1251,8 +1251,7 @@
                         "mode": "absolute",
                         "steps": [
                             {
-                                "color": "green",
-                                "value": null
+                                "color": "green"
                             }
                         ]
                     },
@@ -1354,8 +1353,7 @@
                         "mode": "absolute",
                         "steps": [
                             {
-                                "color": "green",
-                                "value": null
+                                "color": "green"
                             }
                         ]
                     },
@@ -1434,8 +1432,7 @@
                         "mode": "absolute",
                         "steps": [
                             {
-                                "color": "green",
-                                "value": null
+                                "color": "green"
                             }
                         ]
                     }
@@ -1536,8 +1533,7 @@
                         "mode": "absolute",
                         "steps": [
                             {
-                                "color": "green",
-                                "value": null
+                                "color": "green"
                             }
                         ]
                     }
@@ -1613,8 +1609,7 @@
                         "mode": "absolute",
                         "steps": [
                             {
-                                "color": "green",
-                                "value": null
+                                "color": "green"
                             }
                         ]
                     }

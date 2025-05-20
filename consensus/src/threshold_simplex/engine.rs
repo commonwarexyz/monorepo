@@ -90,6 +90,7 @@ impl<
                 activity_timeout: cfg.activity_timeout,
                 replay_concurrency: cfg.replay_concurrency,
                 replay_buffer: cfg.replay_buffer,
+                write_buffer: cfg.write_buffer,
             },
         );
 

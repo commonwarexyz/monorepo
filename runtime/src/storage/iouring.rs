@@ -1,4 +1,7 @@
-use crate::{iouring, Error};
+use crate::{
+    iouring::{self, should_retry},
+    Error,
+};
 use commonware_utils::{from_hex, hex, StableBuf, StableBufMut};
 use futures::{
     channel::{mpsc, oneshot},
@@ -175,6 +178,9 @@ impl crate::Blob for Blob {
 
             // Wait for the result
             let bytes_read = receiver.await.map_err(|_| Error::ReadFailed)?;
+            if should_retry(bytes_read) {
+                continue;
+            }
 
             // A non-positive return value indicates an error.
             let bytes_read: usize = bytes_read.try_into().map_err(|_| Error::ReadFailed)?;
@@ -213,6 +219,9 @@ impl crate::Blob for Blob {
 
             // Wait for the result
             let return_value = receiver.await.map_err(|_| Error::WriteFailed)?;
+            if should_retry(return_value) {
+                continue;
+            }
 
             // A negative return value indicates an error.
             let bytes_written: usize = return_value.try_into().map_err(|_| Error::WriteFailed)?;
@@ -234,41 +243,47 @@ impl crate::Blob for Blob {
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        // Create an operation to do the sync
-        let op = opcode::Fsync::new(types::Fd(self.file.as_raw_fd())).build();
+        loop {
+            // Create an operation to do the sync
+            let op = opcode::Fsync::new(types::Fd(self.file.as_raw_fd())).build();
 
-        // Submit the operation
-        let (sender, receiver) = oneshot::channel();
-        self.io_sender
-            .clone()
-            .send((op, sender))
-            .await
-            .map_err(|_| {
+            // Submit the operation
+            let (sender, receiver) = oneshot::channel();
+            self.io_sender
+                .clone()
+                .send((op, sender))
+                .await
+                .map_err(|_| {
+                    Error::BlobSyncFailed(
+                        self.partition.clone(),
+                        hex(&self.name),
+                        IoError::new(ErrorKind::Other, "failed to send work"),
+                    )
+                })?;
+
+            // Wait for the result
+            let return_value = receiver.await.map_err(|_| {
                 Error::BlobSyncFailed(
                     self.partition.clone(),
                     hex(&self.name),
-                    IoError::new(ErrorKind::Other, "failed to send work"),
+                    IoError::new(ErrorKind::Other, "failed to read result"),
                 )
             })?;
+            if should_retry(return_value) {
+                continue;
+            }
 
-        // Wait for the result
-        let return_value = receiver.await.map_err(|_| {
-            Error::BlobSyncFailed(
-                self.partition.clone(),
-                hex(&self.name),
-                IoError::new(ErrorKind::Other, "failed to read result"),
-            )
-        })?;
-        // If the return value is negative, it indicates an error.
-        if return_value < 0 {
-            return Err(Error::BlobSyncFailed(
-                self.partition.clone(),
-                hex(&self.name),
-                IoError::new(ErrorKind::Other, format!("error code: {}", return_value)),
-            ));
+            // If the return value is negative, it indicates an error.
+            if return_value < 0 {
+                return Err(Error::BlobSyncFailed(
+                    self.partition.clone(),
+                    hex(&self.name),
+                    IoError::new(ErrorKind::Other, format!("error code: {}", return_value)),
+                ));
+            }
+
+            return Ok(());
         }
-
-        Ok(())
     }
 
     /// Drop all references to self.fd to close that resource.

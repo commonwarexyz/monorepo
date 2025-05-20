@@ -32,6 +32,9 @@ pub struct Config {
     /// The items per blob configuration value used by the MMR journal.
     pub mmr_items_per_blob: u64,
 
+    /// The size of the write buffer to use for each blob in the MMR journal.
+    pub mmr_write_buffer: usize,
+
     /// The name of the [RStorage] partition used for the MMR's metadata.
     pub mmr_metadata_partition: String,
 
@@ -40,6 +43,9 @@ pub struct Config {
 
     /// The items per blob configuration value used by the log journal.
     pub log_items_per_blob: u64,
+
+    /// The size of the write buffer to use for each blob in the log journal.
+    pub log_write_buffer: usize,
 
     /// The name of the [RStorage] partition used for the bitmap metadata.
     pub bitmap_metadata_partition: String,
@@ -102,8 +108,10 @@ impl<
             mmr_journal_partition: config.mmr_journal_partition,
             mmr_metadata_partition: config.mmr_metadata_partition,
             mmr_items_per_blob: config.mmr_items_per_blob,
+            mmr_write_buffer: config.mmr_write_buffer,
             log_journal_partition: config.log_journal_partition,
             log_items_per_blob: config.log_items_per_blob,
+            log_write_buffer: config.log_write_buffer,
         };
 
         let context = context.with_label("adb::current");
@@ -390,8 +398,10 @@ pub mod test {
             mmr_journal_partition: format!("{}_journal_partition", partition_prefix),
             mmr_metadata_partition: format!("{}_metadata_partition", partition_prefix),
             mmr_items_per_blob: 11,
+            mmr_write_buffer: 1024,
             log_journal_partition: format!("{}_partition_prefix", partition_prefix),
             log_items_per_blob: 7,
+            log_write_buffer: 1024,
             bitmap_metadata_partition: format!("{}_bitmap_metadata_partition", partition_prefix),
         }
     }

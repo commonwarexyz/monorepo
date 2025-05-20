@@ -324,6 +324,7 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
+                    write_buffer: 1024 * 1024,
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
                 let (voter, resolver) = registrations
@@ -568,6 +569,7 @@ mod tests {
                         fetch_concurrent: 1,
                         replay_concurrency: 1,
                         replay_buffer: 1024 * 1024,
+                        write_buffer: 1024 * 1024,
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     let (voter_network, resolver_network) = registrations
@@ -736,6 +738,7 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
+                    write_buffer: 1024 * 1024,
                 };
                 let (voter, resolver) = registrations
                     .remove(&validator)
@@ -854,6 +857,7 @@ mod tests {
                 fetch_concurrent: 1,
                 replay_concurrency: 1,
                 replay_buffer: 1024 * 1024,
+                write_buffer: 1024 * 1024,
             };
             let (voter, resolver) = registrations
                 .remove(&validator)
@@ -975,6 +979,7 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
+                    write_buffer: 1024 * 1024,
                 };
                 let (voter, resolver) = registrations
                     .remove(&validator)
@@ -1200,6 +1205,7 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
+                    write_buffer: 1024 * 1024,
                 };
                 let (voter, resolver) = registrations
                     .remove(&validator)
@@ -1357,6 +1363,7 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
+                    write_buffer: 1024 * 1024,
                 };
                 let (voter, resolver) = registrations
                     .remove(&validator)
@@ -1539,6 +1546,7 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
+                    write_buffer: 1024 * 1024,
                 };
                 let (voter, resolver) = registrations
                     .remove(&validator)
@@ -1717,6 +1725,7 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
+                    write_buffer: 1024 * 1024,
                 };
                 let (voter, resolver) = registrations
                     .remove(&validator)
@@ -1883,6 +1892,7 @@ mod tests {
                         fetch_concurrent: 1,
                         replay_concurrency: 1,
                         replay_buffer: 1024 * 1024,
+                        write_buffer: 1024 * 1024,
                     };
                     let (voter, resolver) = registrations
                         .remove(&validator)
@@ -2050,6 +2060,7 @@ mod tests {
                         fetch_concurrent: 1,
                         replay_concurrency: 1,
                         replay_buffer: 1024 * 1024,
+                        write_buffer: 1024 * 1024,
                     };
                     let (voter, resolver) = registrations
                         .remove(&validator)
@@ -2213,6 +2224,7 @@ mod tests {
                         fetch_concurrent: 1,
                         replay_concurrency: 1,
                         replay_buffer: 1024 * 1024,
+                        write_buffer: 1024 * 1024,
                     };
                     let (voter, resolver) = registrations
                         .remove(&validator)
@@ -2348,6 +2360,7 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
+                    write_buffer: 1024 * 1024,
                 };
                 let (voter, resolver) = registrations
                     .remove(&validator)
