@@ -317,7 +317,8 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
+            let (polynomial, shares) =
+                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -330,7 +331,10 @@ mod tests {
                 // Configure engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
-                participants.insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
+                participants.insert(
+                    0,
+                    (polynomial.clone(), validators.clone(), shares[idx].clone()),
+                );
                 let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
                     participants,
@@ -534,7 +538,7 @@ mod tests {
 
         // Derive threshold
         let mut rng = StdRng::seed_from_u64(0);
-        let (public, shares) = ops::generate_shares::<_, V>(&mut rng, None, n, threshold);
+        let (polynomial, shares) = ops::generate_shares::<_, V>(&mut rng, None, n, threshold);
 
         // Random restarts every x seconds
         let shutdowns: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
@@ -545,7 +549,7 @@ mod tests {
             let namespace = namespace.clone();
             let shutdowns = shutdowns.clone();
             let supervised = supervised.clone();
-            let public = public.clone();
+            let polynomial = polynomial.clone();
             let shares = shares.clone();
 
             let f = |mut context: deterministic::Context| async move {
@@ -594,8 +598,10 @@ mod tests {
                     // Configure engine
                     let validator = scheme.public_key();
                     let mut participants = BTreeMap::new();
-                    participants
-                        .insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
+                    participants.insert(
+                        0,
+                        (polynomial.clone(), validators.clone(), shares[idx].clone()),
+                    );
                     let supervisor_config = mocks::supervisor::Config::<_, V> {
                         namespace: namespace.clone(),
                         participants,
@@ -764,7 +770,8 @@ mod tests {
             .await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
+            let (polynomial, shares) =
+                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -785,7 +792,7 @@ mod tests {
                 participants.insert(
                     0,
                     (
-                        public.clone(),
+                        polynomial.clone(),
                         validators.clone(),
                         shares[idx_scheme].clone(),
                     ),
@@ -910,7 +917,10 @@ mod tests {
 
             // Configure engine
             let mut participants = BTreeMap::new();
-            participants.insert(0, (public.clone(), validators.clone(), shares[0].clone()));
+            participants.insert(
+                0,
+                (polynomial.clone(), validators.clone(), shares[0].clone()),
+            );
             let supervisor_config = mocks::supervisor::Config::<_, V> {
                 namespace: namespace.clone(),
                 participants,
@@ -1030,7 +1040,8 @@ mod tests {
             .await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
+            let (polynomial, shares) =
+                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -1051,7 +1062,7 @@ mod tests {
                 participants.insert(
                     0,
                     (
-                        public.clone(),
+                        polynomial.clone(),
                         validators.clone(),
                         shares[idx_scheme].clone(),
                     ),
@@ -1290,7 +1301,8 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
+            let (polynomial, shares) =
+                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -1306,7 +1318,7 @@ mod tests {
                 participants.insert(
                     0,
                     (
-                        public.clone(),
+                        polynomial.clone(),
                         validators.clone(),
                         shares[idx_scheme].clone(),
                     ),
@@ -1478,7 +1490,8 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
+            let (polynomial, shares) =
+                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -1491,7 +1504,10 @@ mod tests {
                 // Configure engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
-                participants.insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
+                participants.insert(
+                    0,
+                    (polynomial.clone(), validators.clone(), shares[idx].clone()),
+                );
                 let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
                     participants,
@@ -1685,7 +1701,8 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link.clone()), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
+            let (polynomial, shares) =
+                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -1698,7 +1715,10 @@ mod tests {
                 // Configure engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
-                participants.insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
+                participants.insert(
+                    0,
+                    (polynomial.clone(), validators.clone(), shares[idx].clone()),
+                );
                 let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
                     participants,
@@ -1888,7 +1908,8 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(degraded_link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
+            let (polynomial, shares) =
+                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -1901,7 +1922,10 @@ mod tests {
                 // Configure engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
-                participants.insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
+                participants.insert(
+                    0,
+                    (polynomial.clone(), validators.clone(), shares[idx].clone()),
+                );
                 let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
                     participants,
@@ -2060,7 +2084,8 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
+            let (polynomial, shares) =
+                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -2075,7 +2100,7 @@ mod tests {
                 participants.insert(
                     0,
                     (
-                        public.clone(),
+                        polynomial.clone(),
                         validators.clone(),
                         shares[idx_scheme].clone(),
                     ),
@@ -2253,7 +2278,8 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
+            let (polynomial, shares) =
+                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -2268,7 +2294,7 @@ mod tests {
                 participants.insert(
                     0,
                     (
-                        public.clone(),
+                        polynomial.clone(),
                         validators.clone(),
                         shares[idx_scheme].clone(),
                     ),
@@ -2431,7 +2457,8 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
+            let (polynomial, shares) =
+                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -2446,7 +2473,7 @@ mod tests {
                 participants.insert(
                     0,
                     (
-                        public.clone(),
+                        polynomial.clone(),
                         validators.clone(),
                         shares[idx_scheme].clone(),
                     ),
@@ -2608,7 +2635,8 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
+            let (polynomial, shares) =
+                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -2623,7 +2651,7 @@ mod tests {
                 participants.insert(
                     0,
                     (
-                        public.clone(),
+                        polynomial.clone(),
                         validators.clone(),
                         shares[idx_scheme].clone(),
                     ),
@@ -2794,7 +2822,8 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
+            let (polynomial, shares) =
+                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -2809,7 +2838,7 @@ mod tests {
                 participants.insert(
                     0,
                     (
-                        public.clone(),
+                        polynomial.clone(),
                         validators.clone(),
                         shares[idx_scheme].clone(),
                     ),
@@ -2961,7 +2990,8 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
+            let (polynomial, shares) =
+                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -2974,7 +3004,10 @@ mod tests {
                 // Configure engine
                 let validator = scheme.public_key();
                 let mut participants = BTreeMap::new();
-                participants.insert(0, (public.clone(), validators.clone(), shares[idx].clone()));
+                participants.insert(
+                    0,
+                    (polynomial.clone(), validators.clone(), shares[idx].clone()),
+                );
                 let supervisor_config = mocks::supervisor::Config::<_, V> {
                     namespace: namespace.clone(),
                     participants,
