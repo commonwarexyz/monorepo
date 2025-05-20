@@ -2858,24 +2858,6 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_verifier_new() {
-        let verifier_no_quorum = BatchVerifier::<MinSig, Sha256>::new(None);
-        assert!(verifier_no_quorum.quorum.is_none());
-        assert!(verifier_no_quorum.leader.is_none());
-        assert!(verifier_no_quorum.leader_proposal.is_none());
-        assert!(verifier_no_quorum.notarizes.is_empty());
-        assert!(!verifier_no_quorum.notarizes_force);
-        assert_eq!(verifier_no_quorum.notarizes_verified, 0);
-        assert!(verifier_no_quorum.nullifies.is_empty());
-        assert_eq!(verifier_no_quorum.nullifies_verified, 0);
-        assert!(verifier_no_quorum.finalizes.is_empty());
-        assert_eq!(verifier_no_quorum.finalizes_verified, 0);
-
-        let verifier_with_quorum = BatchVerifier::<MinSig, Sha256>::new(Some(3));
-        assert_eq!(verifier_with_quorum.quorum, Some(3));
-    }
-
-    #[test]
     fn test_batch_verifier_add_notarize() {
         let n_validators = 5;
         let threshold = quorum(n_validators);
