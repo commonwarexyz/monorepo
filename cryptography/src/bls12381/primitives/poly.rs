@@ -64,7 +64,7 @@ impl<C: Element> EncodeSize for Eval<C> {
 ///
 /// The coefficients must be able to multiply the type of the variable,
 /// which is always a scalar.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L24-L28
 pub struct Poly<C>(Vec<C>);
 

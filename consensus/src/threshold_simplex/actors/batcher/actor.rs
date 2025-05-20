@@ -22,7 +22,11 @@ use commonware_runtime::{
 use commonware_utils::quorum;
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
-use std::{collections::BTreeMap, marker::PhantomData, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap, VecDeque},
+    marker::PhantomData,
+    sync::Arc,
+};
 use tracing::{trace, warn};
 
 struct Round<
@@ -323,6 +327,9 @@ pub struct Actor<
     skip_timeout: View,
     namespace: Vec<u8>,
 
+    cache: HashMap<poly::Public<V>, poly::Eval<V::Public>>,
+    cache_items: VecDeque<poly::Public<V>>,
+
     mailbox_receiver: mpsc::Receiver<Message<C::PublicKey, V, D>>,
 
     added: Counter,
@@ -389,6 +396,9 @@ impl<
                 activity_timeout: cfg.activity_timeout,
                 skip_timeout: cfg.skip_timeout,
                 namespace: cfg.namespace,
+
+                cache: HashMap::with_capacity(cfg.cache_size),
+                cache_items: VecDeque::with_capacity(cfg.cache_size),
 
                 mailbox_receiver: receiver,
 
