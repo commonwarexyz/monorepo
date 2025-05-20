@@ -233,4 +233,17 @@ mod tests {
         })
         .await;
     }
+
+    #[tokio::test]
+    #[ignore]
+    async fn stress_trait() {
+        tests::stress_network_trait(|| {
+            TokioNetwork::Network::from(
+                TokioNetwork::Config::default()
+                    .with_read_timeout(Duration::from_secs(15))
+                    .with_write_timeout(Duration::from_secs(15)),
+            )
+        })
+        .await;
+    }
 }

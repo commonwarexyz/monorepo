@@ -213,12 +213,8 @@ impl crate::Stream for Stream {
             let buf_ptr = unsafe { buf.stable_mut_ptr().add(bytes_received) };
 
             // Create the io_uring recv operation
-            let op = io_uring::opcode::Recv::new(
-                self.as_raw_fd(),
-                buf_ptr,
-                remaining_len as u32,
-            )
-            .build();
+            let op = io_uring::opcode::Recv::new(self.as_raw_fd(), buf_ptr, remaining_len as u32)
+                .build();
 
             // Submit the operation to the io_uring event loop
             let (tx, rx) = oneshot::channel();
@@ -240,5 +236,24 @@ impl crate::Stream for Stream {
             bytes_received += result as usize;
         }
         Ok(buf)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::network::tests;
+    use crate::{Listener as _, Network as _, Sink as _, Stream as _};
+    use std::net::SocketAddr;
+
+    #[tokio::test]
+    async fn test_trait() {
+        tests::test_network_trait(|| Network::start(iouring::Config::default()).unwrap()).await;
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn stress_trait() {
+        tests::stress_network_trait(|| Network::start(iouring::Config::default()).unwrap()).await;
     }
 }
