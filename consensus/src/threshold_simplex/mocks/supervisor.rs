@@ -34,7 +34,7 @@ type Faults<P, V, D> = HashMap<P, HashMap<View, HashSet<Activity<V, D>>>>;
 
 #[derive(Clone)]
 pub struct Supervisor<P: Array, V: Variant, D: Digest> {
-    public_key: V::Public,
+    identity: V::Public,
     participants: BTreeMap<View, ViewInfo<P, V>>,
 
     namespace: Vec<u8>,
@@ -56,7 +56,7 @@ pub struct Supervisor<P: Array, V: Variant, D: Digest> {
 
 impl<P: Array, V: Variant, D: Digest> Supervisor<P, V, D> {
     pub fn new(cfg: Config<P, V>) -> Self {
-        let mut public_key = None;
+        let mut identity = None;
         let mut parsed_participants = BTreeMap::new();
         for (view, (polynomial, mut validators, share)) in cfg.participants.into_iter() {
             let mut map = HashMap::new();
@@ -64,16 +64,16 @@ impl<P: Array, V: Variant, D: Digest> Supervisor<P, V, D> {
                 map.insert(validator.clone(), index as u32);
             }
             validators.sort();
-            let view_public = public::<V>(&polynomial);
-            if public_key.is_none() {
-                public_key = Some(*view_public);
-            } else if public_key.as_ref().unwrap() != view_public {
+            let view_identity = public::<V>(&polynomial);
+            if identity.is_none() {
+                identity = Some(*view_identity);
+            } else if identity.as_ref().unwrap() != view_identity {
                 panic!("public keys do not match");
             }
             parsed_participants.insert(view, (polynomial, map, validators, share));
         }
         Self {
-            public_key: public_key.unwrap(),
+            identity: identity.unwrap(),
             participants: parsed_participants,
             namespace: cfg.namespace,
             leaders: Arc::new(Mutex::new(HashMap::new())),
@@ -146,7 +146,7 @@ impl<P: Array, V: Variant, D: Digest> TSu for Supervisor<P, V, D> {
     }
 
     fn identity(&self) -> &Self::Identity {
-        &self.public_key
+        &self.identity
     }
 
     fn polynomial(&self, index: Self::Index) -> Option<&Self::Polynomial> {
@@ -206,7 +206,7 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                 // Verify notarization
                 let view = notarization.view();
                 let seed = notarization.seed();
-                if !notarization.verify(&self.namespace, &self.public_key) {
+                if !notarization.verify(&self.namespace, &self.identity) {
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
@@ -218,7 +218,7 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     .insert(view, notarization);
 
                 // Verify seed
-                if !seed.verify(&self.namespace, &self.public_key) {
+                if !seed.verify(&self.namespace, &self.identity) {
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
@@ -252,7 +252,7 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                 // Verify nullification
                 let view = nullification.view();
                 let seed = nullification.seed();
-                if !nullification.verify(&self.namespace, &self.public_key) {
+                if !nullification.verify(&self.namespace, &self.identity) {
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
@@ -264,7 +264,7 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     .insert(view, nullification);
 
                 // Verify seed
-                if !seed.verify(&self.namespace, &self.public_key) {
+                if !seed.verify(&self.namespace, &self.identity) {
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
@@ -300,7 +300,7 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                 // Verify finalization
                 let view = finalization.view();
                 let seed = finalization.seed();
-                if !finalization.verify(&self.namespace, &self.public_key) {
+                if !finalization.verify(&self.namespace, &self.identity) {
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
@@ -312,7 +312,7 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     .insert(view, finalization.clone());
 
                 // Verify seed
-                if !seed.verify(&self.namespace, &self.public_key) {
+                if !seed.verify(&self.namespace, &self.identity) {
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
