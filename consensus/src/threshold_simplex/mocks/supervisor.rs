@@ -177,6 +177,7 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
         // We check signatures for all messages to ensure that the prover is working correctly
         // but in production this isn't necessary (as signatures are already verified in
         // consensus).
+        let verified = activity.verified();
         match activity {
             Activity::Notarize(notarize) => {
                 let view = notarize.view();
@@ -187,6 +188,7 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     }
                 };
                 if !notarize.verify(&self.namespace, polynomial) {
+                    assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
@@ -207,6 +209,7 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                 let view = notarization.view();
                 let seed = notarization.seed();
                 if !notarization.verify(&self.namespace, &self.identity) {
+                    assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
@@ -219,6 +222,7 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
 
                 // Verify seed
                 if !seed.verify(&self.namespace, &self.identity) {
+                    assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
@@ -235,6 +239,7 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     }
                 };
                 if !nullify.verify(&self.namespace, polynomial) {
+                    assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
@@ -253,6 +258,7 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                 let view = nullification.view();
                 let seed = nullification.seed();
                 if !nullification.verify(&self.namespace, &self.identity) {
+                    assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
@@ -265,6 +271,7 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
 
                 // Verify seed
                 if !seed.verify(&self.namespace, &self.identity) {
+                    assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
@@ -281,6 +288,7 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     }
                 };
                 if !finalize.verify(&self.namespace, polynomial) {
+                    assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
@@ -301,6 +309,7 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                 let view = finalization.view();
                 let seed = finalization.seed();
                 if !finalization.verify(&self.namespace, &self.identity) {
+                    assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
@@ -313,6 +322,7 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
 
                 // Verify seed
                 if !seed.verify(&self.namespace, &self.identity) {
+                    assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
@@ -336,6 +346,7 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     }
                 };
                 if !conflicting.verify(&self.namespace, polynomial) {
+                    assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
@@ -360,6 +371,7 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     }
                 };
                 if !conflicting.verify(&self.namespace, polynomial) {
+                    assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
@@ -384,6 +396,7 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     }
                 };
                 if !nullify_finalize.verify(&self.namespace, polynomial) {
+                    assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }

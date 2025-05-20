@@ -1545,6 +1545,23 @@ pub enum Activity<V: Variant, D: Digest> {
     NullifyFinalize(NullifyFinalize<V, D>),
 }
 
+impl<V: Variant, D: Digest> Activity<V, D> {
+    /// Indicates whether the activity has been verified by consensus.
+    pub fn verified(&self) -> bool {
+        match self {
+            Activity::Notarize(_) => false,
+            Activity::Notarization(_) => true,
+            Activity::Nullify(_) => false,
+            Activity::Nullification(_) => true,
+            Activity::Finalize(_) => false,
+            Activity::Finalization(_) => true,
+            Activity::ConflictingNotarize(_) => false,
+            Activity::ConflictingFinalize(_) => false,
+            Activity::NullifyFinalize(_) => false,
+        }
+    }
+}
+
 impl<V: Variant, D: Digest> Write for Activity<V, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
