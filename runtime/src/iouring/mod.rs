@@ -1,8 +1,10 @@
+use std::time::Duration;
+
 use futures::{
     channel::{mpsc, oneshot},
     StreamExt as _,
 };
-use io_uring::{squeue::Entry as SqueueEntry, IoUring};
+use io_uring::{opcode::LinkTimeout, squeue::Entry as SqueueEntry, types::Timespec, IoUring};
 
 #[derive(Clone, Debug)]
 /// Configuration for an io_uring instance.
@@ -14,6 +16,8 @@ pub struct Config {
     pub iopoll: bool,
     /// If true, use single issuer mode.
     pub single_issuer: bool,
+    /// Timeout for operations.
+    pub timeout: Option<Duration>,
 }
 
 impl Default for Config {
@@ -22,6 +26,7 @@ impl Default for Config {
             size: 128,
             iopoll: false,
             single_issuer: true,
+            timeout: Some(Duration::from_secs(10)),
         }
     }
 }
@@ -98,11 +103,35 @@ pub(crate) async fn run(
             // We'll send the result of this operation to `sender`.
             waiters.insert(work_id, sender);
 
-            // Submit the operation to the ring
-            unsafe {
-                ring.submission()
-                    .push(&work)
-                    .expect("unable to push to queue");
+            // Submit the operation to the ring, with timeout if configured
+            if let Some(timeout) = &cfg.timeout {
+                // Set the IO_LINK flag on the original operation
+                work = work.flags(io_uring::squeue::Flags::IO_LINK);
+
+                unsafe {
+                    ring.submission()
+                        .push(&work)
+                        .expect("unable to push to queue");
+                }
+
+                // Create a timespec from our Duration
+                let ts = Timespec::new().sec(timeout.as_secs());
+
+                // Create a linked timeout operation using the same work_id
+                let timeout_op = LinkTimeout::new(&ts).build();
+
+                unsafe {
+                    ring.submission()
+                        .push(&timeout_op)
+                        .expect("unable to push timeout to queue");
+                }
+            } else {
+                // No timeout, submit the operation normally
+                unsafe {
+                    ring.submission()
+                        .push(&work)
+                        .expect("unable to push to queue");
+                }
             }
         }
 
