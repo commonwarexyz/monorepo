@@ -2996,7 +2996,7 @@ mod tests {
     fn test_batch_verifier_ready_and_verify_notarizes() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (poly_pub, shares) = generate_test_data(n_validators as usize, threshold, 125);
+        let (polynomial, shares) = generate_test_data(n_validators as usize, threshold, 125);
 
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
         let proposal = Proposal::new(1, 0, sample_digest(1));
@@ -3015,7 +3015,7 @@ mod tests {
         assert!(verifier.ready_notarizes()); // notarizes_force is true (Covered by test_ready_notarizes_behavior_with_force_flag)
         assert_eq!(verifier.notarizes.len(), 1);
 
-        let (verified_n, failed_n) = verifier.verify_notarizes(NAMESPACE, &poly_pub);
+        let (verified_n, failed_n) = verifier.verify_notarizes(NAMESPACE, &polynomial);
         assert_eq!(verified_n.len(), 1);
         assert!(failed_n.is_empty());
         assert_eq!(verifier.notarizes_verified, 1);
@@ -3031,7 +3031,7 @@ mod tests {
         assert!(verifier.ready_notarizes()); // (Covered by test_ready_notarizes_exact_quorum)
         assert_eq!(verifier.notarizes.len(), 3);
 
-        let (verified_n, failed_n) = verifier.verify_notarizes(NAMESPACE, &poly_pub);
+        let (verified_n, failed_n) = verifier.verify_notarizes(NAMESPACE, &polynomial);
         assert_eq!(verified_n.len(), 3);
         assert!(failed_n.is_empty());
         assert_eq!(verifier.notarizes_verified, 1 + 3); // 1 previous + 3 new
@@ -3059,7 +3059,7 @@ mod tests {
         verifier2.add(Voter::Notarize(faulty_notarize.clone()), false); // Add invalid notarize
         assert!(verifier2.ready_notarizes()); // Force is true
 
-        let (verified_n, failed_n) = verifier2.verify_notarizes(NAMESPACE, &poly_pub);
+        let (verified_n, failed_n) = verifier2.verify_notarizes(NAMESPACE, &polynomial);
         assert_eq!(verified_n.len(), 1); // Only leader's should verify
         assert!(verified_n.contains(&Voter::Notarize(leader_notarize)));
         assert_eq!(failed_n.len(), 1);
@@ -3090,7 +3090,7 @@ mod tests {
     fn test_batch_verifier_ready_and_verify_nullifies() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (poly_pub, shares) = generate_test_data(n_validators as usize, threshold, 128);
+        let (polynomial, shares) = generate_test_data(n_validators as usize, threshold, 128);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         let nullify_s0 = create_nullify(&shares[0], 1);
@@ -3111,7 +3111,7 @@ mod tests {
         assert!(verifier.ready_nullifies());
         assert_eq!(verifier.nullifies.len(), 3);
 
-        let (verified_null, failed_null) = verifier.verify_nullifies(NAMESPACE, &poly_pub);
+        let (verified_null, failed_null) = verifier.verify_nullifies(NAMESPACE, &polynomial);
         assert_eq!(verified_null.len(), 3);
         assert!(failed_null.is_empty());
         assert_eq!(verifier.nullifies_verified, 1 + 3);
@@ -3166,7 +3166,7 @@ mod tests {
     fn test_batch_verifier_ready_and_verify_finalizes() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (poly_pub, shares) = generate_test_data(n_validators as usize, threshold, 130);
+        let (polynomial, shares) = generate_test_data(n_validators as usize, threshold, 130);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
         let leader_proposal = Proposal::new(1, 0, sample_digest(1));
 
@@ -3201,7 +3201,7 @@ mod tests {
         verifier.add(Voter::Finalize(finalize_s3.clone()), false); // Verified: 1, Pending: 3. Total: 4 == 4
         assert!(verifier.ready_finalizes()); // (Covered by test_ready_finalizes_exact_quorum)
 
-        let (verified_fin, failed_fin) = verifier.verify_finalizes(NAMESPACE, &poly_pub);
+        let (verified_fin, failed_fin) = verifier.verify_finalizes(NAMESPACE, &polynomial);
         assert_eq!(verified_fin.len(), 3);
         assert!(failed_fin.is_empty());
         assert_eq!(verifier.finalizes_verified, 1 + 3);
@@ -3215,7 +3215,7 @@ mod tests {
     fn test_batch_verifier_quorum_none() {
         let n_validators = 3;
         let threshold = quorum(n_validators); // Not strictly used by BatchVerifier logic when quorum is None
-        let (poly_pub, shares) = generate_test_data(n_validators as usize, threshold, 200);
+        let (polynomial, shares) = generate_test_data(n_validators as usize, threshold, 200);
 
         // Test with Notarizes
         let mut verifier_n = BatchVerifier::<MinSig, Sha256>::new(None);
@@ -3227,7 +3227,7 @@ mod tests {
         verifier_n.add(Voter::Notarize(notarize1.clone()), false); // Sets leader proposal and notarizes_force
         assert!(verifier_n.ready_notarizes()); // notarizes_force is true, and notarizes is not empty
 
-        let (verified, failed) = verifier_n.verify_notarizes(NAMESPACE, &poly_pub);
+        let (verified, failed) = verifier_n.verify_notarizes(NAMESPACE, &polynomial);
         assert_eq!(verified.len(), 1);
         assert!(failed.is_empty());
         assert_eq!(verifier_n.notarizes_verified, 1);
@@ -3239,7 +3239,7 @@ mod tests {
         assert!(!verifier_null.ready_nullifies()); // List is empty
         verifier_null.add(Voter::Nullify(nullify1.clone()), false);
         assert!(verifier_null.ready_nullifies()); // List is not empty
-        let (verified, failed) = verifier_null.verify_nullifies(NAMESPACE, &poly_pub);
+        let (verified, failed) = verifier_null.verify_nullifies(NAMESPACE, &polynomial);
         assert_eq!(verified.len(), 1);
         assert!(failed.is_empty());
         assert_eq!(verifier_null.nullifies_verified, 1);
@@ -3253,7 +3253,7 @@ mod tests {
         verifier_f.set_leader_proposal(prop1.clone()); // Assume prop1 is the leader's proposal
         verifier_f.add(Voter::Finalize(finalize1.clone()), false);
         assert!(verifier_f.ready_finalizes()); // Leader/proposal set, list not empty
-        let (verified, failed) = verifier_f.verify_finalizes(NAMESPACE, &poly_pub);
+        let (verified, failed) = verifier_f.verify_finalizes(NAMESPACE, &polynomial);
         assert_eq!(verified.len(), 1);
         assert!(failed.is_empty());
         assert_eq!(verifier_f.finalizes_verified, 1);
@@ -3319,7 +3319,7 @@ mod tests {
     fn test_ready_notarizes_behavior_with_force_flag() {
         let n_validators = 3;
         let threshold = quorum(n_validators);
-        let (poly_pub, shares) = generate_test_data(n_validators as usize, threshold, 203);
+        let (polynomial, shares) = generate_test_data(n_validators as usize, threshold, 203);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         let leader_notarize = create_notarize(&shares[0], 1, 0, 1);
@@ -3339,7 +3339,7 @@ mod tests {
         );
 
         // Assume leader's own notarize is processed. Let's verify it.
-        let (verified, _) = verifier.verify_notarizes(NAMESPACE, &poly_pub);
+        let (verified, _) = verifier.verify_notarizes(NAMESPACE, &polynomial);
         assert_eq!(verified.len(), 1);
 
         assert!(
@@ -3423,14 +3423,14 @@ mod tests {
     fn test_verify_nullifies_empty_pending() {
         let n_validators = 3;
         let threshold = quorum(n_validators);
-        let (poly_pub, _) = generate_test_data(n_validators as usize, threshold, 207);
+        let (polynomial, _) = generate_test_data(n_validators as usize, threshold, 207);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         assert!(verifier.nullifies.is_empty());
         // ready_nullifies will be false if the list is empty and quorum is Some
         assert!(!verifier.ready_nullifies());
 
-        let (verified, failed) = verifier.verify_nullifies(NAMESPACE, &poly_pub);
+        let (verified, failed) = verifier.verify_nullifies(NAMESPACE, &polynomial);
         assert!(verified.is_empty());
         assert!(failed.is_empty());
         assert_eq!(verifier.nullifies_verified, 0);
@@ -3440,7 +3440,7 @@ mod tests {
     fn test_verify_finalizes_empty_pending() {
         let n_validators = 3;
         let threshold = quorum(n_validators);
-        let (poly_pub, shares) = generate_test_data(n_validators as usize, threshold, 208);
+        let (polynomial, shares) = generate_test_data(n_validators as usize, threshold, 208);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         // ready_finalizes will be false if the list is empty and quorum is Some
@@ -3448,7 +3448,7 @@ mod tests {
         assert!(verifier.finalizes.is_empty());
         assert!(!verifier.ready_finalizes());
 
-        let (verified, failed) = verifier.verify_finalizes(NAMESPACE, &poly_pub);
+        let (verified, failed) = verifier.verify_finalizes(NAMESPACE, &polynomial);
         assert!(verified.is_empty());
         assert!(failed.is_empty());
         assert_eq!(verifier.finalizes_verified, 0);
@@ -3458,7 +3458,7 @@ mod tests {
     fn test_ready_notarizes_exact_quorum() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (poly_pub, shares) = generate_test_data(n_validators as usize, threshold, 209);
+        let (polynomial, shares) = generate_test_data(n_validators as usize, threshold, 209);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         let leader_notarize = create_notarize(&shares[0], 1, 0, 1);
@@ -3471,7 +3471,7 @@ mod tests {
 
         // Perform forced verification
         assert!(verifier.ready_notarizes());
-        let (verified, failed) = verifier.verify_notarizes(NAMESPACE, &poly_pub);
+        let (verified, failed) = verifier.verify_notarizes(NAMESPACE, &polynomial);
         assert_eq!(verified.len(), 1);
         assert!(failed.is_empty());
         assert_eq!(verifier.notarizes_verified, 1 + 1);
