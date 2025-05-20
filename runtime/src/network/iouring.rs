@@ -243,8 +243,6 @@ impl crate::Stream for Stream {
 mod tests {
     use super::*;
     use crate::network::tests;
-    use crate::{Listener as _, Network as _, Sink as _, Stream as _};
-    use std::net::SocketAddr;
 
     #[tokio::test]
     async fn test_trait() {
