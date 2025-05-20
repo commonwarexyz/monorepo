@@ -123,8 +123,8 @@ impl<P: Array, V: Variant, D: Digest> Su for Supervisor<P, V, D> {
 
 impl<P: Array, V: Variant, D: Digest> TSu for Supervisor<P, V, D> {
     type Seed = V::Signature;
-    type Public = V::Public;
-    type Identity = poly::Public<V>;
+    type Identity = V::Public;
+    type Polynomial = poly::Public<V>;
     type Share = group::Share;
 
     fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<Self::PublicKey> {

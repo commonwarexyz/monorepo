@@ -85,9 +85,9 @@ pub enum Error {
     ContextHeight,
 
     // Epoch Errors
-    /// No identity is known for the specified epoch
-    #[error("Unknown identity at epoch {0}")]
-    UnknownIdentity(u64),
+    /// No polynomial is known for the specified epoch
+    #[error("Unknown polynomial at epoch {0}")]
+    UnknownPolynomial(u64),
     /// No validators are known for the specified epoch
     #[error("Unknown validators at epoch {0}")]
     UnknownValidators(u64),

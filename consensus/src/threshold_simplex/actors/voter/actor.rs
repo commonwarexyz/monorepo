@@ -58,7 +58,7 @@ struct Round<
         Index = View,
         Share = group::Share,
         PublicKey = C::PublicKey,
-        Public = V::Public,
+        Identity = V::Public,
     >,
 > {
     start: SystemTime,
@@ -110,7 +110,7 @@ impl<
             Index = View,
             Share = group::Share,
             PublicKey = C::PublicKey,
-            Public = V::Public,
+            Identity = V::Public,
         >,
     > Round<C, V, D, S>
 {
@@ -391,13 +391,13 @@ pub struct Actor<
     R: Relay,
     F: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<
-        Identity = poly::Public<V>,
+        Polynomial = poly::Public<V>,
         Seed = V::Signature,
         Index = View,
         Share = group::Share,
         PublicKey = C::PublicKey,
         // TOD: Improve the naming here
-        Public = V::Public,
+        Identity = V::Public,
     >,
 > {
     context: E,
@@ -447,12 +447,12 @@ impl<
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<V, D>>,
         S: ThresholdSupervisor<
-            Identity = poly::Public<V>,
+            Polynomial = poly::Public<V>,
             Seed = V::Signature,
             Index = View,
             Share = group::Share,
             PublicKey = C::PublicKey,
-            Public = V::Public,
+            Identity = V::Public,
         >,
     > Actor<E, C, B, V, D, A, R, F, S>
 {

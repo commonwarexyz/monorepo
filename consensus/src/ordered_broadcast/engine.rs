@@ -66,8 +66,8 @@ pub struct Engine<
         Index = Epoch,
         PublicKey = C::PublicKey,
         Share = group::Share,
-        Identity = poly::Public<V>,
-        Public = V::Public,
+        Polynomial = poly::Public<V>,
+        Identity = V::Public,
     >,
     NetS: Sender<PublicKey = C::PublicKey>,
     NetR: Receiver<PublicKey = C::PublicKey>,
@@ -214,8 +214,8 @@ impl<
             Index = Epoch,
             PublicKey = C::PublicKey,
             Share = group::Share,
-            Identity = poly::Public<V>,
-            Public = V::Public,
+            Polynomial = poly::Public<V>,
+            Identity = V::Public,
         >,
         NetS: Sender<PublicKey = C::PublicKey>,
         NetR: Receiver<PublicKey = C::PublicKey>,
@@ -584,10 +584,10 @@ impl<
     /// (e.g. already exists, threshold already exists, is outside the epoch bounds, etc.).
     async fn handle_ack(&mut self, ack: &Ack<C::PublicKey, V, D>) -> Result<(), Error> {
         // Get the quorum
-        let Some(identity) = self.validators.identity(ack.epoch) else {
-            return Err(Error::UnknownIdentity(ack.epoch));
+        let Some(polynomial) = self.validators.polynomial(ack.epoch) else {
+            return Err(Error::UnknownPolynomial(ack.epoch));
         };
-        let quorum = identity.required();
+        let quorum = polynomial.required();
 
         // Add the partial signature. If a new threshold is formed, handle it.
         if let Some(threshold) = self.ack_manager.add_ack(ack, quorum) {
@@ -843,7 +843,7 @@ impl<
         self.validate_chunk(&node.chunk, self.epoch)?;
 
         // Verify the signature
-        node.verify(&self.namespace, self.validators.public())
+        node.verify(&self.namespace, self.validators.identity())
             .map_err(|_| Error::InvalidNodeSignature)
     }
 
@@ -896,10 +896,10 @@ impl<
 
         // Validate partial signature
         // Optimization: If the ack already exists, don't verify
-        let Some(identity) = self.validators.identity(ack.epoch) else {
-            return Err(Error::UnknownIdentity(ack.epoch));
+        let Some(polynomial) = self.validators.polynomial(ack.epoch) else {
+            return Err(Error::UnknownPolynomial(ack.epoch));
         };
-        if !ack.verify(&self.namespace, identity) {
+        if !ack.verify(&self.namespace, polynomial) {
             return Err(Error::InvalidAckSignature);
         }
 

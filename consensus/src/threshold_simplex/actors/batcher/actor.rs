@@ -30,9 +30,9 @@ struct Round<
     R: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<
         Index = View,
-        Identity = poly::Public<V>,
+        Polynomial = poly::Public<V>,
         PublicKey = C::PublicKey,
-        Public = V::Public,
+        Identity = V::Public,
     >,
 > {
     view: View,
@@ -56,9 +56,9 @@ impl<
         R: Reporter<Activity = Activity<V, D>>,
         S: ThresholdSupervisor<
             Index = View,
-            Identity = poly::Public<V>,
+            Polynomial = poly::Public<V>,
             PublicKey = C::PublicKey,
-            Public = V::Public,
+            Identity = V::Public,
         >,
     > Round<C, B, V, D, R, S>
 {
@@ -306,9 +306,9 @@ pub struct Actor<
     R: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<
         Index = View,
-        Identity = poly::Public<V>,
+        Polynomial = poly::Public<V>,
         PublicKey = C::PublicKey,
-        Public = V::Public,
+        Identity = V::Public,
     >,
 > {
     context: E,
@@ -338,9 +338,9 @@ impl<
         R: Reporter<Activity = Activity<V, D>>,
         S: ThresholdSupervisor<
             Index = View,
-            Identity = poly::Public<V>,
+            Polynomial = poly::Public<V>,
             PublicKey = C::PublicKey,
-            Public = V::Public,
+            Identity = V::Public,
         >,
     > Actor<E, C, B, V, D, R, S>
 {
