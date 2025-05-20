@@ -305,6 +305,11 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
     ///
     /// `true` if [Voter::Notarize] messages should be verified, `false` otherwise.
     pub fn ready_notarizes(&self) -> bool {
+        // If there are no pending notarizes, there is nothing to do.
+        if self.notarizes.is_empty() {
+            return false;
+        }
+
         // If we have the leader's notarize, we should verify immediately to start
         // block verification.
         if self.notarizes_force {
@@ -316,6 +321,8 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
         if self.leader.is_none() || self.leader_proposal.is_none() {
             return false;
         }
+
+        // If we have a quorum, we need to check if we have enough verified and pending
         if let Some(quorum) = self.quorum {
             // If we have already performed sufficient verifications, there is nothing more
             // to do.
@@ -329,8 +336,8 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
             }
         }
 
-        // If we have nothing to verify, there is nothing to do.
-        !self.notarizes.is_empty()
+        // If there is no required quorum and we have pending notarizes, we should verify.
+        true
     }
 
     /// Verifies a batch of pending [Voter::Nullify] messages.
@@ -370,6 +377,11 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
     ///
     /// `true` if [Voter::Nullify] messages should be verified, `false` otherwise.
     pub fn ready_nullifies(&self) -> bool {
+        // If there are no pending nullifies, there is nothing to do.
+        if self.nullifies.is_empty() {
+            return false;
+        }
+
         if let Some(quorum) = self.quorum {
             // If we have already performed sufficient verifications, there is nothing more
             // to do.
@@ -383,8 +395,8 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
             }
         }
 
-        // If we have nothing to verify, there is nothing to do.
-        !self.nullifies.is_empty()
+        // If there is no required quorum and we have pending nullifies, we should verify.
+        true
     }
 
     /// Verifies a batch of pending [Voter::Finalize] messages.
@@ -425,6 +437,11 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
     ///
     /// `true` if [Voter::Finalize] messages should be verified, `false` otherwise.
     pub fn ready_finalizes(&self) -> bool {
+        // If there are no pending finalizes, there is nothing to do.
+        if self.finalizes.is_empty() {
+            return false;
+        }
+
         // If we don't yet know the leader, finalizers may contain messages for
         // a number of different proposals.
         if self.leader.is_none() || self.leader_proposal.is_none() {
@@ -443,8 +460,8 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
             }
         }
 
-        // If we have nothing to verify, there is nothing to do.
-        !self.finalizes.is_empty()
+        // If there is no required quorum and we have pending finalizes, we should verify.
+        true
     }
 }
 
@@ -2860,6 +2877,29 @@ mod tests {
         Finalize::<MinSig, _>::sign(NAMESPACE, share, proposal)
     }
 
+    // Helper to create a Notarization (for panic test)
+    fn create_notarization(
+        proposal_view: View,
+        parent_view: View,
+        payload_val: u8,
+        shares: &[Share],
+        threshold: u32,
+    ) -> Notarization<MinSig, Sha256> {
+        let proposal = Proposal::new(proposal_view, parent_view, sample_digest(payload_val));
+        let notarizes: Vec<_> = shares
+            .iter()
+            .take(threshold as usize)
+            .map(|s| Notarize::<MinSig, _>::sign(NAMESPACE, s, proposal.clone()))
+            .collect();
+        let proposal_partials = notarizes.iter().map(|n| &n.proposal_signature);
+        let proposal_signature =
+            threshold_signature_recover::<MinSig, _>(threshold, proposal_partials).unwrap();
+        let seed_partials = notarizes.iter().map(|n| &n.seed_signature);
+        let seed_signature =
+            threshold_signature_recover::<MinSig, _>(threshold, seed_partials).unwrap();
+        Notarization::new(proposal, proposal_signature, seed_signature)
+    }
+
     #[test]
     fn test_batch_verifier_add_notarize() {
         let n_validators = 5;
@@ -2966,13 +3006,13 @@ mod tests {
         let notarize_s2 = Notarize::<MinSig, _>::sign(NAMESPACE, &shares[2], proposal.clone());
         let notarize_s3 = Notarize::<MinSig, _>::sign(NAMESPACE, &shares[3], proposal.clone()); // Enough for quorum
 
-        // Not ready - no leader/proposal
-        assert!(!verifier.ready_notarizes());
+        // Not ready - no leader/proposal (This specific check is now in test_ready_notarizes_without_leader_or_proposal)
+        // assert!(!verifier.ready_notarizes());
 
         // Set leader and add leader's notarize
         verifier.set_leader(shares[0].index);
         verifier.add(Voter::Notarize(notarize_s0.clone()), false);
-        assert!(verifier.ready_notarizes()); // notarizes_force is true
+        assert!(verifier.ready_notarizes()); // notarizes_force is true (Covered by test_ready_notarizes_behavior_with_force_flag)
         assert_eq!(verifier.notarizes.len(), 1);
 
         let (verified_n, failed_n) = verifier.verify_notarizes(NAMESPACE, &poly_pub);
@@ -2980,7 +3020,7 @@ mod tests {
         assert!(failed_n.is_empty());
         assert_eq!(verifier.notarizes_verified, 1);
         assert!(verifier.notarizes.is_empty());
-        assert!(!verifier.notarizes_force); // Reset after verify
+        assert!(!verifier.notarizes_force); // Reset after verify (Covered by test_ready_notarizes_behavior_with_force_flag)
 
         // Not ready - not enough
         verifier.add(Voter::Notarize(notarize_s1.clone()), false); // Verified: 1, Pending: 1. Total: 2 < 4
@@ -2988,7 +3028,7 @@ mod tests {
         verifier.add(Voter::Notarize(notarize_s2.clone()), false); // Verified: 1, Pending: 2. Total: 3 < 4
         assert!(!verifier.ready_notarizes());
         verifier.add(Voter::Notarize(notarize_s3.clone()), false); // Verified: 1, Pending: 3. Total: 4 == 4
-        assert!(verifier.ready_notarizes());
+        assert!(verifier.ready_notarizes()); // (Covered by test_ready_notarizes_exact_quorum)
         assert_eq!(verifier.notarizes.len(), 3);
 
         let (verified_n, failed_n) = verifier.verify_notarizes(NAMESPACE, &poly_pub);
@@ -2997,25 +3037,31 @@ mod tests {
         assert_eq!(verifier.notarizes_verified, 1 + 3); // 1 previous + 3 new
         assert!(verifier.notarizes.is_empty());
 
-        // Not ready - quorum met by verified
-        assert!(!verifier.ready_notarizes()); // notarizes_verified (4) >= quorum (4)
+        // Not ready - quorum met by verified (Covered by test_ready_notarizes_quorum_already_met_by_verified)
+        assert!(!verifier.ready_notarizes());
 
-        // Scenario 4: Verification with a faulty signature
+        // Scenario: Verification with a faulty signature
         let mut verifier2 = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
-        verifier2.set_leader(shares[0].index);
-        verifier2.add(Voter::Notarize(notarize_s0.clone()), false); // Valid
-        let mut faulty_notarize = notarize_s1.clone();
-        // Corrupt a signature (e.g. by signing with a different share for the same index, or just mangle bytes - here using a different share for simplicity)
-        let (_, other_shares) = generate_test_data(n_validators as usize, threshold, 126);
-        faulty_notarize.proposal_signature =
-            Notarize::<MinSig, _>::sign(NAMESPACE, &other_shares[1], proposal.clone())
-                .proposal_signature;
+        verifier2.set_leader(shares[0].index); // Set leader
+        let leader_notarize = create_notarize(&shares[0], 2, 1, 10);
+        verifier2.add(Voter::Notarize(leader_notarize.clone()), false); // Add leader's notarize
 
-        verifier2.add(Voter::Notarize(faulty_notarize.clone()), false); // Invalid
-        assert!(verifier2.ready_notarizes()); // Force is true after leader set and added their proposal
+        let mut faulty_notarize = create_notarize(&shares[1], 2, 1, 10); // Same proposal as leader
+                                                                         // Corrupt a signature
+        let (_, other_shares) = generate_test_data(n_validators as usize, threshold, 126);
+        faulty_notarize.proposal_signature = Notarize::<MinSig, _>::sign(
+            NAMESPACE,
+            &other_shares[1],
+            faulty_notarize.proposal.clone(),
+        ) // Sign with a "wrong" share for that index
+        .proposal_signature;
+
+        verifier2.add(Voter::Notarize(faulty_notarize.clone()), false); // Add invalid notarize
+        assert!(verifier2.ready_notarizes()); // Force is true
 
         let (verified_n, failed_n) = verifier2.verify_notarizes(NAMESPACE, &poly_pub);
-        assert_eq!(verified_n.len(), 1); // Only s0's should verify
+        assert_eq!(verified_n.len(), 1); // Only leader's should verify
+        assert!(verified_n.contains(&Voter::Notarize(leader_notarize)));
         assert_eq!(failed_n.len(), 1);
         assert_eq!(failed_n[0], shares[1].index); // s1's should fail
     }
@@ -3071,7 +3117,7 @@ mod tests {
         assert_eq!(verifier.nullifies_verified, 1 + 3);
         assert!(verifier.nullifies.is_empty());
 
-        // Not ready, quorum met by verified
+        // Not ready, quorum met by verified (Covered by test_ready_nullifies_quorum_already_met_by_verified)
         assert!(!verifier.ready_nullifies());
     }
 
@@ -3082,37 +3128,37 @@ mod tests {
         let (_, shares) = generate_test_data(n_validators as usize, threshold, 129);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
-        let finalize_s0 = create_finalize(&shares[0], 1, 0, 1);
-        let finalize_s1_diff_prop = create_finalize(&shares[1], 1, 0, 2);
+        let finalize_s0_prop_a = create_finalize(&shares[0], 1, 0, 1); // Proposal A
+        let finalize_s1_prop_b = create_finalize(&shares[1], 1, 0, 2); // Proposal B
 
-        // Add finalize_s1_diff_prop (unverified)
-        verifier.add(Voter::Finalize(finalize_s1_diff_prop.clone()), false);
+        // Add finalize_s1_propB (unverified) - No leader proposal yet, so it's added
+        verifier.add(Voter::Finalize(finalize_s1_prop_b.clone()), false);
         assert_eq!(verifier.finalizes.len(), 1);
-
-        // Add finalize that matches leader proposal
-        verifier.add(Voter::Finalize(finalize_s0.clone()), false);
-        assert_eq!(verifier.finalizes.len(), 2);
         assert_eq!(verifier.finalizes_verified, 0);
 
-        // Set leader proposal (no notarizes, so won't be set and nothing dropped)
+        // Add finalize_s0_prop_a (unverified)
+        verifier.add(Voter::Finalize(finalize_s0_prop_a.clone()), false);
+        assert_eq!(verifier.finalizes.len(), 2); // Both are present
+
+        // Set leader and leader proposal to Proposal A
+        // This specific call to set_leader won't set leader_proposal because no notarize from leader exists.
         verifier.set_leader(shares[0].index);
         assert!(verifier.leader_proposal.is_none());
-        assert_eq!(verifier.finalizes.len(), 2);
+        // Manually set leader_proposal for finalize_s0_propA
+        verifier.set_leader_proposal(finalize_s0_prop_a.proposal.clone());
+        // Now, finalize_s1_propB should have been removed.
+        assert_eq!(verifier.finalizes.len(), 1);
+        assert_eq!(verifier.finalizes[0], finalize_s0_prop_a);
         assert_eq!(verifier.finalizes_verified, 0);
 
-        // Manually set leader_proposal
-        verifier.set_leader_proposal(finalize_s0.proposal.clone());
-        assert_eq!(verifier.finalizes.len(), 1);
-        assert_eq!(verifier.finalizes_verified, 0);
+        // Add finalize_s0_propA (verified)
+        verifier.add(Voter::Finalize(finalize_s0_prop_a.clone()), true);
+        assert_eq!(verifier.finalizes.len(), 1); // Still finalize_s0_propA
+        assert_eq!(verifier.finalizes_verified, 1); // Verified count increased
 
-        // Add finalize that matches leader proposal (verified)
-        verifier.add(Voter::Finalize(finalize_s0.clone()), true);
-        assert_eq!(verifier.finalizes.len(), 1);
-        assert_eq!(verifier.finalizes_verified, 1);
-
-        // Add finalize that does not match leader proposal (unverified)
-        verifier.add(Voter::Finalize(finalize_s1_diff_prop.clone()), false);
-        assert_eq!(verifier.finalizes.len(), 1);
+        // Add finalize_s1_propB (unverified) - should be dropped as it doesn't match leader proposal
+        verifier.add(Voter::Finalize(finalize_s1_prop_b.clone()), false);
+        assert_eq!(verifier.finalizes.len(), 1); // Should still be 1 (finalize_s0_propA)
         assert_eq!(verifier.finalizes_verified, 1);
     }
 
@@ -3133,34 +3179,424 @@ mod tests {
         let finalize_s3 =
             Finalize::<MinSig, _>::sign(NAMESPACE, &shares[3], leader_proposal.clone());
 
-        // Not ready - no leader/proposal set
-        assert!(!verifier.ready_finalizes());
-        verifier.add(Voter::Finalize(finalize_s0.clone()), true); // Won't be added without leader_proposal
-        assert_eq!(verifier.finalizes.len(), 0);
+        // Not ready - no leader/proposal set (Covered by test_ready_finalizes_without_leader_or_proposal)
+        // verifier.add(Voter::Finalize(finalize_s0.clone()), false);
+        // assert!(!verifier.ready_finalizes());
+        // verifier.finalizes.clear(); // Clear for next steps
 
         // Set leader and leader proposal
-        verifier.set_leader(shares[0].index);
+        verifier.set_leader(shares[0].index); // Leader is s0
+                                              // Manually set leader proposal, as set_leader won't do it without a notarize from leader.
         verifier.set_leader_proposal(leader_proposal.clone());
 
         // Add some (verified and unverified)
-        verifier.add(Voter::Finalize(finalize_s1.clone()), true); // Verified: 1
-        assert_eq!(verifier.finalizes_verified, 2);
-        assert_eq!(verifier.finalizes.len(), 0); // Verified ones don't go to vec
+        verifier.add(Voter::Finalize(finalize_s0.clone()), true); // Verified: 1
+        assert_eq!(verifier.finalizes_verified, 1);
+        assert_eq!(verifier.finalizes.len(), 0);
 
-        verifier.add(Voter::Finalize(finalize_s2.clone()), false); // Verified: 1, Pending: 1. Total: 3 < 4
+        verifier.add(Voter::Finalize(finalize_s1.clone()), false); // Verified: 1, Pending: 1. Total: 2 < 4
+        assert!(!verifier.ready_finalizes());
+        verifier.add(Voter::Finalize(finalize_s2.clone()), false); // Verified: 1, Pending: 2. Total: 3 < 4
         assert!(!verifier.ready_finalizes());
 
         // Ready for finalizes
-        verifier.add(Voter::Finalize(finalize_s3.clone()), false); // Verified: 1, Pending: 2. Total: 4 == 4
-        assert!(verifier.ready_finalizes());
+        verifier.add(Voter::Finalize(finalize_s3.clone()), false); // Verified: 1, Pending: 3. Total: 4 == 4
+        assert!(verifier.ready_finalizes()); // (Covered by test_ready_finalizes_exact_quorum)
 
         let (verified_fin, failed_fin) = verifier.verify_finalizes(NAMESPACE, &poly_pub);
-        assert_eq!(verified_fin.len(), 2);
+        assert_eq!(verified_fin.len(), 3);
         assert!(failed_fin.is_empty());
         assert_eq!(verifier.finalizes_verified, 1 + 3);
         assert!(verifier.finalizes.is_empty());
 
-        // Not ready, quorum met
+        // Not ready, quorum met (Covered by test_ready_finalizes_quorum_already_met_by_verified)
+        assert!(!verifier.ready_finalizes());
+    }
+
+    #[test]
+    fn test_batch_verifier_quorum_none() {
+        let n_validators = 3;
+        let threshold = quorum(n_validators); // Not strictly used by BatchVerifier logic when quorum is None
+        let (poly_pub, shares) = generate_test_data(n_validators as usize, threshold, 200);
+
+        // Test with Notarizes
+        let mut verifier_n = BatchVerifier::<MinSig, Sha256>::new(None);
+        let prop1 = Proposal::new(1, 0, sample_digest(1));
+        let notarize1 = create_notarize(&shares[0], 1, 0, 1);
+
+        assert!(!verifier_n.ready_notarizes()); // No leader/proposal
+        verifier_n.set_leader(shares[0].index);
+        verifier_n.add(Voter::Notarize(notarize1.clone()), false); // Sets leader proposal and notarizes_force
+        assert!(verifier_n.ready_notarizes()); // notarizes_force is true, and notarizes is not empty
+
+        let (verified, failed) = verifier_n.verify_notarizes(NAMESPACE, &poly_pub);
+        assert_eq!(verified.len(), 1);
+        assert!(failed.is_empty());
+        assert_eq!(verifier_n.notarizes_verified, 1);
+        assert!(!verifier_n.ready_notarizes()); // notarizes_force is false, list is empty
+
+        // Test with Nullifies
+        let mut verifier_null = BatchVerifier::<MinSig, Sha256>::new(None);
+        let nullify1 = create_nullify(&shares[0], 1);
+        assert!(!verifier_null.ready_nullifies()); // List is empty
+        verifier_null.add(Voter::Nullify(nullify1.clone()), false);
+        assert!(verifier_null.ready_nullifies()); // List is not empty
+        let (verified, failed) = verifier_null.verify_nullifies(NAMESPACE, &poly_pub);
+        assert_eq!(verified.len(), 1);
+        assert!(failed.is_empty());
+        assert_eq!(verifier_null.nullifies_verified, 1);
+        assert!(!verifier_null.ready_nullifies()); // List is empty
+
+        // Test with Finalizes
+        let mut verifier_f = BatchVerifier::<MinSig, Sha256>::new(None);
+        let finalize1 = create_finalize(&shares[0], 1, 0, 1);
+        assert!(!verifier_f.ready_finalizes()); // No leader/proposal
+        verifier_f.set_leader(shares[0].index);
+        verifier_f.set_leader_proposal(prop1.clone()); // Assume prop1 is the leader's proposal
+        verifier_f.add(Voter::Finalize(finalize1.clone()), false);
+        assert!(verifier_f.ready_finalizes()); // Leader/proposal set, list not empty
+        let (verified, failed) = verifier_f.verify_finalizes(NAMESPACE, &poly_pub);
+        assert_eq!(verified.len(), 1);
+        assert!(failed.is_empty());
+        assert_eq!(verifier_f.finalizes_verified, 1);
+        assert!(!verifier_f.ready_finalizes()); // List is empty
+    }
+
+    #[test]
+    fn test_batch_verifier_leader_proposal_filters_messages() {
+        let n_validators = 3;
+        let threshold = quorum(n_validators);
+        let (_, shares) = generate_test_data(n_validators as usize, threshold, 201);
+        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+
+        let proposal_a = Proposal::new(1, 0, sample_digest(10));
+        let proposal_b = Proposal::new(1, 0, sample_digest(20));
+
+        let notarize_a_s0 = Notarize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal_a.clone());
+        let notarize_b_s1 = Notarize::<MinSig, _>::sign(NAMESPACE, &shares[1], proposal_b.clone());
+        let finalize_a_s0 = Finalize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal_a.clone());
+        let finalize_b_s1 = Finalize::<MinSig, _>::sign(NAMESPACE, &shares[1], proposal_b.clone());
+
+        verifier.add(Voter::Notarize(notarize_a_s0.clone()), false);
+        verifier.add(Voter::Notarize(notarize_b_s1.clone()), false);
+        verifier.add(Voter::Finalize(finalize_a_s0.clone()), false);
+        verifier.add(Voter::Finalize(finalize_b_s1.clone()), false);
+
+        assert_eq!(verifier.notarizes.len(), 2);
+        assert_eq!(verifier.finalizes.len(), 2);
+
+        // Set leader proposal to proposal_A
+        // To make set_leader_proposal get called from set_leader, a notarize from the leader must exist.
+        // Or, call it directly.
+        verifier.set_leader_proposal(proposal_a.clone());
+
+        assert!(verifier.notarizes_force);
+        assert_eq!(verifier.notarizes.len(), 1);
+        assert_eq!(verifier.notarizes[0].proposal, proposal_a);
+        assert_eq!(verifier.finalizes.len(), 1);
+        assert_eq!(verifier.finalizes[0].proposal, proposal_a);
+    }
+
+    #[test]
+    #[should_panic(expected = "self.leader.is_none()")]
+    fn test_batch_verifier_set_leader_twice_panics() {
+        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(3));
+        verifier.set_leader(0);
+        verifier.set_leader(1); // This should panic
+    }
+
+    #[test]
+    #[should_panic(expected = "should not be adding recovered messages to partial verifier")]
+    fn test_batch_verifier_add_recovered_message_panics() {
+        let n_validators = 3;
+        let threshold = quorum(n_validators);
+        let (_, shares) = generate_test_data(n_validators as usize, threshold, 202);
+        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+
+        let notarization = create_notarization(1, 0, 1, &shares, threshold);
+        verifier.add(Voter::Notarization(notarization), false); // This should panic
+    }
+
+    #[test]
+    fn test_ready_notarizes_behavior_with_force_flag() {
+        let n_validators = 3;
+        let threshold = quorum(n_validators);
+        let (poly_pub, shares) = generate_test_data(n_validators as usize, threshold, 203);
+        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+
+        let leader_notarize = create_notarize(&shares[0], 1, 0, 1);
+
+        // Set leader and add leader's notarize
+        verifier.set_leader(shares[0].index);
+        // Manually add leader's notarize for it to pick up leader_proposal
+        verifier.add(Voter::Notarize(leader_notarize.clone()), false);
+
+        assert!(
+            verifier.notarizes_force,
+            "notarizes_force should be true after leader's proposal is set"
+        );
+        assert!(
+            verifier.ready_notarizes(),
+            "Ready should be true when notarizes_force is true"
+        );
+
+        // Assume leader's own notarize is processed. Let's verify it.
+        let (verified, _) = verifier.verify_notarizes(NAMESPACE, &poly_pub);
+        assert_eq!(verified.len(), 1);
+
+        assert!(
+            !verifier.notarizes_force,
+            "notarizes_force should be false after verification"
+        );
+        assert!(
+            !verifier.ready_notarizes(),
+            "Ready should be false now (no pending, quorum not met by verified alone)"
+        );
+    }
+
+    #[test]
+    fn test_ready_notarizes_without_leader_or_proposal() {
+        let n_validators = 3;
+        let threshold = quorum(n_validators);
+        let (_, shares) = generate_test_data(n_validators as usize, threshold, 204);
+        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+
+        for i in 0..threshold {
+            verifier.add(
+                Voter::Notarize(create_notarize(&shares[i as usize], 1, 0, 1)),
+                false,
+            );
+        }
+
+        assert!(
+            !verifier.ready_notarizes(),
+            "Should not be ready without leader/proposal set"
+        );
+
+        // Set only leader, still not ready
+        verifier.set_leader(shares[0].index);
+        assert!(
+            !verifier.ready_notarizes(),
+            "Should not be ready without leader_proposal set"
+        );
+    }
+
+    #[test]
+    fn test_ready_finalizes_without_leader_or_proposal() {
+        let n_validators = 3;
+        let threshold = quorum(n_validators);
+        let (_, shares) = generate_test_data(n_validators as usize, threshold, 205);
+        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+
+        for i in 0..threshold {
+            verifier.add(
+                Voter::Finalize(create_finalize(&shares[i as usize], 1, 0, 1)),
+                false,
+            );
+        }
+        assert!(
+            !verifier.ready_finalizes(),
+            "Should not be ready without leader/proposal set"
+        );
+
+        // Set only leader, still not ready
+        verifier.set_leader(shares[0].index);
+        assert!(
+            !verifier.ready_finalizes(),
+            "Should not be ready without leader_proposal set"
+        );
+    }
+
+    #[test]
+    fn test_verify_notarizes_empty_pending_when_forced() {
+        let n_validators = 3;
+        let threshold = quorum(n_validators);
+        let (poly_pub, _) = generate_test_data(n_validators as usize, threshold, 206);
+        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+
+        let leader_proposal = Proposal::new(1, 0, sample_digest(1));
+        verifier.set_leader_proposal(leader_proposal); // This sets notarizes_force = true
+
+        assert!(verifier.notarizes_force);
+        assert!(verifier.notarizes.is_empty());
+        // ready_notarizes will be true because notarizes_force is true, even if list is empty
+        assert!(verifier.ready_notarizes());
+
+        let (verified, failed) = verifier.verify_notarizes(NAMESPACE, &poly_pub);
+        assert!(verified.is_empty());
+        assert!(failed.is_empty());
+        assert_eq!(verifier.notarizes_verified, 0);
+        assert!(!verifier.notarizes_force); // Should be reset
+    }
+
+    #[test]
+    fn test_verify_nullifies_empty_pending() {
+        let n_validators = 3;
+        let threshold = quorum(n_validators);
+        let (poly_pub, _) = generate_test_data(n_validators as usize, threshold, 207);
+        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+
+        assert!(verifier.nullifies.is_empty());
+        // ready_nullifies will be false if the list is empty and quorum is Some
+        assert!(!verifier.ready_nullifies());
+
+        let (verified, failed) = verifier.verify_nullifies(NAMESPACE, &poly_pub);
+        assert!(verified.is_empty());
+        assert!(failed.is_empty());
+        assert_eq!(verifier.nullifies_verified, 0);
+    }
+
+    #[test]
+    fn test_verify_finalizes_empty_pending() {
+        let n_validators = 3;
+        let threshold = quorum(n_validators);
+        let (poly_pub, shares) = generate_test_data(n_validators as usize, threshold, 208);
+        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+
+        let leader_proposal = Proposal::new(1, 0, sample_digest(1));
+        verifier.set_leader(shares[0].index);
+        verifier.set_leader_proposal(leader_proposal.clone());
+
+        assert!(verifier.finalizes.is_empty());
+        // ready_finalizes will be false if the list is empty and quorum is Some
+        assert!(!verifier.ready_finalizes());
+
+        let (verified, failed) = verifier.verify_finalizes(NAMESPACE, &poly_pub);
+        assert!(verified.is_empty());
+        assert!(failed.is_empty());
+        assert_eq!(verifier.finalizes_verified, 0);
+    }
+
+    #[test]
+    fn test_ready_notarizes_exact_quorum() {
+        let n_validators = 5;
+        let threshold = quorum(n_validators); // threshold = 4
+        let (_, shares) = generate_test_data(n_validators as usize, threshold, 209);
+        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+
+        let leader_notarize = create_notarize(&shares[0], 1, 0, 1);
+        verifier.set_leader(shares[0].index);
+        verifier.add(Voter::Notarize(leader_notarize), true); // 1 verified
+        assert_eq!(verifier.notarizes_verified, 1);
+
+        // Add threshold - 1 pending notarizes
+        for i in 1..(threshold as usize) {
+            assert!(!verifier.ready_notarizes());
+            verifier.add(Voter::Notarize(create_notarize(&shares[i], 1, 0, 1)), false);
+        }
+        // Now, notarizes_verified = 1, notarizes.len() = 3. Total = 4 == threshold
+        assert!(verifier.ready_notarizes());
+    }
+
+    #[test]
+    fn test_ready_nullifies_exact_quorum() {
+        let n_validators = 5;
+        let threshold = quorum(n_validators); // threshold = 4
+        let (_, shares) = generate_test_data(n_validators as usize, threshold, 210);
+        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+
+        verifier.add(Voter::Nullify(create_nullify(&shares[0], 1)), true); // 1 verified
+        assert_eq!(verifier.nullifies_verified, 1);
+
+        for i in 1..(threshold as usize) {
+            assert!(!verifier.ready_nullifies());
+            verifier.add(Voter::Nullify(create_nullify(&shares[i], 1)), false);
+        }
+        assert!(verifier.ready_nullifies());
+    }
+
+    #[test]
+    fn test_ready_finalizes_exact_quorum() {
+        let n_validators = 5;
+        let threshold = quorum(n_validators); // threshold = 4
+        let (_, shares) = generate_test_data(n_validators as usize, threshold, 211);
+        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+
+        let leader_proposal = Proposal::new(1, 0, sample_digest(1));
+        verifier.set_leader(shares[0].index);
+        verifier.set_leader_proposal(leader_proposal.clone());
+
+        verifier.add(Voter::Finalize(create_finalize(&shares[0], 1, 0, 1)), true); // 1 verified
+        assert_eq!(verifier.finalizes_verified, 1);
+
+        for i in 1..(threshold as usize) {
+            assert!(!verifier.ready_finalizes());
+            verifier.add(Voter::Finalize(create_finalize(&shares[i], 1, 0, 1)), false);
+        }
+        assert!(verifier.ready_finalizes());
+    }
+
+    #[test]
+    fn test_ready_notarizes_quorum_already_met_by_verified() {
+        let n_validators = 5;
+        let threshold = quorum(n_validators); // threshold = 4
+        let (_, shares) = generate_test_data(n_validators as usize, threshold, 212);
+        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+
+        let leader_notarize = create_notarize(&shares[0], 1, 0, 1);
+        verifier.set_leader(shares[0].index);
+        verifier.add(Voter::Notarize(leader_notarize), false); // This sets leader_proposal and notarizes_force
+                                                               // Manually set notarizes_force to false as if verify_notarizes was called.
+        verifier.notarizes_force = false;
+
+        for i in 0..(threshold as usize) {
+            verifier.add(Voter::Notarize(create_notarize(&shares[i], 1, 0, 1)), true);
+        }
+        assert_eq!(verifier.notarizes_verified as u32, threshold);
+        assert!(
+            !verifier.ready_notarizes(),
+            "Should not be ready if quorum already met by verified messages"
+        );
+
+        // Add one more pending, still should not be ready
+        verifier.add(
+            Voter::Notarize(create_notarize(&shares[threshold as usize], 1, 0, 1)),
+            false,
+        );
+        assert!(!verifier.ready_notarizes());
+    }
+
+    #[test]
+    fn test_ready_nullifies_quorum_already_met_by_verified() {
+        let n_validators = 5;
+        let threshold = quorum(n_validators); // threshold = 4
+        let (_, shares) = generate_test_data(n_validators as usize, threshold, 213);
+        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+
+        for i in 0..(threshold as usize) {
+            verifier.add(Voter::Nullify(create_nullify(&shares[i], 1)), true);
+        }
+        assert_eq!(verifier.nullifies_verified as u32, threshold);
+        assert!(!verifier.ready_nullifies());
+
+        verifier.add(
+            Voter::Nullify(create_nullify(&shares[threshold as usize], 1)),
+            false,
+        );
+        assert!(!verifier.ready_nullifies());
+    }
+
+    #[test]
+    fn test_ready_finalizes_quorum_already_met_by_verified() {
+        let n_validators = 5;
+        let threshold = quorum(n_validators); // threshold = 4
+        let (_, shares) = generate_test_data(n_validators as usize, threshold, 214);
+        let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
+
+        let leader_proposal = Proposal::new(1, 0, sample_digest(1));
+        verifier.set_leader(shares[0].index);
+        verifier.set_leader_proposal(leader_proposal.clone());
+
+        for i in 0..(threshold as usize) {
+            verifier.add(Voter::Finalize(create_finalize(&shares[i], 1, 0, 1)), true);
+        }
+        assert_eq!(verifier.finalizes_verified as u32, threshold);
+        assert!(!verifier.ready_finalizes());
+
+        verifier.add(
+            Voter::Finalize(create_finalize(&shares[threshold as usize], 1, 0, 1)),
+            false,
+        );
         assert!(!verifier.ready_finalizes());
     }
 }
