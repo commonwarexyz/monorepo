@@ -30,9 +30,9 @@ impl Buckets {
     ///
     /// These operations are expected to be fast and not require network access, but might
     /// require expensive computation.
-    pub const CRYPTOGRAPHY: [f64; 18] = [
-        3e-6, 1e-5, 3e-5, 1e-4, 3e-4, 0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 5.0, 10.0,
-        15.0, 30.0, 60.0,
+    pub const CRYPTOGRAPHY: [f64; 16] = [
+        3e-6, 1e-5, 3e-5, 1e-4, 3e-4, 0.001, 0.002, 0.003, 0.005, 0.01, 0.015, 0.02, 0.025, 0.03,
+        0.1, 0.2,
     ];
 }
 
