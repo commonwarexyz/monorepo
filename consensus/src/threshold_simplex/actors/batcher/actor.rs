@@ -15,11 +15,14 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver};
-use commonware_runtime::{Handle, Metrics, Spawner};
+use commonware_runtime::{
+    telemetry::metrics::histogram::{self, Buckets},
+    Clock, Handle, Metrics, Spawner,
+};
 use commonware_utils::quorum;
-use futures::{channel::mpsc, executor::block_on, StreamExt};
+use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
-use std::{collections::BTreeMap, marker::PhantomData};
+use std::{collections::BTreeMap, marker::PhantomData, sync::Arc};
 use tracing::{trace, warn};
 
 struct Round<
@@ -298,7 +301,7 @@ fn interesting(activity_timeout: View, last_finalized: View, current: View, view
 }
 
 pub struct Actor<
-    E: Spawner + Metrics,
+    E: Spawner + Metrics + Clock,
     C: Verifier,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
@@ -325,12 +328,13 @@ pub struct Actor<
     added: Counter,
     verified: Counter,
     batch_size: Histogram,
+    verify_latency: histogram::Timed<E>,
 
     _phantom: PhantomData<C>,
 }
 
 impl<
-        E: Spawner + Metrics,
+        E: Spawner + Metrics + Clock,
         C: Verifier,
         B: Blocker<PublicKey = C::PublicKey>,
         V: Variant,
@@ -360,10 +364,16 @@ impl<
             "number of messages in a partial signature verification batch",
             batch_size.clone(),
         );
+        let verify_latency = Histogram::new(Buckets::CRYPTOGRAPHY.into_iter());
+        context.register(
+            "verify_latency",
+            "latency of partial signature verification",
+            verify_latency.clone(),
+        );
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         (
             Self {
-                context,
+                context: context.clone(),
                 blocker: cfg.blocker,
                 reporter: cfg.reporter,
                 supervisor: cfg.supervisor,
@@ -377,6 +387,7 @@ impl<
                 added,
                 verified,
                 batch_size,
+                verify_latency: histogram::Timed::new(verify_latency, Arc::new(context)),
 
                 _phantom: PhantomData,
             },
@@ -389,11 +400,7 @@ impl<
         consensus: voter::Mailbox<V, D>,
         receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) -> Handle<()> {
-        self.context.spawn_blocking_ref(false)(|| {
-            block_on(async move {
-                self.run(consensus, receiver).await;
-            })
-        })
+        self.context.spawn_ref()(self.run(consensus, receiver))
     }
 
     pub async fn run(
@@ -506,6 +513,7 @@ impl<
             }
 
             // Look for a ready verifier (prioritizing the current view)
+            let mut timer = self.verify_latency.timer();
             let mut selected = None;
             if let Some(verifier) = work.get_mut(&current) {
                 if verifier.ready_notarizes() {
@@ -545,6 +553,7 @@ impl<
             self.verified.inc_by(batch as u64);
             self.batch_size.observe(batch as f64);
             consensus.verified(voters).await;
+            timer.observe();
 
             // Block invalid signers
             if !failed.is_empty() {

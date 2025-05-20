@@ -23,19 +23,21 @@ use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
     Blocker, Receiver, Recipients, Sender,
 };
-use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
+use commonware_runtime::{
+    telemetry::metrics::histogram::{self, Buckets},
+    Clock, Handle, Metrics, Spawner, Storage,
+};
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
 use commonware_utils::quorum;
 use core::panic;
 use futures::{
     channel::{mpsc, oneshot},
-    executor::block_on,
     future::Either,
     pin_mut, StreamExt,
 };
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge, histogram::Histogram};
 use rand::Rng;
-use std::sync::atomic::AtomicI64;
+use std::sync::{atomic::AtomicI64, Arc};
 use std::{
     collections::BTreeMap,
     time::{Duration, SystemTime},
@@ -55,6 +57,7 @@ enum Action {
 }
 
 struct Round<
+    E: Clock,
     C: Scheme,
     V: Variant,
     D: Digest,
@@ -104,9 +107,12 @@ struct Round<
     finalization: Option<Finalization<V, D>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
+
+    recover_latency: histogram::Timed<E>,
 }
 
 impl<
+        E: Clock,
         C: Scheme,
         V: Variant,
         D: Digest,
@@ -117,13 +123,18 @@ impl<
             PublicKey = C::PublicKey,
             Identity = V::Public,
         >,
-    > Round<C, V, D, S>
+    > Round<E, C, V, D, S>
 {
-    pub fn new(clock: &impl Clock, supervisor: S, view: View) -> Self {
+    pub fn new(
+        context: &E,
+        supervisor: S,
+        recover_latency: histogram::Timed<E>,
+        view: View,
+    ) -> Self {
         let participants = supervisor.participants(view).unwrap().len();
         let quorum = quorum(participants as u32);
         Self {
-            start: clock.current(),
+            start: context.current(),
             supervisor,
 
             view,
@@ -155,6 +166,8 @@ impl<
             finalization: None,
             broadcast_finalize: false,
             broadcast_finalization: false,
+
+            recover_latency,
         }
     }
 
@@ -268,6 +281,7 @@ impl<
         );
 
         // Recover threshold signature
+        let mut timer = self.recover_latency.timer();
         let (proposals, seeds): (Vec<_>, Vec<_>) = self
             .notarizes
             .iter()
@@ -276,6 +290,7 @@ impl<
         let (proposal_signature, seed_signature) =
             threshold_signature_recover_pair::<V, _>(threshold, proposals, seeds)
                 .expect("failed to recover threshold signature");
+        timer.observe();
 
         // Construct notarization
         let notarization = Notarization::new(proposal, proposal_signature, seed_signature);
@@ -302,6 +317,7 @@ impl<
         debug!(view = self.view, "broadcasting nullification");
 
         // Recover threshold signature
+        let mut timer = self.recover_latency.timer();
         let (views, seeds): (Vec<_>, Vec<_>) = self
             .nullifies
             .iter()
@@ -310,6 +326,7 @@ impl<
         let (view_signature, seed_signature) =
             threshold_signature_recover_pair::<V, _>(threshold, views, seeds)
                 .expect("failed to recover threshold signature");
+        timer.observe();
 
         // Construct nullification
         let nullification = Nullification::new(self.view, view_signature, seed_signature);
@@ -366,8 +383,10 @@ impl<
             .map(|finalize| &finalize.proposal_signature);
 
         // Recover threshold signature
+        let mut timer = self.recover_latency.timer();
         let proposal_signature = threshold_signature_recover::<V, _>(threshold, proposals)
             .expect("failed to recover threshold signature");
+        timer.observe();
 
         // Construct finalization
         let finalization = Finalization::new(proposal.clone(), proposal_signature, seed_signature);
@@ -432,7 +451,7 @@ pub struct Actor<
     mailbox_receiver: mpsc::Receiver<Message<V, D>>,
 
     view: View,
-    views: BTreeMap<View, Round<C, V, D, S>>,
+    views: BTreeMap<View, Round<E, C, V, D, S>>,
     last_finalized: View,
 
     current_view: Gauge,
@@ -440,6 +459,7 @@ pub struct Actor<
     skipped_views: Counter,
     notarization_latency: Histogram,
     finalization_latency: Histogram,
+    recover_latency: histogram::Timed<E>,
 }
 
 impl<
@@ -473,6 +493,7 @@ impl<
         let skipped_views = Counter::default();
         let notarization_latency = Histogram::new(LATENCY.into_iter());
         let finalization_latency = Histogram::new(LATENCY.into_iter());
+        let recover_latency = Histogram::new(Buckets::CRYPTOGRAPHY.into_iter());
         context.register("current_view", "current view", current_view.clone());
         context.register("tracked_views", "tracked views", tracked_views.clone());
         context.register("skipped_views", "skipped views", skipped_views.clone());
@@ -486,13 +507,18 @@ impl<
             "finalization latency",
             finalization_latency.clone(),
         );
+        context.register(
+            "recover_latency",
+            "threshold signature recover latency",
+            recover_latency.clone(),
+        );
 
         // Initialize store
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_sender);
         (
             Self {
-                context,
+                context: context.clone(),
                 crypto: cfg.crypto,
                 blocker: cfg.blocker,
                 automaton: cfg.automaton,
@@ -528,6 +554,7 @@ impl<
                 skipped_views,
                 notarization_latency,
                 finalization_latency,
+                recover_latency: histogram::Timed::new(recover_latency, Arc::new(context)),
             },
             mailbox,
         )
@@ -769,6 +796,7 @@ impl<
         let round = self.views.entry(view).or_insert(Round::new(
             &self.context,
             self.supervisor.clone(),
+            self.recover_latency.clone(),
             view,
         ));
 
@@ -970,6 +998,7 @@ impl<
         let round = self.views.entry(view).or_insert(Round::new(
             &self.context,
             self.supervisor.clone(),
+            self.recover_latency.clone(),
             view,
         ));
         round.leader_deadline = Some(self.context.current() + self.leader_timeout);
@@ -1035,6 +1064,7 @@ impl<
         let round = self.views.entry(view).or_insert(Round::new(
             &self.context,
             self.supervisor.clone(),
+            self.recover_latency.clone(),
             view,
         ));
 
@@ -1083,6 +1113,7 @@ impl<
         let round = self.views.entry(view).or_insert(Round::new(
             &self.context,
             self.supervisor.clone(),
+            self.recover_latency.clone(),
             view,
         ));
 
@@ -1133,6 +1164,7 @@ impl<
         let round = self.views.entry(view).or_insert(Round::new(
             &self.context,
             self.supervisor.clone(),
+            self.recover_latency.clone(),
             nullification.view,
         ));
 
@@ -1158,6 +1190,7 @@ impl<
         let round = self.views.entry(view).or_insert(Round::new(
             &self.context,
             self.supervisor.clone(),
+            self.recover_latency.clone(),
             view,
         ));
 
@@ -1206,6 +1239,7 @@ impl<
         let round = self.views.entry(view).or_insert(Round::new(
             &self.context,
             self.supervisor.clone(),
+            self.recover_latency.clone(),
             view,
         ));
 
@@ -1529,18 +1563,13 @@ impl<
         recovered_sender: impl Sender<PublicKey = C::PublicKey>,
         recovered_receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) -> Handle<()> {
-        self.context.spawn_blocking_ref(false)(|| {
-            block_on(async move {
-                self.run(
-                    batcher,
-                    resolver,
-                    pending_sender,
-                    recovered_sender,
-                    recovered_receiver,
-                )
-                .await;
-            })
-        })
+        self.context.spawn_ref()(self.run(
+            batcher,
+            resolver,
+            pending_sender,
+            recovered_sender,
+            recovered_receiver,
+        ))
     }
 
     async fn run(
