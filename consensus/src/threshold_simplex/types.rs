@@ -3479,9 +3479,9 @@ mod tests {
         assert_eq!(verifier.notarizes_verified, 1 + 1);
 
         // Add threshold - 1 pending notarizes
-        for i in 2..(threshold as usize) {
+        for share in shares.iter().take(threshold as usize).skip(2) {
             assert!(!verifier.ready_notarizes());
-            verifier.add(Voter::Notarize(create_notarize(&shares[i], 1, 0, 1)), false);
+            verifier.add(Voter::Notarize(create_notarize(share, 1, 0, 1)), false);
         }
 
         // Now, notarizes_verified = 2, notarizes.len() = 2. Total = 4 == threshold
@@ -3498,9 +3498,9 @@ mod tests {
         verifier.add(Voter::Nullify(create_nullify(&shares[0], 1)), true); // 1 verified
         assert_eq!(verifier.nullifies_verified, 1);
 
-        for i in 1..(threshold as usize) {
+        for share in shares.iter().take(threshold as usize).skip(1) {
             assert!(!verifier.ready_nullifies());
-            verifier.add(Voter::Nullify(create_nullify(&shares[i], 1)), false);
+            verifier.add(Voter::Nullify(create_nullify(share, 1)), false);
         }
         assert!(verifier.ready_nullifies());
     }
@@ -3519,9 +3519,9 @@ mod tests {
         verifier.add(Voter::Finalize(create_finalize(&shares[0], 1, 0, 1)), true); // 1 verified
         assert_eq!(verifier.finalizes_verified, 1);
 
-        for i in 1..(threshold as usize) {
+        for share in shares.iter().take(threshold as usize).skip(1) {
             assert!(!verifier.ready_finalizes());
-            verifier.add(Voter::Finalize(create_finalize(&shares[i], 1, 0, 1)), false);
+            verifier.add(Voter::Finalize(create_finalize(share, 1, 0, 1)), false);
         }
         assert!(verifier.ready_finalizes());
     }
@@ -3539,8 +3539,8 @@ mod tests {
                                                                // Manually set notarizes_force to false as if verify_notarizes was called.
         verifier.notarizes_force = false;
 
-        for i in 0..(threshold as usize) {
-            verifier.add(Voter::Notarize(create_notarize(&shares[i], 1, 0, 1)), true);
+        for share in shares.iter().take(threshold as usize) {
+            verifier.add(Voter::Notarize(create_notarize(share, 1, 0, 1)), true);
         }
         assert_eq!(verifier.notarizes_verified as u32, threshold);
         assert!(
@@ -3563,8 +3563,8 @@ mod tests {
         let (_, shares) = generate_test_data(n_validators as usize, threshold, 213);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
-        for i in 0..(threshold as usize) {
-            verifier.add(Voter::Nullify(create_nullify(&shares[i], 1)), true);
+        for share in shares.iter().take(threshold as usize) {
+            verifier.add(Voter::Nullify(create_nullify(share, 1)), true);
         }
         assert_eq!(verifier.nullifies_verified as u32, threshold);
         assert!(!verifier.ready_nullifies());
@@ -3587,8 +3587,8 @@ mod tests {
         verifier.set_leader(shares[0].index);
         verifier.set_leader_proposal(leader_proposal.clone());
 
-        for i in 0..(threshold as usize) {
-            verifier.add(Voter::Finalize(create_finalize(&shares[i], 1, 0, 1)), true);
+        for share in shares.iter().take(threshold as usize) {
+            verifier.add(Voter::Finalize(create_finalize(share, 1, 0, 1)), true);
         }
         assert_eq!(verifier.finalizes_verified as u32, threshold);
         assert!(!verifier.ready_finalizes());
