@@ -256,8 +256,8 @@ impl<
     }
 
     fn verify_notarizes(&mut self, namespace: &[u8]) -> (Vec<Voter<V, D>>, Vec<u32>) {
-        let identity = self.supervisor.identity(self.view).unwrap();
-        self.verifier.verify_notarizes(namespace, identity)
+        let polynomial = self.supervisor.polynomial(self.view).unwrap();
+        self.verifier.verify_notarizes(namespace, polynomial)
     }
 
     fn ready_nullifies(&self) -> bool {
@@ -265,8 +265,8 @@ impl<
     }
 
     fn verify_nullifies(&mut self, namespace: &[u8]) -> (Vec<Voter<V, D>>, Vec<u32>) {
-        let identity = self.supervisor.identity(self.view).unwrap();
-        self.verifier.verify_nullifies(namespace, identity)
+        let polynomial = self.supervisor.polynomial(self.view).unwrap();
+        self.verifier.verify_nullifies(namespace, polynomial)
     }
 
     fn ready_finalizes(&self) -> bool {
@@ -274,8 +274,8 @@ impl<
     }
 
     fn verify_finalizes(&mut self, namespace: &[u8]) -> (Vec<Voter<V, D>>, Vec<u32>) {
-        let identity = self.supervisor.identity(self.view).unwrap();
-        self.verifier.verify_finalizes(namespace, identity)
+        let polynomial = self.supervisor.polynomial(self.view).unwrap();
+        self.verifier.verify_finalizes(namespace, polynomial)
     }
 
     fn is_active(&self, leader: &C::PublicKey) -> Option<bool> {

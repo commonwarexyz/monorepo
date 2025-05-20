@@ -120,7 +120,7 @@ cfg_if::cfg_if! {
         }
 
         /// ThresholdSupervisor is the interface responsible for managing which `polynomial` (typically a group polynomial with
-        /// a fixed constant `identity`) and `share` for a participant is active at a given time.
+        /// a fixed constant `polynomial`) and `share` for a participant is active at a given time.
         ///
         /// ## Synchronization
         ///
@@ -139,7 +139,7 @@ cfg_if::cfg_if! {
             /// against `Identity`.
             type Share;
 
-            /// Returns the static identity of the shared secret (typically the constant term
+            /// Returns the static polynomial of the shared secret (typically the constant term
             /// of the group polynomial).
             fn identity(&self) -> &Self::Identity;
 

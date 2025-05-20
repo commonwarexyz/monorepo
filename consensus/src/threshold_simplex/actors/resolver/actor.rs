@@ -333,7 +333,7 @@ impl<
         // Wait for an event
         let mut current_view = 0;
         let mut finalized_view = 0;
-        let public_key = *self.supervisor.public();
+        let identity = *self.supervisor.identity();
         loop {
             // Record outstanding metric
             self.unfulfilled.set(self.required.len() as i64);
@@ -519,7 +519,7 @@ impl<
                             self.inflight.clear(request.id);
 
                             // Verify message
-                            if !response.verify(&self.namespace, &public_key) {
+                            if !response.verify(&self.namespace, &identity) {
                                 warn!(sender = ?s, "blocking peer");
                                 self.requester.block(s.clone());
                                 self.blocker.block(s).await;

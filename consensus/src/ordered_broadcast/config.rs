@@ -22,7 +22,7 @@ pub struct Config<
     /// be involved in the current broadcast attempt).
     pub monitor: M,
 
-    /// Manages the set of validators and the group identity.
+    /// Manages the set of validators and the group polynomial.
     /// Also manages the cryptographic partial share if the engine is a validator.
     pub validators: TSu,
 

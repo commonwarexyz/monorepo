@@ -58,19 +58,19 @@ impl<P: Array, V: Variant, D: Digest> Supervisor<P, V, D> {
     pub fn new(cfg: Config<P, V>) -> Self {
         let mut public_key = None;
         let mut parsed_participants = BTreeMap::new();
-        for (view, (identity, mut validators, share)) in cfg.participants.into_iter() {
+        for (view, (polynomial, mut validators, share)) in cfg.participants.into_iter() {
             let mut map = HashMap::new();
             for (index, validator) in validators.iter().enumerate() {
                 map.insert(validator.clone(), index as u32);
             }
             validators.sort();
-            let view_public = public::<V>(&identity);
+            let view_public = public::<V>(&polynomial);
             if public_key.is_none() {
                 public_key = Some(*view_public);
             } else if public_key.as_ref().unwrap() != view_public {
                 panic!("public keys do not match");
             }
-            parsed_participants.insert(view, (identity, map, validators, share));
+            parsed_participants.insert(view, (polynomial, map, validators, share));
         }
         Self {
             public_key: public_key.unwrap(),
@@ -145,11 +145,11 @@ impl<P: Array, V: Variant, D: Digest> TSu for Supervisor<P, V, D> {
         Some(leader)
     }
 
-    fn public(&self) -> &Self::Public {
+    fn identity(&self) -> &Self::Identity {
         &self.public_key
     }
 
-    fn identity(&self, index: Self::Index) -> Option<&Self::Identity> {
+    fn polynomial(&self, index: Self::Index) -> Option<&Self::Polynomial> {
         let closest = match self.participants.range(..=index).next_back() {
             Some((_, (p, _, _, _))) => p,
             None => {
@@ -180,13 +180,13 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
         match activity {
             Activity::Notarize(notarize) => {
                 let view = notarize.view();
-                let (identity, validators) = match self.participants.range(..=view).next_back() {
+                let (polynomial, validators) = match self.participants.range(..=view).next_back() {
                     Some((_, (p, _, v, _))) => (p, v),
                     None => {
                         panic!("no participants in required range");
                     }
                 };
-                if !notarize.verify(&self.namespace, identity) {
+                if !notarize.verify(&self.namespace, polynomial) {
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
@@ -228,13 +228,13 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
             }
             Activity::Nullify(nullify) => {
                 let view = nullify.view();
-                let (identity, validators) = match self.participants.range(..=view).next_back() {
+                let (polynomial, validators) = match self.participants.range(..=view).next_back() {
                     Some((_, (p, _, v, _))) => (p, v),
                     None => {
                         panic!("no participants in required range");
                     }
                 };
-                if !nullify.verify(&self.namespace, identity) {
+                if !nullify.verify(&self.namespace, polynomial) {
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
@@ -274,13 +274,13 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
             }
             Activity::Finalize(finalize) => {
                 let view = finalize.view();
-                let (identity, validators) = match self.participants.range(..=view).next_back() {
+                let (polynomial, validators) = match self.participants.range(..=view).next_back() {
                     Some((_, (p, _, v, _))) => (p, v),
                     None => {
                         panic!("no participants in required range");
                     }
                 };
-                if !finalize.verify(&self.namespace, identity) {
+                if !finalize.verify(&self.namespace, polynomial) {
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
@@ -329,13 +329,13 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
             }
             Activity::ConflictingNotarize(ref conflicting) => {
                 let view = conflicting.view();
-                let (identity, validators) = match self.participants.range(..=view).next_back() {
+                let (polynomial, validators) = match self.participants.range(..=view).next_back() {
                     Some((_, (p, _, v, _))) => (p, v),
                     None => {
                         panic!("no participants in required range");
                     }
                 };
-                if !conflicting.verify(&self.namespace, identity) {
+                if !conflicting.verify(&self.namespace, polynomial) {
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
@@ -353,13 +353,13 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
             }
             Activity::ConflictingFinalize(ref conflicting) => {
                 let view = conflicting.view();
-                let (identity, validators) = match self.participants.range(..=view).next_back() {
+                let (polynomial, validators) = match self.participants.range(..=view).next_back() {
                     Some((_, (p, _, v, _))) => (p, v),
                     None => {
                         panic!("no participants in required range");
                     }
                 };
-                if !conflicting.verify(&self.namespace, identity) {
+                if !conflicting.verify(&self.namespace, polynomial) {
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
@@ -377,13 +377,13 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
             }
             Activity::NullifyFinalize(ref nullify_finalize) => {
                 let view = nullify_finalize.view();
-                let (identity, validators) = match self.participants.range(..=view).next_back() {
+                let (polynomial, validators) = match self.participants.range(..=view).next_back() {
                     Some((_, (p, _, v, _))) => (p, v),
                     None => {
                         panic!("no participants in required range");
                     }
                 };
-                if !nullify_finalize.verify(&self.namespace, identity) {
+                if !nullify_finalize.verify(&self.namespace, polynomial) {
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
