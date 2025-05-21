@@ -675,7 +675,7 @@ impl<V: Variant, D: Digest> Notarize<V, D> {
         let seed_namespace = seed_namespace(namespace);
         let seed_message = view_message(self.proposal.view);
         let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
-        let Some(evaluated) = polynomial.get(self.proposal_signature.index as usize) else {
+        let Some(evaluated) = polynomial.get(self.signer() as usize) else {
             return false;
         };
         let signature = aggregate_signatures::<V, _>(&[
@@ -951,7 +951,7 @@ impl<V: Variant> Nullify<V> {
         let nullify_message = (Some(nullify_namespace.as_ref()), view_message.as_ref());
         let seed_namespace = seed_namespace(namespace);
         let seed_message = (Some(seed_namespace.as_ref()), view_message.as_ref());
-        let Some(evaluated) = polynomial.get(self.view_signature.index as usize) else {
+        let Some(evaluated) = polynomial.get(self.signer() as usize) else {
             return false;
         };
         let signature =
@@ -1202,7 +1202,7 @@ impl<V: Variant, D: Digest> Finalize<V, D> {
     pub fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
         let finalize_namespace = finalize_namespace(namespace);
         let message = self.proposal.encode();
-        let Some(evaluated) = polynomial.get(self.proposal_signature.index as usize) else {
+        let Some(evaluated) = polynomial.get(self.signer() as usize) else {
             return false;
         };
         verify_message::<V>(
@@ -1955,7 +1955,7 @@ impl<V: Variant, D: Digest> ConflictingNotarize<V, D> {
             Some(notarize_namespace.as_ref()),
             notarize_message_2.as_ref(),
         );
-        let Some(evaluated) = polynomial.get(self.signature_1.index as usize) else {
+        let Some(evaluated) = polynomial.get(self.signer() as usize) else {
             return false;
         };
         let signature =
@@ -2093,7 +2093,7 @@ impl<V: Variant, D: Digest> ConflictingFinalize<V, D> {
             Some(finalize_namespace.as_ref()),
             finalize_message_2.as_ref(),
         );
-        let Some(evaluated) = polynomial.get(self.signature_1.index as usize) else {
+        let Some(evaluated) = polynomial.get(self.signer() as usize) else {
             return false;
         };
         let signature =
@@ -2206,7 +2206,7 @@ impl<V: Variant, D: Digest> NullifyFinalize<V, D> {
         let finalize_namespace = finalize_namespace(namespace);
         let finalize_message = self.proposal.encode();
         let finalize_message = (Some(finalize_namespace.as_ref()), finalize_message.as_ref());
-        let Some(evaluated) = polynomial.get(self.view_signature.index as usize) else {
+        let Some(evaluated) = polynomial.get(self.signer() as usize) else {
             return false;
         };
         let signature = aggregate_signatures::<V, _>(&[
