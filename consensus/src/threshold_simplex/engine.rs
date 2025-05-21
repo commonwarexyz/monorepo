@@ -29,7 +29,7 @@ pub struct Engine<
         Seed = V::Signature,
         Index = View,
         Share = group::Share,
-        Polynomial = poly::Public<V>,
+        Polynomial = Vec<V::Public>,
         Identity = V::Public,
         PublicKey = C::PublicKey,
     >,

@@ -10,7 +10,8 @@ use commonware_cryptography::{
         ops::{
             aggregate_signatures, aggregate_verify_multiple_messages, partial_sign_message,
             partial_verify_message, partial_verify_multiple_messages,
-            partial_verify_multiple_public_keys, verify_message,
+            partial_verify_multiple_public_keys, partial_verify_multiple_public_keys_precomputed,
+            verify_message,
         },
         poly::{PartialSignature, Poly},
         variant::Variant,
@@ -283,7 +284,7 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
     pub fn verify_notarizes(
         &mut self,
         namespace: &[u8],
-        polynomial: &Poly<V::Public>,
+        polynomial: &Vec<V::Public>,
     ) -> (Vec<Voter<V, D>>, Vec<u32>) {
         self.notarizes_force = false;
         let (notarizes, failed) =
@@ -669,25 +670,29 @@ impl<V: Variant, D: Digest> Notarize<V, D> {
     /// 1. The notarize signature is valid for the claimed proposal
     /// 2. The seed signature is valid for the view
     /// 3. Both signatures are from the same signer
-    pub fn verify(&self, namespace: &[u8], polynomial: &Poly<V::Public>) -> bool {
+    pub fn verify(&self, namespace: &[u8], evaluated: &V::Public) -> bool {
         let notarize_namespace = notarize_namespace(namespace);
         let notarize_message = self.proposal.encode();
         let notarize_message = (Some(notarize_namespace.as_ref()), notarize_message.as_ref());
         let seed_namespace = seed_namespace(namespace);
         let seed_message = view_message(self.proposal.view);
         let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
-        partial_verify_multiple_messages::<V, _, _>(
-            polynomial,
-            self.signer(),
+        let signature = aggregate_signatures::<V, _>(&[
+            self.proposal_signature.value,
+            self.seed_signature.value,
+        ]);
+        aggregate_verify_multiple_messages::<V, _>(
+            evaluated,
             &[notarize_message, seed_message],
-            [&self.proposal_signature, &self.seed_signature],
+            &signature,
+            1,
         )
         .is_ok()
     }
 
     pub fn verify_multiple(
         namespace: &[u8],
-        polynomial: &Poly<V::Public>,
+        polynomial: &Vec<V::Public>,
         notarizes: Vec<Notarize<V, D>>,
     ) -> (Vec<Notarize<V, D>>, Vec<u32>) {
         // Prepare to verify
@@ -696,7 +701,7 @@ impl<V: Variant, D: Digest> Notarize<V, D> {
         } else if notarizes.len() == 1 {
             // If there is only one notarize, verify it directly (will perform
             // inner aggregation)
-            let valid = notarizes[0].verify(namespace, polynomial);
+            let valid = notarizes[0].verify(namespace, &polynomial[0]);
             if valid {
                 return (notarizes, vec![]);
             } else {
@@ -710,7 +715,7 @@ impl<V: Variant, D: Digest> Notarize<V, D> {
         let notarize_namespace = notarize_namespace(namespace);
         let notarize_message = proposal.encode();
         let notarize_signatures = notarizes.iter().map(|n| &n.proposal_signature);
-        if let Err(err) = partial_verify_multiple_public_keys::<V, _>(
+        if let Err(err) = partial_verify_multiple_public_keys_precomputed::<V, _>(
             polynomial,
             Some(&notarize_namespace),
             &notarize_message,
@@ -728,7 +733,7 @@ impl<V: Variant, D: Digest> Notarize<V, D> {
             .iter()
             .filter(|n| !invalid.contains(&n.seed_signature.index))
             .map(|n| &n.seed_signature);
-        if let Err(err) = partial_verify_multiple_public_keys::<V, _>(
+        if let Err(err) = partial_verify_multiple_public_keys_precomputed::<V, _>(
             polynomial,
             Some(&seed_namespace),
             &seed_message,

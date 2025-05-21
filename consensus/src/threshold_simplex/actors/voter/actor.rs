@@ -13,7 +13,6 @@ use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
         ops::{threshold_signature_recover, threshold_signature_recover_pair},
-        poly,
         variant::Variant,
     },
     Digest, Scheme,
@@ -415,12 +414,11 @@ pub struct Actor<
     R: Relay,
     F: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<
-        Polynomial = poly::Public<V>,
+        Polynomial = Vec<V::Public>,
         Seed = V::Signature,
         Index = View,
         Share = group::Share,
         PublicKey = C::PublicKey,
-        // TOD: Improve the naming here
         Identity = V::Public,
     >,
 > {
@@ -472,7 +470,7 @@ impl<
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<V, D>>,
         S: ThresholdSupervisor<
-            Polynomial = poly::Public<V>,
+            Polynomial = Vec<V::Public>,
             Seed = V::Signature,
             Index = View,
             Share = group::Share,
@@ -567,7 +565,7 @@ impl<
         }
         let proposal = round.proposal.as_ref()?;
         let polynomial = self.supervisor.polynomial(view)?;
-        let threshold = polynomial.required();
+        let threshold = quorum(polynomial.len() as u32);
         if round.notarizes.len() >= threshold as usize {
             return Some(&proposal.payload);
         }
@@ -583,7 +581,7 @@ impl<
             Some(polynomial) => polynomial,
             None => return false,
         };
-        let threshold = polynomial.required();
+        let threshold = quorum(polynomial.len() as u32);
         round.nullification.is_some() || round.nullifies.len() >= threshold as usize
     }
 
@@ -594,7 +592,7 @@ impl<
         }
         let proposal = round.proposal.as_ref()?;
         let polynomial = self.supervisor.polynomial(view)?;
-        let threshold = polynomial.required();
+        let threshold = quorum(polynomial.len() as u32);
         if round.finalizes.len() >= threshold as usize {
             return Some(&proposal.payload);
         }
@@ -1294,7 +1292,7 @@ impl<
 
         // Attempt to construct notarization
         let polynomial = self.supervisor.polynomial(view)?;
-        let threshold = polynomial.required();
+        let threshold = quorum(polynomial.len() as u32);
         round.notarizable(threshold, force).await
     }
 
@@ -1308,7 +1306,7 @@ impl<
 
         // Attempt to construct nullification
         let polynomial = self.supervisor.polynomial(view)?;
-        let threshold = polynomial.required();
+        let threshold = quorum(polynomial.len() as u32);
         round.nullifiable(threshold, force).await
     }
 
@@ -1346,7 +1344,7 @@ impl<
 
         // Attempt to construct finalization
         let polynomial = self.supervisor.polynomial(view)?;
-        let threshold = polynomial.required();
+        let threshold = quorum(polynomial.len() as u32);
         round.finalizable(threshold, force).await
     }
 

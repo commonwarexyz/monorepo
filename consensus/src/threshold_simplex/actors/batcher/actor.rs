@@ -33,7 +33,7 @@ struct Round<
     R: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<
         Index = View,
-        Polynomial = poly::Public<V>,
+        Polynomial = Vec<V::Public>,
         PublicKey = C::PublicKey,
         Identity = V::Public,
     >,
@@ -59,7 +59,7 @@ impl<
         R: Reporter<Activity = Activity<V, D>>,
         S: ThresholdSupervisor<
             Index = View,
-            Polynomial = poly::Public<V>,
+            Polynomial = Vec<V::Public>,
             PublicKey = C::PublicKey,
             Identity = V::Public,
         >,
