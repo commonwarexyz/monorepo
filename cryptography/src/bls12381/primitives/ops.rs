@@ -257,6 +257,90 @@ where
 /// of all partial signatures to be precomputed (avoids a significant amount of compute
 /// evaluating each signer on the public polynomial).
 pub fn partial_verify_multiple_public_keys_precomputed<'a, V, I>(
+    polynomial: &[V::Public],
+    namespace: Option<&[u8]>,
+    message: &[u8],
+    partials: I,
+) -> Result<(), Vec<&'a PartialSignature<V>>>
+where
+    V: Variant,
+    I: IntoIterator<Item = &'a PartialSignature<V>>,
+{
+    // Compute aggregate signature
+    let partials = partials.into_iter();
+    let mut aggregate_public_key = V::Public::zero();
+    let mut aggregate_signature = V::Signature::zero();
+    let mut reclaimed = Vec::with_capacity(partials.size_hint().0);
+    let mut invalid = Vec::new();
+    for partial in partials {
+        let Some(public_key) = polynomial.get(partial.index as usize) else {
+            invalid.push(partial);
+            continue;
+        };
+        aggregate_public_key.add(public_key);
+        aggregate_signature.add(&partial.value);
+        reclaimed.push(partial);
+    }
+
+    // Verify message over computed aggregate representations
+    if verify_message::<V>(
+        &aggregate_public_key,
+        namespace,
+        message,
+        &aggregate_signature,
+    )
+    .is_ok()
+    {
+        if invalid.is_empty() {
+            return Ok(());
+        }
+        return Err(invalid);
+    }
+
+    // If verify fails, find offending signatures via recursive bisection
+    if reclaimed.len() <= 1 {
+        return Err(reclaimed);
+    }
+    let mid = reclaimed.len() / 2;
+    let (left_partials, right_partials) = reclaimed.split_at(mid);
+    let result_l = partial_verify_multiple_public_keys_precomputed::<V, _>(
+        polynomial,
+        namespace,
+        message,
+        left_partials.iter().copied(),
+    );
+    let result_r = partial_verify_multiple_public_keys_precomputed::<V, _>(
+        polynomial,
+        namespace,
+        message,
+        right_partials.iter().copied(),
+    );
+
+    // Combine results
+    match (result_l, result_r) {
+        (Ok(_), Ok(_)) => unreachable!("some result must have an invalid signature"),
+        (Err(mut left), Err(right)) => {
+            left.extend_from_slice(&right);
+            left.extend(invalid);
+            Err(left)
+        }
+        (Err(mut left), Ok(_)) => {
+            left.extend(invalid);
+            Err(left)
+        }
+        (Ok(_), Err(mut right)) => {
+            right.extend(invalid);
+            Err(right)
+        }
+    }
+}
+
+/// Attempts to verify multiple [PartialSignature]s over the same message as a single
+/// aggregate signature (or returns any invalid signature found).
+///
+/// We use an "inner" function for recursion to avoid re-evaluating the public polynomial
+/// for each recursive bisection.
+fn partial_verify_multiple_public_keys_inner<'a, V, I>(
     public_keys: &[V::Public],
     namespace: Option<&[u8]>,
     message: &[u8],
@@ -297,13 +381,13 @@ where
     let mid = public_keys.len() / 2;
     let (left_public_keys, right_public_keys) = public_keys.split_at(mid);
     let (left_partials, right_partials) = reclaimed.split_at(mid);
-    let result_l = partial_verify_multiple_public_keys_precomputed::<V, _>(
+    let result_l = partial_verify_multiple_public_keys_inner::<V, _>(
         left_public_keys,
         namespace,
         message,
         left_partials.iter().copied(),
     );
-    let result_r = partial_verify_multiple_public_keys_precomputed::<V, _>(
+    let result_r = partial_verify_multiple_public_keys_inner::<V, _>(
         right_public_keys,
         namespace,
         message,
@@ -348,12 +432,7 @@ where
         .unzip();
 
     // Recursively verify and find invalid signatures
-    partial_verify_multiple_public_keys_precomputed::<V, _>(
-        &public_keys,
-        namespace,
-        message,
-        partials,
-    )
+    partial_verify_multiple_public_keys_inner::<V, _>(&public_keys, namespace, message, partials)
 }
 
 /// Interpolate the value of some [Point] with precomputed Barycentric Weights
