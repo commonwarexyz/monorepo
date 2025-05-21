@@ -44,7 +44,7 @@ pub fn generate_shares<R: RngCore, V: Variant>(
 
 /// Evaluates the polynomial at `n` indices.
 pub fn evaluate_all<V: Variant>(polynomial: &poly::Public<V>, n: u32) -> Vec<V::Public> {
-    let mut evals = Vec::with_capacity(polynomial.degree() as usize);
+    let mut evals = Vec::with_capacity(n as usize);
     for index in 0..n {
         evals.push(polynomial.evaluate(index).value);
     }
