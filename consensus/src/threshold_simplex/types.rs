@@ -670,7 +670,7 @@ impl<V: Variant, D: Digest> Notarize<V, D> {
     /// 1. The notarize signature is valid for the claimed proposal
     /// 2. The seed signature is valid for the view
     /// 3. Both signatures are from the same signer
-    pub fn verify(&self, namespace: &[u8], evaluated: &V::Public) -> bool {
+    pub fn verify(&self, namespace: &[u8], polynomial: &Vec<V::Public>) -> bool {
         let notarize_namespace = notarize_namespace(namespace);
         let notarize_message = self.proposal.encode();
         let notarize_message = (Some(notarize_namespace.as_ref()), notarize_message.as_ref());
@@ -681,6 +681,9 @@ impl<V: Variant, D: Digest> Notarize<V, D> {
             self.proposal_signature.value,
             self.seed_signature.value,
         ]);
+        let Some(evaluated) = polynomial.get(self.proposal_signature.index as usize) else {
+            return false;
+        };
         aggregate_verify_multiple_messages::<V, _>(
             evaluated,
             &[notarize_message, seed_message],

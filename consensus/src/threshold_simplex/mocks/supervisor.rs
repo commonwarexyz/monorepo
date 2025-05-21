@@ -22,7 +22,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-type ViewInfo<P, V> = (poly::Public<V>, HashMap<P, u32>, Vec<P>, group::Share);
+type ViewInfo<P, V> = (Vec<V>, HashMap<P, u32>, Vec<P>, group::Share);
 
 pub struct Config<P: Array, V: Variant> {
     pub namespace: Vec<u8>,
@@ -35,7 +35,7 @@ type Faults<P, V, D> = HashMap<P, HashMap<View, HashSet<Activity<V, D>>>>;
 #[derive(Clone)]
 pub struct Supervisor<P: Array, V: Variant, D: Digest> {
     identity: V::Public,
-    participants: BTreeMap<View, ViewInfo<P, V>>,
+    participants: BTreeMap<View, ViewInfo<P, V::Public>>,
 
     namespace: Vec<u8>,
 
@@ -59,6 +59,9 @@ impl<P: Array, V: Variant, D: Digest> Supervisor<P, V, D> {
         let mut identity = None;
         let mut parsed_participants = BTreeMap::new();
         for (view, (polynomial, mut validators, share)) in cfg.participants.into_iter() {
+            let evaluations = (0..validators.len())
+                .map(|i| polynomial.evaluate(i as u32).value)
+                .collect::<Vec<_>>();
             let mut map = HashMap::new();
             for (index, validator) in validators.iter().enumerate() {
                 map.insert(validator.clone(), index as u32);
@@ -70,7 +73,7 @@ impl<P: Array, V: Variant, D: Digest> Supervisor<P, V, D> {
             } else if identity.as_ref().unwrap() != view_identity {
                 panic!("public keys do not match");
             }
-            parsed_participants.insert(view, (polynomial, map, validators, share));
+            parsed_participants.insert(view, (evaluations, map, validators, share));
         }
         Self {
             identity: identity.unwrap(),
@@ -124,7 +127,7 @@ impl<P: Array, V: Variant, D: Digest> Su for Supervisor<P, V, D> {
 impl<P: Array, V: Variant, D: Digest> TSu for Supervisor<P, V, D> {
     type Seed = V::Signature;
     type Identity = V::Public;
-    type Polynomial = poly::Public<V>;
+    type Polynomial = Vec<V::Public>;
     type Share = group::Share;
 
     fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<Self::PublicKey> {
