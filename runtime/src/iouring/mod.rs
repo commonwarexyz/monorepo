@@ -10,7 +10,9 @@ use io_uring::{
 };
 use std::time::Duration;
 
+/// A CQE with this user data means that an operation timed out.
 const TIMEOUT_WORK_ID: u64 = u64::MAX;
+/// A CQE with this user data means that we woke up to check for new work.
 const POLL_WORK_ID: u64 = u64::MAX - 1;
 
 #[derive(Clone, Debug)]
@@ -24,11 +26,13 @@ pub struct Config {
     /// If true, use single issuer mode.
     pub single_issuer: bool,
     /// In the io_uring event loop, wait at most this long for a new completion
-    /// before checking for new work.
-    /// If None, wait indefinitely. In this case, caller must ensure that
-    /// operations submitted to the ring complete in a timely manner.
-    /// Otherwise, an operation that takes a long time may block the
-    /// event loop while waiting for its completion.
+    /// before checking for new work to submit to the ring.
+    /// If None, wait indefinitely. In this case, caller must ensure that operations
+    /// submitted to the io_uring complete so as to not block the event loop.
+    /// For example, do not submit a recv operation and then a write operation
+    /// that satisfies the recv operation; the event loop may block while
+    /// waiting for the recv operation to complete, and never submit the write,
+    /// causing a deadlock.
     pub poll_new_work_freq: Option<Duration>,
     /// If None, operations submitted to the io_uring will not time out.
     /// In this case, the caller should be careful to ensure that the
