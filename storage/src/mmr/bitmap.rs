@@ -373,6 +373,12 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     }
 
     /// Return the root digest against which inclusion proofs can be verified.
+    ///
+    /// # Format
+    ///
+    /// The root digest is simply that of the underlying MMR whenever the bit count falls on a chunk
+    /// boundary. Otherwise, the root is computed as: hash(next_bit || mmr_root ||
+    /// last_chunk_digest).
     pub async fn root(&self, hasher: &mut impl Hasher<H>) -> Result<H::Digest, Error> {
         let mmr_root = self.mmr.root(hasher);
         if self.next_bit == 0 {
@@ -435,9 +441,9 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
             return Ok((proof, *chunk));
         }
 
-        let last_chunk_digest = hasher.digest(self.last_chunk());
         // Since the bitmap wasn't chunk aligned, we'll need to include the digest of the last chunk
         // in the proof to be able to re-derive the root.
+        let last_chunk_digest = hasher.digest(self.last_chunk());
         proof.digests.push(last_chunk_digest);
 
         Ok((proof, *chunk))
@@ -554,11 +560,11 @@ mod tests {
             let root = bitmap.root(&mut hasher).await.unwrap();
             bitmap.append(&mut hasher, true).await.unwrap();
             // Root should change
-            assert!(root != bitmap.root(&mut hasher).await.unwrap());
+            assert_ne!(root, bitmap.root(&mut hasher).await.unwrap());
             let root = bitmap.root(&mut hasher).await.unwrap();
             bitmap.prune_to_bit(1);
             assert_eq!(bitmap.bit_count(), 1);
-            assert!(bitmap.last_chunk() != &[0u8; SHA256_SIZE]);
+            assert_ne!(bitmap.last_chunk(), &[0u8; SHA256_SIZE]);
             // Pruning should be a no-op since we're not beyond a chunk boundary.
             assert_eq!(bitmap.pruned_chunks, 0);
             assert_eq!(root, bitmap.root(&mut hasher).await.unwrap());
@@ -568,7 +574,7 @@ mod tests {
                 bitmap.append(&mut hasher, i % 2 != 0).await.unwrap();
             }
             assert_eq!(bitmap.bit_count(), 256);
-            assert!(root != bitmap.root(&mut hasher).await.unwrap());
+            assert_ne!(root, bitmap.root(&mut hasher).await.unwrap());
             let root = bitmap.root(&mut hasher).await.unwrap();
 
             // Chunk should be provable.
@@ -578,6 +584,13 @@ mod tests {
                     .await
                     .unwrap(),
                 "failed to prove bit in only chunk"
+            );
+            // bit outside range should not verify
+            assert!(
+                !Bitmap::verify_bit_inclusion(&mut hasher, &proof, &chunk, 256, &root)
+                    .await
+                    .unwrap(),
+                "should not be able to prove bit outside of chunk"
             );
 
             // Now pruning all bits should matter.
@@ -753,7 +766,7 @@ mod tests {
             // Confirm that root changes if we add a 1 bit, even though we won't fill a chunk.
             bitmap.append(&mut hasher, true).await.unwrap();
             let new_root = bitmap.root(&mut hasher).await.unwrap();
-            assert!(root != new_root);
+            assert_ne!(root, new_root);
             assert_eq!(bitmap.mmr.size(), 3); // shouldn't include the trailing bits
 
             // Add 0 bits to fill up entire chunk.
@@ -761,7 +774,7 @@ mod tests {
                 bitmap.append(&mut hasher, false).await.unwrap();
                 let newer_root = bitmap.root(&mut hasher).await.unwrap();
                 // root will change when adding 0s within the same chunk
-                assert!(new_root != newer_root);
+                assert_ne!(new_root, newer_root);
             }
             assert_eq!(bitmap.mmr.size(), 4); // chunk we filled should have been added to mmr
 
@@ -769,7 +782,7 @@ mod tests {
             bitmap.append(&mut hasher, false).await.unwrap();
             assert_eq!(bitmap.bit_count(), 256 * 3 + 1);
             let newer_root = bitmap.root(&mut hasher).await.unwrap();
-            assert!(new_root != newer_root);
+            assert_ne!(new_root, newer_root);
 
             // Confirm pruning everything doesn't affect the root.
             bitmap.prune_to_bit(bitmap.bit_count());
@@ -812,7 +825,7 @@ mod tests {
                 let bit = bitmap.get_bit(bit_pos);
                 bitmap.set_bit(&mut hasher, bit_pos, !bit).await.unwrap();
                 let new_root = bitmap.root(&mut hasher).await.unwrap();
-                assert!(root != new_root, "failed at bit {}", bit_pos);
+                assert_ne!(root, new_root, "failed at bit {}", bit_pos);
                 bitmap.set_bit(&mut hasher, bit_pos, bit).await.unwrap();
                 // flip it back
                 let new_root = bitmap.root(&mut hasher).await.unwrap();
