@@ -9,10 +9,9 @@ use commonware_cryptography::{
         group::Share,
         ops::{
             aggregate_signatures, aggregate_verify_multiple_messages, partial_sign_message,
-            partial_verify_multiple_messages, partial_verify_multiple_public_keys_precomputed,
-            verify_message,
+            partial_verify_multiple_public_keys_precomputed, verify_message,
         },
-        poly::{PartialSignature, Poly},
+        poly::PartialSignature,
         variant::Variant,
     },
     Digest,
@@ -2685,7 +2684,7 @@ mod tests {
     fn test_notarization_verify_wrong_keys() {
         let n = 5;
         let t = quorum(n as u32);
-        let (identity, polynomial, shares) = generate_test_data(n, t, 0);
+        let (identity, _, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
 
@@ -2720,7 +2719,7 @@ mod tests {
     fn test_notarization_verify_wrong_namespace() {
         let n = 5;
         let t = quorum(n as u32);
-        let (identity, polynomial, shares) = generate_test_data(n, t, 0);
+        let (identity, _, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
 
@@ -2752,7 +2751,7 @@ mod tests {
     fn test_threshold_recover_insufficient_signatures() {
         let n = 5;
         let t = quorum(n as u32); // For n=5, t should be 4 (2f+1 where f=1)
-        let (_, shares) = generate_test_data(n, t, 0);
+        let (_, _, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
 
@@ -2775,7 +2774,7 @@ mod tests {
     fn test_conflicting_notarize_detection() {
         let n = 5;
         let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data(n, t, 0);
+        let (_, polynomial, shares) = generate_test_data(n, t, 0);
 
         // Create two different proposals for the same view
         let proposal1 = Proposal::new(10, 5, sample_digest(1));
@@ -2814,7 +2813,7 @@ mod tests {
     fn test_nullify_finalize_detection() {
         let n = 5;
         let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data(n, t, 0);
+        let (_, polynomial, shares) = generate_test_data(n, t, 0);
 
         let view = 10;
 
@@ -2852,10 +2851,10 @@ mod tests {
     fn test_finalization_wrong_signature() {
         let n = 5;
         let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data(n, t, 0);
+        let (identity, _, shares) = generate_test_data(n, t, 0);
 
         // Create a completely different key set
-        let (wrong_polynomial, _) = generate_test_data(n, t, 1);
+        let (wrong_identity, _, _) = generate_test_data(n, t, 1);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
 
@@ -2881,12 +2880,10 @@ mod tests {
             Finalization::<MinSig, _>::new(proposal, proposal_signature, seed_signature);
 
         // Verify with correct public key - should pass
-        let identity = poly::public::<MinSig>(&polynomial);
-        assert!(finalization.verify(NAMESPACE, identity));
+        assert!(finalization.verify(NAMESPACE, &identity));
 
         // Verify with wrong public key - should fail
-        let wrong_identity = poly::public::<MinSig>(&wrong_polynomial);
-        assert!(!finalization.verify(NAMESPACE, wrong_identity));
+        assert!(!finalization.verify(NAMESPACE, &wrong_identity));
     }
 
     // Helper to create a Notarize message
@@ -2943,7 +2940,7 @@ mod tests {
     fn test_batch_verifier_add_notarize() {
         let n_validators = 5;
         let threshold = quorum(n_validators);
-        let (_, shares) = generate_test_data(n_validators as usize, threshold, 123);
+        let (_, _, shares) = generate_test_data(n_validators as usize, threshold, 123);
 
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
@@ -3003,7 +3000,7 @@ mod tests {
     fn test_batch_verifier_set_leader() {
         let n_validators = 5;
         let threshold = quorum(n_validators);
-        let (_, shares) = generate_test_data(n_validators as usize, threshold, 124);
+        let (_, _, shares) = generate_test_data(n_validators as usize, threshold, 124);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         let notarize_s0 = create_notarize(&shares[0], 1, 0, 1);
@@ -3035,7 +3032,7 @@ mod tests {
     fn test_batch_verifier_ready_and_verify_notarizes() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (polynomial, shares) = generate_test_data(n_validators as usize, threshold, 125);
+        let (_, polynomial, shares) = generate_test_data(n_validators as usize, threshold, 125);
 
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
         let proposal = Proposal::new(1, 0, sample_digest(1));
@@ -3087,7 +3084,7 @@ mod tests {
 
         let mut faulty_notarize = create_notarize(&shares[1], 2, 1, 10); // Same proposal as leader
                                                                          // Corrupt a signature
-        let (_, other_shares) = generate_test_data(n_validators as usize, threshold, 126);
+        let (_, _, other_shares) = generate_test_data(n_validators as usize, threshold, 126);
         faulty_notarize.proposal_signature = Notarize::<MinSig, _>::sign(
             NAMESPACE,
             &other_shares[1],
@@ -3109,7 +3106,7 @@ mod tests {
     fn test_batch_verifier_add_nullify() {
         let n_validators = 5;
         let threshold = quorum(n_validators);
-        let (_, shares) = generate_test_data(n_validators as usize, threshold, 127);
+        let (_, _, shares) = generate_test_data(n_validators as usize, threshold, 127);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         let nullify1_s0 = create_nullify(&shares[0], 1);
@@ -3129,7 +3126,7 @@ mod tests {
     fn test_batch_verifier_ready_and_verify_nullifies() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (polynomial, shares) = generate_test_data(n_validators as usize, threshold, 128);
+        let (_, polynomial, shares) = generate_test_data(n_validators as usize, threshold, 128);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         let nullify_s0 = create_nullify(&shares[0], 1);
@@ -3164,7 +3161,7 @@ mod tests {
     fn test_batch_verifier_add_finalize() {
         let n_validators = 5;
         let threshold = quorum(n_validators);
-        let (_, shares) = generate_test_data(n_validators as usize, threshold, 129);
+        let (_, _, shares) = generate_test_data(n_validators as usize, threshold, 129);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         let finalize_s0_prop_a = create_finalize(&shares[0], 1, 0, 1); // Proposal A
@@ -3205,7 +3202,7 @@ mod tests {
     fn test_batch_verifier_ready_and_verify_finalizes() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (polynomial, shares) = generate_test_data(n_validators as usize, threshold, 130);
+        let (_, polynomial, shares) = generate_test_data(n_validators as usize, threshold, 130);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
         let leader_proposal = Proposal::new(1, 0, sample_digest(1));
 
@@ -3254,7 +3251,7 @@ mod tests {
     fn test_batch_verifier_quorum_none() {
         let n_validators = 3;
         let threshold = quorum(n_validators); // Not strictly used by BatchVerifier logic when quorum is None
-        let (polynomial, shares) = generate_test_data(n_validators as usize, threshold, 200);
+        let (_, polynomial, shares) = generate_test_data(n_validators as usize, threshold, 200);
 
         // Test with Notarizes
         let mut verifier_n = BatchVerifier::<MinSig, Sha256>::new(None);
@@ -3303,7 +3300,7 @@ mod tests {
     fn test_batch_verifier_leader_proposal_filters_messages() {
         let n_validators = 3;
         let threshold = quorum(n_validators);
-        let (_, shares) = generate_test_data(n_validators as usize, threshold, 201);
+        let (_, _, shares) = generate_test_data(n_validators as usize, threshold, 201);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         let proposal_a = Proposal::new(1, 0, sample_digest(10));
@@ -3347,7 +3344,7 @@ mod tests {
     fn test_batch_verifier_add_recovered_message_panics() {
         let n_validators = 3;
         let threshold = quorum(n_validators);
-        let (_, shares) = generate_test_data(n_validators as usize, threshold, 202);
+        let (_, _, shares) = generate_test_data(n_validators as usize, threshold, 202);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         let notarization = create_notarization(1, 0, 1, &shares, threshold);
@@ -3358,7 +3355,7 @@ mod tests {
     fn test_ready_notarizes_behavior_with_force_flag() {
         let n_validators = 3;
         let threshold = quorum(n_validators);
-        let (polynomial, shares) = generate_test_data(n_validators as usize, threshold, 203);
+        let (_, polynomial, shares) = generate_test_data(n_validators as usize, threshold, 203);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         let leader_notarize = create_notarize(&shares[0], 1, 0, 1);
@@ -3395,7 +3392,7 @@ mod tests {
     fn test_ready_notarizes_without_leader_or_proposal() {
         let n_validators = 3;
         let threshold = quorum(n_validators);
-        let (_, shares) = generate_test_data(n_validators as usize, threshold, 204);
+        let (_, _, shares) = generate_test_data(n_validators as usize, threshold, 204);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         // Collect sufficient number of unverified notarizes
@@ -3422,7 +3419,7 @@ mod tests {
     fn test_ready_finalizes_without_leader_or_proposal() {
         let n_validators = 3;
         let threshold = quorum(n_validators);
-        let (_, shares) = generate_test_data(n_validators as usize, threshold, 205);
+        let (_, _, shares) = generate_test_data(n_validators as usize, threshold, 205);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         for i in 0..threshold {
@@ -3462,7 +3459,7 @@ mod tests {
     fn test_verify_nullifies_empty_pending() {
         let n_validators = 3;
         let threshold = quorum(n_validators);
-        let (polynomial, _) = generate_test_data(n_validators as usize, threshold, 207);
+        let (_, polynomial, _) = generate_test_data(n_validators as usize, threshold, 207);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         assert!(verifier.nullifies.is_empty());
@@ -3479,7 +3476,7 @@ mod tests {
     fn test_verify_finalizes_empty_pending() {
         let n_validators = 3;
         let threshold = quorum(n_validators);
-        let (polynomial, shares) = generate_test_data(n_validators as usize, threshold, 208);
+        let (_, polynomial, shares) = generate_test_data(n_validators as usize, threshold, 208);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         // ready_finalizes will be false if the list is empty and quorum is Some
@@ -3497,7 +3494,7 @@ mod tests {
     fn test_ready_notarizes_exact_quorum() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (polynomial, shares) = generate_test_data(n_validators as usize, threshold, 209);
+        let (_, polynomial, shares) = generate_test_data(n_validators as usize, threshold, 209);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         let leader_notarize = create_notarize(&shares[0], 1, 0, 1);
@@ -3529,7 +3526,7 @@ mod tests {
     fn test_ready_nullifies_exact_quorum() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (_, shares) = generate_test_data(n_validators as usize, threshold, 210);
+        let (_, _, shares) = generate_test_data(n_validators as usize, threshold, 210);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         verifier.add(Voter::Nullify(create_nullify(&shares[0], 1)), true); // 1 verified
@@ -3546,7 +3543,7 @@ mod tests {
     fn test_ready_finalizes_exact_quorum() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (_, shares) = generate_test_data(n_validators as usize, threshold, 211);
+        let (_, _, shares) = generate_test_data(n_validators as usize, threshold, 211);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         let leader_proposal = Proposal::new(1, 0, sample_digest(1));
@@ -3567,7 +3564,7 @@ mod tests {
     fn test_ready_notarizes_quorum_already_met_by_verified() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (_, shares) = generate_test_data(n_validators as usize, threshold, 212);
+        let (_, _, shares) = generate_test_data(n_validators as usize, threshold, 212);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         let leader_notarize = create_notarize(&shares[0], 1, 0, 1);
@@ -3597,7 +3594,7 @@ mod tests {
     fn test_ready_nullifies_quorum_already_met_by_verified() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (_, shares) = generate_test_data(n_validators as usize, threshold, 213);
+        let (_, _, shares) = generate_test_data(n_validators as usize, threshold, 213);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         for share in shares.iter().take(threshold as usize) {
@@ -3617,7 +3614,7 @@ mod tests {
     fn test_ready_finalizes_quorum_already_met_by_verified() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (_, shares) = generate_test_data(n_validators as usize, threshold, 214);
+        let (_, _, shares) = generate_test_data(n_validators as usize, threshold, 214);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         let leader_proposal = Proposal::new(1, 0, sample_digest(1));
