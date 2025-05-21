@@ -63,9 +63,6 @@
 //!                            +------------+          +++++++++++++++
 //! ```
 //!
-//! _Application is usually a single object that implements the `Automaton`, `Relay`, `Committer`,
-//! and `ThresholdSupervisor` traits._
-//!
 //! ## Joining Consensus
 //!
 //! As soon as `2f+1` notarizes, nullifies, or finalizes are observed for some view `v`, the `Voter` will
