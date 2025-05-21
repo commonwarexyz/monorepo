@@ -50,19 +50,13 @@ fn benchmark_partial_verify_multiple_public_keys_precomputed(c: &mut Criterion) 
                                 signatures.shuffle(&mut rng);
                             }
 
-                            // Prepare keys array
-                            let mut ordered_keys = Vec::with_capacity(keys.len());
-                            for signature in &signatures {
-                                ordered_keys.push(keys[signature.index as usize]);
-                            }
-
                             // Verify
                             let result = black_box(
                                 primitives::ops::partial_verify_multiple_public_keys_precomputed::<
                                     MinSig,
                                     _,
                                 >(
-                                    &ordered_keys, Some(namespace), msg, &signatures
+                                    &keys, Some(namespace), msg, &signatures
                                 ),
                             );
                             if invalid == 0 {
