@@ -177,10 +177,10 @@ pub(crate) async fn run(
             let timeout = io_uring::types::Timespec::new()
                 .sec(freq.as_secs())
                 .nsec(freq.subsec_nanos());
-            let op = Timeout::new(&timeout).build().user_data(POLL_WORK_ID);
+            let timeout = Timeout::new(&timeout).build().user_data(POLL_WORK_ID);
             unsafe {
                 ring.submission()
-                    .push(&op)
+                    .push(&timeout)
                     .expect("unable to push to queue");
             }
         }
