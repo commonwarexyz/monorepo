@@ -704,7 +704,7 @@ impl<V: Variant, D: Digest> Notarize<V, D> {
         } else if notarizes.len() == 1 {
             // If there is only one notarize, verify it directly (will perform
             // inner aggregation)
-            let valid = notarizes[0].verify(namespace, &polynomial[0]);
+            let valid = notarizes[0].verify(namespace, polynomial);
             if valid {
                 return (notarizes, vec![]);
             } else {
