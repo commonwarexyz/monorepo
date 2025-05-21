@@ -8,10 +8,13 @@ use crate::{
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
-    bls12381::primitives::{
-        group,
-        poly::{self, public},
-        variant::Variant,
+    bls12381::{
+        dkg::ops::evaluate_all,
+        primitives::{
+            group,
+            poly::{self, public},
+            variant::Variant,
+        },
     },
     Digest,
 };
@@ -59,9 +62,7 @@ impl<P: Array, V: Variant, D: Digest> Supervisor<P, V, D> {
         let mut identity = None;
         let mut parsed_participants = BTreeMap::new();
         for (view, (polynomial, mut validators, share)) in cfg.participants.into_iter() {
-            let evaluations = (0..validators.len())
-                .map(|i| polynomial.evaluate(i as u32).value)
-                .collect::<Vec<_>>();
+            let evaluations = evaluate_all::<V>(&polynomial);
             let mut map = HashMap::new();
             for (index, validator) in validators.iter().enumerate() {
                 map.insert(validator.clone(), index as u32);

@@ -2278,7 +2278,7 @@ mod tests {
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::{
-            dkg::ops,
+            dkg::ops::{self, evaluate_all},
             primitives::{group::Share, ops::threshold_signature_recover, poly, variant::MinSig},
         },
         sha256::Digest as Sha256,
@@ -2306,10 +2306,8 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(seed);
         let (polynomial, shares) = ops::generate_shares::<_, MinSig>(&mut rng, None, n as u32, t);
         let identity = poly::public::<MinSig>(&polynomial);
-        let evaluations = (0..n)
-            .map(|i| polynomial.evaluate(i as u32).value)
-            .collect::<Vec<_>>();
-        (*identity, evaluations, shares)
+        let polynomial = evaluate_all::<MinSig>(&polynomial);
+        (*identity, polynomial, shares)
     }
 
     #[test]

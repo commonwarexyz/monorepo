@@ -1,5 +1,5 @@
 use commonware_cryptography::bls12381::{
-    dkg,
+    dkg::{self, ops::evaluate_all},
     primitives::{self, variant::MinSig},
 };
 use commonware_utils::quorum;
@@ -22,9 +22,7 @@ fn benchmark_partial_verify_multiple_public_keys_precomputed(c: &mut Criterion) 
                             let mut rng = StdRng::seed_from_u64(0);
                             let (polynomial, shares) =
                                 dkg::ops::generate_shares::<_, MinSig>(&mut rng, None, n, t);
-                            let keys = (0..n)
-                                .map(|i| polynomial.evaluate(i).value)
-                                .collect::<Vec<_>>();
+                            let polynomial = evaluate_all::<MinSig>(&polynomial);
                             let signatures = shares
                                 .iter()
                                 .enumerate()
@@ -42,9 +40,9 @@ fn benchmark_partial_verify_multiple_public_keys_precomputed(c: &mut Criterion) 
                                     }
                                 })
                                 .collect::<Vec<_>>();
-                            (rng, keys, signatures)
+                            (rng, polynomial, signatures)
                         },
-                        |(mut rng, keys, mut signatures)| {
+                        |(mut rng, polynomial, mut signatures)| {
                             // Shuffle faults
                             if invalid > 0 {
                                 signatures.shuffle(&mut rng);
@@ -56,7 +54,7 @@ fn benchmark_partial_verify_multiple_public_keys_precomputed(c: &mut Criterion) 
                                     MinSig,
                                     _,
                                 >(
-                                    &keys, Some(namespace), msg, &signatures
+                                    &polynomial, Some(namespace), msg, &signatures
                                 ),
                             );
                             if invalid == 0 {
