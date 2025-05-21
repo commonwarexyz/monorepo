@@ -9,8 +9,7 @@ use commonware_cryptography::{
         group::Share,
         ops::{
             aggregate_signatures, aggregate_verify_multiple_messages, partial_sign_message,
-            partial_verify_message, partial_verify_multiple_messages,
-            partial_verify_multiple_public_keys, partial_verify_multiple_public_keys_precomputed,
+            partial_verify_multiple_messages, partial_verify_multiple_public_keys_precomputed,
             verify_message,
         },
         poly::{PartialSignature, Poly},
@@ -359,7 +358,7 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
     pub fn verify_nullifies(
         &mut self,
         namespace: &[u8],
-        polynomial: &Poly<V::Public>,
+        polynomial: &Vec<V::Public>,
     ) -> (Vec<Voter<V, D>>, Vec<u32>) {
         let (nullifies, failed) =
             Nullify::verify_multiple(namespace, polynomial, std::mem::take(&mut self.nullifies));
@@ -418,7 +417,7 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
     pub fn verify_finalizes(
         &mut self,
         namespace: &[u8],
-        polynomial: &Poly<V::Public>,
+        polynomial: &Vec<V::Public>,
     ) -> (Vec<Voter<V, D>>, Vec<u32>) {
         let (finalizes, failed) =
             Finalize::verify_multiple(namespace, polynomial, std::mem::take(&mut self.finalizes));
@@ -677,13 +676,13 @@ impl<V: Variant, D: Digest> Notarize<V, D> {
         let seed_namespace = seed_namespace(namespace);
         let seed_message = view_message(self.proposal.view);
         let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
+        let Some(evaluated) = polynomial.get(self.proposal_signature.index as usize) else {
+            return false;
+        };
         let signature = aggregate_signatures::<V, _>(&[
             self.proposal_signature.value,
             self.seed_signature.value,
         ]);
-        let Some(evaluated) = polynomial.get(self.proposal_signature.index as usize) else {
-            return false;
-        };
         aggregate_verify_multiple_messages::<V, _>(
             evaluated,
             &[notarize_message, seed_message],
@@ -947,24 +946,29 @@ impl<V: Variant> Nullify<V> {
     /// 1. The view signature is valid for the given view
     /// 2. The seed signature is valid for the view
     /// 3. Both signatures are from the same signer
-    pub fn verify(&self, namespace: &[u8], polynomial: &Poly<V::Public>) -> bool {
+    pub fn verify(&self, namespace: &[u8], polynomial: &Vec<V::Public>) -> bool {
         let nullify_namespace = nullify_namespace(namespace);
         let view_message = view_message(self.view);
         let nullify_message = (Some(nullify_namespace.as_ref()), view_message.as_ref());
         let seed_namespace = seed_namespace(namespace);
         let seed_message = (Some(seed_namespace.as_ref()), view_message.as_ref());
-        partial_verify_multiple_messages::<V, _, _>(
-            polynomial,
-            self.signer(),
+        let Some(evaluated) = polynomial.get(self.view_signature.index as usize) else {
+            return false;
+        };
+        let signature =
+            aggregate_signatures::<V, _>(&[self.view_signature.value, self.seed_signature.value]);
+        aggregate_verify_multiple_messages::<V, _>(
+            evaluated,
             &[nullify_message, seed_message],
-            [&self.view_signature, &self.seed_signature],
+            &signature,
+            1,
         )
         .is_ok()
     }
 
     pub fn verify_multiple(
         namespace: &[u8],
-        polynomial: &Poly<V::Public>,
+        polynomial: &Vec<V::Public>,
         nullifies: Vec<Nullify<V>>,
     ) -> (Vec<Nullify<V>>, Vec<u32>) {
         // Prepare to verify
@@ -985,7 +989,7 @@ impl<V: Variant> Nullify<V> {
         let nullify_namespace = nullify_namespace(namespace);
         let view_message = view_message(selected.view);
         let view_signatures = nullifies.iter().map(|n| &n.view_signature);
-        if let Err(err) = partial_verify_multiple_public_keys::<V, _>(
+        if let Err(err) = partial_verify_multiple_public_keys_precomputed::<V, _>(
             polynomial,
             Some(&nullify_namespace),
             &view_message,
@@ -1002,7 +1006,7 @@ impl<V: Variant> Nullify<V> {
             .iter()
             .filter(|n| !invalid.contains(&n.seed_signature.index))
             .map(|n| &n.seed_signature);
-        if let Err(err) = partial_verify_multiple_public_keys::<V, _>(
+        if let Err(err) = partial_verify_multiple_public_keys_precomputed::<V, _>(
             polynomial,
             Some(&seed_namespace),
             &view_message,
@@ -1196,21 +1200,24 @@ impl<V: Variant, D: Digest> Finalize<V, D> {
     /// Verifies the signature on this finalize using BLS threshold verification.
     ///
     /// This ensures that the signature is valid for the given proposal.
-    pub fn verify(&self, namespace: &[u8], polynomial: &Poly<V::Public>) -> bool {
+    pub fn verify(&self, namespace: &[u8], polynomial: &Vec<V::Public>) -> bool {
         let finalize_namespace = finalize_namespace(namespace);
         let message = self.proposal.encode();
-        partial_verify_message::<V>(
-            polynomial,
+        let Some(evaluated) = polynomial.get(self.proposal_signature.index as usize) else {
+            return false;
+        };
+        verify_message::<V>(
+            evaluated,
             Some(finalize_namespace.as_ref()),
             &message,
-            &self.proposal_signature,
+            &self.proposal_signature.value,
         )
         .is_ok()
     }
 
     pub fn verify_multiple(
         namespace: &[u8],
-        polynomial: &Poly<V::Public>,
+        polynomial: &Vec<V::Public>,
         finalizes: Vec<Finalize<V, D>>,
     ) -> (Vec<Finalize<V, D>>, Vec<u32>) {
         // Prepare to verify
@@ -1231,7 +1238,7 @@ impl<V: Variant, D: Digest> Finalize<V, D> {
         let finalize_namespace = finalize_namespace(namespace);
         let finalize_message = proposal.encode();
         let finalize_signatures = finalizes.iter().map(|f| &f.proposal_signature);
-        if let Err(err) = partial_verify_multiple_public_keys::<V, _>(
+        if let Err(err) = partial_verify_multiple_public_keys_precomputed::<V, _>(
             polynomial,
             Some(&finalize_namespace),
             &finalize_message,
