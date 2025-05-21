@@ -31,7 +31,7 @@ impl Default for Config {
             size: 128,
             iopoll: false,
             single_issuer: true,
-            op_timeout: Some(Duration::from_secs(10)),
+            op_timeout: None,
         }
     }
 }
@@ -82,8 +82,8 @@ pub(crate) async fn run(
                 }
             } else {
                 // This is a timeout. Make sure timeouts are enabled.
-                debug_assert!(cfg.op_timeout.is_some());
-                debug_assert_eq!(work_id, TIMEOUT_WORK_ID);
+                assert!(cfg.op_timeout.is_some());
+                assert_eq!(work_id, TIMEOUT_WORK_ID);
             }
             continue;
         }
