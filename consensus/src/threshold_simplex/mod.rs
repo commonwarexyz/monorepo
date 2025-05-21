@@ -85,7 +85,10 @@
 //! Unlike other consensus constructions that verify all incoming messages received from peers,
 //! `threshold-simplex` lazily verifies messages (only when a quorum is met). If an invalid signature
 //! is detected, the `Batcher` will perform repeated bisections over collected messages to find the
-//! offending message (and block the peer(s) that sent it).
+//! offending message (and block the peer(s) that sent it via [commonware_p2p::Blocker]).
+//!
+//! _If using a p2p implementation that is not authenticated, it is not safe to employ this optimization
+//! as any attacking peer could simply reconnect from a different address. We recommend [commonware_p2p::authenticated]._
 //!
 //! ## Protocol Description
 //!
