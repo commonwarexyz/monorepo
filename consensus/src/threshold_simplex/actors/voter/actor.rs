@@ -83,6 +83,12 @@ struct Round<
     // Leader is set as soon as we know the seed for the view.
     leader: Option<(C::PublicKey, u32)>,
 
+    // We explicitly distinguish between the proposal being verified (we checked it)
+    // and the proposal being recovered (network has determined its validity). As a sanity
+    // check, we'll never notarize or finalize a proposal that we did not verify.
+    //
+    // We will, however, construct a notarization or finalization (if we have enough partial
+    // signatures of either) even if we did not verify the proposal.
     requested_proposal_build: bool,
     requested_proposal_verify: bool,
     verified_proposal: bool,
