@@ -2298,7 +2298,12 @@ mod tests {
     use commonware_cryptography::{
         bls12381::{
             dkg::ops::{self, evaluate_all},
-            primitives::{group::Share, ops::threshold_signature_recover, poly, variant::MinSig},
+            primitives::{
+                group::{Element, Share},
+                ops::threshold_signature_recover,
+                poly,
+                variant::MinSig,
+            },
         },
         sha256::Digest as Sha256,
     };
@@ -2567,7 +2572,7 @@ mod tests {
     fn test_response_encode_decode() {
         let n = 5;
         let t = quorum(n);
-        let (_, _, shares) = generate_test_data(n, t, 0);
+        let (identity, _, shares) = generate_test_data(n, t, 0);
 
         // Create a notarization
         let proposal = Proposal::new(10, 5, sample_digest(1));
@@ -2600,10 +2605,21 @@ mod tests {
         // Create a response
         let response = Response::<MinSig, Sha256>::new(1, vec![notarization], vec![nullification]);
         let encoded = response.encode();
-        let decoded = Response::<MinSig, Sha256>::decode_cfg(encoded, &usize::MAX).unwrap();
+        let mut decoded = Response::<MinSig, Sha256>::decode_cfg(encoded, &usize::MAX).unwrap();
         assert_eq!(response.id, decoded.id);
         assert_eq!(response.notarizations.len(), decoded.notarizations.len());
         assert_eq!(response.nullifications.len(), decoded.nullifications.len());
+
+        // Verify the response
+        assert!(decoded.verify(NAMESPACE, &identity));
+
+        // Modify the response
+        decoded.nullifications[0]
+            .view_signature
+            .add(&<MinSig as Variant>::Signature::one());
+
+        // Verify the modified response
+        assert!(!decoded.verify(NAMESPACE, &identity));
     }
 
     #[test]
