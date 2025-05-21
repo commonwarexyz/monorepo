@@ -65,9 +65,9 @@ pub struct Engine<
     TSu: ThresholdSupervisor<
         Index = Epoch,
         PublicKey = C::PublicKey,
-        Share = group::Share,
-        Polynomial = poly::Public<V>,
         Identity = V::Public,
+        Polynomial = poly::Public<V>,
+        Share = group::Share,
     >,
     NetS: Sender<PublicKey = C::PublicKey>,
     NetR: Receiver<PublicKey = C::PublicKey>,
@@ -213,9 +213,9 @@ impl<
         TSu: ThresholdSupervisor<
             Index = Epoch,
             PublicKey = C::PublicKey,
-            Share = group::Share,
-            Polynomial = poly::Public<V>,
             Identity = V::Public,
+            Polynomial = poly::Public<V>,
+            Share = group::Share,
         >,
         NetS: Sender<PublicKey = C::PublicKey>,
         NetR: Receiver<PublicKey = C::PublicKey>,
