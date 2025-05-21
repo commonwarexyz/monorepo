@@ -45,6 +45,12 @@ use tracing::{debug, trace, warn};
 
 const GENESIS_VIEW: View = 0;
 
+/// Compute the quorum for a given polynomial.
+fn polynomial_quorum<P>(polynomial: &[P]) -> u32 {
+    let n = polynomial.len() as u32;
+    quorum(n)
+}
+
 /// Action to take after processing a message.
 enum Action {
     /// Skip processing the message.
@@ -565,7 +571,7 @@ impl<
         }
         let proposal = round.proposal.as_ref()?;
         let polynomial = self.supervisor.polynomial(view)?;
-        let threshold = quorum(polynomial.len() as u32);
+        let threshold = polynomial_quorum(polynomial);
         if round.notarizes.len() >= threshold as usize {
             return Some(&proposal.payload);
         }
@@ -581,7 +587,7 @@ impl<
             Some(polynomial) => polynomial,
             None => return false,
         };
-        let threshold = quorum(polynomial.len() as u32);
+        let threshold = polynomial_quorum(polynomial);
         round.nullification.is_some() || round.nullifies.len() >= threshold as usize
     }
 
@@ -592,7 +598,7 @@ impl<
         }
         let proposal = round.proposal.as_ref()?;
         let polynomial = self.supervisor.polynomial(view)?;
-        let threshold = quorum(polynomial.len() as u32);
+        let threshold = polynomial_quorum(polynomial);
         if round.finalizes.len() >= threshold as usize {
             return Some(&proposal.payload);
         }
@@ -1292,7 +1298,7 @@ impl<
 
         // Attempt to construct notarization
         let polynomial = self.supervisor.polynomial(view)?;
-        let threshold = quorum(polynomial.len() as u32);
+        let threshold = polynomial_quorum(polynomial);
         round.notarizable(threshold, force).await
     }
 
@@ -1306,7 +1312,7 @@ impl<
 
         // Attempt to construct nullification
         let polynomial = self.supervisor.polynomial(view)?;
-        let threshold = quorum(polynomial.len() as u32);
+        let threshold = polynomial_quorum(polynomial);
         round.nullifiable(threshold, force).await
     }
 
@@ -1344,7 +1350,7 @@ impl<
 
         // Attempt to construct finalization
         let polynomial = self.supervisor.polynomial(view)?;
-        let threshold = quorum(polynomial.len() as u32);
+        let threshold = polynomial_quorum(polynomial);
         round.finalizable(threshold, force).await
     }
 
