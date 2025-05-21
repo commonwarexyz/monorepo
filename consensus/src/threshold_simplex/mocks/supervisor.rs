@@ -62,7 +62,7 @@ impl<P: Array, V: Variant, D: Digest> Supervisor<P, V, D> {
         let mut identity = None;
         let mut parsed_participants = BTreeMap::new();
         for (view, (polynomial, mut validators, share)) in cfg.participants.into_iter() {
-            let evaluations = evaluate_all::<V>(&polynomial);
+            let evaluations = evaluate_all::<V>(&polynomial, validators.len() as u32);
             let mut map = HashMap::new();
             for (index, validator) in validators.iter().enumerate() {
                 map.insert(validator.clone(), index as u32);

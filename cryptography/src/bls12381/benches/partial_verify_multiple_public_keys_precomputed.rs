@@ -22,7 +22,7 @@ fn benchmark_partial_verify_multiple_public_keys_precomputed(c: &mut Criterion) 
                             let mut rng = StdRng::seed_from_u64(0);
                             let (polynomial, shares) =
                                 dkg::ops::generate_shares::<_, MinSig>(&mut rng, None, n, t);
-                            let polynomial = evaluate_all::<MinSig>(&polynomial);
+                            let polynomial = evaluate_all::<MinSig>(&polynomial, n);
                             let signatures = shares
                                 .iter()
                                 .enumerate()

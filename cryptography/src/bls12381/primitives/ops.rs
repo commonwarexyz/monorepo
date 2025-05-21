@@ -1709,7 +1709,7 @@ mod tests {
         // Verify all signatures
         partial_verify_multiple_public_keys::<MinSig, _>(&public, namespace, msg, &partials)
             .expect("all signatures should be valid");
-        let polynomial = evaluate_all::<MinSig>(&public);
+        let polynomial = evaluate_all::<MinSig>(&public, n);
         partial_verify_multiple_public_keys_precomputed::<MinSig, _>(
             &polynomial,
             namespace,
@@ -1754,7 +1754,7 @@ mod tests {
             }
             _ => panic!("Expected an error with invalid signatures"),
         }
-        let polynomial = evaluate_all::<MinSig>(&public);
+        let polynomial = evaluate_all::<MinSig>(&public, n);
         let result = partial_verify_multiple_public_keys_precomputed::<MinSig, _>(
             &polynomial,
             namespace,
@@ -1817,7 +1817,7 @@ mod tests {
             }
             _ => panic!("Expected an error with invalid signatures"),
         }
-        let polynomial = evaluate_all::<MinSig>(&public);
+        let polynomial = evaluate_all::<MinSig>(&public, n);
         let result = partial_verify_multiple_public_keys_precomputed::<MinSig, _>(
             &polynomial,
             namespace,
