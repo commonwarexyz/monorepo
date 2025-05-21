@@ -67,12 +67,10 @@ impl<H: CHasher> Proof<H> {
         T: IntoIterator<Item: AsRef<[u8]>>,
     {
         match self
-            .reconstruct_peak_digests(hasher, elements, start_element_pos, end_element_pos)
+            .reconstruct_root(hasher, elements, start_element_pos, end_element_pos)
             .await
         {
-            Ok(peak_digests) => {
-                Ok(*root_digest == hasher.root_digest(self.size, peak_digests.iter()))
-            }
+            Ok(reconstructed_root) => Ok(*root_digest == reconstructed_root),
             Err(MissingHashes) => {
                 debug!("Not enough hashes in proof to reconstruct peak hashes");
                 Ok(false)
@@ -83,6 +81,23 @@ impl<H: CHasher> Proof<H> {
             }
             Err(e) => Err(e),
         }
+    }
+
+    pub(super) async fn reconstruct_root<M: Hasher<H>, T>(
+        &self,
+        hasher: &mut M,
+        elements: T,
+        start_element_pos: u64,
+        end_element_pos: u64,
+    ) -> Result<H::Digest, Error>
+    where
+        T: IntoIterator<Item: AsRef<[u8]>>,
+    {
+        let peak_digests = self
+            .reconstruct_peak_digests(hasher, elements, start_element_pos, end_element_pos)
+            .await?;
+
+        Ok(hasher.root_digest(self.size, peak_digests.iter()))
     }
 
     /// Reconstruct the peak hashes of the MMR that produced this proof, returning `MissingHashes`

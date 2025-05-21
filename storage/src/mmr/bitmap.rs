@@ -12,37 +12,14 @@
 
 use crate::{
     metadata::{Config as MConfig, Metadata},
-    mmr::{iterator::leaf_num_to_pos, mem::Mmr, verification::Proof, Error, Hasher, Storage},
+    mmr::{iterator::leaf_num_to_pos, mem::Mmr, verification::Proof, Error, Error::*, Hasher},
 };
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::array::prefixed_u64::U64;
 use std::collections::VecDeque;
-use tracing::{error, warn};
-
-/// Implements the [Storage] trait for generating inclusion proofs over the bitmap.
-struct BitmapStorage<'a, H: CHasher> {
-    /// The Merkle tree over all bitmap bits other than the last chunk.
-    mmr: &'a Mmr<H>,
-
-    /// A pruned Merkle tree over all bits of the bitmap including the last chunk.
-    last_chunk_mmr: &'a Mmr<H>,
-}
-
-impl<H: CHasher + Send + Sync> Storage<H::Digest> for BitmapStorage<'_, H> {
-    async fn get_node(&self, pos: u64) -> Result<Option<H::Digest>, Error> {
-        if pos < self.mmr.size() {
-            Ok(self.mmr.get_node(pos))
-        } else {
-            Ok(self.last_chunk_mmr.get_node(pos))
-        }
-    }
-
-    fn size(&self) -> u64 {
-        self.last_chunk_mmr.size()
-    }
-}
+use tracing::{debug, error, warn};
 
 /// A bitmap supporting inclusion proofs through Merkelization.
 ///
@@ -144,7 +121,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         for (index, pos) in Proof::<H>::nodes_to_pin(mmr_size).enumerate() {
             let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, index as u64)) else {
                 error!(size = mmr_size, pos, "missing pinned node");
-                return Err(Error::MissingNode(pos));
+                return Err(MissingNode(pos));
             };
             let digest = H::Digest::decode(bytes.as_ref());
             let Ok(digest) = digest else {
@@ -152,7 +129,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
                     size = mmr_size,
                     pos, "could not convert node bytes to digest"
                 );
-                return Err(Error::MissingNode(pos));
+                return Err(MissingNode(pos));
             };
             pinned_nodes.push(digest);
         }
@@ -195,7 +172,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
             metadata.put(key, digest.to_vec());
         }
 
-        metadata.close().await.map_err(Error::MetadataError)
+        metadata.close().await.map_err(MetadataError)
     }
 
     /// Return the number of bits currently stored in the bitmap, irrespective of any pruning.
@@ -395,25 +372,35 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         self.mmr.update_leaf(hasher, leaf_pos, chunk).await
     }
 
-    /// Return the root of the Merkle tree over the bitmap.
-    ///
-    /// # Warning
-    ///
-    /// The root will not change when adding "0" bits unless a chunk boundary is crossed. If you
-    /// require a root digest that changes with every bit added, you can hash the value of
-    /// `bit_count()` into the result.
+    /// Return the root digest against which inclusion proofs can be verified.
     pub async fn root(&self, hasher: &mut impl Hasher<H>) -> Result<H::Digest, Error> {
+        let mmr_root = self.mmr.root(hasher);
         if self.next_bit == 0 {
-            return Ok(self.mmr.root(hasher));
+            return Ok(mmr_root);
         }
 
-        // We must add the partial chunk to the Merkle tree for its bits to be provable. We do so on
-        // a temporary lightweight (fully pruned) copy of the tree so that we don't require
-        // mutability of the original.
-        let mut mmr = self.mmr.clone_pruned();
-        mmr.add(hasher, self.last_chunk()).await?;
+        // We must add the partial chunk to the digest for its bits to be provable.
+        let last_chunk_digest = hasher.digest(self.last_chunk());
+        Ok(Self::partial_chunk_root(
+            hasher.inner(),
+            self.next_bit,
+            &mmr_root,
+            &last_chunk_digest,
+        ))
+    }
 
-        Ok(mmr.root(hasher))
+    fn partial_chunk_root(
+        hasher: &mut H,
+        next_bit: u64,
+        mmr_root: &H::Digest,
+        last_chunk_digest: &H::Digest,
+    ) -> H::Digest {
+        assert!(next_bit > 0);
+        assert!(next_bit < Self::CHUNK_SIZE_BITS);
+        hasher.update(&next_bit.to_be_bytes());
+        hasher.update(mmr_root);
+        hasher.update(last_chunk_digest);
+        hasher.finalize()
     }
 
     /// Return an inclusion proof for the specified bit, along with the chunk of the bitmap
@@ -428,20 +415,30 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         let leaf_pos = Self::leaf_pos(bit_offset);
         let chunk = self.get_chunk(bit_offset);
 
+        if leaf_pos == self.mmr.size() {
+            assert!(self.next_bit > 0);
+            // Proof is over a bit in the partial chunk. In this case only a single digest is
+            // required in the proof: the mmr's root.
+            return Ok((
+                Proof {
+                    size: self.bit_count(),
+                    hashes: vec![self.mmr.root(hasher)],
+                },
+                *chunk,
+            ));
+        }
+
+        let mut proof = Proof::<H>::range_proof(&self.mmr, leaf_pos, leaf_pos).await?;
+        proof.size = self.bit_count();
         if self.next_bit == 0 {
-            let proof = Proof::<H>::range_proof(&self.mmr, leaf_pos, leaf_pos).await?;
+            // Bitmap is chunk aligned.
             return Ok((proof, *chunk));
         }
 
-        // We must account for the bits in the last chunk.
-        let mut mmr = self.mmr.clone_pruned();
-        mmr.add(hasher, self.last_chunk()).await?;
-
-        let storage = BitmapStorage {
-            mmr: &self.mmr,
-            last_chunk_mmr: &mmr,
-        };
-        let proof = Proof::<H>::range_proof(&storage, leaf_pos, leaf_pos).await?;
+        let last_chunk_digest = hasher.digest(self.last_chunk());
+        // Since the bitmap wasn't chunk aligned, we'll need to include the digest of the last chunk
+        // in the proof to be able to re-derive the root.
+        proof.hashes.push(last_chunk_digest);
 
         Ok((proof, *chunk))
     }
@@ -455,10 +452,67 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         bit_offset: u64,
         root_digest: &H::Digest,
     ) -> Result<bool, Error> {
+        let bit_count = proof.size;
+        if bit_offset >= bit_count {
+            debug!(bit_count, bit_offset, "tried to verify non-existent bit");
+            return Ok(false);
+        }
         let leaf_pos = Self::leaf_pos(bit_offset);
-        proof
-            .verify_element_inclusion(hasher, chunk, leaf_pos, root_digest)
+
+        let mut mmr_proof = Proof::<H> {
+            size: leaf_num_to_pos(bit_count / Self::CHUNK_SIZE_BITS),
+            hashes: proof.hashes.clone(),
+        };
+
+        if bit_count % Self::CHUNK_SIZE_BITS == 0 {
+            return mmr_proof
+                .verify_element_inclusion(hasher, chunk, leaf_pos, root_digest)
+                .await;
+        }
+
+        // The proof must contain the partial chunk digest as its last hash.
+        if proof.hashes.is_empty() {
+            debug!("proof has no digests");
+            return Ok(false);
+        }
+        if mmr_proof.size == leaf_pos {
+            // The proof is over a bit in the partial chunk. In this case the proof's hashes should
+            // contain only a single digest: the mmr root.
+            if mmr_proof.hashes.len() != 1 {
+                debug!("proof has more than one digest");
+                return Ok(false);
+            }
+            let mmr_root = mmr_proof.hashes.pop().unwrap();
+            let last_chunk_digest = hasher.digest(chunk);
+            let next_bit = bit_count % Self::CHUNK_SIZE_BITS;
+            let reconstructed_root =
+                Self::partial_chunk_root(hasher.inner(), next_bit, &mmr_root, &last_chunk_digest);
+            return Ok(reconstructed_root == *root_digest);
+        };
+        let last_chunk_digest = mmr_proof.hashes.pop().unwrap();
+
+        // Reconstruct the MMR root.
+        let mmr_root = match mmr_proof
+            .reconstruct_root(hasher, &[chunk], leaf_pos, leaf_pos)
             .await
+        {
+            Ok(root) => root,
+            Err(MissingHashes) => {
+                debug!("Not enough hashes in proof to reconstruct root");
+                return Ok(false);
+            }
+            Err(ExtraHashes) => {
+                debug!("Not all hashes in proof were used to reconstruct root");
+                return Ok(false);
+            }
+            Err(e) => return Err(e),
+        };
+
+        let next_bit = bit_count % Self::CHUNK_SIZE_BITS;
+        let reconstructed_root =
+            Self::partial_chunk_root(hasher.inner(), next_bit, &mmr_root, &last_chunk_digest);
+
+        Ok(reconstructed_root == *root_digest)
     }
 }
 
@@ -483,7 +537,7 @@ mod tests {
         vec.try_into().unwrap()
     }
 
-    #[test]
+    #[test_traced]
     fn test_bitmap_empty_then_one() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
@@ -540,7 +594,7 @@ mod tests {
         });
     }
 
-    #[test]
+    #[test_traced]
     fn test_bitmap_building() {
         // Build the same bitmap with 2 chunks worth of bits in multiple ways and make sure they are
         // equivalent based on their roots.
@@ -601,7 +655,7 @@ mod tests {
         });
     }
 
-    #[test]
+    #[test_traced]
     #[should_panic(expected = "cannot add chunk")]
     fn test_bitmap_build_chunked_panic() {
         let executor = deterministic::Runner::default();
@@ -621,7 +675,7 @@ mod tests {
         });
     }
 
-    #[test]
+    #[test_traced]
     #[should_panic(expected = "cannot add byte")]
     fn test_bitmap_build_byte_panic() {
         let executor = deterministic::Runner::default();
@@ -641,7 +695,7 @@ mod tests {
         });
     }
 
-    #[test]
+    #[test_traced]
     #[should_panic(expected = "out of bounds")]
     fn test_bitmap_get_out_of_bounds_bit_panic() {
         let executor = deterministic::Runner::default();
@@ -656,7 +710,7 @@ mod tests {
             bitmap.get_bit(256);
         });
     }
-    #[test]
+    #[test_traced]
     #[should_panic(expected = "pruned")]
     fn test_bitmap_get_pruned_bit_panic() {
         let executor = deterministic::Runner::default();
@@ -677,7 +731,7 @@ mod tests {
         });
     }
 
-    #[test]
+    #[test_traced]
     fn test_bitmap_root_boundaries() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
@@ -706,8 +760,8 @@ mod tests {
             for _ in 0..(Bitmap::<Sha256, SHA256_SIZE>::CHUNK_SIZE * 8 - 1) {
                 bitmap.append(&mut hasher, false).await.unwrap();
                 let newer_root = bitmap.root(&mut hasher).await.unwrap();
-                // root won't change when adding 0s within the same chunk
-                assert_eq!(new_root, newer_root);
+                // root will change when adding 0s within the same chunk
+                assert!(new_root != newer_root);
             }
             assert_eq!(bitmap.mmr.size(), 4); // chunk we filled should have been added to mmr
 
@@ -725,7 +779,7 @@ mod tests {
         });
     }
 
-    #[test]
+    #[test_traced]
     fn test_bitmap_get_set_bits() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
@@ -775,7 +829,7 @@ mod tests {
         tmp.try_into().unwrap()
     }
 
-    #[test]
+    #[test_traced]
     fn test_bitmap_mmr_proof_verification() {
         test_bitmap_mmr_proof_verification_n::<32>();
         test_bitmap_mmr_proof_verification_n::<64>();
