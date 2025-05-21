@@ -1739,42 +1739,30 @@ mod tests {
             .collect();
 
         // Attempt verification and expect failure with bisection identifying the invalid signature
-        let result =
+        let result_1 =
             partial_verify_multiple_public_keys::<MinSig, _>(&public, namespace, msg, &partials);
-        match result {
-            Err(invalid_sigs) => {
-                assert_eq!(
-                    invalid_sigs.len(),
-                    1,
-                    "Exactly one signature should be invalid"
-                );
-                assert_eq!(
-                    invalid_sigs[0].index, corrupted_index as u32,
-                    "The invalid signature should match the corrupted share's index"
-                );
-            }
-            _ => panic!("Expected an error with invalid signatures"),
-        }
         let polynomial = evaluate_all::<MinSig>(&public, n);
-        let result = partial_verify_multiple_public_keys_precomputed::<MinSig, _>(
+        let result_2 = partial_verify_multiple_public_keys_precomputed::<MinSig, _>(
             &polynomial,
             namespace,
             msg,
             &partials,
         );
-        match result {
-            Err(invalid_sigs) => {
-                assert_eq!(
-                    invalid_sigs.len(),
-                    1,
-                    "Exactly one signature should be invalid"
-                );
-                assert_eq!(
-                    invalid_sigs[0].index, corrupted_index as u32,
-                    "The invalid signature should match the corrupted share's index"
-                );
+        for result in [result_1, result_2] {
+            match result {
+                Err(invalid_sigs) => {
+                    assert_eq!(
+                        invalid_sigs.len(),
+                        1,
+                        "Exactly one signature should be invalid"
+                    );
+                    assert_eq!(
+                        invalid_sigs[0].index, corrupted_index as u32,
+                        "The invalid signature should match the corrupted share's index"
+                    );
+                }
+                _ => panic!("Expected an error with invalid signatures"),
             }
-            _ => panic!("Expected an error with invalid signatures"),
         }
     }
 
@@ -1799,48 +1787,34 @@ mod tests {
             .collect();
 
         // Attempt verification and expect failure with bisection identifying invalid signatures
-        let result =
+        let result_1 =
             partial_verify_multiple_public_keys::<MinSig, _>(&public, namespace, msg, &partials);
-        match result {
-            Err(invalid_sigs) => {
-                assert_eq!(
-                    invalid_sigs.len(),
-                    corrupted_indices.len(),
-                    "Number of invalid signatures should match number of corrupted shares"
-                );
-                let invalid_indices: Vec<u32> = invalid_sigs.iter().map(|sig| sig.index).collect();
-                let expected_indices: Vec<u32> =
-                    corrupted_indices.iter().map(|&i| i as u32).collect();
-                assert_eq!(
-                    invalid_indices, expected_indices,
-                    "Invalid signature indices should match corrupted share indices"
-                );
-            }
-            _ => panic!("Expected an error with invalid signatures"),
-        }
         let polynomial = evaluate_all::<MinSig>(&public, n);
-        let result = partial_verify_multiple_public_keys_precomputed::<MinSig, _>(
+        let result_2 = partial_verify_multiple_public_keys_precomputed::<MinSig, _>(
             &polynomial,
             namespace,
             msg,
             &partials,
         );
-        match result {
-            Err(invalid_sigs) => {
-                assert_eq!(
-                    invalid_sigs.len(),
-                    corrupted_indices.len(),
-                    "Number of invalid signatures should match number of corrupted shares"
-                );
-                let invalid_indices: Vec<u32> = invalid_sigs.iter().map(|sig| sig.index).collect();
-                let expected_indices: Vec<u32> =
-                    corrupted_indices.iter().map(|&i| i as u32).collect();
-                assert_eq!(
-                    invalid_indices, expected_indices,
-                    "Invalid signature indices should match corrupted share indices"
-                );
+        for result in [result_1, result_2] {
+            match result {
+                Err(invalid_sigs) => {
+                    assert_eq!(
+                        invalid_sigs.len(),
+                        corrupted_indices.len(),
+                        "Number of invalid signatures should match number of corrupted shares"
+                    );
+                    let invalid_indices: Vec<u32> =
+                        invalid_sigs.iter().map(|sig| sig.index).collect();
+                    let expected_indices: Vec<u32> =
+                        corrupted_indices.iter().map(|&i| i as u32).collect();
+                    assert_eq!(
+                        invalid_indices, expected_indices,
+                        "Invalid signature indices should match corrupted share indices"
+                    );
+                }
+                _ => panic!("Expected an error with invalid signatures"),
             }
-            _ => panic!("Expected an error with invalid signatures"),
         }
     }
 
