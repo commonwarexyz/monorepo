@@ -15,6 +15,5 @@ pub struct Config<B: Blocker, R: Reporter, S: ThresholdSupervisor> {
     pub activity_timeout: View,
     pub skip_timeout: View,
     pub namespace: Vec<u8>,
-    pub cache_size: usize,
     pub mailbox_size: usize,
 }
