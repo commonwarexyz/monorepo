@@ -155,3 +155,83 @@ pub(crate) async fn run(
 pub fn should_retry(return_value: i32) -> bool {
     return_value == -libc::EAGAIN || return_value == -libc::EWOULDBLOCK
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::iouring::Config;
+    use futures::{
+        channel::{mpsc::channel, oneshot},
+        SinkExt as _,
+    };
+    use io_uring::{opcode, types::Fd};
+    use std::{
+        os::{fd::AsRawFd, unix::net::UnixStream},
+        time::Duration,
+    };
+
+    async fn recv_then_send(cfg: Config) {
+        // Create a new io_uring instance
+        let (mut submitter, receiver) = channel(0);
+        let handle = tokio::spawn(super::run(cfg, receiver));
+
+        let (left_pipe, right_pipe) = UnixStream::pair().unwrap();
+
+        // Submit a read
+        let msg = b"hello";
+        let mut buf = vec![0; msg.len()];
+        let recv =
+            opcode::Recv::new(Fd(left_pipe.as_raw_fd()), buf.as_mut_ptr(), buf.len() as _).build();
+        let (recv_tx, recv_rx) = oneshot::channel();
+        submitter
+            .send((recv, recv_tx))
+            .await
+            .expect("failed to send work");
+
+        // Submit a write that satisfies the read.
+        // Note that since the channel capacity is 0, we can only successfully send
+        // the write after the event loop has reached receiver.await(), which implies
+        // the event loop is parked in submit_and_wait when the send below is called.
+        let write =
+            opcode::Write::new(Fd(right_pipe.as_raw_fd()), msg.as_ptr(), msg.len() as _).build();
+        let (write_tx, write_rx) = oneshot::channel();
+        submitter
+            .send((write, write_tx))
+            .await
+            .expect("failed to send work");
+
+        // Wait for the read and write operations to complete.
+        let result = recv_rx.await.expect("failed to receive result");
+        assert!(result > 0, "recv failed: {}", result);
+        let result = write_rx.await.expect("failed to receive result");
+        assert!(result > 0, "write failed: {}", result);
+        drop(submitter);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_poll_new_work_freq() {
+        // When poll_new_work_freq is set, the event loop should wake up
+        // periodically to check for new work.
+        let cfg = Config {
+            poll_new_work_freq: Some(Duration::from_millis(10)),
+            ..Default::default()
+        };
+        recv_then_send(cfg).await;
+
+        // When poll_new_work_freq is None, the event loop should block on recv
+        // and never wake up to check for new work, meaning it never sees the
+        // write operation which satisfies the read. This means it
+        // should hit the timeout and never complete.
+        let cfg = Config {
+            poll_new_work_freq: None,
+            ..Default::default()
+        };
+        // recv_then_send should block indefinitely.
+        // Set a timeout and make sure it doesn't complete.
+        let timeout = tokio::time::timeout(Duration::from_secs(2), recv_then_send(cfg));
+        assert!(
+            timeout.await.is_err(),
+            "recv_then_send completed unexpectedly"
+        );
+    }
+}
