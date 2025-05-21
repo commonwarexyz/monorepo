@@ -124,25 +124,22 @@ pub(crate) async fn run(
 
             // Submit the operation to the ring, with timeout if configured
             if let Some(timeout) = &cfg.op_timeout {
-                // Link the operation to the (following) timeout and submit it
+                // Link the operation to the (following) timeout
                 work = work.flags(io_uring::squeue::Flags::IO_LINK);
-                unsafe {
-                    ring.submission()
-                        .push(&work)
-                        .expect("unable to push to queue");
-                }
 
-                // Submit the timeout
+                // Create the timeout
                 let timeout = Timespec::new()
                     .sec(timeout.as_secs())
                     .nsec(timeout.subsec_nanos());
                 let timeout = LinkTimeout::new(&timeout)
                     .build()
                     .user_data(TIMEOUT_WORK_ID);
+
+                // Submit the op and timeout
                 unsafe {
-                    ring.submission()
-                        .push(&timeout)
-                        .expect("unable to push timeout to queue");
+                    let mut sq = ring.submission();
+                    sq.push(&work).expect("unable to push to queue");
+                    sq.push(&timeout).expect("unable to push timeout to queue");
                 }
             } else {
                 // No timeout, submit the operation normally
