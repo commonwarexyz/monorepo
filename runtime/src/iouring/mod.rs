@@ -74,8 +74,8 @@ pub(crate) async fn run(
 
             // Look up the sender for this work_id
             if let Some(sender) = waiters.remove(&work_id) {
-                // Check if this is a timeout result (-ETIME)
-                if result == -libc::ETIME {
+                // Check if this is operation timed out
+                if result == -libc::ECANCELED && cfg.op_timeout.is_some() {
                     // Send a timeout error code to the caller
                     let _ = sender.send(-libc::ETIMEDOUT);
                 } else {
@@ -83,8 +83,9 @@ pub(crate) async fn run(
                     let _ = sender.send(result);
                 }
             } else {
-                // There's no sender for this work_id, which means it was a timeout
-                // operation that timed out. We don't need to do anything here.
+                // There's no sender for this work_id, which means it was a timeout.
+                // This should only happen if timeouts are enabled.
+                debug_assert!(cfg.op_timeout.is_some());
                 debug_assert_eq!(work_id, TIMEOUT_WORK_ID);
             }
             continue;
@@ -126,7 +127,7 @@ pub(crate) async fn run(
 
             // Submit the operation to the ring, with timeout if configured
             if let Some(timeout) = &cfg.op_timeout {
-                // Link the operation to the timeout and submit it
+                // Link the operation to the (following) timeout and submit it
                 work = work.flags(io_uring::squeue::Flags::IO_LINK);
                 unsafe {
                     ring.submission()
@@ -134,16 +135,16 @@ pub(crate) async fn run(
                         .expect("unable to push to queue");
                 }
 
-                // Submit the timeout operation
+                // Submit the timeout
                 let timeout = Timespec::new()
                     .sec(timeout.as_secs())
                     .nsec(timeout.subsec_nanos());
-                let timeout_op = LinkTimeout::new(&timeout)
+                let timeout = LinkTimeout::new(&timeout)
                     .build()
                     .user_data(TIMEOUT_WORK_ID);
                 unsafe {
                     ring.submission()
-                        .push(&timeout_op)
+                        .push(&timeout)
                         .expect("unable to push timeout to queue");
                 }
             } else {
@@ -172,4 +173,41 @@ pub(crate) async fn run(
 /// * EWOULDBLOCK: Operation would block.
 pub fn should_retry(return_value: i32) -> bool {
     return_value == -libc::EAGAIN || return_value == -libc::EWOULDBLOCK
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::{
+        channel::{mpsc::channel, oneshot},
+        SinkExt as _,
+    };
+    use io_uring::{opcode, types::Fd};
+    use std::os::{fd::AsRawFd, unix::net::UnixStream};
+
+    #[tokio::test]
+    async fn test_timeout() {
+        // Create an io_uring instance
+        let cfg = super::Config {
+            op_timeout: Some(std::time::Duration::from_secs(1)),
+            ..Default::default()
+        };
+        let (mut submitter, receiver) = channel(1);
+        let handle = tokio::spawn(super::run(cfg, receiver));
+
+        // Submit a work item that will time out (because we don't write to the pipe)
+        let (pipe, _pipe_other_side) = UnixStream::pair().unwrap();
+        let mut buf = vec![0; 1024];
+        let work =
+            opcode::Recv::new(Fd(pipe.as_raw_fd()), buf.as_mut_ptr(), buf.len() as _).build();
+        let (tx, rx) = oneshot::channel();
+        submitter
+            .send((work, tx))
+            .await
+            .expect("failed to send work");
+        // Wait for the work to complete
+        let result = rx.await.expect("failed to receive result");
+        assert_eq!(result, -libc::ETIMEDOUT);
+        drop(submitter);
+        handle.await.unwrap();
+    }
 }
