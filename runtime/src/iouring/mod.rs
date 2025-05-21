@@ -5,6 +5,8 @@ use futures::{
 use io_uring::{opcode::LinkTimeout, squeue::Entry as SqueueEntry, types::Timespec, IoUring};
 use std::time::Duration;
 
+const TIMEOUT_WORK_ID: u64 = u64::MAX;
+
 #[derive(Clone, Debug)]
 /// Configuration for an io_uring instance.
 /// See `man io_uring`.
@@ -15,7 +17,11 @@ pub struct Config {
     pub iopoll: bool,
     /// If true, use single issuer mode.
     pub single_issuer: bool,
-    /// Timeout for operations.
+    /// If None, operations submitted to the io_uring will not time out.
+    /// In this case, the caller should be careful to ensure that the
+    /// operations submitted to the io_uring will eventually complete.
+    /// If Some, each submitted operation will time out after this duration.
+    /// If an operation times out, its result will be -[libc::ETIMEDOUT].
     pub op_timeout: Option<Duration>,
 }
 
@@ -76,6 +82,10 @@ pub(crate) async fn run(
                     // Send the actual result
                     let _ = sender.send(result);
                 }
+            } else {
+                // There's no sender for this work_id, which means it was a timeout
+                // operation that timed out. We don't need to do anything here.
+                debug_assert_eq!(work_id, TIMEOUT_WORK_ID);
             }
             continue;
         }
@@ -104,30 +114,33 @@ pub(crate) async fn run(
 
             // Assign a unique id
             let work_id = next_work_id;
+            next_work_id += 1;
+            if next_work_id == TIMEOUT_WORK_ID {
+                // Wrap back to 0
+                next_work_id = 0;
+            }
             work = work.user_data(work_id);
-            // Use wrapping add in case we overflow
-            next_work_id = next_work_id.wrapping_add(1);
 
             // We'll send the result of this operation to `sender`.
             waiters.insert(work_id, sender);
 
             // Submit the operation to the ring, with timeout if configured
             if let Some(timeout) = &cfg.op_timeout {
-                // Set the IO_LINK flag on the original operation
+                // Link the operation to the timeout and submit it
                 work = work.flags(io_uring::squeue::Flags::IO_LINK);
-
                 unsafe {
                     ring.submission()
                         .push(&work)
                         .expect("unable to push to queue");
                 }
 
-                // Create a timespec from our Duration
-                let ts = Timespec::new().sec(timeout.as_secs());
-
-                // Create a linked timeout operation using the same work_id
-                let timeout_op = LinkTimeout::new(&ts).build();
-
+                // Submit the timeout operation
+                let timeout = Timespec::new()
+                    .sec(timeout.as_secs())
+                    .nsec(timeout.subsec_nanos());
+                let timeout_op = LinkTimeout::new(&timeout)
+                    .build()
+                    .user_data(TIMEOUT_WORK_ID);
                 unsafe {
                     ring.submission()
                         .push(&timeout_op)
