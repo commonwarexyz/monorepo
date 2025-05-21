@@ -90,13 +90,6 @@ pub(crate) async fn run(
             let work_id = cqe.user_data();
             let result = cqe.result();
 
-            if work_id == POLL_WORK_ID {
-                // This CQE is to wake us up to check for new work.
-                // We don't need to do anything here.
-                assert!(cfg.poll_new_work_freq.is_some());
-                continue;
-            }
-
             if let Some(sender) = waiters.remove(&work_id) {
                 if result == -libc::ECANCELED && cfg.op_timeout.is_some() {
                     // Send a timeout error code to the caller
@@ -105,12 +98,15 @@ pub(crate) async fn run(
                     // Send the actual result
                     let _ = sender.send(result);
                 }
+            } else if work_id == POLL_WORK_ID {
+                // This CQE is to wake us up to check for new work.
+                // We don't need to do anything here.
+                assert!(cfg.poll_new_work_freq.is_some());
             } else {
                 // This is a timeout. Make sure timeouts are enabled.
                 assert!(cfg.op_timeout.is_some());
                 assert_eq!(work_id, TIMEOUT_WORK_ID);
             }
-            continue;
         }
 
         // Try to fill the submission queue with incoming work.
