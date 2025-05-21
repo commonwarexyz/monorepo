@@ -299,6 +299,7 @@ where
 
     // If verify fails, find offending signatures via recursive bisection
     if reclaimed.len() <= 1 {
+        reclaimed.extend(invalid);
         return Err(reclaimed);
     }
     let mid = reclaimed.len() / 2;
@@ -1837,6 +1838,47 @@ mod tests {
                 assert_eq!(
                     invalid_indices, expected_indices,
                     "Invalid signature indices should match corrupted share indices"
+                );
+            }
+            _ => panic!("Expected an error with invalid signatures"),
+        }
+    }
+
+    #[test]
+    fn test_partial_verify_multiple_public_keys_precomputed_out_of_range() {
+        let mut rng = StdRng::seed_from_u64(0);
+        let (n, t) = (5, 4);
+        let (public, shares) = generate_shares::<_, MinSig>(&mut rng, None, n, t);
+        let namespace = Some(&b"test"[..]);
+        let msg = b"hello";
+
+        // Generate partial signatures
+        let mut partials: Vec<_> = shares
+            .iter()
+            .map(|s| partial_sign_message::<MinSig>(s, namespace, msg))
+            .collect();
+
+        // Corrupt partial signature index
+        partials[0].index = 100;
+
+        // Attempt verification and expect failure with bisection identifying the invalid signature
+        let polynomial = evaluate_all::<MinSig>(&public, n);
+        let result = partial_verify_multiple_public_keys_precomputed::<MinSig, _>(
+            &polynomial,
+            namespace,
+            msg,
+            &partials,
+        );
+        match result {
+            Err(invalid_sigs) => {
+                assert_eq!(
+                    invalid_sigs.len(),
+                    1,
+                    "Exactly one signature should be invalid"
+                );
+                assert_eq!(
+                    invalid_sigs[0].index, 100,
+                    "The invalid signature should match the corrupted index"
                 );
             }
             _ => panic!("Expected an error with invalid signatures"),
