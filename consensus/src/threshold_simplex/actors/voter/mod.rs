@@ -1,6 +1,8 @@
 mod actor;
 mod ingress;
 
+use std::time::Duration;
+
 use crate::{
     threshold_simplex::types::{Activity, Context, View},
     Automaton, Relay, Reporter, ThresholdSupervisor,
@@ -8,11 +10,12 @@ use crate::{
 pub use actor::Actor;
 use commonware_cryptography::{bls12381::primitives::group, Digest};
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Scheme};
+use commonware_p2p::Blocker;
 pub use ingress::{Mailbox, Message};
-use std::time::Duration;
 
 pub struct Config<
     C: Scheme,
+    B: Blocker,
     V: Variant,
     D: Digest,
     A: Automaton<Context = Context<D>>,
@@ -21,6 +24,7 @@ pub struct Config<
     S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
 > {
     pub crypto: C,
+    pub blocker: B,
     pub automaton: A,
     pub relay: R,
     pub reporter: F,
@@ -34,7 +38,6 @@ pub struct Config<
     pub notarization_timeout: Duration,
     pub nullify_retry: Duration,
     pub activity_timeout: View,
-    pub skip_timeout: View,
     pub replay_concurrency: usize,
     pub replay_buffer: usize,
     pub write_buffer: usize,
@@ -44,7 +47,7 @@ pub struct Config<
 mod tests {
     use super::*;
     use crate::threshold_simplex::{
-        actors::resolver,
+        actors::{batcher, resolver},
         mocks,
         types::{Finalization, Finalize, Notarization, Notarize, Proposal, Voter},
     };
@@ -98,13 +101,17 @@ mod tests {
             schemes.sort_by_key(|s| s.public_key());
 
             // Derive threshold shares
-            let (public, shares) = ops::generate_shares::<_, V>(&mut context, None, n, threshold);
+            let (polynomial, shares) =
+                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
 
             // Initialize voter actor
             let scheme = schemes[0].clone();
             let validator = scheme.public_key();
             let mut participants = BTreeMap::new();
-            participants.insert(0, (public.clone(), validators.clone(), shares[0].clone()));
+            participants.insert(
+                0,
+                (polynomial.clone(), validators.clone(), shares[0].clone()),
+            );
             let supervisor_config = mocks::supervisor::Config::<_, V> {
                 namespace: namespace.clone(),
                 participants,
@@ -125,6 +132,7 @@ mod tests {
             actor.start();
             let cfg = Config {
                 crypto: scheme,
+                blocker: oracle.control(validator.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: supervisor.clone(),
@@ -137,23 +145,30 @@ mod tests {
                 notarization_timeout: Duration::from_secs(5),
                 nullify_retry: Duration::from_secs(5),
                 activity_timeout: 10,
-                skip_timeout: 10,
                 replay_concurrency: 1,
                 replay_buffer: 1024 * 1024,
                 write_buffer: 1024 * 1024,
             };
             let (actor, mut mailbox) = Actor::new(context.clone(), cfg);
 
-            // Create a dummy backfiller mailbox
-            let (backfiller_sender, mut backfiller_receiver) = mpsc::channel(1);
-            let backfiller = resolver::Mailbox::new(backfiller_sender);
+            // Create a dummy resolver mailbox
+            let (resolver_sender, mut resolver_receiver) = mpsc::channel(1);
+            let resolver = resolver::Mailbox::new(resolver_sender);
+
+            // Create a dummy batcher mailbox
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(1024);
+            let batcher = batcher::Mailbox::new(batcher_sender);
 
             // Create a dummy network mailbox
             let peer = schemes[1].public_key();
-            let (voter_sender, voter_receiver) =
+            let (pending_sender, _pending_receiver) =
                 oracle.register(validator.clone(), 0).await.unwrap();
-            let (mut peer_sender, mut peer_receiver) =
+            let (recovered_sender, recovered_receiver) =
+                oracle.register(validator.clone(), 1).await.unwrap();
+            let (mut _peer_pending_sender, mut _peer_pending_receiver) =
                 oracle.register(peer.clone(), 0).await.unwrap();
+            let (mut peer_recovered_sender, mut peer_recovered_receiver) =
+                oracle.register(peer.clone(), 1).await.unwrap();
             oracle
                 .add_link(
                     validator.clone(),
@@ -179,15 +194,39 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Drain peer receiver
-            context.with_label("peer_receiver").spawn(|_| async move {
-                loop {
-                    peer_receiver.recv().await.unwrap();
-                }
-            });
-
             // Run the actor
-            actor.start(backfiller, voter_sender, voter_receiver);
+            actor.start(
+                batcher,
+                resolver,
+                pending_sender,
+                recovered_sender,
+                recovered_receiver,
+            );
+
+            // Wait for batcher to be notified
+            let message = batcher_receiver.next().await.unwrap();
+            match message {
+                batcher::Message::Update {
+                    current,
+                    leader: _,
+                    finalized,
+                    active,
+                } => {
+                    assert_eq!(current, 1);
+                    assert_eq!(finalized, 0);
+                    active.send(true).unwrap();
+                }
+                _ => panic!("unexpected batcher message"),
+            }
+
+            // Drain the peer_recovered_receiver
+            context
+                .with_label("peer_recovered_receiver")
+                .spawn(|_| async move {
+                    loop {
+                        peer_recovered_receiver.recv().await.unwrap();
+                    }
+                });
 
             // Send finalization over network (view 100)
             let payload = hash(b"test");
@@ -211,24 +250,45 @@ mod tests {
             let finalization =
                 Finalization::<V, _>::new(proposal, proposal_signature, seed_signature);
             let msg = Voter::Finalization(finalization).encode().into();
-            peer_sender
+            peer_recovered_sender
                 .send(Recipients::All, msg, true)
                 .await
                 .expect("failed to send finalization");
 
-            // Wait for backfiller to be notified
-            let msg = backfiller_receiver
+            // Wait for batcher to be notified
+            loop {
+                let message = batcher_receiver.next().await.unwrap();
+                match message {
+                    batcher::Message::Update {
+                        current,
+                        leader: _,
+                        finalized,
+                        active,
+                    } => {
+                        assert_eq!(current, 101);
+                        assert_eq!(finalized, 100);
+                        active.send(true).unwrap();
+                        break;
+                    }
+                    _ => {
+                        continue;
+                    }
+                }
+            }
+
+            // Wait for resolver to be notified
+            let msg = resolver_receiver
                 .next()
                 .await
-                .expect("failed to receive backfiller message");
+                .expect("failed to receive resolver message");
             match msg {
                 resolver::Message::Finalized { view } => {
                     assert_eq!(view, 100);
                 }
-                _ => panic!("unexpected backfiller message"),
+                _ => panic!("unexpected resolver message"),
             }
 
-            // Send old notarization from backfiller that should be ignored (view 50)
+            // Send old notarization from resolver that should be ignored (view 50)
             let payload = hash(b"test2");
             let proposal = Proposal::new(50, 49, payload);
             let partials: Vec<_> = shares
@@ -248,7 +308,9 @@ mod tests {
             let seed_signature =
                 threshold_signature_recover::<V, _>(threshold, seed_partials).unwrap();
             let notarization = Notarization::new(proposal, proposal_signature, seed_signature);
-            mailbox.notarization(notarization).await;
+            mailbox
+                .verified(vec![Voter::Notarization(notarization)])
+                .await;
 
             // Send new finalization (view 300)
             let payload = hash(b"test3");
@@ -272,16 +334,37 @@ mod tests {
             let finalization =
                 Finalization::<V, _>::new(proposal, proposal_signature, seed_signature);
             let msg = Voter::Finalization(finalization).encode().into();
-            peer_sender
+            peer_recovered_sender
                 .send(Recipients::All, msg, true)
                 .await
                 .expect("failed to send finalization");
 
-            // Wait for backfiller to be notified
-            let msg = backfiller_receiver
+            // Wait for batcher to be notified
+            loop {
+                let message = batcher_receiver.next().await.unwrap();
+                match message {
+                    batcher::Message::Update {
+                        current,
+                        leader: _,
+                        finalized,
+                        active,
+                    } => {
+                        assert_eq!(current, 301);
+                        assert_eq!(finalized, 300);
+                        active.send(true).unwrap();
+                        break;
+                    }
+                    _ => {
+                        continue;
+                    }
+                }
+            }
+
+            // Wait for resolver to be notified
+            let msg = resolver_receiver
                 .next()
                 .await
-                .expect("failed to receive backfiller message");
+                .expect("failed to receive resolver message");
             match msg {
                 resolver::Message::Finalized { view } => {
                     assert_eq!(view, 300);
