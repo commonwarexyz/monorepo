@@ -88,7 +88,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     /// Restore the fully pruned state of a bitmap from the metadata in the given partition. (The
     /// caller must still replay retained elements to restore its full state.)
     ///
-    /// The metadata must store the number of pruned chunks and the pinned hashes corresponding to
+    /// The metadata must store the number of pruned chunks and the pinned digests corresponding to
     /// that pruning boundary.
     pub async fn restore_pruned<C: RStorage + Metrics + Clock>(
         context: C,
@@ -422,7 +422,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
             return Ok((
                 Proof {
                     size: self.bit_count(),
-                    hashes: vec![self.mmr.root(hasher)],
+                    digests: vec![self.mmr.root(hasher)],
                 },
                 *chunk,
             ));
@@ -438,7 +438,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         let last_chunk_digest = hasher.digest(self.last_chunk());
         // Since the bitmap wasn't chunk aligned, we'll need to include the digest of the last chunk
         // in the proof to be able to re-derive the root.
-        proof.hashes.push(last_chunk_digest);
+        proof.digests.push(last_chunk_digest);
 
         Ok((proof, *chunk))
     }
@@ -461,7 +461,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 
         let mut mmr_proof = Proof::<H> {
             size: leaf_num_to_pos(bit_count / Self::CHUNK_SIZE_BITS),
-            hashes: proof.hashes.clone(),
+            digests: proof.digests.clone(),
         };
 
         if bit_count % Self::CHUNK_SIZE_BITS == 0 {
@@ -471,25 +471,25 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         }
 
         // The proof must contain the partial chunk digest as its last hash.
-        if proof.hashes.is_empty() {
+        if proof.digests.is_empty() {
             debug!("proof has no digests");
             return Ok(false);
         }
         if mmr_proof.size == leaf_pos {
-            // The proof is over a bit in the partial chunk. In this case the proof's hashes should
+            // The proof is over a bit in the partial chunk. In this case the proof's digests should
             // contain only a single digest: the mmr root.
-            if mmr_proof.hashes.len() != 1 {
+            if mmr_proof.digests.len() != 1 {
                 debug!("proof has more than one digest");
                 return Ok(false);
             }
-            let mmr_root = mmr_proof.hashes.pop().unwrap();
+            let mmr_root = mmr_proof.digests.pop().unwrap();
             let last_chunk_digest = hasher.digest(chunk);
             let next_bit = bit_count % Self::CHUNK_SIZE_BITS;
             let reconstructed_root =
                 Self::partial_chunk_root(hasher.inner(), next_bit, &mmr_root, &last_chunk_digest);
             return Ok(reconstructed_root == *root_digest);
         };
-        let last_chunk_digest = mmr_proof.hashes.pop().unwrap();
+        let last_chunk_digest = mmr_proof.digests.pop().unwrap();
 
         // Reconstruct the MMR root.
         let mmr_root = match mmr_proof
@@ -497,12 +497,12 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
             .await
         {
             Ok(root) => root,
-            Err(MissingHashes) => {
-                debug!("Not enough hashes in proof to reconstruct root");
+            Err(MissingDigests) => {
+                debug!("Not enough digests in proof to reconstruct root");
                 return Ok(false);
             }
-            Err(ExtraHashes) => {
-                debug!("Not all hashes in proof were used to reconstruct root");
+            Err(ExtraDigests) => {
+                debug!("Not all digests in proof were used to reconstruct root");
                 return Ok(false);
             }
             Err(e) => return Err(e),
@@ -625,8 +625,8 @@ mod tests {
             assert_eq!(root, inner_root);
 
             {
-                // Repeat the above MMR build only using append_chunk_unchecked instead, and make sure root
-                // hashes match.
+                // Repeat the above MMR build only using append_chunk_unchecked instead, and make
+                // sure root digests match.
                 let mut bitmap = Bitmap::<_, SHA256_SIZE>::default();
                 bitmap
                     .append_chunk_unchecked(&mut hasher, &test_chunk)
