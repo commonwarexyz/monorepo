@@ -72,7 +72,7 @@ pub(crate) async fn run(
             let work_id = cqe.user_data();
             let result = cqe.result();
 
-            // Look up the sender for this work_id
+            // Check whether this is a timeout
             if let Some(sender) = waiters.remove(&work_id) {
                 // Check if this is operation timed out
                 if result == -libc::ECANCELED && cfg.op_timeout.is_some() {
@@ -83,8 +83,7 @@ pub(crate) async fn run(
                     let _ = sender.send(result);
                 }
             } else {
-                // There's no sender for this work_id, which means it was a timeout.
-                // This should only happen if timeouts are enabled.
+                // This is a timeout. Make sure timeouts are enabled.
                 debug_assert!(cfg.op_timeout.is_some());
                 debug_assert_eq!(work_id, TIMEOUT_WORK_ID);
             }
@@ -204,7 +203,7 @@ mod tests {
             .send((work, tx))
             .await
             .expect("failed to send work");
-        // Wait for the work to complete
+        // Wait for the timeout
         let result = rx.await.expect("failed to receive result");
         assert_eq!(result, -libc::ETIMEDOUT);
         drop(submitter);
