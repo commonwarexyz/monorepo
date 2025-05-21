@@ -1,8 +1,12 @@
+use std::time::Duration;
+
 use futures::{
     channel::{mpsc, oneshot},
     StreamExt as _,
 };
-use io_uring::{squeue::Entry as SqueueEntry, IoUring};
+use io_uring::{opcode, squeue::Entry as SqueueEntry, IoUring};
+
+const TIMEOUT_WORK_ID: u64 = u64::MAX;
 
 #[derive(Clone, Debug)]
 /// Configuration for an io_uring instance.
@@ -14,6 +18,13 @@ pub struct Config {
     pub iopoll: bool,
     /// If true, use single issuer mode.
     pub single_issuer: bool,
+    /// In the io_uring event loop, wait at most this long for a new completion
+    /// before checking for new work.
+    /// If None, wait indefinitely. In this case, caller must ensure that
+    /// operations submitted to the ring complete in a timely manner.
+    /// Otherwise, an operation that takes a long time may block the
+    /// event loop while waiting for its completion.
+    pub poll_new_work_freq: Option<Duration>,
 }
 
 impl Default for Config {
@@ -22,6 +33,7 @@ impl Default for Config {
             size: 128,
             iopoll: false,
             single_issuer: true,
+            poll_new_work_freq: Some(Duration::from_secs(1)),
         }
     }
 }
@@ -61,6 +73,11 @@ pub(crate) async fn run(
         if let Some(cqe) = ring.completion().next() {
             let work_id = cqe.user_data();
             let result = cqe.result();
+            if work_id == TIMEOUT_WORK_ID {
+                // Ignore timeout. It woke us up to check for new work.
+                // We don't need to do anything here.
+                continue;
+            }
             let sender = waiters.remove(&work_id).expect("work is missing");
             // Notify with the result of this operation
             let _ = sender.send(result);
@@ -102,6 +119,21 @@ pub(crate) async fn run(
             unsafe {
                 ring.submission()
                     .push(&work)
+                    .expect("unable to push to queue");
+            }
+        }
+
+        if let Some(freq) = cfg.poll_new_work_freq {
+            let timeout = io_uring::types::Timespec::new()
+                .sec(freq.as_secs())
+                .nsec(freq.subsec_nanos());
+            let op = opcode::Timeout::new(&timeout)
+                .build()
+                .user_data(TIMEOUT_WORK_ID);
+            // Submit the timeout operation to the ring
+            unsafe {
+                ring.submission()
+                    .push(&op)
                     .expect("unable to push to queue");
             }
         }
