@@ -2594,7 +2594,7 @@ mod tests {
     fn test_conflicting_notarize_encode_decode() {
         let n = 5;
         let t = quorum(n as u32);
-        let (identity, polynomial, shares) = generate_test_data(n, t, 0);
+        let (_, polynomial, shares) = generate_test_data(n, t, 0);
 
         let proposal1 = Proposal::new(10, 5, sample_digest(1));
         let proposal2 = Proposal::new(10, 5, sample_digest(2));
@@ -2613,7 +2613,7 @@ mod tests {
     fn test_conflicting_finalize_encode_decode() {
         let n = 5;
         let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data(n, t, 0);
+        let (_, polynomial, shares) = generate_test_data(n, t, 0);
 
         let proposal1 = Proposal::new(10, 5, sample_digest(1));
         let proposal2 = Proposal::new(10, 5, sample_digest(2));
@@ -2632,7 +2632,7 @@ mod tests {
     fn test_nullify_finalize_encode_decode() {
         let n = 5;
         let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data(n, t, 0);
+        let (_, polynomial, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
         let nullify = Nullify::<MinSig>::sign(NAMESPACE, &shares[0], 10);
@@ -2650,7 +2650,7 @@ mod tests {
     fn test_notarize_verify_wrong_namespace() {
         let n = 5;
         let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data(n, t, 0);
+        let (_, polynomial, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
         let notarize = Notarize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal);
@@ -2666,10 +2666,10 @@ mod tests {
     fn test_notarize_verify_wrong_polynomial() {
         let n = 5;
         let t = quorum(n as u32);
-        let (polynomial1, shares1) = generate_test_data(n, t, 0);
+        let (_, polynomial1, shares1) = generate_test_data(n, t, 0);
 
         // Generate a different set of BLS keys/shares
-        let (polynomial2, _) = generate_test_data(n, t, 1);
+        let (_, polynomial2, _) = generate_test_data(n, t, 1);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
         let notarize = Notarize::<MinSig, _>::sign(NAMESPACE, &shares1[0], proposal);
@@ -2685,7 +2685,7 @@ mod tests {
     fn test_notarization_verify_wrong_keys() {
         let n = 5;
         let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data(n, t, 0);
+        let (identity, polynomial, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
 
@@ -2707,22 +2707,20 @@ mod tests {
             Notarization::<MinSig, _>::new(proposal, proposal_signature, seed_signature);
 
         // Verify with correct public key - should pass
-        let identity = poly::public::<MinSig>(&polynomial);
-        assert!(notarization.verify(NAMESPACE, identity));
+        assert!(notarization.verify(NAMESPACE, &identity));
 
         // Generate a different set of BLS keys/shares
-        let (wrong_polynomial, _) = generate_test_data(n, t, 1);
-        let wrong_identity = poly::public::<MinSig>(&wrong_polynomial);
+        let (wrong_identity, _, _) = generate_test_data(n, t, 1);
 
         // Verify with wrong public key - should fail
-        assert!(!notarization.verify(NAMESPACE, wrong_identity));
+        assert!(!notarization.verify(NAMESPACE, &wrong_identity));
     }
 
     #[test]
     fn test_notarization_verify_wrong_namespace() {
         let n = 5;
         let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data(n, t, 0);
+        let (identity, polynomial, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
 
@@ -2744,11 +2742,10 @@ mod tests {
             Notarization::<MinSig, _>::new(proposal, proposal_signature, seed_signature);
 
         // Verify with correct namespace - should pass
-        let identity = poly::public::<MinSig>(&polynomial);
-        assert!(notarization.verify(NAMESPACE, identity));
+        assert!(notarization.verify(NAMESPACE, &identity));
 
         // Verify with wrong namespace - should fail
-        assert!(!notarization.verify(b"wrong_namespace", identity));
+        assert!(!notarization.verify(b"wrong_namespace", &identity));
     }
 
     #[test]
