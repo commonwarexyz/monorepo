@@ -93,6 +93,7 @@ pub(crate) async fn run(
             if work_id == POLL_WORK_ID {
                 // This CQE is to wake us up to check for new work.
                 // We don't need to do anything here.
+                assert!(cfg.poll_new_work_freq.is_some());
                 continue;
             }
 
