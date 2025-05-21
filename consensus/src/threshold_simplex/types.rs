@@ -282,7 +282,7 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
     pub fn verify_notarizes(
         &mut self,
         namespace: &[u8],
-        polynomial: &Vec<V::Public>,
+        polynomial: &[V::Public],
     ) -> (Vec<Voter<V, D>>, Vec<u32>) {
         self.notarizes_force = false;
         let (notarizes, failed) =
@@ -357,7 +357,7 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
     pub fn verify_nullifies(
         &mut self,
         namespace: &[u8],
-        polynomial: &Vec<V::Public>,
+        polynomial: &[V::Public],
     ) -> (Vec<Voter<V, D>>, Vec<u32>) {
         let (nullifies, failed) =
             Nullify::verify_multiple(namespace, polynomial, std::mem::take(&mut self.nullifies));
@@ -416,7 +416,7 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
     pub fn verify_finalizes(
         &mut self,
         namespace: &[u8],
-        polynomial: &Vec<V::Public>,
+        polynomial: &[V::Public],
     ) -> (Vec<Voter<V, D>>, Vec<u32>) {
         let (finalizes, failed) =
             Finalize::verify_multiple(namespace, polynomial, std::mem::take(&mut self.finalizes));
@@ -668,7 +668,7 @@ impl<V: Variant, D: Digest> Notarize<V, D> {
     /// 1. The notarize signature is valid for the claimed proposal
     /// 2. The seed signature is valid for the view
     /// 3. Both signatures are from the same signer
-    pub fn verify(&self, namespace: &[u8], polynomial: &Vec<V::Public>) -> bool {
+    pub fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
         let notarize_namespace = notarize_namespace(namespace);
         let notarize_message = self.proposal.encode();
         let notarize_message = (Some(notarize_namespace.as_ref()), notarize_message.as_ref());
@@ -693,7 +693,7 @@ impl<V: Variant, D: Digest> Notarize<V, D> {
 
     pub fn verify_multiple(
         namespace: &[u8],
-        polynomial: &Vec<V::Public>,
+        polynomial: &[V::Public],
         notarizes: Vec<Notarize<V, D>>,
     ) -> (Vec<Notarize<V, D>>, Vec<u32>) {
         // Prepare to verify
@@ -945,7 +945,7 @@ impl<V: Variant> Nullify<V> {
     /// 1. The view signature is valid for the given view
     /// 2. The seed signature is valid for the view
     /// 3. Both signatures are from the same signer
-    pub fn verify(&self, namespace: &[u8], polynomial: &Vec<V::Public>) -> bool {
+    pub fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
         let nullify_namespace = nullify_namespace(namespace);
         let view_message = view_message(self.view);
         let nullify_message = (Some(nullify_namespace.as_ref()), view_message.as_ref());
@@ -967,7 +967,7 @@ impl<V: Variant> Nullify<V> {
 
     pub fn verify_multiple(
         namespace: &[u8],
-        polynomial: &Vec<V::Public>,
+        polynomial: &[V::Public],
         nullifies: Vec<Nullify<V>>,
     ) -> (Vec<Nullify<V>>, Vec<u32>) {
         // Prepare to verify
@@ -1199,7 +1199,7 @@ impl<V: Variant, D: Digest> Finalize<V, D> {
     /// Verifies the signature on this finalize using BLS threshold verification.
     ///
     /// This ensures that the signature is valid for the given proposal.
-    pub fn verify(&self, namespace: &[u8], polynomial: &Vec<V::Public>) -> bool {
+    pub fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
         let finalize_namespace = finalize_namespace(namespace);
         let message = self.proposal.encode();
         let Some(evaluated) = polynomial.get(self.proposal_signature.index as usize) else {
@@ -1216,7 +1216,7 @@ impl<V: Variant, D: Digest> Finalize<V, D> {
 
     pub fn verify_multiple(
         namespace: &[u8],
-        polynomial: &Vec<V::Public>,
+        polynomial: &[V::Public],
         finalizes: Vec<Finalize<V, D>>,
     ) -> (Vec<Finalize<V, D>>, Vec<u32>) {
         // Prepare to verify
@@ -1942,7 +1942,7 @@ impl<V: Variant, D: Digest> ConflictingNotarize<V, D> {
     }
 
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
-    pub fn verify(&self, namespace: &[u8], polynomial: &Vec<V::Public>) -> bool {
+    pub fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
         let (proposal_1, proposal_2) = self.proposals();
         let notarize_namespace = notarize_namespace(namespace);
         let notarize_message_1 = proposal_1.encode();
@@ -2080,7 +2080,7 @@ impl<V: Variant, D: Digest> ConflictingFinalize<V, D> {
     }
 
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
-    pub fn verify(&self, namespace: &[u8], polynomial: &Vec<V::Public>) -> bool {
+    pub fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
         let (proposal_1, proposal_2) = self.proposals();
         let finalize_namespace = finalize_namespace(namespace);
         let finalize_message_1 = proposal_1.encode();
@@ -2199,7 +2199,7 @@ impl<V: Variant, D: Digest> NullifyFinalize<V, D> {
     }
 
     /// Verifies that both the nullify and finalize signatures are valid, proving Byzantine behavior.
-    pub fn verify(&self, namespace: &[u8], polynomial: &Vec<V::Public>) -> bool {
+    pub fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
         let nullify_namespace = nullify_namespace(namespace);
         let nullify_message = view_message(self.proposal.view);
         let nullify_message = (Some(nullify_namespace.as_ref()), nullify_message.as_ref());
