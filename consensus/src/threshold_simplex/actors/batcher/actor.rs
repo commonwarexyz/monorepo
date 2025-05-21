@@ -547,6 +547,10 @@ impl<
 
             // Send messages to voter
             let batch = voters.len() + failed.len();
+            assert!(
+                batch >= 1,
+                "we should have tried to verify at least one message"
+            );
             trace!(view, batch, "batch verified messages");
             self.verified.inc_by(batch as u64);
             self.batch_size.observe(batch as f64);
