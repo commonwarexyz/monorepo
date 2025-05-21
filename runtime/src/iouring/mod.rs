@@ -176,11 +176,11 @@ pub(crate) async fn run(
         }
 
         if let Some(freq) = cfg.poll_new_work_freq {
+            // Submit a timeout operation to wake us up to check for new work.
             let timeout = io_uring::types::Timespec::new()
                 .sec(freq.as_secs())
                 .nsec(freq.subsec_nanos());
             let op = Timeout::new(&timeout).build().user_data(POLL_WORK_ID);
-            // Submit the timeout operation to the ring
             unsafe {
                 ring.submission()
                     .push(&op)
