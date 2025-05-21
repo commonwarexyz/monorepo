@@ -72,9 +72,7 @@ pub(crate) async fn run(
             let work_id = cqe.user_data();
             let result = cqe.result();
 
-            // Check whether this is a timeout
             if let Some(sender) = waiters.remove(&work_id) {
-                // Check if this is operation timed out
                 if result == -libc::ECANCELED && cfg.op_timeout.is_some() {
                     // Send a timeout error code to the caller
                     let _ = sender.send(-libc::ETIMEDOUT);
