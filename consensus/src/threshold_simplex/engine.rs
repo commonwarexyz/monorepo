@@ -26,12 +26,12 @@ pub struct Engine<
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<
-        Seed = V::Signature,
         Index = View,
-        Share = group::Share,
-        Polynomial = Vec<V::Public>,
-        Identity = V::Public,
         PublicKey = C::PublicKey,
+        Identity = V::Public,
+        Seed = V::Signature,
+        Polynomial = Vec<V::Public>,
+        Share = group::Share,
     >,
 > {
     context: E,

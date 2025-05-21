@@ -18,11 +18,11 @@ pub struct Config<
     R: Relay,
     F: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<
-        Seed = V::Signature,
         Index = View,
-        Share = group::Share,
         Identity = V::Public,
+        Seed = V::Signature,
         PublicKey = C::PublicKey,
+        Share = group::Share,
     >,
 > {
     /// Cryptographic primitives.

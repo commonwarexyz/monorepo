@@ -107,9 +107,9 @@ pub struct Actor<
     D: Digest,
     S: ThresholdSupervisor<
         Index = View,
-        Polynomial = Vec<V::Public>,
         PublicKey = C::PublicKey,
         Identity = V::Public,
+        Polynomial = Vec<V::Public>,
     >,
 > {
     context: E,
@@ -146,9 +146,9 @@ impl<
         D: Digest,
         S: ThresholdSupervisor<
             Index = View,
-            Polynomial = Vec<V::Public>,
             PublicKey = C::PublicKey,
             Identity = V::Public,
+            Polynomial = Vec<V::Public>,
         >,
     > Actor<E, C, B, V, D, S>
 {
