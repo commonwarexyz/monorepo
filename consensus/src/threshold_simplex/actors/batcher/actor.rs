@@ -368,10 +368,9 @@ impl<
             verify_latency.clone(),
         );
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
-        let arc_context = Arc::new(context.clone());
         (
             Self {
-                context,
+                context: context.clone(),
                 blocker: cfg.blocker,
                 reporter: cfg.reporter,
                 supervisor: cfg.supervisor,
@@ -385,7 +384,7 @@ impl<
                 added,
                 verified,
                 batch_size,
-                verify_latency: histogram::Timed::new(verify_latency, arc_context.clone()),
+                verify_latency: histogram::Timed::new(verify_latency, Arc::new(context)),
                 _phantom: PhantomData,
             },
             Mailbox::new(sender),
