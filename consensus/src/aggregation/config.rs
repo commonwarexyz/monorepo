@@ -1,18 +1,18 @@
 use super::types::{Activity, Epoch, Index};
 use crate::{Automaton, Monitor, Relay, Reporter, ThresholdSupervisor};
-use commonware_cryptography::Digest;
-use commonware_utils::Array;
+use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, Scheme};
 use std::time::Duration;
 
 /// Configuration for the [`Engine`](super::Engine).
 pub struct Config<
-    P: Array,
+    C: Scheme,
+    V: Variant,
     D: Digest,
     A: Automaton<Context = Index, Digest = D>,
     R: Relay<Digest = D>,
-    Z: Reporter<Activity = Activity<D>>,
+    Z: Reporter<Activity = Activity<V, D>>,
     M: Monitor<Index = Epoch>,
-    TSu: ThresholdSupervisor<Index = Epoch, PublicKey = P>,
+    TSu: ThresholdSupervisor<Index = Epoch, PublicKey = C::PublicKey>,
 > {
     /// Tracks the current state of consensus (to determine which participants should
     /// be involved in the current broadcast attempt).
@@ -50,12 +50,8 @@ pub struct Config<
     /// all others are pruned or rejected.
     pub epoch_bounds: (u64, u64),
 
-    /// The number of future heights to accept acks for.
-    /// This is used to prevent spam of acks for arbitrary heights.
-    ///
-    /// For example, if the current tip for a sequencer is at height 100,
-    /// and the height_bound is 10, then acks for heights 100-110 are accepted.
-    pub height_bound: u64,
+    /// TODO
+    pub window: u64,
 
     /// A unique name for the journal.
     pub journal_name: String,
