@@ -2,10 +2,13 @@ use commonware_codec::Encode;
 use commonware_consensus::{
     threshold_simplex::types::View, Supervisor as Su, ThresholdSupervisor as TSu,
 };
-use commonware_cryptography::bls12381::primitives::{
-    group,
-    poly::{self, Public},
-    variant::{MinSig, Variant},
+use commonware_cryptography::bls12381::{
+    dkg::ops::evaluate_all,
+    primitives::{
+        group,
+        poly::{self, Public},
+        variant::{MinSig, Variant},
+    },
 };
 use commonware_utils::{modulo, Array};
 use std::collections::HashMap;
@@ -13,7 +16,8 @@ use std::collections::HashMap;
 /// Implementation of `commonware-consensus::Supervisor`.
 #[derive(Clone)]
 pub struct Supervisor<P: Array> {
-    identity: Public<MinSig>,
+    identity: <MinSig as Variant>::Public,
+    polynomial: Vec<<MinSig as Variant>::Public>,
     participants: Vec<P>,
     participants_map: HashMap<P, u32>,
 
@@ -21,17 +25,20 @@ pub struct Supervisor<P: Array> {
 }
 
 impl<P: Array> Supervisor<P> {
-    pub fn new(identity: Public<MinSig>, mut participants: Vec<P>, share: group::Share) -> Self {
+    pub fn new(polynomial: Public<MinSig>, mut participants: Vec<P>, share: group::Share) -> Self {
         // Setup participants
         participants.sort();
         let mut participants_map = HashMap::new();
         for (index, validator) in participants.iter().enumerate() {
             participants_map.insert(validator.clone(), index as u32);
         }
+        let identity = *poly::public::<MinSig>(&polynomial);
+        let polynomial = evaluate_all::<MinSig>(&polynomial, participants.len() as u32);
 
         // Return supervisor
         Self {
             identity,
+            polynomial,
             participants,
             participants_map,
             share,
@@ -58,7 +65,7 @@ impl<P: Array> Su for Supervisor<P> {
 
 impl<P: Array> TSu for Supervisor<P> {
     type Seed = <MinSig as Variant>::Signature;
-    type Polynomial = Public<MinSig>;
+    type Polynomial = Vec<<MinSig as Variant>::Public>;
     type Share = group::Share;
     type Identity = <MinSig as Variant>::Public;
 
@@ -69,11 +76,11 @@ impl<P: Array> TSu for Supervisor<P> {
     }
 
     fn identity(&self) -> &Self::Identity {
-        poly::public::<MinSig>(&self.identity)
+        &self.identity
     }
 
     fn polynomial(&self, _: Self::Index) -> Option<&Self::Polynomial> {
-        Some(&self.identity)
+        Some(&self.polynomial)
     }
 
     fn share(&self, _: Self::Index) -> Option<&Self::Share> {

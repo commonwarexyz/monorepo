@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{Automaton, Relay, Reporter, ThresholdSupervisor};
 use commonware_cryptography::{
-    bls12381::primitives::{group, poly, variant::Variant},
+    bls12381::primitives::{group, variant::Variant},
     Digest, Scheme,
 };
 use commonware_macros::select;
@@ -29,7 +29,7 @@ pub struct Engine<
         Seed = V::Signature,
         Index = View,
         Share = group::Share,
-        Polynomial = poly::Public<V>,
+        Polynomial = Vec<V::Public>,
         Identity = V::Public,
         PublicKey = C::PublicKey,
     >,
@@ -59,7 +59,7 @@ impl<
             Seed = V::Signature,
             Index = View,
             Share = group::Share,
-            Polynomial = poly::Public<V>,
+            Polynomial = Vec<V::Public>,
             Identity = V::Public,
             PublicKey = C::PublicKey,
         >,
