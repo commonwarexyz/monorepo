@@ -1,12 +1,17 @@
-use std::time::Duration;
-
 use futures::{
     channel::{mpsc, oneshot},
     StreamExt as _,
 };
-use io_uring::{opcode, squeue::Entry as SqueueEntry, IoUring};
+use io_uring::{
+    opcode::{LinkTimeout, Timeout},
+    squeue::Entry as SqueueEntry,
+    types::Timespec,
+    IoUring,
+};
+use std::time::Duration;
 
 const TIMEOUT_WORK_ID: u64 = u64::MAX;
+const POLL_WORK_ID: u64 = u64::MAX - 1;
 
 #[derive(Clone, Debug)]
 /// Configuration for an io_uring instance.
@@ -25,6 +30,12 @@ pub struct Config {
     /// Otherwise, an operation that takes a long time may block the
     /// event loop while waiting for its completion.
     pub poll_new_work_freq: Option<Duration>,
+    /// If None, operations submitted to the io_uring will not time out.
+    /// In this case, the caller should be careful to ensure that the
+    /// operations submitted to the io_uring will eventually complete.
+    /// If Some, each submitted operation will time out after this duration.
+    /// If an operation times out, its result will be -[libc::ETIMEDOUT].
+    pub op_timeout: Option<Duration>,
 }
 
 impl Default for Config {
@@ -34,6 +45,7 @@ impl Default for Config {
             iopoll: false,
             single_issuer: true,
             poll_new_work_freq: Some(Duration::from_secs(1)),
+            op_timeout: None,
         }
     }
 }
@@ -73,14 +85,26 @@ pub(crate) async fn run(
         if let Some(cqe) = ring.completion().next() {
             let work_id = cqe.user_data();
             let result = cqe.result();
-            if work_id == TIMEOUT_WORK_ID {
-                // Ignore timeout. It woke us up to check for new work.
+
+            if work_id == POLL_WORK_ID {
+                // This CQE is to wake us up to check for new work.
                 // We don't need to do anything here.
                 continue;
             }
-            let sender = waiters.remove(&work_id).expect("work is missing");
-            // Notify with the result of this operation
-            let _ = sender.send(result);
+
+            if let Some(sender) = waiters.remove(&work_id) {
+                if result == -libc::ECANCELED && cfg.op_timeout.is_some() {
+                    // Send a timeout error code to the caller
+                    let _ = sender.send(-libc::ETIMEDOUT);
+                } else {
+                    // Send the actual result
+                    let _ = sender.send(result);
+                }
+            } else {
+                // This is a timeout. Make sure timeouts are enabled.
+                assert!(cfg.op_timeout.is_some());
+                assert_eq!(work_id, TIMEOUT_WORK_ID);
+            }
             continue;
         }
 
@@ -108,18 +132,42 @@ pub(crate) async fn run(
 
             // Assign a unique id
             let work_id = next_work_id;
+            next_work_id += 1;
+            if next_work_id == POLL_WORK_ID {
+                // Wrap back to 0
+                next_work_id = 0;
+            }
             work = work.user_data(work_id);
-            // Use wrapping add in case we overflow
-            next_work_id = next_work_id.wrapping_add(1);
 
             // We'll send the result of this operation to `sender`.
             waiters.insert(work_id, sender);
 
-            // Submit the operation to the ring
-            unsafe {
-                ring.submission()
-                    .push(&work)
-                    .expect("unable to push to queue");
+            // Submit the operation to the ring, with timeout if configured
+            if let Some(timeout) = &cfg.op_timeout {
+                // Link the operation to the (following) timeout
+                work = work.flags(io_uring::squeue::Flags::IO_LINK);
+
+                // Create the timeout
+                let timeout = Timespec::new()
+                    .sec(timeout.as_secs())
+                    .nsec(timeout.subsec_nanos());
+                let timeout = LinkTimeout::new(&timeout)
+                    .build()
+                    .user_data(TIMEOUT_WORK_ID);
+
+                // Submit the op and timeout
+                unsafe {
+                    let mut sq = ring.submission();
+                    sq.push(&work).expect("unable to push to queue");
+                    sq.push(&timeout).expect("unable to push timeout to queue");
+                }
+            } else {
+                // No timeout, submit the operation normally
+                unsafe {
+                    ring.submission()
+                        .push(&work)
+                        .expect("unable to push to queue");
+                }
             }
         }
 
@@ -127,9 +175,7 @@ pub(crate) async fn run(
             let timeout = io_uring::types::Timespec::new()
                 .sec(freq.as_secs())
                 .nsec(freq.subsec_nanos());
-            let op = opcode::Timeout::new(&timeout)
-                .build()
-                .user_data(TIMEOUT_WORK_ID);
+            let op = Timeout::new(&timeout).build().user_data(POLL_WORK_ID);
             // Submit the timeout operation to the ring
             unsafe {
                 ring.submission()
@@ -164,10 +210,8 @@ mod tests {
         SinkExt as _,
     };
     use io_uring::{opcode, types::Fd};
-    use std::{
-        os::{fd::AsRawFd, unix::net::UnixStream},
-        time::Duration,
-    };
+    use std::os::{fd::AsRawFd, unix::net::UnixStream};
+    use std::time::Duration;
 
     async fn recv_then_send(cfg: Config) {
         // Create a new io_uring instance
@@ -233,5 +277,32 @@ mod tests {
             timeout.await.is_err(),
             "recv_then_send completed unexpectedly"
         );
+    }
+
+    #[tokio::test]
+    async fn test_timeout() {
+        // Create an io_uring instance
+        let cfg = super::Config {
+            op_timeout: Some(std::time::Duration::from_secs(1)),
+            ..Default::default()
+        };
+        let (mut submitter, receiver) = channel(1);
+        let handle = tokio::spawn(super::run(cfg, receiver));
+
+        // Submit a work item that will time out (because we don't write to the pipe)
+        let (pipe, _pipe_other_side) = UnixStream::pair().unwrap();
+        let mut buf = vec![0; 1024];
+        let work =
+            opcode::Recv::new(Fd(pipe.as_raw_fd()), buf.as_mut_ptr(), buf.len() as _).build();
+        let (tx, rx) = oneshot::channel();
+        submitter
+            .send((work, tx))
+            .await
+            .expect("failed to send work");
+        // Wait for the timeout
+        let result = rx.await.expect("failed to receive result");
+        assert_eq!(result, -libc::ETIMEDOUT);
+        drop(submitter);
+        handle.await.unwrap();
     }
 }
