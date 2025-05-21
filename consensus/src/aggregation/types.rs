@@ -1,4 +1,4 @@
-//! Types used in [`ordered_broadcast`](crate::ordered_broadcast).
+//! Types used in [`aggregation`](crate::aggregation).
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -8,7 +8,7 @@ use commonware_cryptography::{
     bls12381::primitives::{
         group::Share,
         ops,
-        poly::{self, PartialSignature, Public, Signature},
+        poly::{self, PartialSignature},
         variant::Variant,
     },
     Digest,
@@ -73,6 +73,9 @@ pub enum Error {
     ContextHeight,
 
     // Epoch Errors
+    /// Epoch is not in the accepted bounds
+    #[error("Epoch {0} not in bounds {1} - {2}")]
+    EpochNotInBounds(u64, u64, u64),
     /// No identity is known for the specified epoch
     #[error("Unknown identity at epoch {0}")]
     UnknownIdentity(u64),
@@ -127,7 +130,7 @@ pub type Index = u64;
 
 /// Suffix used to identify an acknowledgment (ack) namespace for domain separation.
 /// Used when signing and verifying acks to prevent signature reuse across different message types.
-const ACK_SUFFIX: &[u8] = b"_ACK";
+const ACK_SUFFIX: &[u8] = b"_AGG_ACK";
 
 /// Returns a suffixed namespace for signing an ack.
 ///
@@ -251,12 +254,12 @@ impl<V: Variant, D: Digest> Write for Activity<V, D> {
 }
 
 impl<V: Variant, D: Digest> Read for Activity<V, D> {
-    type Cfg = usize;
+    type Cfg = ();
 
-    fn read_cfg(reader: &mut impl Buf, t: &usize) -> Result<Self, CodecError> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         match u8::read(reader)? {
             0 => Ok(Activity::Ack(Ack::read(reader)?)),
-            1 => Ok(Activity::Lock(Lock::read_cfg(reader, t)?)),
+            1 => Ok(Activity::Lock(Lock::read(reader)?)),
             _ => Err(CodecError::Invalid(
                 "consensus::aggregationActivity",
                 "Invalid type",
@@ -277,16 +280,15 @@ impl<V: Variant, D: Digest> EncodeSize for Activity<V, D> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Lock<V: Variant, D: Digest> {
     pub item: Item<D>,
-    pub epoch: Epoch,
-    pub signature: Signature<V>,
+    pub signature: V::Signature,
 }
 
 impl<V: Variant, D: Digest> Lock<V, D> {
-    pub fn verify(&self, namespace: &[u8], public_key: &Public<V>) -> bool {
+    pub fn verify(&self, namespace: &[u8], public_key: &V::Public) -> bool {
         ops::verify_message::<V>(
             public_key,
             Some(ack_namespace(namespace).as_ref()),
-            &self.item.encode().as_ref(),
+            self.item.encode().as_ref(),
             &self.signature,
         )
         .is_ok()
@@ -296,28 +298,22 @@ impl<V: Variant, D: Digest> Lock<V, D> {
 impl<V: Variant, D: Digest> Write for Lock<V, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.item.write(writer);
-        UInt(self.epoch).write(writer);
         self.signature.write(writer);
     }
 }
 
 impl<V: Variant, D: Digest> Read for Lock<V, D> {
-    type Cfg = usize;
+    type Cfg = ();
 
-    fn read_cfg(reader: &mut impl Buf, t: &usize) -> Result<Self, CodecError> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let item = Item::read(reader)?;
-        let epoch = UInt::read(reader)?.into();
-        let signature = Signature::<V>::read_cfg(reader, t)?;
-        Ok(Self {
-            item,
-            epoch,
-            signature,
-        })
+        let signature = V::Signature::read(reader)?;
+        Ok(Self { item, signature })
     }
 }
 
 impl<V: Variant, D: Digest> EncodeSize for Lock<V, D> {
     fn encode_size(&self) -> usize {
-        self.item.encode_size() + UInt(self.epoch).encode_size() + self.signature.encode_size()
+        self.item.encode_size() + self.signature.encode_size()
     }
 }

@@ -1,31 +1,13 @@
 use commonware_runtime::{telemetry::metrics::status, Metrics as RuntimeMetrics};
-use commonware_utils::Array;
-use prometheus_client::{
-    encoding::EncodeLabelSet,
-    metrics::{counter::Counter, gauge::Gauge},
-};
-
-/// Label for sequencer height metrics
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct SequencerLabel {
-    /// Hex representation of the sequencer's public key
-    pub sequencer: String,
-}
-
-impl SequencerLabel {
-    /// Create a new sequencer label from a public key
-    pub fn from<A: Array>(sequencer: &A) -> Self {
-        Self {
-            sequencer: sequencer.to_string(),
-        }
-    }
-}
+use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 
 /// Metrics for the [`Engine`](super::Engine)
 pub struct Metrics {
     /// Current height
     pub height: Gauge,
-    /// Number of acks processed by status
+    /// Number of verifies processed by status
+    pub verify: status::Counter,
+    /// Number of [`Ack`](super::types::Ack) messages processed by status
     pub acks: status::Counter,
     /// Number of threshold signatures produced
     pub threshold: Counter,
@@ -38,14 +20,20 @@ impl Metrics {
     pub fn init<E: RuntimeMetrics>(context: E) -> Self {
         let metrics = Self {
             height: Gauge::default(),
+            verify: status::Counter::default(),
             acks: status::Counter::default(),
             threshold: Counter::default(),
             rebroadcast: status::Counter::default(),
         };
         context.register("height", "Current height", metrics.height.clone());
         context.register(
+            "verify",
+            "Number of verifies processed by status",
+            metrics.verify.clone(),
+        );
+        context.register(
             "acks",
-            "Number of acks processed by status",
+            "Number of Ack messages processed by status",
             metrics.acks.clone(),
         );
         context.register(

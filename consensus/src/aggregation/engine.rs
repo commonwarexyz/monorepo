@@ -14,8 +14,13 @@ use super::{
 };
 use crate::{Automaton, Monitor, Relay, Reporter, ThresholdSupervisor};
 use commonware_cryptography::{
-    bls12381::primitives::{group, poly},
-    Digest,
+    bls12381::primitives::{
+        group,
+        ops::{self, threshold_signature_recover},
+        poly,
+        variant::Variant,
+    },
+    Digest, Scheme,
 };
 use commonware_macros::select;
 use commonware_p2p::{
@@ -30,42 +35,51 @@ use commonware_runtime::{
     Clock, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::{self, variable::Journal};
-use commonware_utils::{futures::Pool as FuturesPool, Array};
+use commonware_utils::futures::Pool as FuturesPool;
 use futures::{
-    channel::oneshot,
+    channel::{mpsc, oneshot},
     future::{self, Either},
     pin_mut, StreamExt,
 };
 use std::{
-    collections::HashMap,
+    cmp::{max, min},
+    collections::{BTreeMap, BTreeSet, HashMap},
     marker::PhantomData,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, error, warn};
 
-struct Propose<D: Digest, E: Clock> {
-    timer: histogram::Timer<E>,
+/// The type returned by the `pending` pool, used by the application to return which digest is
+/// associated with the given index.
+struct Verify<D: Digest, E: Clock> {
+    /// The index in question.
     index: Index,
+
+    /// The result of the verification.
     result: Result<D, Error>,
+
+    /// Records the time taken to verify the digest.
+    timer: histogram::Timer<E>,
 }
 
 /// Instance of the engine.
 pub struct Engine<
     E: Clock + Spawner + Storage + Metrics,
-    P: Array,
+    C: Scheme,
+    V: Variant,
     D: Digest,
     A: Automaton<Context = Index, Digest = D> + Clone,
     R: Relay<Digest = D>,
-    Z: Reporter<Activity = Activity<D>>,
+    Z: Reporter<Activity = Activity<V, D>>,
     M: Monitor<Index = Epoch>,
     TSu: ThresholdSupervisor<
         Index = Epoch,
-        PublicKey = P,
+        PublicKey = C::PublicKey,
         Share = group::Share,
-        Identity = poly::Public,
+        Identity = poly::Public<V>,
     >,
-    NetS: Sender<PublicKey = P>,
-    NetR: Receiver<PublicKey = P>,
+    NetS: Sender<PublicKey = C::PublicKey>,
+    NetR: Receiver<PublicKey = C::PublicKey>,
 > {
     ////////////////////////////////////////
     // Interfaces
@@ -107,55 +121,36 @@ pub struct Engine<
 
     // The number of future heights to accept acks for.
     // This is used to prevent spam of acks for arbitrary heights.
-    //
-    // For example, if the current tip for a sequencer is at height 100,
-    // and the height_bound is 10, then acks for heights 100-110 are accepted.
-    height_bound: u64,
-
-    ////////////////////////////////////////
-    // Storage
-    ////////////////////////////////////////
-
-    // The number of heights per each journal section.
-    journal_heights_per_section: u64,
-
-    // The number of concurrent operations when replaying journals.
-    journal_replay_concurrency: usize,
-
-    // A prefix for the journal name.
-    journal_name: String,
-
-    // Compression level for the journal.
-    journal_compression: Option<u8>,
-
-    // A map of sequencer public keys to their journals.
-    journal: Option<Journal<E, (), Item<D>>>,
+    window: u64,
 
     ////////////////////////////////////////
     // Messaging
     ////////////////////////////////////////
-    pending: FuturesPool<Propose<D, E>>,
-
-    /// If the number of pending requests is than this number, we will request a new proposal from
-    /// the automaton.
-    ///
-    /// While this doesn't supply an upper limit, it essentially gives a lower bound on the number
-    /// of outstanding pending requests.
-    concurrent_proposals: usize,
-
-    /// Items that we have received from peers but are waiting for the pending response to get back.
-    gated: HashMap<Index, HashMap<P, Ack<D>>>,
+    /// Pool of pending futures.
+    verifies: FuturesPool<Verify<D, E>>,
 
     ////////////////////////////////////////
     // State
     ////////////////////////////////////////
 
-    // Tracks the acknowledgements for chunks.
-    // This is comprised of partial signatures or threshold signatures.
-    manager: Manager<D>,
-
     // The current epoch.
     epoch: Epoch,
+
+    /// The keys represent the set of all outstanding requests to the automaton.
+    ///
+    /// The inner map may be empty. If we receive an `Ack` for an outstanding index, we store it in
+    /// the inner map. This is because we are not yet sure if the digest is valid or not. This data
+    /// structure essentially acts as the staging area for the `Ack` before we verify it and store
+    /// it in the `acks` map.
+    gated: BTreeMap<Index, HashMap<Epoch, HashMap<u32, V::Signature>>>,
+
+    /// The keys represent the set of all verified indices with their corresponding digests.
+    ///
+    /// The inner map contains the `Acks` for the
+    acks: BTreeMap<Index, (D, HashMap<Epoch, HashMap<u32, V::Signature>>)>,
+
+    /// A map of indices with a threshold signature. Cached in memory if needed to send to other peers.
+    confirmed: BTreeMap<Index, (D, V::Signature)>,
 
     ////////////////////////////////////////
     // Network
@@ -177,24 +172,25 @@ pub struct Engine<
 
 impl<
         E: Clock + Spawner + Storage + Metrics,
-        P: Array,
+        C: Scheme,
+        V: Variant,
         D: Digest,
         A: Automaton<Context = Index, Digest = D> + Clone,
         R: Relay<Digest = D>,
-        Z: Reporter<Activity = Activity<D>>,
+        Z: Reporter<Activity = Activity<V, D>>,
         M: Monitor<Index = Epoch>,
         TSu: ThresholdSupervisor<
             Index = Epoch,
-            PublicKey = P,
+            PublicKey = C::PublicKey,
             Share = group::Share,
-            Identity = poly::Public,
+            Identity = poly::Public<V>,
         >,
-        NetS: Sender<PublicKey = P>,
-        NetR: Receiver<PublicKey = P>,
-    > Engine<E, P, D, A, R, Z, M, TSu, NetS, NetR>
+        NetS: Sender<PublicKey = C::PublicKey>,
+        NetR: Receiver<PublicKey = C::PublicKey>,
+    > Engine<E, C, V, D, A, R, Z, M, TSu, NetS, NetR>
 {
     /// Creates a new engine with the given context and configuration.
-    pub fn new(context: E, cfg: Config<P, D, A, R, Z, M, TSu>) -> Self {
+    pub fn new(context: E, cfg: Config<C, V, D, A, R, Z, M, TSu>) -> Self {
         let metrics = metrics::Metrics::init(context.clone());
 
         Self {
@@ -208,14 +204,12 @@ impl<
             rebroadcast_timeout: cfg.rebroadcast_timeout,
             rebroadcast_deadline: None,
             epoch_bounds: cfg.epoch_bounds,
-            height_bound: cfg.height_bound,
-            journal_heights_per_section: cfg.journal_heights_per_section,
-            journal_replay_concurrency: cfg.journal_replay_concurrency,
-            journal_name: cfg.journal_name,
-            journal_compression: cfg.journal_compression,
-            journal: None,
-            manager: Manager::<D>::new(),
+            window: cfg.window,
             epoch: 0,
+            verifies: FuturesPool::default(),
+            gated: BTreeMap::new(),
+            acks: BTreeMap::new(),
+            confirmed: BTreeMap::new(),
             priority_acks: cfg.priority_acks,
             _phantom: PhantomData,
             metrics,
@@ -223,22 +217,13 @@ impl<
     }
 
     /// Runs the engine until the context is stopped.
-    ///
-    /// The engine will handle:
-    /// - Requesting and processing proposals from the application
-    /// - Timeouts
-    ///   - Refreshing the Epoch
-    ///   - Rebroadcasting Proposals
-    /// - Messages from the network:
-    ///   - Nodes
-    ///   - Acks
     pub fn start(mut self, network: (NetS, NetR)) -> Handle<()> {
         self.context.spawn_ref()(self.run(network))
     }
 
     /// Inner run loop called by `start`.
-    async fn run(mut self, network: (NetS, NetR)) {
-        let (mut net_sender, mut net_receiver) = wrap((), network.0, network.1);
+    async fn run(mut self, (net_sender, net_receiver): (NetS, NetR)) {
+        let (mut net_sender, mut net_receiver) = wrap((), net_sender, net_receiver);
         let mut shutdown = self.context.stopped();
 
         // Tracks if there is an outstanding proposal request to the automaton.
@@ -249,17 +234,7 @@ impl<
         self.epoch = latest;
 
         loop {
-            // Create deadline futures.
-            //
-            // If the deadline is None, the future will never resolve.
-            let rebroadcast = match self.rebroadcast_deadline {
-                Some(deadline) => Either::Left(self.context.sleep_until(deadline)),
-                None => Either::Right(future::pending()),
-            };
-            let propose = match &mut pending {
-                Some((_context, receiver)) => Either::Left(receiver),
-                None => Either::Right(futures::future::pending()),
-            };
+            // TODO: Rebroadcasting
 
             // Process the next event
             select! {
@@ -281,25 +256,27 @@ impl<
                     debug!(current=self.epoch, new=epoch, "refresh epoch");
                     assert!(epoch >= self.epoch);
                     self.epoch = epoch;
+
+                    // TODO: update data structures by purging old epochs
+
                     continue;
                 },
 
-                // Sign a new dot
-                digest = propose => {
-                    // Clear the pending proposal
-                    let (index, _) = pending.take().unwrap();
-                    debug!(?index, "ack");
-
-                    // Error handling for dropped proposals
-                    let Ok(digest) = digest else {
-                        warn!(?index, "automaton dropped proposal");
-                        continue;
-                    };
-
-                    // Ack the dot
-                    if let Err(err) = self.handle_propose(index, digest, &mut net_sender).await {
-                        warn!(?err, ?index, "propose failed");
-                        continue;
+                // Sign a new ack
+                verify = self.verifies.next_completed() => {
+                    let Verify { index, result, timer } = verify;
+                    drop(timer); // Record metric. Explicitly reference timer to avoid lint warning
+                    match result {
+                        Err(err) => {
+                            warn!(?err, ?index, "verify returned error");
+                            self.metrics.verify.inc(Status::Dropped);
+                        }
+                        Ok(digest) => {
+                            if let Err(err) = self.handle_verify(index, digest, &mut net_sender).await {
+                                warn!(?err, ?index, "verify failed");
+                                continue;
+                            }
+                        }
                     }
                 },
 
@@ -336,53 +313,31 @@ impl<
             }
         }
 
-        // Close journal, regardless of how we exit the loop
-        if let Some(journal) = self.journal.take() {
-            journal.close().await.expect("unable to close journal");
-        }
-    }
-
-    ////////////////////////////////////////
-    // Proposal
-    ////////////////////////////////////////
-
-    /// Returns an `Index` to propose at if the engine should request a proposal from the automaton.
-    ///
-    /// Should only be called if the engine is not already waiting for a proposal.
-    fn should_propose(&self) -> Option<Index> {
-        let share = self.validators.share(self.epoch)?;
-
-        // Return the next context unless my current tip has no threshold signature
-        match self.manager.get() {
-            None => Some(0),
-            Some(tip) => self
-                .manager
-                .get_threshold(tip.item.index)
-                .map(|_| tip.item.index.checked_add(1)),
-        }
+        // TODO: Close journal
     }
 
     ////////////////////////////////////////
     // Handling
     ////////////////////////////////////////
 
-    async fn handle_propose(
+    async fn handle_verify(
         &mut self,
         index: Index,
         digest: D,
-        sender: &mut WrappedSender<NetS, (), Ack<D>>,
+        sender: &mut WrappedSender<NetS, Ack<V, D>>,
     ) -> Result<(), Error> {
-        // Create ack
-        let dot = Item {
-            index,
-            epoch: self.epoch,
-            digest,
+        // Remove entry from `gated`, moving over any relevant items to `acks`
+        let Some(acks) = self.gated.remove(&index) else {
+            // Index is no longer relevant
+            return Ok(());
         };
-        let ack = Ack::sign(
-            &self.namespace,
-            self.validators.share(self.epoch).unwrap(),
-            dot,
-        );
+        assert!(self.acks.insert(index, (digest, acks)).is_none());
+
+        // Sign my own ack
+        let Some(share) = self.validators.share(self.epoch) else {
+            return Err(Error::UnknownShare(self.epoch));
+        };
+        let ack = Ack::sign(&self.namespace, self.epoch, share, Item { index, digest });
 
         // Handle ack as if it was received over the network
         self.handle_ack(&ack).await?;
@@ -399,48 +354,73 @@ impl<
         Ok(())
     }
 
-    /// Handles a threshold, either received from a `Node` from the network or generated locally.
-    ///
-    /// The threshold must already be verified.
-    /// If the threshold is new, it is stored and the proof is emitted to the committer.
-    /// If the threshold is already known, it is ignored.
-    async fn handle_threshold(&mut self, dot: &Item<D>, threshold: group::Signature) {
-        // Set the threshold signature, returning early if it already exists
-        if !self.manager.add_threshold(dot.index, dot.epoch, threshold) {
-            return;
-        }
-
-        // Emit the activity
-        self.reporter
-            .report(Activity::Lock(Lock {
-                dot: dot.clone(),
-                signature: threshold,
-            }))
-            .await;
-    }
-
     /// Handles an ack
     ///
     /// Returns an error if the ack is invalid, or can be ignored
     /// (e.g. already exists, threshold already exists, is outside the epoch bounds, etc.).
-    async fn handle_ack(&mut self, ack: &Ack<D>) -> Result<(), Error> {
+    async fn handle_ack(&mut self, ack: &Ack<V, D>) -> Result<(), Error> {
         // Get the quorum
         let Some(identity) = self.validators.identity(ack.epoch) else {
             return Err(Error::UnknownIdentity(ack.epoch));
         };
         let quorum = identity.required();
 
-        // Add the partial signature. If a new threshold is formed, handle it.
-        if let Some(threshold) = self.manager.add_ack(ack, quorum) {
-            debug!(
-                epoch = ack.epoch,
-                index = ack.item.index,
-                "recovered threshold"
-            );
+        // Get the acks
+        let acks_by_epoch = self
+            .acks
+            .get(&ack.item.index)
+            .map(|(digest, abe)| {
+                if ack.item.digest == *digest {
+                    Err(Error::AckDigestMismatch(ack.item.index))
+                } else {
+                    Ok(abe)
+                }
+            })
+            .ok_or_else(|| {
+                self.gated
+                    .get(&ack.item.index)
+                    .ok_or(Error::AckIndexUnknown(ack.item.index))
+            })?;
+
+        // Add the partial signature
+        let acks = acks_by_epoch.entry(ack.epoch).or_default();
+        if acks.contains_key(&ack.signature.index) {
+            return Ok(());
+        }
+        acks.insert(ack.signature.index, ack.signature.clone());
+
+        // If a new threshold is formed, handle it
+        if acks.len() >= (quorum as usize) {
+            let threshold = threshold_signature_recover(quorum, acks.values())
+                .expect("Failed to recover threshold signature");
             self.metrics.threshold.inc();
-            self.handle_threshold(&ack.item, threshold).await;
+            self.handle_threshold(ack.item, threshold).await;
         }
 
+        Ok(())
+    }
+
+    async fn handle_threshold(
+        &mut self,
+        item: Item<D>,
+        threshold: V::Signature,
+    ) -> Result<(), Error> {
+        // Check if we already have the threshold
+        if self.confirmed.contains_key(&item.index) {
+            return Ok(());
+        }
+
+        // Store the threshold
+        self.confirmed
+            .insert(item.index, (item.digest.clone(), threshold.clone()));
+
+        // Notify the automaton
+        self.reporter
+            .report(Activity::Lock(Lock {
+                item,
+                signature: threshold,
+            }))
+            .await;
         Ok(())
     }
 
@@ -452,16 +432,8 @@ impl<
     ///
     /// Returns the chunk, epoch, and partial signature if the ack is valid.
     /// Returns an error if the ack is invalid.
-    fn validate_ack(&self, ack: &Ack<D>, sender: &P) -> Result<(), Error> {
-        // Validate sender
-        let Some(index) = self.validators.is_participant(ack.epoch, sender) else {
-            return Err(Error::UnknownValidator(ack.epoch, sender.to_string()));
-        };
-        if index != ack.signature.index {
-            return Err(Error::PeerMismatch);
-        }
-
-        // Spam prevention: If the ack is for an epoch that is too old or too new, ignore.
+    fn validate_ack(&self, ack: &Ack<V, D>, sender: &C::PublicKey) -> Result<(), Error> {
+        // Validate epoch
         {
             let (eb_lo, eb_hi) = self.epoch_bounds;
             let bound_lo = self.epoch.saturating_sub(eb_lo);
@@ -471,21 +443,51 @@ impl<
             }
         }
 
-        // Spam prevention: If the ack is for a height that is too old or too new, ignore.
+        // Validate sender
+        let Some(sig_index) = self.validators.is_participant(ack.epoch, sender) else {
+            return Err(Error::UnknownValidator(ack.epoch, sender.to_string()));
+        };
+        if sig_index != ack.signature.index {
+            return Err(Error::PeerMismatch);
+        }
+
+        // Validate height
         {
-            let bound_lo = self.tip_manager.get(&ack.item.index).unwrap_or(0);
-            let bound_hi = bound_lo + self.height_bound;
-            if ack.chunk.height < bound_lo || ack.chunk.height > bound_hi {
+            let bound_lo = self.tip;
+            let bound_hi = self.tip.saturating_add(self.window);
+            if (bound_lo).contains(&ack.item.index) {
                 return Err(Error::AckHeightOutsideBounds(
-                    ack.chunk.height,
+                    ack.item.index,
                     bound_lo,
                     bound_hi,
                 ));
             }
         }
 
+        // Validate that we don't already have the ack
+        if self.confirmed.contains_key(&ack.item.index) {
+            return Err(Error::AckAlreadyExists(ack.item.index));
+        }
+        if Some(existing) = self
+            .gated
+            .get(&ack.item.index)
+            .map(|v| v.get(&ack.signature.index))
+        {
+            if ack.epoch <= existing.epoch {
+                return Err(Error::AckAlreadyExists(ack.item.index));
+            }
+        }
+        if Some(existing) = self
+            .acks
+            .get(&ack.item.index)
+            .map(|v| v.get(&ack.signature.index))
+        {
+            if ack.epoch <= existing.epoch {
+                return Err(Error::AckAlreadyExists(ack.item.index));
+            }
+        }
+
         // Validate partial signature
-        // Optimization: If the ack already exists, don't verify
         let Some(identity) = self.validators.identity(ack.epoch) else {
             return Err(Error::UnknownIdentity(ack.epoch));
         };
@@ -497,96 +499,43 @@ impl<
     }
 
     ////////////////////////////////////////
-    // Journal
+    // Helpers
     ////////////////////////////////////////
 
-    /// Returns the section of the journal for the given height.
-    fn get_journal_section(&self, index: u64) -> u64 {
-        index / self.journal_heights_per_section
+    /// Returns the minimum index for which we do not have either:
+    /// - The digest
+    /// - An outstanding request to the automation for the digest
+    fn next(&self) -> Index {
+        let max_gated = self
+            .gated
+            .last_key_value()
+            .map(|(k, _)| *k + 1)
+            .unwrap_or_default();
+        let max_acks = self
+            .acks
+            .last_key_value()
+            .map(|(k, _)| *k + 1)
+            .unwrap_or_default();
+        let max_confirmed = self
+            .confirmed
+            .last_key_value()
+            .map(|(k, _)| *k + 1)
+            .unwrap_or_default();
+        max(max(max_gated, max_acks), max_confirmed)
     }
 
-    /// Ensures the journal exists and is initialized for the given sequencer.
-    /// If the journal does not exist, it is created and replayed.
-    /// Else, no action is taken.
-    async fn journal_prepare(&mut self) {
-        // Return early if the journal already exists
-        if self.journal.is_some() {
-            return;
-        }
-
-        // Initialize journal
-        let cfg = journal::variable::Config {
-            partition: format!("{}", &self.journal_name),
-            compression: self.journal_compression,
-            codec_config: (),
-        };
-        let mut journal = Journal::<_, _, Ack<D>>::init(self.context.with_label("journal"), cfg)
-            .await
-            .expect("unable to init journal");
-
-        // Replay journal
-        {
-            debug!("journal replay begin");
-
-            // Prepare the stream
-            let stream = journal
-                .replay(self.journal_replay_concurrency)
-                .await
-                .expect("unable to replay journal");
-            pin_mut!(stream);
-
-            // Read from the stream, which may be in arbitrary order.
-            // Remember the highest node height
-            let mut tip: Option<Item<D>> = None;
-            let mut num_items = 0;
-            while let Some(msg) = stream.next().await {
-                let (_, _, _, node) = msg.expect("unable to read from journal");
-                num_items += 1;
-                let height = node.chunk.height;
-                match tip {
-                    None => {
-                        tip = Some(node);
-                    }
-                    Some(ref t) => {
-                        if height > t.chunk.height {
-                            tip = Some(node);
-                        }
-                    }
-                }
-            }
-
-            // Set the tip only once. The items from the journal may be in arbitrary order,
-            // and the tip manager will panic if inserting tips out-of-order.
-            if let Some(node) = tip.take() {
-                let is_new = self.tip_manager.put(&node);
-                assert!(is_new);
-            }
-
-            debug!(?num_items, "journal replay end");
-        }
-
-        // Store journal
-        self.journal = Some(journal);
-    }
-
-    /// Write a `Node` to the appropriate journal, which contains the tip `Chunk` for the sequencer.
-    ///
-    /// To prevent ever writing two conflicting `Chunk`s at the same height,
-    /// the journal must already be open and replayed.
-    async fn journal_append(&mut self, ack: Ack<D>) {
-        let section = self.get_journal_section(ack.item.index);
-        self.journal
-            .expect("journal uninitialized")
-            .append(section, ack)
-            .await
-            .expect("unable to append to journal");
-    }
-
-    /// Syncs (ensures all data is written to disk) and prunes the journal for the given sequencer and height.
-    async fn journal_sync(&mut self, index: Index) {
-        let mut journal = self.journal.expect("journal uninitialized");
-        let section = self.get_journal_section(index);
-        journal.sync(section).await.expect("unable to sync journal");
-        let _ = journal.prune(section).await;
+    /// Returns the minimum index for which we do not have a threshold signature.
+    fn tip(&self) -> Index {
+        let min_gated = self
+            .gated
+            .first_key_value()
+            .map(|(k, _)| *k)
+            .unwrap_or_default();
+        let min_acks = self
+            .acks
+            .first_key_value()
+            .map(|(k, _)| *k)
+            .unwrap_or_default();
+        min(min_gated, min_acks)
     }
 }
