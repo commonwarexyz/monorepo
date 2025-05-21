@@ -9,10 +9,7 @@ use crate::{
     },
     Reporter, ThresholdSupervisor,
 };
-use commonware_cryptography::{
-    bls12381::primitives::{poly, variant::Variant},
-    Digest, Verifier,
-};
+use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, Verifier};
 use commonware_macros::select;
 use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver};
 use commonware_runtime::{
@@ -309,7 +306,7 @@ pub struct Actor<
     R: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<
         Index = View,
-        Polynomial = poly::Public<V>,
+        Polynomial = Vec<V::Public>,
         PublicKey = C::PublicKey,
         Identity = V::Public,
     >,
@@ -343,7 +340,7 @@ impl<
         R: Reporter<Activity = Activity<V, D>>,
         S: ThresholdSupervisor<
             Index = View,
-            Polynomial = poly::Public<V>,
+            Polynomial = Vec<V::Public>,
             PublicKey = C::PublicKey,
             Identity = V::Public,
         >,
