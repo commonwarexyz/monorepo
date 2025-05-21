@@ -42,10 +42,10 @@ pub fn generate_shares<R: RngCore, V: Variant>(
     (commitment, shares)
 }
 
-/// Evaluates the polynomial at all indices.
+/// Evaluates the polynomial at all indices (0..=degree + 1).
 pub fn evaluate_all<V: Variant>(polynomial: &poly::Public<V>) -> Vec<V::Public> {
-    let mut evals = Vec::new();
-    for index in 0..=polynomial.degree() {
+    let mut evals = Vec::with_capacity(polynomial.degree() as usize);
+    for index in 0..=polynomial.degree() + 1 {
         evals.push(polynomial.evaluate(index).value);
     }
     evals
