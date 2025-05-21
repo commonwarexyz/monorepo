@@ -662,7 +662,7 @@ impl<V: Variant, D: Digest> Notarize<V, D> {
         }
     }
 
-    /// Verifies the signatures on this notarize using BLS threshold verification.
+    /// Verifies the [PartialSignature]s on this [Notarize].
     ///
     /// This ensures that:
     /// 1. The notarize signature is valid for the claimed proposal
@@ -691,6 +691,12 @@ impl<V: Variant, D: Digest> Notarize<V, D> {
         .is_ok()
     }
 
+    /// Verifies a batch of [Notarize] messages using BLS aggregate verification.
+    ///
+    /// This function verifies a batch of [Notarize] messages using BLS aggregate verification.
+    /// It returns a tuple containing:
+    /// * A vector of successfully verified [Notarize] messages.
+    /// * A vector of signer indices for whom verification failed.
     pub fn verify_multiple(
         namespace: &[u8],
         polynomial: &[V::Public],
@@ -755,7 +761,7 @@ impl<V: Variant, D: Digest> Notarize<V, D> {
         )
     }
 
-    /// Creates a new signed notarize using BLS threshold signatures.
+    /// Creates a [PartialSignature] over this [Notarize].
     pub fn sign(namespace: &[u8], share: &Share, proposal: Proposal<D>) -> Self {
         let notarize_namespace = notarize_namespace(namespace);
         let proposal_message = proposal.encode();
@@ -845,7 +851,7 @@ impl<V: Variant, D: Digest> Notarization<V, D> {
         }
     }
 
-    /// Verifies the threshold signatures on this notarization.
+    /// Verifies the threshold signatures on this [Notarization].
     ///
     /// This ensures that:
     /// 1. The notarization signature is a valid threshold signature for the proposal
@@ -939,7 +945,7 @@ impl<V: Variant> Nullify<V> {
         }
     }
 
-    /// Verifies the signatures on this nullify using BLS threshold verification.
+    /// Verifies the [PartialSignature]s on this [Nullify].
     ///
     /// This ensures that:
     /// 1. The view signature is valid for the given view
@@ -965,6 +971,12 @@ impl<V: Variant> Nullify<V> {
         .is_ok()
     }
 
+    /// Verifies a batch of [Nullify] messages using BLS aggregate verification.
+    ///
+    /// This function verifies a batch of [Nullify] messages using BLS aggregate verification.
+    /// It returns a tuple containing:
+    /// * A vector of successfully verified [Nullify] messages.
+    /// * A vector of signer indices for whom verification failed.
     pub fn verify_multiple(
         namespace: &[u8],
         polynomial: &[V::Public],
@@ -1026,7 +1038,7 @@ impl<V: Variant> Nullify<V> {
         )
     }
 
-    /// Creates a new signed nullify using BLS threshold signatures.
+    /// Creates a [PartialSignature] over this [Nullify].
     pub fn sign(namespace: &[u8], share: &Share, view: View) -> Self {
         let nullify_namespace = nullify_namespace(namespace);
         let view_message = view_message(view);
@@ -1111,7 +1123,7 @@ impl<V: Variant> Nullification<V> {
         }
     }
 
-    /// Verifies the threshold signatures on this nullification.
+    /// Verifies the threshold signatures on this [Nullification].
     ///
     /// This ensures that:
     /// 1. The view signature is a valid threshold signature for the view
@@ -1196,7 +1208,7 @@ impl<V: Variant, D: Digest> Finalize<V, D> {
         }
     }
 
-    /// Verifies the signature on this finalize using BLS threshold verification.
+    /// Verifies the [PartialSignature] on this [Finalize].
     ///
     /// This ensures that the signature is valid for the given proposal.
     pub fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
@@ -1214,6 +1226,12 @@ impl<V: Variant, D: Digest> Finalize<V, D> {
         .is_ok()
     }
 
+    /// Verifies a batch of [Finalize] messages using BLS aggregate verification.
+    ///
+    /// This function verifies a batch of [Finalize] messages using BLS aggregate verification.
+    /// It returns a tuple containing:
+    /// * A vector of successfully verified [Finalize] messages.
+    /// * A vector of signer indices for whom verification failed.
     pub fn verify_multiple(
         namespace: &[u8],
         polynomial: &[V::Public],
@@ -1258,7 +1276,7 @@ impl<V: Variant, D: Digest> Finalize<V, D> {
         )
     }
 
-    /// Creates a new signed finalize using BLS threshold signatures.
+    /// Creates a [PartialSignature] over this [Finalize].
     pub fn sign(namespace: &[u8], share: &Share, proposal: Proposal<D>) -> Self {
         let finalize_namespace = finalize_namespace(namespace);
         let message = proposal.encode();
@@ -1333,7 +1351,7 @@ impl<V: Variant, D: Digest> Finalization<V, D> {
         }
     }
 
-    /// Verifies the threshold signatures on this finalization.
+    /// Verifies the threshold signatures on this [Finalization].
     ///
     /// This ensures that:
     /// 1. The proposal signature is a valid threshold signature for the proposal
@@ -1555,6 +1573,7 @@ impl<V: Variant, D: Digest> Response<V, D> {
         }
     }
 
+    /// Verifies the signatures on this response using BLS aggregate verification.
     pub fn verify(&self, namespace: &[u8], identity: &V::Public) -> bool {
         // Prepare to verify
         if self.notarizations.is_empty() && self.nullifications.is_empty() {
@@ -1860,7 +1879,7 @@ impl<V: Variant> Seed<V> {
         Seed { view, signature }
     }
 
-    /// Verifies the threshold signature on this seed.
+    /// Verifies the threshold signature on this [Seed].
     pub fn verify(&self, namespace: &[u8], identity: &V::Public) -> bool {
         let seed_namespace = seed_namespace(namespace);
         let message = view_message(self.view);
