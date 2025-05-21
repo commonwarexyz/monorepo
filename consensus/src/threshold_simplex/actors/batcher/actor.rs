@@ -9,10 +9,7 @@ use crate::{
     },
     Reporter, ThresholdSupervisor,
 };
-use commonware_cryptography::{
-    bls12381::primitives::{poly, variant::Variant},
-    Digest, Verifier,
-};
+use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, Verifier};
 use commonware_macros::select;
 use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver};
 use commonware_runtime::{
@@ -33,7 +30,7 @@ struct Round<
     R: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<
         Index = View,
-        Polynomial = poly::Public<V>,
+        Polynomial = Vec<V::Public>,
         PublicKey = C::PublicKey,
         Identity = V::Public,
     >,
@@ -59,7 +56,7 @@ impl<
         R: Reporter<Activity = Activity<V, D>>,
         S: ThresholdSupervisor<
             Index = View,
-            Polynomial = poly::Public<V>,
+            Polynomial = Vec<V::Public>,
             PublicKey = C::PublicKey,
             Identity = V::Public,
         >,
@@ -309,7 +306,7 @@ pub struct Actor<
     R: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<
         Index = View,
-        Polynomial = poly::Public<V>,
+        Polynomial = Vec<V::Public>,
         PublicKey = C::PublicKey,
         Identity = V::Public,
     >,
@@ -329,7 +326,6 @@ pub struct Actor<
     verified: Counter,
     batch_size: Histogram,
     verify_latency: histogram::Timed<E>,
-    notify_latency: histogram::Timed<E>,
 
     _phantom: PhantomData<C>,
 }
@@ -343,7 +339,7 @@ impl<
         R: Reporter<Activity = Activity<V, D>>,
         S: ThresholdSupervisor<
             Index = View,
-            Polynomial = poly::Public<V>,
+            Polynomial = Vec<V::Public>,
             PublicKey = C::PublicKey,
             Identity = V::Public,
         >,
@@ -371,12 +367,6 @@ impl<
             "latency of partial signature verification",
             verify_latency.clone(),
         );
-        let notify_latency = Histogram::new(Buckets::CRYPTOGRAPHY.into_iter());
-        context.register(
-            "notify_latency",
-            "latency of notifying the consensus engine",
-            notify_latency.clone(),
-        );
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         let arc_context = Arc::new(context.clone());
         (
@@ -396,7 +386,6 @@ impl<
                 verified,
                 batch_size,
                 verify_latency: histogram::Timed::new(verify_latency, arc_context.clone()),
-                notify_latency: histogram::Timed::new(notify_latency, arc_context.clone()),
                 _phantom: PhantomData,
             },
             Mailbox::new(sender),
@@ -561,9 +550,7 @@ impl<
             trace!(view, batch, "batch verified messages");
             self.verified.inc_by(batch as u64);
             self.batch_size.observe(batch as f64);
-            let mut timer = self.notify_latency.timer();
             consensus.verified(voters).await;
-            timer.observe();
 
             // Block invalid signers
             if !failed.is_empty() {

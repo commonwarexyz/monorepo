@@ -9,10 +9,9 @@ use commonware_cryptography::{
         group::Share,
         ops::{
             aggregate_signatures, aggregate_verify_multiple_messages, partial_sign_message,
-            partial_verify_message, partial_verify_multiple_messages,
-            partial_verify_multiple_public_keys, verify_message,
+            partial_verify_multiple_public_keys_precomputed, verify_message,
         },
-        poly::{PartialSignature, Poly},
+        poly::PartialSignature,
         variant::Variant,
     },
     Digest,
@@ -283,7 +282,7 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
     pub fn verify_notarizes(
         &mut self,
         namespace: &[u8],
-        polynomial: &Poly<V::Public>,
+        polynomial: &[V::Public],
     ) -> (Vec<Voter<V, D>>, Vec<u32>) {
         self.notarizes_force = false;
         let (notarizes, failed) =
@@ -358,7 +357,7 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
     pub fn verify_nullifies(
         &mut self,
         namespace: &[u8],
-        polynomial: &Poly<V::Public>,
+        polynomial: &[V::Public],
     ) -> (Vec<Voter<V, D>>, Vec<u32>) {
         let (nullifies, failed) =
             Nullify::verify_multiple(namespace, polynomial, std::mem::take(&mut self.nullifies));
@@ -417,7 +416,7 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
     pub fn verify_finalizes(
         &mut self,
         namespace: &[u8],
-        polynomial: &Poly<V::Public>,
+        polynomial: &[V::Public],
     ) -> (Vec<Voter<V, D>>, Vec<u32>) {
         let (finalizes, failed) =
             Finalize::verify_multiple(namespace, polynomial, std::mem::take(&mut self.finalizes));
@@ -669,25 +668,32 @@ impl<V: Variant, D: Digest> Notarize<V, D> {
     /// 1. The notarize signature is valid for the claimed proposal
     /// 2. The seed signature is valid for the view
     /// 3. Both signatures are from the same signer
-    pub fn verify(&self, namespace: &[u8], polynomial: &Poly<V::Public>) -> bool {
+    pub fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
         let notarize_namespace = notarize_namespace(namespace);
         let notarize_message = self.proposal.encode();
         let notarize_message = (Some(notarize_namespace.as_ref()), notarize_message.as_ref());
         let seed_namespace = seed_namespace(namespace);
         let seed_message = view_message(self.proposal.view);
         let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
-        partial_verify_multiple_messages::<V, _, _>(
-            polynomial,
-            self.signer(),
+        let Some(evaluated) = polynomial.get(self.signer() as usize) else {
+            return false;
+        };
+        let signature = aggregate_signatures::<V, _>(&[
+            self.proposal_signature.value,
+            self.seed_signature.value,
+        ]);
+        aggregate_verify_multiple_messages::<V, _>(
+            evaluated,
             &[notarize_message, seed_message],
-            [&self.proposal_signature, &self.seed_signature],
+            &signature,
+            1,
         )
         .is_ok()
     }
 
     pub fn verify_multiple(
         namespace: &[u8],
-        polynomial: &Poly<V::Public>,
+        polynomial: &[V::Public],
         notarizes: Vec<Notarize<V, D>>,
     ) -> (Vec<Notarize<V, D>>, Vec<u32>) {
         // Prepare to verify
@@ -710,7 +716,7 @@ impl<V: Variant, D: Digest> Notarize<V, D> {
         let notarize_namespace = notarize_namespace(namespace);
         let notarize_message = proposal.encode();
         let notarize_signatures = notarizes.iter().map(|n| &n.proposal_signature);
-        if let Err(err) = partial_verify_multiple_public_keys::<V, _>(
+        if let Err(err) = partial_verify_multiple_public_keys_precomputed::<V, _>(
             polynomial,
             Some(&notarize_namespace),
             &notarize_message,
@@ -728,7 +734,7 @@ impl<V: Variant, D: Digest> Notarize<V, D> {
             .iter()
             .filter(|n| !invalid.contains(&n.seed_signature.index))
             .map(|n| &n.seed_signature);
-        if let Err(err) = partial_verify_multiple_public_keys::<V, _>(
+        if let Err(err) = partial_verify_multiple_public_keys_precomputed::<V, _>(
             polynomial,
             Some(&seed_namespace),
             &seed_message,
@@ -939,24 +945,29 @@ impl<V: Variant> Nullify<V> {
     /// 1. The view signature is valid for the given view
     /// 2. The seed signature is valid for the view
     /// 3. Both signatures are from the same signer
-    pub fn verify(&self, namespace: &[u8], polynomial: &Poly<V::Public>) -> bool {
+    pub fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
         let nullify_namespace = nullify_namespace(namespace);
         let view_message = view_message(self.view);
         let nullify_message = (Some(nullify_namespace.as_ref()), view_message.as_ref());
         let seed_namespace = seed_namespace(namespace);
         let seed_message = (Some(seed_namespace.as_ref()), view_message.as_ref());
-        partial_verify_multiple_messages::<V, _, _>(
-            polynomial,
-            self.signer(),
+        let Some(evaluated) = polynomial.get(self.signer() as usize) else {
+            return false;
+        };
+        let signature =
+            aggregate_signatures::<V, _>(&[self.view_signature.value, self.seed_signature.value]);
+        aggregate_verify_multiple_messages::<V, _>(
+            evaluated,
             &[nullify_message, seed_message],
-            [&self.view_signature, &self.seed_signature],
+            &signature,
+            1,
         )
         .is_ok()
     }
 
     pub fn verify_multiple(
         namespace: &[u8],
-        polynomial: &Poly<V::Public>,
+        polynomial: &[V::Public],
         nullifies: Vec<Nullify<V>>,
     ) -> (Vec<Nullify<V>>, Vec<u32>) {
         // Prepare to verify
@@ -977,7 +988,7 @@ impl<V: Variant> Nullify<V> {
         let nullify_namespace = nullify_namespace(namespace);
         let view_message = view_message(selected.view);
         let view_signatures = nullifies.iter().map(|n| &n.view_signature);
-        if let Err(err) = partial_verify_multiple_public_keys::<V, _>(
+        if let Err(err) = partial_verify_multiple_public_keys_precomputed::<V, _>(
             polynomial,
             Some(&nullify_namespace),
             &view_message,
@@ -994,7 +1005,7 @@ impl<V: Variant> Nullify<V> {
             .iter()
             .filter(|n| !invalid.contains(&n.seed_signature.index))
             .map(|n| &n.seed_signature);
-        if let Err(err) = partial_verify_multiple_public_keys::<V, _>(
+        if let Err(err) = partial_verify_multiple_public_keys_precomputed::<V, _>(
             polynomial,
             Some(&seed_namespace),
             &view_message,
@@ -1188,21 +1199,24 @@ impl<V: Variant, D: Digest> Finalize<V, D> {
     /// Verifies the signature on this finalize using BLS threshold verification.
     ///
     /// This ensures that the signature is valid for the given proposal.
-    pub fn verify(&self, namespace: &[u8], polynomial: &Poly<V::Public>) -> bool {
+    pub fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
         let finalize_namespace = finalize_namespace(namespace);
         let message = self.proposal.encode();
-        partial_verify_message::<V>(
-            polynomial,
+        let Some(evaluated) = polynomial.get(self.signer() as usize) else {
+            return false;
+        };
+        verify_message::<V>(
+            evaluated,
             Some(finalize_namespace.as_ref()),
             &message,
-            &self.proposal_signature,
+            &self.proposal_signature.value,
         )
         .is_ok()
     }
 
     pub fn verify_multiple(
         namespace: &[u8],
-        polynomial: &Poly<V::Public>,
+        polynomial: &[V::Public],
         finalizes: Vec<Finalize<V, D>>,
     ) -> (Vec<Finalize<V, D>>, Vec<u32>) {
         // Prepare to verify
@@ -1223,7 +1237,7 @@ impl<V: Variant, D: Digest> Finalize<V, D> {
         let finalize_namespace = finalize_namespace(namespace);
         let finalize_message = proposal.encode();
         let finalize_signatures = finalizes.iter().map(|f| &f.proposal_signature);
-        if let Err(err) = partial_verify_multiple_public_keys::<V, _>(
+        if let Err(err) = partial_verify_multiple_public_keys_precomputed::<V, _>(
             polynomial,
             Some(&finalize_namespace),
             &finalize_message,
@@ -1928,7 +1942,7 @@ impl<V: Variant, D: Digest> ConflictingNotarize<V, D> {
     }
 
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
-    pub fn verify(&self, namespace: &[u8], polynomial: &Poly<V::Public>) -> bool {
+    pub fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
         let (proposal_1, proposal_2) = self.proposals();
         let notarize_namespace = notarize_namespace(namespace);
         let notarize_message_1 = proposal_1.encode();
@@ -1941,11 +1955,16 @@ impl<V: Variant, D: Digest> ConflictingNotarize<V, D> {
             Some(notarize_namespace.as_ref()),
             notarize_message_2.as_ref(),
         );
-        partial_verify_multiple_messages::<V, _, _>(
-            polynomial,
-            self.signer(),
+        let Some(evaluated) = polynomial.get(self.signer() as usize) else {
+            return false;
+        };
+        let signature =
+            aggregate_signatures::<V, _>(&[self.signature_1.value, self.signature_2.value]);
+        aggregate_verify_multiple_messages::<V, _>(
+            evaluated,
             &[notarize_message_1, notarize_message_2],
-            [&self.signature_1, &self.signature_2],
+            &signature,
+            1,
         )
         .is_ok()
     }
@@ -2061,7 +2080,7 @@ impl<V: Variant, D: Digest> ConflictingFinalize<V, D> {
     }
 
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
-    pub fn verify(&self, namespace: &[u8], polynomial: &Poly<V::Public>) -> bool {
+    pub fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
         let (proposal_1, proposal_2) = self.proposals();
         let finalize_namespace = finalize_namespace(namespace);
         let finalize_message_1 = proposal_1.encode();
@@ -2074,11 +2093,16 @@ impl<V: Variant, D: Digest> ConflictingFinalize<V, D> {
             Some(finalize_namespace.as_ref()),
             finalize_message_2.as_ref(),
         );
-        partial_verify_multiple_messages::<V, _, _>(
-            polynomial,
-            self.signer(),
+        let Some(evaluated) = polynomial.get(self.signer() as usize) else {
+            return false;
+        };
+        let signature =
+            aggregate_signatures::<V, _>(&[self.signature_1.value, self.signature_2.value]);
+        aggregate_verify_multiple_messages::<V, _>(
+            evaluated,
             &[finalize_message_1, finalize_message_2],
-            [&self.signature_1, &self.signature_2],
+            &signature,
+            1,
         )
         .is_ok()
     }
@@ -2175,18 +2199,25 @@ impl<V: Variant, D: Digest> NullifyFinalize<V, D> {
     }
 
     /// Verifies that both the nullify and finalize signatures are valid, proving Byzantine behavior.
-    pub fn verify(&self, namespace: &[u8], polynomial: &Poly<V::Public>) -> bool {
+    pub fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
         let nullify_namespace = nullify_namespace(namespace);
         let nullify_message = view_message(self.proposal.view);
         let nullify_message = (Some(nullify_namespace.as_ref()), nullify_message.as_ref());
         let finalize_namespace = finalize_namespace(namespace);
         let finalize_message = self.proposal.encode();
         let finalize_message = (Some(finalize_namespace.as_ref()), finalize_message.as_ref());
-        partial_verify_multiple_messages::<V, _, _>(
-            polynomial,
-            self.signer(),
+        let Some(evaluated) = polynomial.get(self.signer() as usize) else {
+            return false;
+        };
+        let signature = aggregate_signatures::<V, _>(&[
+            self.view_signature.value,
+            self.finalize_signature.value,
+        ]);
+        aggregate_verify_multiple_messages::<V, _>(
+            evaluated,
             &[nullify_message, finalize_message],
-            [&self.view_signature, &self.finalize_signature],
+            &signature,
+            1,
         )
         .is_ok()
     }
@@ -2247,7 +2278,7 @@ mod tests {
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::{
-            dkg::ops,
+            dkg::ops::{self, evaluate_all},
             primitives::{group::Share, ops::threshold_signature_recover, poly, variant::MinSig},
         },
         sha256::Digest as Sha256,
@@ -2263,9 +2294,20 @@ mod tests {
     }
 
     // Helper function to generate BLS shares and polynomial
-    fn generate_test_data(n: usize, t: u32, seed: u64) -> (poly::Public<MinSig>, Vec<Share>) {
+    fn generate_test_data(
+        n: u32,
+        t: u32,
+        seed: u64,
+    ) -> (
+        <MinSig as Variant>::Public,
+        Vec<<MinSig as Variant>::Public>,
+        Vec<Share>,
+    ) {
         let mut rng = StdRng::seed_from_u64(seed);
-        ops::generate_shares::<_, MinSig>(&mut rng, None, n as u32, t)
+        let (polynomial, shares) = ops::generate_shares::<_, MinSig>(&mut rng, None, n, t);
+        let identity = poly::public::<MinSig>(&polynomial);
+        let polynomial = evaluate_all::<MinSig>(&polynomial, n);
+        (*identity, polynomial, shares)
     }
 
     #[test]
@@ -2279,8 +2321,8 @@ mod tests {
     #[test]
     fn test_notarize_encode_decode() {
         let n = 5;
-        let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data(n, t, 0);
+        let t = quorum(n);
+        let (_, polynomial, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
         let notarize = Notarize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal);
@@ -2295,8 +2337,8 @@ mod tests {
     #[test]
     fn test_notarization_encode_decode() {
         let n = 5;
-        let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data(n, t, 0);
+        let t = quorum(n);
+        let (identity, _, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
 
@@ -2320,8 +2362,7 @@ mod tests {
         assert_eq!(notarization, decoded);
 
         // Verify the notarization
-        let identity = poly::public::<MinSig>(&polynomial);
-        assert!(decoded.verify(NAMESPACE, identity));
+        assert!(decoded.verify(NAMESPACE, &identity));
 
         // Create seed
         let seed = notarization.seed();
@@ -2330,14 +2371,14 @@ mod tests {
         assert_eq!(seed, decoded);
 
         // Verify the seed
-        assert!(decoded.verify(NAMESPACE, identity));
+        assert!(decoded.verify(NAMESPACE, &identity));
     }
 
     #[test]
     fn test_nullify_encode_decode() {
         let n = 5;
-        let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data(n, t, 0);
+        let t = quorum(n);
+        let (_, polynomial, shares) = generate_test_data(n, t, 0);
 
         let nullify = Nullify::<MinSig>::sign(NAMESPACE, &shares[0], 10);
 
@@ -2351,8 +2392,8 @@ mod tests {
     #[test]
     fn test_nullification_encode_decode() {
         let n = 5;
-        let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data(n, t, 0);
+        let t = quorum(n);
+        let (identity, _, shares) = generate_test_data(n, t, 0);
 
         // Create nullifies
         let nullifies: Vec<_> = shares
@@ -2373,8 +2414,7 @@ mod tests {
         assert_eq!(nullification, decoded);
 
         // Verify the nullification
-        let identity = poly::public::<MinSig>(&polynomial);
-        assert!(decoded.verify(NAMESPACE, identity));
+        assert!(decoded.verify(NAMESPACE, &identity));
 
         // Create seed
         let seed = nullification.seed();
@@ -2383,14 +2423,14 @@ mod tests {
         assert_eq!(seed, decoded);
 
         // Verify the seed
-        assert!(decoded.verify(NAMESPACE, identity));
+        assert!(decoded.verify(NAMESPACE, &identity));
     }
 
     #[test]
     fn test_finalize_encode_decode() {
         let n = 5;
-        let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data(n, t, 0);
+        let t = quorum(n);
+        let (_, polynomial, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
         let finalize = Finalize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal);
@@ -2405,8 +2445,8 @@ mod tests {
     #[test]
     fn test_finalization_encode_decode() {
         let n = 5;
-        let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data(n, t, 0);
+        let t = quorum(n);
+        let (identity, _, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
 
@@ -2434,8 +2474,7 @@ mod tests {
         assert_eq!(finalization, decoded);
 
         // Verify the finalization
-        let identity = poly::public::<MinSig>(&polynomial);
-        assert!(decoded.verify(NAMESPACE, identity));
+        assert!(decoded.verify(NAMESPACE, &identity));
 
         // Create seed
         let seed = finalization.seed();
@@ -2444,7 +2483,7 @@ mod tests {
         assert_eq!(seed, decoded);
 
         // Verify the seed
-        assert!(decoded.verify(NAMESPACE, identity));
+        assert!(decoded.verify(NAMESPACE, &identity));
     }
 
     #[test]
@@ -2458,8 +2497,8 @@ mod tests {
 
         // Test Response
         let n = 5;
-        let t = quorum(n as u32);
-        let (_, shares) = generate_test_data(n, t, 0);
+        let t = quorum(n);
+        let (_, _, shares) = generate_test_data(n, t, 0);
 
         // Create a notarization
         let proposal = Proposal::new(10, 5, sample_digest(1));
@@ -2508,8 +2547,8 @@ mod tests {
     #[test]
     fn test_response_encode_decode() {
         let n = 5;
-        let t = quorum(n as u32);
-        let (_, shares) = generate_test_data(n, t, 0);
+        let t = quorum(n);
+        let (_, _, shares) = generate_test_data(n, t, 0);
 
         // Create a notarization
         let proposal = Proposal::new(10, 5, sample_digest(1));
@@ -2551,8 +2590,8 @@ mod tests {
     #[test]
     fn test_conflicting_notarize_encode_decode() {
         let n = 5;
-        let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data(n, t, 0);
+        let t = quorum(n);
+        let (_, polynomial, shares) = generate_test_data(n, t, 0);
 
         let proposal1 = Proposal::new(10, 5, sample_digest(1));
         let proposal2 = Proposal::new(10, 5, sample_digest(2));
@@ -2570,8 +2609,8 @@ mod tests {
     #[test]
     fn test_conflicting_finalize_encode_decode() {
         let n = 5;
-        let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data(n, t, 0);
+        let t = quorum(n);
+        let (_, polynomial, shares) = generate_test_data(n, t, 0);
 
         let proposal1 = Proposal::new(10, 5, sample_digest(1));
         let proposal2 = Proposal::new(10, 5, sample_digest(2));
@@ -2589,8 +2628,8 @@ mod tests {
     #[test]
     fn test_nullify_finalize_encode_decode() {
         let n = 5;
-        let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data(n, t, 0);
+        let t = quorum(n);
+        let (_, polynomial, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
         let nullify = Nullify::<MinSig>::sign(NAMESPACE, &shares[0], 10);
@@ -2607,8 +2646,8 @@ mod tests {
     #[test]
     fn test_notarize_verify_wrong_namespace() {
         let n = 5;
-        let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data(n, t, 0);
+        let t = quorum(n);
+        let (_, polynomial, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
         let notarize = Notarize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal);
@@ -2623,11 +2662,11 @@ mod tests {
     #[test]
     fn test_notarize_verify_wrong_polynomial() {
         let n = 5;
-        let t = quorum(n as u32);
-        let (polynomial1, shares1) = generate_test_data(n, t, 0);
+        let t = quorum(n);
+        let (_, polynomial1, shares1) = generate_test_data(n, t, 0);
 
         // Generate a different set of BLS keys/shares
-        let (polynomial2, _) = generate_test_data(n, t, 1);
+        let (_, polynomial2, _) = generate_test_data(n, t, 1);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
         let notarize = Notarize::<MinSig, _>::sign(NAMESPACE, &shares1[0], proposal);
@@ -2642,8 +2681,8 @@ mod tests {
     #[test]
     fn test_notarization_verify_wrong_keys() {
         let n = 5;
-        let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data(n, t, 0);
+        let t = quorum(n);
+        let (identity, _, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
 
@@ -2665,22 +2704,20 @@ mod tests {
             Notarization::<MinSig, _>::new(proposal, proposal_signature, seed_signature);
 
         // Verify with correct public key - should pass
-        let identity = poly::public::<MinSig>(&polynomial);
-        assert!(notarization.verify(NAMESPACE, identity));
+        assert!(notarization.verify(NAMESPACE, &identity));
 
         // Generate a different set of BLS keys/shares
-        let (wrong_polynomial, _) = generate_test_data(n, t, 1);
-        let wrong_identity = poly::public::<MinSig>(&wrong_polynomial);
+        let (wrong_identity, _, _) = generate_test_data(n, t, 1);
 
         // Verify with wrong public key - should fail
-        assert!(!notarization.verify(NAMESPACE, wrong_identity));
+        assert!(!notarization.verify(NAMESPACE, &wrong_identity));
     }
 
     #[test]
     fn test_notarization_verify_wrong_namespace() {
         let n = 5;
-        let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data(n, t, 0);
+        let t = quorum(n);
+        let (identity, _, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
 
@@ -2702,18 +2739,17 @@ mod tests {
             Notarization::<MinSig, _>::new(proposal, proposal_signature, seed_signature);
 
         // Verify with correct namespace - should pass
-        let identity = poly::public::<MinSig>(&polynomial);
-        assert!(notarization.verify(NAMESPACE, identity));
+        assert!(notarization.verify(NAMESPACE, &identity));
 
         // Verify with wrong namespace - should fail
-        assert!(!notarization.verify(b"wrong_namespace", identity));
+        assert!(!notarization.verify(b"wrong_namespace", &identity));
     }
 
     #[test]
     fn test_threshold_recover_insufficient_signatures() {
         let n = 5;
-        let t = quorum(n as u32); // For n=5, t should be 4 (2f+1 where f=1)
-        let (_, shares) = generate_test_data(n, t, 0);
+        let t = quorum(n); // For n=5, t should be 4 (2f+1 where f=1)
+        let (_, _, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
 
@@ -2735,8 +2771,8 @@ mod tests {
     #[test]
     fn test_conflicting_notarize_detection() {
         let n = 5;
-        let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data(n, t, 0);
+        let t = quorum(n);
+        let (_, polynomial, shares) = generate_test_data(n, t, 0);
 
         // Create two different proposals for the same view
         let proposal1 = Proposal::new(10, 5, sample_digest(1));
@@ -2774,8 +2810,8 @@ mod tests {
     #[test]
     fn test_nullify_finalize_detection() {
         let n = 5;
-        let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data(n, t, 0);
+        let t = quorum(n);
+        let (_, polynomial, shares) = generate_test_data(n, t, 0);
 
         let view = 10;
 
@@ -2812,11 +2848,11 @@ mod tests {
     #[test]
     fn test_finalization_wrong_signature() {
         let n = 5;
-        let t = quorum(n as u32);
-        let (polynomial, shares) = generate_test_data(n, t, 0);
+        let t = quorum(n);
+        let (identity, _, shares) = generate_test_data(n, t, 0);
 
         // Create a completely different key set
-        let (wrong_polynomial, _) = generate_test_data(n, t, 1);
+        let (wrong_identity, _, _) = generate_test_data(n, t, 1);
 
         let proposal = Proposal::new(10, 5, sample_digest(1));
 
@@ -2842,12 +2878,10 @@ mod tests {
             Finalization::<MinSig, _>::new(proposal, proposal_signature, seed_signature);
 
         // Verify with correct public key - should pass
-        let identity = poly::public::<MinSig>(&polynomial);
-        assert!(finalization.verify(NAMESPACE, identity));
+        assert!(finalization.verify(NAMESPACE, &identity));
 
         // Verify with wrong public key - should fail
-        let wrong_identity = poly::public::<MinSig>(&wrong_polynomial);
-        assert!(!finalization.verify(NAMESPACE, wrong_identity));
+        assert!(!finalization.verify(NAMESPACE, &wrong_identity));
     }
 
     // Helper to create a Notarize message
@@ -2904,7 +2938,7 @@ mod tests {
     fn test_batch_verifier_add_notarize() {
         let n_validators = 5;
         let threshold = quorum(n_validators);
-        let (_, shares) = generate_test_data(n_validators as usize, threshold, 123);
+        let (_, _, shares) = generate_test_data(n_validators, threshold, 123);
 
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
@@ -2964,7 +2998,7 @@ mod tests {
     fn test_batch_verifier_set_leader() {
         let n_validators = 5;
         let threshold = quorum(n_validators);
-        let (_, shares) = generate_test_data(n_validators as usize, threshold, 124);
+        let (_, _, shares) = generate_test_data(n_validators, threshold, 124);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         let notarize_s0 = create_notarize(&shares[0], 1, 0, 1);
@@ -2996,7 +3030,7 @@ mod tests {
     fn test_batch_verifier_ready_and_verify_notarizes() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (polynomial, shares) = generate_test_data(n_validators as usize, threshold, 125);
+        let (_, polynomial, shares) = generate_test_data(n_validators, threshold, 125);
 
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
         let proposal = Proposal::new(1, 0, sample_digest(1));
@@ -3048,7 +3082,7 @@ mod tests {
 
         let mut faulty_notarize = create_notarize(&shares[1], 2, 1, 10); // Same proposal as leader
                                                                          // Corrupt a signature
-        let (_, other_shares) = generate_test_data(n_validators as usize, threshold, 126);
+        let (_, _, other_shares) = generate_test_data(n_validators, threshold, 126);
         faulty_notarize.proposal_signature = Notarize::<MinSig, _>::sign(
             NAMESPACE,
             &other_shares[1],
@@ -3070,7 +3104,7 @@ mod tests {
     fn test_batch_verifier_add_nullify() {
         let n_validators = 5;
         let threshold = quorum(n_validators);
-        let (_, shares) = generate_test_data(n_validators as usize, threshold, 127);
+        let (_, _, shares) = generate_test_data(n_validators, threshold, 127);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         let nullify1_s0 = create_nullify(&shares[0], 1);
@@ -3090,7 +3124,7 @@ mod tests {
     fn test_batch_verifier_ready_and_verify_nullifies() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (polynomial, shares) = generate_test_data(n_validators as usize, threshold, 128);
+        let (_, polynomial, shares) = generate_test_data(n_validators, threshold, 128);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         let nullify_s0 = create_nullify(&shares[0], 1);
@@ -3125,7 +3159,7 @@ mod tests {
     fn test_batch_verifier_add_finalize() {
         let n_validators = 5;
         let threshold = quorum(n_validators);
-        let (_, shares) = generate_test_data(n_validators as usize, threshold, 129);
+        let (_, _, shares) = generate_test_data(n_validators, threshold, 129);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         let finalize_s0_prop_a = create_finalize(&shares[0], 1, 0, 1); // Proposal A
@@ -3166,7 +3200,7 @@ mod tests {
     fn test_batch_verifier_ready_and_verify_finalizes() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (polynomial, shares) = generate_test_data(n_validators as usize, threshold, 130);
+        let (_, polynomial, shares) = generate_test_data(n_validators, threshold, 130);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
         let leader_proposal = Proposal::new(1, 0, sample_digest(1));
 
@@ -3215,7 +3249,7 @@ mod tests {
     fn test_batch_verifier_quorum_none() {
         let n_validators = 3;
         let threshold = quorum(n_validators); // Not strictly used by BatchVerifier logic when quorum is None
-        let (polynomial, shares) = generate_test_data(n_validators as usize, threshold, 200);
+        let (_, polynomial, shares) = generate_test_data(n_validators, threshold, 200);
 
         // Test with Notarizes
         let mut verifier_n = BatchVerifier::<MinSig, Sha256>::new(None);
@@ -3264,7 +3298,7 @@ mod tests {
     fn test_batch_verifier_leader_proposal_filters_messages() {
         let n_validators = 3;
         let threshold = quorum(n_validators);
-        let (_, shares) = generate_test_data(n_validators as usize, threshold, 201);
+        let (_, _, shares) = generate_test_data(n_validators, threshold, 201);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         let proposal_a = Proposal::new(1, 0, sample_digest(10));
@@ -3308,7 +3342,7 @@ mod tests {
     fn test_batch_verifier_add_recovered_message_panics() {
         let n_validators = 3;
         let threshold = quorum(n_validators);
-        let (_, shares) = generate_test_data(n_validators as usize, threshold, 202);
+        let (_, _, shares) = generate_test_data(n_validators, threshold, 202);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         let notarization = create_notarization(1, 0, 1, &shares, threshold);
@@ -3319,7 +3353,7 @@ mod tests {
     fn test_ready_notarizes_behavior_with_force_flag() {
         let n_validators = 3;
         let threshold = quorum(n_validators);
-        let (polynomial, shares) = generate_test_data(n_validators as usize, threshold, 203);
+        let (_, polynomial, shares) = generate_test_data(n_validators, threshold, 203);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         let leader_notarize = create_notarize(&shares[0], 1, 0, 1);
@@ -3356,7 +3390,7 @@ mod tests {
     fn test_ready_notarizes_without_leader_or_proposal() {
         let n_validators = 3;
         let threshold = quorum(n_validators);
-        let (_, shares) = generate_test_data(n_validators as usize, threshold, 204);
+        let (_, _, shares) = generate_test_data(n_validators, threshold, 204);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         // Collect sufficient number of unverified notarizes
@@ -3383,7 +3417,7 @@ mod tests {
     fn test_ready_finalizes_without_leader_or_proposal() {
         let n_validators = 3;
         let threshold = quorum(n_validators);
-        let (_, shares) = generate_test_data(n_validators as usize, threshold, 205);
+        let (_, _, shares) = generate_test_data(n_validators, threshold, 205);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         for i in 0..threshold {
@@ -3423,7 +3457,7 @@ mod tests {
     fn test_verify_nullifies_empty_pending() {
         let n_validators = 3;
         let threshold = quorum(n_validators);
-        let (polynomial, _) = generate_test_data(n_validators as usize, threshold, 207);
+        let (_, polynomial, _) = generate_test_data(n_validators, threshold, 207);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         assert!(verifier.nullifies.is_empty());
@@ -3440,7 +3474,7 @@ mod tests {
     fn test_verify_finalizes_empty_pending() {
         let n_validators = 3;
         let threshold = quorum(n_validators);
-        let (polynomial, shares) = generate_test_data(n_validators as usize, threshold, 208);
+        let (_, polynomial, shares) = generate_test_data(n_validators, threshold, 208);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         // ready_finalizes will be false if the list is empty and quorum is Some
@@ -3458,7 +3492,7 @@ mod tests {
     fn test_ready_notarizes_exact_quorum() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (polynomial, shares) = generate_test_data(n_validators as usize, threshold, 209);
+        let (_, polynomial, shares) = generate_test_data(n_validators, threshold, 209);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         let leader_notarize = create_notarize(&shares[0], 1, 0, 1);
@@ -3490,7 +3524,7 @@ mod tests {
     fn test_ready_nullifies_exact_quorum() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (_, shares) = generate_test_data(n_validators as usize, threshold, 210);
+        let (_, _, shares) = generate_test_data(n_validators, threshold, 210);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         verifier.add(Voter::Nullify(create_nullify(&shares[0], 1)), true); // 1 verified
@@ -3507,7 +3541,7 @@ mod tests {
     fn test_ready_finalizes_exact_quorum() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (_, shares) = generate_test_data(n_validators as usize, threshold, 211);
+        let (_, _, shares) = generate_test_data(n_validators, threshold, 211);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         let leader_proposal = Proposal::new(1, 0, sample_digest(1));
@@ -3528,7 +3562,7 @@ mod tests {
     fn test_ready_notarizes_quorum_already_met_by_verified() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (_, shares) = generate_test_data(n_validators as usize, threshold, 212);
+        let (_, _, shares) = generate_test_data(n_validators, threshold, 212);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         let leader_notarize = create_notarize(&shares[0], 1, 0, 1);
@@ -3558,7 +3592,7 @@ mod tests {
     fn test_ready_nullifies_quorum_already_met_by_verified() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (_, shares) = generate_test_data(n_validators as usize, threshold, 213);
+        let (_, _, shares) = generate_test_data(n_validators, threshold, 213);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         for share in shares.iter().take(threshold as usize) {
@@ -3578,7 +3612,7 @@ mod tests {
     fn test_ready_finalizes_quorum_already_met_by_verified() {
         let n_validators = 5;
         let threshold = quorum(n_validators); // threshold = 4
-        let (_, shares) = generate_test_data(n_validators as usize, threshold, 214);
+        let (_, _, shares) = generate_test_data(n_validators, threshold, 214);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         let leader_proposal = Proposal::new(1, 0, sample_digest(1));

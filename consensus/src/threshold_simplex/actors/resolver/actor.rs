@@ -11,10 +11,7 @@ use crate::{
     },
     ThresholdSupervisor,
 };
-use commonware_cryptography::{
-    bls12381::primitives::{poly, variant::Variant},
-    Digest, Scheme,
-};
+use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{
     utils::{
@@ -110,7 +107,7 @@ pub struct Actor<
     D: Digest,
     S: ThresholdSupervisor<
         Index = View,
-        Polynomial = poly::Public<V>,
+        Polynomial = Vec<V::Public>,
         PublicKey = C::PublicKey,
         Identity = V::Public,
     >,
@@ -149,7 +146,7 @@ impl<
         D: Digest,
         S: ThresholdSupervisor<
             Index = View,
-            Polynomial = poly::Public<V>,
+            Polynomial = Vec<V::Public>,
             PublicKey = C::PublicKey,
             Identity = V::Public,
         >,
