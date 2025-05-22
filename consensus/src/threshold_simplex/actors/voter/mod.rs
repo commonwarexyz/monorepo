@@ -603,8 +603,7 @@ mod tests {
             let not_prop_sig = threshold_signature_recover::<MinSig,_>(threshold, notarization_jft_sigs.iter().map(|n| &n.proposal_signature)).unwrap();
             let not_seed_sig = threshold_signature_recover::<MinSig,_>(threshold, notarization_jft_sigs.iter().map(|n| &n.seed_signature)).unwrap();
             let notarization_for_floor = Notarization::<MinSig, _>::new(proposal_jft, not_prop_sig, not_seed_sig);
-            let msg = Voter::Notarization(notarization_for_floor.clone()).encode().into();
-            peer_recovered_sender.send(Recipients::All, msg, true).await.expect("failed to send notarization");
+            mailbox.verified(vec![Voter::Notarization(notarization_for_floor)]).await;
 
             // Advance time significantly to ensure main loop runs, processes messages, and calls prune_views
             context.sleep(Duration::from_secs(5)).await;
