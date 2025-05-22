@@ -55,10 +55,7 @@ mod tests {
     use commonware_cryptography::{
         bls12381::{
             dkg::ops,
-            primitives::{
-                ops::threshold_signature_recover,
-                variant::{MinPk, MinSig},
-            },
+            primitives::{ops::threshold_signature_recover, variant::MinSig},
         },
         hash, Ed25519, Sha256, Signer,
     };
@@ -401,7 +398,9 @@ mod tests {
             // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
-                NConfig { max_size: 1024 * 1024 },
+                NConfig {
+                    max_size: 1024 * 1024,
+                },
             );
             network.start();
 
@@ -421,7 +420,7 @@ mod tests {
                 ops::generate_shares::<_, MinSig>(&mut context, None, n, threshold);
 
             // Setup the target Voter actor (validator 0)
-            let scheme= schemes[0].clone();
+            let scheme = schemes[0].clone();
             let validator = scheme.public_key();
             let mut participants = BTreeMap::new();
             participants.insert(
@@ -475,8 +474,10 @@ mod tests {
 
             // Create a dummy network mailbox
             let peer = schemes[1].public_key();
-            let (pending_sender, _pending_receiver) = oracle.register(validator.clone(), 0).await.unwrap();
-            let (recovered_sender, recovered_receiver) = oracle.register(validator.clone(), 1).await.unwrap();
+            let (pending_sender, _pending_receiver) =
+                oracle.register(validator.clone(), 0).await.unwrap();
+            let (recovered_sender, recovered_receiver) =
+                oracle.register(validator.clone(), 1).await.unwrap();
             let (mut _peer_pending_sender, mut _peer_pending_receiver) =
                 oracle.register(peer.clone(), 0).await.unwrap();
             let (mut peer_recovered_sender, mut peer_recovered_receiver) =
@@ -540,23 +541,45 @@ mod tests {
                     }
                 });
 
-            // --- Phase 1: Establish Prune Floor ---
+            // Establish Prune Floor (50 - 10 + 5 = 45)
+            //
+            // Theoretical interesting floor is 50-10 = 40.
+            // We want journal pruned at 45.
             let lf_target: View = 50;
-            let journal_floor_target: View = lf_target - activity_timeout_val + 5; // e.g., 50 - 10 + 5 = 45
-                                                                            // Theoretical interesting floor is 50-10 = 40.
-                                                                            // We want journal pruned at 45.
+            let journal_floor_target: View = lf_target - activity_timeout_val + 5;
 
             // Send Finalization to advance last_finalized
             let proposal_lf = Proposal::new(lf_target, lf_target - 1, hash(b"test"));
-            let finalization_lf_sigs = shares.iter().take(threshold as usize).map(|s| {
-                let notarize = Notarize::<MinSig,_>::sign(&namespace, s, proposal_lf.clone());
-                let finalize = Finalize::<MinSig,_>::sign(&namespace, s, proposal_lf.clone());
-                (finalize.proposal_signature, notarize.seed_signature)
-            }).collect::<Vec<_>>();
-            let final_prop_sig = threshold_signature_recover::<MinSig,_>(threshold, finalization_lf_sigs.iter().map(|(ps, _)| ps)).unwrap();
-            let final_seed_sig = threshold_signature_recover::<MinSig,_>(threshold, finalization_lf_sigs.iter().map(|(_, ss)| ss)).unwrap();
-            let msg = Voter::Finalization(Finalization::<MinSig, _>::new(proposal_lf, final_prop_sig, final_seed_sig)).encode().into();
-            peer_recovered_sender.send(Recipients::All, msg, true).await.expect("failed to send finalization");
+            let finalization_lf_sigs = shares
+                .iter()
+                .take(threshold as usize)
+                .map(|s| {
+                    let notarize = Notarize::<MinSig, _>::sign(&namespace, s, proposal_lf.clone());
+                    let finalize = Finalize::<MinSig, _>::sign(&namespace, s, proposal_lf.clone());
+                    (finalize.proposal_signature, notarize.seed_signature)
+                })
+                .collect::<Vec<_>>();
+            let final_prop_sig = threshold_signature_recover::<MinSig, _>(
+                threshold,
+                finalization_lf_sigs.iter().map(|(ps, _)| ps),
+            )
+            .unwrap();
+            let final_seed_sig = threshold_signature_recover::<MinSig, _>(
+                threshold,
+                finalization_lf_sigs.iter().map(|(_, ss)| ss),
+            )
+            .unwrap();
+            let msg = Voter::Finalization(Finalization::<MinSig, _>::new(
+                proposal_lf,
+                final_prop_sig,
+                final_seed_sig,
+            ))
+            .encode()
+            .into();
+            peer_recovered_sender
+                .send(Recipients::All, msg, true)
+                .await
+                .expect("failed to send finalization");
 
             // Wait for batcher to be notified
             loop {
@@ -592,41 +615,119 @@ mod tests {
             }
 
             // Send a Notarization for `journal_floor_target` to ensure it's in `actor.views`
-            let proposal_jft = Proposal::new(journal_floor_target, journal_floor_target -1 , hash(b"test2"));
-            let notarization_jft_sigs = shares.iter().take(threshold as usize).map(|s| {
-                Notarize::<MinSig,_>::sign(&namespace, s, proposal_jft.clone())
-            }).collect::<Vec<_>>();
-            let not_prop_sig = threshold_signature_recover::<MinSig,_>(threshold, notarization_jft_sigs.iter().map(|n| &n.proposal_signature)).unwrap();
-            let not_seed_sig = threshold_signature_recover::<MinSig,_>(threshold, notarization_jft_sigs.iter().map(|n| &n.seed_signature)).unwrap();
-            let notarization_for_floor = Notarization::<MinSig, _>::new(proposal_jft, not_prop_sig, not_seed_sig);
-            mailbox.verified(vec![Voter::Notarization(notarization_for_floor)]).await;
+            let proposal_jft = Proposal::new(
+                journal_floor_target,
+                journal_floor_target - 1,
+                hash(b"test2"),
+            );
+            let notarization_jft_sigs = shares
+                .iter()
+                .take(threshold as usize)
+                .map(|s| Notarize::<MinSig, _>::sign(&namespace, s, proposal_jft.clone()))
+                .collect::<Vec<_>>();
+            let not_prop_sig = threshold_signature_recover::<MinSig, _>(
+                threshold,
+                notarization_jft_sigs.iter().map(|n| &n.proposal_signature),
+            )
+            .unwrap();
+            let not_seed_sig = threshold_signature_recover::<MinSig, _>(
+                threshold,
+                notarization_jft_sigs.iter().map(|n| &n.seed_signature),
+            )
+            .unwrap();
+            let notarization_for_floor =
+                Notarization::<MinSig, _>::new(proposal_jft, not_prop_sig, not_seed_sig);
+            mailbox
+                .verified(vec![Voter::Notarization(notarization_for_floor)])
+                .await;
 
             // Advance time significantly to ensure main loop runs, processes messages, and calls prune_views
             context.sleep(Duration::from_secs(5)).await;
 
-            // --- Phase 2: Trigger Append to Pruned Section ---
-            let problematic_view: View = journal_floor_target - 3; // e.g., 45 - 3 = 42
-                                                                    // Check: problematic_view (42) < journal_floor_target (45)
-                                                                    // Check: interesting(42, false) -> 42 + AT(10) >= LF(50) -> 52 >= 50 (TRUE)
-
-            let notarize_problem = Notarize::<MinSig, _>::sign(
+            // Send notarization below oldest interesting view (42)
+            //
+            // problematic_view (42) < journal_floor_target (45)
+            // interesting(42, false) -> 42 + AT(10) >= LF(50) -> 52 >= 50
+            let problematic_view: View = journal_floor_target - 3;
+            let notarize = Notarize::<MinSig, _>::sign(
                 &namespace,
                 &shares[1], // Sign by a different validator for variety
                 Proposal::new(problematic_view, problematic_view - 1, hash(b"test3")),
             );
+            let msg = Voter::Notarize(notarize).encode().into();
+            peer_recovered_sender
+                .send(Recipients::All, msg, true)
+                .await
+                .expect("failed to send notarization");
 
-            // This should pass the `interesting(problematic_view, false)` check in the actor's
-            // mailbox processing logic, then call `handle_notarize`, which will attempt
-            // to `append` to the journal for `problematic_view`.
-            // This append should hit the `AlreadyPrunedToSection` error.
-            let msg = Voter::Notarize(notarize_problem).encode().into();
-            peer_recovered_sender.send(Recipients::All, msg, true).await.expect("failed to send notarization");
-
-            // Allow some time for the actor to process and panic
+            // Allow some time for the actor to process
             context.sleep(Duration::from_secs(2)).await;
-            // If it hasn't panicked by now, the test setup might be wrong.
-            // The #[should_panic] will catch it if it does.
-            panic!("Test did not panic as expected. The append to pruned section was likely not triggered or prevented by other logic.");
+
+            // Send Finalization to new view (100)
+            let proposal_lf = Proposal::new(100, 99, hash(b"test4"));
+            let finalization_lf_sigs = shares
+                .iter()
+                .take(threshold as usize)
+                .map(|s| {
+                    let notarize = Notarize::<MinSig, _>::sign(&namespace, s, proposal_lf.clone());
+                    let finalize = Finalize::<MinSig, _>::sign(&namespace, s, proposal_lf.clone());
+                    (finalize.proposal_signature, notarize.seed_signature)
+                })
+                .collect::<Vec<_>>();
+            let final_prop_sig = threshold_signature_recover::<MinSig, _>(
+                threshold,
+                finalization_lf_sigs.iter().map(|(ps, _)| ps),
+            )
+            .unwrap();
+            let final_seed_sig = threshold_signature_recover::<MinSig, _>(
+                threshold,
+                finalization_lf_sigs.iter().map(|(_, ss)| ss),
+            )
+            .unwrap();
+            let msg = Voter::Finalization(Finalization::<MinSig, _>::new(
+                proposal_lf,
+                final_prop_sig,
+                final_seed_sig,
+            ))
+            .encode()
+            .into();
+            peer_recovered_sender
+                .send(Recipients::All, msg, true)
+                .await
+                .expect("failed to send finalization");
+
+            // Wait for batcher to be notified
+            loop {
+                let message = batcher_receiver.next().await.unwrap();
+                match message {
+                    batcher::Message::Update {
+                        current,
+                        leader: _,
+                        finalized,
+                        active,
+                    } => {
+                        assert_eq!(current, 101);
+                        assert_eq!(finalized, 100);
+                        active.send(true).unwrap();
+                        break;
+                    }
+                    _ => {
+                        continue;
+                    }
+                }
+            }
+
+            // Wait for resolver to be notified
+            let msg = resolver_receiver
+                .next()
+                .await
+                .expect("failed to receive resolver message");
+            match msg {
+                resolver::Message::Finalized { view } => {
+                    assert_eq!(view, 100);
+                }
+                _ => panic!("unexpected resolver message"),
+            }
         });
     }
 }
