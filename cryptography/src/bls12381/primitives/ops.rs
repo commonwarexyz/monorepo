@@ -250,17 +250,20 @@ where
     V::verify(&public, &hm_sum, &signature)
 }
 
+/// Attempts to verify [PartialSignature]s provided or performs repeated
+/// bisection to find any invalid signatures.
+///
+/// TODO (#903): parallelize this
 fn partial_verify_multiple_public_keys_bisect<'a, V>(
     pending: &[(&V::Public, &'a PartialSignature<V>)],
-    invalid: &mut Vec<&'a PartialSignature<V>>,
+    mut invalid: Vec<&'a PartialSignature<V>>,
     namespace: Option<&[u8]>,
     message: &[u8],
-) where
+) -> Result<(), Vec<&'a PartialSignature<V>>>
+where
     V: Variant,
 {
     // Iteratively bisect to find invalid signatures
-    //
-    // TODO (#903): parallelize this
     let mut stack = vec![(0, pending.len())];
     while let Some((start, end)) = stack.pop() {
         // Skip if range is empty
@@ -288,6 +291,12 @@ fn partial_verify_multiple_public_keys_bisect<'a, V>(
             }
         }
     }
+
+    // Return invalid partial signatures, if any
+    if !invalid.is_empty() {
+        return Err(invalid);
+    }
+    Ok(())
 }
 
 /// Attempts to verify multiple [PartialSignature]s over the same message as a single
@@ -318,17 +327,10 @@ where
     }
 
     // Find any invalid partial signatures
-    partial_verify_multiple_public_keys_bisect::<V>(&pending, &mut invalid, namespace, message);
-
-    // Return invalid partial signatures, if any
-    if invalid.is_empty() {
-        Ok(())
-    } else {
-        Err(invalid)
-    }
+    partial_verify_multiple_public_keys_bisect::<V>(&pending, invalid, namespace, message)
 }
 
-/// Verifies multiple [PartialSignature]s over the same message as a single
+/// Attempts to verify multiple [PartialSignature]s over the same message as a single
 /// aggregate signature (or returns any invalid signature found).
 ///
 /// # Warning
@@ -360,20 +362,7 @@ where
         .collect::<Vec<_>>();
 
     // Find any invalid partial signatures
-    let mut invalid = Vec::new();
-    partial_verify_multiple_public_keys_bisect::<V>(
-        &pending_refs,
-        &mut invalid,
-        namespace,
-        message,
-    );
-
-    // Return invalid partial signatures, if any
-    if invalid.is_empty() {
-        Ok(())
-    } else {
-        Err(invalid)
-    }
+    partial_verify_multiple_public_keys_bisect::<V>(&pending_refs, Vec::new(), namespace, message)
 }
 
 /// Interpolate the value of some [Point] with precomputed Barycentric Weights
