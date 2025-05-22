@@ -325,37 +325,21 @@ where
     V: Variant,
     I: IntoIterator<Item = &'a PartialSignature<V>>,
 {
-    let partials_vec: Vec<&'a PartialSignature<V>> = partials.into_iter().collect();
-
-    // Compute aggregate representations for the full set
-    let mut aggregate_public_key = V::Public::zero();
-    let mut aggregate_signature = V::Signature::zero();
-    for (pk, partial) in public_keys.iter().zip(partials_vec.iter()) {
-        aggregate_public_key.add(pk);
-        aggregate_signature.add(&partial.value);
-    }
-
-    if verify_message::<V>(
-        &aggregate_public_key,
-        namespace,
-        message,
-        &aggregate_signature,
-    )
-    .is_ok()
-    {
-        return Ok(());
-    }
-
     // Iteratively bisect to find invalid signatures
+    //
+    // TODO (#903): parallelize this
+    let partials: Vec<&'a PartialSignature<V>> = partials.into_iter().collect();
     let mut stack = vec![(0usize, public_keys.len())];
     let mut invalid = Vec::new();
     while let Some((start, end)) = stack.pop() {
+        // Skip if range is empty
         let pk_slice = &public_keys[start..end];
-        let part_slice = &partials_vec[start..end];
+        let part_slice = &partials[start..end];
         if pk_slice.is_empty() {
             continue;
         }
 
+        // Create aggregate public key and signature
         let mut agg_pk = V::Public::zero();
         let mut agg_sig = V::Signature::zero();
         for (pk, partial) in pk_slice.iter().zip(part_slice.iter()) {
@@ -363,6 +347,7 @@ where
             agg_sig.add(&partial.value);
         }
 
+        // If aggregate signature is invalid, bisect. Otherwise, continue.
         if verify_message::<V>(&agg_pk, namespace, message, &agg_sig).is_err() {
             if pk_slice.len() == 1 {
                 invalid.extend_from_slice(part_slice);
@@ -373,7 +358,6 @@ where
             }
         }
     }
-
     Err(invalid)
 }
 
