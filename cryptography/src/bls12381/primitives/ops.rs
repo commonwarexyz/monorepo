@@ -250,8 +250,8 @@ where
     V::verify(&public, &hm_sum, &signature)
 }
 
-/// Attempts to verify [PartialSignature]s provided or performs repeated
-/// bisection to find any invalid signatures.
+/// Verify a list of [PartialSignature]s by performing aggregate verification,
+/// performing repeated bisection to find invalid signatures (if any exist).
 ///
 /// TODO (#903): parallelize this
 fn partial_verify_multiple_public_keys_bisect<'a, V, VP>(
