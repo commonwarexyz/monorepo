@@ -572,8 +572,8 @@ mod tests {
                         finalized,
                         active,
                     } => {
-                        assert_eq!(current, 101);
-                        assert_eq!(finalized, 100);
+                        assert_eq!(current, 51);
+                        assert_eq!(finalized, 50);
                         active.send(true).unwrap();
                         break;
                     }
@@ -590,7 +590,7 @@ mod tests {
                 .expect("failed to receive resolver message");
             match msg {
                 resolver::Message::Finalized { view } => {
-                    assert_eq!(view, 100);
+                    assert_eq!(view, 50);
                 }
                 _ => panic!("unexpected resolver message"),
             }
