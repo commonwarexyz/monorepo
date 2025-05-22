@@ -91,28 +91,31 @@ pub(crate) async fn run(
             let work_id = cqe.user_data();
             match work_id {
                 POLL_WORK_ID => {
+                    // This CQE means we woke up to check for new work.
                     // Assert that new work polling is enabled.
                     assert!(cfg.poll_new_work_freq.is_some());
-                    // Check for more work.
-                    continue;
                 }
                 TIMEOUT_WORK_ID => {
-                    // An operation timed out.
+                    // An operation timed out. The timed out operation will be
+                    // reported to the submitter when its CQE is processed.
                     assert!(cfg.op_timeout.is_some());
                 }
-                _ => {}
+                _ => {
+                    // Report this operation's result to the submitter.
+                    let result = cqe.result();
+                    let result = if result == -libc::ECANCELED && cfg.op_timeout.is_some() {
+                        // This operation timed out
+                        -libc::ETIMEDOUT
+                    } else {
+                        result
+                    };
+
+                    let result_sender = waiters.remove(&work_id).expect("result sender not found");
+                    result_sender.send(result).expect("failed to send result");
+                }
             }
-
-            let result = cqe.result();
-            let result = if result == -libc::ECANCELED && cfg.op_timeout.is_some() {
-                // The operation was canceled due to a timeout. Report this to caller.
-                -libc::ETIMEDOUT
-            } else {
-                result
-            };
-
-            let result_sender = waiters.remove(&work_id).expect("result sender not found");
-            result_sender.send(result).expect("failed to send result");
+            // Try to get another completion.
+            continue;
         }
 
         // Try to fill the submission queue with incoming work.
