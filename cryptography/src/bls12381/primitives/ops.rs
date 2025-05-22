@@ -1830,8 +1830,15 @@ mod tests {
             msg,
             &partials,
         );
-        assert!(result1.is_err());
-        assert!(result2.is_err());
+        for result in [result1, result2] {
+            match result {
+                Err(invalid_sigs) => {
+                    assert_eq!(invalid_sigs.len(), 1);
+                    assert_eq!(invalid_sigs[0].index, 0);
+                }
+                _ => panic!("Expected an error with invalid signatures"),
+            }
+        }
     }
 
     #[test]
