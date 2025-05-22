@@ -14,7 +14,7 @@ use std::hash::Hash;
 /// A specific instance of a signature scheme.
 pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
     /// The public key type.
-    type Public: Point + FixedSize + Debug + Hash + Copy;
+    type Public: Point + FixedSize + Debug + Hash + Copy + AsRef<Self::Public>;
 
     /// The signature type.
     type Signature: Point + FixedSize + Debug + Hash + Copy;

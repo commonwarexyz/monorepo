@@ -254,14 +254,15 @@ where
 /// bisection to find any invalid signatures.
 ///
 /// TODO (#903): parallelize this
-fn partial_verify_multiple_public_keys_bisect<'a, V>(
-    pending: &[(&V::Public, &'a PartialSignature<V>)],
+fn partial_verify_multiple_public_keys_bisect<'a, V, VP>(
+    pending: &[(VP, &'a PartialSignature<V>)],
     mut invalid: Vec<&'a PartialSignature<V>>,
     namespace: Option<&[u8]>,
     message: &[u8],
 ) -> Result<(), Vec<&'a PartialSignature<V>>>
 where
     V: Variant,
+    VP: AsRef<V::Public>,
 {
     // Iteratively bisect to find invalid signatures
     let mut stack = vec![(0, pending.len())];
@@ -276,7 +277,7 @@ where
         let mut agg_pk = V::Public::zero();
         let mut agg_sig = V::Signature::zero();
         for (pk, partial) in slice {
-            agg_pk.add(pk);
+            agg_pk.add(pk.as_ref());
             agg_sig.add(&partial.value);
         }
 
@@ -327,7 +328,7 @@ where
     }
 
     // Find any invalid partial signatures
-    partial_verify_multiple_public_keys_bisect::<V>(&pending, invalid, namespace, message)
+    partial_verify_multiple_public_keys_bisect::<V, _>(&pending, invalid, namespace, message)
 }
 
 /// Attempts to verify multiple [PartialSignature]s over the same message as a single
@@ -355,14 +356,8 @@ where
         })
         .collect::<Vec<_>>();
 
-    // Create references to the pending vector entries
-    let pending_refs = pending
-        .iter()
-        .map(|(pk, partial)| (pk, *partial))
-        .collect::<Vec<_>>();
-
     // Find any invalid partial signatures
-    partial_verify_multiple_public_keys_bisect::<V>(&pending_refs, Vec::new(), namespace, message)
+    partial_verify_multiple_public_keys_bisect::<V, _>(&pending, Vec::new(), namespace, message)
 }
 
 /// Interpolate the value of some [Point] with precomputed Barycentric Weights
