@@ -36,12 +36,15 @@ use futures::{
 };
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge, histogram::Histogram};
 use rand::Rng;
-use std::sync::{atomic::AtomicI64, Arc};
 use std::{
     collections::BTreeMap,
     time::{Duration, SystemTime},
 };
-use tracing::{debug, trace, warn};
+use std::{
+    sync::{atomic::AtomicI64, Arc},
+    time::Instant,
+};
+use tracing::{debug, info, trace, warn};
 
 const GENESIS_VIEW: View = 0;
 
@@ -1618,6 +1621,7 @@ impl<
         .expect("unable to open journal");
 
         // Rebuild from journal
+        let start = Instant::now();
         {
             let stream = journal
                 .replay(self.replay_concurrency, self.replay_buffer)
@@ -1708,7 +1712,7 @@ impl<
 
         // Update current view and immediately move to timeout (very unlikely we restarted and still within timeout)
         let observed_view = self.view;
-        debug!(current_view = observed_view, "replayed journal");
+        info!(current_view = observed_view, elapsed = ?start.elapsed(), "consensus initialized");
         {
             let round = self.views.get_mut(&observed_view).expect("missing round");
             round.leader_deadline = Some(self.context.current());
