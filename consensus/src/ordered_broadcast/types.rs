@@ -139,18 +139,18 @@ pub enum Error {
 
 /// Suffix used to identify a chunk namespace for domain separation.
 /// Used when signing and verifying chunks to prevent signature reuse across different message types.
-const CHUNK_SUFFIX: &[u8] = b"_CHUNK";
+pub const CHUNK_SUFFIX: &[u8] = b"_CHUNK";
 
 /// Suffix used to identify an acknowledgment (ack) namespace for domain separation.
 /// Used when signing and verifying acks to prevent signature reuse across different message types.
-const ACK_SUFFIX: &[u8] = b"_ACK";
+pub const ACK_SUFFIX: &[u8] = b"_ACK";
 
 /// Returns a suffixed namespace for signing a chunk.
 ///
 /// This provides domain separation for signatures, preventing cross-protocol attacks
 /// by ensuring signatures for chunks cannot be reused for other message types.
 #[inline]
-fn chunk_namespace(namespace: &[u8]) -> Vec<u8> {
+pub fn chunk_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, CHUNK_SUFFIX)
 }
 
@@ -159,7 +159,7 @@ fn chunk_namespace(namespace: &[u8]) -> Vec<u8> {
 /// This provides domain separation for signatures, preventing cross-protocol attacks
 /// by ensuring signatures for acks cannot be reused for other message types.
 #[inline]
-fn ack_namespace(namespace: &[u8]) -> Vec<u8> {
+pub fn ack_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, ACK_SUFFIX)
 }
 
