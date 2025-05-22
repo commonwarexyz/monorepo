@@ -379,4 +379,225 @@ mod tests {
         stale_backfill::<MinPk>();
         stale_backfill::<MinSig>();
     }
+
+    /// Test designed to trigger the AlreadyPrunedToSection panic during append.
+    /// 1. Advance last_finalized to a certain point (e.g., V50).
+    /// 2. Ensure self.views contains a view V_A (e.g., V45) which is interesting,
+    ///    and becomes the 'oldest' view when prune_views runs, setting the journal floor.
+    ///    Crucially, ensure there's a "gap" so that V_A is not LF - activity_timeout.
+    /// 3. Let prune_views run, setting the journal floor to V_A.
+    /// 4. Inject a message for V_B such that V_B < V_A but V_B is still "interesting"
+    ///    relative to the current last_finalized.
+    /// 5. This should cause an append for V_B which panics.
+    #[test_traced]
+    #[should_panic(expected = "unable to append to journal: AlreadyPrunedToSection")]
+    fn test_append_to_pruned_journal_section_panic() {
+        let n = 5;
+        let threshold = quorum(n);
+        let namespace = b"test_prune_panic".to_vec();
+        let activity_timeout_val: View = 10;
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                NConfig { max_size: 1024 * 1024 },
+            );
+            network.start();
+
+            // Get participants
+            let mut schemes = Vec::new();
+            let mut validators = Vec::new();
+            for i in 0..n {
+                let scheme = Ed25519::from_seed(i as u64);
+                validators.push(scheme.public_key());
+                schemes.push(scheme);
+            }
+            validators.sort();
+            schemes.sort_by_key(|s| s.public_key());
+
+            // Derive threshold shares
+            let (polynomial, shares) =
+                ops::generate_shares::<_, MinSig>(&mut context, None, n, threshold);
+
+            // Setup the target Voter actor (validator 0)
+            let scheme= schemes[0].clone();
+            let validator = scheme.public_key();
+            let mut participants = BTreeMap::new();
+            participants.insert(
+                0, // view 0 for simplicity, actual view changes won't affect this map's PKs
+                (polynomial.clone(), validators.clone(), shares[0].clone()),
+            );
+            let supervisor_config = mocks::supervisor::Config::<_, MinSig> {
+                namespace: namespace.clone(),
+                participants,
+            };
+            let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let app_config = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                participant: validator.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+            };
+            let (actor, application) =
+                mocks::application::Application::new(context.with_label("app"), app_config);
+            actor.start();
+
+            let voter_config = Config {
+                crypto: scheme.clone(),
+                blocker: oracle.control(validator.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: supervisor.clone(),
+                supervisor: supervisor.clone(),
+                partition: format!("voter_actor_test_{}", validator),
+                compression: None,
+                namespace: namespace.clone(),
+                mailbox_size: 128,
+                leader_timeout: Duration::from_millis(500),
+                notarization_timeout: Duration::from_millis(1000),
+                nullify_retry: Duration::from_millis(1000),
+                activity_timeout: activity_timeout_val,
+                replay_concurrency: 1,
+                replay_buffer: 10240,
+                write_buffer: 10240,
+            };
+            let (actor, mut mailbox) = Actor::new(context.clone(), voter_config);
+
+            // Create a dummy resolver mailbox
+            let (resolver_tx, _resolver_rx) = mpsc::channel(1);
+            let resolver_mailbox = resolver::Mailbox::new(resolver_tx);
+
+            // Create a dummy batcher mailbox
+            let (batcher_tx, mut batcher_rx) = mpsc::channel(10);
+            let batcher_mailbox = batcher::Mailbox::new(batcher_tx);
+
+            // Create a dummy network mailbox
+            let peer = schemes[1].public_key();
+            let (pending_sender, pending_receiver) = oracle.register(validator.clone(), 0).await.unwrap();
+            let (recovered_sender, recovered_receiver) = oracle.register(validator.clone(), 1).await.unwrap();
+            let (mut _peer_pending_sender, mut _peer_pending_receiver) =
+                oracle.register(peer.clone(), 0).await.unwrap();
+            let (mut peer_recovered_sender, mut peer_recovered_receiver) =
+                oracle.register(peer.clone(), 1).await.unwrap();
+            oracle
+                .add_link(
+                    validator.clone(),
+                    peer.clone(),
+                    Link {
+                        latency: 0.0,
+                        jitter: 0.0,
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
+            oracle
+                .add_link(
+                    peer,
+                    validator,
+                    Link {
+                        latency: 0.0,
+                        jitter: 0.0,
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
+
+            // Start the actor
+            actor.start(
+                batcher_mailbox,
+                resolver_mailbox,
+                pending_sender,
+                recovered_sender,
+                recovered_receiver,
+            );
+
+            // Wait for initial batcher update
+            if let Some(batcher::Message::Update { active, .. }) = batcher_rx.next().await {
+                active.send(true).unwrap();
+            } else {
+                panic!("Did not receive initial batcher update");
+            }
+
+            // --- Phase 1: Establish Prune Floor ---
+            let lf_target: View = 50;
+            let journal_floor_target: View = lf_target - activity_timeout_val + 5; // e.g., 50 - 10 + 5 = 45
+                                                                            // Theoretical interesting floor is 50-10 = 40.
+                                                                            // We want journal pruned at 45.
+
+            // Send Finalization to advance last_finalized
+            let proposal_lf = Proposal::new(lf_target, lf_target - 1, Sha256::from([1; 32]));
+            let finalization_lf_sigs = shares.iter().take(threshold as usize).map(|s| {
+                let notarize = Notarize::<V,_>::sign(&namespace, s, proposal_lf.clone());
+                let finalize = Finalize::<V,_>::sign(&namespace, s, proposal_lf.clone());
+                (finalize.proposal_signature, notarize.seed_signature)
+            }).collect::<Vec<_>>();
+            let final_prop_sig = threshold_signature_recover::<V,_>(threshold, finalization_lf_sigs.iter().map(|(ps, _)| ps)).unwrap();
+            let final_seed_sig = threshold_signature_recover::<V,_>(threshold, finalization_lf_sigs.iter().map(|(_, ss)| ss)).unwrap();
+            let finalization_msg = Finalization::<V, Sha256>::new(proposal_lf, final_prop_sig, final_seed_sig);
+
+            // Use actor_mailbox.verified, as if it came from resolver/batcher after verification
+            // This path uses `handle_finalization` which updates `last_finalized`
+            actor_mailbox.verified(vec![Voter::Finalization(finalization_msg.clone())]).await;
+
+            // Also send to resolver to update its state for the actor
+            let (res_tx, mut res_finalized_rx) = oneshot::channel();
+            supervisor.lock().unwrap().subscribers.lock().unwrap().push(res_tx); // Get a finalization subscription from supervisor
+
+            // The actor's main loop will call resolver.finalized()
+            // We need to ensure `prune_views` runs after `last_finalized` is updated.
+            // And before that, ensure view `journal_floor_target` is in `self.views`.
+
+            // Send a Notarization for `journal_floor_target` to ensure it's in `actor.views`
+            let proposal_jft = Proposal::new(journal_floor_target, journal_floor_target -1 , Sha256::from([2; 32]));
+            let notarization_jft_sigs = shares.iter().take(threshold as usize).map(|s| {
+                Notarize::<V,_>::sign(&namespace, s, proposal_jft.clone())
+            }).collect::<Vec<_>>();
+            let not_prop_sig = threshold_signature_recover::<V,_>(threshold, notarization_jft_sigs.iter().map(|n| &n.proposal_signature)).unwrap();
+            let not_seed_sig = threshold_signature_recover::<V,_>(threshold, notarization_jft_sigs.iter().map(|n| &n.seed_signature)).unwrap();
+            let notarization_for_floor = Notarization::<V, Sha256>::new(proposal_jft, not_prop_sig, not_seed_sig);
+            actor_mailbox.verified(vec![Voter::Notarization(notarization_for_floor.clone())]).await;
+
+            // Advance time significantly to ensure main loop runs, processes messages, and calls prune_views
+            context.sleep(Duration::from_secs(5)).await; // Give time for actor to process and prune
+
+            // Check batcher updates to confirm `last_finalized` has propagated
+             loop {
+                if let Some(batcher::Message::Update { finalized, active, .. }) = batcher_rx.next().await {
+                    active.send(true).unwrap();
+                    if finalized >= lf_target {
+                        break;
+                    }
+                } else { panic!("Batcher channel closed prematurely"); }
+            }
+
+            // --- Phase 2: Trigger Append to Pruned Section ---
+            let problematic_view: View = journal_floor_target - 3; // e.g., 45 - 3 = 42
+                                                                    // Check: problematic_view (42) < journal_floor_target (45)
+                                                                    // Check: interesting(42, false) -> 42 + AT(10) >= LF(50) -> 52 >= 50 (TRUE)
+
+            let notarize_problem = Notarize::<V, Sha256>::sign(
+                &namespace,
+                &shares[1], // Sign by a different validator for variety
+                Proposal::new(problematic_view, problematic_view - 1, Sha256::from([3; 32])),
+            );
+
+            // This should pass the `interesting(problematic_view, false)` check in the actor's
+            // mailbox processing logic, then call `handle_notarize`, which will attempt
+            // to `append` to the journal for `problematic_view`.
+            // This append should hit the `AlreadyPrunedToSection` error.
+            info!("Injecting problematic notarize for view {}", problematic_view);
+            actor_mailbox.verified(vec![Voter::Notarize(notarize_problem)]).await;
+
+            // Allow some time for the actor to process and panic
+            context.sleep(Duration::from_secs(2)).await;
+            // If it hasn't panicked by now, the test setup might be wrong.
+            // The #[should_panic] will catch it if it does.
+            panic!("Test did not panic as expected. The append to pruned section was likely not triggered or prevented by other logic.");
+        });
+    }
 }
