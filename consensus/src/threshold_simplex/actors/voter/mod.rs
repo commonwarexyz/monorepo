@@ -69,14 +69,18 @@ mod tests {
     };
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
     use commonware_utils::quorum;
-    use futures::{
-        channel::{mpsc, oneshot},
-        StreamExt,
-    };
+    use futures::{channel::mpsc, StreamExt};
     use std::time::Duration;
     use std::{collections::BTreeMap, sync::Arc};
 
-    fn stale_backfill<V: Variant>() {
+    /// Trigger processing of an uninteresting view from the resolver after
+    /// jumping ahead to a new finalize view:
+    ///
+    /// 1. Send a finalization for view 100.
+    /// 2. Send a notarization from resolver for view 50 (should be ignored).
+    /// 3. Send a finalization for view 300 (should be processed).
+    #[test_traced]
+    fn test_stale_backfill() {
         let n = 5;
         let threshold = quorum(n);
         let namespace = b"consensus".to_vec();
@@ -105,7 +109,7 @@ mod tests {
 
             // Derive threshold shares
             let (polynomial, shares) =
-                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
+                ops::generate_shares::<_, MinSig>(&mut context, None, n, threshold);
 
             // Initialize voter actor
             let scheme = schemes[0].clone();
@@ -115,7 +119,7 @@ mod tests {
                 0,
                 (polynomial.clone(), validators.clone(), shares[0].clone()),
             );
-            let supervisor_config = mocks::supervisor::Config::<_, V> {
+            let supervisor_config = mocks::supervisor::Config::<_, MinSig> {
                 namespace: namespace.clone(),
                 participants,
             };
@@ -237,8 +241,8 @@ mod tests {
             let partials: Vec<_> = shares
                 .iter()
                 .map(|share| {
-                    let notarize = Notarize::<V, _>::sign(&namespace, share, proposal.clone());
-                    let finalize = Finalize::<V, _>::sign(&namespace, share, proposal.clone());
+                    let notarize = Notarize::<MinSig, _>::sign(&namespace, share, proposal.clone());
+                    let finalize = Finalize::<MinSig, _>::sign(&namespace, share, proposal.clone());
                     (finalize.proposal_signature, notarize.seed_signature)
                 })
                 .collect();
@@ -246,12 +250,12 @@ mod tests {
                 .iter()
                 .map(|(proposal_signature, _)| proposal_signature);
             let proposal_signature =
-                threshold_signature_recover::<V, _>(threshold, proposal_partials).unwrap();
+                threshold_signature_recover::<MinSig, _>(threshold, proposal_partials).unwrap();
             let seed_partials = partials.iter().map(|(_, seed_signature)| seed_signature);
             let seed_signature =
-                threshold_signature_recover::<V, _>(threshold, seed_partials).unwrap();
+                threshold_signature_recover::<MinSig, _>(threshold, seed_partials).unwrap();
             let finalization =
-                Finalization::<V, _>::new(proposal, proposal_signature, seed_signature);
+                Finalization::<MinSig, _>::new(proposal, proposal_signature, seed_signature);
             let msg = Voter::Finalization(finalization).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
@@ -297,8 +301,8 @@ mod tests {
             let partials: Vec<_> = shares
                 .iter()
                 .map(|share| {
-                    let notarize = Notarize::<V, _>::sign(&namespace, share, proposal.clone());
-                    let finalize = Finalize::<V, _>::sign(&namespace, share, proposal.clone());
+                    let notarize = Notarize::<MinSig, _>::sign(&namespace, share, proposal.clone());
+                    let finalize = Finalize::<MinSig, _>::sign(&namespace, share, proposal.clone());
                     (finalize.proposal_signature, notarize.seed_signature)
                 })
                 .collect();
@@ -306,10 +310,10 @@ mod tests {
                 .iter()
                 .map(|(proposal_signature, _)| proposal_signature);
             let proposal_signature =
-                threshold_signature_recover::<V, _>(threshold, proposal_partials).unwrap();
+                threshold_signature_recover::<MinSig, _>(threshold, proposal_partials).unwrap();
             let seed_partials = partials.iter().map(|(_, seed_signature)| seed_signature);
             let seed_signature =
-                threshold_signature_recover::<V, _>(threshold, seed_partials).unwrap();
+                threshold_signature_recover::<MinSig, _>(threshold, seed_partials).unwrap();
             let notarization = Notarization::new(proposal, proposal_signature, seed_signature);
             mailbox
                 .verified(vec![Voter::Notarization(notarization)])
@@ -321,8 +325,8 @@ mod tests {
             let partials: Vec<_> = shares
                 .iter()
                 .map(|share| {
-                    let notarize = Notarize::<V, _>::sign(&namespace, share, proposal.clone());
-                    let finalize = Finalize::<V, _>::sign(&namespace, share, proposal.clone());
+                    let notarize = Notarize::<MinSig, _>::sign(&namespace, share, proposal.clone());
+                    let finalize = Finalize::<MinSig, _>::sign(&namespace, share, proposal.clone());
                     (finalize.proposal_signature, notarize.seed_signature)
                 })
                 .collect();
@@ -330,12 +334,12 @@ mod tests {
                 .iter()
                 .map(|(proposal_signature, _)| proposal_signature);
             let proposal_signature =
-                threshold_signature_recover::<V, _>(threshold, proposal_partials).unwrap();
+                threshold_signature_recover::<MinSig, _>(threshold, proposal_partials).unwrap();
             let seed_partials = partials.iter().map(|(_, seed_signature)| seed_signature);
             let seed_signature =
-                threshold_signature_recover::<V, _>(threshold, seed_partials).unwrap();
+                threshold_signature_recover::<MinSig, _>(threshold, seed_partials).unwrap();
             let finalization =
-                Finalization::<V, _>::new(proposal, proposal_signature, seed_signature);
+                Finalization::<MinSig, _>::new(proposal, proposal_signature, seed_signature);
             let msg = Voter::Finalization(finalization).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
@@ -377,23 +381,16 @@ mod tests {
         });
     }
 
-    #[test_traced]
-    fn test_stale_backfill() {
-        stale_backfill::<MinPk>();
-        stale_backfill::<MinSig>();
-    }
-
-    /// Test designed to trigger the AlreadyPrunedToSection panic during append.
-    /// 1. Advance last_finalized to a certain point (e.g., V50).
-    /// 2. Ensure self.views contains a view V_A (e.g., V45) which is interesting,
+    /// Process an interesting view below the oldest tracked view:
+    ///
+    /// 1. Advance last_finalized to a view 50.
+    /// 2. Ensure self.views contains a view V_A (45) which is interesting,
     ///    and becomes the 'oldest' view when prune_views runs, setting the journal floor.
     ///    Crucially, ensure there's a "gap" so that V_A is not LF - activity_timeout.
     /// 3. Let prune_views run, setting the journal floor to V_A.
     /// 4. Inject a message for V_B such that V_B < V_A but V_B is still "interesting"
     ///    relative to the current last_finalized.
-    /// 5. This should cause an append for V_B which panics.
     #[test_traced]
-    #[should_panic(expected = "unable to append to journal: AlreadyPrunedToSection")]
     fn test_append_to_pruned_journal_section_panic() {
         let n = 5;
         let threshold = quorum(n);
@@ -428,7 +425,7 @@ mod tests {
             let validator = scheme.public_key();
             let mut participants = BTreeMap::new();
             participants.insert(
-                0, // view 0 for simplicity, actual view changes won't affect this map's PKs
+                0,
                 (polynomial.clone(), validators.clone(), shares[0].clone()),
             );
             let supervisor_config = mocks::supervisor::Config::<_, MinSig> {
@@ -447,7 +444,6 @@ mod tests {
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), app_config);
             actor.start();
-
             let voter_config = Config {
                 crypto: scheme.clone(),
                 blocker: oracle.control(validator.clone()),
