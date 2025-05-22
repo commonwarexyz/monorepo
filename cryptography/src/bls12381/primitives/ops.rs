@@ -266,48 +266,29 @@ where
     V: Variant,
     I: IntoIterator<Item = &'a PartialSignature<V>>,
 {
-    // Build valid signer data and collect any invalid indices
+    // Ensure all partial signatures are associated with a signer
     let partials = partials.into_iter();
-    let mut data = Vec::with_capacity(partials.size_hint().0);
+    let mut pending = Vec::with_capacity(partials.size_hint().0);
     let mut invalid = Vec::new();
     for partial in partials {
         match polynomial.get(partial.index as usize) {
-            Some(public_key) => data.push((public_key, partial)),
+            Some(public_key) => pending.push((public_key, partial)),
             None => invalid.push(partial),
         }
     }
 
-    // Compute aggregate representations for all valid signatures
-    let mut aggregate_public_key = V::Public::zero();
-    let mut aggregate_signature = V::Signature::zero();
-    for (pk, partial) in &data {
-        aggregate_public_key.add(pk);
-        aggregate_signature.add(&partial.value);
-    }
-
-    if verify_message::<V>(
-        &aggregate_public_key,
-        namespace,
-        message,
-        &aggregate_signature,
-    )
-    .is_ok()
-    {
-        if invalid.is_empty() {
-            return Ok(());
-        }
-        return Err(invalid);
-    }
-
     // Iteratively bisect to find invalid signatures
-    let mut stack = vec![(0usize, data.len())];
-    let mut bad = invalid;
+    //
+    // TODO (#903): parallelize this
+    let mut stack = vec![(0, pending.len())];
     while let Some((start, end)) = stack.pop() {
-        let slice = &data[start..end];
+        // Skip if range is empty
+        let slice = &pending[start..end];
         if slice.is_empty() {
             continue;
         }
 
+        // Create aggregate public key and signature
         let mut agg_pk = V::Public::zero();
         let mut agg_sig = V::Signature::zero();
         for (pk, partial) in slice {
@@ -315,9 +296,10 @@ where
             agg_sig.add(&partial.value);
         }
 
+        // If aggregate signature is invalid, bisect. Otherwise, continue.
         if verify_message::<V>(&agg_pk, namespace, message, &agg_sig).is_err() {
             if slice.len() == 1 {
-                bad.push(slice[0].1);
+                invalid.push(slice[0].1);
             } else {
                 let mid = slice.len() / 2;
                 stack.push((start + mid, end));
@@ -325,8 +307,7 @@ where
             }
         }
     }
-
-    Err(bad)
+    Err(invalid)
 }
 
 /// Attempts to verify multiple [PartialSignature]s over the same message as a single
