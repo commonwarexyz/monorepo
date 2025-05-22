@@ -353,9 +353,20 @@ where
         })
         .collect::<Vec<_>>();
 
+    // Create references to the pending vector entries
+    let pending_refs = pending
+        .iter()
+        .map(|(pk, partial)| (pk, *partial))
+        .collect::<Vec<_>>();
+
     // Find any invalid partial signatures
     let mut invalid = Vec::new();
-    partial_verify_multiple_public_keys_bisect::<V>(&pending, &mut invalid, namespace, message);
+    partial_verify_multiple_public_keys_bisect::<V>(
+        &pending_refs,
+        &mut invalid,
+        namespace,
+        message,
+    );
 
     // Return invalid partial signatures, if any
     if invalid.is_empty() {
@@ -1869,7 +1880,7 @@ mod tests {
             match result {
                 Err(invalid_sigs) => {
                     assert_eq!(invalid_sigs.len(), 1);
-                    assert_eq!(invalid_sigs[0].index, corrupted_index as u32);
+                    assert_eq!(invalid_sigs[0].index, corrupted_index);
                 }
                 _ => panic!("Expected an error with invalid signatures"),
             }
