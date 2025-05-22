@@ -10,9 +10,10 @@ use io_uring::{
 };
 use std::time::Duration;
 
-/// A CQE with this user data means that an operation timed out.
+/// Reserved ID for a CQE that indicates an operation timed out.
 const TIMEOUT_WORK_ID: u64 = u64::MAX;
-/// A CQE with this user data means that we woke up to check for new work.
+/// Reserved ID for a CQE that indicates the event loop should
+/// wake up to check for new work.
 const POLL_WORK_ID: u64 = u64::MAX - 1;
 
 #[derive(Clone, Debug)]
@@ -25,13 +26,13 @@ pub struct Config {
     pub iopoll: bool,
     /// If true, use single issuer mode.
     pub single_issuer: bool,
-    /// In the io_uring event loop, wait at most this long for a new completion
-    /// before checking for new work to submit to the ring.
+    /// In the io_uring event loop (`run`), wait at most this long for a new
+    /// completion before checking for new work to submit to the io_ring.
     /// If None, wait indefinitely. In this case, caller must ensure that operations
-    /// submitted to the io_uring complete so as to not block the event loop.
+    /// submitted to the io_uring complete so that they don't block the event loop.
     /// For example, do not submit a recv operation and then a write operation
     /// that satisfies the recv operation; the event loop may block while
-    /// waiting for the recv operation to complete, and never submit the write,
+    /// waiting for the recv operation to complete and never submit the write,
     /// causing a deadlock.
     pub poll_new_work_freq: Option<Duration>,
     /// If None, operations submitted to the io_uring will not time out.
@@ -88,25 +89,30 @@ pub(crate) async fn run(
         // Try to get a completion
         if let Some(cqe) = ring.completion().next() {
             let work_id = cqe.user_data();
-            let result = cqe.result();
-
-            if let Some(sender) = waiters.remove(&work_id) {
-                if result == -libc::ECANCELED && cfg.op_timeout.is_some() {
-                    // Send a timeout error code to the caller
-                    let _ = sender.send(-libc::ETIMEDOUT);
-                } else {
-                    // Send the actual result
-                    let _ = sender.send(result);
+            match work_id {
+                POLL_WORK_ID => {
+                    // Assert that new work polling is enabled.
+                    assert!(cfg.poll_new_work_freq.is_some());
+                    // Check for more work.
+                    continue;
                 }
-            } else if work_id == POLL_WORK_ID {
-                // This CQE is to wake us up to check for new work.
-                // We don't need to do anything here.
-                assert!(cfg.poll_new_work_freq.is_some());
-            } else {
-                // This is a timeout. Make sure timeouts are enabled.
-                assert!(cfg.op_timeout.is_some());
-                assert_eq!(work_id, TIMEOUT_WORK_ID);
+                TIMEOUT_WORK_ID => {
+                    // An operation timed out.
+                    assert!(cfg.op_timeout.is_some());
+                }
+                _ => {}
             }
+
+            let result = cqe.result();
+            let result = if result == -libc::ECANCELED && cfg.op_timeout.is_some() {
+                // The operation was canceled due to a timeout. Report this to caller.
+                -libc::ETIMEDOUT
+            } else {
+                result
+            };
+
+            let result_sender = waiters.remove(&work_id).expect("result sender not found");
+            result_sender.send(result).expect("failed to send result");
         }
 
         // Try to fill the submission queue with incoming work.
