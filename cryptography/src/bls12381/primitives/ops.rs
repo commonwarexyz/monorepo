@@ -250,33 +250,14 @@ where
     V::verify(&public, &hm_sum, &signature)
 }
 
-/// Attempts to verify multiple [PartialSignature]s over the same message as a single
-/// aggregate signature (or returns any invalid signature found).
-///
-/// Unlike `partial_verify_multiple_public_keys`, this function requires the public keys
-/// of all partial signatures to be precomputed (avoids a significant amount of compute
-/// evaluating each signer on the public polynomial).
-pub fn partial_verify_multiple_public_keys_precomputed<'a, V, I>(
-    polynomial: &[V::Public],
+fn partial_verify_multiple_public_keys_bisect<'a, V>(
+    pending: &[(&V::Public, &'a PartialSignature<V>)],
+    invalid: &mut Vec<&'a PartialSignature<V>>,
     namespace: Option<&[u8]>,
     message: &[u8],
-    partials: I,
-) -> Result<(), Vec<&'a PartialSignature<V>>>
-where
+) where
     V: Variant,
-    I: IntoIterator<Item = &'a PartialSignature<V>>,
 {
-    // Ensure all partial signatures are associated with a signer
-    let partials = partials.into_iter();
-    let mut pending = Vec::with_capacity(partials.size_hint().0);
-    let mut invalid = Vec::new();
-    for partial in partials {
-        match polynomial.get(partial.index as usize) {
-            Some(public_key) => pending.push((public_key, partial)),
-            None => invalid.push(partial),
-        }
-    }
-
     // Iteratively bisect to find invalid signatures
     //
     // TODO (#903): parallelize this
@@ -307,16 +288,16 @@ where
             }
         }
     }
-    Err(invalid)
 }
 
 /// Attempts to verify multiple [PartialSignature]s over the same message as a single
 /// aggregate signature (or returns any invalid signature found).
 ///
-/// We use an "inner" function for recursion to avoid re-evaluating the public polynomial
-/// for each recursive bisection.
-fn partial_verify_multiple_public_keys_inner<'a, V, I>(
-    public_keys: &[V::Public],
+/// Unlike `partial_verify_multiple_public_keys`, this function requires the public keys
+/// of all partial signatures to be precomputed (avoids a significant amount of compute
+/// evaluating each signer on the public polynomial).
+pub fn partial_verify_multiple_public_keys_precomputed<'a, V, I>(
+    polynomial: &[V::Public],
     namespace: Option<&[u8]>,
     message: &[u8],
     partials: I,
@@ -325,40 +306,26 @@ where
     V: Variant,
     I: IntoIterator<Item = &'a PartialSignature<V>>,
 {
-    // Iteratively bisect to find invalid signatures
-    //
-    // TODO (#903): parallelize this
-    let partials: Vec<&'a PartialSignature<V>> = partials.into_iter().collect();
-    let mut stack = vec![(0usize, public_keys.len())];
+    // Ensure all partial signatures are associated with a signer
+    let partials = partials.into_iter();
+    let mut pending = Vec::with_capacity(partials.size_hint().0);
     let mut invalid = Vec::new();
-    while let Some((start, end)) = stack.pop() {
-        // Skip if range is empty
-        let pk_slice = &public_keys[start..end];
-        let part_slice = &partials[start..end];
-        if pk_slice.is_empty() {
-            continue;
-        }
-
-        // Create aggregate public key and signature
-        let mut agg_pk = V::Public::zero();
-        let mut agg_sig = V::Signature::zero();
-        for (pk, partial) in pk_slice.iter().zip(part_slice.iter()) {
-            agg_pk.add(pk);
-            agg_sig.add(&partial.value);
-        }
-
-        // If aggregate signature is invalid, bisect. Otherwise, continue.
-        if verify_message::<V>(&agg_pk, namespace, message, &agg_sig).is_err() {
-            if pk_slice.len() == 1 {
-                invalid.extend_from_slice(part_slice);
-            } else {
-                let mid = pk_slice.len() / 2;
-                stack.push((start + mid, end));
-                stack.push((start, start + mid));
-            }
+    for partial in partials {
+        match polynomial.get(partial.index as usize) {
+            Some(public_key) => pending.push((public_key, partial)),
+            None => invalid.push(partial),
         }
     }
-    Err(invalid)
+
+    // Find any invalid partial signatures
+    partial_verify_multiple_public_keys_bisect::<V>(&pending, &mut invalid, namespace, message);
+
+    // Return invalid partial signatures, if any
+    if invalid.is_empty() {
+        Ok(())
+    } else {
+        Err(invalid)
+    }
 }
 
 /// Verifies multiple [PartialSignature]s over the same message as a single
@@ -378,16 +345,24 @@ where
     I: IntoIterator<Item = &'a PartialSignature<V>>,
 {
     // Evaluate public polynomial to compute signer public keys
-    let (public_keys, partials): (Vec<V::Public>, Vec<&'a PartialSignature<V>>) = partials
+    let pending = partials
         .into_iter()
         .map(|partial| {
             let public_key = public.evaluate(partial.index).value;
             (public_key, partial)
         })
-        .unzip();
+        .collect::<Vec<_>>();
 
-    // Recursively verify and find invalid signatures
-    partial_verify_multiple_public_keys_inner::<V, _>(&public_keys, namespace, message, partials)
+    // Find any invalid partial signatures
+    let mut invalid = Vec::new();
+    partial_verify_multiple_public_keys_bisect::<V>(&pending, &mut invalid, namespace, message);
+
+    // Return invalid partial signatures, if any
+    if invalid.is_empty() {
+        Ok(())
+    } else {
+        Err(invalid)
+    }
 }
 
 /// Interpolate the value of some [Point] with precomputed Barycentric Weights
