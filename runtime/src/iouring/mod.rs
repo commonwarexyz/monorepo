@@ -2,10 +2,16 @@ use futures::{
     channel::{mpsc, oneshot},
     StreamExt as _,
 };
-use io_uring::{opcode::LinkTimeout, squeue::Entry as SqueueEntry, types::Timespec, IoUring};
-use std::time::Duration;
+use io_uring::{
+    opcode::{LinkTimeout, Timeout},
+    squeue::Entry as SqueueEntry,
+    types::Timespec,
+    IoUring,
+};
+use std::{collections::HashMap, time::Duration};
 
 const TIMEOUT_WORK_ID: u64 = u64::MAX;
+const SHUTDOWN_TIMEOUT_WORK_ID: u64 = u64::MAX - 1;
 
 #[derive(Clone, Debug)]
 /// Configuration for an io_uring instance.
@@ -23,6 +29,12 @@ pub struct Config {
     /// If Some, each submitted operation will time out after this duration.
     /// If an operation times out, its result will be -[libc::ETIMEDOUT].
     pub op_timeout: Option<Duration>,
+    /// The maximum time the io_uring event loop will wait for in-flight operations
+    /// to complete before abandoning them during shutdown.
+    /// If None, the event loop will wait indefinitely for in-flight operations
+    /// to complete before shutting down. In this case, the caller should be careful
+    /// to ensure that the operations submitted to the io_uring will eventually complete.
+    pub shutdown_timeout: Option<Duration>,
 }
 
 impl Default for Config {
@@ -32,6 +44,7 @@ impl Default for Config {
             iopoll: false,
             single_issuer: true,
             op_timeout: None,
+            shutdown_timeout: None,
         }
     }
 }
@@ -63,8 +76,7 @@ pub(crate) async fn run(
     let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
     let mut next_work_id: u64 = 0;
     // Maps a work ID to the sender that we will send the result to.
-    let mut waiters: std::collections::HashMap<_, oneshot::Sender<i32>> =
-        std::collections::HashMap::with_capacity(cfg.size as usize);
+    let mut waiters: HashMap<_, oneshot::Sender<i32>> = HashMap::with_capacity(cfg.size as usize);
 
     loop {
         // Try to get a completion
@@ -96,15 +108,33 @@ pub(crate) async fn run(
                 // Block until there is something to do
                 match receiver.next().await {
                     Some(work) => work,
-                    None => return,
+                    None => {
+                        drain(
+                            &mut ring,
+                            &mut waiters,
+                            cfg.op_timeout.is_some(),
+                            cfg.shutdown_timeout,
+                        )
+                        .await;
+                        return;
+                    }
                 }
             } else {
                 // Handle incoming work
                 match receiver.try_next() {
                     // Got work without blocking
                     Ok(Some(work_item)) => work_item,
-                    // Channel closed, shut down
-                    Ok(None) => return,
+                    Ok(None) => {
+                        // Channel closed, shut down
+                        drain(
+                            &mut ring,
+                            &mut waiters,
+                            cfg.op_timeout.is_some(),
+                            cfg.shutdown_timeout,
+                        )
+                        .await;
+                        return;
+                    }
                     // No new work available, wait for a completion
                     Err(_) => break,
                 }
@@ -156,6 +186,57 @@ pub(crate) async fn run(
         // even if it's there before this call. That is, a completion
         // that arrived before this call will be counted and cause this
         // call to return. Note that waiters.len() > 0 here.
+        ring.submit_and_wait(1).expect("unable to submit to ring");
+    }
+}
+
+/// Process `ring` completions until all pending operations are complete or
+/// until `timeout` fires. If `timeout` is None, wait indefinitely.
+async fn drain(
+    ring: &mut IoUring,
+    waiters: &mut HashMap<u64, oneshot::Sender<i32>>,
+    has_op_timeout: bool,
+    timeout: Option<Duration>,
+) {
+    if let Some(timeout) = timeout {
+        // Create a timeout that will fire if we can't clear all the inflight operations.
+        let timeout = Timespec::new()
+            .sec(timeout.as_secs())
+            .nsec(timeout.subsec_nanos());
+        let timeout = Timeout::new(&timeout)
+            .build()
+            .user_data(SHUTDOWN_TIMEOUT_WORK_ID);
+        unsafe {
+            ring.submission()
+                .push(&timeout)
+                .expect("unable to push to queue");
+        }
+    }
+
+    while !waiters.is_empty() {
+        while let Some(cqe) = ring.completion().next() {
+            let work_id = cqe.user_data();
+            let result = cqe.result();
+
+            if work_id == SHUTDOWN_TIMEOUT_WORK_ID {
+                // We timed out draining the completion queue
+                return;
+            }
+
+            if let Some(sender) = waiters.remove(&work_id) {
+                if result == -libc::ECANCELED && has_op_timeout {
+                    // Send a timeout error code to the caller
+                    let _ = sender.send(-libc::ETIMEDOUT);
+                } else {
+                    // Send the actual result
+                    let _ = sender.send(result);
+                }
+            } else {
+                // This is a timeout. Make sure timeouts are enabled.
+                assert!(has_op_timeout);
+                assert_eq!(work_id, TIMEOUT_WORK_ID);
+            }
+        }
         ring.submit_and_wait(1).expect("unable to submit to ring");
     }
 }
