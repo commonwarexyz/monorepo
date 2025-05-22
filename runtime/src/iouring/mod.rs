@@ -87,7 +87,7 @@ pub(crate) async fn run(
 
     loop {
         // Try to get a completion
-        if let Some(cqe) = ring.completion().next() {
+        while let Some(cqe) = ring.completion().next() {
             let work_id = cqe.user_data();
             match work_id {
                 POLL_WORK_ID => {
@@ -114,8 +114,6 @@ pub(crate) async fn run(
                     result_sender.send(result).expect("failed to send result");
                 }
             }
-            // Try to get another completion.
-            continue;
         }
 
         // Try to fill the submission queue with incoming work.
