@@ -17,9 +17,9 @@ cfg_if::cfg_if! {
         use std::future::Future;
 
         /// Histogram buckets for measuring consensus latency.
-        const LATENCY: [f64; 20] = [
-            0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.6, 0.7, 0.8,
-            0.9, 1.0, 1.25, 1.5, 1.75, 2.0, 3.0,
+        const LATENCY: [f64; 36] = [
+            0.05, 0.1, 0.125, 0.15, 0.16, 0.17, 0.18, 0.19, 0.2, 0.21, 0.22, 0.23, 0.24, 0.25, 0.26, 0.27, 0.28, 0.29, 0.3, 0.31, 0.32, 0.33, 0.34, 0.35,
+            0.36, 0.37, 0.38, 0.39, 0.4, 0.45, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0,
         ];
 
         /// Automaton is the interface responsible for driving the consensus forward by proposing new payloads
@@ -119,33 +119,41 @@ cfg_if::cfg_if! {
             fn is_participant(&self, index: Self::Index, candidate: &Self::PublicKey) -> Option<u32>;
         }
 
-        /// ThresholdSupervisor is the interface responsible for managing which `identity` (typically a group polynomial with
-        /// a fixed constant factor) and `share` for a participant is active at a given time.
+        /// ThresholdSupervisor is the interface responsible for managing which `polynomial` (typically a polynomial with
+        /// a fixed constant `identity`) and `share` for a participant is active at a given time.
         ///
         /// ## Synchronization
         ///
         /// The same considerations for [`Supervisor`](crate::Supervisor) apply here.
         pub trait ThresholdSupervisor: Supervisor {
+            /// Identity is the type against which threshold signatures are verified.
+            type Identity;
+
             /// Seed is some random value used to bias the leader selection process.
             type Seed;
 
-            /// Identity is the type against which partial signatures are verified.
-            type Identity;
+            /// Polynomial is the group polynomial over which partial signatures are verified.
+            type Polynomial;
 
             /// Share is the type used to generate a partial signature that can be verified
             /// against `Identity`.
             type Share;
 
+            /// Returns the static identity of the shared secret (typically the constant term
+            /// of a polynomial).
+            fn identity(&self) -> &Self::Identity;
+
             /// Return the leader at a given index over the provided seed.
             fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<Self::PublicKey>;
 
-            /// Returns the identity (typically a group polynomial with a fixed constant factor)
-            /// at the given index. This is used to verify partial signatures from participants
-            /// enumerated in `Supervisor::participants`.
-            fn identity(&self, index: Self::Index) -> Option<&Self::Identity>;
+            /// Returns the polynomial over which partial signatures are verified at a given index.
+            fn polynomial(&self, index: Self::Index) -> Option<&Self::Polynomial>;
 
             /// Returns share to sign with at a given index. After resharing, the share
             /// may change (and old shares may be deleted).
+            ///
+            /// This can be used to generate a partial signature that can be verified
+            /// against `polynomial`.
             fn share(&self, index: Self::Index) -> Option<&Self::Share>;
         }
 

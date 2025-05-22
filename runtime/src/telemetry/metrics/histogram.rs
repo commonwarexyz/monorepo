@@ -25,6 +25,15 @@ impl Buckets {
     pub const LOCAL: [f64; 12] = [
         3e-6, 1e-5, 3e-5, 1e-4, 3e-4, 0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0,
     ];
+
+    /// For cryptographic operations.
+    ///
+    /// These operations are expected to be fast and not require network access, but might
+    /// require expensive computation.
+    pub const CRYPTOGRAPHY: [f64; 16] = [
+        3e-6, 1e-5, 3e-5, 1e-4, 3e-4, 0.001, 0.002, 0.003, 0.005, 0.01, 0.015, 0.02, 0.025, 0.03,
+        0.1, 0.2,
+    ];
 }
 
 /// Extension trait for histograms.
@@ -46,6 +55,7 @@ impl HistogramExt for Histogram {
 }
 
 /// A wrapper around a histogram that includes a clock.
+#[derive(Clone)]
 pub struct Timed<C: Clock> {
     /// The histogram to record durations in.
     histogram: Histogram,
