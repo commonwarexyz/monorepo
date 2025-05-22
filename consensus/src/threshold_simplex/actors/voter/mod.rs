@@ -67,9 +67,12 @@ mod tests {
         simulated::{Config as NConfig, Link, Network},
         Receiver, Recipients, Sender,
     };
-    use commonware_runtime::{deterministic, Metrics, Runner, Spawner};
+    use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
     use commonware_utils::quorum;
-    use futures::{channel::mpsc, StreamExt};
+    use futures::{
+        channel::{mpsc, oneshot},
+        StreamExt,
+    };
     use std::time::Duration;
     use std::{collections::BTreeMap, sync::Arc};
 
@@ -467,16 +470,16 @@ mod tests {
             let (actor, mut mailbox) = Actor::new(context.clone(), voter_config);
 
             // Create a dummy resolver mailbox
-            let (resolver_tx, _resolver_rx) = mpsc::channel(1);
-            let resolver_mailbox = resolver::Mailbox::new(resolver_tx);
+            let (resolver_sender, mut resolver_receiver) = mpsc::channel(1);
+            let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
 
             // Create a dummy batcher mailbox
-            let (batcher_tx, mut batcher_rx) = mpsc::channel(10);
-            let batcher_mailbox = batcher::Mailbox::new(batcher_tx);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(10);
+            let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Create a dummy network mailbox
             let peer = schemes[1].public_key();
-            let (pending_sender, pending_receiver) = oracle.register(validator.clone(), 0).await.unwrap();
+            let (pending_sender, _pending_receiver) = oracle.register(validator.clone(), 0).await.unwrap();
             let (recovered_sender, recovered_receiver) = oracle.register(validator.clone(), 1).await.unwrap();
             let (mut _peer_pending_sender, mut _peer_pending_receiver) =
                 oracle.register(peer.clone(), 0).await.unwrap();
@@ -516,12 +519,30 @@ mod tests {
                 recovered_receiver,
             );
 
-            // Wait for initial batcher update
-            if let Some(batcher::Message::Update { active, .. }) = batcher_rx.next().await {
-                active.send(true).unwrap();
-            } else {
-                panic!("Did not receive initial batcher update");
+            // Wait for batcher to be notified
+            let message = batcher_receiver.next().await.unwrap();
+            match message {
+                batcher::Message::Update {
+                    current,
+                    leader: _,
+                    finalized,
+                    active,
+                } => {
+                    assert_eq!(current, 1);
+                    assert_eq!(finalized, 0);
+                    active.send(true).unwrap();
+                }
+                _ => panic!("unexpected batcher message"),
             }
+
+            // Drain the peer_recovered_receiver
+            context
+                .with_label("peer_recovered_receiver")
+                .spawn(|_| async move {
+                    loop {
+                        peer_recovered_receiver.recv().await.unwrap();
+                    }
+                });
 
             // --- Phase 1: Establish Prune Floor ---
             let lf_target: View = 50;
@@ -530,68 +551,81 @@ mod tests {
                                                                             // We want journal pruned at 45.
 
             // Send Finalization to advance last_finalized
-            let proposal_lf = Proposal::new(lf_target, lf_target - 1, Sha256::from([1; 32]));
+            let proposal_lf = Proposal::new(lf_target, lf_target - 1, hash(b"test"));
             let finalization_lf_sigs = shares.iter().take(threshold as usize).map(|s| {
-                let notarize = Notarize::<V,_>::sign(&namespace, s, proposal_lf.clone());
-                let finalize = Finalize::<V,_>::sign(&namespace, s, proposal_lf.clone());
+                let notarize = Notarize::<MinSig,_>::sign(&namespace, s, proposal_lf.clone());
+                let finalize = Finalize::<MinSig,_>::sign(&namespace, s, proposal_lf.clone());
                 (finalize.proposal_signature, notarize.seed_signature)
             }).collect::<Vec<_>>();
-            let final_prop_sig = threshold_signature_recover::<V,_>(threshold, finalization_lf_sigs.iter().map(|(ps, _)| ps)).unwrap();
-            let final_seed_sig = threshold_signature_recover::<V,_>(threshold, finalization_lf_sigs.iter().map(|(_, ss)| ss)).unwrap();
-            let finalization_msg = Finalization::<V, Sha256>::new(proposal_lf, final_prop_sig, final_seed_sig);
+            let final_prop_sig = threshold_signature_recover::<MinSig,_>(threshold, finalization_lf_sigs.iter().map(|(ps, _)| ps)).unwrap();
+            let final_seed_sig = threshold_signature_recover::<MinSig,_>(threshold, finalization_lf_sigs.iter().map(|(_, ss)| ss)).unwrap();
+            let msg = Voter::Finalization(Finalization::<MinSig, _>::new(proposal_lf, final_prop_sig, final_seed_sig)).encode().into();
+            peer_recovered_sender.send(Recipients::All, msg, true).await.expect("failed to send finalization");
 
-            // Use actor_mailbox.verified, as if it came from resolver/batcher after verification
-            // This path uses `handle_finalization` which updates `last_finalized`
-            actor_mailbox.verified(vec![Voter::Finalization(finalization_msg.clone())]).await;
-
-            // Also send to resolver to update its state for the actor
-            let (res_tx, mut res_finalized_rx) = oneshot::channel();
-            supervisor.lock().unwrap().subscribers.lock().unwrap().push(res_tx); // Get a finalization subscription from supervisor
-
-            // The actor's main loop will call resolver.finalized()
-            // We need to ensure `prune_views` runs after `last_finalized` is updated.
-            // And before that, ensure view `journal_floor_target` is in `self.views`.
-
-            // Send a Notarization for `journal_floor_target` to ensure it's in `actor.views`
-            let proposal_jft = Proposal::new(journal_floor_target, journal_floor_target -1 , Sha256::from([2; 32]));
-            let notarization_jft_sigs = shares.iter().take(threshold as usize).map(|s| {
-                Notarize::<V,_>::sign(&namespace, s, proposal_jft.clone())
-            }).collect::<Vec<_>>();
-            let not_prop_sig = threshold_signature_recover::<V,_>(threshold, notarization_jft_sigs.iter().map(|n| &n.proposal_signature)).unwrap();
-            let not_seed_sig = threshold_signature_recover::<V,_>(threshold, notarization_jft_sigs.iter().map(|n| &n.seed_signature)).unwrap();
-            let notarization_for_floor = Notarization::<V, Sha256>::new(proposal_jft, not_prop_sig, not_seed_sig);
-            actor_mailbox.verified(vec![Voter::Notarization(notarization_for_floor.clone())]).await;
-
-            // Advance time significantly to ensure main loop runs, processes messages, and calls prune_views
-            context.sleep(Duration::from_secs(5)).await; // Give time for actor to process and prune
-
-            // Check batcher updates to confirm `last_finalized` has propagated
-             loop {
-                if let Some(batcher::Message::Update { finalized, active, .. }) = batcher_rx.next().await {
-                    active.send(true).unwrap();
-                    if finalized >= lf_target {
+            // Wait for batcher to be notified
+            loop {
+                let message = batcher_receiver.next().await.unwrap();
+                match message {
+                    batcher::Message::Update {
+                        current,
+                        leader: _,
+                        finalized,
+                        active,
+                    } => {
+                        assert_eq!(current, 101);
+                        assert_eq!(finalized, 100);
+                        active.send(true).unwrap();
                         break;
                     }
-                } else { panic!("Batcher channel closed prematurely"); }
+                    _ => {
+                        continue;
+                    }
+                }
             }
+
+            // Wait for resolver to be notified
+            let msg = resolver_receiver
+                .next()
+                .await
+                .expect("failed to receive resolver message");
+            match msg {
+                resolver::Message::Finalized { view } => {
+                    assert_eq!(view, 100);
+                }
+                _ => panic!("unexpected resolver message"),
+            }
+
+            // Send a Notarization for `journal_floor_target` to ensure it's in `actor.views`
+            let proposal_jft = Proposal::new(journal_floor_target, journal_floor_target -1 , hash(b"test2"));
+            let notarization_jft_sigs = shares.iter().take(threshold as usize).map(|s| {
+                Notarize::<MinSig,_>::sign(&namespace, s, proposal_jft.clone())
+            }).collect::<Vec<_>>();
+            let not_prop_sig = threshold_signature_recover::<MinSig,_>(threshold, notarization_jft_sigs.iter().map(|n| &n.proposal_signature)).unwrap();
+            let not_seed_sig = threshold_signature_recover::<MinSig,_>(threshold, notarization_jft_sigs.iter().map(|n| &n.seed_signature)).unwrap();
+            let notarization_for_floor = Notarization::<MinSig, _>::new(proposal_jft, not_prop_sig, not_seed_sig);
+            let msg = Voter::Notarization(notarization_for_floor.clone()).encode().into();
+            peer_recovered_sender.send(Recipients::All, msg, true).await.expect("failed to send notarization");
+
+            // Advance time significantly to ensure main loop runs, processes messages, and calls prune_views
+            context.sleep(Duration::from_secs(5)).await;
 
             // --- Phase 2: Trigger Append to Pruned Section ---
             let problematic_view: View = journal_floor_target - 3; // e.g., 45 - 3 = 42
                                                                     // Check: problematic_view (42) < journal_floor_target (45)
                                                                     // Check: interesting(42, false) -> 42 + AT(10) >= LF(50) -> 52 >= 50 (TRUE)
 
-            let notarize_problem = Notarize::<V, Sha256>::sign(
+            let notarize_problem = Notarize::<MinSig, _>::sign(
                 &namespace,
                 &shares[1], // Sign by a different validator for variety
-                Proposal::new(problematic_view, problematic_view - 1, Sha256::from([3; 32])),
+                Proposal::new(problematic_view, problematic_view - 1, hash(b"test3")),
             );
 
             // This should pass the `interesting(problematic_view, false)` check in the actor's
             // mailbox processing logic, then call `handle_notarize`, which will attempt
             // to `append` to the journal for `problematic_view`.
             // This append should hit the `AlreadyPrunedToSection` error.
-            info!("Injecting problematic notarize for view {}", problematic_view);
-            actor_mailbox.verified(vec![Voter::Notarize(notarize_problem)]).await;
+            let msg = Voter::Notarize(notarize_problem).encode().into();
+            peer_recovered_sender.send(Recipients::All, msg, true).await.expect("failed to send notarization");
 
             // Allow some time for the actor to process and panic
             context.sleep(Duration::from_secs(2)).await;
