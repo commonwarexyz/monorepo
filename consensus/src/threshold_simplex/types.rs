@@ -65,42 +65,42 @@ pub trait Seedable<V: Variant> {
 
 // Constants for domain separation in signature verification
 // These are used to prevent cross-protocol attacks and message-type confusion
-const SEED_SUFFIX: &[u8] = b"_SEED";
-const NOTARIZE_SUFFIX: &[u8] = b"_NOTARIZE";
-const NULLIFY_SUFFIX: &[u8] = b"_NULLIFY";
-const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
+pub const SEED_SUFFIX: &[u8] = b"_SEED";
+pub const NOTARIZE_SUFFIX: &[u8] = b"_NOTARIZE";
+pub const NULLIFY_SUFFIX: &[u8] = b"_NULLIFY";
+pub const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
 
 /// Creates a message to be signed containing just the view number
 #[inline]
-fn view_message(view: View) -> Vec<u8> {
+pub fn view_message(view: View) -> Vec<u8> {
     View::encode(&view).into()
 }
 
 /// Creates a namespace for seed messages by appending the SEED_SUFFIX
 /// The seed is used for leader election and randomness generation
 #[inline]
-fn seed_namespace(namespace: &[u8]) -> Vec<u8> {
+pub fn seed_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, SEED_SUFFIX)
 }
 
 /// Creates a namespace for notarize messages by appending the NOTARIZE_SUFFIX
 /// Domain separation prevents cross-protocol attacks
 #[inline]
-fn notarize_namespace(namespace: &[u8]) -> Vec<u8> {
+pub fn notarize_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, NOTARIZE_SUFFIX)
 }
 
 /// Creates a namespace for nullify messages by appending the NULLIFY_SUFFIX
 /// Domain separation prevents cross-protocol attacks
 #[inline]
-fn nullify_namespace(namespace: &[u8]) -> Vec<u8> {
+pub fn nullify_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, NULLIFY_SUFFIX)
 }
 
 /// Creates a namespace for finalize messages by appending the FINALIZE_SUFFIX
 /// Domain separation prevents cross-protocol attacks
 #[inline]
-fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
+pub fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, FINALIZE_SUFFIX)
 }
 
