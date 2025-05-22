@@ -388,11 +388,11 @@ mod tests {
     /// 4. Inject a message for V_B such that V_B < V_A but V_B is still "interesting"
     ///    relative to the current last_finalized.
     #[test_traced]
-    fn test_append_to_pruned_journal_section_panic() {
+    fn test_append_old_interesting_view() {
         let n = 5;
         let threshold = quorum(n);
         let namespace = b"test_prune_panic".to_vec();
-        let activity_timeout_val: View = 10;
+        let activity_timeout: View = 10;
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
             // Create simulated network
@@ -457,7 +457,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 notarization_timeout: Duration::from_millis(1000),
                 nullify_retry: Duration::from_millis(1000),
-                activity_timeout: activity_timeout_val,
+                activity_timeout,
                 replay_concurrency: 1,
                 replay_buffer: 10240,
                 write_buffer: 10240,
@@ -546,7 +546,7 @@ mod tests {
             // Theoretical interesting floor is 50-10 = 40.
             // We want journal pruned at 45.
             let lf_target: View = 50;
-            let journal_floor_target: View = lf_target - activity_timeout_val + 5;
+            let journal_floor_target: View = lf_target - activity_timeout + 5;
 
             // Send Finalization to advance last_finalized
             let proposal_lf = Proposal::new(lf_target, lf_target - 1, hash(b"test"));
@@ -661,7 +661,7 @@ mod tests {
                 .expect("failed to send notarization");
 
             // Allow some time for the actor to process
-            context.sleep(Duration::from_secs(2)).await;
+            context.sleep(Duration::from_secs(5)).await;
 
             // Send Finalization to new view (100)
             let proposal_lf = Proposal::new(100, 99, hash(b"test4"));
