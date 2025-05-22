@@ -17,7 +17,7 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
     type Public: Point + FixedSize + Debug + Hash + Copy + AsRef<Self::Public>;
 
     /// The signature type.
-    type Signature: Point + FixedSize + Debug + Hash + Copy;
+    type Signature: Point + FixedSize + Debug + Hash + Copy + AsRef<Self::Signature>;
 
     /// The domain separator tag (DST) for a proof of possession.
     const PROOF_OF_POSSESSION: DST;
