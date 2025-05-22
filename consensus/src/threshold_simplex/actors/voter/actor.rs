@@ -1712,7 +1712,7 @@ impl<
 
         // Update current view and immediately move to timeout (very unlikely we restarted and still within timeout)
         let observed_view = self.view;
-        info!(current_view = observed_view, elapsed = ?start.elapsed(), "initialized consensus");
+        info!(current_view = observed_view, elapsed = ?start.elapsed(), "consensus initialized");
         {
             let round = self.views.get_mut(&observed_view).expect("missing round");
             round.leader_deadline = Some(self.context.current());

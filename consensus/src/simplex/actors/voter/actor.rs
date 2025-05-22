@@ -1764,7 +1764,7 @@ impl<
         self.journal = Some(journal);
 
         // Update current view and immediately move to timeout (very unlikely we restarted and still within timeout)
-        debug!(current_view = observed_view, elapsed = ?start.elapsed(), "initialized consensus");
+        debug!(current_view = observed_view, elapsed = ?start.elapsed(), "consensus initialized");
         self.enter_view(observed_view);
         {
             let round = self.views.get_mut(&observed_view).expect("missing round");
