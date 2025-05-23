@@ -45,7 +45,7 @@ pub trait Verifier: Specification + Clone + Send + Sync + 'static {
 /// Implementation that can sign a message with a `PrivateKey`.
 pub trait Signer: Specification + Clone + Send + Sync + 'static {
     /// Private key used for signing.
-    type PrivateKey;
+    type PrivateKey: Array;
 
     /// Returns a new instance of the scheme.
     fn new<R: Rng + CryptoRng>(rng: &mut R) -> Self;
@@ -150,7 +150,7 @@ pub trait Digestible: Clone + Sized + Send + Sync + 'static {
 }
 
 /// An object that can produce a commitment of itself.
-pub trait Committable: Clone + Sized + Send + Sync + 'static {
+pub trait Committable: Digestible + Clone + Sized + Send + Sync + 'static {
     type Commitment: Digest;
 
     /// Returns the unique commitment of the object as a [Digest].
