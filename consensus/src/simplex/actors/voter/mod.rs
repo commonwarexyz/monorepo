@@ -44,7 +44,7 @@ mod tests {
     use crate::simplex::{
         actors::resolver,
         mocks,
-        types::{Finalization, Finalize, Notarization, Notarize, Proposal, Voter},
+        types::{Finalization, Finalize, Notarization, Notarize, Proposal, Viewable, Voter},
     };
     use commonware_codec::Encode;
     use commonware_cryptography::{hash, Ed25519, Sha256, Signer};
@@ -267,7 +267,7 @@ mod tests {
         let threshold = quorum(n);
         let namespace = b"consensus".to_vec();
         let activity_timeout: View = 10;
-        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -332,7 +332,7 @@ mod tests {
                 replay_buffer: 1024 * 1024,
                 write_buffer: 1024 * 1024,
             };
-            let (actor, mut mailbox) = Actor::new(context.clone(), cfg);
+            let (actor, _mailbox) = Actor::new(context.clone(), cfg);
 
             // Create a dummy backfiller mailbox
             let (backfiller_sender, mut backfiller_receiver) = mpsc::channel(1);
@@ -426,7 +426,23 @@ mod tests {
                 signatures.push(notarization.signature);
             }
             let notarization = Notarization::new(proposal, signatures);
-            mailbox.notarization(notarization).await;
+            let msg = Voter::Notarization(notarization).encode().into();
+            peer_sender
+                .send(Recipients::All, msg, true)
+                .await
+                .expect("failed to send notarization");
+
+            // Wait for backfiller to be notified
+            let msg = backfiller_receiver
+                .next()
+                .await
+                .expect("failed to receive backfiller message");
+            match msg {
+                resolver::Message::Notarized { notarization } => {
+                    assert_eq!(notarization.view(), journal_floor_target);
+                }
+                _ => panic!("unexpected backfiller message"),
+            }
 
             // Advance time significantly to ensure main loop runs, processes messages, and calls prune_views
             context.sleep(Duration::from_secs(5)).await;
@@ -449,6 +465,18 @@ mod tests {
                 .send(Recipients::All, msg, true)
                 .await
                 .expect("failed to send finalization");
+
+            // Wait for backfiller to be notified
+            let msg = backfiller_receiver
+                .next()
+                .await
+                .expect("failed to receive backfiller message");
+            match msg {
+                resolver::Message::Notarized { notarization } => {
+                    assert_eq!(notarization.view(), problematic_view);
+                }
+                _ => panic!("unexpected backfiller message"),
+            }
 
             // Allow some time for the actor to process
             context.sleep(Duration::from_secs(5)).await;
