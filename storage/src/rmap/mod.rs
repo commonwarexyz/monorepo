@@ -146,7 +146,7 @@ impl RMap {
     /// M is the number of ranges that overlap with the removal range (iterate part), and K is the number of
     /// new ranges created or ranges removed (at most 2 additions and M removals).
     ///
-    /// # Examples
+    /// # Example
     ///
     /// ```
     /// use commonware_storage::rmap::RMap;
@@ -222,10 +222,75 @@ impl RMap {
         }
     }
 
+    /// Returns an iterator over the ranges `(start, end)` in the [RMap].
+    ///
+    /// The ranges are yielded in ascending order of their start points.
+    /// Each tuple represents an inclusive range `[start, end]`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use commonware_storage::rmap::RMap;
+    ///
+    /// let mut map = RMap::new();
+    /// map.insert(0); map.insert(1); // Map: [0, 1]
+    /// map.insert(3); map.insert(4); // Map: [0, 1], [3, 4]
+    ///
+    /// let mut iter = map.iter();
+    /// assert_eq!(iter.next(), Some((&0, &1)));
+    /// assert_eq!(iter.next(), Some((&3, &4)));
+    /// assert_eq!(iter.next(), None);
+    /// ```
     pub fn iter(&self) -> impl Iterator<Item = (&u64, &u64)> {
         self.ranges.iter()
     }
 
+    /// Finds the end of the range containing or preceding `value`, and the start of the
+    /// range succeeding `value`. This method is useful for identifying gaps around a given point.
+    ///
+    /// # Behavior
+    ///
+    /// - If `value` falls within an existing range `[r_start, r_end]`, `current_range_end` will be `Some(r_end)`.
+    /// - If `value` falls in a gap between two ranges `[..., prev_end]` and `[next_start, ...]`,
+    ///   `current_range_end` will be `Some(prev_end)` (the end of the range just before the gap where `value` lies),
+    ///   and `next_range_start` will be `Some(next_start)`.
+    /// - If `value` is before all ranges in the map, `current_range_end` will be `None`.
+    /// - If `value` is after all ranges in the map (or within the last range), `next_range_start` will be `None`.
+    /// - If the map is empty, both will be `None`.
+    ///
+    /// # Arguments
+    ///
+    /// * `value`: The `u64` value to query around.
+    ///
+    /// # Returns
+    ///
+    /// A tuple `(Option<u64>, Option<u64>)` where:
+    /// - The first element (`current_range_end`) is `Some(end)` of the range that contains `value` or is immediately
+    ///   before `value`. It's `None` if `value` is before all ranges or the map is empty.
+    /// - The second element (`next_range_start`) is `Some(start)` of the first range that begins strictly after `value`.
+    ///   It's `None` if no range starts after `value` or the map is empty.
+    ///
+    /// # Complexity
+    ///
+    /// O(log N) due to `BTreeMap::range` lookups, where N is the number of ranges.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use commonware_storage::rmap::RMap;
+    ///
+    /// let mut map = RMap::new();
+    /// map.insert(1); map.insert(2); // Map: [1, 2]
+    /// map.insert(5); map.insert(6); // Map: [1, 2], [5, 6]
+    ///
+    /// assert_eq!(map.next_gap(0), (None, Some(1)));        // Before all ranges
+    /// assert_eq!(map.next_gap(1), (Some(2), Some(5)));     // Value is at the start of a range
+    /// assert_eq!(map.next_gap(2), (Some(2), Some(5)));     // Value is at the end of a range
+    /// assert_eq!(map.next_gap(3), (Some(2), Some(5)));     // Value is in a gap
+    /// assert_eq!(map.next_gap(5), (Some(6), None));        // Value is at the start of the last range
+    /// assert_eq!(map.next_gap(6), (Some(6), None));        // Value is at the end of the last range
+    /// assert_eq!(map.next_gap(7), (Some(6), None));        // After all ranges
+    /// ```
     pub fn next_gap(&self, value: u64) -> (Option<u64>, Option<u64>) {
         let current_range_end = self.ranges.range(..=value).next_back().map(|(_, &end)| end);
 
