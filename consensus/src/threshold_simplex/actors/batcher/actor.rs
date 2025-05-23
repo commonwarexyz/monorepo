@@ -2,6 +2,7 @@ use super::{Config, Mailbox, Message};
 use crate::{
     threshold_simplex::{
         actors::voter,
+        interesting,
         metrics::Inbound,
         types::{
             Activity, Attributable, BatchVerifier, ConflictingFinalize, ConflictingNotarize,
@@ -314,16 +315,6 @@ impl<
     }
 }
 
-fn interesting(activity_timeout: View, last_finalized: View, current: View, view: View) -> bool {
-    if view + activity_timeout < last_finalized {
-        return false;
-    }
-    if view > current + 1 {
-        return false;
-    }
-    true
-}
-
 pub struct Actor<
     E: Spawner + Metrics + Clock,
     C: Verifier,
@@ -499,7 +490,13 @@ impl<
                         Some(Message::Constructed(message)) => {
                             // If the view isn't interesting, we can skip
                             let view = message.view();
-                            if !interesting(self.activity_timeout, finalized, current, view) {
+                            if !interesting(
+                                self.activity_timeout,
+                                finalized,
+                                current,
+                                view,
+                                false,
+                            ) {
                                 continue;
                             }
 
@@ -529,7 +526,13 @@ impl<
 
                     // If the view isn't interesting, we can skip
                     let view = message.view();
-                    if !interesting(self.activity_timeout, finalized, current, view) {
+                    if !interesting(
+                        self.activity_timeout,
+                        finalized,
+                        current,
+                        view,
+                        false,
+                    ) {
                         continue;
                     }
 
@@ -602,7 +605,7 @@ impl<
                     break;
                 };
                 let view = *view;
-                if interesting(self.activity_timeout, finalized, current, view) {
+                if interesting(self.activity_timeout, finalized, current, view, false) {
                     break;
                 }
                 work.remove(&view);

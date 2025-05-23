@@ -2,7 +2,9 @@ use super::{Config, Mailbox, Message};
 use crate::{
     threshold_simplex::{
         actors::{batcher, resolver},
+        interesting,
         metrics::{self, Inbound, Outbound},
+        min_active,
         types::{
             Activity, Attributable, Context, Finalization, Finalize, Notarization, Notarize,
             Nullification, Nullify, Proposal, View, Viewable, Voter,
@@ -1051,27 +1053,9 @@ impl<
         self.current_view.set(view as i64);
     }
 
-    /// The minimum view we are tracking both in-memory and on-disk.
-    fn min_active(&self) -> View {
-        self.last_finalized.saturating_sub(self.activity_timeout)
-    }
-
-    /// Whether or not a view is interesting to us. This is a function
-    /// of both `min_active` and whether or not the view is too far
-    /// in the future (based on the view we are currently in).
-    fn interesting(&self, view: View, allow_future: bool) -> bool {
-        if view < self.min_active() {
-            return false;
-        }
-        if !allow_future && view > self.view + 1 {
-            return false;
-        }
-        true
-    }
-
     async fn prune_views(&mut self) {
         // Get last min
-        let min = self.min_active();
+        let min = min_active(self.activity_timeout, self.last_finalized);
         let mut pruned = false;
         loop {
             // Get next key
@@ -1133,7 +1117,13 @@ impl<
     async fn notarization(&mut self, notarization: Notarization<V, D>) -> Action {
         // Check if we are still in a view where this notarization could help
         let view = notarization.view();
-        if !self.interesting(view, true) {
+        if !interesting(
+            self.activity_timeout,
+            self.last_finalized,
+            self.view,
+            view,
+            true,
+        ) {
             return Action::Skip;
         }
 
@@ -1184,7 +1174,13 @@ impl<
 
     async fn nullification(&mut self, nullification: Nullification<V>) -> Action {
         // Check if we are still in a view where this notarization could help
-        if !self.interesting(nullification.view, true) {
+        if !interesting(
+            self.activity_timeout,
+            self.last_finalized,
+            self.view,
+            nullification.view,
+            true,
+        ) {
             return Action::Skip;
         }
 
@@ -1259,7 +1255,13 @@ impl<
     async fn finalization(&mut self, finalization: Finalization<V, D>) -> Action {
         // Check if we are still in a view where this finalization could help
         let view = finalization.view();
-        if !self.interesting(view, true) {
+        if !interesting(
+            self.activity_timeout,
+            self.last_finalized,
+            self.view,
+            view,
+            true,
+        ) {
             return Action::Skip;
         }
 
@@ -1910,13 +1912,22 @@ impl<
                     };
                     let Message::Verified(msg) = msg;
 
-                    // Ensure view is still useful
+                    // Ensure view is still useful.
                     //
                     // It is possible that we make a request to the resolver and prune the view
                     // before we receive the response. In this case, we should ignore the response (not
                     // doing so may result in attempting to store before the prune boundary).
+                    //
+                    // We do not need to allow `future` here because any notarization or nullification we see
+                    // here must've been requested by us (something we only do when ahead of said view).
                     view = msg.view();
-                    if !self.interesting(view, false) {
+                    if !interesting(
+                        self.activity_timeout,
+                        self.last_finalized,
+                        self.view,
+                        view,
+                        false,
+                    ) {
                         debug!(view, "verified message is not interesting");
                         continue;
                     }
