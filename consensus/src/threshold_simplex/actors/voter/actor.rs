@@ -1,12 +1,10 @@
 use super::{Config, Mailbox, Message};
 use crate::{
     threshold_simplex::{
-        actors::resolver,
-        metrics,
+        actors::{batcher, resolver},
         types::{
-            Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Context,
-            Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
-            NullifyFinalize, Proposal, View, Viewable, Voter,
+            Activity, Attributable, Context, Finalization, Finalize, Notarization, Notarize,
+            Nullification, Nullify, Proposal, View, Viewable, Voter,
         },
     },
     Automaton, Relay, Reporter, ThresholdSupervisor, LATENCY,
@@ -15,7 +13,6 @@ use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
         ops::{threshold_signature_recover, threshold_signature_recover_pair},
-        poly,
         variant::Variant,
     },
     Digest, Scheme,
@@ -23,265 +20,203 @@ use commonware_cryptography::{
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
-    Receiver, Recipients, Sender,
+    Blocker, Receiver, Recipients, Sender,
 };
-use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
+use commonware_runtime::{
+    telemetry::metrics::histogram::{self, Buckets},
+    Clock, Handle, Metrics, Spawner, Storage,
+};
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
 use commonware_utils::quorum;
+use core::panic;
 use futures::{
     channel::{mpsc, oneshot},
     future::Either,
     pin_mut, StreamExt,
 };
-use prometheus_client::metrics::{
-    counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
-};
+use prometheus_client::metrics::{counter::Counter, gauge::Gauge, histogram::Histogram};
 use rand::Rng;
-use std::{collections::hash_map::Entry, sync::atomic::AtomicI64};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     time::{Duration, SystemTime},
 };
-use tracing::{debug, trace, warn};
+use std::{
+    sync::{atomic::AtomicI64, Arc},
+    time::Instant,
+};
+use tracing::{debug, info, trace, warn};
 
 const GENESIS_VIEW: View = 0;
 
+/// Compute the quorum for a given polynomial.
+fn polynomial_quorum<P>(polynomial: &[P]) -> u32 {
+    let n = polynomial.len() as u32;
+    quorum(n)
+}
+
+/// Action to take after processing a message.
+enum Action {
+    /// Skip processing the message.
+    Skip,
+    /// Block the peer from sending any more messages.
+    Block,
+    /// Process the message.
+    Process,
+}
+
 struct Round<
+    E: Clock,
     C: Scheme,
     V: Variant,
     D: Digest,
-    R: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<
-        Seed = V::Signature,
         Index = View,
-        Share = group::Share,
         PublicKey = C::PublicKey,
+        Identity = V::Public,
+        Seed = V::Signature,
+        Share = group::Share,
     >,
 > {
     start: SystemTime,
-    reporter: R,
     supervisor: S,
 
     view: View,
-    participants: usize,
+    quorum: u32,
 
-    leader: Option<C::PublicKey>,
+    // Leader is set as soon as we know the seed for the view.
+    leader: Option<(C::PublicKey, u32)>,
+
+    // We explicitly distinguish between the proposal being verified (we checked it)
+    // and the proposal being recovered (network has determined its validity). As a sanity
+    // check, we'll never notarize or finalize a proposal that we did not verify.
+    //
+    // We will, however, construct a notarization or finalization (if we have enough partial
+    // signatures of either) even if we did not verify the proposal.
+    requested_proposal_build: bool,
+    requested_proposal_verify: bool,
+    verified_proposal: bool,
+
+    proposal: Option<Proposal<D>>,
+
     leader_deadline: Option<SystemTime>,
     advance_deadline: Option<SystemTime>,
     nullify_retry: Option<SystemTime>,
 
-    // Track one proposal per view (only matters prior to notarization)
-    proposal: Option<Proposal<D>>,
-    requested_proposal: bool,
-    verified_proposal: bool,
-
-    // Track notarizes for all proposals (ensuring any participant only has one recorded notarize)
-    notarized_proposals: HashMap<Proposal<D>, Vec<u32>>,
-    notarizes: Vec<Option<Notarize<V, D>>>,
+    // We only receive verified notarizes for the leader's proposal, so we don't
+    // need to track multiple proposals here.
+    notarizes: Vec<Notarize<V, D>>,
     notarization: Option<Notarization<V, D>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
 
     // Track nullifies (ensuring any participant only has one recorded nullify)
-    nullifies: HashMap<u32, Nullify<V>>,
+    nullifies: Vec<Nullify<V>>,
     nullification: Option<Nullification<V>>,
     broadcast_nullify: bool,
     broadcast_nullification: bool,
 
-    // Track finalizes for all proposals (ensuring any participant only has one recorded finalize)
-    finalized_proposals: HashMap<Proposal<D>, Vec<u32>>,
-    finalizes: Vec<Option<Finalize<V, D>>>,
+    // We only receive verified finalizes for the leader's proposal, so we don't
+    // need to track multiple proposals here.
+    finalizes: Vec<Finalize<V, D>>,
     finalization: Option<Finalization<V, D>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
+
+    recover_latency: histogram::Timed<E>,
 }
 
 impl<
+        E: Clock,
         C: Scheme,
         V: Variant,
         D: Digest,
-        R: Reporter<Activity = Activity<V, D>>,
         S: ThresholdSupervisor<
             Seed = V::Signature,
             Index = View,
             Share = group::Share,
             PublicKey = C::PublicKey,
+            Identity = V::Public,
         >,
-    > Round<C, V, D, R, S>
+    > Round<E, C, V, D, S>
 {
-    pub fn new(clock: &impl Clock, reporter: R, supervisor: S, view: View) -> Self {
+    pub fn new(
+        context: &E,
+        supervisor: S,
+        recover_latency: histogram::Timed<E>,
+        view: View,
+    ) -> Self {
         let participants = supervisor.participants(view).unwrap().len();
+        let quorum = quorum(participants as u32);
         Self {
-            start: clock.current(),
-            reporter,
+            start: context.current(),
             supervisor,
 
             view,
-            participants,
+            quorum,
 
             leader: None,
+
+            requested_proposal_build: false,
+            requested_proposal_verify: false,
+            verified_proposal: false,
+
+            proposal: None,
+
             leader_deadline: None,
             advance_deadline: None,
             nullify_retry: None,
 
-            requested_proposal: false,
-            proposal: None,
-            verified_proposal: false,
-
-            notarized_proposals: HashMap::new(),
-            notarizes: vec![None; participants],
+            notarizes: Vec::with_capacity(participants),
             notarization: None,
             broadcast_notarize: false,
             broadcast_notarization: false,
 
-            nullifies: HashMap::new(),
+            nullifies: Vec::with_capacity(participants),
             nullification: None,
             broadcast_nullify: false,
             broadcast_nullification: false,
 
-            finalized_proposals: HashMap::new(),
-            finalizes: vec![None; participants],
+            finalizes: Vec::with_capacity(participants),
             finalization: None,
             broadcast_finalize: false,
             broadcast_finalization: false,
+
+            recover_latency,
         }
     }
 
     pub fn set_leader(&mut self, seed: V::Signature) {
         let leader = ThresholdSupervisor::leader(&self.supervisor, self.view, seed).unwrap();
-        self.leader = Some(leader);
+        let leader_index = self.supervisor.is_participant(self.view, &leader).unwrap();
+        self.leader = Some((leader, leader_index));
     }
 
-    fn add_verified_proposal(&mut self, proposal: Proposal<D>) {
+    fn add_recovered_proposal(&mut self, proposal: Proposal<D>) {
         if self.proposal.is_none() {
-            debug!(?proposal, "setting unverified proposal in notarization");
+            debug!(?proposal, "setting verified proposal");
             self.proposal = Some(proposal);
         } else if let Some(previous) = &self.proposal {
-            if proposal != *previous {
-                warn!(
-                    ?proposal,
-                    ?previous,
-                    "proposal in notarization does not match stored proposal"
-                );
-            }
+            assert_eq!(proposal, *previous);
         }
     }
 
-    async fn add_verified_notarize(
-        &mut self,
-        public_key_index: u32,
-        notarize: Notarize<V, D>,
-    ) -> bool {
-        // Check if already notarized
-        if let Some(previous) = self.notarizes[public_key_index as usize].as_ref() {
-            if previous == &notarize {
-                trace!(?notarize, ?previous, "already notarized");
-                return false;
-            }
-
-            // Create fault
-            let activity = ConflictingNotarize::new(previous.clone(), notarize);
-            self.reporter
-                .report(Activity::ConflictingNotarize(activity))
-                .await;
-            warn!(
-                view = self.view,
-                signer = public_key_index,
-                "recorded fault"
-            );
-            return false;
+    async fn add_verified_notarize(&mut self, notarize: Notarize<V, D>) {
+        if self.proposal.is_none() {
+            self.proposal = Some(notarize.proposal.clone());
         }
-
-        // Store the notarize
-        if let Some(vec) = self.notarized_proposals.get_mut(&notarize.proposal) {
-            vec.push(public_key_index);
-        } else {
-            self.notarized_proposals
-                .insert(notarize.proposal.clone(), vec![public_key_index]);
-        }
-        self.notarizes[public_key_index as usize] = Some(notarize.clone());
-        self.reporter.report(Activity::Notarize(notarize)).await;
-        true
+        self.notarizes.push(notarize);
     }
 
-    async fn add_verified_nullify(&mut self, public_key_index: u32, nullify: Nullify<V>) -> bool {
-        // Check if already issued finalize
-        let Some(finalize) = self.finalizes[public_key_index as usize].as_ref() else {
-            // Store the nullify
-            let item = self.nullifies.entry(public_key_index);
-            return match item {
-                Entry::Occupied(_) => false,
-                Entry::Vacant(v) => {
-                    v.insert(nullify.clone());
-                    self.reporter.report(Activity::Nullify(nullify)).await;
-                    true
-                }
-            };
-        };
-
-        // Create fault
-        let activity = NullifyFinalize::new(nullify, finalize.clone());
-        self.reporter
-            .report(Activity::NullifyFinalize(activity))
-            .await;
-        warn!(
-            view = self.view,
-            signer = public_key_index,
-            "recorded fault"
-        );
-        false
+    async fn add_verified_nullify(&mut self, nullify: Nullify<V>) {
+        // We don't consider a nullify vote as being active.
+        self.nullifies.push(nullify);
     }
 
-    async fn add_verified_finalize(
-        &mut self,
-        public_key_index: u32,
-        finalize: Finalize<V, D>,
-    ) -> bool {
-        // Check if also issued nullify
-        if let Some(previous) = self.nullifies.get(&public_key_index) {
-            // Create fault
-            let activity = NullifyFinalize::new(previous.clone(), finalize);
-            self.reporter
-                .report(Activity::NullifyFinalize(activity))
-                .await;
-            warn!(
-                view = self.view,
-                signer = public_key_index,
-                "recorded fault"
-            );
-            return false;
+    async fn add_verified_finalize(&mut self, finalize: Finalize<V, D>) {
+        if self.proposal.is_none() {
+            self.proposal = Some(finalize.proposal.clone());
         }
-
-        // Check if already finalized
-        if let Some(previous) = self.finalizes[public_key_index as usize].as_ref() {
-            if previous == &finalize {
-                trace!(?finalize, ?previous, "already finalize");
-                return false;
-            }
-
-            // Create fault
-            let activity = ConflictingFinalize::new(previous.clone(), finalize);
-            self.reporter
-                .report(Activity::ConflictingFinalize(activity))
-                .await;
-            warn!(
-                view = self.view,
-                signer = public_key_index,
-                "recorded fault"
-            );
-            return false;
-        }
-
-        // Store the finalize
-        if let Some(vec) = self.finalized_proposals.get_mut(&finalize.proposal) {
-            vec.push(public_key_index);
-        } else {
-            self.finalized_proposals
-                .insert(finalize.proposal.clone(), vec![public_key_index]);
-        }
-        self.finalizes[public_key_index as usize] = Some(finalize.clone());
-        self.reporter.report(Activity::Finalize(finalize)).await;
-        true
+        self.finalizes.push(finalize);
     }
 
     fn add_verified_notarization(&mut self, notarization: Notarization<V, D>) -> bool {
@@ -295,7 +230,7 @@ impl<
         self.advance_deadline = None;
 
         // If proposal is missing, set it
-        self.add_verified_proposal(notarization.proposal.clone());
+        self.add_recovered_proposal(notarization.proposal.clone());
 
         // Store the notarization
         self.notarization = Some(notarization);
@@ -328,7 +263,7 @@ impl<
         self.advance_deadline = None;
 
         // If proposal is missing, set it
-        self.add_verified_proposal(finalization.proposal.clone());
+        self.add_recovered_proposal(finalization.proposal.clone());
 
         // Store the finalization
         self.finalization = Some(finalization);
@@ -349,41 +284,32 @@ impl<
         }
 
         // Attempt to construct notarization
-        for (proposal, notarizes) in self.notarized_proposals.iter() {
-            if (notarizes.len() as u32) < threshold {
-                continue;
-            }
-
-            // There should never exist enough notarizes for multiple proposals, so it doesn't
-            // matter which one we choose.
-            debug!(
-                ?proposal,
-                verified = self.verified_proposal,
-                "broadcasting notarization"
-            );
-
-            // Only select notarizes that are for this proposal
-            let notarizes = notarizes
-                .iter()
-                .filter_map(|x| self.notarizes[*x as usize].as_ref());
-
-            // Recover threshold signature
-            let proposals = notarizes
-                .clone()
-                .map(|x| &x.proposal_signature)
-                .collect::<Vec<_>>();
-            let seeds = notarizes.map(|x| &x.seed_signature).collect::<Vec<_>>();
-            let (proposal_signature, seed_signature) =
-                threshold_signature_recover_pair::<V, _>(threshold, proposals, seeds)
-                    .expect("failed to recover threshold signature");
-
-            // Construct notarization
-            let notarization =
-                Notarization::new(proposal.clone(), proposal_signature, seed_signature);
-            self.broadcast_notarization = true;
-            return Some(notarization);
+        if self.notarizes.len() < threshold as usize {
+            return None;
         }
-        None
+        let proposal = self.proposal.as_ref().unwrap().clone();
+        debug!(
+            ?proposal,
+            verified = self.verified_proposal,
+            "broadcasting notarization"
+        );
+
+        // Recover threshold signature
+        let mut timer = self.recover_latency.timer();
+        let (proposals, seeds): (Vec<_>, Vec<_>) = self
+            .notarizes
+            .iter()
+            .map(|notarize| (&notarize.proposal_signature, &notarize.seed_signature))
+            .unzip();
+        let (proposal_signature, seed_signature) =
+            threshold_signature_recover_pair::<V, _>(threshold, proposals, seeds)
+                .expect("failed to recover threshold signature");
+        timer.observe();
+
+        // Construct notarization
+        let notarization = Notarization::new(proposal, proposal_signature, seed_signature);
+        self.broadcast_notarization = true;
+        Some(notarization)
     }
 
     async fn nullifiable(&mut self, threshold: u32, force: bool) -> Option<Nullification<V>> {
@@ -399,21 +325,22 @@ impl<
         }
 
         // Attempt to construct nullification
-        if (self.nullifies.len() as u32) < threshold {
+        if self.nullifies.len() < threshold as usize {
             return None;
         }
         debug!(view = self.view, "broadcasting nullification");
 
         // Recover threshold signature
-        let nullifies = self.nullifies.values();
-        let views = nullifies
-            .clone()
-            .map(|x| &x.view_signature)
-            .collect::<Vec<_>>();
-        let seeds = nullifies.map(|x| &x.seed_signature).collect::<Vec<_>>();
+        let mut timer = self.recover_latency.timer();
+        let (views, seeds): (Vec<_>, Vec<_>) = self
+            .nullifies
+            .iter()
+            .map(|nullify| (&nullify.view_signature, &nullify.seed_signature))
+            .unzip();
         let (view_signature, seed_signature) =
             threshold_signature_recover_pair::<V, _>(threshold, views, seeds)
                 .expect("failed to recover threshold signature");
+        timer.observe();
 
         // Construct nullification
         let nullification = Nullification::new(self.view, view_signature, seed_signature);
@@ -435,85 +362,84 @@ impl<
         }
 
         // Attempt to construct finalization
-        for (proposal, finalizes) in self.finalized_proposals.iter() {
-            if (finalizes.len() as u32) < threshold {
-                continue;
-            }
-
-            // Ensure we have a notarization
-            let Some(notarization) = &self.notarization else {
-                continue;
-            };
-            let seed_signature = notarization.seed_signature;
-
-            // Check notarization and finalization proposal match
-            if notarization.proposal != *proposal {
-                warn!(
-                    ?proposal,
-                    ?notarization.proposal,
-                    "finalization proposal does not match notarization"
-                );
-            }
-
-            // There should never exist enough finalizes for multiple proposals, so it doesn't
-            // matter which one we choose.
-            debug!(
-                ?proposal,
-                verified = self.verified_proposal,
-                "broadcasting finalization"
-            );
-
-            // Only select finalizes that are for this proposal
-            let finalizes = finalizes
-                .iter()
-                .filter_map(|x| self.finalizes[*x as usize].as_ref());
-
-            // Recover threshold signature
-            let proposals = finalizes.map(|x| &x.proposal_signature);
-            let proposal_signature = threshold_signature_recover::<V, _>(threshold, proposals)
-                .expect("failed to recover threshold signature");
-
-            // Construct finalization
-            let finalization =
-                Finalization::new(proposal.clone(), proposal_signature, seed_signature);
-            self.broadcast_finalization = true;
-            return Some(finalization);
+        if self.finalizes.len() < threshold as usize {
+            return None;
         }
-        None
+        let proposal = self.proposal.as_ref().unwrap().clone();
+
+        // Ensure we have a notarization
+        let Some(notarization) = &self.notarization else {
+            return None;
+        };
+        let seed_signature = notarization.seed_signature;
+
+        // Check notarization and finalization proposal match
+        if notarization.proposal != proposal {
+            warn!(
+                ?proposal,
+                ?notarization.proposal,
+                "finalization proposal does not match notarization"
+            );
+        }
+
+        // There should never exist enough finalizes for multiple proposals, so it doesn't
+        // matter which one we choose.
+        debug!(
+            ?proposal,
+            verified = self.verified_proposal,
+            "broadcasting finalization"
+        );
+
+        // Only select verified finalizes
+        let proposals = self
+            .finalizes
+            .iter()
+            .map(|finalize| &finalize.proposal_signature);
+
+        // Recover threshold signature
+        let mut timer = self.recover_latency.timer();
+        let proposal_signature = threshold_signature_recover::<V, _>(threshold, proposals)
+            .expect("failed to recover threshold signature");
+        timer.observe();
+
+        // Construct finalization
+        let finalization = Finalization::new(proposal.clone(), proposal_signature, seed_signature);
+        self.broadcast_finalization = true;
+        Some(finalization)
     }
 
     /// Returns whether at least one honest participant has notarized a proposal.
     pub fn at_least_one_honest(&self) -> Option<View> {
-        let threshold = quorum(self.participants as u32);
-        let at_least_one_honest = (threshold - 1) / 2 + 1;
-        for (proposal, notarizes) in self.notarized_proposals.iter() {
-            if notarizes.len() < at_least_one_honest as usize {
-                continue;
-            }
-            return Some(proposal.parent);
+        let at_least_one_honest = (self.quorum - 1) / 2 + 1;
+        if self.notarizes.len() < at_least_one_honest as usize {
+            return None;
         }
-        None
+        let proposal = self.proposal.as_ref().unwrap().clone();
+        Some(proposal.parent)
     }
 }
 
 pub struct Actor<
     E: Clock + Rng + Spawner + Storage + Metrics,
     C: Scheme,
+    B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     D: Digest,
     A: Automaton<Digest = D, Context = Context<D>>,
     R: Relay,
     F: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<
-        Identity = poly::Public<V>,
-        Seed = V::Signature,
         Index = View,
-        Share = group::Share,
         PublicKey = C::PublicKey,
+        Identity = V::Public,
+        Seed = V::Signature,
+        Polynomial = Vec<V::Public>,
+        Share = group::Share,
     >,
 > {
     context: E,
     crypto: C,
+    blocker: B,
     automaton: A,
     relay: R,
     reporter: F,
@@ -523,6 +449,7 @@ pub struct Actor<
     compression: Option<u8>,
     replay_concurrency: usize,
     replay_buffer: usize,
+    write_buffer: usize,
     journal: Option<Journal<E, Voter<V, D>>>,
 
     genesis: Option<D>,
@@ -533,41 +460,41 @@ pub struct Actor<
     notarization_timeout: Duration,
     nullify_retry: Duration,
     activity_timeout: View,
-    skip_timeout: View,
 
     mailbox_receiver: mpsc::Receiver<Message<V, D>>,
 
-    last_finalized: View,
     view: View,
-    views: BTreeMap<View, Round<C, V, D, F, S>>,
+    views: BTreeMap<View, Round<E, C, V, D, S>>,
+    last_finalized: View,
 
     current_view: Gauge,
     tracked_views: Gauge,
     skipped_views: Counter,
-    received_messages: Family<metrics::PeerMessage, Counter>,
-    broadcast_messages: Family<metrics::Message, Counter>,
     notarization_latency: Histogram,
     finalization_latency: Histogram,
+    recover_latency: histogram::Timed<E>,
 }
 
 impl<
         E: Clock + Rng + Spawner + Storage + Metrics,
         C: Scheme,
+        B: Blocker<PublicKey = C::PublicKey>,
         V: Variant,
         D: Digest,
         A: Automaton<Digest = D, Context = Context<D>>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<V, D>>,
         S: ThresholdSupervisor<
-            Identity = poly::Public<V>,
-            Seed = V::Signature,
             Index = View,
-            Share = group::Share,
             PublicKey = C::PublicKey,
+            Identity = V::Public,
+            Seed = V::Signature,
+            Polynomial = Vec<V::Public>,
+            Share = group::Share,
         >,
-    > Actor<E, C, V, D, A, R, F, S>
+    > Actor<E, C, B, V, D, A, R, F, S>
 {
-    pub fn new(context: E, cfg: Config<C, V, D, A, R, F, S>) -> (Self, Mailbox<V, D>) {
+    pub fn new(context: E, cfg: Config<C, B, V, D, A, R, F, S>) -> (Self, Mailbox<V, D>) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -577,23 +504,12 @@ impl<
         let current_view = Gauge::<i64, AtomicI64>::default();
         let tracked_views = Gauge::<i64, AtomicI64>::default();
         let skipped_views = Counter::default();
-        let received_messages = Family::<metrics::PeerMessage, Counter>::default();
-        let broadcast_messages = Family::<metrics::Message, Counter>::default();
         let notarization_latency = Histogram::new(LATENCY.into_iter());
         let finalization_latency = Histogram::new(LATENCY.into_iter());
+        let recover_latency = Histogram::new(Buckets::CRYPTOGRAPHY.into_iter());
         context.register("current_view", "current view", current_view.clone());
         context.register("tracked_views", "tracked views", tracked_views.clone());
         context.register("skipped_views", "skipped views", skipped_views.clone());
-        context.register(
-            "received_messages",
-            "received messages",
-            received_messages.clone(),
-        );
-        context.register(
-            "broadcast_messages",
-            "broadcast messages",
-            broadcast_messages.clone(),
-        );
         context.register(
             "notarization_latency",
             "notarization latency",
@@ -604,14 +520,20 @@ impl<
             "finalization latency",
             finalization_latency.clone(),
         );
+        context.register(
+            "recover_latency",
+            "threshold signature recover latency",
+            recover_latency.clone(),
+        );
 
         // Initialize store
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_sender);
         (
             Self {
-                context,
+                context: context.clone(),
                 crypto: cfg.crypto,
+                blocker: cfg.blocker,
                 automaton: cfg.automaton,
                 relay: cfg.relay,
                 reporter: cfg.reporter,
@@ -621,6 +543,7 @@ impl<
                 compression: cfg.compression,
                 replay_concurrency: cfg.replay_concurrency,
                 replay_buffer: cfg.replay_buffer,
+                write_buffer: cfg.write_buffer,
                 journal: None,
 
                 genesis: None,
@@ -632,7 +555,6 @@ impl<
                 nullify_retry: cfg.nullify_retry,
 
                 activity_timeout: cfg.activity_timeout,
-                skip_timeout: cfg.skip_timeout,
 
                 mailbox_receiver,
 
@@ -643,10 +565,9 @@ impl<
                 current_view,
                 tracked_views,
                 skipped_views,
-                received_messages,
-                broadcast_messages,
                 notarization_latency,
                 finalization_latency,
+                recover_latency: histogram::Timed::new(recover_latency, Arc::new(context)),
             },
             mailbox,
         )
@@ -658,10 +579,9 @@ impl<
             return Some(&notarization.proposal.payload);
         }
         let proposal = round.proposal.as_ref()?;
-        let notarizes = round.notarized_proposals.get(proposal)?;
-        let identity = self.supervisor.identity(view)?;
-        let threshold = identity.required();
-        if notarizes.len() >= threshold as usize {
+        let polynomial = self.supervisor.polynomial(view)?;
+        let threshold = polynomial_quorum(polynomial);
+        if round.notarizes.len() >= threshold as usize {
             return Some(&proposal.payload);
         }
         None
@@ -672,11 +592,11 @@ impl<
             Some(round) => round,
             None => return false,
         };
-        let identity = match self.supervisor.identity(view) {
-            Some(identity) => identity,
+        let polynomial = match self.supervisor.polynomial(view) {
+            Some(polynomial) => polynomial,
             None => return false,
         };
-        let threshold = identity.required();
+        let threshold = polynomial_quorum(polynomial);
         round.nullification.is_some() || round.nullifies.len() >= threshold as usize
     }
 
@@ -686,10 +606,9 @@ impl<
             return Some(&finalization.proposal.payload);
         }
         let proposal = round.proposal.as_ref()?;
-        let finalizes = round.finalized_proposals.get(proposal)?;
-        let identity = self.supervisor.identity(view)?;
-        let threshold = identity.required();
-        if finalizes.len() >= threshold as usize {
+        let polynomial = self.supervisor.polynomial(view)?;
+        let threshold = polynomial_quorum(polynomial);
+        if round.finalizes.len() >= threshold as usize {
             return Some(&proposal.payload);
         }
         None
@@ -740,12 +659,12 @@ impl<
     #[allow(clippy::question_mark)]
     async fn propose(
         &mut self,
-        backfiller: &mut resolver::Mailbox<V, D>,
+        resolver: &mut resolver::Mailbox<V, D>,
     ) -> Option<(Context<D>, oneshot::Receiver<D>)> {
         // Check if we are leader
         {
             let round = self.views.get_mut(&self.view).unwrap();
-            let Some(leader) = &round.leader else {
+            let Some((leader, _)) = &round.leader else {
                 return None;
             };
             if *leader != self.crypto.public_key() {
@@ -753,7 +672,7 @@ impl<
             }
 
             // Check if we have already requested a proposal
-            if round.requested_proposal {
+            if round.requested_proposal_build {
                 return None;
             }
 
@@ -764,7 +683,7 @@ impl<
 
             // Set that we requested a proposal even if we don't end up finding a parent
             // to prevent frequent scans.
-            round.requested_proposal = true;
+            round.requested_proposal_build = true;
         }
 
         // Find best parent
@@ -776,7 +695,7 @@ impl<
                     missing = view,
                     "skipping proposal opportunity"
                 );
-                backfiller.fetch(vec![view], vec![view]).await;
+                resolver.fetch(vec![view], vec![view]).await;
                 return None;
             }
         };
@@ -812,7 +731,12 @@ impl<
         null_retry
     }
 
-    async fn timeout<Sr: Sender>(&mut self, sender: &mut WrappedSender<Sr, Voter<V, D>>) {
+    async fn timeout<Sp: Sender, Sr: Sender>(
+        &mut self,
+        batcher: &mut batcher::Mailbox<C::PublicKey, V, D>,
+        pending_sender: &mut WrappedSender<Sp, Voter<V, D>>,
+        recovered_sender: &mut WrappedSender<Sr, Voter<V, D>>,
+    ) {
         // Set timeout fired
         let round = self.views.get_mut(&self.view).unwrap();
         let mut retry = false;
@@ -831,18 +755,18 @@ impl<
         if retry && past_view > 0 {
             if let Some(notarization) = self.construct_notarization(past_view, true).await {
                 let msg = Voter::Notarization(notarization);
-                sender.send(Recipients::All, msg, true).await.unwrap();
-                self.broadcast_messages
-                    .get_or_create(&metrics::NOTARIZATION)
-                    .inc();
+                recovered_sender
+                    .send(Recipients::All, msg, true)
+                    .await
+                    .unwrap();
                 debug!(view = past_view, "rebroadcast entry notarization");
             } else if let Some(nullification) = self.construct_nullification(past_view, true).await
             {
                 let msg = Voter::Nullification(nullification);
-                sender.send(Recipients::All, msg, true).await.unwrap();
-                self.broadcast_messages
-                    .get_or_create(&metrics::NULLIFICATION)
-                    .inc();
+                recovered_sender
+                    .send(Recipients::All, msg, true)
+                    .await
+                    .unwrap();
                 debug!(view = past_view, "rebroadcast entry nullification");
             } else {
                 warn!(
@@ -857,67 +781,41 @@ impl<
         let nullify = Nullify::sign(&self.namespace, share, self.view);
 
         // Handle the nullify
-        self.handle_nullify(share.index, nullify.clone()).await;
+        if !retry {
+            batcher.constructed(Voter::Nullify(nullify.clone())).await;
+            self.handle_nullify(nullify.clone()).await;
 
-        // Sync the journal
-        self.journal
-            .as_mut()
-            .unwrap()
-            .sync(self.view)
-            .await
-            .expect("unable to sync journal");
+            // Sync the journal
+            self.journal
+                .as_mut()
+                .unwrap()
+                .sync(self.view)
+                .await
+                .expect("unable to sync journal");
+        }
 
         // Broadcast nullify
         let msg = Voter::Nullify(nullify);
-        sender.send(Recipients::All, msg, true).await.unwrap();
-        self.broadcast_messages
-            .get_or_create(&metrics::NULLIFY)
-            .inc();
+        pending_sender
+            .send(Recipients::All, msg, true)
+            .await
+            .unwrap();
         debug!(view = self.view, "broadcasted nullify");
     }
 
-    async fn nullify(&mut self, sender: &C::PublicKey, nullify: Nullify<V>) -> bool {
-        // Ensure we are in the right view to process this message
-        if !self.interesting(nullify.view, false) {
-            return false;
-        }
-
-        // Verify that signer is a validator
-        let Some(public_key_index) = self.supervisor.is_participant(nullify.view, sender) else {
-            return false;
-        };
-        let Some(identity) = self.supervisor.identity(nullify.view) else {
-            return false;
-        };
-
-        // Verify signatures
-        if public_key_index != nullify.signer() {
-            return false;
-        }
-        if !nullify.verify(&self.namespace, identity) {
-            return false;
-        }
-
-        // Handle nullify
-        self.handle_nullify(public_key_index, nullify).await;
-        true
-    }
-
-    async fn handle_nullify(&mut self, public_key_index: u32, nullify: Nullify<V>) {
+    async fn handle_nullify(&mut self, nullify: Nullify<V>) {
         // Check to see if nullify is for proposal in view
         let view = nullify.view;
-        let round = self.views.entry(view).or_insert_with(|| {
-            Round::new(
-                &self.context,
-                self.reporter.clone(),
-                self.supervisor.clone(),
-                view,
-            )
-        });
+        let round = self.views.entry(view).or_insert(Round::new(
+            &self.context,
+            self.supervisor.clone(),
+            self.recover_latency.clone(),
+            view,
+        ));
 
         // Handle nullify
-        let msg = Voter::Nullify(nullify.clone());
-        if round.add_verified_nullify(public_key_index, nullify).await && self.journal.is_some() {
+        if self.journal.is_some() {
+            let msg = Voter::Nullify(nullify.clone());
             self.journal
                 .as_mut()
                 .unwrap()
@@ -925,6 +823,7 @@ impl<
                 .await
                 .expect("unable to append nullify");
         }
+        round.add_verified_nullify(nullify).await
     }
 
     async fn our_proposal(&mut self, proposal: Proposal<D>) -> bool {
@@ -943,7 +842,9 @@ impl<
 
         // Store the proposal
         debug!(?proposal, "generated proposal");
+        assert!(round.proposal.is_none());
         round.proposal = Some(proposal);
+        round.requested_proposal_verify = true;
         round.verified_proposal = true;
         round.leader_deadline = None;
         true
@@ -958,7 +859,7 @@ impl<
             let round = self.views.get(&self.view)?;
 
             // If we are the leader, drop peer proposals
-            let Some(leader) = &round.leader else {
+            let Some((leader, _)) = &round.leader else {
                 debug!(
                     view = self.view,
                     "dropping peer proposal because leader is not set"
@@ -968,19 +869,19 @@ impl<
             if *leader == self.crypto.public_key() {
                 return None;
             }
-            let leader_index = self.supervisor.is_participant(self.view, leader)?;
 
             // If we already broadcast nullify or set proposal, do nothing
             if round.broadcast_nullify {
                 return None;
             }
-            if round.proposal.is_some() {
+            if round.requested_proposal_verify {
                 return None;
             }
 
             // Check if leader has signed a digest
-            let notarize = round.notarizes[leader_index as usize].as_ref()?;
-            let proposal = &notarize.proposal;
+            let Some(ref proposal) = round.proposal else {
+                return None;
+            };
 
             // Check parent validity
             if proposal.view <= proposal.parent {
@@ -1050,7 +951,7 @@ impl<
         let proposal = proposal.clone();
         let payload = proposal.payload;
         let round = self.views.get_mut(&context.view).unwrap();
-        round.proposal = Some(proposal);
+        round.requested_proposal_verify = true;
         Some((
             context.clone(),
             self.automaton.verify(context, payload).await,
@@ -1088,7 +989,7 @@ impl<
 
     fn since_view_start(&self, view: u64) -> Option<(bool, f64)> {
         let round = self.views.get(&view)?;
-        let leader = round.leader.as_ref()?;
+        let (leader, _) = round.leader.as_ref()?;
         let Ok(elapsed) = self.context.current().duration_since(round.start) else {
             return None;
         };
@@ -1107,14 +1008,12 @@ impl<
         }
 
         // Setup new view
-        let round = self.views.entry(view).or_insert_with(|| {
-            Round::new(
-                &self.context,
-                self.reporter.clone(),
-                self.supervisor.clone(),
-                view,
-            )
-        });
+        let round = self.views.entry(view).or_insert(Round::new(
+            &self.context,
+            self.supervisor.clone(),
+            self.recover_latency.clone(),
+            view,
+        ));
         round.leader_deadline = Some(self.context.current() + self.leader_timeout);
         round.advance_deadline = Some(self.context.current() + self.notarization_timeout);
         round.set_leader(seed);
@@ -1122,46 +1021,6 @@ impl<
 
         // Update metrics
         self.current_view.set(view as i64);
-
-        // If we are backfilling, exit early
-        if self.journal.is_none() {
-            return;
-        }
-
-        // Check if we should skip this view
-        let leader = round.leader.as_ref().unwrap().clone();
-        if view < self.skip_timeout || leader == self.crypto.public_key() {
-            // Don't skip the view
-            return;
-        }
-        let mut next = view - 1;
-        while next > view - self.skip_timeout {
-            let leader_index = match self.supervisor.is_participant(next, &leader) {
-                Some(index) => index,
-                None => {
-                    // Don't punish a participant if they weren't online at any point during
-                    // the lookback window.
-                    return;
-                }
-            };
-            let round = match self.views.get(&next) {
-                Some(round) => round,
-                None => {
-                    return;
-                }
-            };
-            if round.notarizes[leader_index as usize].is_some()
-                || round.nullifies.contains_key(&leader_index)
-            {
-                return;
-            }
-            next -= 1;
-        }
-
-        // Reduce leader deadline to now
-        debug!(view, ?leader, "skipping leader timeout due to inactivity");
-        self.skipped_views.inc();
-        self.views.get_mut(&view).unwrap().leader_deadline = Some(self.context.current());
     }
 
     fn interesting(&self, view: View, allow_future: bool) -> bool {
@@ -1177,7 +1036,7 @@ impl<
     async fn prune_views(&mut self) {
         // Get last min
         let mut pruned = false;
-        let min = loop {
+        let oldest = loop {
             // Get next key
             let next = match self.views.keys().next() {
                 Some(next) => *next,
@@ -1203,7 +1062,7 @@ impl<
             self.journal
                 .as_mut()
                 .unwrap()
-                .prune(min)
+                .prune(oldest)
                 .await
                 .expect("unable to prune journal");
         }
@@ -1212,53 +1071,19 @@ impl<
         self.tracked_views.set(self.views.len() as i64);
     }
 
-    async fn notarize(&mut self, sender: &C::PublicKey, notarize: Notarize<V, D>) -> bool {
-        // Ensure we are in the right view to process this message
-        let view = notarize.view();
-        if !self.interesting(view, false) {
-            return false;
-        }
-
-        // Verify that signer is a validator
-        let Some(public_key_index) = self.supervisor.is_participant(view, sender) else {
-            return false;
-        };
-        let Some(identity) = self.supervisor.identity(view) else {
-            return false;
-        };
-
-        // Verify signatures
-        if public_key_index != notarize.signer() {
-            return false;
-        }
-        if !notarize.verify(&self.namespace, identity) {
-            return false;
-        }
-
-        // Handle notarize
-        self.handle_notarize(public_key_index, notarize).await;
-        true
-    }
-
-    async fn handle_notarize(&mut self, public_key_index: u32, notarize: Notarize<V, D>) {
+    async fn handle_notarize(&mut self, notarize: Notarize<V, D>) {
         // Check to see if notarize is for proposal in view
         let view = notarize.view();
-        let round = self.views.entry(view).or_insert_with(|| {
-            Round::new(
-                &self.context,
-                self.reporter.clone(),
-                self.supervisor.clone(),
-                view,
-            )
-        });
+        let round = self.views.entry(view).or_insert(Round::new(
+            &self.context,
+            self.supervisor.clone(),
+            self.recover_latency.clone(),
+            view,
+        ));
 
         // Handle notarize
-        let msg = Voter::Notarize(notarize.clone());
-        if round
-            .add_verified_notarize(public_key_index, notarize)
-            .await
-            && self.journal.is_some()
-        {
+        if self.journal.is_some() {
+            let msg = Voter::Notarize(notarize.clone());
             self.journal
                 .as_mut()
                 .unwrap()
@@ -1266,48 +1091,44 @@ impl<
                 .await
                 .expect("unable to append to journal");
         }
+        round.add_verified_notarize(notarize).await;
     }
 
-    async fn notarization(&mut self, notarization: Notarization<V, D>) -> bool {
+    async fn notarization(&mut self, notarization: Notarization<V, D>) -> Action {
         // Check if we are still in a view where this notarization could help
         let view = notarization.view();
         if !self.interesting(view, true) {
-            return false;
+            return Action::Skip;
         }
 
         // Determine if we already broadcast notarization for this view (in which
         // case we can ignore this message)
         if let Some(ref round) = self.views.get_mut(&view) {
             if round.broadcast_notarization {
-                return false;
+                return Action::Skip;
             }
         }
 
         // Verify notarization
-        let Some(identity) = self.supervisor.identity(view) else {
-            return false;
-        };
-        let public_key = poly::public::<V>(identity);
-        if !notarization.verify(&self.namespace, public_key) {
-            return false;
+        let identity = self.supervisor.identity();
+        if !notarization.verify(&self.namespace, identity) {
+            return Action::Block;
         }
 
         // Handle notarization
         self.handle_notarization(notarization).await;
-        true
+        Action::Process
     }
 
     async fn handle_notarization(&mut self, notarization: Notarization<V, D>) {
         // Create round (if it doesn't exist)
         let view = notarization.view();
-        let round = self.views.entry(view).or_insert_with(|| {
-            Round::new(
-                &self.context,
-                self.reporter.clone(),
-                self.supervisor.clone(),
-                view,
-            )
-        });
+        let round = self.views.entry(view).or_insert(Round::new(
+            &self.context,
+            self.supervisor.clone(),
+            self.recover_latency.clone(),
+            view,
+        ));
 
         // Store notarization
         let msg = Voter::Notarization(notarization.clone());
@@ -1325,45 +1146,40 @@ impl<
         self.enter_view(view + 1, seed);
     }
 
-    async fn nullification(&mut self, nullification: Nullification<V>) -> bool {
+    async fn nullification(&mut self, nullification: Nullification<V>) -> Action {
         // Check if we are still in a view where this notarization could help
         if !self.interesting(nullification.view, true) {
-            return false;
+            return Action::Skip;
         }
 
         // Determine if we already broadcast nullification for this view (in which
         // case we can ignore this message)
         if let Some(ref round) = self.views.get_mut(&nullification.view) {
             if round.broadcast_nullification {
-                return false;
+                return Action::Skip;
             }
         }
 
         // Verify nullification
-        let Some(identity) = self.supervisor.identity(nullification.view) else {
-            return false;
-        };
-        let public_key = poly::public::<V>(identity);
-        if !nullification.verify(&self.namespace, public_key) {
-            return false;
+        let identity = self.supervisor.identity();
+        if !nullification.verify(&self.namespace, identity) {
+            return Action::Block;
         }
 
         // Handle notarization
         self.handle_nullification(nullification).await;
-        true
+        Action::Process
     }
 
     async fn handle_nullification(&mut self, nullification: Nullification<V>) {
         // Create round (if it doesn't exist)
         let view = nullification.view;
-        let round = self.views.entry(view).or_insert_with(|| {
-            Round::new(
-                &self.context,
-                self.reporter.clone(),
-                self.supervisor.clone(),
-                nullification.view,
-            )
-        });
+        let round = self.views.entry(view).or_insert(Round::new(
+            &self.context,
+            self.supervisor.clone(),
+            self.recover_latency.clone(),
+            nullification.view,
+        ));
 
         // Store nullification
         let msg = Voter::Nullification(nullification.clone());
@@ -1381,53 +1197,19 @@ impl<
         self.enter_view(view + 1, seed);
     }
 
-    async fn finalize(&mut self, sender: &C::PublicKey, finalize: Finalize<V, D>) -> bool {
-        // Ensure we are in the right view to process this message
-        let view = finalize.view();
-        if !self.interesting(view, false) {
-            return false;
-        }
-
-        // Verify that signer is a validator
-        let Some(public_key_index) = self.supervisor.is_participant(view, sender) else {
-            return false;
-        };
-        let Some(identity) = self.supervisor.identity(view) else {
-            return false;
-        };
-
-        // Verify signature
-        if public_key_index != finalize.signer() {
-            return false;
-        }
-        if !finalize.verify(&self.namespace, identity) {
-            return false;
-        }
-
-        // Handle finalize
-        self.handle_finalize(public_key_index, finalize).await;
-        true
-    }
-
-    async fn handle_finalize(&mut self, public_key_index: u32, finalize: Finalize<V, D>) {
+    async fn handle_finalize(&mut self, finalize: Finalize<V, D>) {
         // Get view for finalize
         let view = finalize.view();
-        let round = self.views.entry(view).or_insert_with(|| {
-            Round::new(
-                &self.context,
-                self.reporter.clone(),
-                self.supervisor.clone(),
-                view,
-            )
-        });
+        let round = self.views.entry(view).or_insert(Round::new(
+            &self.context,
+            self.supervisor.clone(),
+            self.recover_latency.clone(),
+            view,
+        ));
 
         // Handle finalize
-        let msg = Voter::Finalize(finalize.clone());
-        if round
-            .add_verified_finalize(public_key_index, finalize)
-            .await
-            && self.journal.is_some()
-        {
+        if self.journal.is_some() {
+            let msg = Voter::Finalize(finalize.clone());
             self.journal
                 .as_mut()
                 .unwrap()
@@ -1435,48 +1217,44 @@ impl<
                 .await
                 .expect("unable to append to journal");
         }
+        round.add_verified_finalize(finalize).await
     }
 
-    async fn finalization(&mut self, finalization: Finalization<V, D>) -> bool {
+    async fn finalization(&mut self, finalization: Finalization<V, D>) -> Action {
         // Check if we are still in a view where this finalization could help
         let view = finalization.view();
         if !self.interesting(view, true) {
-            return false;
+            return Action::Skip;
         }
 
         // Determine if we already broadcast finalization for this view (in which
         // case we can ignore this message)
         if let Some(ref round) = self.views.get_mut(&view) {
             if round.broadcast_finalization {
-                return false;
+                return Action::Skip;
             }
         }
 
         // Verify finalization
-        let Some(identity) = self.supervisor.identity(view) else {
-            return false;
-        };
-        let public_key = poly::public::<V>(identity);
-        if !finalization.verify(&self.namespace, public_key) {
-            return false;
+        let identity = self.supervisor.identity();
+        if !finalization.verify(&self.namespace, identity) {
+            return Action::Block;
         }
 
         // Process finalization
         self.handle_finalization(finalization).await;
-        true
+        Action::Process
     }
 
     async fn handle_finalization(&mut self, finalization: Finalization<V, D>) {
         // Create round (if it doesn't exist)
         let view = finalization.view();
-        let round = self.views.entry(view).or_insert_with(|| {
-            Round::new(
-                &self.context,
-                self.reporter.clone(),
-                self.supervisor.clone(),
-                view,
-            )
-        });
+        let round = self.views.entry(view).or_insert(Round::new(
+            &self.context,
+            self.supervisor.clone(),
+            self.recover_latency.clone(),
+            view,
+        ));
 
         // Store finalization
         let msg = Voter::Finalization(finalization.clone());
@@ -1500,6 +1278,7 @@ impl<
     }
 
     fn construct_notarize(&mut self, view: u64) -> Option<Notarize<V, D>> {
+        // Determine if it makes sense to broadcast a notarize
         let round = self.views.get_mut(&view)?;
         if round.broadcast_notarize {
             return None;
@@ -1527,8 +1306,8 @@ impl<
         let round = self.views.get_mut(&view)?;
 
         // Attempt to construct notarization
-        let identity = self.supervisor.identity(view)?;
-        let threshold = identity.required();
+        let polynomial = self.supervisor.polynomial(view)?;
+        let threshold = polynomial_quorum(polynomial);
         round.notarizable(threshold, force).await
     }
 
@@ -1541,12 +1320,13 @@ impl<
         let round = self.views.get_mut(&view)?;
 
         // Attempt to construct nullification
-        let identity = self.supervisor.identity(view)?;
-        let threshold = identity.required();
+        let polynomial = self.supervisor.polynomial(view)?;
+        let threshold = polynomial_quorum(polynomial);
         round.nullifiable(threshold, force).await
     }
 
     fn construct_finalize(&mut self, view: u64) -> Option<Finalize<V, D>> {
+        // Determine if it makes sense to broadcast a finalize
         let round = self.views.get_mut(&view)?;
         if round.broadcast_nullify {
             return None;
@@ -1578,25 +1358,24 @@ impl<
         let round = self.views.get_mut(&view)?;
 
         // Attempt to construct finalization
-        let identity = self.supervisor.identity(view)?;
-        let threshold = identity.required();
+        let polynomial = self.supervisor.polynomial(view)?;
+        let threshold = polynomial_quorum(polynomial);
         round.finalizable(threshold, force).await
     }
 
-    async fn notify<Sr: Sender>(
+    async fn notify<Sp: Sender, Sr: Sender>(
         &mut self,
-        backfiller: &mut resolver::Mailbox<V, D>,
-        sender: &mut WrappedSender<Sr, Voter<V, D>>,
+        batcher: &mut batcher::Mailbox<C::PublicKey, V, D>,
+        resolver: &mut resolver::Mailbox<V, D>,
+        pending_sender: &mut WrappedSender<Sp, Voter<V, D>>,
+        recovered_sender: &mut WrappedSender<Sr, Voter<V, D>>,
         view: u64,
     ) {
-        // Get public key index
-        let public_key_index = self.supervisor.share(view).unwrap().index;
-
         // Attempt to notarize
         if let Some(notarize) = self.construct_notarize(view) {
             // Handle the notarize
-            self.handle_notarize(public_key_index, notarize.clone())
-                .await;
+            batcher.constructed(Voter::Notarize(notarize.clone())).await;
+            self.handle_notarize(notarize.clone()).await;
 
             // Sync the journal
             self.journal
@@ -1607,11 +1386,11 @@ impl<
                 .expect("unable to sync journal");
 
             // Broadcast the notarize
-            let msg = Voter::Notarize(notarize.clone());
-            sender.send(Recipients::All, msg, true).await.unwrap();
-            self.broadcast_messages
-                .get_or_create(&metrics::NOTARIZE)
-                .inc();
+            let msg = Voter::Notarize(notarize);
+            pending_sender
+                .send(Recipients::All, msg, true)
+                .await
+                .unwrap();
         };
 
         // Attempt to notarization
@@ -1623,8 +1402,8 @@ impl<
                 }
             }
 
-            // Update backfiller
-            backfiller.notarized(notarization.clone()).await;
+            // Update resolver
+            resolver.notarized(notarization.clone()).await;
 
             // Handle the notarization
             self.handle_notarization(notarization.clone()).await;
@@ -1644,18 +1423,18 @@ impl<
 
             // Broadcast the notarization
             let msg = Voter::Notarization(notarization.clone());
-            sender.send(Recipients::All, msg, true).await.unwrap();
-            self.broadcast_messages
-                .get_or_create(&metrics::NOTARIZATION)
-                .inc();
+            recovered_sender
+                .send(Recipients::All, msg, true)
+                .await
+                .unwrap();
         };
 
         // Attempt to nullification
         //
         // We handle broadcast of nullify in `timeout`.
         if let Some(nullification) = self.construct_nullification(view, false).await {
-            // Update backfiller
-            backfiller.nullified(nullification.clone()).await;
+            // Update resolver
+            resolver.nullified(nullification.clone()).await;
 
             // Handle the nullification
             self.handle_nullification(nullification.clone()).await;
@@ -1675,10 +1454,10 @@ impl<
 
             // Broadcast the nullification
             let msg = Voter::Nullification(nullification.clone());
-            sender.send(Recipients::All, msg, true).await.unwrap();
-            self.broadcast_messages
-                .get_or_create(&metrics::NULLIFICATION)
-                .inc();
+            recovered_sender
+                .send(Recipients::All, msg, true)
+                .await
+                .unwrap();
 
             // If `>= f+1` notarized a given proposal, then we should backfill missing
             // notarizations
@@ -1701,7 +1480,7 @@ impl<
                             ?missing_nullifications,
                             ">= 1 honest notarize for nullified parent"
                         );
-                        backfiller
+                        resolver
                             .fetch(missing_notarizations, missing_nullifications)
                             .await;
                     }
@@ -1716,13 +1495,10 @@ impl<
                         self.construct_finalization(self.last_finalized, true).await
                     {
                         let msg = Voter::Finalization(finalization.clone());
-                        sender
+                        recovered_sender
                             .send(Recipients::All, msg, true)
                             .await
                             .expect("unable to broadcast finalization");
-                        self.broadcast_messages
-                            .get_or_create(&metrics::FINALIZATION)
-                            .inc();
                     } else {
                         warn!(
                             last_finalized = self.last_finalized,
@@ -1736,8 +1512,8 @@ impl<
         // Attempt to finalize
         if let Some(finalize) = self.construct_finalize(view) {
             // Handle the finalize
-            self.handle_finalize(public_key_index, finalize.clone())
-                .await;
+            batcher.constructed(Voter::Finalize(finalize.clone())).await;
+            self.handle_finalize(finalize.clone()).await;
 
             // Sync the journal
             self.journal
@@ -1749,10 +1525,10 @@ impl<
 
             // Broadcast the finalize
             let msg = Voter::Finalize(finalize.clone());
-            sender.send(Recipients::All, msg, true).await.unwrap();
-            self.broadcast_messages
-                .get_or_create(&metrics::FINALIZE)
-                .inc();
+            pending_sender
+                .send(Recipients::All, msg, true)
+                .await
+                .unwrap();
         };
 
         // Attempt to finalization
@@ -1764,8 +1540,8 @@ impl<
                 }
             }
 
-            // Update backfiller
-            backfiller.finalized(view).await;
+            // Update resolver
+            resolver.finalized(view).await;
 
             // Handle the finalization
             self.handle_finalization(finalization.clone()).await;
@@ -1785,32 +1561,42 @@ impl<
 
             // Broadcast the finalization
             let msg = Voter::Finalization(finalization.clone());
-            sender.send(Recipients::All, msg, true).await.unwrap();
-            self.broadcast_messages
-                .get_or_create(&metrics::FINALIZATION)
-                .inc();
+            recovered_sender
+                .send(Recipients::All, msg, true)
+                .await
+                .unwrap();
         };
     }
 
     pub fn start(
-        self,
-        backfiller: resolver::Mailbox<V, D>,
-        sender: impl Sender<PublicKey = C::PublicKey>,
-        receiver: impl Receiver<PublicKey = C::PublicKey>,
+        mut self,
+        batcher: batcher::Mailbox<C::PublicKey, V, D>,
+        resolver: resolver::Mailbox<V, D>,
+        pending_sender: impl Sender<PublicKey = C::PublicKey>,
+        recovered_sender: impl Sender<PublicKey = C::PublicKey>,
+        recovered_receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) -> Handle<()> {
-        self.context
-            .clone()
-            .spawn(|_| self.run(backfiller, sender, receiver))
+        self.context.spawn_ref()(self.run(
+            batcher,
+            resolver,
+            pending_sender,
+            recovered_sender,
+            recovered_receiver,
+        ))
     }
 
     async fn run(
         mut self,
-        mut backfiller: resolver::Mailbox<V, D>,
-        sender: impl Sender<PublicKey = C::PublicKey>,
-        receiver: impl Receiver<PublicKey = C::PublicKey>,
+        mut batcher: batcher::Mailbox<C::PublicKey, V, D>,
+        mut resolver: resolver::Mailbox<V, D>,
+        pending_sender: impl Sender<PublicKey = C::PublicKey>,
+        recovered_sender: impl Sender<PublicKey = C::PublicKey>,
+        recovered_receiver: impl Receiver<PublicKey = C::PublicKey>,
     ) {
         // Wrap channel
-        let (mut sender, mut receiver) = wrap((), sender, receiver);
+        let mut pending_sender = WrappedSender::new(pending_sender);
+        let (mut recovered_sender, mut recovered_receiver) =
+            wrap::<_, _, Voter<V, D>>((), recovered_sender, recovered_receiver);
 
         // Compute genesis
         let genesis = self.automaton.genesis().await;
@@ -1828,12 +1614,14 @@ impl<
                 partition: self.partition.clone(),
                 compression: self.compression,
                 codec_config: (),
+                write_buffer: self.write_buffer,
             },
         )
         .await
         .expect("unable to open journal");
 
         // Rebuild from journal
+        let start = Instant::now();
         {
             let stream = journal
                 .replay(self.replay_concurrency, self.replay_buffer)
@@ -1851,12 +1639,14 @@ impl<
                             [public_key_index as usize]
                             == self.crypto.public_key();
                         let proposal = notarize.proposal.clone();
-                        self.handle_notarize(public_key_index, notarize).await;
+                        self.handle_notarize(notarize).await;
 
                         // Update round info
                         if me {
                             let round = self.views.get_mut(&view).expect("missing round");
                             round.proposal = Some(proposal);
+                            round.requested_proposal_build = true;
+                            round.requested_proposal_verify = true;
                             round.verified_proposal = true;
                             round.broadcast_notarize = true;
                         }
@@ -1875,7 +1665,7 @@ impl<
                         let me = self.supervisor.participants(view).unwrap()
                             [public_key_index as usize]
                             == self.crypto.public_key();
-                        self.handle_nullify(public_key_index, nullify).await;
+                        self.handle_nullify(nullify).await;
 
                         // Update round info
                         if me {
@@ -1897,7 +1687,7 @@ impl<
                         let me = self.supervisor.participants(view).unwrap()
                             [public_key_index as usize]
                             == self.crypto.public_key();
-                        self.handle_finalize(public_key_index, finalize).await;
+                        self.handle_finalize(finalize).await;
 
                         // Update round info
                         //
@@ -1922,7 +1712,7 @@ impl<
 
         // Update current view and immediately move to timeout (very unlikely we restarted and still within timeout)
         let observed_view = self.view;
-        debug!(current_view = observed_view, "replayed journal");
+        info!(current_view = observed_view, elapsed = ?start.elapsed(), "consensus initialized");
         {
             let round = self.views.get_mut(&observed_view).expect("missing round");
             round.leader_deadline = Some(self.context.current());
@@ -1930,6 +1720,13 @@ impl<
         }
         self.current_view.set(observed_view as i64);
         self.tracked_views.set(self.views.len() as i64);
+
+        // Initialize verifier with leader
+        let round = self.views.get_mut(&observed_view).expect("missing round");
+        let (leader, _) = round.leader.as_ref().unwrap();
+        batcher
+            .update(observed_view, leader.clone(), self.last_finalized)
+            .await;
 
         // Create shutdown tracker
         let mut shutdown = self.context.stopped();
@@ -1953,7 +1750,7 @@ impl<
             }
 
             // Attempt to propose a container
-            if let Some((context, new_propose)) = self.propose(&mut backfiller).await {
+            if let Some((context, new_propose)) = self.propose(&mut resolver).await {
                 pending_set = Some(self.view);
                 pending_propose_context = Some(context);
                 pending_propose = Some(new_propose);
@@ -1976,6 +1773,7 @@ impl<
 
             // Wait for a timeout to fire or for a message to arrive
             let timeout = self.timeout_deadline();
+            let start = self.view;
             let view;
             select! {
                 _ = &mut shutdown => {
@@ -1990,7 +1788,7 @@ impl<
                 },
                 _ = self.context.sleep_until(timeout) => {
                     // Trigger the timeout
-                    self.timeout(&mut sender).await;
+                    self.timeout(&mut batcher, &mut pending_sender, &mut recovered_sender).await;
                     view = self.view;
                 },
                 proposed = propose_wait => {
@@ -2055,31 +1853,48 @@ impl<
                     }
                 },
                 mailbox = self.mailbox_receiver.next() => {
+                    // Extract message
+                    let Some(msg) = mailbox else {
+                        break;
+                    };
+                    let Message::Verified(msg) = msg;
+
                     // Ensure view is still useful
                     //
-                    // It is possible that we make a request to the backfiller and prune the view
+                    // It is possible that we make a request to the resolver and prune the view
                     // before we receive the response. In this case, we should ignore the response (not
                     // doing so may result in attempting to store before the prune boundary).
-                    let msg = mailbox.unwrap();
                     view = msg.view();
                     if !self.interesting(view, false) {
-                        debug!(view, "backfilled message is not interesting");
+                        debug!(view, "verified message is not interesting");
                         continue;
                     }
 
-                    // Handle backfill
+                    // Handle verifier and resolver
                     match msg {
-                        Message::Notarization(notarization)  => {
-                            debug!(view, "received notarization from backfiller");
+                        Voter::Notarize(notarize) => {
+                            self.handle_notarize(notarize).await;
+                        }
+                        Voter::Nullify(nullify) => {
+                            self.handle_nullify(nullify).await;
+                        }
+                        Voter::Finalize(finalize) => {
+                            self.handle_finalize(finalize).await;
+                        }
+                        Voter::Notarization(notarization)  => {
+                            trace!(view, "received notarization from resolver");
                             self.handle_notarization(notarization).await;
                         },
-                        Message::Nullification(nullification) => {
-                            debug!(view, "received nullification from backfiller");
+                        Voter::Nullification(nullification) => {
+                            trace!(view, "received nullification from resolver");
                             self.handle_nullification(nullification).await;
                         },
+                        Voter::Finalization(_) => {
+                            unreachable!("unexpected message type");
+                        }
                     }
                 },
-                msg = receiver.recv() => {
+                msg = recovered_receiver.recv() => {
                     // Break if there is an internal error
                     let Ok((s, msg)) = msg else {
                         break;
@@ -2087,6 +1902,8 @@ impl<
 
                     // Skip if there is a decoding error
                     let Ok(msg) = msg else {
+                        warn!(sender = ?s, "blocking peer");
+                        self.blocker.block(s).await;
                         continue;
                     };
 
@@ -2095,45 +1912,66 @@ impl<
                     // We opt to not filter by `interesting()` here because each message type has a different
                     // configuration for handling `future` messages.
                     view = msg.view();
-                    let interesting = match msg {
-                        Voter::Notarize(notarize) => {
-                            self.received_messages.get_or_create(&metrics::PeerMessage::notarize(&s)).inc();
-                            self.notarize(&s, notarize).await
-                        }
+                    let action = match msg {
                         Voter::Notarization(notarization) => {
-                            self.received_messages.get_or_create(&metrics::PeerMessage::notarization(&s)).inc();
                             self.notarization(notarization).await
                         }
-                        Voter::Nullify(nullify) => {
-                            self.received_messages.get_or_create(&metrics::PeerMessage::nullify(&s)).inc();
-                            self.nullify(&s, nullify).await
-                        }
                         Voter::Nullification(nullification) => {
-                            self.received_messages.get_or_create(&metrics::PeerMessage::nullification(&s)).inc();
                             self.nullification(nullification).await
                         }
-                        Voter::Finalize(finalize) => {
-                            self.received_messages.get_or_create(&metrics::PeerMessage::finalize(&s)).inc();
-                            self.finalize(&s, finalize).await
-                        }
                         Voter::Finalization(finalization) => {
-                            self.received_messages.get_or_create(&metrics::PeerMessage::finalization(&s)).inc();
                             self.finalization(finalization).await
                         }
+                        Voter::Notarize(_) | Voter::Nullify(_) | Voter::Finalize(_) => {
+                            warn!(sender=?s, "blocking peer");
+                            self.blocker.block(s).await;
+                            continue;
+                        }
                     };
-                    if !interesting {
-                        trace!(sender=?s, view, "dropped message");
-                        continue;
+                    match action {
+                        Action::Process => {}
+                        Action::Skip => {
+                            trace!(sender=?s, view, "dropped useless");
+                            continue;
+                        }
+                        Action::Block => {
+                            warn!(sender=?s, view, "blocking peer");
+                            self.blocker.block(s).await;
+                            continue;
+                        }
                     }
                 },
             };
 
             // Attempt to send any new view messages
-            self.notify(&mut backfiller, &mut sender, view).await;
+            self.notify(
+                &mut batcher,
+                &mut resolver,
+                &mut pending_sender,
+                &mut recovered_sender,
+                view,
+            )
+            .await;
 
             // After sending all required messages, prune any views
             // we no longer need
             self.prune_views().await;
+
+            // Update the verifier if we have moved to a new view
+            if self.view > start {
+                let round = self.views.get_mut(&self.view).expect("missing round");
+                let (leader, _) = round.leader.as_ref().unwrap();
+                let is_active = batcher
+                    .update(self.view, leader.clone(), self.last_finalized)
+                    .await;
+
+                // If the leader is not active (and not us), we should reduce leader timeout to now
+                if !is_active && leader != &self.crypto.public_key() {
+                    debug!(view, ?leader, "skipping leader timeout due to inactivity");
+                    self.skipped_views.inc();
+                    round.leader_deadline = Some(self.context.current());
+                }
+            }
         }
     }
 }

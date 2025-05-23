@@ -8,10 +8,13 @@ use crate::{
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
-    bls12381::primitives::{
-        group,
-        poly::{self, public},
-        variant::Variant,
+    bls12381::{
+        dkg::ops::evaluate_all,
+        primitives::{
+            group,
+            poly::{self, public},
+            variant::Variant,
+        },
     },
     Digest,
 };
@@ -22,7 +25,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-type ViewInfo<P, V> = (poly::Public<V>, HashMap<P, u32>, Vec<P>, group::Share);
+type ViewInfo<P, V> = (Vec<V>, HashMap<P, u32>, Vec<P>, group::Share);
 
 pub struct Config<P: Array, V: Variant> {
     pub namespace: Vec<u8>,
@@ -34,7 +37,8 @@ type Faults<P, V, D> = HashMap<P, HashMap<View, HashSet<Activity<V, D>>>>;
 
 #[derive(Clone)]
 pub struct Supervisor<P: Array, V: Variant, D: Digest> {
-    participants: BTreeMap<View, ViewInfo<P, V>>,
+    identity: V::Public,
+    participants: BTreeMap<View, ViewInfo<P, V::Public>>,
 
     namespace: Vec<u8>,
 
@@ -47,6 +51,7 @@ pub struct Supervisor<P: Array, V: Variant, D: Digest> {
     pub finalizes: Arc<Mutex<Participation<P, D>>>,
     pub finalizations: Arc<Mutex<HashMap<View, Finalization<V, D>>>>,
     pub faults: Arc<Mutex<Faults<P, V, D>>>,
+    pub invalid: Arc<Mutex<usize>>,
 
     latest: Arc<Mutex<View>>,
     subscribers: Arc<Mutex<Vec<Sender<View>>>>,
@@ -54,16 +59,25 @@ pub struct Supervisor<P: Array, V: Variant, D: Digest> {
 
 impl<P: Array, V: Variant, D: Digest> Supervisor<P, V, D> {
     pub fn new(cfg: Config<P, V>) -> Self {
+        let mut identity = None;
         let mut parsed_participants = BTreeMap::new();
-        for (view, (identity, mut validators, share)) in cfg.participants.into_iter() {
+        for (view, (polynomial, mut validators, share)) in cfg.participants.into_iter() {
+            let evaluations = evaluate_all::<V>(&polynomial, validators.len() as u32);
             let mut map = HashMap::new();
             for (index, validator) in validators.iter().enumerate() {
                 map.insert(validator.clone(), index as u32);
             }
             validators.sort();
-            parsed_participants.insert(view, (identity, map, validators, share));
+            let view_identity = public::<V>(&polynomial);
+            if identity.is_none() {
+                identity = Some(*view_identity);
+            } else if identity.as_ref().unwrap() != view_identity {
+                panic!("public keys do not match");
+            }
+            parsed_participants.insert(view, (evaluations, map, validators, share));
         }
         Self {
+            identity: identity.unwrap(),
             participants: parsed_participants,
             namespace: cfg.namespace,
             leaders: Arc::new(Mutex::new(HashMap::new())),
@@ -75,6 +89,7 @@ impl<P: Array, V: Variant, D: Digest> Supervisor<P, V, D> {
             finalizes: Arc::new(Mutex::new(HashMap::new())),
             finalizations: Arc::new(Mutex::new(HashMap::new())),
             faults: Arc::new(Mutex::new(HashMap::new())),
+            invalid: Arc::new(Mutex::new(0)),
             latest: Arc::new(Mutex::new(0)),
             subscribers: Arc::new(Mutex::new(Vec::new())),
         }
@@ -112,7 +127,8 @@ impl<P: Array, V: Variant, D: Digest> Su for Supervisor<P, V, D> {
 
 impl<P: Array, V: Variant, D: Digest> TSu for Supervisor<P, V, D> {
     type Seed = V::Signature;
-    type Identity = poly::Public<V>;
+    type Identity = V::Public;
+    type Polynomial = Vec<V::Public>;
     type Share = group::Share;
 
     fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<Self::PublicKey> {
@@ -133,7 +149,11 @@ impl<P: Array, V: Variant, D: Digest> TSu for Supervisor<P, V, D> {
         Some(leader)
     }
 
-    fn identity(&self, index: Self::Index) -> Option<&Self::Identity> {
+    fn identity(&self) -> &Self::Identity {
+        &self.identity
+    }
+
+    fn polynomial(&self, index: Self::Index) -> Option<&Self::Polynomial> {
         let closest = match self.participants.range(..=index).next_back() {
             Some((_, (p, _, _, _))) => p,
             None => {
@@ -161,17 +181,20 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
         // We check signatures for all messages to ensure that the prover is working correctly
         // but in production this isn't necessary (as signatures are already verified in
         // consensus).
+        let verified = activity.verified();
         match activity {
             Activity::Notarize(notarize) => {
                 let view = notarize.view();
-                let (identity, validators) = match self.participants.range(..=view).next_back() {
+                let (polynomial, validators) = match self.participants.range(..=view).next_back() {
                     Some((_, (p, _, v, _))) => (p, v),
                     None => {
                         panic!("no participants in required range");
                     }
                 };
-                if !notarize.verify(&self.namespace, identity) {
-                    panic!("signature verification failed");
+                if !notarize.verify(&self.namespace, polynomial) {
+                    assert!(!verified);
+                    *self.invalid.lock().unwrap() += 1;
+                    return;
                 }
                 let encoded = notarize.encode();
                 Notarize::<V, D>::decode(encoded).unwrap();
@@ -186,19 +209,13 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     .insert(public_key);
             }
             Activity::Notarization(notarization) => {
-                let view = notarization.view();
-                let (identity, _) = match self.participants.range(..=view).next_back() {
-                    Some((_, (p, _, v, _))) => (p, v),
-                    None => {
-                        panic!("no participants in required range");
-                    }
-                };
-                let public = public::<V>(identity);
-
                 // Verify notarization
+                let view = notarization.view();
                 let seed = notarization.seed();
-                if !notarization.verify(&self.namespace, public) {
-                    panic!("signature verification failed");
+                if !notarization.verify(&self.namespace, &self.identity) {
+                    assert!(!verified);
+                    *self.invalid.lock().unwrap() += 1;
+                    return;
                 }
                 let encoded = notarization.encode();
                 Notarization::<V, D>::decode(encoded).unwrap();
@@ -208,8 +225,10 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     .insert(view, notarization);
 
                 // Verify seed
-                if !seed.verify(&self.namespace, public) {
-                    panic!("signature verification failed");
+                if !seed.verify(&self.namespace, &self.identity) {
+                    assert!(!verified);
+                    *self.invalid.lock().unwrap() += 1;
+                    return;
                 }
                 let encoded = seed.encode();
                 Seed::<V>::decode(encoded).unwrap();
@@ -217,14 +236,16 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
             }
             Activity::Nullify(nullify) => {
                 let view = nullify.view();
-                let (identity, validators) = match self.participants.range(..=view).next_back() {
+                let (polynomial, validators) = match self.participants.range(..=view).next_back() {
                     Some((_, (p, _, v, _))) => (p, v),
                     None => {
                         panic!("no participants in required range");
                     }
                 };
-                if !nullify.verify(&self.namespace, identity) {
-                    panic!("signature verification failed");
+                if !nullify.verify(&self.namespace, polynomial) {
+                    assert!(!verified);
+                    *self.invalid.lock().unwrap() += 1;
+                    return;
                 }
                 let encoded = nullify.encode();
                 Nullify::<V>::decode(encoded).unwrap();
@@ -237,19 +258,13 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     .insert(public_key);
             }
             Activity::Nullification(nullification) => {
-                let view = nullification.view();
-                let (identity, _) = match self.participants.range(..=view).next_back() {
-                    Some((_, (p, _, v, _))) => (p, v),
-                    None => {
-                        panic!("no participants in required range");
-                    }
-                };
-                let public = public::<V>(identity);
-
                 // Verify nullification
+                let view = nullification.view();
                 let seed = nullification.seed();
-                if !nullification.verify(&self.namespace, public) {
-                    panic!("signature verification failed");
+                if !nullification.verify(&self.namespace, &self.identity) {
+                    assert!(!verified);
+                    *self.invalid.lock().unwrap() += 1;
+                    return;
                 }
                 let encoded = nullification.encode();
                 Nullification::<V>::decode(encoded).unwrap();
@@ -259,8 +274,10 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     .insert(view, nullification);
 
                 // Verify seed
-                if !seed.verify(&self.namespace, public) {
-                    panic!("signature verification failed");
+                if !seed.verify(&self.namespace, &self.identity) {
+                    assert!(!verified);
+                    *self.invalid.lock().unwrap() += 1;
+                    return;
                 }
                 let encoded = seed.encode();
                 Seed::<V>::decode(encoded).unwrap();
@@ -268,14 +285,16 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
             }
             Activity::Finalize(finalize) => {
                 let view = finalize.view();
-                let (identity, validators) = match self.participants.range(..=view).next_back() {
+                let (polynomial, validators) = match self.participants.range(..=view).next_back() {
                     Some((_, (p, _, v, _))) => (p, v),
                     None => {
                         panic!("no participants in required range");
                     }
                 };
-                if !finalize.verify(&self.namespace, identity) {
-                    panic!("signature verification failed");
+                if !finalize.verify(&self.namespace, polynomial) {
+                    assert!(!verified);
+                    *self.invalid.lock().unwrap() += 1;
+                    return;
                 }
                 let encoded = finalize.encode();
                 Finalize::<V, D>::decode(encoded).unwrap();
@@ -290,19 +309,13 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     .insert(public_key);
             }
             Activity::Finalization(ref finalization) => {
-                let view = finalization.view();
-                let (identity, _) = match self.participants.range(..=view).next_back() {
-                    Some((_, (p, _, v, _))) => (p, v),
-                    None => {
-                        panic!("no participants in required range");
-                    }
-                };
-                let public = public::<V>(identity);
-
                 // Verify finalization
+                let view = finalization.view();
                 let seed = finalization.seed();
-                if !finalization.verify(&self.namespace, public) {
-                    panic!("signature verification failed");
+                if !finalization.verify(&self.namespace, &self.identity) {
+                    assert!(!verified);
+                    *self.invalid.lock().unwrap() += 1;
+                    return;
                 }
                 let encoded = finalization.encode();
                 Finalization::<V, D>::decode(encoded).unwrap();
@@ -312,8 +325,10 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
                     .insert(view, finalization.clone());
 
                 // Verify seed
-                if !seed.verify(&self.namespace, public) {
-                    panic!("signature verification failed");
+                if !seed.verify(&self.namespace, &self.identity) {
+                    assert!(!verified);
+                    *self.invalid.lock().unwrap() += 1;
+                    return;
                 }
                 let encoded = seed.encode();
                 Seed::<V>::decode(encoded).unwrap();
@@ -328,14 +343,16 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
             }
             Activity::ConflictingNotarize(ref conflicting) => {
                 let view = conflicting.view();
-                let (identity, validators) = match self.participants.range(..=view).next_back() {
+                let (polynomial, validators) = match self.participants.range(..=view).next_back() {
                     Some((_, (p, _, v, _))) => (p, v),
                     None => {
                         panic!("no participants in required range");
                     }
                 };
-                if !conflicting.verify(&self.namespace, identity) {
-                    panic!("signature verification failed");
+                if !conflicting.verify(&self.namespace, polynomial) {
+                    assert!(!verified);
+                    *self.invalid.lock().unwrap() += 1;
+                    return;
                 }
                 let encoded = conflicting.encode();
                 ConflictingNotarize::<V, D>::decode(encoded).unwrap();
@@ -351,14 +368,16 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
             }
             Activity::ConflictingFinalize(ref conflicting) => {
                 let view = conflicting.view();
-                let (identity, validators) = match self.participants.range(..=view).next_back() {
+                let (polynomial, validators) = match self.participants.range(..=view).next_back() {
                     Some((_, (p, _, v, _))) => (p, v),
                     None => {
                         panic!("no participants in required range");
                     }
                 };
-                if !conflicting.verify(&self.namespace, identity) {
-                    panic!("signature verification failed");
+                if !conflicting.verify(&self.namespace, polynomial) {
+                    assert!(!verified);
+                    *self.invalid.lock().unwrap() += 1;
+                    return;
                 }
                 let encoded = conflicting.encode();
                 ConflictingFinalize::<V, D>::decode(encoded).unwrap();
@@ -374,14 +393,16 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
             }
             Activity::NullifyFinalize(ref nullify_finalize) => {
                 let view = nullify_finalize.view();
-                let (identity, validators) = match self.participants.range(..=view).next_back() {
+                let (polynomial, validators) = match self.participants.range(..=view).next_back() {
                     Some((_, (p, _, v, _))) => (p, v),
                     None => {
                         panic!("no participants in required range");
                     }
                 };
-                if !nullify_finalize.verify(&self.namespace, identity) {
-                    panic!("signature verification failed");
+                if !nullify_finalize.verify(&self.namespace, polynomial) {
+                    assert!(!verified);
+                    *self.invalid.lock().unwrap() += 1;
+                    return;
                 }
                 let encoded = nullify_finalize.encode();
                 NullifyFinalize::<V, D>::decode(encoded).unwrap();

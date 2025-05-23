@@ -2,7 +2,7 @@
 name = "commonware-runtime"
 edition = "2021"
 publish = true
-version = "0.0.50"
+version = "0.0.52"
 license = "MIT OR Apache-2.0"
 description = "Execute asynchronous tasks with a configurable scheduler."
 readme = "README.md"
@@ -28,10 +28,12 @@ tracing-opentelemetry = { workspace = true }
 rayon = { workspace = true }
 async-lock = { workspace = true }
 io-uring = { workspace = true, optional = true }
+libc = { workspace = true }
 
 [features]
 default = []
-iouring = ["io-uring"]
+iouring-storage = ["io-uring"]
+iouring-network = ["io-uring"]
 
 # Enable "js" feature when WASM is target
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]

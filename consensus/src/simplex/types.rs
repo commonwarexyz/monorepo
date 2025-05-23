@@ -42,31 +42,31 @@ pub trait Attributable {
 
 // Constants for domain separation in signature verification
 // These are used to prevent cross-protocol attacks and message-type confusion
-const NOTARIZE_SUFFIX: &[u8] = b"_NOTARIZE";
-const NULLIFY_SUFFIX: &[u8] = b"_NULLIFY";
-const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
+pub const NOTARIZE_SUFFIX: &[u8] = b"_NOTARIZE";
+pub const NULLIFY_SUFFIX: &[u8] = b"_NULLIFY";
+pub const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
 
 /// Creates a message to be signed containing just the view number
 #[inline]
-fn view_message(view: View) -> Vec<u8> {
+pub fn view_message(view: View) -> Vec<u8> {
     View::encode(&view).into()
 }
 
 /// Creates a namespace for notarize messages by appending the NOTARIZE_SUFFIX
 #[inline]
-fn notarize_namespace(namespace: &[u8]) -> Vec<u8> {
+pub fn notarize_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, NOTARIZE_SUFFIX)
 }
 
 /// Creates a namespace for nullify messages by appending the NULLIFY_SUFFIX
 #[inline]
-fn nullify_namespace(namespace: &[u8]) -> Vec<u8> {
+pub fn nullify_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, NULLIFY_SUFFIX)
 }
 
 /// Creates a namespace for finalize messages by appending the FINALIZE_SUFFIX
 #[inline]
-fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
+pub fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, FINALIZE_SUFFIX)
 }
 

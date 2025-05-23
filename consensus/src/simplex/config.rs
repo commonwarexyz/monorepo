@@ -47,6 +47,9 @@ pub struct Config<
     /// Number of bytes to buffer when replaying during startup.
     pub replay_buffer: usize,
 
+    /// The size of the write buffer to use for each blob in the journal.
+    pub write_buffer: usize,
+
     /// Amount of time to wait for a leader to propose a payload
     /// in a view.
     pub leader_timeout: Duration,

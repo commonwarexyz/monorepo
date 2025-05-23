@@ -32,7 +32,7 @@ use rand::Rng;
 use std::{
     cmp::max,
     collections::{btree_map::Entry, BTreeMap, HashMap},
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 use std::{collections::BTreeSet, sync::atomic::AtomicI64};
 use tracing::{debug, trace, warn};
@@ -328,6 +328,7 @@ pub struct Actor<
     compression: Option<u8>,
     replay_concurrency: usize,
     replay_buffer: usize,
+    write_buffer: usize,
     journal: Option<Journal<E, Voter<C::Signature, D>>>,
 
     genesis: Option<D>,
@@ -420,6 +421,7 @@ impl<
                 compression: cfg.compression,
                 replay_concurrency: cfg.replay_concurrency,
                 replay_buffer: cfg.replay_buffer,
+                write_buffer: cfg.write_buffer,
                 journal: None,
 
                 genesis: None,
@@ -1686,6 +1688,7 @@ impl<
                 partition: self.partition.clone(),
                 compression: self.compression,
                 codec_config: usize::MAX, // anything we read from journal is already verified
+                write_buffer: self.write_buffer,
             },
         )
         .await
@@ -1693,6 +1696,7 @@ impl<
 
         // Rebuild from journal
         let mut observed_view = 1;
+        let start = Instant::now();
         {
             let stream = journal
                 .replay(self.replay_concurrency, self.replay_buffer)
@@ -1760,7 +1764,7 @@ impl<
         self.journal = Some(journal);
 
         // Update current view and immediately move to timeout (very unlikely we restarted and still within timeout)
-        debug!(current_view = observed_view, "replayed journal");
+        debug!(current_view = observed_view, elapsed = ?start.elapsed(), "consensus initialized");
         self.enter_view(observed_view);
         {
             let round = self.views.get_mut(&observed_view).expect("missing round");

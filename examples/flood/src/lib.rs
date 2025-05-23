@@ -110,4 +110,5 @@ pub struct Config {
     pub message_size: usize,
     pub message_backlog: usize,
     pub mailbox_size: usize,
+    pub profiling: bool,
 }

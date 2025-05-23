@@ -65,8 +65,9 @@ pub struct Engine<
     TSu: ThresholdSupervisor<
         Index = Epoch,
         PublicKey = C::PublicKey,
+        Identity = V::Public,
+        Polynomial = poly::Public<V>,
         Share = group::Share,
-        Identity = poly::Public<V>,
     >,
     NetS: Sender<PublicKey = C::PublicKey>,
     NetR: Receiver<PublicKey = C::PublicKey>,
@@ -144,6 +145,9 @@ pub struct Engine<
     // The number of bytes to buffer when replaying a journal.
     journal_replay_buffer: usize,
 
+    // The size of the write buffer to use for each blob in the journal.
+    journal_write_buffer: usize,
+
     // A prefix for the journal names.
     // The rest of the name is the hex-encoded public keys of the relevant sequencer.
     journal_name_prefix: String,
@@ -209,8 +213,9 @@ impl<
         TSu: ThresholdSupervisor<
             Index = Epoch,
             PublicKey = C::PublicKey,
+            Identity = V::Public,
+            Polynomial = poly::Public<V>,
             Share = group::Share,
-            Identity = poly::Public<V>,
         >,
         NetS: Sender<PublicKey = C::PublicKey>,
         NetR: Receiver<PublicKey = C::PublicKey>,
@@ -238,6 +243,7 @@ impl<
             journal_heights_per_section: cfg.journal_heights_per_section,
             journal_replay_concurrency: cfg.journal_replay_concurrency,
             journal_replay_buffer: cfg.journal_replay_buffer,
+            journal_write_buffer: cfg.journal_write_buffer,
             journal_name_prefix: cfg.journal_name_prefix,
             journal_compression: cfg.journal_compression,
             journals: BTreeMap::new(),
@@ -578,10 +584,10 @@ impl<
     /// (e.g. already exists, threshold already exists, is outside the epoch bounds, etc.).
     async fn handle_ack(&mut self, ack: &Ack<C::PublicKey, V, D>) -> Result<(), Error> {
         // Get the quorum
-        let Some(identity) = self.validators.identity(ack.epoch) else {
-            return Err(Error::UnknownIdentity(ack.epoch));
+        let Some(polynomial) = self.validators.polynomial(ack.epoch) else {
+            return Err(Error::UnknownPolynomial(ack.epoch));
         };
-        let quorum = identity.required();
+        let quorum = polynomial.required();
 
         // Add the partial signature. If a new threshold is formed, handle it.
         if let Some(threshold) = self.ack_manager.add_ack(ack, quorum) {
@@ -836,18 +842,8 @@ impl<
         // Validate chunk
         self.validate_chunk(&node.chunk, self.epoch)?;
 
-        // Get parent identity
-        let public = if let Some(parent) = &node.parent {
-            let Some(identity) = self.validators.identity(parent.epoch) else {
-                return Err(Error::UnknownIdentity(parent.epoch));
-            };
-            Some(poly::public::<V>(identity))
-        } else {
-            None
-        };
-
         // Verify the signature
-        node.verify(&self.namespace, public)
+        node.verify(&self.namespace, self.validators.identity())
             .map_err(|_| Error::InvalidNodeSignature)
     }
 
@@ -900,10 +896,10 @@ impl<
 
         // Validate partial signature
         // Optimization: If the ack already exists, don't verify
-        let Some(identity) = self.validators.identity(ack.epoch) else {
-            return Err(Error::UnknownIdentity(ack.epoch));
+        let Some(polynomial) = self.validators.polynomial(ack.epoch) else {
+            return Err(Error::UnknownPolynomial(ack.epoch));
         };
-        if !ack.verify(&self.namespace, identity) {
+        if !ack.verify(&self.namespace, polynomial) {
             return Err(Error::InvalidAckSignature);
         }
 
@@ -970,6 +966,7 @@ impl<
             partition: format!("{}{}", &self.journal_name_prefix, sequencer),
             compression: self.journal_compression,
             codec_config: (),
+            write_buffer: self.journal_write_buffer,
         };
         let journal = Journal::<_, Node<C, V, D>>::init(self.context.with_label("journal"), cfg)
             .await

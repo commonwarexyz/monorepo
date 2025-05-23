@@ -155,7 +155,8 @@ impl Default for Config {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct Network {
+/// [crate::Network] implementation that uses the [tokio] runtime.
+pub struct Network {
     cfg: Config,
 }
 

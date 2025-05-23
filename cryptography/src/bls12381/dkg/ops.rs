@@ -42,6 +42,15 @@ pub fn generate_shares<R: RngCore, V: Variant>(
     (commitment, shares)
 }
 
+/// Evaluates the polynomial at `n` indices.
+pub fn evaluate_all<V: Variant>(polynomial: &poly::Public<V>, n: u32) -> Vec<V::Public> {
+    let mut evals = Vec::with_capacity(n as usize);
+    for index in 0..n {
+        evals.push(polynomial.evaluate(index).value);
+    }
+    evals
+}
+
 /// Verify that a given commitment is valid for a dealer. If a previous
 /// polynomial is provided, verify that the commitment is on that polynomial.
 pub fn verify_commitment<V: Variant>(

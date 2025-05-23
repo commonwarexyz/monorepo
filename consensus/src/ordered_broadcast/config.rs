@@ -22,7 +22,7 @@ pub struct Config<
     /// be involved in the current broadcast attempt).
     pub monitor: M,
 
-    /// Manages the set of validators and the group identity.
+    /// Manages the set of validators and the group polynomial.
     /// Also manages the cryptographic partial share if the engine is a validator.
     pub validators: TSu,
 
@@ -79,6 +79,9 @@ pub struct Config<
 
     /// The number of bytes to buffer when replaying a journal.
     pub journal_replay_buffer: usize,
+
+    /// The size of the write buffer to use for each blob in the journal.
+    pub journal_write_buffer: usize,
 
     /// Compression level for the journal.
     pub journal_compression: Option<u8>,

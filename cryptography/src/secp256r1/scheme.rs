@@ -495,6 +495,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_decode_zero_signature_fails() {
+        let result = Signature::decode(vec![0u8; SIGNATURE_LENGTH].as_ref());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decode_high_s_signature_fails() {
+        let (private_key, _) = vector_keypair_1();
+        let message = b"edge";
+        let mut signer = <Secp256r1 as CommonwareSigner>::from(private_key).unwrap();
+        let signature = signer.sign(None, message);
+        let mut bad_signature = signature.to_vec();
+        bad_signature[32] |= 0x80; // force S into upper range
+        assert!(Signature::decode(bad_signature.as_ref()).is_err());
+    }
+
+    #[test]
+    fn test_decode_zero_r_signature_fails() {
+        let (private_key, _) = vector_keypair_1();
+        let message = b"edge";
+        let mut signer = <Secp256r1 as CommonwareSigner>::from(private_key).unwrap();
+        let signature = signer.sign(None, message);
+        let mut bad_signature = signature.to_vec();
+        for b in bad_signature.iter_mut().take(32) {
+            *b = 0x00;
+        }
+        // ensure S component is non-zero
+        bad_signature[32] = 1;
+        assert!(Signature::decode(bad_signature.as_ref()).is_err());
+    }
+
     // Ensure RFC6979 compliance (should also be tested by underlying library)
     #[test]
     fn test_rfc6979() {
