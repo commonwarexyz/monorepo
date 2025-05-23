@@ -53,6 +53,36 @@ pub struct Bls12381 {
     public: <MinPk as Variant>::Public,
 }
 
+// type PrivateKey = group::Private;
+
+impl crate::PrivateKey for PrivateKey {
+    type Public = PublicKey;
+
+    type Signature = Signature;
+
+    fn public_key(&self) -> Self::Public {
+        let public = ops::compute_public::<MinPk>(&self.key);
+        PublicKey::from(public)
+    }
+
+    fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Self::Signature {
+        let signature = ops::sign_message::<MinPk>(&self.key, namespace, msg);
+        Signature::from(signature)
+    }
+}
+
+// type PublicKey = <MinPk as Variant>::Public;
+
+impl crate::PublicKey for PublicKey {
+    type Private = PrivateKey;
+
+    type Signature = Signature;
+
+    fn verify(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Self::Signature) -> bool {
+        ops::verify_message::<MinPk>(&self.key, namespace, msg, &sig.signature).is_ok()
+    }
+}
+
 impl Specification for Bls12381 {
     type PublicKey = PublicKey;
     type Signature = Signature;
@@ -269,6 +299,10 @@ impl Display for PublicKey {
 pub struct Signature {
     raw: [u8; <MinPk as Variant>::Signature::SIZE],
     signature: <MinPk as Variant>::Signature,
+}
+
+impl crate::Signature for Signature {
+    type Public = PublicKey;
 }
 
 impl AsRef<<MinPk as Variant>::Signature> for Signature {

@@ -128,6 +128,24 @@ pub struct PrivateKey {
     key: ed25519_consensus::SigningKey,
 }
 
+impl crate::PrivateKey for PrivateKey {
+    type Public = PublicKey;
+
+    type Signature = Signature;
+
+    fn public_key(&self) -> Self::Public {
+        PublicKey::from(self.key.verification_key())
+    }
+
+    fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Self::Signature {
+        let sig = match namespace {
+            Some(namespace) => self.key.sign(&union_unique(namespace, msg)),
+            None => self.key.sign(msg),
+        };
+        Signature::from(sig)
+    }
+}
+
 impl Write for PrivateKey {
     fn write(&self, buf: &mut impl BufMut) {
         self.raw.write(buf);
@@ -215,6 +233,22 @@ pub struct PublicKey {
     key: ed25519_consensus::VerificationKey,
 }
 
+impl crate::PublicKey for PublicKey {
+    type Private = PrivateKey;
+
+    type Signature = Signature;
+
+    fn verify(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Self::Signature) -> bool {
+        match namespace {
+            Some(namespace) => {
+                let payload = union_unique(namespace, msg);
+                self.key.verify(&sig.signature, &payload).is_ok()
+            }
+            None => self.key.verify(&sig.signature, msg).is_ok(),
+        }
+    }
+}
+
 impl Write for PublicKey {
     fn write(&self, buf: &mut impl BufMut) {
         self.raw.write(buf);
@@ -275,6 +309,10 @@ impl Display for PublicKey {
 pub struct Signature {
     raw: [u8; SIGNATURE_LENGTH],
     signature: ed25519_consensus::Signature,
+}
+
+impl crate::Signature for Signature {
+    type Public = PublicKey;
 }
 
 impl Write for Signature {

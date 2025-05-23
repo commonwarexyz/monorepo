@@ -192,7 +192,7 @@ mod tests {
     };
     use crate::bls12381::primitives::poly::public;
     use crate::bls12381::primitives::variant::{MinPk, MinSig, Variant};
-    use crate::{Ed25519, Signer};
+    use crate::{Ed25519, Signer as _};
     use arbiter::Output;
     use commonware_utils::quorum;
     use rand::rngs::StdRng;

@@ -25,6 +25,37 @@ pub trait Specification {
     type Signature: Array;
 }
 
+/// A private key, able to derive its public key and sign messages.
+pub trait PrivateKey: Sized + Clone {
+    /// The corresponding public key type.
+    type Public: PublicKey<Private = Self>;
+    /// The signature type produced by this keypair.
+    type Signature: Signature<Public = Self::Public>;
+
+    /// Derive the public key.
+    fn public_key(&self) -> Self::Public;
+
+    /// Sign a message, returning a signature.
+    fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Self::Signature;
+}
+
+/// A public key, able to verify signatures.
+pub trait PublicKey: Sized + Clone {
+    /// The private key it came from.
+    type Private: PrivateKey<Public = Self>;
+    /// The signature type it verifies.
+    type Signature: Signature<Public = Self>;
+
+    /// Verify that `sig` is a valid signature over `msg`.
+    fn verify(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Self::Signature) -> bool;
+}
+
+/// A signature over a message by some private key.
+pub trait Signature: Sized + Clone + AsRef<[u8]> {
+    /// The public key type that can verify this signature.
+    type Public: PublicKey<Signature = Self>;
+}
+
 /// Implementation that can verify that a `PublicKey` produced a valid `Signature`.
 pub trait Verifier: Specification + Clone + Send + Sync + 'static {
     /// Check that a signature is valid for the given message and public key.
