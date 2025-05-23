@@ -4,15 +4,15 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
-use commonware_cryptography::{PrivateKey, PublicKey};
+use commonware_cryptography::{PrivateKey, PublicKey, Signature};
 use commonware_runtime::Clock;
 use commonware_utils::SystemTimeExt;
 use std::time::Duration;
 
 /// Handshake information that is signed over by the sender.
-pub struct Info<C: PrivateKey> {
+pub struct Info<K: PublicKey> {
     /// The public key of the recipient.
-    recipient: C::PublicKey,
+    recipient: K,
 
     /// The ephemeral public key of the sender.
     ///
@@ -23,12 +23,8 @@ pub struct Info<C: PrivateKey> {
     timestamp: u64,
 }
 
-impl<C: PrivateKey> Info<C> {
-    pub fn new(
-        recipient: C::PublicKey,
-        secret: &x25519_dalek::EphemeralSecret,
-        timestamp: u64,
-    ) -> Self {
+impl<K: PublicKey> Info<K> {
+    pub fn new(recipient: K, secret: &x25519_dalek::EphemeralSecret, timestamp: u64) -> Self {
         Self {
             recipient,
             ephemeral_public_key: x25519::PublicKey::from_secret(secret),
@@ -37,7 +33,7 @@ impl<C: PrivateKey> Info<C> {
     }
 }
 
-impl<C: PrivateKey> Write for Info<C> {
+impl<K: PublicKey> Write for Info<K> {
     fn write(&self, buf: &mut impl BufMut) {
         self.recipient.write(buf);
         self.ephemeral_public_key.write(buf);
@@ -45,11 +41,12 @@ impl<C: PrivateKey> Write for Info<C> {
     }
 }
 
-impl<C: PrivateKey> Read for Info<C> {
+impl<K: PublicKey> Read for Info<K> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let recipient = <C::PublicKey>::read(buf)?;
+        // let recipient = K::read(buf)?;
+        let recipient = K::read(buf)?;
         let ephemeral_public_key = x25519::PublicKey::read(buf)?;
         let timestamp = UInt::read(buf)?.into();
         Ok(Info {
@@ -60,7 +57,7 @@ impl<C: PrivateKey> Read for Info<C> {
     }
 }
 
-impl<C: PrivateKey> EncodeSize for Info<C> {
+impl<K: PublicKey> EncodeSize for Info<K> {
     fn encode_size(&self) -> usize {
         self.recipient.encode_size()
             + self.ephemeral_public_key.encode_size()
@@ -80,7 +77,7 @@ impl<C: PrivateKey> EncodeSize for Info<C> {
 // it should connect to them.
 pub struct Signed<C: PrivateKey> {
     // The handshake info that was signed over
-    info: Info<C>,
+    info: Info<C::PublicKey>,
 
     // The public key of the sender
     signer: C::PublicKey,
@@ -89,8 +86,11 @@ pub struct Signed<C: PrivateKey> {
     signature: C::Signature,
 }
 
-impl<C: PrivateKey> Signed<C> {
-    pub fn sign(crypto: &mut C, namespace: &[u8], info: Info<C>) -> Self {
+impl<C: PrivateKey> Signed<C>
+where
+    C::Signature: Signature<Public = C::PublicKey>,
+{
+    pub fn sign(crypto: &mut C, namespace: &[u8], info: Info<C::PublicKey>) -> Self {
         let signature = crypto.sign(Some(namespace), &info.encode());
         Self {
             info,
@@ -163,7 +163,7 @@ impl<C: PrivateKey> Read for Signed<C> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let info = Info::<C>::read(buf)?;
+        let info = Info::<C::PublicKey>::read(buf)?;
         let signer = C::PublicKey::read(buf)?;
         let signature = C::Signature::read(buf)?;
         Ok(Self {

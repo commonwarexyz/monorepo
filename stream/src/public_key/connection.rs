@@ -128,7 +128,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let msg = handshake::Signed::sign(
             &mut config.crypto,
             &config.namespace,
-            handshake::Info::<C>::new(peer.clone(), &secret, timestamp),
+            handshake::Info::<C::PublicKey>::new(peer.clone(), &secret, timestamp),
         )
         .encode();
 
@@ -207,7 +207,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let msg = handshake::Signed::sign(
             &mut crypto,
             &namespace,
-            handshake::Info::<C>::new(incoming.peer_public_key, &secret, timestamp),
+            handshake::Info::<C::PublicKey>::new(incoming.peer_public_key, &secret, timestamp),
         )
         .encode();
 

@@ -5,7 +5,7 @@
 //! `commonware-cryptography` is **ALPHA** software and is not yet recommended for production use. Developers should
 //! expect breaking changes and occasional instability.
 
-use commonware_codec::{Codec, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Codec, Encode, FixedSize, Read, ReadExt, Write};
 use commonware_utils::Array;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 
@@ -26,7 +26,10 @@ pub mod secp256r1;
 // }
 
 /// A private key, able to derive its public key and sign messages.
-pub trait PrivateKey: Sized + Clone {
+pub trait PrivateKey: Sized + Clone
+where
+    Self::PublicKey: PublicKey<Private = Self, Signature = Self::Signature>,
+{
     /// The corresponding public key type.
     type PublicKey: PublicKey<Private = Self>;
     /// The signature type produced by this keypair.
@@ -48,7 +51,7 @@ pub trait PrivateKey: Sized + Clone {
 }
 
 /// A public key, able to verify signatures.
-pub trait PublicKey: Sized + Clone + From<Self::Private> + Codec + PartialEq {
+pub trait PublicKey: Sized + Clone + From<Self::Private> + ReadExt + Encode + PartialEq {
     /// The private key it came from.
     type Private: PrivateKey<PublicKey = Self>;
     /// The signature type it verifies.
@@ -59,7 +62,7 @@ pub trait PublicKey: Sized + Clone + From<Self::Private> + Codec + PartialEq {
 }
 
 /// A signature over a message by some private key.
-pub trait Signature: Sized + Clone + Codec + PartialEq {
+pub trait Signature: Sized + Clone + ReadExt + Encode + PartialEq {
     /// The public key type that can verify this signature.
     type Public: PublicKey<Signature = Self>;
 }
