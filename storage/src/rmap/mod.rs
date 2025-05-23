@@ -254,15 +254,14 @@ impl RMap {
         self.ranges.iter()
     }
 
-    /// Finds the end of the range containing or preceding `value`, and the start of the
+    /// Finds the end of the range containing `value` and the start of the
     /// range succeeding `value`. This method is useful for identifying gaps around a given point.
     ///
     /// # Behavior
     ///
     /// - If `value` falls within an existing range `[r_start, r_end]`, `current_range_end` will be `Some(r_end)`.
     /// - If `value` falls in a gap between two ranges `[..., prev_end]` and `[next_start, ...]`,
-    ///   `current_range_end` will be `Some(prev_end)` (the end of the range just before the gap where `value` lies),
-    ///   and `next_range_start` will be `Some(next_start)`.
+    ///   `current_range_end` will be `None` and `next_range_start` will be `Some(next_start)`.
     /// - If `value` is before all ranges in the map, `current_range_end` will be `None`.
     /// - If `value` is after all ranges in the map (or within the last range), `next_range_start` will be `None`.
     /// - If the map is empty, both will be `None`.
@@ -274,10 +273,8 @@ impl RMap {
     /// # Returns
     ///
     /// A tuple `(Option<u64>, Option<u64>)` where:
-    /// - The first element (`current_range_end`) is `Some(end)` of the range that contains `value` or is immediately
-    ///   before `value`. It's `None` if `value` is before all ranges or the map is empty.
-    /// - The second element (`next_range_start`) is `Some(start)` of the first range that begins strictly after `value`.
-    ///   It's `None` if no range starts after `value` or the map is empty.
+    /// - The first element (`current_range_end`) is `Some(end)` of the range that contains `value`. It's `None` if `value` is before all ranges, the map is empty, or `value` is not in any range.
+    /// - The second element (`next_range_start`) is `Some(start)` of the first range that begins strictly after `value`. It's `None` if no range starts after `value` or the map is empty.
     ///
     /// # Complexity
     ///
@@ -295,13 +292,17 @@ impl RMap {
     /// assert_eq!(map.next_gap(0), (None, Some(1)));        // Before all ranges
     /// assert_eq!(map.next_gap(1), (Some(2), Some(5)));     // Value is at the start of a range
     /// assert_eq!(map.next_gap(2), (Some(2), Some(5)));     // Value is at the end of a range
-    /// assert_eq!(map.next_gap(3), (Some(2), Some(5)));     // Value is in a gap
+    /// assert_eq!(map.next_gap(3), (None, Some(5)));     // Value is in a gap
     /// assert_eq!(map.next_gap(5), (Some(6), None));        // Value is at the start of the last range
     /// assert_eq!(map.next_gap(6), (Some(6), None));        // Value is at the end of the last range
-    /// assert_eq!(map.next_gap(7), (Some(6), None));        // After all ranges
+    /// assert_eq!(map.next_gap(7), (None, None));        // After all ranges
     /// ```
     pub fn next_gap(&self, value: u64) -> (Option<u64>, Option<u64>) {
-        let current_range_end = self.ranges.range(..=value).next_back().map(|(_, &end)| end);
+        let current_range_end = match self.ranges.range(..=value).next_back().map(|(_, &end)| end) {
+            Some(end) if end >= value => Some(end),
+            _ => None,
+        };
+
         let next_range_start = match value {
             u64::MAX => None,
             _ => self
@@ -778,9 +779,9 @@ mod tests {
         // Sanity check next_gap
         assert_eq!(map.next_gap(0), (None, Some(1)));
         assert_eq!(map.next_gap(1), (Some(1), Some(10)));
-        assert_eq!(map.next_gap(10), (Some(10), Some(14)));
-        assert_eq!(map.next_gap(11), (Some(14), None));
-        assert_eq!(map.next_gap(12), (Some(14), None));
+        assert_eq!(map.next_gap(10), (Some(11), Some(14)));
+        assert_eq!(map.next_gap(11), (Some(11), Some(14)));
+        assert_eq!(map.next_gap(12), (None, Some(14)));
         assert_eq!(map.next_gap(14), (Some(14), None));
     }
 }
