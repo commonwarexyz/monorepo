@@ -49,7 +49,7 @@ mod tests {
     use crate::threshold_simplex::{
         actors::{batcher, resolver},
         mocks,
-        types::{Finalization, Finalize, Notarization, Notarize, Proposal, Voter},
+        types::{Finalization, Finalize, Notarization, Notarize, Proposal, Viewable, Voter},
     };
     use commonware_codec::Encode;
     use commonware_cryptography::{
@@ -462,7 +462,7 @@ mod tests {
                 replay_buffer: 10240,
                 write_buffer: 10240,
             };
-            let (actor, mut mailbox) = Actor::new(context.clone(), voter_config);
+            let (actor, _mailbox) = Actor::new(context.clone(), voter_config);
 
             // Create a dummy resolver mailbox
             let (resolver_sender, mut resolver_receiver) = mpsc::channel(1);
@@ -637,9 +637,23 @@ mod tests {
             .unwrap();
             let notarization_for_floor =
                 Notarization::<MinSig, _>::new(proposal_jft, not_prop_sig, not_seed_sig);
-            mailbox
-                .verified(vec![Voter::Notarization(notarization_for_floor)])
-                .await;
+            let msg = Voter::Notarization(notarization_for_floor).encode().into();
+            peer_recovered_sender
+                .send(Recipients::All, msg, true)
+                .await
+                .expect("failed to send notarization");
+
+            // Wait for resolver to be notified
+            let msg = resolver_receiver
+                .next()
+                .await
+                .expect("failed to receive resolver message");
+            match msg {
+                resolver::Message::Notarized { notarization } => {
+                    assert_eq!(notarization.view(), journal_floor_target);
+                }
+                _ => panic!("unexpected resolver message"),
+            }
 
             // Advance time significantly to ensure main loop runs, processes messages, and calls prune_views
             context.sleep(Duration::from_secs(5)).await;
@@ -649,19 +663,42 @@ mod tests {
             // problematic_view (42) < journal_floor_target (45)
             // interesting(42, false) -> 42 + AT(10) >= LF(50) -> 52 >= 50
             let problematic_view: View = journal_floor_target - 3;
-            let notarize = Notarize::<MinSig, _>::sign(
-                &namespace,
-                &shares[1], // Sign by a different validator for variety
-                Proposal::new(problematic_view, problematic_view - 1, hash(b"test3")),
-            );
-            let msg = Voter::Notarize(notarize).encode().into();
+            let proposal_bft =
+                Proposal::new(problematic_view, problematic_view - 1, hash(b"test3"));
+            let notarization_bft_sigs = shares
+                .iter()
+                .take(threshold as usize)
+                .map(|s| Notarize::<MinSig, _>::sign(&namespace, s, proposal_bft.clone()))
+                .collect::<Vec<_>>();
+            let not_prop_sig = threshold_signature_recover::<MinSig, _>(
+                threshold,
+                notarization_bft_sigs.iter().map(|n| &n.proposal_signature),
+            )
+            .unwrap();
+            let not_seed_sig = threshold_signature_recover::<MinSig, _>(
+                threshold,
+                notarization_bft_sigs.iter().map(|n| &n.seed_signature),
+            )
+            .unwrap();
+            let notarization_for_bft =
+                Notarization::<MinSig, _>::new(proposal_bft, not_prop_sig, not_seed_sig);
+            let msg = Voter::Notarization(notarization_for_bft).encode().into();
             peer_recovered_sender
                 .send(Recipients::All, msg, true)
                 .await
                 .expect("failed to send notarization");
 
-            // Allow some time for the actor to process
-            context.sleep(Duration::from_secs(5)).await;
+            // Wait for resolver to be notified
+            let msg = resolver_receiver
+                .next()
+                .await
+                .expect("failed to receive resolver message");
+            match msg {
+                resolver::Message::Notarized { notarization } => {
+                    assert_eq!(notarization.view(), problematic_view);
+                }
+                _ => panic!("unexpected resolver message"),
+            }
 
             // Send Finalization to new view (100)
             let proposal_lf = Proposal::new(100, 99, hash(b"test4"));
