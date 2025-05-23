@@ -9,4 +9,4 @@
 pub mod dkg;
 pub mod primitives;
 mod scheme;
-pub use scheme::{Bls12381, Bls12381Batch, Signature};
+pub use scheme::Signature;

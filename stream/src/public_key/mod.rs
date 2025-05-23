@@ -62,10 +62,10 @@
 //! bandwidth (no need to send the nonce alongside the encrypted message). This "pedantic" construction of the nonce
 //! also avoids accidental reuse of a nonce over long-lived connections (when setting it to be a small hash as in XChaCha20-Poly1305).
 
-use commonware_cryptography::Scheme;
 use std::time::Duration;
 
 mod connection;
+use commonware_cryptography::PrivateKey;
 pub use connection::{Connection, IncomingConnection, Receiver, Sender};
 mod handshake;
 mod nonce;
@@ -79,7 +79,7 @@ mod x25519;
 /// If this is not synchronized, connections could be unnecessarily dropped,
 /// or messages could be parsed incorrectly.
 #[derive(Clone)]
-pub struct Config<C: Scheme> {
+pub struct Config<C: PrivateKey> {
     /// Cryptographic primitives.
     pub crypto: C,
 

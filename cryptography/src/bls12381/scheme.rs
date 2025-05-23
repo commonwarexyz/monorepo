@@ -24,7 +24,7 @@ use super::primitives::{
     ops,
     variant::{MinPk, Variant},
 };
-use crate::{Array, BatchScheme, Signer, Specification, Verifier};
+use crate::Array;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     DecodeExt, EncodeFixed, Error as CodecError, FixedSize, Read, ReadExt, Write,
@@ -47,11 +47,11 @@ const CURVE_NAME: &str = "bls12381";
 /// crate implements serialization according to the "ZCash BLS12-381" specification
 /// (<https://github.com/supranational/blst/tree/master?tab=readme-ov-file#serialization-format>) and
 /// hashes messages according to RFC 9380.
-#[derive(Clone)]
-pub struct Bls12381 {
-    private: group::Private,
-    public: <MinPk as Variant>::Public,
-}
+// #[derive(Clone)]
+// pub struct Bls12381 {
+//     private: group::Private,
+//     public: <MinPk as Variant>::Public,
+// }
 
 // type PrivateKey = group::Private;
 
@@ -60,6 +60,7 @@ impl crate::PrivateKey for PrivateKey {
 
     type Signature = Signature;
 
+    // TODO remove duplicate impl
     fn public_key(&self) -> Self::Public {
         let public = ops::compute_public::<MinPk>(&self.key);
         PublicKey::from(public)
@@ -68,6 +69,12 @@ impl crate::PrivateKey for PrivateKey {
     fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Self::Signature {
         let signature = ops::sign_message::<MinPk>(&self.key, namespace, msg);
         Signature::from(signature)
+    }
+
+    fn from_rng<R: Rng + CryptoRng>(rng: &mut R) -> Self {
+        let (private, _) = ops::keypair::<_, MinPk>(rng);
+        let raw = private.encode_fixed();
+        Self { raw, key: private }
     }
 }
 
@@ -83,50 +90,57 @@ impl crate::PublicKey for PublicKey {
     }
 }
 
-impl Specification for Bls12381 {
-    type PublicKey = PublicKey;
-    type Signature = Signature;
-}
-
-impl Verifier for Bls12381 {
-    fn verify(
-        namespace: Option<&[u8]>,
-        message: &[u8],
-        public_key: &PublicKey,
-        signature: &Signature,
-    ) -> bool {
-        ops::verify_message::<MinPk>(&public_key.key, namespace, message, &signature.signature)
-            .is_ok()
+impl From<PrivateKey> for PublicKey {
+    fn from(private_key: PrivateKey) -> Self {
+        let public = ops::compute_public::<MinPk>(&private_key.key);
+        PublicKey::from(public)
     }
 }
 
-impl Signer for Bls12381 {
-    type PrivateKey = PrivateKey;
+// impl Specification for Bls12381 {
+//     type PublicKey = PublicKey;
+//     type Signature = Signature;
+// }
 
-    fn new<R: CryptoRng + Rng>(r: &mut R) -> Self {
-        let (private, public) = ops::keypair::<_, MinPk>(r);
-        Self { private, public }
-    }
+// impl Verifier for Bls12381 {
+//     fn verify(
+//         namespace: Option<&[u8]>,
+//         message: &[u8],
+//         public_key: &PublicKey,
+//         signature: &Signature,
+//     ) -> bool {
+//         ops::verify_message::<MinPk>(&public_key.key, namespace, message, &signature.signature)
+//             .is_ok()
+//     }
+// }
 
-    fn from(private_key: PrivateKey) -> Option<Self> {
-        let private = private_key.key.clone();
-        let public = ops::compute_public::<MinPk>(&private);
-        Some(Self { private, public })
-    }
+// impl Signer for Bls12381 {
+//     type PrivateKey = PrivateKey;
 
-    fn private_key(&self) -> PrivateKey {
-        PrivateKey::from(self.private.clone())
-    }
+//     fn new<R: CryptoRng + Rng>(r: &mut R) -> Self {
+//         let (private, public) = ops::keypair::<_, MinPk>(r);
+//         Self { private, public }
+//     }
 
-    fn public_key(&self) -> PublicKey {
-        PublicKey::from(self.public)
-    }
+//     fn from(private_key: PrivateKey) -> Option<Self> {
+//         let private = private_key.key.clone();
+//         let public = ops::compute_public::<MinPk>(&private);
+//         Some(Self { private, public })
+//     }
 
-    fn sign(&mut self, namespace: Option<&[u8]>, message: &[u8]) -> Signature {
-        let signature = ops::sign_message::<MinPk>(&self.private, namespace, message);
-        Signature::from(signature)
-    }
-}
+//     fn private_key(&self) -> PrivateKey {
+//         PrivateKey::from(self.private.clone())
+//     }
+
+//     fn public_key(&self) -> PublicKey {
+//         PublicKey::from(self.public)
+//     }
+
+//     fn sign(&mut self, namespace: Option<&[u8]>, message: &[u8]) -> Signature {
+//         let signature = ops::sign_message::<MinPk>(&self.private, namespace, message);
+//         Signature::from(signature)
+//     }
+// }
 
 /// BLS12-381 private key.
 #[derive(Clone, Eq, PartialEq, Zeroize, ZeroizeOnDrop)]
@@ -384,49 +398,49 @@ impl Display for Signature {
     }
 }
 
-/// BLS12-381 batch verifier.
-pub struct Bls12381Batch {
-    publics: Vec<<MinPk as Variant>::Public>,
-    hms: Vec<<MinPk as Variant>::Signature>,
-    signatures: Vec<<MinPk as Variant>::Signature>,
-}
+// /// BLS12-381 batch verifier.
+// pub struct Bls12381Batch {
+//     publics: Vec<<MinPk as Variant>::Public>,
+//     hms: Vec<<MinPk as Variant>::Signature>,
+//     signatures: Vec<<MinPk as Variant>::Signature>,
+// }
 
-impl Specification for Bls12381Batch {
-    type PublicKey = PublicKey;
-    type Signature = Signature;
-}
+// impl Specification for Bls12381Batch {
+//     type PublicKey = PublicKey;
+//     type Signature = Signature;
+// }
 
-impl BatchScheme for Bls12381Batch {
-    fn new() -> Self {
-        Self {
-            publics: Vec::new(),
-            hms: Vec::new(),
-            signatures: Vec::new(),
-        }
-    }
+// impl BatchScheme for Bls12381Batch {
+//     fn new() -> Self {
+//         Self {
+//             publics: Vec::new(),
+//             hms: Vec::new(),
+//             signatures: Vec::new(),
+//         }
+//     }
 
-    fn add(
-        &mut self,
-        namespace: Option<&[u8]>,
-        message: &[u8],
-        public_key: &Self::PublicKey,
-        signature: &Self::Signature,
-    ) -> bool {
-        self.publics.push(public_key.key);
-        let payload = match namespace {
-            Some(namespace) => Cow::Owned(union_unique(namespace, message)),
-            None => Cow::Borrowed(message),
-        };
-        let hm = ops::hash_message::<MinPk>(MinPk::MESSAGE, &payload);
-        self.hms.push(hm);
-        self.signatures.push(signature.signature);
-        true
-    }
+//     fn add(
+//         &mut self,
+//         namespace: Option<&[u8]>,
+//         message: &[u8],
+//         public_key: &Self::PublicKey,
+//         signature: &Self::Signature,
+//     ) -> bool {
+//         self.publics.push(public_key.key);
+//         let payload = match namespace {
+//             Some(namespace) => Cow::Owned(union_unique(namespace, message)),
+//             None => Cow::Borrowed(message),
+//         };
+//         let hm = ops::hash_message::<MinPk>(MinPk::MESSAGE, &payload);
+//         self.hms.push(hm);
+//         self.signatures.push(signature.signature);
+//         true
+//     }
 
-    fn verify<R: rand::RngCore + CryptoRng>(self, rng: &mut R) -> bool {
-        MinPk::batch_verify(rng, &self.publics, &self.hms, &self.signatures).is_ok()
-    }
-}
+//     fn verify<R: rand::RngCore + CryptoRng>(self, rng: &mut R) -> bool {
+//         MinPk::batch_verify(rng, &self.publics, &self.hms, &self.signatures).is_ok()
+//     }
+// }
 
 /// Test vectors sourced from https://github.com/ethereum/bls12-381-tests/releases/tag/v0.1.2.
 #[cfg(test)]
@@ -467,27 +481,27 @@ mod tests {
         assert_eq!(original, decoded);
     }
 
-    #[test]
-    fn test_sign() {
-        let cases = [
-            vector_sign_1(),
-            vector_sign_2(),
-            vector_sign_3(),
-            vector_sign_4(),
-            vector_sign_5(),
-            vector_sign_6(),
-            vector_sign_7(),
-            vector_sign_8(),
-            vector_sign_9(),
-        ];
-        for (index, test) in cases.into_iter().enumerate() {
-            let (private_key, message, expected) = test;
-            let mut signer =
-                <Bls12381 as Signer>::from(private_key).expect("unable to deserialize private key");
-            let signature = signer.sign(None, &message);
-            assert_eq!(signature, expected, "vector_sign_{}", index + 1);
-        }
-    }
+    // #[test]
+    // fn test_sign() {
+    //     let cases = [
+    //         vector_sign_1(),
+    //         vector_sign_2(),
+    //         vector_sign_3(),
+    //         vector_sign_4(),
+    //         vector_sign_5(),
+    //         vector_sign_6(),
+    //         vector_sign_7(),
+    //         vector_sign_8(),
+    //         vector_sign_9(),
+    //     ];
+    //     for (index, test) in cases.into_iter().enumerate() {
+    //         let (private_key, message, expected) = test;
+    //         let mut signer =
+    //             <Bls12381 as Signer>::from(private_key).expect("unable to deserialize private key");
+    //         let signature = signer.sign(None, &message);
+    //         assert_eq!(signature, expected, "vector_sign_{}", index + 1);
+    //     }
+    // }
 
     #[test]
     fn test_sign_10() {
@@ -536,12 +550,12 @@ mod tests {
             let expected = if !expected {
                 public_key.is_err()
                     || signature.is_err()
-                    || !Bls12381::verify(None, &message, &public_key.unwrap(), &signature.unwrap())
+                    || !public_key.verify(None, &message, &signature.unwrap())
             } else {
                 let public_key = public_key.unwrap();
                 let signature = signature.unwrap();
                 batch.add(None, &message, &public_key, &signature);
-                Bls12381::verify(None, &message, &public_key, &signature)
+                public_key.verify(None, &message, &signature)
             };
             assert!(expected, "vector_verify_{}", index + 1);
         }

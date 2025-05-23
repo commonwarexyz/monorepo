@@ -25,4 +25,4 @@
 
 mod scheme;
 
-pub use scheme::{PrivateKey, PublicKey, Secp256r1, Signature};
+pub use scheme::{PrivateKey, PublicKey, /*Secp256r1,*/ Signature};

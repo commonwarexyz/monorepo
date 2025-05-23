@@ -1,4 +1,4 @@
-use commonware_cryptography::{bls12381::Bls12381Batch, BatchScheme, Bls12381, Signer};
+use commonware_cryptography::{bls12381::Bls12381Batch, BatchScheme};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
 use std::hint::black_box;

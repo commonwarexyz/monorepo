@@ -4,13 +4,13 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
-use commonware_cryptography::Scheme;
+use commonware_cryptography::PrivateKey;
 use commonware_runtime::Clock;
 use commonware_utils::SystemTimeExt;
 use std::time::Duration;
 
 /// Handshake information that is signed over by the sender.
-pub struct Info<C: Scheme> {
+pub struct Info<C: PrivateKey> {
     /// The public key of the recipient.
     recipient: C::PublicKey,
 
@@ -23,7 +23,7 @@ pub struct Info<C: Scheme> {
     timestamp: u64,
 }
 
-impl<C: Scheme> Info<C> {
+impl<C: PrivateKey> Info<C> {
     pub fn new(
         recipient: C::PublicKey,
         secret: &x25519_dalek::EphemeralSecret,
@@ -37,7 +37,7 @@ impl<C: Scheme> Info<C> {
     }
 }
 
-impl<C: Scheme> Write for Info<C> {
+impl<C: PrivateKey> Write for Info<C> {
     fn write(&self, buf: &mut impl BufMut) {
         self.recipient.write(buf);
         self.ephemeral_public_key.write(buf);
@@ -45,7 +45,7 @@ impl<C: Scheme> Write for Info<C> {
     }
 }
 
-impl<C: Scheme> Read for Info<C> {
+impl<C: PrivateKey> Read for Info<C> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -60,7 +60,7 @@ impl<C: Scheme> Read for Info<C> {
     }
 }
 
-impl<C: Scheme> EncodeSize for Info<C> {
+impl<C: PrivateKey> EncodeSize for Info<C> {
     fn encode_size(&self) -> usize {
         self.recipient.encode_size()
             + self.ephemeral_public_key.encode_size()
@@ -78,7 +78,7 @@ impl<C: Scheme> EncodeSize for Info<C> {
 // dialer to sign some random bytes provided by the server but this would
 // require the server to send a message to a peer before authorizing that
 // it should connect to them.
-pub struct Signed<C: Scheme> {
+pub struct Signed<C: PrivateKey> {
     // The handshake info that was signed over
     info: Info<C>,
 
@@ -89,7 +89,7 @@ pub struct Signed<C: Scheme> {
     signature: C::Signature,
 }
 
-impl<C: Scheme> Signed<C> {
+impl<C: PrivateKey> Signed<C> {
     pub fn sign(crypto: &mut C, namespace: &[u8], info: Info<C>) -> Self {
         let signature = crypto.sign(Some(namespace), &info.encode());
         Self {
@@ -153,7 +153,7 @@ impl<C: Scheme> Signed<C> {
     }
 }
 
-impl<C: Scheme> Write for Signed<C> {
+impl<C: PrivateKey> Write for Signed<C> {
     fn write(&self, buf: &mut impl BufMut) {
         self.info.write(buf);
         self.signer.write(buf);
@@ -161,7 +161,7 @@ impl<C: Scheme> Write for Signed<C> {
     }
 }
 
-impl<C: Scheme> Read for Signed<C> {
+impl<C: PrivateKey> Read for Signed<C> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -176,7 +176,7 @@ impl<C: Scheme> Read for Signed<C> {
     }
 }
 
-impl<C: Scheme> EncodeSize for Signed<C> {
+impl<C: PrivateKey> EncodeSize for Signed<C> {
     fn encode_size(&self) -> usize {
         self.info.encode_size() + self.signer.encode_size() + self.signature.encode_size()
     }
@@ -190,7 +190,6 @@ mod tests {
         utils::codec::send_frame,
     };
     use commonware_codec::DecodeExt;
-    use commonware_cryptography::{Ed25519, Signer, Verifier};
     use commonware_runtime::{deterministic, mocks, Metrics, Runner, Spawner};
     use x25519::PublicKey;
 
