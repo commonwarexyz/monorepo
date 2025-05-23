@@ -2,6 +2,7 @@ use super::{Config, Error, Translator};
 use crate::{
     index::Index,
     journal::variable::{Config as JConfig, Journal},
+    rmap::RMap,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Codec, EncodeSize, Read, ReadExt, Write};
@@ -9,7 +10,6 @@ use commonware_runtime::{Metrics, Storage};
 use commonware_utils::Array;
 use futures::{pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use rangemap::RangeInclusiveSet;
 use std::collections::BTreeMap;
 use tracing::{debug, trace};
 
@@ -78,7 +78,7 @@ pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
     // indexes to their locations in the journal.
     keys: Index<T, u64>,
     indices: BTreeMap<u64, Location>,
-    intervals: RangeInclusiveSet<u64>,
+    intervals: RMap,
 
     // Track the number of writes pending for a section to determine when to sync.
     pending_writes: usize,
@@ -113,7 +113,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         // Initialize keys and run corruption check
         let mut indices = BTreeMap::new();
         let mut keys = Index::init(context.with_label("index"), cfg.translator.clone());
-        let mut intervals = RangeInclusiveSet::new();
+        let mut intervals = RMap::new();
         {
             debug!("initializing archive");
             let stream = journal
@@ -132,7 +132,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
                 keys.insert(&data.key, index);
 
                 // Store index in intervals
-                intervals.insert(index..=index);
+                intervals.insert(index);
             }
             debug!(keys = keys.keys(), "archive initialized");
         }
@@ -208,7 +208,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         self.indices.insert(index, Location { offset, len });
 
         // Store interval
-        self.intervals.insert(index..=index);
+        self.intervals.insert(index);
 
         // Insert and prune any useless keys
         self.keys
@@ -346,7 +346,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
 
         // Remove all keys from interval tree less than min
         if min > 0 {
-            self.intervals.remove(0..=min - 1);
+            self.intervals.remove(0, min - 1);
         }
 
         // Update last pruned (to prevent reads from
@@ -380,14 +380,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
     ///
     /// This is useful for driving backfill operations over the archive.
     pub fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
-        // Get end of current range (if exists)
-        let current = self.intervals.get(&index);
-        let current_end = current.map(|range| range.end());
-
-        // Get start of next range (if exists)
-        let next = self.intervals.iter().find(|range| range.start() > &index);
-        let next_start = next.map(|range| range.start());
-        (current_end.copied(), next_start.copied())
+        self.intervals.next_gap(index)
     }
 
     /// Close `Archive` (and underlying `Journal`).
