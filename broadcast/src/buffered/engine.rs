@@ -93,6 +93,7 @@ pub struct Engine<E: Clock + Spawner + Metrics, P: Array, M: Committable + Diges
     /// This is used to limit the number of digests stored per peer.
     /// At most `deque_size` digests are stored per peer. This value is expected to be small, so
     /// membership checks are done in linear time.
+    #[allow(clippy::type_complexity)]
     deques: HashMap<P, VecDeque<Pair<M::Commitment, M::Digest>>>,
 
     /// The number of times each digest (globally unique) exists in one of the deques.
