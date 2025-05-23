@@ -1,5 +1,5 @@
 use criterion::criterion_main;
 
-mod put;
+mod insert;
 
-criterion_main!(put::benches);
+criterion_main!(insert::benches);
