@@ -765,4 +765,22 @@ mod tests {
         assert_eq!(map.next_gap(u64::MAX - 1), (Some(u64::MAX), None));
         assert_eq!(map.next_gap(u64::MAX), (Some(u64::MAX), None));
     }
+
+    #[test]
+    fn test_odd_ranges() {
+        // Insert values
+        let mut map = RMap::new();
+        map.insert(1);
+        map.insert(10);
+        map.insert(11);
+        map.insert(14);
+
+        // Sanity check next_gap
+        assert_eq!(map.next_gap(0), (None, Some(1)));
+        assert_eq!(map.next_gap(1), (Some(1), Some(10)));
+        assert_eq!(map.next_gap(10), (Some(10), Some(14)));
+        assert_eq!(map.next_gap(11), (Some(14), None));
+        assert_eq!(map.next_gap(12), (Some(14), None));
+        assert_eq!(map.next_gap(14), (Some(14), None));
+    }
 }
