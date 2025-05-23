@@ -1507,7 +1507,7 @@ mod tests {
         let encoded = notarize.encode();
         let decoded = Notarize::<ed25519::Signature, Sha256Digest>::decode(encoded).unwrap();
         assert_eq!(notarize, decoded);
-        assert!(decoded.verify::<ed25519::PrivateKey>(NAMESPACE, &scheme.public_key()));
+        assert!(decoded.verify::<ed25519::PublicKey>(NAMESPACE, &scheme.public_key()));
     }
 
     #[test]
@@ -1524,7 +1524,7 @@ mod tests {
             Notarization::<ed25519::Signature, Sha256Digest>::decode_cfg(encoded, &usize::MAX)
                 .unwrap();
         assert_eq!(notarization, decoded);
-        assert!(decoded.verify::<ed25519::PrivateKey>(
+        assert!(decoded.verify::<ed25519::PublicKey>(
             NAMESPACE,
             &[scheme_1.public_key(), scheme_2.public_key()]
         ));
@@ -1714,7 +1714,7 @@ mod tests {
     #[test]
     fn test_notarization_verify_invalid_validator_index() {
         let mut scheme_1 = sample_scheme(0);
-        let mut scheme_2 = sample_scheme(1);
+        let scheme_2 = sample_scheme(1);
         let proposal = Proposal::new(10, 5, sample_digest(1));
 
         // Create notarize with invalid public key index (3, which is out of bounds)

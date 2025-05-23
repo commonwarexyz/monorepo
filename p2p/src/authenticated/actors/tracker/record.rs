@@ -302,7 +302,7 @@ mod tests {
         S::PublicKey: Clone + PartialEq + std::fmt::Debug,
         S::Signature: Clone + PartialEq + std::fmt::Debug,
     {
-        let mut signer = S::from_seed(signer_seed);
+        let signer = S::from_seed(signer_seed);
         let signature = signer.sign(None, &(socket, timestamp).encode());
         PeerInfo {
             socket,

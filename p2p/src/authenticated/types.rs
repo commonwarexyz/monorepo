@@ -252,7 +252,7 @@ mod tests {
 
     fn signed_peer_info() -> PeerInfo<secp256r1::PrivateKey> {
         let mut rng = rand::thread_rng();
-        let mut c = secp256r1::PrivateKey::from_rng(&mut rng);
+        let c = secp256r1::PrivateKey::from_rng(&mut rng);
         PeerInfo {
             socket: SocketAddr::from(([127, 0, 0, 1], 8080)),
             timestamp: 1234567890,

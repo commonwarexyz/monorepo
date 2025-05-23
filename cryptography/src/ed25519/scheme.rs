@@ -409,11 +409,9 @@ impl Display for Signature {
 /// Test vectors sourced from https://datatracker.ietf.org/doc/html/rfc8032#section-7.1.
 #[cfg(test)]
 mod tests {
-    use crate::PublicKey as _;
-
     use super::*;
+    use crate::PublicKey as _;
     use commonware_codec::{DecodeExt, Encode};
-    use rand::rngs::OsRng;
 
     fn test_sign_and_verify(
         private_key: PrivateKey,

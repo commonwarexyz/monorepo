@@ -110,7 +110,7 @@ where
     pub fn verify<E: Clock>(
         &self,
         context: &E,
-        crypto: &C,
+        crypto: &C, // TODO use
         namespace: &[u8],
         synchrony_bound: Duration,
         max_handshake_age: Duration,

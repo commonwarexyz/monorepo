@@ -906,7 +906,7 @@ mod tests {
     }
 
     fn node_encode_decode<V: Variant>() {
-        let mut scheme = sample_scheme(0);
+        let scheme = sample_scheme(0);
         let public_key = scheme.public_key();
         let chunk_namespace = chunk_namespace(NAMESPACE);
 
@@ -1004,7 +1004,7 @@ mod tests {
     }
 
     fn activity_encode_decode<V: Variant>() {
-        let mut scheme = sample_scheme(0);
+        let scheme = sample_scheme(0);
         let public_key = scheme.public_key();
         let chunk_namespace = chunk_namespace(NAMESPACE);
 
@@ -1073,7 +1073,7 @@ mod tests {
 
     #[test]
     fn test_proposal_encode_decode() {
-        let mut scheme = sample_scheme(0);
+        let scheme = sample_scheme(0);
         let public_key = scheme.public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
 
@@ -1288,7 +1288,7 @@ mod tests {
 
     #[test]
     fn test_proposal_verify() {
-        let mut scheme = sample_scheme(0);
+        let scheme = sample_scheme(0);
         let chunk = Chunk::new(scheme.public_key(), 42, sample_digest(1));
 
         // Sign and create proposal
@@ -1356,7 +1356,7 @@ mod tests {
     }
 
     fn node_verify_invalid_signature<V: Variant>() {
-        let mut scheme = sample_scheme(0);
+        let scheme = sample_scheme(0);
         let public_key = scheme.public_key();
         let n = 4;
         let t = quorum(n as u32);
@@ -1397,7 +1397,7 @@ mod tests {
     }
 
     fn node_verify_invalid_parent_signature<V: Variant>() {
-        let mut scheme = sample_scheme(0);
+        let scheme = sample_scheme(0);
         let public_key = scheme.public_key();
 
         // Generate BLS keys for threshold signature verification
@@ -1592,7 +1592,7 @@ mod tests {
 
     #[test]
     fn test_proposal_verify_wrong_namespace() {
-        let mut scheme = sample_scheme(0);
+        let scheme = sample_scheme(0);
         let chunk = Chunk::new(scheme.public_key(), 42, sample_digest(1));
 
         // Sign and create proposal
@@ -1611,7 +1611,7 @@ mod tests {
     #[test]
     fn test_proposal_verify_wrong_sequencer() {
         let scheme1 = sample_scheme(0);
-        let mut scheme2 = sample_scheme(1); // Different key
+        let scheme2 = sample_scheme(1); // Different key
 
         // Create chunk with scheme1's public key
         let chunk = Chunk::new(scheme1.public_key(), 42, sample_digest(1));
