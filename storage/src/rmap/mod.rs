@@ -1,14 +1,16 @@
+//! A collection that manages disjoint, inclusive ranges `[start, end]`.
+//!
+//! # Design
+//!
+//! - Ranges are stored in ascending order of their start points.
+//! - Ranges are disjoint; there are no overlapping ranges.
+//! - Adjacent ranges are merged (e.g., inserting `5` into `[0,4]` and then inserting `4` results in `[0,5]`).
+//! - Each key in the [BTreeMap] represents the inclusive start of a range, and its
+//!   corresponding value represents the inclusive end of that range.
+
 use std::collections::BTreeMap;
 
-/// A collection of disjoint, inclusive ranges `[start, end]`.
-///
-/// # Design
-///
-/// - Ranges are stored in ascending order of their start points.
-/// - Ranges are disjoint; there are no overlapping ranges.
-/// - Adjacent ranges are merged (e.g., inserting `5` into `[0,4]` and then inserting `4` results in `[0,5]`).
-/// - Each key in the [BTreeMap] represents the inclusive start of a range, and its
-///   corresponding value represents the inclusive end of that range.
+/// A collection that manages disjoint, inclusive ranges `[start, end]`.
 #[derive(Debug, Default, PartialEq)]
 pub struct RMap {
     ranges: BTreeMap<u64, u64>,
