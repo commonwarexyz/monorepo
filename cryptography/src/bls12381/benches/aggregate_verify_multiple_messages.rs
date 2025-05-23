@@ -15,7 +15,7 @@ fn benchmark_aggregate_verify_multiple_messages(c: &mut Criterion) {
             .iter()
             .map(|msg| (Some(&namespace[..]), msg.as_ref()))
             .collect::<Vec<_>>();
-        for concurrency in [1, 2, 4, 8].into_iter() {
+        for concurrency in [1, 8].into_iter() {
             c.bench_function(
                 &format!("{}/conc={} msgs={}", module_path!(), concurrency, n,),
                 |b| {
