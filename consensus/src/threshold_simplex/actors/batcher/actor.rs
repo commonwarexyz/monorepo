@@ -2,6 +2,7 @@ use super::{Config, Mailbox, Message};
 use crate::{
     threshold_simplex::{
         actors::voter,
+        metrics::Inbound,
         types::{
             Activity, Attributable, BatchVerifier, ConflictingFinalize, ConflictingNotarize,
             Finalize, Notarize, Nullify, NullifyFinalize, View, Viewable, Voter,
@@ -18,7 +19,7 @@ use commonware_runtime::{
 };
 use commonware_utils::quorum;
 use futures::{channel::mpsc, StreamExt};
-use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
+use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
 use std::{collections::BTreeMap, marker::PhantomData, sync::Arc};
 use tracing::{trace, warn};
 
@@ -45,6 +46,8 @@ struct Round<
     nullifies: Vec<Option<Nullify<V>>>,
     finalizes: Vec<Option<Finalize<V, D>>>,
 
+    inbound_messages: Family<Inbound, Counter>,
+
     _phantom: PhantomData<C>,
 }
 
@@ -62,7 +65,14 @@ impl<
         >,
     > Round<C, B, V, D, R, S>
 {
-    fn new(blocker: B, reporter: R, supervisor: S, view: View, batch: bool) -> Self {
+    fn new(
+        blocker: B,
+        reporter: R,
+        supervisor: S,
+        inbound_messages: Family<Inbound, Counter>,
+        view: View,
+        batch: bool,
+    ) -> Self {
         // Configure quorum params
         let participants = supervisor.participants(view).unwrap().len();
         let quorum = if batch {
@@ -84,6 +94,8 @@ impl<
             nullifies: vec![None; participants],
             finalizes: vec![None; participants],
 
+            inbound_messages,
+
             _phantom: PhantomData,
         }
     }
@@ -99,6 +111,11 @@ impl<
         // Attempt to reserve
         match message {
             Voter::Notarize(notarize) => {
+                // Update metrics
+                self.inbound_messages
+                    .get_or_create(&Inbound::notarize(&sender))
+                    .inc();
+
                 // Verify sender is signer
                 if index != notarize.signer() {
                     warn!(?sender, "blocking peer");
@@ -130,6 +147,11 @@ impl<
                 }
             }
             Voter::Nullify(nullify) => {
+                // Update metrics
+                self.inbound_messages
+                    .get_or_create(&Inbound::nullify(&sender))
+                    .inc();
+
                 // Verify sender is signer
                 if index != nullify.signer() {
                     warn!(?sender, "blocking peer");
@@ -168,6 +190,11 @@ impl<
                 }
             }
             Voter::Finalize(finalize) => {
+                // Update metrics
+                self.inbound_messages
+                    .get_or_create(&Inbound::finalize(&sender))
+                    .inc();
+
                 // Verify sender is signer
                 if index != finalize.signer() {
                     warn!(?sender, "blocking peer");
@@ -324,6 +351,7 @@ pub struct Actor<
 
     added: Counter,
     verified: Counter,
+    inbound_messages: Family<Inbound, Counter>,
     batch_size: Histogram,
     verify_latency: histogram::Timed<E>,
 
@@ -348,6 +376,7 @@ impl<
     pub fn new(context: E, cfg: Config<B, R, S>) -> (Self, Mailbox<C::PublicKey, V, D>) {
         let added = Counter::default();
         let verified = Counter::default();
+        let inbound_messages = Family::<Inbound, Counter>::default();
         let batch_size =
             Histogram::new([1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0].into_iter());
         context.register(
@@ -356,6 +385,11 @@ impl<
             added.clone(),
         );
         context.register("verified", "number of messages verified", verified.clone());
+        context.register(
+            "inbound_messages",
+            "number of inbound messages",
+            inbound_messages.clone(),
+        );
         context.register(
             "batch_size",
             "number of messages in a partial signature verification batch",
@@ -383,6 +417,7 @@ impl<
 
                 added,
                 verified,
+                inbound_messages,
                 batch_size,
                 verify_latency: histogram::Timed::new(verify_latency, Arc::new(context)),
                 _phantom: PhantomData,
@@ -428,7 +463,7 @@ impl<
                             finalized = new_finalized;
                             let leader_index = self.supervisor.is_participant(current, &leader).unwrap();
                             work.entry(current)
-                                .or_insert(Round::new(self.blocker.clone(), self.reporter.clone(), self.supervisor.clone(), current, initialized))
+                                .or_insert(Round::new(self.blocker.clone(), self.reporter.clone(), self.supervisor.clone(), self.inbound_messages.clone(), current, initialized))
                                 .set_leader(leader_index);
                             initialized = true;
 
@@ -470,7 +505,7 @@ impl<
 
                             // Add the message to the verifier
                             work.entry(view).or_insert(
-                                Round::new(self.blocker.clone(), self.reporter.clone(), self.supervisor.clone(), view, initialized)
+                                Round::new(self.blocker.clone(), self.reporter.clone(), self.supervisor.clone(), self.inbound_messages.clone(), view, initialized)
                             ).add_constructed(message).await;
                             self.added.inc();
                         }
@@ -500,7 +535,7 @@ impl<
 
                     // Add the message to the verifier
                     let added = work.entry(view).or_insert(
-                        Round::new(self.blocker.clone(), self.reporter.clone(), self.supervisor.clone(), view, initialized)
+                        Round::new(self.blocker.clone(), self.reporter.clone(), self.supervisor.clone(), self.inbound_messages.clone(), view, initialized)
                     ).add(sender, message).await;
                     if added {
                         self.added.inc();

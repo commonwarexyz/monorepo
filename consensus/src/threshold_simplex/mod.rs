@@ -173,6 +173,7 @@ cfg_if::cfg_if! {
         pub use config::Config;
         mod engine;
         pub use engine::Engine;
+        mod metrics;
     }
 }
 
