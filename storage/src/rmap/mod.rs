@@ -1,17 +1,59 @@
 use std::collections::BTreeMap;
 
+/// A collection of disjoint, inclusive ranges `[start, end]`.
+///
+/// # Design
+///
+/// - Ranges are stored in ascending order of their start points.
+/// - Ranges are disjoint; there are no overlapping ranges.
+/// - Adjacent ranges are merged (e.g., inserting `5` into `[0,4]` and then inserting `4` results in `[0,5]`).
+/// - Each key in the [BTreeMap] represents the inclusive start of a range, and its
+///   corresponding value represents the inclusive end of that range.
 #[derive(Debug, Default, PartialEq)]
 pub struct RMap {
     ranges: BTreeMap<u64, u64>,
 }
 
 impl RMap {
+    /// Creates a new, empty [RMap].
     pub fn new() -> Self {
         Self {
             ranges: BTreeMap::new(),
         }
     }
 
+    /// Inserts a value into the [RMap].
+    ///
+    /// # Behavior
+    ///
+    /// - Create a new range `[value, value]` if `value` is isolated.
+    /// - Extend an existing range if `value` is adjacent to it (e.g., inserting `5` into `[1, 4]` results in `[1, 5]`).
+    /// - Merge two ranges if `value` bridges them (e.g., inserting `3` into a map with `[1, 2]` and `[4, 5]` results in `[1, 5]`).
+    /// - Do nothing if `value` is already covered by an existing range.
+    ///
+    /// # Complexity
+    ///
+    /// The time complexity is typically O(log N) due to `BTreeMap` lookups and insertions,
+    /// where N is the number of disjoint ranges in the map. In scenarios involving merges,
+    /// a few extra map operations (removals, insertions) might occur, but the overall
+    /// complexity remains logarithmic.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use commonware_storage::rmap::RMap;
+    ///
+    /// let mut map = RMap::new();
+    /// map.insert(1); // Map: [1, 1]
+    /// assert_eq!(map.next_gap(0), (None, Some(1)));
+    /// map.insert(3); // Map: [1, 1], [3, 3]
+    /// assert_eq!(map.next_gap(1), (Some(1), Some(3)));
+    /// map.insert(2); // Map: [1, 3]
+    /// map.insert(0); // Map: [0, 3]
+    /// map.insert(5); // Map: [0, 3], [5, 5]
+    /// map.insert(4); // Map: [0, 5]
+    /// assert_eq!(map.get(&3), Some((0, 5)));
+    /// ```
     pub fn insert(&mut self, value: u64) {
         let prev_opt = self
             .ranges
@@ -75,6 +117,7 @@ impl RMap {
         }
     }
 
+    /// Returns the range that contains the given value.
     pub fn get(&self, value: &u64) -> Option<(u64, u64)> {
         if let Some((&start, &end)) = self.ranges.range(..=value).next_back() {
             if *value <= end {
@@ -84,6 +127,40 @@ impl RMap {
         None
     }
 
+    /// Removes a range `[start, end]` (inclusive) from the [RMap].
+    ///
+    /// # Behavior
+    ///
+    /// - If the removal range completely covers an existing range, the existing range is removed.
+    /// - If the removal range is a sub-range of an existing range, the existing range may be split
+    ///   into two (e.g., removing `[3, 4]` from `[1, 6]` results in `[1, 2]` and `[5, 6]`).
+    /// - If the removal range overlaps with the start or end of an existing range, the existing
+    ///   range is truncated (e.g., removing `[1, 2]` from `[1, 5]` results in `[3, 5]`).
+    /// - If the removal range covers multiple existing ranges, all such ranges are affected or removed.
+    /// - If `start > end`, the method does nothing.
+    /// - If the removal range does not overlap with any existing range, the map remains unchanged.
+    ///
+    /// # Complexity
+    ///
+    /// The time complexity is O(M + K log N), where N is the total number of ranges in the map,
+    /// M is the number of ranges that overlap with the removal range (iterate part), and K is the number of
+    /// new ranges created or ranges removed (at most 2 additions and M removals).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use commonware_storage::rmap::RMap;
+    ///
+    /// let mut map = RMap::new();
+    /// map.insert(1); map.insert(2); map.insert(3); // Map: [1, 3]
+    /// map.insert(5); map.insert(6); map.insert(7); // Map: [1, 3], [5, 7]
+    ///
+    /// map.remove(2, 6); // Results in [1, 1], [7, 7]
+    /// assert_eq!(map.get(&1), Some((1, 1)));
+    /// assert_eq!(map.get(&2), None);
+    /// assert_eq!(map.get(&6), None);
+    /// assert_eq!(map.get(&7), Some((7, 7)));
+    /// ```
     pub fn remove(&mut self, start: u64, end: u64) {
         if start > end {
             return;
@@ -92,6 +169,11 @@ impl RMap {
         let mut to_add = Vec::new();
         let mut to_remove = Vec::new();
 
+        // Iterate over ranges that could possibly overlap with the removal range `[start, end]`.
+        // A range (r_start, r_end) overlaps if r_start <= end AND r_end >= start.
+        // We optimize the BTreeMap iteration by only looking at ranges whose start (r_start)
+        // is less than or equal to the `end` of the removal range. If r_start > end,
+        // then (r_start, r_end) cannot overlap with [start, end].
         for (&r_start, &r_end) in self.ranges.iter() {
             // Case 1: No overlap
             if r_end < start || r_start > end {
