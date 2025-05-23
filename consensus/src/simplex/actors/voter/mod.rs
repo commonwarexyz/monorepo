@@ -53,7 +53,7 @@ mod tests {
         simulated::{Config as NConfig, Link, Network},
         Receiver, Recipients, Sender,
     };
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
+    use commonware_runtime::{deterministic, Metrics, Runner, Spawner};
     use commonware_utils::quorum;
     use futures::{channel::mpsc, StreamExt};
     use std::time::Duration;
@@ -444,9 +444,6 @@ mod tests {
                 _ => panic!("unexpected backfiller message"),
             }
 
-            // Advance time significantly to ensure main loop runs, processes messages, and calls prune_views
-            context.sleep(Duration::from_secs(5)).await;
-
             // Send notarization below oldest interesting view (42)
             //
             // problematic_view (42) < journal_floor_target (45)
@@ -477,9 +474,6 @@ mod tests {
                 }
                 _ => panic!("unexpected backfiller message"),
             }
-
-            // Allow some time for the actor to process
-            context.sleep(Duration::from_secs(5)).await;
 
             // Send finalization over network (view 100)
             let proposal = Proposal::new(100, 99, hash(b"test"));
