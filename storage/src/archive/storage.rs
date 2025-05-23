@@ -2,6 +2,7 @@ use super::{Config, Error, Translator};
 use crate::{
     index::Index,
     journal::variable::{Config as JConfig, Journal},
+    rmap::RMap,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Codec, EncodeSize, Read, ReadExt, Write};
@@ -35,160 +36,6 @@ impl<K: Array, V: Codec> Record<K, V> {
     /// Create a new `Record`.
     fn new(index: u64, key: K, value: V) -> Self {
         Self { index, key, value }
-    }
-}
-
-#[derive(Debug, Default, PartialEq)]
-pub struct RangeMap {
-    ranges: BTreeMap<u64, u64>,
-}
-
-impl RangeMap {
-    pub fn new() -> Self {
-        Self {
-            ranges: BTreeMap::new(),
-        }
-    }
-
-    pub fn insert(&mut self, value: u64) {
-        let mut prev_opt = self.ranges.range(..=value).next_back().map(|(&s, &e)| (s, e));
-        let mut next_opt = self.ranges.range(value + 1..).next().map(|(&s, &e)| (s, e));
-
-        match (prev_opt, next_opt) {
-            (Some((p_start, p_end)), Some((n_start, n_end))) => {
-                if value <= p_end {
-                    // Value is within prev range
-                    return;
-                }
-                if value == p_end + 1 && value + 1 == n_start {
-                    // Value bridges prev and next
-                    self.ranges.remove(&p_start);
-                    self.ranges.remove(&n_start);
-                    self.ranges.insert(p_start, n_end);
-                } else if value == p_end + 1 {
-                    // Value is adjacent to prev's end
-                    self.ranges.remove(&p_start);
-                    self.ranges.insert(p_start, value);
-                } else if value + 1 == n_start {
-                    // Value is adjacent to next's start
-                    self.ranges.remove(&n_start);
-                    self.ranges.insert(value, n_end);
-                } else {
-                    // New isolated range
-                    self.ranges.insert(value, value);
-                }
-            }
-            (Some((p_start, p_end)), None) => {
-                if value <= p_end {
-                    // Value is within prev range
-                    return;
-                }
-                if value == p_end + 1 {
-                    // Value is adjacent to prev's end
-                    self.ranges.remove(&p_start);
-                    self.ranges.insert(p_start, value);
-                } else {
-                    // New isolated range
-                    self.ranges.insert(value, value);
-                }
-            }
-            (None, Some((n_start, n_end))) => {
-                if value + 1 == n_start {
-                    // Value is adjacent to next's start
-                    self.ranges.remove(&n_start);
-                    self.ranges.insert(value, n_end);
-                } else {
-                    // New isolated range
-                    self.ranges.insert(value, value);
-                }
-            }
-            (None, None) => {
-                // Map is empty or value is isolated
-                self.ranges.insert(value, value);
-            }
-        }
-    }
-
-    pub fn get(&self, value: &u64) -> Option<(u64, u64)> {
-        if let Some((&start, &end)) = self.ranges.range(..=value).next_back() {
-            if *value <= end {
-                return Some((start, end));
-            }
-        }
-        None
-    }
-
-    pub fn remove(&mut self, start: u64, end: u64) {
-        if start > end {
-            return;
-        }
-
-        let mut to_add = Vec::new();
-        let mut to_remove = Vec::new();
-
-        for (&r_start, &r_end) in self.ranges.iter() {
-            // Case 1: No overlap
-            if r_end < start || r_start > end {
-                continue;
-            }
-
-            // Case 2: Removal range completely covers current range
-            if start <= r_start && end >= r_end {
-                to_remove.push(r_start);
-                continue;
-            }
-
-            // Case 3: Current range completely covers removal range (split)
-            if r_start < start && r_end > end {
-                to_remove.push(r_start);
-                to_add.push((r_start, start - 1));
-                to_add.push((end + 1, r_end));
-                continue;
-            }
-
-            // Case 4: Removal range overlaps start of current range
-            if start <= r_start && end < r_end { // and end >= r_start implied by not Case 1
-                to_remove.push(r_start);
-                to_add.push((end + 1, r_end));
-                continue;
-            }
-
-            // Case 5: Removal range overlaps end of current range
-            if start > r_start && end >= r_end { // and start <= r_end implied by not Case 1
-                to_remove.push(r_start);
-                to_add.push((r_start, start - 1));
-                continue;
-            }
-        }
-
-        for r_start in to_remove {
-            self.ranges.remove(&r_start);
-        }
-        for (a_start, a_end) in to_add {
-            if a_start <= a_end { // Ensure valid range before adding
-                 self.ranges.insert(a_start, a_end);
-            }
-        }
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (&u64, &u64)> {
-        self.ranges.iter()
-    }
-
-    pub fn next_gap(&self, value: u64) -> (Option<u64>, Option<u64>) {
-        let current_range_end = self
-            .ranges
-            .range(..=value)
-            .next_back()
-            .map(|(_, &end)| end);
-
-        let next_range_start = self
-            .ranges
-            .range(value + 1..)
-            .next()
-            .map(|(&start, _)| start);
-            
-        (current_range_end, next_range_start)
     }
 }
 
@@ -231,7 +78,7 @@ pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
     // indexes to their locations in the journal.
     keys: Index<T, u64>,
     indices: BTreeMap<u64, Location>,
-    intervals: RangeMap,
+    intervals: RMap,
 
     // Track the number of writes pending for a section to determine when to sync.
     pending_writes: usize,
@@ -266,7 +113,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         // Initialize keys and run corruption check
         let mut indices = BTreeMap::new();
         let mut keys = Index::init(context.with_label("index"), cfg.translator.clone());
-        let mut intervals = RangeMap::new();
+        let mut intervals = RMap::new();
         {
             debug!("initializing archive");
             let stream = journal
