@@ -1010,3 +1010,396 @@ mod tests {
         });
     }
 }
+
+#[cfg(test)]
+mod range_map_tests {
+    use super::storage::RangeMap;
+    // BTreeMap is not directly used in every test but useful for expected values
+    #[allow(unused_imports)] 
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn test_new() {
+        let map = RangeMap::new();
+        assert_eq!(map.iter().count(), 0);
+    }
+
+    #[test]
+    fn test_insert_empty() {
+        let mut map = RangeMap::new();
+        map.insert(5);
+        assert_eq!(map.get(&5), Some((5, 5)));
+        assert_eq!(map.iter().collect::<Vec<_>>(), vec![(&5, &5)]);
+    }
+
+    #[test]
+    fn test_insert_isolated() {
+        let mut map = RangeMap::new();
+        map.insert(5);
+        map.insert(10);
+        assert_eq!(map.get(&5), Some((5, 5)));
+        assert_eq!(map.get(&10), Some((10, 10)));
+        assert_eq!(map.iter().collect::<Vec<_>>(), vec![(&5, &5), (&10, &10)]);
+    }
+
+    #[test]
+    fn test_insert_covered() {
+        let mut map = RangeMap::new();
+        map.insert(1);
+        map.insert(2);
+        map.insert(3); // Range is 1-3
+        map.insert(2); // Insert value already covered
+        assert_eq!(map.get(&1), Some((1, 3)));
+        assert_eq!(map.get(&2), Some((1, 3)));
+        assert_eq!(map.get(&3), Some((1, 3)));
+        assert_eq!(map.iter().count(), 1);
+        assert_eq!(map.iter().next(), Some((&1, &3)));
+    }
+
+    #[test]
+    fn test_insert_adjacent_end() {
+        let mut map = RangeMap::new();
+        map.insert(1);
+        map.insert(2); // Range is 1-2
+        map.insert(3); // Adjacent to end
+        assert_eq!(map.get(&1), Some((1, 3)));
+        assert_eq!(map.get(&3), Some((1, 3)));
+        assert_eq!(map.iter().next(), Some((&1, &3)));
+    }
+
+    #[test]
+    fn test_insert_adjacent_start() {
+        let mut map = RangeMap::new();
+        map.insert(2);
+        map.insert(3); // Range is 2-3
+        map.insert(1); // Adjacent to start
+        assert_eq!(map.get(&1), Some((1, 3)));
+        assert_eq!(map.get(&3), Some((1, 3)));
+        assert_eq!(map.iter().next(), Some((&1, &3)));
+    }
+
+    #[test]
+    fn test_insert_bridge_ranges() {
+        let mut map = RangeMap::new();
+        map.insert(1); 
+        map.insert(2); 
+        assert_eq!(map.get(&1), Some((1,2)));
+        map.insert(5); 
+        map.insert(6); 
+        assert_eq!(map.get(&5), Some((5,6)));
+                       // Current: (1,2), (5,6)
+        map.insert(3); // Insert 3, should become (1,3), (5,6)
+        assert_eq!(map.get(&1), Some((1, 3)));
+        assert_eq!(map.get(&2), Some((1, 3)));
+        assert_eq!(map.get(&3), Some((1, 3)));
+        assert_eq!(map.get(&5), Some((5, 6)));
+        assert_eq!(map.iter().collect::<Vec<_>>(), vec![(&1, &3), (&5, &6)]);
+        
+        map.insert(4); // Insert 4, should bridge to (1,6)
+        assert_eq!(map.get(&1), Some((1, 6)));
+        assert_eq!(map.get(&3), Some((1, 6)));
+        assert_eq!(map.get(&4), Some((1, 6)));
+        assert_eq!(map.get(&6), Some((1, 6)));
+        assert_eq!(map.iter().count(), 1);
+        assert_eq!(map.iter().next(), Some((&1, &6)));
+    }
+    
+    #[test]
+    fn test_insert_complex_merging_and_ordering() {
+        let mut map = RangeMap::new();
+        map.insert(10); // (10,10)
+        map.insert(12); // (10,10), (12,12)
+        map.insert(11); // (10,12)
+        assert_eq!(map.get(&10), Some((10,12)));
+        assert_eq!(map.get(&11), Some((10,12)));
+        assert_eq!(map.get(&12), Some((10,12)));
+
+        map.insert(15); // (10,12), (15,15)
+        map.insert(13); // (10,13), (15,15)
+        assert_eq!(map.get(&13), Some((10,13)));
+        assert_eq!(map.get(&12), Some((10,13)));
+        assert_eq!(map.get(&15), Some((15,15)));
+        
+        map.insert(14); // (10,15)
+        assert_eq!(map.get(&10), Some((10,15)));
+        assert_eq!(map.get(&14), Some((10,15)));
+        assert_eq!(map.get(&15), Some((10,15)));
+        assert_eq!(map.iter().count(), 1);
+        assert_eq!(map.iter().next(), Some((&10, &15)));
+
+        map.insert(5); // (5,5), (10,15)
+        map.insert(7); // (5,5), (7,7), (10,15)
+        map.insert(6); // (5,7), (10,15)
+        assert_eq!(map.get(&5), Some((5,7)));
+        assert_eq!(map.get(&6), Some((5,7)));
+        assert_eq!(map.get(&7), Some((5,7)));
+        assert_eq!(map.iter().collect::<Vec<_>>(), vec![(&5,&7),(&10,&15)]);
+
+        map.insert(9); // (5,7), (9,9), (10,15) -> should become (5,7), (9,15)
+        assert_eq!(map.get(&9), Some((9,15)));
+        assert_eq!(map.get(&10), Some((9,15)));
+        assert_eq!(map.iter().collect::<Vec<_>>(), vec![(&5,&7),(&9,&15)]);
+        
+        map.insert(8); // (5,15)
+        assert_eq!(map.get(&5), Some((5,15)));
+        assert_eq!(map.get(&8), Some((5,15)));
+        assert_eq!(map.get(&15), Some((5,15)));
+        assert_eq!(map.iter().next(), Some((&5, &15)));
+    }
+
+    #[test]
+    fn test_insert_max_value() {
+        let mut map = RangeMap::new();
+        map.insert(u64::MAX);
+        assert_eq!(map.get(&u64::MAX), Some((u64::MAX, u64::MAX)));
+        map.insert(u64::MAX - 1);
+        assert_eq!(map.get(&(u64::MAX -1)), Some((u64::MAX - 1, u64::MAX)));
+        assert_eq!(map.get(&u64::MAX), Some((u64::MAX - 1, u64::MAX)));
+    }
+
+    #[test]
+    fn test_get() {
+        let mut map = RangeMap::new();
+        map.insert(1); map.insert(2); map.insert(3); // Range 1-3
+        map.insert(5); map.insert(6); // Range 5-6
+
+        assert_eq!(map.get(&1), Some((1, 3)));
+        assert_eq!(map.get(&2), Some((1, 3)));
+        assert_eq!(map.get(&3), Some((1, 3)));
+        assert_eq!(map.get(&4), None);
+        assert_eq!(map.get(&5), Some((5, 6)));
+        assert_eq!(map.get(&6), Some((5, 6)));
+        assert_eq!(map.get(&0), None);
+        assert_eq!(map.get(&7), None);
+    }
+
+    #[test]
+    fn test_remove_empty() {
+        let mut map = RangeMap::new();
+        map.remove(1, 5);
+        assert_eq!(map.iter().count(), 0);
+    }
+
+    #[test]
+    fn test_remove_invalid_range() {
+        let mut map = RangeMap::new();
+        map.insert(1); map.insert(2); // 1-2
+        map.remove(5, 1); // start > end, should do nothing
+        assert_eq!(map.iter().next(), Some((&1,&2)));
+    }
+
+    #[test]
+    fn test_remove_non_existent() {
+        let mut map = RangeMap::new();
+        map.insert(5); map.insert(6); // 5-6
+        map.remove(1, 3); // Before existing
+        assert_eq!(map.iter().next(), Some((&5, &6)));
+        map.remove(8, 10); // After existing
+        assert_eq!(map.iter().next(), Some((&5, &6)));
+        map.remove(1,10); // Covers existing
+        assert_eq!(map.iter().count(), 0);
+    }
+    
+    #[test]
+    fn test_remove_exact_match() {
+        let mut map = RangeMap::new();
+        map.insert(1); map.insert(2); map.insert(3); // 1-3
+        map.insert(5); map.insert(6); // 5-6
+        map.remove(1, 3);
+        assert_eq!(map.get(&2), None);
+        assert_eq!(map.iter().next(), Some((&5, &6)));
+        map.remove(5,6);
+        assert_eq!(map.iter().count(), 0);
+    }
+
+    #[test]
+    fn test_remove_subset_split() {
+        let mut map = RangeMap::new();
+        map.insert(1); map.insert(2); map.insert(3); map.insert(4); map.insert(5); // 1-5
+        map.remove(3, 3); // Remove 3 from 1-5 -> (1,2), (4,5)
+        assert_eq!(map.get(&2), Some((1, 2)));
+        assert_eq!(map.get(&3), None);
+        assert_eq!(map.get(&4), Some((4, 5)));
+        assert_eq!(map.iter().collect::<Vec<_>>(), vec![(&1, &2), (&4, &5)]);
+
+        // Reset and test another split
+        let mut map2 = RangeMap::new();
+        map2.insert(1); map2.insert(2); map2.insert(3); map2.insert(4); map2.insert(5); // 1-5
+        map2.remove(2,4); // Remove 2-4 from 1-5 -> (1,1), (5,5)
+        assert_eq!(map2.get(&1), Some((1,1)));
+        assert_eq!(map2.get(&2), None);
+        assert_eq!(map2.get(&3), None);
+        assert_eq!(map2.get(&4), None);
+        assert_eq!(map2.get(&5), Some((5,5)));
+        assert_eq!(map2.iter().collect::<Vec<_>>(), vec![(&1, &1), (&5, &5)]);
+    }
+
+    #[test]
+    fn test_remove_overlap_start() {
+        let mut map = RangeMap::new();
+        map.insert(1); map.insert(2); map.insert(3); map.insert(4); map.insert(5); // 1-5
+        map.remove(0, 2); // Remove 0-2 from 1-5 -> (3,5)
+        assert_eq!(map.get(&1), None);
+        assert_eq!(map.get(&2), None);
+        assert_eq!(map.get(&3), Some((3,5)));
+        assert_eq!(map.iter().next(), Some((&3, &5)));
+    }
+
+    #[test]
+    fn test_remove_overlap_end() {
+        let mut map = RangeMap::new();
+        map.insert(1); map.insert(2); map.insert(3); map.insert(4); map.insert(5); // 1-5
+        map.remove(4, 6); // Remove 4-6 from 1-5 -> (1,3)
+        assert_eq!(map.get(&3), Some((1,3)));
+        assert_eq!(map.get(&4), None);
+        assert_eq!(map.get(&5), None);
+        assert_eq!(map.iter().next(), Some((&1, &3)));
+    }
+
+    #[test]
+    fn test_remove_cover_multiple_ranges() {
+        let mut map = RangeMap::new();
+        map.insert(1); map.insert(2); // 1-2
+        map.insert(4); map.insert(5); // 4-5
+        map.insert(7); map.insert(8); // 7-8
+        
+        map.remove(3, 6); // Removes 4-5, no truncation as 3 and 6 are in gaps. (1,2), (7,8)
+        assert_eq!(map.get(&2), Some((1,2)));
+        assert_eq!(map.get(&4), None);
+        assert_eq!(map.get(&5), None);
+        assert_eq!(map.get(&7), Some((7,8)));
+        assert_eq!(map.iter().collect::<Vec<_>>(), vec![(&1,&2), (&7,&8)]);
+
+        map.remove(0,10); // Removes all remaining ranges
+        assert_eq!(map.iter().count(), 0);
+    }
+
+    #[test]
+    fn test_remove_partial_overlap_multiple_ranges() {
+        let mut map = RangeMap::new();
+        map.insert(1); map.insert(2); map.insert(3);       // 1-3
+        map.insert(5); map.insert(6); map.insert(7);       // 5-7
+        map.insert(9); map.insert(10); map.insert(11);    // 9-11
+
+        map.remove(2, 6); // Affects 1-3 (becomes 1-1) and 5-7 (becomes 7-7)
+        assert_eq!(map.get(&1), Some((1,1)));
+        assert_eq!(map.get(&2), None);
+        assert_eq!(map.get(&3), None);
+        assert_eq!(map.get(&5), None);
+        assert_eq!(map.get(&6), None);
+        assert_eq!(map.get(&7), Some((7,7)));
+        assert_eq!(map.get(&9), Some((9,11)));
+        assert_eq!(map.iter().collect::<Vec<_>>(), vec![(&1,&1), (&7,&7), (&9,&11)]);
+        
+        // Reset and test removing all
+        let mut map2 = RangeMap::new();
+        map2.insert(1); map2.insert(2); map2.insert(3); 
+        map2.insert(5); map2.insert(6); map2.insert(7); 
+        map2.insert(9); map2.insert(10); map2.insert(11);
+        map2.remove(0, 20); // remove all
+        assert_eq!(map2.iter().count(), 0);
+    }
+    
+    #[test]
+    fn test_remove_touching_boundaries_no_merge() {
+        let mut map = RangeMap::new();
+        map.insert(0); map.insert(1); map.insert(2); // 0-2
+        map.insert(4); map.insert(5); // 4-5
+
+        // Remove range that is exactly between two existing ranges
+        map.remove(3,3); 
+        assert_eq!(map.iter().collect::<Vec<_>>(), vec![(&0,&2), (&4,&5)]);
+    }
+
+    #[test]
+    fn test_remove_max_value_ranges() {
+        let mut map = RangeMap::new();
+        map.insert(u64::MAX - 2); 
+        map.insert(u64::MAX - 1);
+        map.insert(u64::MAX); // MAX-2 to MAX
+        
+        map.remove(u64::MAX, u64::MAX); // Remove MAX -> (MAX-2, MAX-1)
+        assert_eq!(map.get(&(u64::MAX-2)), Some((u64::MAX-2, u64::MAX-1)));
+        assert_eq!(map.get(&u64::MAX), None);
+
+        map.remove(u64::MAX - 2, u64::MAX - 2); // Remove MAX-2 -> (MAX-1, MAX-1)
+        assert_eq!(map.get(&(u64::MAX-2)), None);
+        assert_eq!(map.get(&(u64::MAX-1)), Some((u64::MAX-1, u64::MAX-1)));
+
+        map.remove(u64::MAX - 1, u64::MAX -1); // Remove MAX-1 -> empty
+        assert_eq!(map.iter().count(), 0);
+
+        map.insert(u64::MAX-1);
+        map.insert(u64::MAX); // MAX-1 to MAX
+        map.remove(u64::MIN, u64::MAX); // Remove all
+        assert_eq!(map.iter().count(), 0);
+    }
+
+
+    #[test]
+    fn test_iter() {
+        let mut map = RangeMap::new();
+        assert_eq!(map.iter().next(), None);
+        map.insert(5); map.insert(6); // 5-6
+        map.insert(1); map.insert(2); // 1-2
+        let mut iter = map.iter();
+        assert_eq!(iter.next(), Some((&1, &2)));
+        assert_eq!(iter.next(), Some((&5, &6)));
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_next_gap_empty() {
+        let map = RangeMap::new();
+        assert_eq!(map.next_gap(5), (None, None));
+    }
+
+    #[test]
+    fn test_next_gap_single_range() {
+        let mut map = RangeMap::new();
+        map.insert(5); map.insert(6); map.insert(7); // 5-7
+        assert_eq!(map.next_gap(4), (None, Some(5)));         // Before range
+        assert_eq!(map.next_gap(5), (Some(7), None));         // Start of range
+        assert_eq!(map.next_gap(6), (Some(7), None));         // Middle of range
+        assert_eq!(map.next_gap(7), (Some(7), None));         // End of range
+        assert_eq!(map.next_gap(8), (Some(7), None));         // After range
+    }
+
+    #[test]
+    fn test_next_gap_multiple_ranges() {
+        let mut map = RangeMap::new();
+        map.insert(1); map.insert(2); // 1-2
+        map.insert(5); map.insert(6); // 5-6
+        map.insert(10);               // 10-10
+
+        assert_eq!(map.next_gap(0), (None, Some(1)));         // Before all
+        assert_eq!(map.next_gap(1), (Some(2), Some(5)));      // Start of first range
+        assert_eq!(map.next_gap(2), (Some(2), Some(5)));      // End of first range
+        assert_eq!(map.next_gap(3), (Some(2), Some(5)));      // Gap between 1st and 2nd
+        assert_eq!(map.next_gap(4), (Some(2), Some(5)));      // Gap, closer to 2nd
+        assert_eq!(map.next_gap(5), (Some(6), Some(10)));     // Start of 2nd range
+        assert_eq!(map.next_gap(6), (Some(6), Some(10)));     // End of 2nd range
+        assert_eq!(map.next_gap(7), (Some(6), Some(10)));     // Gap between 2nd and 3rd
+        assert_eq!(map.next_gap(8), (Some(6), Some(10)));     // Gap
+        assert_eq!(map.next_gap(9), (Some(6), Some(10)));     // Gap, closer to 3rd
+        assert_eq!(map.next_gap(10), (Some(10), None));       // Start/End of 3rd range
+        assert_eq!(map.next_gap(11), (Some(10), None));       // After all
+    }
+    
+    #[test]
+    fn test_next_gap_value_is_max() {
+        let mut map = RangeMap::new();
+        map.insert(u64::MAX - 5);
+        map.insert(u64::MAX - 4); // MAX-5 to MAX-4
+        map.insert(u64::MAX - 1);
+        map.insert(u64::MAX);     // MAX-1 to MAX
+
+        assert_eq!(map.next_gap(u64::MAX - 6), (None, Some(u64::MAX - 5)));
+        assert_eq!(map.next_gap(u64::MAX - 5), (Some(u64::MAX - 4), Some(u64::MAX - 1)));
+        assert_eq!(map.next_gap(u64::MAX - 4), (Some(u64::MAX - 4), Some(u64::MAX - 1)));
+        assert_eq!(map.next_gap(u64::MAX - 3), (Some(u64::MAX - 4), Some(u64::MAX - 1))); // In gap
+        assert_eq!(map.next_gap(u64::MAX - 2), (Some(u64::MAX - 4), Some(u64::MAX - 1))); // In gap
+        assert_eq!(map.next_gap(u64::MAX - 1), (Some(u64::MAX), None));
+        assert_eq!(map.next_gap(u64::MAX), (Some(u64::MAX), None));
+    }
+}
