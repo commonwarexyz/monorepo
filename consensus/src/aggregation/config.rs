@@ -1,18 +1,18 @@
 use super::types::{Activity, Epoch, Index};
-use crate::{Automaton, Monitor, Relay, Reporter, ThresholdSupervisor};
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, Scheme};
+use crate::{Automaton, Monitor, Reporter, ThresholdSupervisor};
+use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
+use commonware_utils::Array;
 use std::time::Duration;
 
 /// Configuration for the [`Engine`](super::Engine).
 pub struct Config<
-    C: Scheme,
+    P: Array,
     V: Variant,
     D: Digest,
     A: Automaton<Context = Index, Digest = D>,
-    R: Relay<Digest = D>,
     Z: Reporter<Activity = Activity<V, D>>,
     M: Monitor<Index = Epoch>,
-    TSu: ThresholdSupervisor<Index = Epoch, PublicKey = C::PublicKey>,
+    TSu: ThresholdSupervisor<Index = Epoch, PublicKey = P>,
 > {
     /// Tracks the current state of consensus (to determine which participants should
     /// be involved in the current broadcast attempt).
@@ -24,9 +24,6 @@ pub struct Config<
 
     /// Proposes and verifies digests.
     pub automaton: A,
-
-    /// Broadcasts the raw payload.
-    pub relay: R,
 
     /// Notified when a chunk receives a threshold of acks.
     pub reporter: Z,

@@ -52,26 +52,6 @@ pub enum Error {
     #[error("Unable to send message")]
     UnableToSendMessage,
 
-    // Broadcast errors
-    /// The chunk already has a threshold signature
-    #[error("Already thresholded")]
-    AlreadyThresholded,
-    /// Nothing to rebroadcast
-    #[error("Nothing to rebroadcast")]
-    NothingToRebroadcast,
-    /// The broadcast failed
-    #[error("Broadcast failed")]
-    BroadcastFailed,
-    /// A threshold signature is missing
-    #[error("Missing threshold")]
-    MissingThreshold,
-    /// The sequencer in the context doesn't match the expected sequencer
-    #[error("Invalid context sequencer")]
-    ContextSequencer,
-    /// The height in the context is invalid
-    #[error("Invalid context height")]
-    ContextHeight,
-
     // Epoch Errors
     /// Epoch is not in the accepted bounds
     #[error("Epoch {0} not in bounds {1} - {2}")]
@@ -113,8 +93,14 @@ pub enum Error {
     #[error("Invalid ack epoch {0} outside bounds {1} - {2}")]
     AckEpochOutsideBounds(u64, u64, u64),
     /// The acknowledgment's height is outside the accepted bounds
-    #[error("Invalid ack height {0} outside bounds {1} - {2}")]
-    AckHeightOutsideBounds(u64, u64, u64),
+    #[error("Non-useful ack index {0}")]
+    AckIndex(u64),
+    /// Duplicate acknowledgment for the same index
+    #[error("Duplicate ack from sender {0} for index {1}")]
+    AckDuplicate(String, u64),
+    /// The acknowledgement is for an index that already has a threshold
+    #[error("Ack for index {0} already has a threshold")]
+    AckThresholded(u64),
     /// The chunk's height is lower than the current tip height
     #[error("Chunk height {0} lower than tip height {1}")]
     ChunkHeightTooLow(u64, u64),
@@ -193,7 +179,7 @@ impl<V: Variant, D: Digest> Ack<V, D> {
         let signature = ops::partial_sign_message::<V>(
             share,
             Some(ack_namespace.as_ref()),
-            &item.encode().as_ref(),
+            item.encode().as_ref(),
         );
         Self {
             item,

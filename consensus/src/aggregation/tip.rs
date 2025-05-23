@@ -3,13 +3,11 @@ use commonware_utils::{max_faults, Array};
 use std::collections::{btree_map, BTreeMap, HashMap, HashSet};
 
 /// A data structure that keeps track of the reported tip for each validator.
-/// It can efficiently query the `f`th highest tip.
-struct Tip<P: Array> {
+/// It can efficiently query the `f`th highest tip, where `f` is the maximum number of faults
+/// that can be tolerated for the given set of validators.
+pub struct Tip<P: Array> {
     /// For each validator, the maximum tip that it has reported.
     tips: HashMap<P, Index>,
-
-    /// The maximum number of faults for `tips.len()` validators.
-    f: usize,
 
     /// The `f` highest tips, stored as a map from index to number of validators.
     ///
@@ -23,15 +21,25 @@ struct Tip<P: Array> {
     lo: BTreeMap<Index, usize>,
 }
 
+impl<P: Array> Default for Tip<P> {
+    fn default() -> Self {
+        Self {
+            tips: HashMap::new(),
+            hi: BTreeMap::new(),
+            lo: BTreeMap::new(),
+        }
+    }
+}
+
 impl<P: Array> Tip<P> {
     /// Create a new [`Tip`] instance with the given validators.
     ///
     /// # Panics
     ///
     /// Panics if the validator set is empty or if the validators are not unique.
-    fn new(validators: Vec<P>) -> Self {
+    pub fn new(validators: &Vec<P>) -> Self {
         // Ensure the validator set is not empty and all validators are unique
-        assert!(validators.len() > 0);
+        assert!(!validators.is_empty());
 
         // Get the number of validators and the maximum number of faults
         let n = validators.len();
@@ -39,7 +47,7 @@ impl<P: Array> Tip<P> {
 
         // Initialize the tips map
         let mut tips = HashMap::with_capacity(n);
-        for validator in &validators {
+        for validator in validators {
             tips.insert(validator.clone(), Index::default());
         }
         assert!(tips.len() == validators.len()); // Ensure all validators are unique
@@ -52,7 +60,7 @@ impl<P: Array> Tip<P> {
             hi.insert(Index::default(), f);
         }
 
-        Self { tips, f, hi, lo }
+        Self { tips, hi, lo }
     }
 
     /// Updates the validator set. New validators are added with a default tip of 0.
@@ -60,7 +68,7 @@ impl<P: Array> Tip<P> {
     /// # Panics
     ///
     /// Panics if the new validator set is not unique and the same size as the existing set.
-    fn reconcile(&mut self, validators: Vec<P>) {
+    pub fn reconcile(&mut self, validators: &Vec<P>) {
         // Verify the new validators and collect them into a set.
         assert!(
             validators.len() == self.tips.len(),
@@ -134,7 +142,7 @@ impl<P: Array> Tip<P> {
 
         // Add new validators with default index
         for new_val in new_vals {
-            self.tips.entry(new_val).or_insert(Index::default());
+            self.tips.entry(new_val.clone()).or_default();
         }
     }
 
@@ -146,9 +154,9 @@ impl<P: Array> Tip<P> {
     /// # Panics
     ///
     /// Panics if the public key is not in the set of validators.
-    fn update(&mut self, public_key: P, new: Index) -> Option<Index> {
-        // Update the tip for the given validator
-        let &old = self.tips.get(&public_key).expect("Invalid public key");
+    pub fn update(&mut self, public_key: P, new: Index) -> Option<Index> {
+        // Update the tip for the given validator. Return early if the validator is not in the set.
+        let &old = self.tips.get(&public_key)?;
 
         // If the new tip is not higher than the old tip, this is a no-op.
         if old >= new {
@@ -205,7 +213,7 @@ impl<P: Array> Tip<P> {
     /// # Panics
     ///
     /// Panics if the set of validators is empty.
-    fn get(&self) -> Index {
+    pub fn get(&self) -> Index {
         self.lo
             .last_key_value()
             .map(|(k, _)| *k)

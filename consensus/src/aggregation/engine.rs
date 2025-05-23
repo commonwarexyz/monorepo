@@ -9,18 +9,14 @@
 
 use super::{
     metrics,
+    tip::Tip,
     types::{Ack, Activity, Epoch, Error, Index, Item, Lock},
-    Config, Manager,
+    Config,
 };
-use crate::{Automaton, Monitor, Relay, Reporter, ThresholdSupervisor};
+use crate::{aggregation::wire::PeerAck, Automaton, Monitor, Reporter, ThresholdSupervisor};
 use commonware_cryptography::{
-    bls12381::primitives::{
-        group,
-        ops::{self, threshold_signature_recover},
-        poly,
-        variant::Variant,
-    },
-    Digest, Scheme,
+    bls12381::primitives::{group, ops::threshold_signature_recover, poly, variant::Variant},
+    Digest,
 };
 use commonware_macros::select;
 use commonware_p2p::{
@@ -34,20 +30,29 @@ use commonware_runtime::{
     },
     Clock, Handle, Metrics, Spawner, Storage,
 };
-use commonware_storage::journal::{self, variable::Journal};
-use commonware_utils::futures::Pool as FuturesPool;
-use futures::{
-    channel::{mpsc, oneshot},
-    future::{self, Either},
-    pin_mut, StreamExt,
-};
+use commonware_utils::{futures::Pool as FuturesPool, Array};
+use futures::StreamExt;
 use std::{
-    cmp::{max, min},
-    collections::{BTreeMap, BTreeSet, HashMap},
+    cmp::max,
+    collections::{BTreeMap, HashMap},
     marker::PhantomData,
-    time::{Duration, SystemTime},
 };
 use tracing::{debug, error, warn};
+
+/// An entry for an index that does not yet have a threshold signature.
+///
+/// For efficiency, we validate the partial signatures lazily (only in the event that we receive a
+/// quorum) number of them. For this reason, the signatures stored in this structure are not
+/// necessarily valid. Furthermore, the digest for which the signature is purported does not need to
+/// be stored; if the digest is invalid, the signature will also be invalid. Either way, the signer
+/// of an invalid message will be blocked.
+enum Pending<V: Variant, D: Digest> {
+    /// Not yet verified by the automaton. Unknown digest.
+    Unverified(HashMap<Epoch, HashMap<u32, Ack<V, D>>>),
+
+    /// Verified by the automaton. Now stores the digest.
+    Verified(D, HashMap<Epoch, HashMap<u32, Ack<V, D>>>),
+}
 
 /// The type returned by the `pending` pool, used by the application to return which digest is
 /// associated with the given index.
@@ -65,28 +70,26 @@ struct Verify<D: Digest, E: Clock> {
 /// Instance of the engine.
 pub struct Engine<
     E: Clock + Spawner + Storage + Metrics,
-    C: Scheme,
+    P: Array,
     V: Variant,
     D: Digest,
     A: Automaton<Context = Index, Digest = D> + Clone,
-    R: Relay<Digest = D>,
     Z: Reporter<Activity = Activity<V, D>>,
     M: Monitor<Index = Epoch>,
     TSu: ThresholdSupervisor<
         Index = Epoch,
-        PublicKey = C::PublicKey,
+        PublicKey = P,
         Share = group::Share,
         Identity = poly::Public<V>,
     >,
-    NetS: Sender<PublicKey = C::PublicKey>,
-    NetR: Receiver<PublicKey = C::PublicKey>,
+    NetS: Sender<PublicKey = P>,
+    NetR: Receiver<PublicKey = P>,
 > {
     ////////////////////////////////////////
     // Interfaces
     ////////////////////////////////////////
     context: E,
     automaton: A,
-    relay: R,
     monitor: M,
     validators: TSu,
     reporter: Z,
@@ -94,33 +97,23 @@ pub struct Engine<
     ////////////////////////////////////////
     // Namespace Constants
     ////////////////////////////////////////
-
-    // The namespace signatures.
+    /// The namespace signatures.
     namespace: Vec<u8>,
-
-    ////////////////////////////////////////
-    // Timeouts
-    ////////////////////////////////////////
-
-    // The configured timeout for re-acking. TODO
-    rebroadcast_timeout: Duration,
-    rebroadcast_deadline: Option<SystemTime>,
 
     ////////////////////////////////////////
     // Pruning
     ////////////////////////////////////////
-
-    // A tuple representing the epochs to keep in memory.
-    // The first element is the number of old epochs to keep.
-    // The second element is the number of future epochs to accept.
-    //
-    // For example, if the current epoch is 10, and the bounds are (1, 2), then
-    // epochs 9, 10, 11, and 12 are kept (and accepted);
-    // all others are pruned or rejected.
+    /// A tuple representing the epochs to keep in memory.
+    /// The first element is the number of old epochs to keep.
+    /// The second element is the number of future epochs to accept.
+    ///
+    /// For example, if the current epoch is 10, and the bounds are (1, 2), then
+    /// epochs 9, 10, 11, and 12 are kept (and accepted);
+    /// all others are pruned or rejected.
     epoch_bounds: (u64, u64),
 
-    // The number of future heights to accept acks for.
-    // This is used to prevent spam of acks for arbitrary heights.
+    /// The number of future heights to accept acks for.
+    /// This is used to prevent spam of acks for arbitrary heights.
     window: u64,
 
     ////////////////////////////////////////
@@ -132,22 +125,16 @@ pub struct Engine<
     ////////////////////////////////////////
     // State
     ////////////////////////////////////////
-
-    // The current epoch.
+    /// The current epoch.
     epoch: Epoch,
 
-    /// The keys represent the set of all outstanding requests to the automaton.
-    ///
-    /// The inner map may be empty. If we receive an `Ack` for an outstanding index, we store it in
-    /// the inner map. This is because we are not yet sure if the digest is valid or not. This data
-    /// structure essentially acts as the staging area for the `Ack` before we verify it and store
-    /// it in the `acks` map.
-    gated: BTreeMap<Index, HashMap<Epoch, HashMap<u32, V::Signature>>>,
+    /// Tracks the tip of other validators.
+    tip_manager: Tip<P>,
 
-    /// The keys represent the set of all verified indices with their corresponding digests.
-    ///
-    /// The inner map contains the `Acks` for the
-    acks: BTreeMap<Index, (D, HashMap<Epoch, HashMap<u32, V::Signature>>)>,
+    /// The keys represent the set of all `Index` values for which we are attempting to form a
+    /// threshold signature, but do not yet have one. Values may be [`Pending::Unverified`] or
+    /// [`Pending::Verified`], depending on whether the automaton has verified the digest or not.
+    pending: BTreeMap<Index, Pending<V, D>>,
 
     /// A map of indices with a threshold signature. Cached in memory if needed to send to other peers.
     confirmed: BTreeMap<Index, (D, V::Signature)>,
@@ -155,60 +142,54 @@ pub struct Engine<
     ////////////////////////////////////////
     // Network
     ////////////////////////////////////////
-
-    // Whether to send acks as priority messages.
+    /// Whether to send acks as priority messages.
     priority_acks: bool,
 
-    // The network sender and receiver types.
+    /// The network sender and receiver types.
     _phantom: PhantomData<(NetS, NetR)>,
 
     ////////////////////////////////////////
     // Metrics
     ////////////////////////////////////////
-
-    // Metrics
-    metrics: metrics::Metrics,
+    /// Metrics
+    metrics: metrics::Metrics<E>,
 }
 
 impl<
         E: Clock + Spawner + Storage + Metrics,
-        C: Scheme,
+        P: Array,
         V: Variant,
         D: Digest,
         A: Automaton<Context = Index, Digest = D> + Clone,
-        R: Relay<Digest = D>,
         Z: Reporter<Activity = Activity<V, D>>,
         M: Monitor<Index = Epoch>,
         TSu: ThresholdSupervisor<
             Index = Epoch,
-            PublicKey = C::PublicKey,
+            PublicKey = P,
             Share = group::Share,
             Identity = poly::Public<V>,
         >,
-        NetS: Sender<PublicKey = C::PublicKey>,
-        NetR: Receiver<PublicKey = C::PublicKey>,
-    > Engine<E, C, V, D, A, R, Z, M, TSu, NetS, NetR>
+        NetS: Sender<PublicKey = P>,
+        NetR: Receiver<PublicKey = P>,
+    > Engine<E, P, V, D, A, Z, M, TSu, NetS, NetR>
 {
     /// Creates a new engine with the given context and configuration.
-    pub fn new(context: E, cfg: Config<C, V, D, A, R, Z, M, TSu>) -> Self {
+    pub fn new(context: E, cfg: Config<P, V, D, A, Z, M, TSu>) -> Self {
         let metrics = metrics::Metrics::init(context.clone());
 
         Self {
             context,
             automaton: cfg.automaton,
-            relay: cfg.relay,
             reporter: cfg.reporter,
             monitor: cfg.monitor,
             validators: cfg.validators,
             namespace: cfg.namespace,
-            rebroadcast_timeout: cfg.rebroadcast_timeout,
-            rebroadcast_deadline: None,
             epoch_bounds: cfg.epoch_bounds,
             window: cfg.window,
             epoch: 0,
+            tip_manager: Tip::default(), // placeholder
             verifies: FuturesPool::default(),
-            gated: BTreeMap::new(),
-            acks: BTreeMap::new(),
+            pending: BTreeMap::new(),
             confirmed: BTreeMap::new(),
             priority_acks: cfg.priority_acks,
             _phantom: PhantomData,
@@ -226,15 +207,22 @@ impl<
         let (mut net_sender, mut net_receiver) = wrap((), net_sender, net_receiver);
         let mut shutdown = self.context.stopped();
 
-        // Tracks if there is an outstanding proposal request to the automaton.
-        let mut pending: Option<(Index, oneshot::Receiver<D>)> = None;
-
         // Initialize the epoch
         let (latest, mut epoch_updates) = self.monitor.subscribe().await;
         self.epoch = latest;
 
+        // Initialize the tip manager
+        self.tip_manager = Tip::new(self.validators.participants(self.epoch).unwrap());
+
         loop {
-            // TODO: Rebroadcasting
+            self.metrics.tip.set(self.tip() as i64);
+
+            // Propose a new digest if we are processing less than the window
+            let next = self.next();
+            if next < self.tip() + self.window {
+                self.verify(next);
+                continue;
+            }
 
             // Process the next event
             select! {
@@ -257,7 +245,21 @@ impl<
                     assert!(epoch >= self.epoch);
                     self.epoch = epoch;
 
-                    // TODO: update data structures by purging old epochs
+                    // Update the tip manager
+                    self.tip_manager.reconcile(self.validators.participants(epoch).unwrap());
+
+                    // Update data structures by purging old epochs
+                    let min_epoch = self.epoch.saturating_sub(self.epoch_bounds.0);
+                    self.pending.iter_mut().for_each(|(_, pending)| {
+                        match pending {
+                            Pending::Unverified(acks) => {
+                                acks.retain(|epoch, _| *epoch >= min_epoch);
+                            }
+                            Pending::Verified(_, acks) => {
+                                acks.retain(|epoch, _| *epoch >= min_epoch);
+                            }
+                        }
+                    });
 
                     continue;
                 },
@@ -291,22 +293,38 @@ impl<
                         }
                     };
                     let mut guard = self.metrics.acks.guard(Status::Invalid);
-                    let ack = match msg {
-                        Ok(ack) => ack,
+                    let peer_ack = match msg {
+                        Ok(peer_ack) => peer_ack,
                         Err(err) => {
                             warn!(?err, ?sender, "ack decode failed");
                             continue;
                         }
                     };
+                    let PeerAck { ack, tip } = peer_ack;
+
+                    // Update the tip manager
+                    if self.tip_manager.update(sender.clone(), tip).is_some() {
+                        // Fast-forward our tip if needed
+                        let tip = self.tip_manager.get();
+                        if tip > self.tip() {
+                            self.pending.retain(|index, _| *index >= tip);
+                        }
+                    }
+
+                    // Validate that we need to process the ack
                     if let Err(err) = self.validate_ack(&ack, &sender) {
                         warn!(?err, ?sender, "ack validate failed");
                         continue;
                     };
+
+                    // Handle the ack
                     if let Err(err) = self.handle_ack(&ack).await {
                         warn!(?err, ?sender, "ack handle failed");
                         guard.set(Status::Failure);
                         continue;
                     }
+
+                    // Update the metrics
                     debug!(?sender, epoch=ack.epoch, index=ack.item.index, "ack");
                     guard.set(Status::Success);
                 },
@@ -324,14 +342,31 @@ impl<
         &mut self,
         index: Index,
         digest: D,
-        sender: &mut WrappedSender<NetS, Ack<V, D>>,
+        sender: &mut WrappedSender<NetS, PeerAck<V, D>>,
     ) -> Result<(), Error> {
-        // Remove entry from `gated`, moving over any relevant items to `acks`
-        let Some(acks) = self.gated.remove(&index) else {
-            // Index is no longer relevant
-            return Ok(());
+        // Entry must be `Pending::Unverified`, or return early
+        if !matches!(self.pending.get(&index), Some(Pending::Unverified(_))) {
+            return Err(Error::AckIndex(index));
         };
-        assert!(self.acks.insert(index, (digest, acks)).is_none());
+
+        // Move the entry to `Pending::Verified`
+        let Some(Pending::Unverified(epoch_map)) = self.pending.remove(&index) else {
+            panic!("Pending::Unverified entry not found");
+        };
+        self.pending
+            .insert(index, Pending::Verified(digest, HashMap::new()));
+
+        // Handle each `ack` as if it was received over the network. This inserts the values into
+        // the new map, and may form a threshold signature if enough acks are present.
+        for acks in epoch_map.values() {
+            for ack in acks.values() {
+                let _ = self.handle_ack(ack).await; // Ignore any errors
+            }
+            // Return early if a threshold signature was formed
+            if self.confirmed.contains_key(&index) {
+                return Ok(());
+            }
+        }
 
         // Sign my own ack
         let Some(share) = self.validators.share(self.epoch) else {
@@ -344,7 +379,14 @@ impl<
 
         // Send ack over the network.
         sender
-            .send(Recipients::All, ack, self.priority_acks)
+            .send(
+                Recipients::All,
+                PeerAck {
+                    ack,
+                    tip: self.tip(),
+                },
+                self.priority_acks,
+            )
             .await
             .map_err(|err| {
                 warn!(?err, "failed to send ack");
@@ -366,53 +408,49 @@ impl<
         let quorum = identity.required();
 
         // Get the acks
-        let acks_by_epoch = self
-            .acks
-            .get(&ack.item.index)
-            .map(|(digest, abe)| {
-                if ack.item.digest == *digest {
-                    Err(Error::AckDigestMismatch(ack.item.index))
-                } else {
-                    Ok(abe)
-                }
-            })
-            .ok_or_else(|| {
-                self.gated
-                    .get(&ack.item.index)
-                    .ok_or(Error::AckIndexUnknown(ack.item.index))
-            })?;
+        let acks_by_epoch = match self.pending.get_mut(&ack.item.index) {
+            None => {
+                // If the index is not in the pending pool, it may be in the gated pool
+                // (i.e. we have a threshold signature for it).
+                return Err(Error::AckIndex(ack.item.index));
+            }
+            Some(Pending::Unverified(acks)) => acks,
+            Some(Pending::Verified(_, acks)) => acks,
+        };
+
+        // We already checked that we don't have the ack
 
         // Add the partial signature
         let acks = acks_by_epoch.entry(ack.epoch).or_default();
         if acks.contains_key(&ack.signature.index) {
             return Ok(());
         }
-        acks.insert(ack.signature.index, ack.signature.clone());
+        acks.insert(ack.signature.index, ack.clone());
 
         // If a new threshold is formed, handle it
         if acks.len() >= (quorum as usize) {
-            let threshold = threshold_signature_recover(quorum, acks.values())
+            let item = ack.item.clone();
+            let partials = acks // TODO: don't collect into vec
+                .values()
+                .map(|ack| ack.signature.clone())
+                .collect::<Vec<_>>();
+            let threshold = threshold_signature_recover::<V, _>(quorum, &partials)
                 .expect("Failed to recover threshold signature");
             self.metrics.threshold.inc();
-            self.handle_threshold(ack.item, threshold).await;
+            self.handle_threshold(item, threshold).await;
         }
 
         Ok(())
     }
 
-    async fn handle_threshold(
-        &mut self,
-        item: Item<D>,
-        threshold: V::Signature,
-    ) -> Result<(), Error> {
+    async fn handle_threshold(&mut self, item: Item<D>, threshold: V::Signature) {
         // Check if we already have the threshold
         if self.confirmed.contains_key(&item.index) {
-            return Ok(());
+            return;
         }
 
         // Store the threshold
-        self.confirmed
-            .insert(item.index, (item.digest.clone(), threshold.clone()));
+        self.confirmed.insert(item.index, (item.digest, threshold));
 
         // Notify the automaton
         self.reporter
@@ -421,18 +459,36 @@ impl<
                 signature: threshold,
             }))
             .await;
-        Ok(())
     }
 
     ////////////////////////////////////////
     // Validation
     ////////////////////////////////////////
 
+    /// Sets `index` as pending and sends a verify request to the automaton.
+    fn verify(&mut self, index: Index) {
+        assert!(self
+            .pending
+            .insert(index, Pending::Unverified(HashMap::new()))
+            .is_none());
+        let mut automaton = self.automaton.clone();
+        let timer = self.metrics.verify_duration.timer();
+        self.verifies.push(async move {
+            let receiver = automaton.propose(index).await;
+            let result = receiver.await.map_err(Error::AppProposeCanceled);
+            Verify {
+                index,
+                result,
+                timer,
+            }
+        });
+    }
+
     /// Takes a raw ack (from sender) from the p2p network and validates it.
     ///
     /// Returns the chunk, epoch, and partial signature if the ack is valid.
     /// Returns an error if the ack is invalid.
-    fn validate_ack(&self, ack: &Ack<V, D>, sender: &C::PublicKey) -> Result<(), Error> {
+    fn validate_ack(&self, ack: &Ack<V, D>, sender: &P) -> Result<(), Error> {
         // Validate epoch
         {
             let (eb_lo, eb_hi) = self.epoch_bounds;
@@ -453,38 +509,28 @@ impl<
 
         // Validate height
         {
-            let bound_lo = self.tip;
-            let bound_hi = self.tip.saturating_add(self.window);
-            if (bound_lo).contains(&ack.item.index) {
-                return Err(Error::AckHeightOutsideBounds(
-                    ack.item.index,
-                    bound_lo,
-                    bound_hi,
-                ));
+            let bound_lo = self.tip();
+            let bound_hi = bound_lo.saturating_add(self.window);
+            if (bound_lo..=bound_hi).contains(&ack.item.index) {
+                return Err(Error::AckIndex(ack.item.index));
             }
         }
 
         // Validate that we don't already have the ack
         if self.confirmed.contains_key(&ack.item.index) {
-            return Err(Error::AckAlreadyExists(ack.item.index));
+            return Err(Error::AckThresholded(ack.item.index));
         }
-        if Some(existing) = self
-            .gated
-            .get(&ack.item.index)
-            .map(|v| v.get(&ack.signature.index))
-        {
-            if ack.epoch <= existing.epoch {
-                return Err(Error::AckAlreadyExists(ack.item.index));
-            }
-        }
-        if Some(existing) = self
-            .acks
-            .get(&ack.item.index)
-            .map(|v| v.get(&ack.signature.index))
-        {
-            if ack.epoch <= existing.epoch {
-                return Err(Error::AckAlreadyExists(ack.item.index));
-            }
+        let have_ack = match self.pending.get(&ack.item.index) {
+            None => false,
+            Some(Pending::Unverified(epoch_map)) => epoch_map
+                .get(&ack.epoch)
+                .is_some_and(|acks| acks.contains_key(&ack.signature.index)),
+            Some(Pending::Verified(_, epoch_map)) => epoch_map
+                .get(&ack.epoch)
+                .is_some_and(|acks| acks.contains_key(&ack.signature.index)),
+        };
+        if have_ack {
+            return Err(Error::AckDuplicate(sender.to_string(), ack.item.index));
         }
 
         // Validate partial signature
@@ -506,13 +552,8 @@ impl<
     /// - The digest
     /// - An outstanding request to the automation for the digest
     fn next(&self) -> Index {
-        let max_gated = self
-            .gated
-            .last_key_value()
-            .map(|(k, _)| *k + 1)
-            .unwrap_or_default();
-        let max_acks = self
-            .acks
+        let max_pending = self
+            .pending
             .last_key_value()
             .map(|(k, _)| *k + 1)
             .unwrap_or_default();
@@ -521,21 +562,14 @@ impl<
             .last_key_value()
             .map(|(k, _)| *k + 1)
             .unwrap_or_default();
-        max(max(max_gated, max_acks), max_confirmed)
+        max(max_pending, max_confirmed)
     }
 
     /// Returns the minimum index for which we do not have a threshold signature.
     fn tip(&self) -> Index {
-        let min_gated = self
-            .gated
+        self.pending
             .first_key_value()
             .map(|(k, _)| *k)
-            .unwrap_or_default();
-        let min_acks = self
-            .acks
-            .first_key_value()
-            .map(|(k, _)| *k)
-            .unwrap_or_default();
-        min(min_gated, min_acks)
+            .unwrap_or_default()
     }
 }

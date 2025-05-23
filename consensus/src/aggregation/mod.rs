@@ -8,8 +8,6 @@ cfg_if::cfg_if! {
         pub use config::Config;
         mod engine;
         pub use engine::Engine;
-        mod ingress;
-        pub use ingress::Mailbox;
         mod metrics;
         mod tip;
         pub mod types;
