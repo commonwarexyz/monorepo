@@ -1023,10 +1023,14 @@ impl<
         self.current_view.set(view as i64);
     }
 
+    /// The minimum view we are tracking both in-memory and on-disk.
     fn min_active(&self) -> View {
         self.last_finalized.saturating_sub(self.activity_timeout)
     }
 
+    /// Whether or not a view is interesting to us. This is a function
+    /// of both `min_active` and whether or not the view is too far
+    /// in the future (based on the view we are currently in).
     fn interesting(&self, view: View, allow_future: bool) -> bool {
         if view < self.min_active() {
             return false;
