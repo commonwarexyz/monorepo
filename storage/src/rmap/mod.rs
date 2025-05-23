@@ -62,7 +62,10 @@ impl RMap {
             .range(..=value)
             .next_back()
             .map(|(&s, &e)| (s, e));
-        let next_opt = self.ranges.range(value + 1..).next().map(|(&s, &e)| (s, e));
+        let next_opt = match value {
+            u64::MAX => None,
+            _ => self.ranges.range(value + 1..).next().map(|(&s, &e)| (s, e)),
+        };
 
         match (prev_opt, next_opt) {
             (Some((p_start, p_end)), Some((n_start, n_end))) => {
@@ -176,6 +179,7 @@ impl RMap {
         // then (r_start, r_end) cannot overlap with [start, end].
         let mut to_add = Vec::new();
         let mut to_remove = Vec::new();
+
         for (&r_start, &r_end) in self.ranges.iter() {
             // Case 1: No overlap
             if r_end < start || r_start > end {
@@ -298,12 +302,14 @@ impl RMap {
     /// ```
     pub fn next_gap(&self, value: u64) -> (Option<u64>, Option<u64>) {
         let current_range_end = self.ranges.range(..=value).next_back().map(|(_, &end)| end);
-
-        let next_range_start = self
-            .ranges
-            .range(value + 1..)
-            .next()
-            .map(|(&start, _)| start);
+        let next_range_start = match value {
+            u64::MAX => None,
+            _ => self
+                .ranges
+                .range(value + 1..)
+                .next()
+                .map(|(&start, _)| start),
+        };
 
         (current_range_end, next_range_start)
     }
