@@ -59,3 +59,7 @@ name="mmr"
 harness = false
 path = "src/mmr/benches/bench.rs"
 
+[[bench]]
+name="rmap"
+harness = false
+path = "src/rmap/benches/bench.rs"
