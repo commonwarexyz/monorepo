@@ -712,7 +712,7 @@ mod tests {
         assert_eq!(map.next_gap(5), (Some(7), None)); // Start of range
         assert_eq!(map.next_gap(6), (Some(7), None)); // Middle of range
         assert_eq!(map.next_gap(7), (Some(7), None)); // End of range
-        assert_eq!(map.next_gap(8), (Some(7), None)); // After range
+        assert_eq!(map.next_gap(8), (None, None)); // After range
     }
 
     #[test]
@@ -727,15 +727,15 @@ mod tests {
         assert_eq!(map.next_gap(0), (None, Some(1))); // Before all
         assert_eq!(map.next_gap(1), (Some(2), Some(5))); // Start of first range
         assert_eq!(map.next_gap(2), (Some(2), Some(5))); // End of first range
-        assert_eq!(map.next_gap(3), (Some(2), Some(5))); // Gap between 1st and 2nd
-        assert_eq!(map.next_gap(4), (Some(2), Some(5))); // Gap, closer to 2nd
+        assert_eq!(map.next_gap(3), (None, Some(5))); // Gap between 1st and 2nd
+        assert_eq!(map.next_gap(4), (None, Some(5))); // Gap, closer to 2nd
         assert_eq!(map.next_gap(5), (Some(6), Some(10))); // Start of 2nd range
         assert_eq!(map.next_gap(6), (Some(6), Some(10))); // End of 2nd range
-        assert_eq!(map.next_gap(7), (Some(6), Some(10))); // Gap between 2nd and 3rd
-        assert_eq!(map.next_gap(8), (Some(6), Some(10))); // Gap
-        assert_eq!(map.next_gap(9), (Some(6), Some(10))); // Gap, closer to 3rd
+        assert_eq!(map.next_gap(7), (None, Some(10))); // Gap between 2nd and 3rd
+        assert_eq!(map.next_gap(8), (None, Some(10))); // Gap
+        assert_eq!(map.next_gap(9), (None, Some(10))); // Gap, closer to 3rd
         assert_eq!(map.next_gap(10), (Some(10), None)); // Start/End of 3rd range
-        assert_eq!(map.next_gap(11), (Some(10), None)); // After all
+        assert_eq!(map.next_gap(11), (None, None)); // After all
     }
 
     #[test]
@@ -755,14 +755,8 @@ mod tests {
             map.next_gap(u64::MAX - 4),
             (Some(u64::MAX - 4), Some(u64::MAX - 1))
         );
-        assert_eq!(
-            map.next_gap(u64::MAX - 3),
-            (Some(u64::MAX - 4), Some(u64::MAX - 1))
-        ); // In gap
-        assert_eq!(
-            map.next_gap(u64::MAX - 2),
-            (Some(u64::MAX - 4), Some(u64::MAX - 1))
-        ); // In gap
+        assert_eq!(map.next_gap(u64::MAX - 3), (None, Some(u64::MAX - 1))); // In gap
+        assert_eq!(map.next_gap(u64::MAX - 2), (None, Some(u64::MAX - 1))); // In gap
         assert_eq!(map.next_gap(u64::MAX - 1), (Some(u64::MAX), None));
         assert_eq!(map.next_gap(u64::MAX), (Some(u64::MAX), None));
     }
