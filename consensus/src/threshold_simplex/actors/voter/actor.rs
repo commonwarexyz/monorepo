@@ -1023,8 +1023,12 @@ impl<
         self.current_view.set(view as i64);
     }
 
+    fn min_active(&self) -> View {
+        self.last_finalized.saturating_sub(self.activity_timeout)
+    }
+
     fn interesting(&self, view: View, allow_future: bool) -> bool {
-        if view + self.activity_timeout < self.last_finalized {
+        if view < self.min_active() {
             return false;
         }
         if !allow_future && view > self.view + 1 {
@@ -1035,34 +1039,34 @@ impl<
 
     async fn prune_views(&mut self) {
         // Get last min
+        let min = self.min_active();
         let mut pruned = false;
-        let oldest = loop {
+        loop {
             // Get next key
             let next = match self.views.keys().next() {
                 Some(next) => *next,
                 None => return,
             };
 
-            // Compare to last finalized
-            if !self.interesting(next, false) {
-                self.views.remove(&next);
-                debug!(
-                    view = next,
-                    last_finalized = self.last_finalized,
-                    "pruned view"
-                );
-                pruned = true;
-            } else {
-                break next;
+            // If less than min, prune
+            if next >= min {
+                break;
             }
-        };
+            self.views.remove(&next);
+            debug!(
+                view = next,
+                last_finalized = self.last_finalized,
+                "pruned view"
+            );
+            pruned = true;
+        }
 
         // Prune journal up to min
         if pruned {
             self.journal
                 .as_mut()
                 .unwrap()
-                .prune(oldest)
+                .prune(min)
                 .await
                 .expect("unable to prune journal");
         }
