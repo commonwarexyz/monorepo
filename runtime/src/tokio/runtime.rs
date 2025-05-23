@@ -33,6 +33,8 @@ use std::{
 };
 use tokio::runtime::{Builder, Runtime};
 
+const COMMONWARE_STORAGE_DIRECTORY: &str = "COMMONWARE_STORAGE_DIRECTORY";
+
 #[derive(Debug)]
 struct Metrics {
     tasks_spawned: Family<Label, Counter>,
@@ -146,6 +148,25 @@ impl Config {
     /// See [Config]
     pub fn with_maximum_buffer_size(mut self, n: usize) -> Self {
         self.maximum_buffer_size = n;
+        self
+    }
+    /// Set the storage directory from the environment variable
+    /// COMMONWARE_STORAGE_DIRECTORY. Panics if it's unset.
+    pub fn with_storage_directory_from_env(mut self) -> Self {
+        let Ok(storage_directory) = env::var(COMMONWARE_STORAGE_DIRECTORY) else {
+            panic!(
+                "Environment variable {} is not set",
+                COMMONWARE_STORAGE_DIRECTORY
+            )
+        };
+
+        self.storage_directory = PathBuf::from(storage_directory);
+        if !self.storage_directory.is_absolute() {
+            panic!(
+                "Environment variable {} must be an absolute path",
+                COMMONWARE_STORAGE_DIRECTORY
+            )
+        }
         self
     }
 

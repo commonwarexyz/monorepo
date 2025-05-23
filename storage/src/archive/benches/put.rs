@@ -1,10 +1,14 @@
 use super::utils::{append_random, get_archive};
-use commonware_runtime::benchmarks::{context, tokio};
+use commonware_runtime::{
+    benchmarks::{context, tokio::Runner as TokioBenchRunner},
+    tokio,
+};
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 
 fn bench_put(c: &mut Criterion) {
-    let runner = tokio::Runner::default();
+    let cfg = tokio::Config::default().with_storage_directory_from_env();
+    let runner = TokioBenchRunner::new(cfg);
     for compression in [None, Some(3)] {
         for items in [10_000, 50_000, 100_000] {
             let label = format!(

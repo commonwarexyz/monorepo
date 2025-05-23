@@ -60,7 +60,7 @@ async fn read_concurrent_indices(a: &ArchiveType, indices: &[u64]) {
 
 fn bench_get(c: &mut Criterion) {
     // Create a config we can use across all benchmarks (with a fixed `storage_directory`).
-    let cfg = Config::default();
+    let cfg = Config::new().with_storage_directory_from_env();
     for compression in [None, Some(3)] {
         // Create a shared on-disk archive once so later setup is fast.
         let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
