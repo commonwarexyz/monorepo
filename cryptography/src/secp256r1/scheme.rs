@@ -100,6 +100,28 @@ pub struct PrivateKey {
     key: SigningKey,
 }
 
+impl crate::PrivateKey for PrivateKey {
+    type Public = PublicKey;
+
+    type Signature = Signature;
+
+    fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Self::Signature {
+        let signature: p256::ecdsa::Signature = match namespace {
+            Some(namespace) => self.key.sign(&union_unique(namespace, msg)),
+            None => self.key.sign(msg),
+        };
+        let signature = match signature.normalize_s() {
+            Some(normalized) => normalized,
+            None => signature,
+        };
+        Signature::from(signature)
+    }
+
+    fn public_key(&self) -> Self::Public {
+        PublicKey::from(self.key.verifying_key().to_owned())
+    }
+}
+
 impl Write for PrivateKey {
     fn write(&self, buf: &mut impl BufMut) {
         self.raw.write(buf);
@@ -180,6 +202,20 @@ pub struct PublicKey {
     key: VerifyingKey,
 }
 
+impl crate::PublicKey for PublicKey {
+    type Private = PrivateKey;
+
+    type Signature = Signature;
+
+    fn verify(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Self::Signature) -> bool {
+        let payload = match namespace {
+            Some(namespace) => Cow::Owned(union_unique(namespace, msg)),
+            None => Cow::Borrowed(msg),
+        };
+        self.key.verify(&payload, &sig.signature).is_ok()
+    }
+}
+
 impl Write for PublicKey {
     fn write(&self, buf: &mut impl BufMut) {
         self.raw.write(buf);
@@ -247,6 +283,10 @@ impl Display for PublicKey {
 pub struct Signature {
     raw: [u8; SIGNATURE_LENGTH],
     signature: p256::ecdsa::Signature,
+}
+
+impl crate::Signature for Signature {
+    type Public = PublicKey;
 }
 
 impl Write for Signature {
