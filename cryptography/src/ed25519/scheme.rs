@@ -79,47 +79,47 @@ const SIGNATURE_LENGTH: usize = 64;
 //     }
 // }
 
-// /// Ed25519 Batch Verifier.
-// pub struct Ed25519Batch {
-//     verifier: ed25519_consensus::batch::Verifier,
-// }
+/// Ed25519 Batch Verifier.
+pub struct Ed25519Batch {
+    verifier: ed25519_consensus::batch::Verifier,
+}
 
 // impl Specification for Ed25519Batch {
 //     type PublicKey = PublicKey;
 //     type Signature = Signature;
 // }
 
-// impl BatchScheme for Ed25519Batch {
-//     fn new() -> Self {
-//         Ed25519Batch {
-//             verifier: ed25519_consensus::batch::Verifier::new(),
-//         }
-//     }
+impl crate::BatchScheme<PrivateKey> for Ed25519Batch {
+    fn new() -> Self {
+        Ed25519Batch {
+            verifier: ed25519_consensus::batch::Verifier::new(),
+        }
+    }
 
-//     fn add(
-//         &mut self,
-//         namespace: Option<&[u8]>,
-//         message: &[u8],
-//         public_key: &Self::PublicKey,
-//         signature: &Self::Signature,
-//     ) -> bool {
-//         let payload = match namespace {
-//             Some(namespace) => Cow::Owned(union_unique(namespace, message)),
-//             None => Cow::Borrowed(message),
-//         };
-//         let item = ed25519_consensus::batch::Item::from((
-//             public_key.key.into(),
-//             signature.signature,
-//             &payload,
-//         ));
-//         self.verifier.queue(item);
-//         true
-//     }
+    fn add(
+        &mut self,
+        namespace: Option<&[u8]>,
+        message: &[u8],
+        public_key: &PublicKey,
+        signature: &Signature,
+    ) -> bool {
+        let payload = match namespace {
+            Some(namespace) => Cow::Owned(union_unique(namespace, message)),
+            None => Cow::Borrowed(message),
+        };
+        let item = ed25519_consensus::batch::Item::from((
+            public_key.key.into(),
+            signature.signature,
+            &payload,
+        ));
+        self.verifier.queue(item);
+        true
+    }
 
-//     fn verify<R: RngCore + CryptoRng>(self, rng: &mut R) -> bool {
-//         self.verifier.verify(rng).is_ok()
-//     }
-// }
+    fn verify<R: RngCore + CryptoRng>(self, rng: &mut R) -> bool {
+        self.verifier.verify(rng).is_ok()
+    }
+}
 
 /// Ed25519 Private Key.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]

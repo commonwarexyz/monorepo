@@ -399,52 +399,54 @@ impl Display for Signature {
 }
 
 // /// BLS12-381 batch verifier.
-// pub struct Bls12381Batch {
-//     publics: Vec<<MinPk as Variant>::Public>,
-//     hms: Vec<<MinPk as Variant>::Signature>,
-//     signatures: Vec<<MinPk as Variant>::Signature>,
-// }
+pub struct Bls12381Batch {
+    publics: Vec<<MinPk as Variant>::Public>,
+    hms: Vec<<MinPk as Variant>::Signature>,
+    signatures: Vec<<MinPk as Variant>::Signature>,
+}
 
 // impl Specification for Bls12381Batch {
 //     type PublicKey = PublicKey;
 //     type Signature = Signature;
 // }
 
-// impl BatchScheme for Bls12381Batch {
-//     fn new() -> Self {
-//         Self {
-//             publics: Vec::new(),
-//             hms: Vec::new(),
-//             signatures: Vec::new(),
-//         }
-//     }
+impl crate::BatchScheme<PrivateKey> for Bls12381Batch {
+    fn new() -> Self {
+        Self {
+            publics: Vec::new(),
+            hms: Vec::new(),
+            signatures: Vec::new(),
+        }
+    }
 
-//     fn add(
-//         &mut self,
-//         namespace: Option<&[u8]>,
-//         message: &[u8],
-//         public_key: &Self::PublicKey,
-//         signature: &Self::Signature,
-//     ) -> bool {
-//         self.publics.push(public_key.key);
-//         let payload = match namespace {
-//             Some(namespace) => Cow::Owned(union_unique(namespace, message)),
-//             None => Cow::Borrowed(message),
-//         };
-//         let hm = ops::hash_message::<MinPk>(MinPk::MESSAGE, &payload);
-//         self.hms.push(hm);
-//         self.signatures.push(signature.signature);
-//         true
-//     }
+    fn add(
+        &mut self,
+        namespace: Option<&[u8]>,
+        message: &[u8],
+        public_key: &PublicKey,
+        signature: &Signature,
+    ) -> bool {
+        self.publics.push(public_key.key);
+        let payload = match namespace {
+            Some(namespace) => Cow::Owned(union_unique(namespace, message)),
+            None => Cow::Borrowed(message),
+        };
+        let hm = ops::hash_message::<MinPk>(MinPk::MESSAGE, &payload);
+        self.hms.push(hm);
+        self.signatures.push(signature.signature);
+        true
+    }
 
-//     fn verify<R: rand::RngCore + CryptoRng>(self, rng: &mut R) -> bool {
-//         MinPk::batch_verify(rng, &self.publics, &self.hms, &self.signatures).is_ok()
-//     }
-// }
+    fn verify<R: rand::RngCore + CryptoRng>(self, rng: &mut R) -> bool {
+        MinPk::batch_verify(rng, &self.publics, &self.hms, &self.signatures).is_ok()
+    }
+}
 
 /// Test vectors sourced from https://github.com/ethereum/bls12-381-tests/releases/tag/v0.1.2.
 #[cfg(test)]
 mod tests {
+    use crate::{BatchScheme as _, PublicKey as _};
+
     use super::*;
     use commonware_codec::{DecodeExt, Encode};
 
@@ -550,7 +552,9 @@ mod tests {
             let expected = if !expected {
                 public_key.is_err()
                     || signature.is_err()
-                    || !public_key.verify(None, &message, &signature.unwrap())
+                    || !public_key
+                        .unwrap()
+                        .verify(None, &message, &signature.unwrap())
             } else {
                 let public_key = public_key.unwrap();
                 let signature = signature.unwrap();

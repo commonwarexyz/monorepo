@@ -320,7 +320,7 @@ impl<St: Stream> crate::Receiver for Receiver<St> {
 mod tests {
     use super::*;
     use crate::{Receiver as _, Sender as _};
-    use commonware_cryptography::Ed25519;
+    use commonware_cryptography::ed25519;
     use commonware_runtime::{deterministic, mocks, Metrics, Runner};
     use std::time::Duration;
 
@@ -460,8 +460,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create cryptographic identities
-            let dialer_crypto = Ed25519::from_seed(0);
-            let listener_crypto = Ed25519::from_seed(1);
+            let dialer_crypto = ed25519::PrivateKey::from_seed(0);
+            let listener_crypto = ed25519::PrivateKey::from_seed(1);
 
             // Set up mock channels for transport simulation
             let (dialer_sink, listener_stream) = mocks::Channel::init();
@@ -547,9 +547,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create cryptographic identities
-            let dialer_crypto = Ed25519::from_seed(0);
-            let expected_peer = Ed25519::from_seed(1).public_key();
-            let mut actual_peer = Ed25519::from_seed(2);
+            let dialer_crypto = ed25519::PrivateKey::from_seed(0);
+            let expected_peer = ed25519::PrivateKey::from_seed(1).public_key();
+            let mut actual_peer = ed25519::PrivateKey::from_seed(2);
 
             // Set up mock channels
             let (dialer_sink, mut peer_stream) = mocks::Channel::init();
@@ -571,7 +571,7 @@ mod tests {
                 move |mut context| async move {
                     // Read the handshake from dialer
                     let msg = recv_frame(&mut peer_stream, 1024).await.unwrap();
-                    let _ = handshake::Signed::<Ed25519>::decode(msg).unwrap(); // Simulate reading
+                    let _ = handshake::Signed::<ed25519::PrivateKey>::decode(msg).unwrap(); // Simulate reading
 
                     // Create and send own handshake
                     let secret = x25519::new(&mut context);

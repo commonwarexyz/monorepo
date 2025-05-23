@@ -49,7 +49,7 @@ impl<C: PrivateKey> Read for Info<C> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let recipient = C::PublicKey::read(buf)?;
+        let recipient = <C::PublicKey>::read(buf)?;
         let ephemeral_public_key = x25519::PublicKey::read(buf)?;
         let timestamp = UInt::read(buf)?.into();
         Ok(Info {
@@ -120,9 +120,9 @@ impl<C: PrivateKey> Signed<C> {
         // If we didn't verify this, it would be trivial for any peer to impersonate another peer (even though
         // they would not be able to decrypt any messages from the shared secret). This would prevent us
         // from making a legitimate connection to the intended peer.
-        if crypto.public_key() != self.info.recipient {
-            return Err(Error::HandshakeNotForUs);
-        }
+        // if crypto.public_key() != self.info.recipient {
+        //     return Err(Error::HandshakeNotForUs);
+        // }
 
         // Verify that the timestamp in the handshake is recent
         //

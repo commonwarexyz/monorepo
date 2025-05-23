@@ -5,6 +5,7 @@
 //! `commonware-cryptography` is **ALPHA** software and is not yet recommended for production use. Developers should
 //! expect breaking changes and occasional instability.
 
+use commonware_codec::{Codec, FixedSize, Read, ReadExt, Write};
 use commonware_utils::Array;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 
@@ -47,7 +48,7 @@ pub trait PrivateKey: Sized + Clone {
 }
 
 /// A public key, able to verify signatures.
-pub trait PublicKey: Sized + Clone + From<Self::Private> {
+pub trait PublicKey: Sized + Clone + From<Self::Private> + Codec + PartialEq {
     /// The private key it came from.
     type Private: PrivateKey<PublicKey = Self>;
     /// The signature type it verifies.
@@ -58,7 +59,7 @@ pub trait PublicKey: Sized + Clone + From<Self::Private> {
 }
 
 /// A signature over a message by some private key.
-pub trait Signature: Sized + Clone + AsRef<[u8]> {
+pub trait Signature: Sized + Clone + Codec + PartialEq {
     /// The public key type that can verify this signature.
     type Public: PublicKey<Signature = Self>;
 }
@@ -128,42 +129,42 @@ pub trait Signature: Sized + Clone + AsRef<[u8]> {
 
 // /// Implementation that can indicate whether all `Signatures` are correct or that some `Signature`
 // /// is incorrect.
-// pub trait BatchScheme: Specification {
-//     /// Create a new batch scheme.
-//     fn new() -> Self;
+pub trait BatchScheme<K: PrivateKey> {
+    /// Create a new batch scheme.
+    fn new() -> Self;
 
-//     /// Append item to the batch.
-//     ///
-//     /// The message should not be hashed prior to calling this function. If a particular scheme
-//     /// requires a payload to be hashed before it is signed, it will be done internally.
-//     ///
-//     /// A namespace should be used to prevent replay attacks. It will be prepended to the message so
-//     /// that a signature meant for one context cannot be used unexpectedly in another (i.e. signing
-//     /// a message on the network layer can't accidentally spend funds on the execution layer). See
-//     /// [union_unique](commonware_utils::union_unique) for details.
-//     fn add(
-//         &mut self,
-//         namespace: Option<&[u8]>,
-//         message: &[u8],
-//         public_key: &Self::PublicKey,
-//         signature: &Self::Signature,
-//     ) -> bool;
+    /// Append item to the batch.
+    ///
+    /// The message should not be hashed prior to calling this function. If a particular scheme
+    /// requires a payload to be hashed before it is signed, it will be done internally.
+    ///
+    /// A namespace should be used to prevent replay attacks. It will be prepended to the message so
+    /// that a signature meant for one context cannot be used unexpectedly in another (i.e. signing
+    /// a message on the network layer can't accidentally spend funds on the execution layer). See
+    /// [union_unique](commonware_utils::union_unique) for details.
+    fn add(
+        &mut self,
+        namespace: Option<&[u8]>,
+        message: &[u8],
+        public_key: &K::PublicKey,
+        signature: &K::Signature,
+    ) -> bool;
 
-//     /// Verify all items added to the batch.
-//     ///
-//     /// Returns `true` if all items are valid, `false` otherwise.
-//     ///
-//     /// # Why Randomness?
-//     ///
-//     /// When performing batch verification, it is often important to add some randomness
-//     /// to prevent an attacker from constructing a malicious batch of signatures that pass
-//     /// batch verification but are invalid individually. Abstractly, think of this as
-//     /// there existing two valid signatures (`c_1` and `c_2`) and an attacker proposing
-//     /// (`c_1 + d` and `c_2 - d`).
-//     ///
-//     /// You can read more about this [here](https://ethresear.ch/t/security-of-bls-batch-verification/10748#the-importance-of-randomness-4).
-//     fn verify<R: RngCore + CryptoRng>(self, rng: &mut R) -> bool;
-// }
+    /// Verify all items added to the batch.
+    ///
+    /// Returns `true` if all items are valid, `false` otherwise.
+    ///
+    /// # Why Randomness?
+    ///
+    /// When performing batch verification, it is often important to add some randomness
+    /// to prevent an attacker from constructing a malicious batch of signatures that pass
+    /// batch verification but are invalid individually. Abstractly, think of this as
+    /// there existing two valid signatures (`c_1` and `c_2`) and an attacker proposing
+    /// (`c_1 + d` and `c_2 - d`).
+    ///
+    /// You can read more about this [here](https://ethresear.ch/t/security-of-bls-batch-verification/10748#the-importance-of-randomness-4).
+    fn verify<R: RngCore + CryptoRng>(self, rng: &mut R) -> bool;
+}
 
 /// Specializes the [commonware_utils::Array] trait with the Copy trait for cryptographic digests
 /// (which should be cheap to clone).
