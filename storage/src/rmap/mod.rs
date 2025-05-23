@@ -168,14 +168,14 @@ impl RMap {
             return;
         }
 
-        let mut to_add = Vec::new();
-        let mut to_remove = Vec::new();
-
         // Iterate over ranges that could possibly overlap with the removal range `[start, end]`.
         // A range (r_start, r_end) overlaps if r_start <= end AND r_end >= start.
+        //
         // We optimize the BTreeMap iteration by only looking at ranges whose start (r_start)
         // is less than or equal to the `end` of the removal range. If r_start > end,
         // then (r_start, r_end) cannot overlap with [start, end].
+        let mut to_add = Vec::new();
+        let mut to_remove = Vec::new();
         for (&r_start, &r_end) in self.ranges.iter() {
             // Case 1: No overlap
             if r_end < start || r_start > end {
@@ -213,9 +213,12 @@ impl RMap {
             }
         }
 
+        // Remove anything no longer needed.
         for r_start in to_remove {
             self.ranges.remove(&r_start);
         }
+
+        // Add anything that is now needed.
         for (a_start, a_end) in to_add {
             if a_start <= a_end {
                 // Ensure valid range before adding
