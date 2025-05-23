@@ -39,7 +39,7 @@ fn bench_insert(c: &mut Criterion) {
 
                 let mut total = Duration::ZERO;
                 for _ in 0..iters {
-                    // Shuffle items and setup RMap
+                    // Shuffle items and setup Index
                     kvs.shuffle(&mut rng);
                     let mut index = Index::init(DummyMetrics, TwoCap);
 
