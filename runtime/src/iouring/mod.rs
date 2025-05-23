@@ -220,7 +220,8 @@ async fn drain(
             let result = cqe.result();
 
             if work_id == SHUTDOWN_TIMEOUT_WORK_ID {
-                // We timed out draining the completion queue
+                // We timed out draining the completion queue.
+                // Abandon any remaining operations.
                 return;
             }
 
@@ -252,9 +253,11 @@ pub fn should_retry(return_value: i32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use commonware_macros::select;
     use futures::{
-        channel::{mpsc::channel, oneshot},
+        channel::{
+            mpsc::channel,
+            oneshot::{self, Canceled},
+        },
         SinkExt as _,
     };
     use io_uring::{
@@ -277,10 +280,10 @@ mod tests {
         let handle = tokio::spawn(super::run(cfg, receiver));
 
         // Submit a work item that will time out (because we don't write to the pipe)
-        let (pipe, _pipe_other_side) = UnixStream::pair().unwrap();
-        let mut buf = vec![0; 1024];
+        let (pipe_left, _pipe_right) = UnixStream::pair().unwrap();
+        let mut buf = vec![0; 8];
         let work =
-            opcode::Recv::new(Fd(pipe.as_raw_fd()), buf.as_mut_ptr(), buf.len() as _).build();
+            opcode::Recv::new(Fd(pipe_left.as_raw_fd()), buf.as_mut_ptr(), buf.len() as _).build();
         let (tx, rx) = oneshot::channel();
         submitter
             .send((work, tx))
@@ -305,22 +308,22 @@ mod tests {
 
         // Submit an operation that will complete after shutdown
         let timeout = Timespec::new().sec(3);
-        let op = opcode::Timeout::new(&timeout).build();
+        let timeout = opcode::Timeout::new(&timeout).build();
         let (tx, rx) = oneshot::channel();
-        submitter.send((op, tx)).await.unwrap();
+        submitter.send((timeout, tx)).await.unwrap();
 
         // Drop submission channel to trigger io_uring shutdown
         drop(submitter);
 
-        // Wait for the timeout to fire
-        let result = rx.await.expect("failed to receive result");
+        // Wait for the operation `timeout` to fire.
+        let result = rx.await.unwrap();
         assert_eq!(result, -libc::ETIME);
         handle.await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_shutdown_timeout() {
-        // Create an io_uring instance with shutdown timeout disabled
+        // Create an io_uring instance with shutdown timeout enabled
         let cfg = super::Config {
             shutdown_timeout: Some(Duration::from_secs(1)),
             ..Default::default()
@@ -328,18 +331,19 @@ mod tests {
         let (mut submitter, receiver) = channel(1);
         let handle = tokio::spawn(super::run(cfg, receiver));
 
-        // Submit an operation that will complete after shutdown starts
-        let timeout = Timespec::new().sec(100);
-        let op = opcode::Timeout::new(&timeout).build();
+        // Submit an operation that will complete long after shutdown starts
+        let timeout = Timespec::new().sec(5_000);
+        let timeout = opcode::Timeout::new(&timeout).build();
         let (tx, rx) = oneshot::channel();
-        submitter.send((op, tx)).await.unwrap();
+        submitter.send((timeout, tx)).await.unwrap();
 
         // Drop submission channel to trigger io_uring shutdown
         drop(submitter);
 
-        // The event loop should shut down before the operation returns,
-        // dropping `tx`, which causes `rx` to return canceled.
-        assert!(rx.await.is_err());
+        // The event loop should shut down before the `timeout` fires,
+        // dropping `tx` and causing `rx` to return Canceled.
+        let err = rx.await.unwrap_err();
+        assert!(matches!(err, Canceled { .. }));
         handle.await.unwrap();
     }
 }
