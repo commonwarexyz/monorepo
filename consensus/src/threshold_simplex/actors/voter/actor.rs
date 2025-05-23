@@ -15,7 +15,7 @@ use commonware_cryptography::{
         ops::{threshold_signature_recover, threshold_signature_recover_pair},
         variant::Variant,
     },
-    Digest, Scheme,
+    Digest, PrivateKey,
 };
 use commonware_macros::select;
 use commonware_p2p::{
@@ -66,7 +66,7 @@ enum Action {
 
 struct Round<
     E: Clock,
-    C: Scheme,
+    C: PrivateKey,
     V: Variant,
     D: Digest,
     S: ThresholdSupervisor<
@@ -127,7 +127,7 @@ struct Round<
 
 impl<
         E: Clock,
-        C: Scheme,
+        C: PrivateKey,
         V: Variant,
         D: Digest,
         S: ThresholdSupervisor<
@@ -421,7 +421,7 @@ impl<
 
 pub struct Actor<
     E: Clock + Rng + Spawner + Storage + Metrics,
-    C: Scheme,
+    C: PrivateKey,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     D: Digest,
@@ -477,7 +477,7 @@ pub struct Actor<
 
 impl<
         E: Clock + Rng + Spawner + Storage + Metrics,
-        C: Scheme,
+        C: PrivateKey,
         B: Blocker<PublicKey = C::PublicKey>,
         V: Variant,
         D: Digest,

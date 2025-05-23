@@ -11,7 +11,7 @@ use crate::{
     },
     Automaton, Relay, Reporter, Supervisor, LATENCY,
 };
-use commonware_cryptography::{Digest, Scheme};
+use commonware_cryptography::{Digest, PrivateKey};
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
@@ -52,7 +52,7 @@ type Finalizable<'a, V, D> = Option<(
 const GENESIS_VIEW: View = 0;
 
 struct Round<
-    C: Scheme,
+    C: PrivateKey,
     D: Digest,
     R: Reporter<Activity = Activity<C::Signature, D>>,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
@@ -91,7 +91,7 @@ struct Round<
 }
 
 impl<
-        C: Scheme,
+        C: PrivateKey,
         D: Digest,
         R: Reporter<Activity = Activity<C::Signature, D>>,
         S: Supervisor<Index = View, PublicKey = C::PublicKey>,
@@ -310,7 +310,7 @@ impl<
 
 pub struct Actor<
     E: Clock + Rng + Spawner + Storage + Metrics,
-    C: Scheme,
+    C: PrivateKey,
     D: Digest,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
@@ -359,7 +359,7 @@ pub struct Actor<
 
 impl<
         E: Clock + Rng + Spawner + Storage + Metrics,
-        C: Scheme,
+        C: PrivateKey,
         D: Digest,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
@@ -1004,7 +1004,7 @@ impl<
         };
 
         // Verify the signature
-        if !notarize.verify::<C>(&self.namespace, public_key) {
+        if !notarize.verify::<C::PublicKey>(&self.namespace, public_key) {
             return false;
         }
 
@@ -1056,7 +1056,7 @@ impl<
         let Some(participants) = self.supervisor.participants(view) else {
             return false;
         };
-        if !notarization.verify::<C>(&self.namespace, participants) {
+        if !notarization.verify::<C::PublicKey>(&self.namespace, participants) {
             return false;
         }
 

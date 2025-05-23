@@ -8,7 +8,7 @@ use commonware_cryptography::{
         dkg,
         primitives::{poly, variant::MinSig},
     },
-    Scheme,
+    PrivateKey, PublicKey,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -19,7 +19,7 @@ use std::{
 };
 use tracing::{debug, info, warn};
 
-pub struct Arbiter<E: Clock + Spawner, C: Scheme> {
+pub struct Arbiter<E: Clock + Spawner, C: PrivateKey> {
     context: E,
     dkg_frequency: Duration,
     dkg_phase_timeout: Duration,
@@ -28,7 +28,7 @@ pub struct Arbiter<E: Clock + Spawner, C: Scheme> {
 
 /// Implementation of a "trusted arbiter" that tracks commitments,
 /// acknowledgements, and complaints during a DKG round.
-impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
+impl<E: Clock + Spawner, C: PrivateKey> Arbiter<E, C> {
     pub fn new(
         context: E,
         dkg_frequency: Duration,
@@ -113,7 +113,7 @@ impl<E: Clock + Spawner, C: Scheme> Arbiter<E, C> {
                             let payload = payload(round, &sender, &commitment);
                             if !acks.iter().all(|(i, sig)| {
                                 self.contributors.get(*i as usize).map(|signer| {
-                                    C::verify(Some(ACK_NAMESPACE), &payload, signer, sig)
+                                    signer.verify(Some(ACK_NAMESPACE), &payload,  sig)
                                 }).unwrap_or(false)
                             }) {
                                 arbiter.disqualify(sender);

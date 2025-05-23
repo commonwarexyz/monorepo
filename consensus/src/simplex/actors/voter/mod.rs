@@ -5,12 +5,12 @@ use crate::simplex::types::{Activity, Context, View};
 use crate::{Automaton, Supervisor};
 use crate::{Relay, Reporter};
 pub use actor::Actor;
-use commonware_cryptography::{Digest, Scheme};
+use commonware_cryptography::{Digest, PrivateKey};
 pub use ingress::{Mailbox, Message};
 use std::time::Duration;
 
 pub struct Config<
-    C: Scheme,
+    C: PrivateKey,
     D: Digest,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
@@ -47,7 +47,7 @@ mod tests {
         types::{Finalization, Finalize, Notarization, Notarize, Proposal, Voter},
     };
     use commonware_codec::Encode;
-    use commonware_cryptography::{hash, Ed25519, Sha256, Signer};
+    use commonware_cryptography::{ed25519, hash, Sha256};
     use commonware_macros::test_traced;
     use commonware_p2p::{
         simulated::{Config as NConfig, Link, Network},
@@ -79,7 +79,7 @@ mod tests {
             let mut schemes = Vec::new();
             let mut validators = Vec::new();
             for i in 0..n {
-                let scheme = Ed25519::from_seed(i as u64);
+                let scheme = ed25519::PrivateKey::from_seed(i as u64);
                 let pk = scheme.public_key();
                 schemes.push(scheme);
                 validators.push(pk);
@@ -91,10 +91,11 @@ mod tests {
             // Initialize voter actor
             let scheme = schemes[0].clone();
             let validator = scheme.public_key();
-            let supervisor_config: mocks::supervisor::Config<Ed25519> = mocks::supervisor::Config {
-                namespace: namespace.clone(),
-                participants: view_validators.clone(),
-            };
+            let supervisor_config: mocks::supervisor::Config<ed25519::PrivateKey> =
+                mocks::supervisor::Config {
+                    namespace: namespace.clone(),
+                    participants: view_validators.clone(),
+                };
             let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
             let relay = Arc::new(mocks::relay::Relay::new());
             let application_cfg = mocks::application::Config {

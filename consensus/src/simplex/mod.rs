@@ -134,7 +134,9 @@ pub mod mocks;
 mod tests {
     use super::*;
     use crate::Monitor;
-    use commonware_cryptography::{sha256::Digest as Sha256Digest, Ed25519, Sha256, Signer};
+    use commonware_cryptography::{
+        ed25519, sha256::Digest as Sha256Digest, PrivateKey as _, Sha256,
+    };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
@@ -254,7 +256,7 @@ mod tests {
             let mut schemes = Vec::new();
             let mut validators = Vec::new();
             for i in 0..n {
-                let scheme = Ed25519::from_seed(i as u64);
+                let scheme = ed25519::PrivateKey::from_seed(i as u64);
                 let pk = scheme.public_key();
                 schemes.push(scheme);
                 validators.push(pk);
@@ -287,7 +289,9 @@ mod tests {
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
+                    mocks::supervisor::Supervisor::<ed25519::PrivateKey, Sha256Digest>::new(
+                        supervisor_config,
+                    );
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -496,7 +500,7 @@ mod tests {
                 let mut schemes = Vec::new();
                 let mut validators = Vec::new();
                 for i in 0..n {
-                    let scheme = Ed25519::from_seed(i as u64);
+                    let scheme = ed25519::PrivateKey::from_seed(i as u64);
                     let pk = scheme.public_key();
                     schemes.push(scheme);
                     validators.push(pk);
@@ -530,9 +534,10 @@ mod tests {
                         namespace: namespace.clone(),
                         participants: view_validators.clone(),
                     };
-                    let supervisor = mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(
-                        supervisor_config,
-                    );
+                    let supervisor = mocks::supervisor::Supervisor::<
+                        ed25519::PrivateKey,
+                        Sha256Digest,
+                    >::new(supervisor_config);
                     supervisors.insert(validator.clone(), supervisor.clone());
                     let application_cfg = mocks::application::Config {
                         hasher: Sha256::default(),
@@ -657,7 +662,7 @@ mod tests {
             let mut schemes = Vec::new();
             let mut validators = Vec::new();
             for i in 0..n {
-                let scheme = Ed25519::from_seed(i as u64);
+                let scheme = ed25519::PrivateKey::from_seed(i as u64);
                 let pk = scheme.public_key();
                 schemes.push(scheme);
                 validators.push(pk);
@@ -701,7 +706,9 @@ mod tests {
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
+                    mocks::supervisor::Supervisor::<ed25519::PrivateKey, Sha256Digest>::new(
+                        supervisor_config,
+                    );
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -820,7 +827,9 @@ mod tests {
                 participants: view_validators.clone(),
             };
             let mut supervisor =
-                mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
+                mocks::supervisor::Supervisor::<ed25519::PrivateKey, Sha256Digest>::new(
+                    supervisor_config,
+                );
             supervisors.push(supervisor.clone());
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
@@ -898,7 +907,7 @@ mod tests {
             let mut schemes = Vec::new();
             let mut validators = Vec::new();
             for i in 0..n {
-                let scheme = Ed25519::from_seed(i as u64);
+                let scheme = ed25519::PrivateKey::from_seed(i as u64);
                 let pk = scheme.public_key();
                 schemes.push(scheme);
                 validators.push(pk);
@@ -942,7 +951,9 @@ mod tests {
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
+                    mocks::supervisor::Supervisor::<ed25519::PrivateKey, Sha256Digest>::new(
+                        supervisor_config,
+                    );
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -1125,7 +1136,7 @@ mod tests {
             let mut schemes = Vec::new();
             let mut validators = Vec::new();
             for i in 0..n {
-                let scheme = Ed25519::from_seed(i as u64);
+                let scheme = ed25519::PrivateKey::from_seed(i as u64);
                 let pk = scheme.public_key();
                 schemes.push(scheme);
                 validators.push(pk);
@@ -1158,7 +1169,9 @@ mod tests {
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
+                    mocks::supervisor::Supervisor::<ed25519::PrivateKey, Sha256Digest>::new(
+                        supervisor_config,
+                    );
                 supervisors.push(supervisor.clone());
                 let application_cfg = if idx_scheme == 0 {
                     mocks::application::Config {
@@ -1293,7 +1306,7 @@ mod tests {
             let mut schemes = Vec::new();
             let mut validators = Vec::new();
             for i in 0..n {
-                let scheme = Ed25519::from_seed(i as u64);
+                let scheme = ed25519::PrivateKey::from_seed(i as u64);
                 let pk = scheme.public_key();
                 schemes.push(scheme);
                 validators.push(pk);
@@ -1326,7 +1339,9 @@ mod tests {
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
+                    mocks::supervisor::Supervisor::<ed25519::PrivateKey, Sha256Digest>::new(
+                        supervisor_config,
+                    );
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -1479,7 +1494,7 @@ mod tests {
             let mut schemes = Vec::new();
             let mut validators = Vec::new();
             for i in 0..n {
-                let scheme = Ed25519::from_seed(i as u64);
+                let scheme = ed25519::PrivateKey::from_seed(i as u64);
                 let pk = scheme.public_key();
                 schemes.push(scheme);
                 validators.push(pk);
@@ -1509,7 +1524,9 @@ mod tests {
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
+                    mocks::supervisor::Supervisor::<ed25519::PrivateKey, Sha256Digest>::new(
+                        supervisor_config,
+                    );
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -1655,7 +1672,7 @@ mod tests {
             let mut schemes = Vec::new();
             let mut validators = Vec::new();
             for i in 0..n {
-                let scheme = Ed25519::from_seed(i as u64);
+                let scheme = ed25519::PrivateKey::from_seed(i as u64);
                 let pk = scheme.public_key();
                 schemes.push(scheme);
                 validators.push(pk);
@@ -1688,7 +1705,9 @@ mod tests {
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
+                    mocks::supervisor::Supervisor::<ed25519::PrivateKey, Sha256Digest>::new(
+                        supervisor_config,
+                    );
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -1807,7 +1826,7 @@ mod tests {
             let mut schemes = Vec::new();
             let mut validators = Vec::new();
             for i in 0..n {
-                let scheme = Ed25519::from_seed(i as u64);
+                let scheme = ed25519::PrivateKey::from_seed(i as u64);
                 let pk = scheme.public_key();
                 schemes.push(scheme);
                 validators.push(pk);
@@ -1839,7 +1858,9 @@ mod tests {
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
+                    mocks::supervisor::Supervisor::<ed25519::PrivateKey, Sha256Digest>::new(
+                        supervisor_config,
+                    );
                 if idx_scheme == 0 {
                     let cfg = mocks::conflicter::Config {
                         crypto: scheme,
@@ -1978,7 +1999,7 @@ mod tests {
             let mut schemes = Vec::new();
             let mut validators = Vec::new();
             for i in 0..n {
-                let scheme = Ed25519::from_seed(i as u64);
+                let scheme = ed25519::PrivateKey::from_seed(i as u64);
                 let pk = scheme.public_key();
                 schemes.push(scheme);
                 validators.push(pk);
@@ -2010,7 +2031,9 @@ mod tests {
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
+                    mocks::supervisor::Supervisor::<ed25519::PrivateKey, Sha256Digest>::new(
+                        supervisor_config,
+                    );
                 if idx_scheme == 0 {
                     let cfg = mocks::nuller::Config {
                         crypto: scheme,
@@ -2141,7 +2164,7 @@ mod tests {
             let mut schemes = Vec::new();
             let mut validators = Vec::new();
             for i in 0..n {
-                let scheme = Ed25519::from_seed(i as u64);
+                let scheme = ed25519::PrivateKey::from_seed(i as u64);
                 let pk = scheme.public_key();
                 schemes.push(scheme);
                 validators.push(pk);
@@ -2173,7 +2196,9 @@ mod tests {
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
+                    mocks::supervisor::Supervisor::<ed25519::PrivateKey, Sha256Digest>::new(
+                        supervisor_config,
+                    );
                 if idx_scheme == 0 {
                     let cfg = mocks::outdated::Config {
                         crypto: scheme,
@@ -2290,7 +2315,7 @@ mod tests {
             let mut schemes = Vec::new();
             let mut validators = Vec::new();
             for i in 0..n {
-                let scheme = Ed25519::from_seed(i as u64);
+                let scheme = ed25519::PrivateKey::from_seed(i as u64);
                 let pk = scheme.public_key();
                 schemes.push(scheme);
                 validators.push(pk);
@@ -2323,7 +2348,9 @@ mod tests {
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
+                    mocks::supervisor::Supervisor::<ed25519::PrivateKey, Sha256Digest>::new(
+                        supervisor_config,
+                    );
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),

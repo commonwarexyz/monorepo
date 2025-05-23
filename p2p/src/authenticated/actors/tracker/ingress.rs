@@ -1,6 +1,6 @@
 use super::Reservation;
 use crate::authenticated::{actors::peer, types};
-use commonware_cryptography::Verifier;
+use commonware_cryptography::PrivateKey;
 use commonware_runtime::{Metrics, Spawner};
 use futures::{
     channel::{mpsc, oneshot},
@@ -8,7 +8,7 @@ use futures::{
 };
 
 /// Messages that can be sent to the tracker actor.
-pub enum Message<E: Spawner + Metrics, C: Verifier> {
+pub enum Message<E: Spawner + Metrics, C: PrivateKey> {
     // ---------- Used by oracle ----------
     /// Register a peer set at a given index.
     ///
@@ -107,11 +107,11 @@ pub enum Message<E: Spawner + Metrics, C: Verifier> {
 
 /// Mailbox for sending messages to the tracker actor.
 #[derive(Clone)]
-pub struct Mailbox<E: Spawner + Metrics, C: Verifier> {
+pub struct Mailbox<E: Spawner + Metrics, C: PrivateKey> {
     sender: mpsc::Sender<Message<E, C>>,
 }
 
-impl<E: Spawner + Metrics, C: Verifier> Mailbox<E, C> {
+impl<E: Spawner + Metrics, C: PrivateKey> Mailbox<E, C> {
     /// Create a new mailbox for the tracker.
     pub(super) fn new(sender: mpsc::Sender<Message<E, C>>) -> Self {
         Self { sender }
@@ -203,11 +203,11 @@ impl<E: Spawner + Metrics, C: Verifier> Mailbox<E, C> {
 /// Peers that are not explicitly authorized
 /// will be blocked by commonware-p2p.
 #[derive(Clone)]
-pub struct Oracle<E: Spawner + Metrics, C: Verifier> {
+pub struct Oracle<E: Spawner + Metrics, C: PrivateKey> {
     sender: mpsc::Sender<Message<E, C>>,
 }
 
-impl<E: Spawner + Metrics, C: Verifier> Oracle<E, C> {
+impl<E: Spawner + Metrics, C: PrivateKey> Oracle<E, C> {
     pub(super) fn new(sender: mpsc::Sender<Message<E, C>>) -> Self {
         Self { sender }
     }
@@ -228,7 +228,7 @@ impl<E: Spawner + Metrics, C: Verifier> Oracle<E, C> {
     }
 }
 
-impl<E: Spawner + Metrics, C: Verifier> crate::Blocker for Oracle<E, C> {
+impl<E: Spawner + Metrics, C: PrivateKey> crate::Blocker for Oracle<E, C> {
     type PublicKey = C::PublicKey;
 
     async fn block(&mut self, public_key: Self::PublicKey) {

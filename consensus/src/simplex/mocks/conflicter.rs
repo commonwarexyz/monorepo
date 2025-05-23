@@ -5,15 +5,15 @@ use crate::{
     Supervisor,
 };
 use commonware_codec::{Decode, Encode};
-use commonware_cryptography::Digest;
-use commonware_cryptography::{Hasher, Scheme};
+use commonware_cryptography::Hasher;
+use commonware_cryptography::{Digest, PrivateKey};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
 use rand::{CryptoRng, Rng};
 use std::marker::PhantomData;
 use tracing::debug;
 
-pub struct Config<C: Scheme, S: Supervisor<Index = View>> {
+pub struct Config<C: PrivateKey, S: Supervisor<Index = View>> {
     pub crypto: C,
     pub supervisor: S,
     pub namespace: Vec<u8>,
@@ -21,7 +21,7 @@ pub struct Config<C: Scheme, S: Supervisor<Index = View>> {
 
 pub struct Conflicter<
     E: Clock + Rng + CryptoRng + Spawner,
-    C: Scheme,
+    C: PrivateKey,
     H: Hasher,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
@@ -35,7 +35,7 @@ pub struct Conflicter<
 
 impl<
         E: Clock + Rng + CryptoRng + Spawner,
-        C: Scheme,
+        C: PrivateKey,
         H: Hasher,
         S: Supervisor<Index = View, PublicKey = C::PublicKey>,
     > Conflicter<E, C, H, S>

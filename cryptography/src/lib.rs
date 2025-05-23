@@ -26,7 +26,7 @@ pub mod secp256r1;
 // }
 
 /// A private key, able to derive its public key and sign messages.
-pub trait PrivateKey: Sized + Clone
+pub trait PrivateKey: Sized + Clone + Array
 where
     Self::PublicKey: PublicKey<Private = Self, Signature = Self::Signature>,
 {
@@ -51,7 +51,9 @@ where
 }
 
 /// A public key, able to verify signatures.
-pub trait PublicKey: Sized + Clone + From<Self::Private> + ReadExt + Encode + PartialEq {
+pub trait PublicKey:
+    Sized + Clone + From<Self::Private> + ReadExt + Encode + PartialEq + Array
+{
     /// The private key it came from.
     type Private: PrivateKey<PublicKey = Self>;
     /// The signature type it verifies.
@@ -62,7 +64,7 @@ pub trait PublicKey: Sized + Clone + From<Self::Private> + ReadExt + Encode + Pa
 }
 
 /// A signature over a message by some private key.
-pub trait Signature: Sized + Clone + ReadExt + Encode + PartialEq {
+pub trait Signature: Sized + Clone + ReadExt + Encode + PartialEq + Array {
     /// The public key type that can verify this signature.
     type Public: PublicKey<Signature = Self>;
 }

@@ -210,7 +210,7 @@ pub use network::Network;
 mod tests {
     use super::*;
     use crate::{Receiver, Recipients, Sender};
-    use commonware_cryptography::{Ed25519, Signer};
+    use commonware_cryptography::{ed25519, PrivateKey as _};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         deterministic, tokio, Clock, Metrics, Network as RNetwork, Runner, Spawner,
@@ -247,7 +247,7 @@ mod tests {
         // Create peers
         let mut peers = Vec::new();
         for i in 0..n {
-            peers.push(Ed25519::from_seed(i as u64));
+            peers.push(ed25519::PrivateKey::from_seed(i as u64));
         }
         let addresses = peers.iter().map(|p| p.public_key()).collect::<Vec<_>>();
 
@@ -490,7 +490,7 @@ mod tests {
             // Create peers
             let mut peers = Vec::new();
             for i in 0..n {
-                peers.push(Ed25519::from_seed(i as u64));
+                peers.push(ed25519::PrivateKey::from_seed(i as u64));
             }
             let addresses = peers.iter().map(|p| p.public_key()).collect::<Vec<_>>();
 
@@ -592,7 +592,7 @@ mod tests {
             // Create peers
             let mut peers = Vec::new();
             for i in 0..n {
-                peers.push(Ed25519::from_seed(i as u64));
+                peers.push(ed25519::PrivateKey::from_seed(i as u64));
             }
             let addresses = peers.iter().map(|p| p.public_key()).collect::<Vec<_>>();
 

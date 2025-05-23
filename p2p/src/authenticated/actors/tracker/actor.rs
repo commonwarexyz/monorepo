@@ -4,7 +4,7 @@ use super::{
     Config, Error,
 };
 use crate::authenticated::{ip, types};
-use commonware_cryptography::Scheme;
+use commonware_cryptography::PrivateKey;
 use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::{union, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
@@ -17,7 +17,7 @@ use tracing::debug;
 const NAMESPACE_SUFFIX_IP: &[u8] = b"_IP";
 
 /// The tracker actor that manages peer discovery and connection reservations.
-pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> {
+pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PrivateKey> {
     context: E,
 
     // ---------- Configuration ----------
@@ -49,7 +49,7 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> 
     directory: Directory<E, C>,
 }
 
-impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> {
+impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PrivateKey> Actor<E, C> {
     /// Create a new tracker [`Actor`] from the given `context` and `cfg`.
     pub fn new(context: E, mut cfg: Config<C>) -> (Self, Mailbox<E, C>, Oracle<E, C>) {
         // Sign my own information
@@ -243,11 +243,7 @@ mod tests {
         // Blocker is implicitly available via oracle.block() due to Oracle implementing crate::Blocker
     };
     use commonware_codec::{DecodeExt, Encode};
-    use commonware_cryptography::{
-        ed25519::{self, PublicKey},
-        Ed25519,
-        Signer, // Verifier is not directly used in this test module's scope
-    };
+    use commonware_cryptography::ed25519::{self, PublicKey};
     use commonware_runtime::{
         deterministic::{self, Context},
         Clock, Runner,
@@ -263,7 +259,7 @@ mod tests {
     use types::PeerInfo;
 
     // Test Configuration Setup
-    fn default_test_config<C: Scheme>(
+    fn default_test_config<C: PrivateKey>(
         crypto: C,
         bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
     ) -> Config<C> {
@@ -284,21 +280,21 @@ mod tests {
     }
 
     // Helper to create Ed25519 signer and public key
-    fn new_signer_and_pk(seed: u64) -> (Ed25519, PublicKey) {
-        let signer = Ed25519::from_seed(seed);
+    fn new_signer_and_pk(seed: u64) -> (ed25519::PrivateKey, PublicKey) {
+        let signer = ed25519::PrivateKey::from_seed(seed);
         let pk = signer.public_key();
         (signer, pk)
     }
 
     // Helper to create PeerInfo
     fn new_peer_info(
-        signer: &mut Ed25519,
+        signer: &mut ed25519::PrivateKey,
         ip_namespace: &[u8],
         socket: SocketAddr,
         timestamp: u64,
         target_pk_override: Option<PublicKey>,
         make_sig_invalid: bool,
-    ) -> PeerInfo<Ed25519> {
+    ) -> PeerInfo<ed25519::PrivateKey> {
         let peer_info_pk = target_pk_override.unwrap_or_else(|| signer.public_key());
         let mut signature = signer.sign(Some(ip_namespace), &(socket, timestamp).encode());
 
@@ -319,10 +315,10 @@ mod tests {
     // Mock a connection to a peer by reserving it as if it had dialed us and the `peer` actor had
     // sent an initialization.
     async fn connect_to_peer(
-        mailbox: &mut tracker::Mailbox<Context, Ed25519>,
+        mailbox: &mut tracker::Mailbox<Context, ed25519::PrivateKey>,
         peer: &PublicKey,
-        peer_mailbox: &peer::Mailbox<Ed25519>,
-        peer_receiver: &mut mpsc::Receiver<peer::Message<Ed25519>>,
+        peer_mailbox: &peer::Mailbox<ed25519::PrivateKey>,
+        peer_receiver: &mut mpsc::Receiver<peer::Message<ed25519::PrivateKey>>,
     ) -> tracker::Reservation<Context, PublicKey> {
         let res = mailbox
             .listen(peer.clone())
@@ -344,17 +340,17 @@ mod tests {
     struct TestHarness {
         #[allow(dead_code)]
         actor_handle: Handle<()>,
-        mailbox: Mailbox<deterministic::Context, Ed25519>,
-        oracle: Oracle<deterministic::Context, Ed25519>,
+        mailbox: Mailbox<deterministic::Context, ed25519::PrivateKey>,
+        oracle: Oracle<deterministic::Context, ed25519::PrivateKey>,
         ip_namespace: Vec<u8>,
         tracker_pk: PublicKey,
-        tracker_signer: Ed25519,
-        cfg: Config<Ed25519>, // Store cloned config for access to its values
+        tracker_signer: ed25519::PrivateKey,
+        cfg: Config<ed25519::PrivateKey>, // Store cloned config for access to its values
     }
 
     fn setup_actor(
         runner_context: deterministic::Context,
-        cfg_to_clone: Config<Ed25519>, // Pass by value to allow cloning
+        cfg_to_clone: Config<ed25519::PrivateKey>, // Pass by value to allow cloning
     ) -> TestHarness {
         let tracker_signer = cfg_to_clone.crypto.clone();
         let tracker_pk = tracker_signer.public_key();
@@ -382,7 +378,7 @@ mod tests {
     fn test_register_peer_set_too_large() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg_initial = default_test_config(Ed25519::from_seed(0), Vec::new());
+            let cfg_initial = default_test_config(ed25519::PrivateKey::from_seed(0), Vec::new());
             let TestHarness {
                 mut oracle,
                 cfg,
@@ -402,7 +398,7 @@ mod tests {
     fn test_connect_unauthorized_peer_is_killed() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = default_test_config(Ed25519::from_seed(0), Vec::new());
+            let cfg = default_test_config(ed25519::PrivateKey::from_seed(0), Vec::new());
             let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg);
 
             let (_unauth_signer, unauth_pk) = new_signer_and_pk(1);
@@ -430,7 +426,7 @@ mod tests {
     fn test_connect_authorized_peer_receives_tracker_info() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg_initial = default_test_config(Ed25519::from_seed(0), Vec::new());
+            let cfg_initial = default_test_config(ed25519::PrivateKey::from_seed(0), Vec::new());
             let TestHarness {
                 mut mailbox,
                 mut oracle,
@@ -472,8 +468,10 @@ mod tests {
         executor.start(|context| async move {
             let (_boot_signer, boot_pk) = new_signer_and_pk(99);
             let boot_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9999);
-            let cfg_with_boot =
-                default_test_config(Ed25519::from_seed(0), vec![(boot_pk.clone(), boot_addr)]);
+            let cfg_with_boot = default_test_config(
+                ed25519::PrivateKey::from_seed(0),
+                vec![(boot_pk.clone(), boot_addr)],
+            );
             let TestHarness {
                 mailbox: mut new_mailbox,
                 ..
@@ -503,7 +501,7 @@ mod tests {
     fn test_handle_peers_received_self() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg_initial = default_test_config(Ed25519::from_seed(0), Vec::new());
+            let cfg_initial = default_test_config(ed25519::PrivateKey::from_seed(0), Vec::new());
             let TestHarness {
                 mut mailbox,
                 mut oracle,
@@ -545,7 +543,7 @@ mod tests {
     fn test_handle_bit_vec_for_unknown_index_sends_no_peers() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg_initial = default_test_config(Ed25519::from_seed(0), Vec::new());
+            let cfg_initial = default_test_config(ed25519::PrivateKey::from_seed(0), Vec::new());
             let TestHarness {
                 mut mailbox,
                 mut oracle,
@@ -585,7 +583,7 @@ mod tests {
     fn test_block_peer_standard_behavior() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg_initial = default_test_config(Ed25519::from_seed(0), Vec::new());
+            let cfg_initial = default_test_config(ed25519::PrivateKey::from_seed(0), Vec::new());
             let TestHarness {
                 mut mailbox,
                 mut oracle,
@@ -621,7 +619,7 @@ mod tests {
     fn test_block_peer_already_blocked_is_noop() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg_initial = default_test_config(Ed25519::from_seed(0), Vec::new());
+            let cfg_initial = default_test_config(ed25519::PrivateKey::from_seed(0), Vec::new());
             let TestHarness {
                 mut mailbox,
                 mut oracle,
@@ -655,7 +653,7 @@ mod tests {
     fn test_block_peer_non_existent_is_noop() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg_initial = default_test_config(Ed25519::from_seed(0), Vec::new());
+            let cfg_initial = default_test_config(ed25519::PrivateKey::from_seed(0), Vec::new());
             let TestHarness { mut oracle, .. } = setup_actor(context.clone(), cfg_initial);
 
             let (_s1_signer, pk_non_existent) = new_signer_and_pk(100);
@@ -669,7 +667,7 @@ mod tests {
     fn test_handle_peers_learns_unknown_peer() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg_initial = default_test_config(Ed25519::from_seed(0), Vec::new());
+            let cfg_initial = default_test_config(ed25519::PrivateKey::from_seed(0), Vec::new());
             let TestHarness {
                 mut mailbox,
                 mut oracle,
@@ -743,7 +741,7 @@ mod tests {
     fn test_handle_peers_rejects_older_info_for_known_peer() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg_initial = default_test_config(Ed25519::from_seed(0), Vec::new());
+            let cfg_initial = default_test_config(ed25519::PrivateKey::from_seed(0), Vec::new());
             let TestHarness {
                 mut mailbox,
                 mut oracle,
@@ -835,7 +833,7 @@ mod tests {
     fn test_listen() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg_initial = default_test_config(Ed25519::from_seed(0), Vec::new());
+            let cfg_initial = default_test_config(ed25519::PrivateKey::from_seed(0), Vec::new());
             let TestHarness {
                 mut mailbox,
                 mut oracle,
@@ -870,8 +868,10 @@ mod tests {
         executor.start(|context| async move {
             let (_boot_signer, boot_pk) = new_signer_and_pk(99);
             let boot_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9000);
-            let cfg_initial =
-                default_test_config(Ed25519::from_seed(0), vec![(boot_pk.clone(), boot_addr)]);
+            let cfg_initial = default_test_config(
+                ed25519::PrivateKey::from_seed(0),
+                vec![(boot_pk.clone(), boot_addr)],
+            );
             let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg_initial);
 
             let dialable_peers = mailbox.dialable().await;
@@ -886,8 +886,10 @@ mod tests {
         executor.start(|context| async move {
             let (_boot_signer, boot_pk) = new_signer_and_pk(99);
             let boot_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9000);
-            let cfg_initial =
-                default_test_config(Ed25519::from_seed(0), vec![(boot_pk.clone(), boot_addr)]);
+            let cfg_initial = default_test_config(
+                ed25519::PrivateKey::from_seed(0),
+                vec![(boot_pk.clone(), boot_addr)],
+            );
 
             let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg_initial);
 
@@ -913,7 +915,7 @@ mod tests {
     fn test_validate_kill_on_too_many() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut cfg = default_test_config(Ed25519::from_seed(0), Vec::new());
+            let mut cfg = default_test_config(ed25519::PrivateKey::from_seed(0), Vec::new());
             let max_gossip = 2;
             cfg.peer_gossip_max_count = max_gossip;
             let TestHarness {
@@ -967,7 +969,7 @@ mod tests {
     fn test_validate_kill_on_private_ip_disallowed() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut cfg = default_test_config(Ed25519::from_seed(0), Vec::new());
+            let mut cfg = default_test_config(ed25519::PrivateKey::from_seed(0), Vec::new());
             cfg.allow_private_ips = false;
             let TestHarness {
                 mut mailbox,
@@ -999,7 +1001,7 @@ mod tests {
     fn test_validate_kill_on_synchrony_bound() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg_initial = default_test_config(Ed25519::from_seed(0), Vec::new());
+            let cfg_initial = default_test_config(ed25519::PrivateKey::from_seed(0), Vec::new());
             let TestHarness {
                 mut mailbox,
                 ip_namespace,
@@ -1032,7 +1034,7 @@ mod tests {
     fn test_validate_kill_on_invalid_signature() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg_initial = default_test_config(Ed25519::from_seed(0), Vec::new());
+            let cfg_initial = default_test_config(ed25519::PrivateKey::from_seed(0), Vec::new());
             let TestHarness {
                 mut mailbox,
                 mut oracle,
@@ -1068,7 +1070,7 @@ mod tests {
     fn test_bitvec_kill_on_length_mismatch() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg_initial = default_test_config(Ed25519::from_seed(0), Vec::new());
+            let cfg_initial = default_test_config(ed25519::PrivateKey::from_seed(0), Vec::new());
             let TestHarness {
                 mut mailbox,
                 mut oracle,
@@ -1101,7 +1103,7 @@ mod tests {
         // Combines and clarifies parts of the old test_bit_vec
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg_initial = default_test_config(Ed25519::from_seed(0), Vec::new());
+            let cfg_initial = default_test_config(ed25519::PrivateKey::from_seed(0), Vec::new());
             let TestHarness {
                 mut mailbox,
                 mut oracle,
