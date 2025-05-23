@@ -765,7 +765,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_write_straddling_non_mergable() {
+    fn test_write_straddling_non_mergeable() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Test write operations that are non-contiguous with the current buffer, forcing flushes.
