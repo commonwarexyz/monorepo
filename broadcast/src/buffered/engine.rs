@@ -1,7 +1,7 @@
 use super::{metrics, Config, Mailbox, Message};
 use crate::buffered::metrics::SequencerLabel;
 use commonware_codec::Codec;
-use commonware_cryptography::{Committable, Digest, Digestible};
+use commonware_cryptography::{Committable, Digestible};
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
@@ -48,13 +48,7 @@ struct Pair<Dc, Dd> {
 /// - Receiving messages from the network
 /// - Storing messages in the cache
 /// - Responding to requests from the application
-pub struct Engine<
-    E: Clock + Spawner + Metrics,
-    P: Array,
-    Dc: Digest,
-    Dd: Digest,
-    M: Committable<Dc> + Digestible<Dd> + Codec,
-> {
+pub struct Engine<E: Clock + Spawner + Metrics, P: Array, M: Committable + Digestible + Codec> {
     ////////////////////////////////////////
     // Interfaces
     ////////////////////////////////////////
@@ -79,10 +73,11 @@ pub struct Engine<
     // Messaging
     ////////////////////////////////////////
     /// The mailbox for receiving messages.
-    mailbox_receiver: mpsc::Receiver<Message<P, Dc, Dd, M>>,
+    mailbox_receiver: mpsc::Receiver<Message<P, M>>,
 
     /// Pending requests from the application.
-    waiters: HashMap<Dc, Vec<Waiter<P, Dd, M>>>,
+    #[allow(clippy::type_complexity)]
+    waiters: HashMap<M::Commitment, Vec<Waiter<P, M::Digest, M>>>,
 
     ////////////////////////////////////////
     // Cache
@@ -91,20 +86,21 @@ pub struct Engine<
     ///
     /// We store messages outside of the deques to minimize memory usage
     /// when receiving duplicate messages.
-    items: HashMap<Dc, HashMap<Dd, M>>,
+    items: HashMap<M::Commitment, HashMap<M::Digest, M>>,
 
     /// A LRU cache of the latest received identities and digests from each peer.
     ///
     /// This is used to limit the number of digests stored per peer.
     /// At most `deque_size` digests are stored per peer. This value is expected to be small, so
     /// membership checks are done in linear time.
-    deques: HashMap<P, VecDeque<Pair<Dc, Dd>>>,
+    #[allow(clippy::type_complexity)]
+    deques: HashMap<P, VecDeque<Pair<M::Commitment, M::Digest>>>,
 
     /// The number of times each digest (globally unique) exists in one of the deques.
     ///
     /// Multiple peers can send the same message and we only want to store
     /// the message once.
-    counts: HashMap<Dd, usize>,
+    counts: HashMap<M::Digest, usize>,
 
     ////////////////////////////////////////
     // Metrics
@@ -113,19 +109,12 @@ pub struct Engine<
     metrics: metrics::Metrics,
 }
 
-impl<
-        E: Clock + Spawner + Metrics,
-        P: Array,
-        Dc: Digest,
-        Dd: Digest,
-        M: Committable<Dc> + Digestible<Dd> + Codec,
-    > Engine<E, P, Dc, Dd, M>
-{
+impl<E: Clock + Spawner + Metrics, P: Array, M: Committable + Digestible + Codec> Engine<E, P, M> {
     /// Creates a new engine with the given context and configuration.
     /// Returns the engine and a mailbox for sending messages to the engine.
-    pub fn new(context: E, cfg: Config<P, M::Cfg>) -> (Self, Mailbox<P, Dc, Dd, M>) {
+    pub fn new(context: E, cfg: Config<P, M::Cfg>) -> (Self, Mailbox<P, M>) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
-        let mailbox = Mailbox::<P, Dc, Dd, M>::new(mailbox_sender);
+        let mailbox = Mailbox::<P, M>::new(mailbox_sender);
         let metrics = metrics::Metrics::init(context.clone());
 
         let result = Self {
@@ -250,8 +239,8 @@ impl<
     fn find_messages(
         &mut self,
         peer: &Option<P>,
-        commitment: Dc,
-        digest: Option<Dd>,
+        commitment: M::Commitment,
+        digest: Option<M::Digest>,
         all: bool,
     ) -> Vec<M> {
         match peer {
@@ -295,8 +284,8 @@ impl<
     async fn handle_subscribe(
         &mut self,
         peer: Option<P>,
-        commitment: Dc,
-        digest: Option<Dd>,
+        commitment: M::Commitment,
+        digest: Option<M::Digest>,
         responder: oneshot::Sender<M>,
     ) {
         // Check if the message is already in the cache
@@ -318,8 +307,8 @@ impl<
     async fn handle_get(
         &mut self,
         peer: Option<P>,
-        commitment: Dc,
-        digest: Option<Dd>,
+        commitment: M::Commitment,
+        digest: Option<M::Digest>,
         responder: oneshot::Sender<Vec<M>>,
     ) {
         let items = self.find_messages(&peer, commitment, digest, true);

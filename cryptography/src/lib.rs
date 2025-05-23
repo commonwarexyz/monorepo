@@ -140,16 +140,19 @@ pub trait Digest: Array + Copy {
 }
 
 /// An object that can be uniquely represented as a [Digest].
-pub trait Digestible<D: Digest>: Clone + Sized + Send + Sync + 'static {
+pub trait Digestible: Clone + Sized + Send + Sync + 'static {
+    type Digest: Digest;
     /// Returns a unique representation of the object as a [Digest].
     ///
     /// If many objects with [Digest]s are related (map to some higher-level
     /// group [Digest]), you should also implement [Committable].
-    fn digest(&self) -> D;
+    fn digest(&self) -> Self::Digest;
 }
 
-/// An object that shares a (commitment) [Digest] with other, related values.
-pub trait Committable<D: Digest>: Clone + Sized + Send + Sync + 'static {
+/// An object that can produce a commitment of itself.
+pub trait Committable: Digestible + Clone + Sized + Send + Sync + 'static {
+    type Commitment: Digest;
+
     /// Returns the unique commitment of the object as a [Digest].
     ///
     /// For simple objects (like a block), this is often just the digest of the object
@@ -162,7 +165,7 @@ pub trait Committable<D: Digest>: Clone + Sized + Send + Sync + 'static {
     /// to different commitments. Primitives assume there is a one-to-one
     /// relation between digest and commitment and a one-to-many relation
     /// between commitment and digest.
-    fn commitment(&self) -> D;
+    fn commitment(&self) -> Self::Commitment;
 }
 
 /// Interface that commonware crates rely on for hashing.
