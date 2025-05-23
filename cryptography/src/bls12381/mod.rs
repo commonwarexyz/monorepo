@@ -9,4 +9,4 @@
 pub mod dkg;
 pub mod primitives;
 mod scheme;
-pub use scheme::Signature;
+pub use {scheme::PrivateKey, scheme::PublicKey, scheme::Signature};

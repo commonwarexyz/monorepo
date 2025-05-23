@@ -129,11 +129,11 @@ pub struct PrivateKey {
 }
 
 impl crate::PrivateKey for PrivateKey {
-    type Public = PublicKey;
+    type PublicKey = PublicKey;
 
     type Signature = Signature;
 
-    fn public_key(&self) -> Self::Public {
+    fn public_key(&self) -> Self::PublicKey {
         PublicKey::from(self.key.verification_key())
     }
 

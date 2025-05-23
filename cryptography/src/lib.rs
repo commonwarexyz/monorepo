@@ -10,7 +10,8 @@ use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 
 pub mod bls12381;
 pub mod ed25519;
-// pub use ed25519::{ /*Ed25519, Ed25519Batch*/};
+// pub use ed25519::{PrivateKey, PublicKey, Signature};
+
 pub mod sha256;
 pub use sha256::{hash, Sha256};
 pub mod secp256r1;
@@ -26,12 +27,12 @@ pub mod secp256r1;
 /// A private key, able to derive its public key and sign messages.
 pub trait PrivateKey: Sized + Clone {
     /// The corresponding public key type.
-    type Public: PublicKey<Private = Self>;
+    type PublicKey: PublicKey<Private = Self>;
     /// The signature type produced by this keypair.
-    type Signature: Signature<Public = Self::Public>;
+    type Signature: Signature<Public = Self::PublicKey>;
 
     /// Derive the public key.
-    fn public_key(&self) -> Self::Public;
+    fn public_key(&self) -> Self::PublicKey;
 
     /// Sign a message, returning a signature.
     fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Self::Signature;
@@ -48,7 +49,7 @@ pub trait PrivateKey: Sized + Clone {
 /// A public key, able to verify signatures.
 pub trait PublicKey: Sized + Clone + From<Self::Private> {
     /// The private key it came from.
-    type Private: PrivateKey<Public = Self>;
+    type Private: PrivateKey<PublicKey = Self>;
     /// The signature type it verifies.
     type Signature: Signature<Public = Self>;
 

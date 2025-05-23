@@ -4,7 +4,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
-use commonware_cryptography::PrivateKey;
+use commonware_cryptography::{PrivateKey, PublicKey};
 use commonware_runtime::Clock;
 use commonware_utils::SystemTimeExt;
 use std::time::Duration;
@@ -141,12 +141,10 @@ impl<C: PrivateKey> Signed<C> {
         }
 
         // Verify signature
-        if !C::verify(
-            Some(namespace),
-            &self.info.encode(),
-            &self.signer,
-            &self.signature,
-        ) {
+        if !self
+            .signer
+            .verify(Some(namespace), &self.info.encode(), &self.signature)
+        {
             return Err(Error::InvalidSignature);
         }
         Ok(())
@@ -190,6 +188,7 @@ mod tests {
         utils::codec::send_frame,
     };
     use commonware_codec::DecodeExt;
+    use commonware_cryptography::{ed25519, PublicKey as _};
     use commonware_runtime::{deterministic, mocks, Metrics, Runner, Spawner};
     use x25519::PublicKey;
 
@@ -202,8 +201,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create participants
-            let mut sender = Ed25519::from_seed(0);
-            let recipient = Ed25519::from_seed(1);
+            let mut sender = ed25519::PrivateKey::from_seed(0);
+            let recipient = ed25519::PrivateKey::from_seed(1);
             let ephemeral_public_key = PublicKey::from_bytes([3u8; 32]);
 
             // Create handshake message
@@ -219,8 +218,8 @@ mod tests {
             );
 
             // Decode the handshake message
-            let handshake =
-                Signed::<Ed25519>::decode(handshake.encode()).expect("failed to decode handshake");
+            let handshake = Signed::<ed25519::PrivateKey>::decode(handshake.encode())
+                .expect("failed to decode handshake");
 
             // Verify the timestamp
             let synchrony_bound = Duration::from_secs(5);
@@ -235,10 +234,9 @@ mod tests {
             assert_eq!(handshake.info.ephemeral_public_key, ephemeral_public_key,);
 
             // Verify signature
-            assert!(Ed25519::verify(
+            assert!(sender.public_key().verify(
                 Some(TEST_NAMESPACE),
                 &handshake.info.encode(),
-                &sender.public_key(),
                 &handshake.signature,
             ));
 
@@ -263,8 +261,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create participants
-            let mut sender = Ed25519::from_seed(0);
-            let recipient = Ed25519::from_seed(1);
+            let mut sender = ed25519::PrivateKey::from_seed(0);
+            let recipient = ed25519::PrivateKey::from_seed(1);
             let ephemeral_public_key = PublicKey::from_bytes([3u8; 32]);
 
             // Create handshake message
@@ -314,7 +312,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create participants
-            let mut sender = Ed25519::from_seed(0);
+            let mut sender = ed25519::PrivateKey::from_seed(0);
             let ephemeral_public_key = PublicKey::from_bytes([3u8; 32]);
 
             // Create handshake message
@@ -323,7 +321,7 @@ mod tests {
                 TEST_NAMESPACE,
                 Info {
                     timestamp: 0,
-                    recipient: Ed25519::from_seed(1).public_key(),
+                    recipient: ed25519::PrivateKey::from_seed(1).public_key(),
                     ephemeral_public_key,
                 },
             );
@@ -341,7 +339,7 @@ mod tests {
 
             // Call the verify function
             let config = Config {
-                crypto: Ed25519::from_seed(2),
+                crypto: ed25519::PrivateKey::from_seed(2),
                 namespace: TEST_NAMESPACE.to_vec(),
                 max_message_size: ONE_MEGABYTE,
                 synchrony_bound: Duration::from_secs(5),
@@ -373,7 +371,7 @@ mod tests {
 
             // Call the verify function
             let config = Config {
-                crypto: Ed25519::from_seed(0),
+                crypto: ed25519::PrivateKey::from_seed(0),
                 namespace: TEST_NAMESPACE.to_vec(),
                 max_message_size: ONE_MEGABYTE,
                 synchrony_bound: Duration::from_secs(1),
@@ -397,7 +395,7 @@ mod tests {
 
             // Call the verify function for one peer, but never send the handshake from the other
             let config = Config {
-                crypto: Ed25519::from_seed(1),
+                crypto: ed25519::PrivateKey::from_seed(1),
                 namespace: TEST_NAMESPACE.to_vec(),
                 max_message_size: ONE_MEGABYTE,
                 synchrony_bound: Duration::from_secs(1),
@@ -415,7 +413,7 @@ mod tests {
     fn test_handshake_verify_invalid_signature() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut crypto = Ed25519::from_seed(0);
+            let mut crypto = ed25519::PrivateKey::from_seed(0);
             let recipient = crypto.public_key();
             let ephemeral_public_key = x25519::PublicKey::from_bytes([0u8; 32]);
 
@@ -450,7 +448,7 @@ mod tests {
     fn test_handshake_verify_invalid_timestamp_old() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut crypto = Ed25519::from_seed(0);
+            let mut crypto = ed25519::PrivateKey::from_seed(0);
             let recipient = crypto.public_key();
             let ephemeral_public_key = x25519::PublicKey::from_bytes([0u8; 32]);
 
@@ -502,7 +500,7 @@ mod tests {
     fn test_handshake_verify_invalid_timestamp_future() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut crypto = Ed25519::from_seed(0);
+            let mut crypto = ed25519::PrivateKey::from_seed(0);
             let recipient = crypto.public_key();
             let ephemeral_public_key = x25519::PublicKey::from_bytes([0u8; 32]);
 

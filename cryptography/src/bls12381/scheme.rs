@@ -56,12 +56,12 @@ const CURVE_NAME: &str = "bls12381";
 // type PrivateKey = group::Private;
 
 impl crate::PrivateKey for PrivateKey {
-    type Public = PublicKey;
+    type PublicKey = PublicKey;
 
     type Signature = Signature;
 
     // TODO remove duplicate impl
-    fn public_key(&self) -> Self::Public {
+    fn public_key(&self) -> Self::PublicKey {
         let public = ops::compute_public::<MinPk>(&self.key);
         PublicKey::from(public)
     }
