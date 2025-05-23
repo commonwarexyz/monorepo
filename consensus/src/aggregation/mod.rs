@@ -9,7 +9,7 @@ cfg_if::cfg_if! {
         mod engine;
         pub use engine::Engine;
         mod metrics;
-        mod tip;
+        mod safe_tip;
         pub mod types;
     }
 }

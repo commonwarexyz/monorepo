@@ -9,7 +9,7 @@
 
 use super::{
     metrics,
-    tip::Tip,
+    safe_tip::SafeTip,
     types::{Ack, Activity, Epoch, Error, Index, Item, Lock},
     Config,
 };
@@ -128,8 +128,11 @@ pub struct Engine<
     /// The current epoch.
     epoch: Epoch,
 
-    /// Tracks the tip of other validators.
-    tip_manager: Tip<P>,
+    /// The current tip.
+    tip: Index,
+
+    /// Tracks the tips of all validators.
+    safe_tip: SafeTip<P>,
 
     /// The keys represent the set of all `Index` values for which we are attempting to form a
     /// threshold signature, but do not yet have one. Values may be [`Pending::Unverified`] or
@@ -187,7 +190,8 @@ impl<
             epoch_bounds: cfg.epoch_bounds,
             window: cfg.window,
             epoch: 0,
-            tip_manager: Tip::default(), // placeholder
+            tip: 0,
+            safe_tip: SafeTip::default(),
             verifies: FuturesPool::default(),
             pending: BTreeMap::new(),
             confirmed: BTreeMap::new(),
@@ -212,14 +216,15 @@ impl<
         self.epoch = latest;
 
         // Initialize the tip manager
-        self.tip_manager = Tip::new(self.validators.participants(self.epoch).unwrap());
+        self.safe_tip
+            .init(self.validators.participants(self.epoch).unwrap());
 
         loop {
-            self.metrics.tip.set(self.tip() as i64);
+            self.metrics.tip.set(self.tip as i64);
 
             // Propose a new digest if we are processing less than the window
             let next = self.next();
-            if next < self.tip() + self.window {
+            if next < self.tip + self.window {
                 self.verify(next);
                 continue;
             }
@@ -246,7 +251,7 @@ impl<
                     self.epoch = epoch;
 
                     // Update the tip manager
-                    self.tip_manager.reconcile(self.validators.participants(epoch).unwrap());
+                    self.safe_tip.reconcile(self.validators.participants(epoch).unwrap());
 
                     // Update data structures by purging old epochs
                     let min_epoch = self.epoch.saturating_sub(self.epoch_bounds.0);
@@ -303,11 +308,11 @@ impl<
                     let PeerAck { ack, tip } = peer_ack;
 
                     // Update the tip manager
-                    if self.tip_manager.update(sender.clone(), tip).is_some() {
+                    if self.safe_tip.update(sender.clone(), tip).is_some() {
                         // Fast-forward our tip if needed
-                        let tip = self.tip_manager.get();
-                        if tip > self.tip() {
-                            self.pending.retain(|index, _| *index >= tip);
+                        let safe_tip = self.safe_tip.get();
+                        if safe_tip > self.tip {
+                           self.fast_forward_tip(safe_tip);
                         }
                     }
 
@@ -381,10 +386,7 @@ impl<
         sender
             .send(
                 Recipients::All,
-                PeerAck {
-                    ack,
-                    tip: self.tip(),
-                },
+                PeerAck { ack, tip: self.tip },
                 self.priority_acks,
             )
             .await
@@ -402,10 +404,7 @@ impl<
     /// (e.g. already exists, threshold already exists, is outside the epoch bounds, etc.).
     async fn handle_ack(&mut self, ack: &Ack<V, D>) -> Result<(), Error> {
         // Get the quorum
-        let Some(identity) = self.validators.identity(ack.epoch) else {
-            return Err(Error::UnknownIdentity(ack.epoch));
-        };
-        let quorum = identity.required();
+        let quorum = self.validators.identity().required();
 
         // Get the acks
         let acks_by_epoch = match self.pending.get_mut(&ack.item.index) {
@@ -443,6 +442,7 @@ impl<
         Ok(())
     }
 
+    /// Handles a threshold signature.
     async fn handle_threshold(&mut self, item: Item<D>, threshold: V::Signature) {
         // Check if we already have the threshold
         if self.confirmed.contains_key(&item.index) {
@@ -451,6 +451,11 @@ impl<
 
         // Store the threshold
         self.confirmed.insert(item.index, (item.digest, threshold));
+
+        // Increase the tip if needed
+        if item.index == self.tip {
+            self.fast_forward_tip(item.index);
+        }
 
         // Notify the automaton
         self.reporter
@@ -508,12 +513,11 @@ impl<
         }
 
         // Validate height
-        {
-            let bound_lo = self.tip();
-            let bound_hi = bound_lo.saturating_add(self.window);
-            if (bound_lo..=bound_hi).contains(&ack.item.index) {
-                return Err(Error::AckIndex(ack.item.index));
-            }
+        if ack.item.index <= self.tip {
+            return Err(Error::AckThresholded(ack.item.index));
+        }
+        if ack.item.index >= self.tip + self.window {
+            return Err(Error::AckIndex(ack.item.index));
         }
 
         // Validate that we don't already have the ack
@@ -534,10 +538,7 @@ impl<
         }
 
         // Validate partial signature
-        let Some(identity) = self.validators.identity(ack.epoch) else {
-            return Err(Error::UnknownIdentity(ack.epoch));
-        };
-        if !ack.verify(&self.namespace, identity) {
+        if !ack.verify(&self.namespace, self.validators.identity()) {
             return Err(Error::InvalidAckSignature);
         }
 
@@ -548,9 +549,8 @@ impl<
     // Helpers
     ////////////////////////////////////////
 
-    /// Returns the minimum index for which we do not have either:
-    /// - The digest
-    /// - An outstanding request to the automation for the digest
+    /// Returns the next index that we should request the digest for. This is the minimum index for
+    /// which we do not have a digest or an outstanding request to the automaton for the digest.
     fn next(&self) -> Index {
         let max_pending = self
             .pending
@@ -562,14 +562,18 @@ impl<
             .last_key_value()
             .map(|(k, _)| *k + 1)
             .unwrap_or_default();
-        max(max_pending, max_confirmed)
+        max(self.tip, max(max_pending, max_confirmed))
     }
 
-    /// Returns the minimum index for which we do not have a threshold signature.
-    fn tip(&self) -> Index {
-        self.pending
-            .first_key_value()
-            .map(|(k, _)| *k)
-            .unwrap_or_default()
+    /// Increases the tip to the given value, pruning stale entries.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the given tip is less-than-or-equal-to the current tip.
+    fn fast_forward_tip(&mut self, tip: Index) {
+        assert!(tip > self.tip);
+        self.pending.retain(|index, _| *index >= tip);
+        self.confirmed.retain(|index, _| *index >= tip);
+        self.tip = tip;
     }
 }

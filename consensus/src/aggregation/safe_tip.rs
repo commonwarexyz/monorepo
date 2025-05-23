@@ -5,7 +5,7 @@ use std::collections::{btree_map, BTreeMap, HashMap, HashSet};
 /// A data structure that keeps track of the reported tip for each validator.
 /// It can efficiently query the `f`th highest tip, where `f` is the maximum number of faults
 /// that can be tolerated for the given set of validators.
-pub struct Tip<P: Array> {
+pub struct SafeTip<P: Array> {
     /// For each validator, the maximum tip that it has reported.
     tips: HashMap<P, Index>,
 
@@ -21,7 +21,7 @@ pub struct Tip<P: Array> {
     lo: BTreeMap<Index, usize>,
 }
 
-impl<P: Array> Default for Tip<P> {
+impl<P: Array> Default for SafeTip<P> {
     fn default() -> Self {
         Self {
             tips: HashMap::new(),
@@ -31,13 +31,13 @@ impl<P: Array> Default for Tip<P> {
     }
 }
 
-impl<P: Array> Tip<P> {
-    /// Create a new [`Tip`] instance with the given validators.
+impl<P: Array> SafeTip<P> {
+    /// Initializes an instance with the given validators.
     ///
     /// # Panics
     ///
     /// Panics if the validator set is empty or if the validators are not unique.
-    pub fn new(validators: &Vec<P>) -> Self {
+    pub fn init(&mut self, validators: &Vec<P>) {
         // Ensure the validator set is not empty and all validators are unique
         assert!(!validators.is_empty());
 
@@ -60,7 +60,9 @@ impl<P: Array> Tip<P> {
             hi.insert(Index::default(), f);
         }
 
-        Self { tips, hi, lo }
+        self.tips = tips;
+        self.hi = hi;
+        self.lo = lo;
     }
 
     /// Updates the validator set. New validators are added with a default tip of 0.
