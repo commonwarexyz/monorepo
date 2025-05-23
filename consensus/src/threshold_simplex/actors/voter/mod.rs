@@ -64,7 +64,7 @@ mod tests {
         simulated::{Config as NConfig, Link, Network},
         Receiver, Recipients, Sender,
     };
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
+    use commonware_runtime::{deterministic, Metrics, Runner, Spawner};
     use commonware_utils::quorum;
     use futures::{channel::mpsc, StreamExt};
     use std::time::Duration;
@@ -654,9 +654,6 @@ mod tests {
                 }
                 _ => panic!("unexpected resolver message"),
             }
-
-            // Advance time significantly to ensure main loop runs, processes messages, and calls prune_views
-            context.sleep(Duration::from_secs(5)).await;
 
             // Send notarization below oldest interesting view (42)
             //
