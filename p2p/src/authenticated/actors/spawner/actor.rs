@@ -119,7 +119,7 @@ impl<
                         .with_label("peer")
                         .spawn(move |context| async move {
                             // Create peer
-                            info!(?peer, "peer started");
+                            debug!(?peer, "peer started");
                             let (actor, messenger) = peer::Actor::new(
                                 context,
                                 peer::Config {
