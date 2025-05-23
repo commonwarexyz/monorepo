@@ -231,7 +231,7 @@ pub fn install_monitoring_cmd(
     prometheus_version, prometheus_version
 );
     let grafana_url = format!(
-        "https://dl.grafana.com/oss/release/grafana_{}_arm64.deb",
+        "https://grafana.com/docs/grafana/latest/_{}_arm64.deb",
         grafana_version
     );
     let loki_url = format!(
