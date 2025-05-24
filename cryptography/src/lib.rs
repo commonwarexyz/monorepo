@@ -178,330 +178,317 @@ pub trait Hasher: Clone + Send + Sync + 'static {
     fn reset(&mut self);
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use commonware_codec::{DecodeExt, FixedSize};
-//     use rand::rngs::OsRng;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_codec::{DecodeExt, FixedSize};
+    use rand::rngs::OsRng;
 
-//     fn test_validate<C: Scheme>() {
-//         let signer = C::new(&mut OsRng);
-//         let public_key = signer.public_key();
-//         assert!(C::PublicKey::decode(public_key.as_ref()).is_ok());
-//     }
+    fn test_validate<C: PrivateKey>() {
+        let private_key = C::from_rng(&mut OsRng);
+        let public_key = private_key.public_key();
+        assert!(C::PublicKey::decode(public_key.as_ref()).is_ok());
+    }
 
-//     fn test_from_valid_private_key<C: Scheme>() {
-//         let signer = C::new(&mut OsRng);
-//         let private_key = signer.private_key();
-//         let public_key = signer.public_key();
-//         let signer = C::from(private_key).unwrap();
-//         assert_eq!(public_key, signer.public_key());
-//     }
+    fn test_from_valid_private_key<C: PrivateKey>() {
+        let private_key = C::from_rng(&mut OsRng);
+        assert_eq!(private_key.public_key(), C::PublicKey::from(private_key));
+    }
 
-//     fn test_validate_invalid_public_key<C: Signer>() {
-//         let result = C::PublicKey::decode(vec![0; 1024].as_ref());
-//         assert!(result.is_err());
-//     }
+    fn test_validate_invalid_public_key<C: PrivateKey>() {
+        let result = C::PublicKey::decode(vec![0; 1024].as_ref());
+        assert!(result.is_err());
+    }
 
-//     fn test_sign_and_verify<C: Scheme>() {
-//         let mut signer = C::from_seed(0);
-//         let namespace = Some(&b"test_namespace"[..]);
-//         let message = b"test_message";
-//         let signature = signer.sign(namespace, message);
-//         let public_key = signer.public_key();
-//         assert!(C::verify(namespace, message, &public_key, &signature));
-//     }
+    fn test_sign_and_verify<C: PrivateKey>() {
+        let private_key = C::from_seed(0);
+        let namespace = Some(&b"test_namespace"[..]);
+        let message = b"test_message";
+        let signature = private_key.sign(namespace, message);
+        let public_key = private_key.public_key();
+        assert!(public_key.verify(namespace, message, &signature));
+    }
 
-//     fn test_sign_and_verify_wrong_message<C: Scheme>() {
-//         let mut signer = C::from_seed(0);
-//         let namespace: Option<&[u8]> = Some(&b"test_namespace"[..]);
-//         let message = b"test_message";
-//         let wrong_message = b"wrong_message";
-//         let signature = signer.sign(namespace, message);
-//         let public_key = signer.public_key();
-//         assert!(!C::verify(
-//             namespace,
-//             wrong_message,
-//             &public_key,
-//             &signature
-//         ));
-//     }
+    fn test_sign_and_verify_wrong_message<C: PrivateKey>() {
+        let private_key = C::from_seed(0);
+        let namespace: Option<&[u8]> = Some(&b"test_namespace"[..]);
+        let message = b"test_message";
+        let wrong_message = b"wrong_message";
+        let signature = private_key.sign(namespace, message);
+        let public_key = private_key.public_key();
+        assert!(!public_key.verify(namespace, wrong_message, &signature));
+    }
 
-//     fn test_sign_and_verify_wrong_namespace<C: Scheme>() {
-//         let mut signer = C::from_seed(0);
-//         let namespace = Some(&b"test_namespace"[..]);
-//         let wrong_namespace = Some(&b"wrong_namespace"[..]);
-//         let message = b"test_message";
-//         let signature = signer.sign(namespace, message);
-//         let public_key = signer.public_key();
-//         assert!(!C::verify(
-//             wrong_namespace,
-//             message,
-//             &public_key,
-//             &signature
-//         ));
-//     }
+    fn test_sign_and_verify_wrong_namespace<C: PrivateKey>() {
+        let private_key = C::from_seed(0);
+        let namespace = Some(&b"test_namespace"[..]);
+        let wrong_namespace = Some(&b"wrong_namespace"[..]);
+        let message = b"test_message";
+        let signature = private_key.sign(namespace, message);
+        let public_key = private_key.public_key();
+        assert!(!public_key.verify(wrong_namespace, message, &signature));
+    }
 
-//     fn test_empty_vs_none_namespace<C: Scheme>() {
-//         let mut signer = C::from_seed(0);
-//         let empty_namespace = Some(&b""[..]);
-//         let message = b"test_message";
-//         let signature = signer.sign(empty_namespace, message);
-//         let public_key = signer.public_key();
-//         assert!(C::verify(empty_namespace, message, &public_key, &signature));
-//         assert!(!C::verify(None, message, &public_key, &signature));
-//     }
+    fn test_empty_vs_none_namespace<C: PrivateKey>() {
+        let private_key = C::from_seed(0);
+        let empty_namespace = Some(&b""[..]);
+        let message = b"test_message";
+        let signature = private_key.sign(empty_namespace, message);
+        let public_key = private_key.public_key();
+        assert!(public_key.verify(empty_namespace, message, &signature));
+        assert!(!public_key.verify(None, message, &signature));
+    }
 
-//     fn test_signature_determinism<C: Scheme>() {
-//         let mut signer_1 = C::from_seed(0);
-//         let mut signer_2 = C::from_seed(0);
-//         let namespace = Some(&b"test_namespace"[..]);
-//         let message = b"test_message";
-//         let signature_1 = signer_1.sign(namespace, message);
-//         let signature_2 = signer_2.sign(namespace, message);
-//         assert_eq!(signer_1.public_key(), signer_2.public_key());
-//         assert_eq!(signature_1, signature_2);
-//     }
+    fn test_signature_determinism<C: PrivateKey>() {
+        let private_key_1 = C::from_seed(0);
+        let private_key_2 = C::from_seed(0);
+        let namespace = Some(&b"test_namespace"[..]);
+        let message = b"test_message";
+        let signature_1 = private_key_1.sign(namespace, message);
+        let signature_2 = private_key_2.sign(namespace, message);
+        assert_eq!(private_key_1.public_key(), private_key_2.public_key());
+        assert_eq!(signature_1, signature_2);
+    }
 
-//     fn test_invalid_signature_publickey_pair<C: Scheme>() {
-//         let mut signer = C::from_seed(0);
-//         let signer_2 = C::from_seed(1);
-//         let namespace = Some(&b"test_namespace"[..]);
-//         let message = b"test_message";
-//         let signature = signer.sign(namespace, message);
-//         let public_key = signer_2.public_key();
-//         assert!(!C::verify(namespace, message, &public_key, &signature));
-//     }
+    fn test_invalid_signature_publickey_pair<C: PrivateKey>() {
+        let private_key = C::from_seed(0);
+        let private_key_2 = C::from_seed(1);
+        let namespace = Some(&b"test_namespace"[..]);
+        let message = b"test_message";
+        let signature = private_key.sign(namespace, message);
+        let public_key = private_key_2.public_key();
+        assert!(!public_key.verify(namespace, message, &signature));
+    }
 
-//     #[test]
-//     fn test_ed25519_validate() {
-//         test_validate::<Ed25519>();
-//     }
+    #[test]
+    fn test_ed25519_validate() {
+        test_validate::<ed25519::PrivateKey>();
+    }
 
-//     #[test]
-//     fn test_ed25519_validate_invalid_public_key() {
-//         test_validate_invalid_public_key::<Ed25519>();
-//     }
+    #[test]
+    fn test_ed25519_validate_invalid_public_key() {
+        test_validate_invalid_public_key::<ed25519::PrivateKey>();
+    }
 
-//     #[test]
-//     fn test_ed25519_from_valid_private_key() {
-//         test_from_valid_private_key::<Ed25519>();
-//     }
+    #[test]
+    fn test_ed25519_from_valid_private_key() {
+        test_from_valid_private_key::<ed25519::PrivateKey>();
+    }
 
-//     #[test]
-//     fn test_ed25519_sign_and_verify() {
-//         test_sign_and_verify::<Ed25519>();
-//     }
+    #[test]
+    fn test_ed25519_sign_and_verify() {
+        test_sign_and_verify::<ed25519::PrivateKey>();
+    }
 
-//     #[test]
-//     fn test_ed25519_sign_and_verify_wrong_message() {
-//         test_sign_and_verify_wrong_message::<Ed25519>();
-//     }
+    #[test]
+    fn test_ed25519_sign_and_verify_wrong_message() {
+        test_sign_and_verify_wrong_message::<ed25519::PrivateKey>();
+    }
 
-//     #[test]
-//     fn test_ed25519_sign_and_verify_wrong_namespace() {
-//         test_sign_and_verify_wrong_namespace::<Ed25519>();
-//     }
+    #[test]
+    fn test_ed25519_sign_and_verify_wrong_namespace() {
+        test_sign_and_verify_wrong_namespace::<ed25519::PrivateKey>();
+    }
 
-//     #[test]
-//     fn test_ed25519_empty_vs_none_namespace() {
-//         test_empty_vs_none_namespace::<Ed25519>();
-//     }
+    #[test]
+    fn test_ed25519_empty_vs_none_namespace() {
+        test_empty_vs_none_namespace::<ed25519::PrivateKey>();
+    }
 
-//     #[test]
-//     fn test_ed25519_signature_determinism() {
-//         test_signature_determinism::<Ed25519>();
-//     }
+    #[test]
+    fn test_ed25519_signature_determinism() {
+        test_signature_determinism::<ed25519::PrivateKey>();
+    }
 
-//     #[test]
-//     fn test_ed25519_invalid_signature_publickey_pair() {
-//         test_invalid_signature_publickey_pair::<Ed25519>();
-//     }
+    #[test]
+    fn test_ed25519_invalid_signature_publickey_pair() {
+        test_invalid_signature_publickey_pair::<ed25519::PrivateKey>();
+    }
 
-//     #[test]
-//     fn test_ed25519_len() {
-//         assert_eq!(<Ed25519 as Specification>::PublicKey::SIZE, 32);
-//         assert_eq!(<Ed25519 as Specification>::Signature::SIZE, 64);
-//     }
+    #[test]
+    fn test_ed25519_len() {
+        assert_eq!(ed25519::PublicKey::SIZE, 32);
+        assert_eq!(ed25519::Signature::SIZE, 64);
+    }
 
-//     #[test]
-//     fn test_bls12381_validate() {
-//         test_validate::<Bls12381>();
-//     }
+    #[test]
+    fn test_bls12381_validate() {
+        test_validate::<bls12381::PrivateKey>();
+    }
 
-//     #[test]
-//     fn test_bls12381_validate_invalid_public_key() {
-//         test_validate_invalid_public_key::<Bls12381>();
-//     }
+    #[test]
+    fn test_bls12381_validate_invalid_public_key() {
+        test_validate_invalid_public_key::<bls12381::PrivateKey>();
+    }
 
-//     #[test]
-//     fn test_bls12381_from_valid_private_key() {
-//         test_from_valid_private_key::<Bls12381>();
-//     }
+    #[test]
+    fn test_bls12381_from_valid_private_key() {
+        test_from_valid_private_key::<bls12381::PrivateKey>();
+    }
 
-//     #[test]
-//     fn test_bls12381_sign_and_verify() {
-//         test_sign_and_verify::<Bls12381>();
-//     }
+    #[test]
+    fn test_bls12381_sign_and_verify() {
+        test_sign_and_verify::<bls12381::PrivateKey>();
+    }
 
-//     #[test]
-//     fn test_bls12381_sign_and_verify_wrong_message() {
-//         test_sign_and_verify_wrong_message::<Bls12381>();
-//     }
+    #[test]
+    fn test_bls12381_sign_and_verify_wrong_message() {
+        test_sign_and_verify_wrong_message::<bls12381::PrivateKey>();
+    }
 
-//     #[test]
-//     fn test_bls12381_sign_and_verify_wrong_namespace() {
-//         test_sign_and_verify_wrong_namespace::<Bls12381>();
-//     }
+    #[test]
+    fn test_bls12381_sign_and_verify_wrong_namespace() {
+        test_sign_and_verify_wrong_namespace::<bls12381::PrivateKey>();
+    }
 
-//     #[test]
-//     fn test_bls12381_empty_vs_none_namespace() {
-//         test_empty_vs_none_namespace::<Bls12381>();
-//     }
+    #[test]
+    fn test_bls12381_empty_vs_none_namespace() {
+        test_empty_vs_none_namespace::<bls12381::PrivateKey>();
+    }
 
-//     #[test]
-//     fn test_bls12381_signature_determinism() {
-//         test_signature_determinism::<Bls12381>();
-//     }
+    #[test]
+    fn test_bls12381_signature_determinism() {
+        test_signature_determinism::<bls12381::PrivateKey>();
+    }
 
-//     #[test]
-//     fn test_bls12381_invalid_signature_publickey_pair() {
-//         test_invalid_signature_publickey_pair::<Bls12381>();
-//     }
+    #[test]
+    fn test_bls12381_invalid_signature_publickey_pair() {
+        test_invalid_signature_publickey_pair::<bls12381::PrivateKey>();
+    }
 
-//     #[test]
-//     fn test_bls12381_len() {
-//         assert_eq!(<Bls12381 as Specification>::PublicKey::SIZE, 48);
-//         assert_eq!(<Bls12381 as Specification>::Signature::SIZE, 96);
-//     }
+    #[test]
+    fn test_bls12381_len() {
+        assert_eq!(bls12381::PublicKey::SIZE, 48);
+        assert_eq!(bls12381::Signature::SIZE, 96);
+    }
 
-//     #[test]
-//     fn test_secp256r1_validate() {
-//         test_validate::<Secp256r1>();
-//     }
+    #[test]
+    fn test_secp256r1_validate() {
+        test_validate::<secp256r1::PrivateKey>();
+    }
 
-//     #[test]
-//     fn test_secp256r1_validate_invalid_public_key() {
-//         test_validate_invalid_public_key::<Secp256r1>();
-//     }
+    #[test]
+    fn test_secp256r1_validate_invalid_public_key() {
+        test_validate_invalid_public_key::<secp256r1::PrivateKey>();
+    }
 
-//     #[test]
-//     fn test_secp256r1_from_valid_private_key() {
-//         test_from_valid_private_key::<Secp256r1>();
-//     }
+    #[test]
+    fn test_secp256r1_from_valid_private_key() {
+        test_from_valid_private_key::<secp256r1::PrivateKey>();
+    }
 
-//     #[test]
-//     fn test_secp256r1_sign_and_verify() {
-//         test_sign_and_verify::<Secp256r1>();
-//     }
+    #[test]
+    fn test_secp256r1_sign_and_verify() {
+        test_sign_and_verify::<secp256r1::PrivateKey>();
+    }
 
-//     #[test]
-//     fn test_secp256r1_sign_and_verify_wrong_message() {
-//         test_sign_and_verify_wrong_message::<Secp256r1>();
-//     }
+    #[test]
+    fn test_secp256r1_sign_and_verify_wrong_message() {
+        test_sign_and_verify_wrong_message::<secp256r1::PrivateKey>();
+    }
 
-//     #[test]
-//     fn test_secp256r1_sign_and_verify_wrong_namespace() {
-//         test_sign_and_verify_wrong_namespace::<Secp256r1>();
-//     }
+    #[test]
+    fn test_secp256r1_sign_and_verify_wrong_namespace() {
+        test_sign_and_verify_wrong_namespace::<secp256r1::PrivateKey>();
+    }
 
-//     #[test]
-//     fn test_secp256r1_empty_vs_none_namespace() {
-//         test_empty_vs_none_namespace::<Secp256r1>();
-//     }
+    #[test]
+    fn test_secp256r1_empty_vs_none_namespace() {
+        test_empty_vs_none_namespace::<secp256r1::PrivateKey>();
+    }
 
-//     #[test]
-//     fn test_secp256r1_signature_determinism() {
-//         test_signature_determinism::<Secp256r1>();
-//     }
+    #[test]
+    fn test_secp256r1_signature_determinism() {
+        test_signature_determinism::<secp256r1::PrivateKey>();
+    }
 
-//     #[test]
-//     fn test_secp256r1_invalid_signature_publickey_pair() {
-//         test_invalid_signature_publickey_pair::<Secp256r1>();
-//     }
+    #[test]
+    fn test_secp256r1_invalid_signature_publickey_pair() {
+        test_invalid_signature_publickey_pair::<secp256r1::PrivateKey>();
+    }
 
-//     #[test]
-//     fn test_secp256r1_len() {
-//         assert_eq!(<Secp256r1 as Specification>::PublicKey::SIZE, 33);
-//         assert_eq!(<Secp256r1 as Specification>::Signature::SIZE, 64);
-//     }
+    #[test]
+    fn test_secp256r1_len() {
+        assert_eq!(secp256r1::PublicKey::SIZE, 33);
+        assert_eq!(secp256r1::Signature::SIZE, 64);
+    }
 
-//     fn test_hasher_multiple_runs<H: Hasher>() {
-//         // Generate initial hash
-//         let mut hasher = H::new();
-//         hasher.update(b"hello world");
-//         let digest = hasher.finalize();
-//         assert!(H::Digest::decode(digest.as_ref()).is_ok());
-//         assert_eq!(digest.as_ref().len(), H::Digest::SIZE);
+    fn test_hasher_multiple_runs<H: Hasher>() {
+        // Generate initial hash
+        let mut hasher = H::new();
+        hasher.update(b"hello world");
+        let digest = hasher.finalize();
+        assert!(H::Digest::decode(digest.as_ref()).is_ok());
+        assert_eq!(digest.as_ref().len(), H::Digest::SIZE);
 
-//         // Reuse hasher without reset
-//         hasher.update(b"hello world");
-//         let digest_again = hasher.finalize();
-//         assert!(H::Digest::decode(digest_again.as_ref()).is_ok());
-//         assert_eq!(digest, digest_again);
+        // Reuse hasher without reset
+        hasher.update(b"hello world");
+        let digest_again = hasher.finalize();
+        assert!(H::Digest::decode(digest_again.as_ref()).is_ok());
+        assert_eq!(digest, digest_again);
 
-//         // Reuse hasher with reset
-//         hasher.update(b"hello mars");
-//         hasher.reset();
-//         hasher.update(b"hello world");
-//         let digest_reset = hasher.finalize();
-//         assert!(H::Digest::decode(digest_reset.as_ref()).is_ok());
-//         assert_eq!(digest, digest_reset);
+        // Reuse hasher with reset
+        hasher.update(b"hello mars");
+        hasher.reset();
+        hasher.update(b"hello world");
+        let digest_reset = hasher.finalize();
+        assert!(H::Digest::decode(digest_reset.as_ref()).is_ok());
+        assert_eq!(digest, digest_reset);
 
-//         // Hash different data
-//         hasher.update(b"hello mars");
-//         let digest_mars = hasher.finalize();
-//         assert!(H::Digest::decode(digest_mars.as_ref()).is_ok());
-//         assert_ne!(digest, digest_mars);
-//     }
+        // Hash different data
+        hasher.update(b"hello mars");
+        let digest_mars = hasher.finalize();
+        assert!(H::Digest::decode(digest_mars.as_ref()).is_ok());
+        assert_ne!(digest, digest_mars);
+    }
 
-//     fn test_hasher_multiple_updates<H: Hasher>() {
-//         // Generate initial hash
-//         let mut hasher = H::new();
-//         hasher.update(b"hello");
-//         hasher.update(b" world");
-//         let digest = hasher.finalize();
-//         assert!(H::Digest::decode(digest.as_ref()).is_ok());
+    fn test_hasher_multiple_updates<H: Hasher>() {
+        // Generate initial hash
+        let mut hasher = H::new();
+        hasher.update(b"hello");
+        hasher.update(b" world");
+        let digest = hasher.finalize();
+        assert!(H::Digest::decode(digest.as_ref()).is_ok());
 
-//         // Generate hash in oneshot
-//         let mut hasher = H::new();
-//         hasher.update(b"hello world");
-//         let digest_oneshot = hasher.finalize();
-//         assert!(H::Digest::decode(digest_oneshot.as_ref()).is_ok());
-//         assert_eq!(digest, digest_oneshot);
-//     }
+        // Generate hash in oneshot
+        let mut hasher = H::new();
+        hasher.update(b"hello world");
+        let digest_oneshot = hasher.finalize();
+        assert!(H::Digest::decode(digest_oneshot.as_ref()).is_ok());
+        assert_eq!(digest, digest_oneshot);
+    }
 
-//     fn test_hasher_empty_input<H: Hasher>() {
-//         let mut hasher = H::new();
-//         let digest = hasher.finalize();
-//         assert!(H::Digest::decode(digest.as_ref()).is_ok());
-//     }
+    fn test_hasher_empty_input<H: Hasher>() {
+        let mut hasher = H::new();
+        let digest = hasher.finalize();
+        assert!(H::Digest::decode(digest.as_ref()).is_ok());
+    }
 
-//     fn test_hasher_large_input<H: Hasher>() {
-//         let mut hasher = H::new();
-//         let data = vec![1; 1024];
-//         hasher.update(&data);
-//         let digest = hasher.finalize();
-//         assert!(H::Digest::decode(digest.as_ref()).is_ok());
-//     }
+    fn test_hasher_large_input<H: Hasher>() {
+        let mut hasher = H::new();
+        let data = vec![1; 1024];
+        hasher.update(&data);
+        let digest = hasher.finalize();
+        assert!(H::Digest::decode(digest.as_ref()).is_ok());
+    }
 
-//     #[test]
-//     fn test_sha256_hasher_multiple_runs() {
-//         test_hasher_multiple_runs::<Sha256>();
-//     }
+    #[test]
+    fn test_sha256_hasher_multiple_runs() {
+        test_hasher_multiple_runs::<Sha256>();
+    }
 
-//     #[test]
-//     fn test_sha256_hasher_multiple_updates() {
-//         test_hasher_multiple_updates::<Sha256>();
-//     }
+    #[test]
+    fn test_sha256_hasher_multiple_updates() {
+        test_hasher_multiple_updates::<Sha256>();
+    }
 
-//     #[test]
-//     fn test_sha256_hasher_empty_input() {
-//         test_hasher_empty_input::<Sha256>();
-//     }
+    #[test]
+    fn test_sha256_hasher_empty_input() {
+        test_hasher_empty_input::<Sha256>();
+    }
 
-//     #[test]
-//     fn test_sha256_hasher_large_input() {
-//         test_hasher_large_input::<Sha256>();
-//     }
-// }
+    #[test]
+    fn test_sha256_hasher_large_input() {
+        test_hasher_large_input::<Sha256>();
+    }
+}

@@ -343,6 +343,7 @@ mod tests {
     use super::*;
     use crate::{ed25519, BatchScheme as _, PrivateKey as _, PublicKey as _};
     use commonware_codec::{DecodeExt, Encode};
+    use rand::rngs::OsRng;
 
     fn test_sign_and_verify(
         private_key: PrivateKey,
@@ -497,7 +498,8 @@ mod tests {
     #[should_panic]
     fn bad_signature() {
         let (private_key, public_key, message, _) = vector_1();
-        let bad_signature = private_key.sign(None, message.as_ref());
+        let private_key_2 = PrivateKey::from_rng(&mut OsRng);
+        let bad_signature = private_key_2.sign(None, message.as_ref());
         test_sign_and_verify(private_key, public_key, &message, bad_signature);
     }
 
