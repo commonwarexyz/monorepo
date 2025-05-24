@@ -62,12 +62,6 @@ impl CommonwareSigner for Secp256r1 {
         Self { signer, verifier }
     }
 
-    fn from(private_key: PrivateKey) -> Option<Self> {
-        let signer = private_key.key.clone();
-        let verifier = signer.verifying_key().to_owned();
-        Some(Self { signer, verifier })
-    }
-
     fn private_key(&self) -> PrivateKey {
         PrivateKey::from(self.signer.clone())
     }
@@ -86,6 +80,14 @@ impl CommonwareSigner for Secp256r1 {
             None => signature,
         };
         Signature::from(signature)
+    }
+}
+
+impl From<PrivateKey> for Secp256r1 {
+    fn from(private_key: PrivateKey) -> Self {
+        let signer = private_key.key.clone();
+        let verifier = signer.verifying_key().to_owned();
+        Self { signer, verifier }
     }
 }
 
@@ -421,7 +423,7 @@ mod tests {
     #[test]
     fn test_codec_public_key() {
         let private_key = create_private_key();
-        let signer = <Secp256r1 as CommonwareSigner>::from(private_key).unwrap();
+        let signer = Secp256r1::from(private_key);
         let original: PublicKey = signer.public_key();
 
         let encoded = original.encode();
@@ -434,7 +436,7 @@ mod tests {
     #[test]
     fn test_codec_signature() {
         let private_key = create_private_key();
-        let mut signer = <Secp256r1 as CommonwareSigner>::from(private_key).unwrap();
+        let mut signer = Secp256r1::from(private_key);
         let original = signer.sign(None, "Hello World".as_bytes());
 
         let encoded = original.encode();
@@ -467,7 +469,7 @@ mod tests {
             9bd386a5e471ea7a65c17cc934a9d791e91491eb3754d03799790fe2d308d16146d5c9b0d0debd97d79ce8",
         )
         .unwrap();
-        let mut signer = <Secp256r1 as CommonwareSigner>::from(private_key).unwrap();
+        let mut signer = Secp256r1::from(private_key);
         let signature = signer.sign(None, &message);
         assert_eq!(SIGNATURE_LENGTH, signature.len());
         assert!(Secp256r1::verify(
@@ -487,7 +489,7 @@ mod tests {
                 .as_ref(),
         )
         .unwrap();
-        let signer = <Secp256r1 as CommonwareSigner>::from(private_key).unwrap();
+        let signer = Secp256r1::from(private_key);
         let exported_private_key = signer.private_key();
         assert_eq!(
             private_key_hex,
@@ -505,7 +507,7 @@ mod tests {
     fn test_decode_high_s_signature_fails() {
         let (private_key, _) = vector_keypair_1();
         let message = b"edge";
-        let mut signer = <Secp256r1 as CommonwareSigner>::from(private_key).unwrap();
+        let mut signer = Secp256r1::from(private_key);
         let signature = signer.sign(None, message);
         let mut bad_signature = signature.to_vec();
         bad_signature[32] |= 0x80; // force S into upper range
@@ -516,7 +518,7 @@ mod tests {
     fn test_decode_zero_r_signature_fails() {
         let (private_key, _) = vector_keypair_1();
         let message = b"edge";
-        let mut signer = <Secp256r1 as CommonwareSigner>::from(private_key).unwrap();
+        let mut signer = Secp256r1::from(private_key);
         let signature = signer.sign(None, message);
         let mut bad_signature = signature.to_vec();
         for b in bad_signature.iter_mut().take(32) {
@@ -550,7 +552,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let mut signer = <Secp256r1 as CommonwareSigner>::from(private_key).unwrap();
+        let mut signer = Secp256r1::from(private_key);
         let signature = signer.sign(None, message);
         assert_eq!(signature.to_vec(), exp_sig.normalize_s().unwrap().to_vec());
 
@@ -607,7 +609,7 @@ mod tests {
         )
         .unwrap();
         let message = b"sample";
-        let mut signer = <Secp256r1 as CommonwareSigner>::from(private_key).unwrap();
+        let mut signer = Secp256r1::from(private_key);
         let signature = signer.sign(None, message);
         let (_, s) = signature.split_at(32);
         let mut signature: Vec<u8> = vec![0x00; 32];
@@ -629,7 +631,7 @@ mod tests {
         )
         .unwrap();
         let message = b"sample";
-        let mut signer = <Secp256r1 as CommonwareSigner>::from(private_key).unwrap();
+        let mut signer = Secp256r1::from(private_key);
         let signature = signer.sign(None, message);
         let (r, _) = signature.split_at(32);
         let s: Vec<u8> = vec![0x00; 32];
@@ -657,7 +659,7 @@ mod tests {
 
         for (index, test) in cases.into_iter().enumerate() {
             let (private_key, exp_public_key) = test;
-            let signer = <Secp256r1 as CommonwareSigner>::from(private_key).unwrap();
+            let signer = Secp256r1::from(private_key);
             assert_eq!(
                 exp_public_key,
                 signer.public_key(),

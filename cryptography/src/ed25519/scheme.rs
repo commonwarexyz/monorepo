@@ -56,12 +56,6 @@ impl Signer for Ed25519 {
         Self { signer, verifier }
     }
 
-    fn from(private_key: PrivateKey) -> Option<Self> {
-        let signer = private_key.key.clone();
-        let verifier = signer.verification_key();
-        Some(Self { signer, verifier })
-    }
-
     fn private_key(&self) -> PrivateKey {
         PrivateKey::from(self.signer.clone())
     }
@@ -79,6 +73,13 @@ impl Signer for Ed25519 {
     }
 }
 
+impl From<PrivateKey> for Ed25519 {
+    fn from(private_key: PrivateKey) -> Self {
+        let signer = private_key.key.clone();
+        let verifier = signer.verification_key();
+        Self { signer, verifier }
+    }
+}
 /// Ed25519 Batch Verifier.
 pub struct Ed25519Batch {
     verifier: ed25519_consensus::batch::Verifier,
@@ -365,7 +366,7 @@ mod tests {
         message: &[u8],
         signature: Signature,
     ) {
-        let mut signer = <Ed25519 as Signer>::from(private_key).unwrap();
+        let mut signer = Ed25519::from(private_key);
         let computed_signature = signer.sign(None, message);
         assert_eq!(computed_signature, signature);
         assert!(Ed25519::verify(

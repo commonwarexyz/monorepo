@@ -43,7 +43,7 @@ pub trait Verifier: Specification + Clone + Send + Sync + 'static {
 }
 
 /// Implementation that can sign a message with a `PrivateKey`.
-pub trait Signer: Specification + Clone + Send + Sync + 'static {
+pub trait Signer: From<Self::PrivateKey> + Specification + Clone + Send + Sync + 'static {
     /// Private key used for signing.
     type PrivateKey: Array;
 
@@ -60,9 +60,6 @@ pub trait Signer: Specification + Clone + Send + Sync + 'static {
     /// a message on the network layer can't accidentally spend funds on the execution layer). See
     /// [union_unique](commonware_utils::union_unique) for details.
     fn sign(&mut self, namespace: Option<&[u8]>, message: &[u8]) -> Self::Signature;
-
-    /// Returns a new instance of the scheme from a secret key.
-    fn from(private_key: Self::PrivateKey) -> Option<Self>;
 
     /// Returns a new instance of the scheme from a provided seed.
     ///
@@ -213,7 +210,7 @@ mod tests {
         let signer = C::new(&mut OsRng);
         let private_key = signer.private_key();
         let public_key = signer.public_key();
-        let signer = C::from(private_key).unwrap();
+        let signer = C::from(private_key);
         assert_eq!(public_key, signer.public_key());
     }
 
