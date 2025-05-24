@@ -111,7 +111,7 @@ use std::{
     collections::{btree_map::Entry, BTreeMap},
     marker::PhantomData,
 };
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, trace, warn};
 use zstd::bulk::{compress, decompress};
 
 /// Configuration for `Journal` storage.
@@ -277,10 +277,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
         // If we're not at the right position, seek to it
         if reader.position() != file_offset {
-            info!("seeking to {}", file_offset);
             reader.seek_to(file_offset).map_err(Error::Runtime)?;
-            // Refill the buffer at the new position
-            reader.refill().await.map_err(Error::Runtime)?;
         }
 
         // Read item size (4 bytes)

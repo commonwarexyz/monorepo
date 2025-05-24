@@ -78,7 +78,7 @@ impl<B: Blob> Read<B> {
 
     /// Refills the buffer from the blob starting at the current blob position.
     /// Returns the number of bytes read or an error if the read failed.
-    pub async fn refill(&mut self) -> Result<usize, Error> {
+    async fn refill(&mut self) -> Result<usize, Error> {
         // Update blob position to account for consumed bytes
         self.blob_position += self.buffer_position as u64;
         self.buffer_position = 0;
