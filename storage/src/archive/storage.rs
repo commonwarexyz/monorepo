@@ -136,6 +136,12 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
                 // Extract key from record
                 let (_, offset, len, data) = result?;
                 buffered_records.push((data.index, data.key.clone(), Location { offset, len }));
+                if buffered_records.len() % 10_000 == 0 {
+                    info!(
+                        num_records = buffered_records.len(),
+                        "read 100,000 records into memory"
+                    );
+                }
             }
             info!(
                 num_records = buffered_records.len(),
