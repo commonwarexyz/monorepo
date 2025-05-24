@@ -37,12 +37,12 @@ pub struct Config {
     /// consider a common network pattern.
     /// In one task, a client sends a message to the server and recvs a response.
     /// In another task, the server recvs a message from the client and sends a response.
-    /// If the client task submits its recv operation to the io_uring before the
-    /// server task submits its send operation, and the io_uring event loop is awaiting
-    /// a completion (i.e. parked in `submit_and_wait`) there is a deadlock: the
-    /// client's recv can't complete until the server sends its message, but the server
-    /// can't send its message until the io_uring event loop wakes up to process the
-    /// completion of the client's recv operation.
+    /// If the client submits its recv operation to the io_uring, and the
+    /// io_uring event loop begins to await its completion (i.e. it parks in
+    /// `submit_and_wait`) before the server submits its recv operation, there is a
+    /// deadlock. The client's recv can't complete until the server sends its message,
+    /// but the server can't send its message until the io_uring event loop wakes up
+    /// to process the completion of the client's recv operation.
     /// Note that in this example, the server and client are both using the same
     /// io_uring instance. If they aren't, this situation can't occur.
     pub force_poll: Option<Duration>,
