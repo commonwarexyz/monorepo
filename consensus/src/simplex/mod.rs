@@ -19,10 +19,9 @@
 //!
 //! ## Architecture
 //!
-//! All logic is split into two components: the `Voter` and the `Resolver` (and the user of `simplex`
-//! provides `Application`). The `Voter` is responsible for participating in the latest view and the
-//! `Resolver` is responsible for fetching artifacts from previous views required to verify proposed
-//! blocks in the latest view.
+//! All logic is split into three components: the `Voter`, the `Resolver`, and the `Application` (provided by the user).
+//! The `Voter` is responsible for participating in the latest view and the `Resolver` is responsible for fetching artifacts
+//! from previous views required to verify proposed blocks in the latest view.
 //!
 //! To provide great performance, all interactions between `Voter`, `Resolver`, and `Application` are
 //! non-blocking. This means that, for example, the `Voter` can continue processing messages while the
@@ -1068,6 +1067,36 @@ mod tests {
                     }
                 }
             }
+
+            // Ensure we are skipping views
+            let encoded = context.encode();
+            let lines = encoded.lines();
+            let mut skipped_views = 0;
+            let mut nodes_skipping = 0;
+            for line in lines {
+                if line.contains("_engine_voter_skipped_views_total") {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if let Some(number_str) = parts.last() {
+                        if let Ok(number) = number_str.parse::<u64>() {
+                            if number > 0 {
+                                nodes_skipping += 1;
+                            }
+                            if number > skipped_views {
+                                skipped_views = number;
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(
+                skipped_views > 0,
+                "expected skipped views to be greater than 0"
+            );
+            assert_eq!(
+                nodes_skipping,
+                n - 1,
+                "expected all online nodes to be skipping views"
+            );
         });
     }
 
@@ -1245,9 +1274,9 @@ mod tests {
         let n = 5;
         let required_containers = 100;
         let activity_timeout = 10;
-        let skip_timeout = 5;
+        let skip_timeout = 2;
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(120));
+        let executor = deterministic::Runner::timed(Duration::from_secs(180));
         executor.start(|context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1361,13 +1390,29 @@ mod tests {
             }
             join_all(finalizers).await;
 
+            // Unlink all validators to get latest view
+            link_validators(&mut oracle, &validators, Action::Unlink, None).await;
+
+            // Wait for a virtual minute (nothing should happen)
+            context.sleep(Duration::from_secs(60)).await;
+
+            // Get latest view
+            let mut latest = 0;
+            for supervisor in supervisors.iter() {
+                let nullifies = supervisor.nullifies.lock().unwrap();
+                let max = nullifies.keys().max().unwrap();
+                if *max > latest {
+                    latest = *max;
+                }
+            }
+
             // Update links
             let link = Link {
                 latency: 10.0,
                 jitter: 1.0,
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &validators, Action::Update(link), None).await;
+            link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
@@ -1387,6 +1432,22 @@ mod tests {
                 {
                     let faults = supervisor.faults.lock().unwrap();
                     assert!(faults.is_empty());
+                }
+
+                // Ensure quick recovery.
+                //
+                // If the skip timeout isn't implemented correctly, we may go many views before participants
+                // start to consider a validator's proposal.
+                {
+                    // Ensure nearly all views around latest finalize
+                    let mut found = 0;
+                    let finalizations = supervisor.finalizations.lock().unwrap();
+                    for i in latest..latest + activity_timeout {
+                        if finalizations.contains_key(&i) {
+                            found += 1;
+                        }
+                    }
+                    assert!(found >= activity_timeout - 2, "found: {}", found);
                 }
             }
         });

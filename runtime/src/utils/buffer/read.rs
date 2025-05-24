@@ -78,7 +78,7 @@ impl<B: Blob> Read<B> {
 
     /// Refills the buffer from the blob starting at the current blob position.
     /// Returns the number of bytes read or an error if the read failed.
-    pub async fn refill(&mut self) -> Result<usize, Error> {
+    async fn refill(&mut self) -> Result<usize, Error> {
         // Update blob position to account for consumed bytes
         self.blob_position += self.buffer_position as u64;
         self.buffer_position = 0;
@@ -149,10 +149,19 @@ impl<B: Blob> Read<B> {
             return Err(Error::BlobInsufficientLength);
         }
 
-        // Reset buffer state
-        self.blob_position = position;
-        self.buffer_position = 0;
-        self.buffer_valid_len = 0;
+        // Check if the position is within the current buffer
+        let buffer_start = self.blob_position;
+        let buffer_end = self.blob_position + self.buffer_valid_len as u64;
+
+        if position >= buffer_start && position < buffer_end {
+            // Position is within the current buffer, adjust buffer_position
+            self.buffer_position = (position - self.blob_position) as usize;
+        } else {
+            // Position is outside the current buffer, reset buffer state
+            self.blob_position = position;
+            self.buffer_position = 0;
+            self.buffer_valid_len = 0;
+        }
 
         Ok(())
     }

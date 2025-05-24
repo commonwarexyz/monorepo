@@ -32,7 +32,7 @@ use rand::Rng;
 use std::{
     cmp::max,
     collections::{btree_map::Entry, BTreeMap, HashMap},
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 use std::{collections::BTreeSet, sync::atomic::AtomicI64};
 use tracing::{debug, trace, warn};
@@ -940,8 +940,16 @@ impl<
         self.views.get_mut(&view).unwrap().leader_deadline = Some(self.context.current());
     }
 
+    /// The minimum view we are tracking both in-memory and on-disk.
+    fn min_active(&self) -> View {
+        self.last_finalized.saturating_sub(self.activity_timeout)
+    }
+
+    /// Whether or not a view is interesting to us. This is a function
+    /// of both `min_active` and whether or not the view is too far
+    /// in the future (based on the view we are currently in).
     fn interesting(&self, view: View, allow_future: bool) -> bool {
-        if view + self.activity_timeout < self.last_finalized {
+        if view < self.min_active() {
             return false;
         }
         if !allow_future && view > self.view + 1 {
@@ -952,27 +960,27 @@ impl<
 
     async fn prune_views(&mut self) {
         // Get last min
+        let min = self.min_active();
         let mut pruned = false;
-        let min = loop {
+        loop {
             // Get next key
             let next = match self.views.keys().next() {
                 Some(next) => *next,
                 None => return,
             };
 
-            // Compare to last finalized
-            if !self.interesting(next, false) {
-                self.views.remove(&next);
-                debug!(
-                    view = next,
-                    last_finalized = self.last_finalized,
-                    "pruned view"
-                );
-                pruned = true;
-            } else {
-                break next;
+            // If less than min, prune
+            if next >= min {
+                break;
             }
-        };
+            self.views.remove(&next);
+            debug!(
+                view = next,
+                last_finalized = self.last_finalized,
+                "pruned view"
+            );
+            pruned = true;
+        }
 
         // Prune journal up to min
         if pruned {
@@ -1696,6 +1704,7 @@ impl<
 
         // Rebuild from journal
         let mut observed_view = 1;
+        let start = Instant::now();
         {
             let stream = journal
                 .replay(self.replay_concurrency, self.replay_buffer)
@@ -1763,7 +1772,7 @@ impl<
         self.journal = Some(journal);
 
         // Update current view and immediately move to timeout (very unlikely we restarted and still within timeout)
-        debug!(current_view = observed_view, "replayed journal");
+        debug!(current_view = observed_view, elapsed = ?start.elapsed(), "consensus initialized");
         self.enter_view(observed_view);
         {
             let round = self.views.get_mut(&observed_view).expect("missing round");
