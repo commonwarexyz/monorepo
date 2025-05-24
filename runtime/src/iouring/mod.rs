@@ -28,12 +28,23 @@ pub struct Config {
     pub single_issuer: bool,
     /// In the io_uring event loop (`run`), wait at most this long for a new
     /// completion before checking for new work to submit to the io_ring.
+    ///
     /// If None, wait indefinitely. In this case, caller must ensure that operations
-    /// submitted to the io_uring complete so that they don't block the event loop.
-    /// For example, do not submit a recv operation and then a write operation
-    /// that satisfies the recv operation; the event loop may block while
-    /// waiting for the recv operation to complete and never submit the write,
-    /// causing a deadlock.
+    /// submitted to the io_uring complete so that they don't block the event loop
+    /// and cause a deadlock.
+    ///
+    /// To illustrate the possibility of deadlock when this field is None,
+    /// consider a common network pattern.
+    /// In one task, a client sends a message to the server and recvs a response.
+    /// In another task, the server recvs a message from the client and sends a response.
+    /// If the client task submits its recv operation to the io_uring before the
+    /// server task submits its send operation, and the io_uring event loop is awaiting
+    /// a completion (i.e. parked in `submit_and_wait`) there is a deadlock: the
+    /// client's recv can't complete until the server sends its message, but the server
+    /// can't send its message until the io_uring event loop wakes up to process the
+    /// completion of the client's recv operation.
+    /// Note that in this example, the server and client are both using the same
+    /// io_uring instance. If they aren't, this situation can't occur.
     pub force_poll: Option<Duration>,
     /// If None, operations submitted to the io_uring will not time out.
     /// In this case, the caller should be careful to ensure that the
