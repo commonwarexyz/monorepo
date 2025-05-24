@@ -34,7 +34,7 @@ pub struct Config {
     /// that satisfies the recv operation; the event loop may block while
     /// waiting for the recv operation to complete and never submit the write,
     /// causing a deadlock.
-    pub poll_new_work_freq: Option<Duration>,
+    pub force_poll: Option<Duration>,
     /// If None, operations submitted to the io_uring will not time out.
     /// In this case, the caller should be careful to ensure that the
     /// operations submitted to the io_uring will eventually complete.
@@ -49,7 +49,7 @@ impl Default for Config {
             size: 128,
             iopoll: false,
             single_issuer: true,
-            poll_new_work_freq: Some(Duration::from_secs(1)),
+            force_poll: Some(Duration::from_secs(1)),
             op_timeout: None,
         }
     }
@@ -93,7 +93,7 @@ pub(crate) async fn run(
                 POLL_WORK_ID => {
                     // This CQE means we woke up to check for new work.
                     // Assert that new work polling is enabled.
-                    assert!(cfg.poll_new_work_freq.is_some());
+                    assert!(cfg.force_poll.is_some());
                 }
                 TIMEOUT_WORK_ID => {
                     // An operation timed out. The timed out operation will be
@@ -179,7 +179,7 @@ pub(crate) async fn run(
             }
         }
 
-        if let Some(freq) = cfg.poll_new_work_freq {
+        if let Some(freq) = cfg.force_poll {
             // Submit a timeout operation to wake us up to check for new work.
             let timeout = io_uring::types::Timespec::new()
                 .sec(freq.as_secs())
@@ -261,21 +261,21 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_poll_new_work_freq() {
-        // When poll_new_work_freq is set, the event loop should wake up
+    async fn test_force_poll() {
+        // When force_poll is set, the event loop should wake up
         // periodically to check for new work.
         let cfg = Config {
-            poll_new_work_freq: Some(Duration::from_millis(10)),
+            force_poll: Some(Duration::from_millis(10)),
             ..Default::default()
         };
         recv_then_send(cfg).await;
 
-        // When poll_new_work_freq is None, the event loop should block on recv
+        // When force_poll is None, the event loop should block on recv
         // and never wake up to check for new work, meaning it never sees the
         // write operation which satisfies the read. This means it
         // should hit the timeout and never complete.
         let cfg = Config {
-            poll_new_work_freq: None,
+            force_poll: None,
             ..Default::default()
         };
         // recv_then_send should block indefinitely.
