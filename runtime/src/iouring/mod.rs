@@ -61,7 +61,13 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
     builder.build(cfg.size)
 }
 
-fn handle_cqe(waiters: &mut HashMap<u64, oneshot::Sender<i32>>, cqe: Entry, has_op_timeout: bool) {
+// Returns false iff we received a shutdown timeout
+// and we should stop processing completions.
+fn handle_cqe(
+    waiters: &mut HashMap<u64, oneshot::Sender<i32>>,
+    cqe: Entry,
+    has_op_timeout: bool,
+) -> bool {
     let work_id = cqe.user_data();
     let result = cqe.result();
 
@@ -78,6 +84,7 @@ fn handle_cqe(waiters: &mut HashMap<u64, oneshot::Sender<i32>>, cqe: Entry, has_
         assert!(has_op_timeout);
         assert_eq!(work_id, TIMEOUT_WORK_ID);
     }
+    true
 }
 
 /// Creates a new io_uring instance that listens for incoming work on `receiver`.
@@ -222,6 +229,12 @@ async fn drain(
     while !waiters.is_empty() {
         ring.submit_and_wait(1).expect("unable to submit to ring");
         while let Some(cqe) = ring.completion().next() {
+            if cqe.user_data() == SHUTDOWN_TIMEOUT_WORK_ID {
+                // We timed out waiting for the shutdown to complete.
+                // Abandon all remaining operations.
+                assert!(timeout.is_some());
+                return;
+            }
             handle_cqe(waiters, cqe, has_op_timeout);
         }
     }
