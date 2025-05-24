@@ -3,7 +3,7 @@ use crate::authenticated::{
     metrics,
     types::{self, PeerInfo},
 };
-use commonware_cryptography::Verifier;
+use commonware_cryptography::PrivateKey;
 use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::SystemTimeExt;
 use futures::channel::mpsc;
@@ -35,7 +35,7 @@ pub struct Config {
 }
 
 /// Represents a collection of records for all peers.
-pub struct Directory<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> {
+pub struct Directory<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PrivateKey> {
     context: E,
 
     // ---------- Configuration ----------
@@ -70,7 +70,7 @@ pub struct Directory<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Veri
     metrics: Metrics,
 }
 
-impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Directory<E, C> {
+impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PrivateKey> Directory<E, C> {
     /// Create a new set of records using the given bootstrappers and local node information.
     pub fn init(
         context: E,

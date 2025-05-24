@@ -11,7 +11,7 @@ use crate::{
     },
     ThresholdSupervisor,
 };
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, Scheme};
+use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PrivateKey};
 use commonware_macros::select;
 use commonware_p2p::{
     utils::{
@@ -101,7 +101,7 @@ impl Inflight {
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
     E: Clock + GClock + Rng + Metrics + Spawner,
-    C: Scheme,
+    C: PrivateKey,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     D: Digest,
@@ -140,7 +140,7 @@ pub struct Actor<
 
 impl<
         E: Clock + GClock + Rng + Metrics + Spawner,
-        C: Scheme,
+        C: PrivateKey,
         B: Blocker<PublicKey = C::PublicKey>,
         V: Variant,
         D: Digest,

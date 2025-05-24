@@ -6,14 +6,14 @@ use crate::{
     Monitor, Reporter, Supervisor as Su,
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
-use commonware_cryptography::{Digest, Verifier};
+use commonware_cryptography::{Digest, PrivateKey};
 use futures::channel::mpsc::{Receiver, Sender};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, Mutex},
 };
 
-pub struct Config<C: Verifier> {
+pub struct Config<C: PrivateKey> {
     pub namespace: Vec<u8>,
     pub participants: BTreeMap<View, Vec<C::PublicKey>>,
 }
@@ -23,7 +23,7 @@ type Faults<P, S, D> = HashMap<P, HashMap<View, HashSet<Activity<S, D>>>>;
 type Participants<P> = BTreeMap<View, (HashMap<P, u32>, Vec<P>)>;
 
 #[derive(Clone)]
-pub struct Supervisor<C: Verifier, D: Digest> {
+pub struct Supervisor<C: PrivateKey, D: Digest> {
     participants: Participants<C::PublicKey>,
 
     namespace: Vec<u8>,
@@ -45,7 +45,7 @@ pub struct Supervisor<C: Verifier, D: Digest> {
     subscribers: Arc<Mutex<Vec<Sender<View>>>>,
 }
 
-impl<C: Verifier, D: Digest> Supervisor<C, D> {
+impl<C: PrivateKey, D: Digest> Supervisor<C, D> {
     pub fn new(cfg: Config<C>) -> Self {
         let mut parsed_participants = BTreeMap::new();
         for (view, mut validators) in cfg.participants.into_iter() {
@@ -73,7 +73,7 @@ impl<C: Verifier, D: Digest> Supervisor<C, D> {
     }
 }
 
-impl<C: Verifier, D: Digest> Su for Supervisor<C, D> {
+impl<C: PrivateKey, D: Digest> Su for Supervisor<C, D> {
     type Index = View;
     type PublicKey = C::PublicKey;
 
@@ -114,7 +114,7 @@ impl<C: Verifier, D: Digest> Su for Supervisor<C, D> {
     }
 }
 
-impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
+impl<C: PrivateKey, D: Digest> Reporter for Supervisor<C, D> {
     type Activity = Activity<C::Signature, D>;
 
     async fn report(&mut self, activity: Activity<C::Signature, D>) {
@@ -126,7 +126,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                 let view = notarize.view();
                 let participants = self.participants(view).unwrap();
                 let public_key = participants[notarize.signer() as usize].clone();
-                if !notarize.verify::<C>(&self.namespace, &public_key) {
+                if !notarize.verify::<C::PublicKey>(&self.namespace, &public_key) {
                     panic!("signature verification failed");
                 }
                 let encoded = notarize.encode();
@@ -143,7 +143,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
             Activity::Notarization(notarization) => {
                 let view = notarization.view();
                 let participants = self.participants(view).unwrap();
-                if !notarization.verify::<C>(&self.namespace, participants) {
+                if !notarization.verify::<C::PublicKey>(&self.namespace, participants) {
                     panic!("signature verification failed");
                 }
                 let encoded = notarization.encode();
@@ -307,7 +307,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
     }
 }
 
-impl<C: Verifier, D: Digest> Monitor for Supervisor<C, D> {
+impl<C: PrivateKey, D: Digest> Monitor for Supervisor<C, D> {
     type Index = View;
     async fn subscribe(&mut self) -> (Self::Index, Receiver<Self::Index>) {
         let (sender, receiver) = futures::channel::mpsc::channel(128);

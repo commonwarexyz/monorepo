@@ -2,7 +2,7 @@ use super::types::{Activity, Context, View};
 use crate::{Automaton, Relay, Reporter, ThresholdSupervisor};
 use commonware_cryptography::{
     bls12381::primitives::{group, variant::Variant},
-    Digest, Scheme,
+    Digest, PrivateKey,
 };
 use commonware_p2p::Blocker;
 use governor::Quota;
@@ -10,7 +10,7 @@ use std::time::Duration;
 
 /// Configuration for the consensus engine.
 pub struct Config<
-    C: Scheme,
+    C: PrivateKey,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     D: Digest,
@@ -106,7 +106,7 @@ pub struct Config<
 }
 
 impl<
-        C: Scheme,
+        C: PrivateKey,
         B: Blocker<PublicKey = C::PublicKey>,
         V: Variant,
         D: Digest,

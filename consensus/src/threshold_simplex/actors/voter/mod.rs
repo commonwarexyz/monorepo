@@ -9,12 +9,12 @@ use crate::{
 };
 pub use actor::Actor;
 use commonware_cryptography::{bls12381::primitives::group, Digest};
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Scheme};
+use commonware_cryptography::{bls12381::primitives::variant::Variant, PrivateKey};
 use commonware_p2p::Blocker;
 pub use ingress::{Mailbox, Message};
 
 pub struct Config<
-    C: Scheme,
+    C: PrivateKey,
     B: Blocker,
     V: Variant,
     D: Digest,
@@ -57,7 +57,7 @@ mod tests {
             dkg::ops,
             primitives::{ops::threshold_signature_recover, variant::MinSig},
         },
-        hash, Ed25519, Sha256, Signer,
+        ed25519, hash, Sha256,
     };
     use commonware_macros::test_traced;
     use commonware_p2p::{
@@ -96,7 +96,7 @@ mod tests {
             let mut schemes = Vec::new();
             let mut validators = Vec::new();
             for i in 0..n {
-                let scheme = Ed25519::from_seed(i as u64);
+                let scheme = ed25519::PrivateKey::from_seed(i as u64);
                 let pk = scheme.public_key();
                 schemes.push(scheme);
                 validators.push(pk);

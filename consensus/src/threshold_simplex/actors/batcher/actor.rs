@@ -11,7 +11,7 @@ use crate::{
     },
     Reporter, ThresholdSupervisor,
 };
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, Verifier};
+use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PrivateKey};
 use commonware_macros::select;
 use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver};
 use commonware_runtime::{
@@ -25,7 +25,7 @@ use std::{collections::BTreeMap, marker::PhantomData, sync::Arc};
 use tracing::{trace, warn};
 
 struct Round<
-    C: Verifier,
+    C: PrivateKey,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     D: Digest,
@@ -53,7 +53,7 @@ struct Round<
 }
 
 impl<
-        C: Verifier,
+        C: PrivateKey,
         B: Blocker<PublicKey = C::PublicKey>,
         V: Variant,
         D: Digest,
@@ -317,7 +317,7 @@ impl<
 
 pub struct Actor<
     E: Spawner + Metrics + Clock,
-    C: Verifier,
+    C: PrivateKey,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     D: Digest,
@@ -351,7 +351,7 @@ pub struct Actor<
 
 impl<
         E: Spawner + Metrics + Clock,
-        C: Verifier,
+        C: PrivateKey,
         B: Blocker<PublicKey = C::PublicKey>,
         V: Variant,
         D: Digest,

@@ -1,11 +1,11 @@
 use super::types::{Activity, Context, Epoch};
 use crate::{Automaton, Monitor, Relay, Reporter, Supervisor, ThresholdSupervisor};
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, Scheme};
+use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PrivateKey};
 use std::time::Duration;
 
 /// Configuration for the [`Engine`](super::Engine).
 pub struct Config<
-    C: Scheme,
+    C: PrivateKey,
     V: Variant,
     D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D>,

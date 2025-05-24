@@ -79,7 +79,7 @@
 mod handlers;
 
 use clap::{value_parser, Arg, Command};
-use commonware_cryptography::{Ed25519, Signer};
+use commonware_cryptography::{ed25519, PrivateKey as _};
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{tokio, Metrics, Runner};
 use commonware_utils::{quorum, NZU32};
@@ -164,7 +164,7 @@ fn main() {
         panic!("Identity not well-formed");
     }
     let key = parts[0].parse::<u64>().expect("Key not well-formed");
-    let signer = Ed25519::from_seed(key);
+    let signer = ed25519::PrivateKey::from_seed(key);
     tracing::info!(key = ?signer.public_key(), "loaded signer");
 
     // Configure my port
@@ -181,7 +181,7 @@ fn main() {
         panic!("Please provide at least one participant");
     }
     for peer in participants {
-        let verifier = Ed25519::from_seed(peer).public_key();
+        let verifier = ed25519::PrivateKey::from_seed(peer).public_key();
         tracing::info!(key = ?verifier, "registered authorized key",);
         recipients.push(verifier);
     }
@@ -195,7 +195,7 @@ fn main() {
             let bootstrapper_key = parts[0]
                 .parse::<u64>()
                 .expect("Bootstrapper key not well-formed");
-            let verifier = Ed25519::from_seed(bootstrapper_key).public_key();
+            let verifier = ed25519::PrivateKey::from_seed(bootstrapper_key).public_key();
             let bootstrapper_address =
                 SocketAddr::from_str(parts[1]).expect("Bootstrapper address not well-formed");
             bootstrapper_identities.push((verifier, bootstrapper_address));
@@ -233,7 +233,7 @@ fn main() {
             panic!("Please provide at least one contributor");
         }
         for peer in participants {
-            let verifier = Ed25519::from_seed(peer).public_key();
+            let verifier = ed25519::PrivateKey::from_seed(peer).public_key();
             tracing::info!(key = ?verifier, "registered contributor",);
             contributors.push(verifier);
         }
@@ -258,7 +258,7 @@ fn main() {
                 DEFAULT_MESSAGE_BACKLOG,
                 COMPRESSION_LEVEL,
             );
-            let arbiter = Ed25519::from_seed(*arbiter).public_key();
+            let arbiter = ed25519::PrivateKey::from_seed(*arbiter).public_key();
             let (contributor, requests) = handlers::Contributor::new(
                 context.with_label("contributor"),
                 signer,
@@ -293,7 +293,7 @@ fn main() {
                 DEFAULT_MESSAGE_BACKLOG,
                 COMPRESSION_LEVEL,
             );
-            let arbiter: handlers::Arbiter<_, Ed25519> = handlers::Arbiter::new(
+            let arbiter: handlers::Arbiter<_, ed25519::PrivateKey> = handlers::Arbiter::new(
                 context.with_label("arbiter"),
                 DKG_FREQUENCY,
                 DKG_PHASE_TIMEOUT,
