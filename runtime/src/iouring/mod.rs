@@ -49,7 +49,7 @@ impl Default for Config {
             size: 128,
             io_poll: false,
             single_issuer: true,
-            force_poll: Some(Duration::from_secs(1)),
+            force_poll: None,
             op_timeout: None,
         }
     }
