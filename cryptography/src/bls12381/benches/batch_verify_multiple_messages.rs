@@ -16,7 +16,7 @@ fn benchmark_batch_verify_multiple_messages(c: &mut Criterion) {
         c.bench_function(&format!("{}/msgs={}", module_path!(), n_messages), |b| {
             b.iter_batched(
                 || {
-                    let mut batch = bls12381::Bls12381Batch::new();
+                    let mut batch = bls12381::Batch::new();
                     let signer = bls12381::PrivateKey::from_rng(&mut thread_rng());
                     for msg in msgs.iter() {
                         let sig = signer.sign(Some(namespace), msg);

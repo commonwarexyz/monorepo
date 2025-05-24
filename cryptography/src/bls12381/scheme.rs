@@ -343,13 +343,13 @@ impl Display for Signature {
 }
 
 /// BLS12-381 batch verifier.
-pub struct Bls12381Batch {
+pub struct Batch {
     publics: Vec<<MinPk as Variant>::Public>,
     hms: Vec<<MinPk as Variant>::Signature>,
     signatures: Vec<<MinPk as Variant>::Signature>,
 }
 
-impl crate::BatchScheme<PrivateKey> for Bls12381Batch {
+impl crate::BatchScheme<PrivateKey> for Batch {
     fn new() -> Self {
         Self {
             publics: Vec::new(),
@@ -483,7 +483,7 @@ mod tests {
             vector_verify_29(),
         ];
 
-        let mut batch = Bls12381Batch::new();
+        let mut batch = Batch::new();
         for (index, test) in cases.into_iter().enumerate() {
             let (public_key, message, signature, expected) = test;
             let expected = if !expected {
