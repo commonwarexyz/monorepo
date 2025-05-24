@@ -121,9 +121,16 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
                 .await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
+                // Extract key from record
                 let (_, offset, len, data) = result?;
+
+                // Store index
                 indices.insert(data.index, Location { offset, len });
+
+                // Store index in keys
                 keys.insert(&data.key, data.index);
+
+                // Store index in intervals
                 intervals.insert(data.index);
             }
             debug!(keys = keys.keys(), "archive initialized");
