@@ -69,69 +69,6 @@ pub trait Signature: Sized + Clone + ReadExt + Encode + PartialEq + Array {
     type Public: PublicKey<Signature = Self>;
 }
 
-// /// Implementation that can verify that a `PublicKey` produced a valid `Signature`.
-// pub trait Verifier: Specification + Clone + Send + Sync + 'static {
-//     /// Check that a signature is valid for the given message and public key.
-//     ///
-//     /// The message should not be hashed prior to calling this function. If a particular
-//     /// scheme requires a payload to be hashed before it is signed, it will be done internally.
-//     ///
-//     /// Because namespace is prepended to message before signing, the namespace provided here must
-//     /// match the namespace provided during signing.
-//     fn verify(
-//         namespace: Option<&[u8]>,
-//         message: &[u8],
-//         public_key: &Self::PublicKey,
-//         signature: &Self::Signature,
-//     ) -> bool;
-// }
-
-// /// Implementation that can sign a message with a `PrivateKey`.
-// pub trait Signer: Specification + Clone + Send + Sync + 'static {
-//     /// Private key used for signing.
-//     type PrivateKey: Array;
-
-//     /// Returns a new instance of the scheme.
-//     fn new<R: Rng + CryptoRng>(rng: &mut R) -> Self;
-
-//     /// Sign the given message.
-//     ///
-//     /// The message should not be hashed prior to calling this function. If a particular scheme
-//     /// requires a payload to be hashed before it is signed, it will be done internally.
-//     ///
-//     /// A namespace should be used to prevent replay attacks. It will be prepended to the message so
-//     /// that a signature meant for one context cannot be used unexpectedly in another (i.e. signing
-//     /// a message on the network layer can't accidentally spend funds on the execution layer). See
-//     /// [union_unique](commonware_utils::union_unique) for details.
-//     fn sign(&mut self, namespace: Option<&[u8]>, message: &[u8]) -> Self::Signature;
-
-//     /// Returns a new instance of the scheme from a secret key.
-//     fn from(private_key: Self::PrivateKey) -> Option<Self>;
-
-//     /// Returns a new instance of the scheme from a provided seed.
-//     ///
-//     /// # Warning
-//     ///
-//     /// This function is insecure and should only be used for examples
-//     /// and testing.
-//     fn from_seed(seed: u64) -> Self {
-//         let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-//         Self::new(&mut rng)
-//     }
-
-//     /// Returns the private key of the signer.
-//     fn private_key(&self) -> Self::PrivateKey;
-
-//     /// Returns the public key of the signer.
-//     fn public_key(&self) -> Self::PublicKey;
-// }
-
-// /// Implementation that can both sign and verify messages.
-// pub trait Scheme: Signer + Verifier {}
-
-// /// Blanket implementation of the `Scheme` trait for types that implement both the `Signer` and `Verifier` traits.
-// impl<T> Scheme for T where T: Signer + Verifier {}
-
 // /// Implementation that can indicate whether all `Signatures` are correct or that some `Signature`
 // /// is incorrect.
 pub trait BatchScheme<K: PrivateKey> {
