@@ -60,6 +60,25 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
     builder.build(cfg.size)
 }
 
+fn handle_cqe(waiters: &mut HashMap<u64, oneshot::Sender<i32>>, cqe: &Cqe, has_op_timeout: bool) {
+    let work_id = cqe.user_data();
+    let result = cqe.result();
+
+    if let Some(sender) = waiters.remove(&work_id) {
+        if result == -libc::ECANCELED && has_op_timeout {
+            // Send a timeout error code to the caller
+            let _ = sender.send(-libc::ETIMEDOUT);
+        } else {
+            // Send the actual result
+            let _ = sender.send(result);
+        }
+    } else {
+        // This is a timeout. Make sure timeouts are enabled.
+        assert!(has_op_timeout);
+        assert_eq!(work_id, TIMEOUT_WORK_ID);
+    }
+}
+
 /// Creates a new io_uring instance that listens for incoming work on `receiver`.
 ///
 /// Each incoming work is `(work, sender)`, where:
@@ -80,24 +99,8 @@ pub(crate) async fn run(
 
     loop {
         // Try to get a completion
-        if let Some(cqe) = ring.completion().next() {
-            let work_id = cqe.user_data();
-            let result = cqe.result();
-
-            if let Some(sender) = waiters.remove(&work_id) {
-                if result == -libc::ECANCELED && cfg.op_timeout.is_some() {
-                    // Send a timeout error code to the caller
-                    let _ = sender.send(-libc::ETIMEDOUT);
-                } else {
-                    // Send the actual result
-                    let _ = sender.send(result);
-                }
-            } else {
-                // This is a timeout. Make sure timeouts are enabled.
-                assert!(cfg.op_timeout.is_some());
-                assert_eq!(work_id, TIMEOUT_WORK_ID);
-            }
-            continue;
+        while let Some(cqe) = ring.completion().next() {
+            handle_cqe(&mut waiters, &cqe, cfg.op_timeout.is_some());
         }
 
         // Try to fill the submission queue with incoming work.
@@ -218,28 +221,7 @@ async fn drain(
     while !waiters.is_empty() {
         ring.submit_and_wait(1).expect("unable to submit to ring");
         while let Some(cqe) = ring.completion().next() {
-            let work_id = cqe.user_data();
-            let result = cqe.result();
-
-            if work_id == SHUTDOWN_TIMEOUT_WORK_ID {
-                // We timed out draining the completion queue.
-                // Abandon any remaining operations.
-                return;
-            }
-
-            if let Some(sender) = waiters.remove(&work_id) {
-                if result == -libc::ECANCELED && has_op_timeout {
-                    // Send a timeout error code to the caller
-                    let _ = sender.send(-libc::ETIMEDOUT);
-                } else {
-                    // Send the actual result
-                    let _ = sender.send(result);
-                }
-            } else {
-                // This is a timeout. Make sure timeouts are enabled.
-                assert!(has_op_timeout);
-                assert_eq!(work_id, TIMEOUT_WORK_ID);
-            }
+            handle_cqe(&mut waiters, &cqe, cfg.op_timeout.is_some());
         }
     }
 }
