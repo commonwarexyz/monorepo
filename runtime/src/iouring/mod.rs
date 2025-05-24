@@ -200,7 +200,7 @@ pub(crate) async fn run(
 /// until `timeout` fires. If `timeout` is None, wait indefinitely.
 async fn drain(
     ring: &mut IoUring,
-    mut waiters: &mut HashMap<u64, oneshot::Sender<i32>>,
+    waiters: &mut HashMap<u64, oneshot::Sender<i32>>,
     has_op_timeout: bool,
     timeout: Option<Duration>,
 ) {
