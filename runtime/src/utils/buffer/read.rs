@@ -149,10 +149,19 @@ impl<B: Blob> Read<B> {
             return Err(Error::BlobInsufficientLength);
         }
 
-        // Reset buffer state
-        self.blob_position = position;
-        self.buffer_position = 0;
-        self.buffer_valid_len = 0;
+        // Check if the position is within the current buffer
+        let buffer_start = self.blob_position;
+        let buffer_end = self.blob_position + self.buffer_valid_len as u64;
+
+        if position >= buffer_start && position < buffer_end {
+            // Position is within the current buffer, adjust buffer_position
+            self.buffer_position = (position - self.blob_position) as usize;
+        } else {
+            // Position is outside the current buffer, reset buffer state
+            self.blob_position = position;
+            self.buffer_position = 0;
+            self.buffer_valid_len = 0;
+        }
 
         Ok(())
     }
