@@ -107,7 +107,9 @@ pub(crate) async fn run(
             let (mut work, sender) = if waiters.is_empty() {
                 // Block until there is something to do
                 match receiver.next().await {
+                    // Got work
                     Some(work) => work,
+                    // Channel closed, shut down
                     None => {
                         drain(
                             &mut ring,
@@ -124,8 +126,8 @@ pub(crate) async fn run(
                 match receiver.try_next() {
                     // Got work without blocking
                     Ok(Some(work_item)) => work_item,
+                    // Channel closed, shut down
                     Ok(None) => {
-                        // Channel closed, shut down
                         drain(
                             &mut ring,
                             &mut waiters,
