@@ -11,7 +11,7 @@ fn benchmark_batch_verify_multiple_public_keys(c: &mut Criterion) {
         c.bench_function(&format!("{}/pks={}", module_path!(), n_signers), |b| {
             b.iter_batched(
                 || {
-                    let mut batch = ed25519::Ed25519Batch::new();
+                    let mut batch = ed25519::Batch::new();
                     for _ in 0..n_signers {
                         let signer = ed25519::PrivateKey::from_rng(&mut thread_rng());
                         let sig = signer.sign(Some(namespace), &msg);

@@ -301,13 +301,13 @@ impl Display for Signature {
 }
 
 /// Ed25519 Batch Verifier.
-pub struct Ed25519Batch {
+pub struct Batch {
     verifier: ed25519_consensus::batch::Verifier,
 }
 
-impl crate::BatchScheme<PrivateKey> for Ed25519Batch {
+impl crate::BatchScheme<PrivateKey> for Batch {
     fn new() -> Self {
-        Ed25519Batch {
+        Batch {
             verifier: ed25519_consensus::batch::Verifier::new(),
         }
     }
@@ -341,7 +341,7 @@ impl crate::BatchScheme<PrivateKey> for Ed25519Batch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::PublicKey as _;
+    use crate::{ed25519, BatchScheme as _, PrivateKey as _, PublicKey as _};
     use commonware_codec::{DecodeExt, Encode};
 
     fn test_sign_and_verify(
@@ -493,14 +493,13 @@ mod tests {
     }
 
     // sanity check the test infra rejects bad signatures
-    // #[test]
-    // #[should_panic]
-    // fn bad_signature() {
-    //     let (private_key, public_key, message, _) = vector_1();
-    //     let mut signer = <Ed25519 as Signer>::new(&mut OsRng);
-    //     let bad_signature = signer.sign(None, message.as_ref());
-    //     test_sign_and_verify(private_key, public_key, &message, bad_signature);
-    // }
+    #[test]
+    #[should_panic]
+    fn bad_signature() {
+        let (private_key, public_key, message, _) = vector_1();
+        let bad_signature = private_key.sign(None, message.as_ref());
+        test_sign_and_verify(private_key, public_key, &message, bad_signature);
+    }
 
     // sanity check the test infra rejects non-matching messages
     #[test]
@@ -679,33 +678,33 @@ mod tests {
         )
     }
 
-    // #[test]
-    // fn batch_verify_valid() {
-    //     let v1 = vector_1();
-    //     let v2 = vector_2();
-    //     let mut batch = Ed25519Batch::new();
-    //     assert!(batch.add(None, &v1.2, &v1.1, &v1.3));
-    //     assert!(batch.add(None, &v2.2, &v2.1, &v2.3));
-    //     assert!(batch.verify(&mut rand::thread_rng()));
-    // }
+    #[test]
+    fn batch_verify_valid() {
+        let v1 = vector_1();
+        let v2 = vector_2();
+        let mut batch = ed25519::Batch::new();
+        assert!(batch.add(None, &v1.2, &v1.1, &v1.3));
+        assert!(batch.add(None, &v2.2, &v2.1, &v2.3));
+        assert!(batch.verify(&mut rand::thread_rng()));
+    }
 
-    // #[test]
-    // fn batch_verify_invalid() {
-    //     let v1 = vector_1();
-    //     let v2 = vector_2();
-    //     let mut bad_signature = v2.3.to_vec();
-    //     bad_signature[3] = 0xff;
+    #[test]
+    fn batch_verify_invalid() {
+        let v1 = vector_1();
+        let v2 = vector_2();
+        let mut bad_signature = v2.3.to_vec();
+        bad_signature[3] = 0xff;
 
-    //     let mut batch = Ed25519Batch::new();
-    //     assert!(batch.add(None, &v1.2, &v1.1, &v1.3));
-    //     assert!(batch.add(
-    //         None,
-    //         &v2.2,
-    //         &v2.1,
-    //         &Signature::decode(bad_signature.as_ref()).unwrap()
-    //     ));
-    //     assert!(!batch.verify(&mut rand::thread_rng()));
-    // }
+        let mut batch = Batch::new();
+        assert!(batch.add(None, &v1.2, &v1.1, &v1.3));
+        assert!(batch.add(
+            None,
+            &v2.2,
+            &v2.1,
+            &Signature::decode(bad_signature.as_ref()).unwrap()
+        ));
+        assert!(!batch.verify(&mut rand::thread_rng()));
+    }
 
     #[test]
     fn test_zero_signature_fails() {

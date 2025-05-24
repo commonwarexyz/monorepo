@@ -25,4 +25,4 @@
 //! ```
 
 mod scheme;
-pub use scheme::{Ed25519Batch, PrivateKey, PublicKey, Signature};
+pub use scheme::{Batch, PrivateKey, PublicKey, Signature};
