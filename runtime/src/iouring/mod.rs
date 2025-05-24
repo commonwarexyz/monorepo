@@ -3,6 +3,7 @@ use futures::{
     StreamExt as _,
 };
 use io_uring::{
+    cqueue::Entry,
     opcode::{LinkTimeout, Timeout},
     squeue::Entry as SqueueEntry,
     types::Timespec,
@@ -60,7 +61,7 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
     builder.build(cfg.size)
 }
 
-fn handle_cqe(waiters: &mut HashMap<u64, oneshot::Sender<i32>>, cqe: &Cqe, has_op_timeout: bool) {
+fn handle_cqe(waiters: &mut HashMap<u64, oneshot::Sender<i32>>, cqe: Entry, has_op_timeout: bool) {
     let work_id = cqe.user_data();
     let result = cqe.result();
 
@@ -100,7 +101,7 @@ pub(crate) async fn run(
     loop {
         // Try to get a completion
         while let Some(cqe) = ring.completion().next() {
-            handle_cqe(&mut waiters, &cqe, cfg.op_timeout.is_some());
+            handle_cqe(&mut waiters, cqe, cfg.op_timeout.is_some());
         }
 
         // Try to fill the submission queue with incoming work.
@@ -199,7 +200,7 @@ pub(crate) async fn run(
 /// until `timeout` fires. If `timeout` is None, wait indefinitely.
 async fn drain(
     ring: &mut IoUring,
-    waiters: &mut HashMap<u64, oneshot::Sender<i32>>,
+    mut waiters: &mut HashMap<u64, oneshot::Sender<i32>>,
     has_op_timeout: bool,
     timeout: Option<Duration>,
 ) {
@@ -221,7 +222,7 @@ async fn drain(
     while !waiters.is_empty() {
         ring.submit_and_wait(1).expect("unable to submit to ring");
         while let Some(cqe) = ring.completion().next() {
-            handle_cqe(&mut waiters, &cqe, cfg.op_timeout.is_some());
+            handle_cqe(waiters, cqe, has_op_timeout);
         }
     }
 }
