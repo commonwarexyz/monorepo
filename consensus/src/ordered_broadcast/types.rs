@@ -11,7 +11,7 @@ use commonware_cryptography::{
         poly::{self, PartialSignature},
         variant::Variant,
     },
-    Digest, PrivateKey,
+    Digest, PrivateKey, PublicKey,
 };
 use commonware_utils::{union, Array};
 use futures::channel::oneshot;
@@ -368,12 +368,11 @@ impl<C: PrivateKey, V: Variant, D: Digest> Node<C, V, D> {
         // Verify chunk
         let chunk_namespace = chunk_namespace(namespace);
         let message = self.chunk.encode();
-        if !C::verify(
-            Some(chunk_namespace.as_ref()),
-            &message,
-            &self.chunk.sequencer,
-            &self.signature,
-        ) {
+        if !self
+            .chunk
+            .sequencer
+            .verify(Some(chunk_namespace.as_ref()), &message, &self.signature)
+        {
             return Err(Error::InvalidSequencerSignature);
         }
         let Some(parent) = &self.parent else {
@@ -682,12 +681,9 @@ impl<C: PrivateKey, D: Digest> Proposal<C, D> {
         // Verify chunk
         let chunk_namespace = chunk_namespace(namespace);
         let message = self.chunk.encode();
-        C::verify(
-            Some(chunk_namespace.as_ref()),
-            &message,
-            &self.chunk.sequencer,
-            &self.signature,
-        )
+        self.chunk
+            .sequencer
+            .verify(Some(chunk_namespace.as_ref()), &message, &self.signature)
     }
 }
 

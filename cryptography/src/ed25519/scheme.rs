@@ -15,112 +15,6 @@ const PRIVATE_KEY_LENGTH: usize = 32;
 const PUBLIC_KEY_LENGTH: usize = 32;
 const SIGNATURE_LENGTH: usize = 64;
 
-// /// Ed25519 Signer.
-// #[derive(Clone)]
-// pub struct Ed25519 {
-//     signer: ed25519_consensus::SigningKey,
-//     verifier: ed25519_consensus::VerificationKey,
-// }
-
-// impl Specification for Ed25519 {
-//     type PublicKey = PublicKey;
-//     type Signature = Signature;
-// }
-
-// impl Verifier for Ed25519 {
-//     fn verify(
-//         namespace: Option<&[u8]>,
-//         message: &[u8],
-//         public_key: &Self::PublicKey,
-//         signature: &Self::Signature,
-//     ) -> bool {
-//         match namespace {
-//             Some(namespace) => {
-//                 let payload = union_unique(namespace, message);
-//                 public_key
-//                     .key
-//                     .verify(&signature.signature, &payload)
-//                     .is_ok()
-//             }
-//             None => public_key.key.verify(&signature.signature, message).is_ok(),
-//         }
-//     }
-// }
-
-// impl Signer for Ed25519 {
-//     type PrivateKey = PrivateKey;
-
-//     fn new<R: CryptoRng + Rng>(r: &mut R) -> Self {
-//         let signer = ed25519_consensus::SigningKey::new(r);
-//         let verifier = signer.verification_key();
-//         Self { signer, verifier }
-//     }
-
-//     fn from(private_key: PrivateKey) -> Option<Self> {
-//         let signer = private_key.key.clone();
-//         let verifier = signer.verification_key();
-//         Some(Self { signer, verifier })
-//     }
-
-//     fn private_key(&self) -> PrivateKey {
-//         PrivateKey::from(self.signer.clone())
-//     }
-
-//     fn public_key(&self) -> PublicKey {
-//         PublicKey::from(self.verifier)
-//     }
-
-//     fn sign(&mut self, namespace: Option<&[u8]>, message: &[u8]) -> Signature {
-//         let sig = match namespace {
-//             Some(namespace) => self.signer.sign(&union_unique(namespace, message)),
-//             None => self.signer.sign(message),
-//         };
-//         Signature::from(sig)
-//     }
-// }
-
-/// Ed25519 Batch Verifier.
-pub struct Ed25519Batch {
-    verifier: ed25519_consensus::batch::Verifier,
-}
-
-// impl Specification for Ed25519Batch {
-//     type PublicKey = PublicKey;
-//     type Signature = Signature;
-// }
-
-impl crate::BatchScheme<PrivateKey> for Ed25519Batch {
-    fn new() -> Self {
-        Ed25519Batch {
-            verifier: ed25519_consensus::batch::Verifier::new(),
-        }
-    }
-
-    fn add(
-        &mut self,
-        namespace: Option<&[u8]>,
-        message: &[u8],
-        public_key: &PublicKey,
-        signature: &Signature,
-    ) -> bool {
-        let payload = match namespace {
-            Some(namespace) => Cow::Owned(union_unique(namespace, message)),
-            None => Cow::Borrowed(message),
-        };
-        let item = ed25519_consensus::batch::Item::from((
-            public_key.key.into(),
-            signature.signature,
-            &payload,
-        ));
-        self.verifier.queue(item);
-        true
-    }
-
-    fn verify<R: RngCore + CryptoRng>(self, rng: &mut R) -> bool {
-        self.verifier.verify(rng).is_ok()
-    }
-}
-
 /// Ed25519 Private Key.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct PrivateKey {
@@ -403,6 +297,43 @@ impl Debug for Signature {
 impl Display for Signature {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", hex(&self.raw))
+    }
+}
+
+/// Ed25519 Batch Verifier.
+pub struct Ed25519Batch {
+    verifier: ed25519_consensus::batch::Verifier,
+}
+
+impl crate::BatchScheme<PrivateKey> for Ed25519Batch {
+    fn new() -> Self {
+        Ed25519Batch {
+            verifier: ed25519_consensus::batch::Verifier::new(),
+        }
+    }
+
+    fn add(
+        &mut self,
+        namespace: Option<&[u8]>,
+        message: &[u8],
+        public_key: &PublicKey,
+        signature: &Signature,
+    ) -> bool {
+        let payload = match namespace {
+            Some(namespace) => Cow::Owned(union_unique(namespace, message)),
+            None => Cow::Borrowed(message),
+        };
+        let item = ed25519_consensus::batch::Item::from((
+            public_key.key.into(),
+            signature.signature,
+            &payload,
+        ));
+        self.verifier.queue(item);
+        true
+    }
+
+    fn verify<R: RngCore + CryptoRng>(self, rng: &mut R) -> bool {
+        self.verifier.verify(rng).is_ok()
     }
 }
 

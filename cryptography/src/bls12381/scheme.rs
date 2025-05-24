@@ -1,5 +1,10 @@
 //! BLS12-381 implementation of the `Scheme` trait.
 //!
+//! This implementation uses the `blst` crate for BLS12-381 operations. This
+//! crate implements serialization according to the "ZCash BLS12-381" specification
+//! (<https://github.com/supranational/blst/tree/master?tab=readme-ov-file#serialization-format>)
+//! and hashes messages according to RFC 9380.
+//!
 //! # Example
 //! ```rust
 //! use commonware_cryptography::{Bls12381, Signer, Verifier};
@@ -40,107 +45,6 @@ use std::{
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const CURVE_NAME: &str = "bls12381";
-
-/// BLS12-381 implementation of the `Scheme` trait.
-///
-/// This implementation uses the `blst` crate for BLS12-381 operations. This
-/// crate implements serialization according to the "ZCash BLS12-381" specification
-/// (<https://github.com/supranational/blst/tree/master?tab=readme-ov-file#serialization-format>) and
-/// hashes messages according to RFC 9380.
-// #[derive(Clone)]
-// pub struct Bls12381 {
-//     private: group::Private,
-//     public: <MinPk as Variant>::Public,
-// }
-
-// type PrivateKey = group::Private;
-
-impl crate::PrivateKey for PrivateKey {
-    type PublicKey = PublicKey;
-
-    type Signature = Signature;
-
-    // TODO remove duplicate impl
-    fn public_key(&self) -> Self::PublicKey {
-        let public = ops::compute_public::<MinPk>(&self.key);
-        PublicKey::from(public)
-    }
-
-    fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Self::Signature {
-        let signature = ops::sign_message::<MinPk>(&self.key, namespace, msg);
-        Signature::from(signature)
-    }
-
-    fn from_rng<R: Rng + CryptoRng>(rng: &mut R) -> Self {
-        let (private, _) = ops::keypair::<_, MinPk>(rng);
-        let raw = private.encode_fixed();
-        Self { raw, key: private }
-    }
-}
-
-// type PublicKey = <MinPk as Variant>::Public;
-
-impl crate::PublicKey for PublicKey {
-    type Private = PrivateKey;
-
-    type Signature = Signature;
-
-    fn verify(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Self::Signature) -> bool {
-        ops::verify_message::<MinPk>(&self.key, namespace, msg, &sig.signature).is_ok()
-    }
-}
-
-impl From<PrivateKey> for PublicKey {
-    fn from(private_key: PrivateKey) -> Self {
-        let public = ops::compute_public::<MinPk>(&private_key.key);
-        PublicKey::from(public)
-    }
-}
-
-// impl Specification for Bls12381 {
-//     type PublicKey = PublicKey;
-//     type Signature = Signature;
-// }
-
-// impl Verifier for Bls12381 {
-//     fn verify(
-//         namespace: Option<&[u8]>,
-//         message: &[u8],
-//         public_key: &PublicKey,
-//         signature: &Signature,
-//     ) -> bool {
-//         ops::verify_message::<MinPk>(&public_key.key, namespace, message, &signature.signature)
-//             .is_ok()
-//     }
-// }
-
-// impl Signer for Bls12381 {
-//     type PrivateKey = PrivateKey;
-
-//     fn new<R: CryptoRng + Rng>(r: &mut R) -> Self {
-//         let (private, public) = ops::keypair::<_, MinPk>(r);
-//         Self { private, public }
-//     }
-
-//     fn from(private_key: PrivateKey) -> Option<Self> {
-//         let private = private_key.key.clone();
-//         let public = ops::compute_public::<MinPk>(&private);
-//         Some(Self { private, public })
-//     }
-
-//     fn private_key(&self) -> PrivateKey {
-//         PrivateKey::from(self.private.clone())
-//     }
-
-//     fn public_key(&self) -> PublicKey {
-//         PublicKey::from(self.public)
-//     }
-
-//     fn sign(&mut self, namespace: Option<&[u8]>, message: &[u8]) -> Signature {
-//         let signature = ops::sign_message::<MinPk>(&self.private, namespace, message);
-//         Signature::from(signature)
-//     }
-// }
 
 /// BLS12-381 private key.
 #[derive(Clone, Eq, PartialEq, Zeroize, ZeroizeOnDrop)]
@@ -222,11 +126,51 @@ impl Display for PrivateKey {
     }
 }
 
+impl crate::PrivateKey for PrivateKey {
+    type PublicKey = PublicKey;
+
+    type Signature = Signature;
+
+    // TODO remove duplicate impl
+    fn public_key(&self) -> Self::PublicKey {
+        let public = ops::compute_public::<MinPk>(&self.key);
+        PublicKey::from(public)
+    }
+
+    fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Self::Signature {
+        let signature = ops::sign_message::<MinPk>(&self.key, namespace, msg);
+        Signature::from(signature)
+    }
+
+    fn from_rng<R: Rng + CryptoRng>(rng: &mut R) -> Self {
+        let (private, _) = ops::keypair::<_, MinPk>(rng);
+        let raw = private.encode_fixed();
+        Self { raw, key: private }
+    }
+}
+
+impl crate::PublicKey for PublicKey {
+    type Private = PrivateKey;
+
+    type Signature = Signature;
+
+    fn verify(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Self::Signature) -> bool {
+        ops::verify_message::<MinPk>(&self.key, namespace, msg, &sig.signature).is_ok()
+    }
+}
+
 /// BLS12-381 public key.
 #[derive(Clone, Eq, PartialEq)]
 pub struct PublicKey {
     raw: [u8; <MinPk as Variant>::Public::SIZE],
     key: <MinPk as Variant>::Public,
+}
+
+impl From<PrivateKey> for PublicKey {
+    fn from(private_key: PrivateKey) -> Self {
+        let public = ops::compute_public::<MinPk>(&private_key.key);
+        PublicKey::from(public)
+    }
 }
 
 impl AsRef<<MinPk as Variant>::Public> for PublicKey {
@@ -398,17 +342,12 @@ impl Display for Signature {
     }
 }
 
-// /// BLS12-381 batch verifier.
+/// BLS12-381 batch verifier.
 pub struct Bls12381Batch {
     publics: Vec<<MinPk as Variant>::Public>,
     hms: Vec<<MinPk as Variant>::Signature>,
     signatures: Vec<<MinPk as Variant>::Signature>,
 }
-
-// impl Specification for Bls12381Batch {
-//     type PublicKey = PublicKey;
-//     type Signature = Signature;
-// }
 
 impl crate::BatchScheme<PrivateKey> for Bls12381Batch {
     fn new() -> Self {

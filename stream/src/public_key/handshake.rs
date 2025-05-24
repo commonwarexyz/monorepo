@@ -4,7 +4,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
-use commonware_cryptography::{PrivateKey, PublicKey, Signature};
+use commonware_cryptography::{PrivateKey, PublicKey};
 use commonware_runtime::Clock;
 use commonware_utils::SystemTimeExt;
 use std::time::Duration;
@@ -86,10 +86,7 @@ pub struct Signed<C: PrivateKey> {
     signature: C::Signature,
 }
 
-impl<C: PrivateKey> Signed<C>
-where
-    C::Signature: Signature<Public = C::PublicKey>,
-{
+impl<C: PrivateKey> Signed<C> {
     pub fn sign(crypto: &mut C, namespace: &[u8], info: Info<C::PublicKey>) -> Self {
         let signature = crypto.sign(Some(namespace), &info.encode());
         Self {
@@ -110,7 +107,7 @@ where
     pub fn verify<E: Clock>(
         &self,
         context: &E,
-        crypto: &C, // TODO use
+        crypto: &C,
         namespace: &[u8],
         synchrony_bound: Duration,
         max_handshake_age: Duration,
@@ -120,9 +117,9 @@ where
         // If we didn't verify this, it would be trivial for any peer to impersonate another peer (even though
         // they would not be able to decrypt any messages from the shared secret). This would prevent us
         // from making a legitimate connection to the intended peer.
-        // if crypto.public_key() != self.info.recipient {
-        //     return Err(Error::HandshakeNotForUs);
-        // }
+        if crypto.public_key() != self.info.recipient {
+            return Err(Error::HandshakeNotForUs);
+        }
 
         // Verify that the timestamp in the handshake is recent
         //

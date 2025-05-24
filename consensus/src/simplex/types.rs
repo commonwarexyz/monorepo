@@ -309,7 +309,7 @@ impl<S: Array, D: Digest> Notarize<S, D> {
     /// Verifies the signature on this notarize using the provided verifier.
     ///
     /// This ensures that the notarize was actually produced by the claimed validator.
-    pub fn verify<K: PublicKey>(&self, namespace: &[u8], public_key: &K) -> bool {
+    pub fn verify<K: PublicKey<Signature = S>>(&self, namespace: &[u8], public_key: &K) -> bool {
         let notarize_namespace = notarize_namespace(namespace);
         let message = self.proposal.encode();
         public_key.verify(
@@ -320,7 +320,7 @@ impl<S: Array, D: Digest> Notarize<S, D> {
     }
 
     /// Creates a new signed notarize using the provided cryptographic scheme.
-    pub fn sign<C: PrivateKey>(
+    pub fn sign<C: PrivateKey<Signature = S>>(
         namespace: &[u8],
         scheme: &mut C,
         public_key_index: u32,
@@ -405,7 +405,11 @@ impl<S: Array, D: Digest> Notarization<S, D> {
     /// 3. All signers are in the validator set
     ///
     /// In `read_cfg`, we ensure that the signatures are sorted by public key index and are unique.
-    pub fn verify<K: PublicKey>(&self, namespace: &[u8], participants: &[K]) -> bool {
+    pub fn verify<K: PublicKey<Signature = S>>(
+        &self,
+        namespace: &[u8],
+        participants: &[K],
+    ) -> bool {
         // Get allowed signers
         let (threshold, count) = threshold(participants);
         if self.signatures.len() < threshold as usize {
@@ -496,7 +500,11 @@ impl<S: Array> Nullify<S> {
     }
 
     /// Verifies the signature on this nullify using the provided verifier.
-    pub fn verify<K: PrivateKey>(&self, namespace: &[u8], public_key: &K::PublicKey) -> bool {
+    pub fn verify<K: PrivateKey<Signature = S>>(
+        &self,
+        namespace: &[u8],
+        public_key: &K::PublicKey,
+    ) -> bool {
         let nullify_namespace = nullify_namespace(namespace);
         let message = view_message(self.view);
         public_key.verify(
@@ -507,7 +515,7 @@ impl<S: Array> Nullify<S> {
     }
 
     /// Creates a new signed nullify using the provided cryptographic scheme.
-    pub fn sign<C: PrivateKey>(
+    pub fn sign<C: PrivateKey<Signature = S>>(
         namespace: &[u8],
         scheme: &mut C,
         public_key_index: u32,
@@ -581,7 +589,11 @@ impl<S: Array> Nullification<S> {
     /// Verifies all signatures in this nullification using the provided verifier.
     ///
     /// Similar to Notarization::verify, ensures quorum of valid signatures from validators.
-    pub fn verify<K: PrivateKey>(&self, namespace: &[u8], participants: &[K::PublicKey]) -> bool {
+    pub fn verify<K: PrivateKey<Signature = S>>(
+        &self,
+        namespace: &[u8],
+        participants: &[K::PublicKey],
+    ) -> bool {
         // Get allowed signers
         let (threshold, count) = threshold(participants);
         if self.signatures.len() < threshold as usize {
@@ -673,7 +685,11 @@ impl<S: Array, D: Digest> Finalize<S, D> {
     }
 
     /// Verifies the signature on this finalize using the provided verifier.
-    pub fn verify<K: PrivateKey>(&self, namespace: &[u8], public_key: &K::PublicKey) -> bool {
+    pub fn verify<K: PrivateKey<Signature = S>>(
+        &self,
+        namespace: &[u8],
+        public_key: &K::PublicKey,
+    ) -> bool {
         let finalize_namespace = finalize_namespace(namespace);
         let message = self.proposal.encode();
         public_key.verify(
@@ -684,7 +700,7 @@ impl<S: Array, D: Digest> Finalize<S, D> {
     }
 
     /// Creates a new signed finalize using the provided cryptographic scheme.
-    pub fn sign<C: PrivateKey>(
+    pub fn sign<C: PrivateKey<Signature = S>>(
         namespace: &[u8],
         scheme: &mut C,
         public_key_index: u32,
@@ -764,7 +780,11 @@ impl<S: Array, D: Digest> Finalization<S, D> {
     /// Verifies all signatures in this finalization using the provided verifier.
     ///
     /// Similar to Notarization::verify, ensures quorum of valid signatures from validators.
-    pub fn verify<V: PrivateKey>(&self, namespace: &[u8], participants: &[V::PublicKey]) -> bool {
+    pub fn verify<V: PrivateKey<Signature = S>>(
+        &self,
+        namespace: &[u8],
+        participants: &[V::PublicKey],
+    ) -> bool {
         // Get allowed signers
         let (threshold, count) = threshold(participants);
         if self.signatures.len() < threshold as usize {
@@ -784,10 +804,9 @@ impl<S: Array, D: Digest> Finalization<S, D> {
             };
 
             // Verify signature
-            if !V::verify(
+            if !public_key.verify(
                 Some(finalize_namespace.as_ref()),
                 &message,
-                public_key,
                 &signature.signature,
             ) {
                 return false;
@@ -1196,7 +1215,11 @@ impl<S: Array, D: Digest> ConflictingNotarize<S, D> {
     }
 
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
-    pub fn verify<V: PrivateKey>(&self, namespace: &[u8], public_key: &V::PublicKey) -> bool {
+    pub fn verify<V: PrivateKey<Signature = S>>(
+        &self,
+        namespace: &[u8],
+        public_key: &V::PublicKey,
+    ) -> bool {
         let (notarize_1, notarize_2) = self.notarizes();
         notarize_1.verify::<V::PublicKey>(namespace, public_key)
             && notarize_2.verify::<V::PublicKey>(namespace, public_key)
@@ -1319,7 +1342,11 @@ impl<S: Array, D: Digest> ConflictingFinalize<S, D> {
     }
 
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
-    pub fn verify<V: PrivateKey>(&self, namespace: &[u8], public_key: &V::PublicKey) -> bool {
+    pub fn verify<V: PrivateKey<Signature = S>>(
+        &self,
+        namespace: &[u8],
+        public_key: &V::PublicKey,
+    ) -> bool {
         let (finalize_1, finalize_2) = self.finalizes();
         finalize_1.verify::<V>(namespace, public_key)
             && finalize_2.verify::<V>(namespace, public_key)
@@ -1417,7 +1444,11 @@ impl<S: Array, D: Digest> NullifyFinalize<S, D> {
     }
 
     /// Verifies that both the nullify and finalize signatures are valid, proving Byzantine behavior.
-    pub fn verify<V: PrivateKey>(&self, namespace: &[u8], public_key: &V::PublicKey) -> bool {
+    pub fn verify<V: PrivateKey<Signature = S>>(
+        &self,
+        namespace: &[u8],
+        public_key: &V::PublicKey,
+    ) -> bool {
         let nullify = Nullify::new(self.proposal.view(), self.view_signature.clone());
         let finalize = Finalize::new(self.proposal.clone(), self.finalize_signature.clone());
         nullify.verify::<V>(namespace, public_key) && finalize.verify::<V>(namespace, public_key)
