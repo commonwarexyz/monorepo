@@ -23,7 +23,7 @@ pub struct Config {
     /// Size of the ring.
     pub size: u32,
     /// If true, use IOPOLL mode.
-    pub iopoll: bool,
+    pub io_poll: bool,
     /// If true, use single issuer mode.
     pub single_issuer: bool,
     /// In the io_uring event loop (`run`), wait at most this long for a new
@@ -47,7 +47,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             size: 128,
-            iopoll: false,
+            io_poll: false,
             single_issuer: true,
             force_poll: Some(Duration::from_secs(1)),
             op_timeout: None,
@@ -57,7 +57,7 @@ impl Default for Config {
 
 fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
     let mut builder = &mut IoUring::builder();
-    if cfg.iopoll {
+    if cfg.io_poll {
         builder = builder.setup_iopoll();
     }
     if cfg.single_issuer {
