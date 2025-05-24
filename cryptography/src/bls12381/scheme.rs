@@ -384,7 +384,7 @@ impl crate::BatchScheme<PrivateKey> for Bls12381Batch {
 /// Test vectors sourced from https://github.com/ethereum/bls12-381-tests/releases/tag/v0.1.2.
 #[cfg(test)]
 mod tests {
-    use crate::{BatchScheme as _, PublicKey as _};
+    use crate::{bls12381, BatchScheme as _, PrivateKey as _, PublicKey as _};
 
     use super::*;
     use commonware_codec::{DecodeExt, Encode};
@@ -395,8 +395,8 @@ mod tests {
             parse_private_key("0x263dbd792f5b1be47ed85f8938c0f29586af0d3ac7b977f21c278fe1462040e3")
                 .unwrap();
         let encoded = original.encode();
-        assert_eq!(encoded.len(), PrivateKey::SIZE);
-        let decoded = PrivateKey::decode(encoded).unwrap();
+        assert_eq!(encoded.len(), bls12381::PrivateKey::SIZE);
+        let decoded = bls12381::PrivateKey::decode(encoded).unwrap();
         assert_eq!(original, decoded);
     }
 
@@ -422,27 +422,25 @@ mod tests {
         assert_eq!(original, decoded);
     }
 
-    // #[test]
-    // fn test_sign() {
-    //     let cases = [
-    //         vector_sign_1(),
-    //         vector_sign_2(),
-    //         vector_sign_3(),
-    //         vector_sign_4(),
-    //         vector_sign_5(),
-    //         vector_sign_6(),
-    //         vector_sign_7(),
-    //         vector_sign_8(),
-    //         vector_sign_9(),
-    //     ];
-    //     for (index, test) in cases.into_iter().enumerate() {
-    //         let (private_key, message, expected) = test;
-    //         let mut signer =
-    //             <Bls12381 as Signer>::from(private_key).expect("unable to deserialize private key");
-    //         let signature = signer.sign(None, &message);
-    //         assert_eq!(signature, expected, "vector_sign_{}", index + 1);
-    //     }
-    // }
+    #[test]
+    fn test_sign() {
+        let cases = [
+            vector_sign_1(),
+            vector_sign_2(),
+            vector_sign_3(),
+            vector_sign_4(),
+            vector_sign_5(),
+            vector_sign_6(),
+            vector_sign_7(),
+            vector_sign_8(),
+            vector_sign_9(),
+        ];
+        for (index, test) in cases.into_iter().enumerate() {
+            let (private_key, message, expected) = test;
+            let signature = private_key.sign(None, &message);
+            assert_eq!(signature, expected, "vector_sign_{}", index + 1);
+        }
+    }
 
     #[test]
     fn test_sign_10() {
