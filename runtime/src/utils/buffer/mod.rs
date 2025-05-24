@@ -309,9 +309,6 @@ mod tests {
             // Seek far ahead, past the current buffer
             reader.seek_to(500).unwrap();
 
-            // Refill the buffer at the new position
-            reader.refill().await.unwrap();
-
             // Read data - should get data from position 500
             let mut buf = [0u8; 5];
             reader.read_exact(&mut buf, 5).await.unwrap();
@@ -320,7 +317,6 @@ mod tests {
 
             // Seek backwards
             reader.seek_to(100).unwrap();
-            reader.refill().await.unwrap();
 
             // Read again - should be at position 100
             let mut buf = [0u8; 5];
