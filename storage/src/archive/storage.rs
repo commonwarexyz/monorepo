@@ -11,7 +11,7 @@ use commonware_utils::Array;
 use futures::{pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::BTreeMap;
-use tracing::{debug, info, trace};
+use tracing::{debug, trace};
 
 /// Subject of a `get` or `has` operation.
 pub enum Identifier<'a, K: Array> {
@@ -120,50 +120,13 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
                 .replay(cfg.replay_concurrency, cfg.replay_buffer)
                 .await?;
             pin_mut!(stream);
-
-            // Phase 1: Read all records from journal into an in-memory buffer.
-            // This helps in separating the I/O-heavy read phase from the
-            // data structure population phase. It might also improve performance
-            // if Index::insert performs its own I/O by allowing more contiguous
-            // I/O operations for the Index.
-            // Ensure K: Clone is available (it is, via the Array trait).
-            info!("starting phase 1: reading all records from journal");
-            let mut buffered_records = Vec::new();
-            // TODO: Consider adding with_capacity here if an estimate of item count is available.
-            // For 1M items, if (u64, K, Location) is e.g. 64 bytes, this vec is ~64MB.
-
             while let Some(result) = stream.next().await {
-                // Extract key from record
                 let (_, offset, len, data) = result?;
-                buffered_records.push((data.index, data.key.clone(), Location { offset, len }));
-                if buffered_records.len() % 10_000 == 0 {
-                    info!(
-                        num_records = buffered_records.len(),
-                        "read 100,000 records into memory"
-                    );
-                }
+                indices.insert(data.index, Location { offset, len });
+                keys.insert(&data.key, data.index);
+                intervals.insert(data.index);
             }
-            info!(
-                num_records = buffered_records.len(),
-                "finished phase 1: all records read into memory"
-            );
-
-            // Phase 2: Populate data structures from the in-memory buffer.
-            info!("starting phase 2: populating in-memory data structures");
-            for (index, key, location) in buffered_records {
-                // Store index
-                indices.insert(index, location);
-
-                // Store index in keys
-                keys.insert(&key, index);
-
-                // Store index in intervals
-                intervals.insert(index);
-            }
-            info!(
-                keys = keys.keys(),
-                "finished phase 2: data structures populated. Archive initialized."
-            );
+            debug!(keys = keys.keys(), "archive initialized");
         }
 
         // Initialize metrics
