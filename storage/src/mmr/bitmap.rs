@@ -85,6 +85,14 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         }
     }
 
+    pub fn size(&self) -> u64 {
+        self.mmr.size()
+    }
+
+    pub async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, Error> {
+        Ok(self.mmr.get_node(position))
+    }
+
     /// Restore the fully pruned state of a bitmap from the metadata in the given partition. (The
     /// caller must still replay retained elements to restore its full state.)
     ///

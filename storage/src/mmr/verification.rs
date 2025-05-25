@@ -3,9 +3,10 @@
 
 use crate::mmr::{
     iterator::{leaf_pos_to_num, PathIterator, PeakIterator},
+    storage::Storage,
     Error,
     Error::*,
-    Hasher, Storage,
+    Hasher,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{FixedSize, ReadExt};

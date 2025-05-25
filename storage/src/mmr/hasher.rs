@@ -1,13 +1,13 @@
 //! Decorator for a cryptographic hasher that implements the MMR-specific hashing logic.
 
 use crate::mmr::{
-    iterator::{leaf_pos_to_num, pos_to_height, PeakIterator},
-    Error, Storage,
+    iterator::{leaf_pos_to_num, pos_to_height},
+    storage::Storage,
+    Error,
 };
 use commonware_cryptography::Hasher as CHasher;
-use futures::future::try_join_all;
 use std::future::Future;
-use tracing::warn;
+use tracing::debug;
 
 /// A trait for computing the various digests of an MMR.
 pub trait Hasher<H: CHasher>: Send + Sync {
@@ -226,7 +226,7 @@ fn destination_pos(peak_node_pos: u64, height: u32) -> u64 {
 
 /// Inverse computation of destination_pos, with an analogous implementation involving walks down
 /// corresponding branches of both trees. Returns none if there is no corresponding node.
-fn source_pos(base_node_pos: u64, height: u32) -> Option<u64> {
+pub(super) fn source_pos(base_node_pos: u64, height: u32) -> Option<u64> {
     if pos_to_height(base_node_pos) < height {
         // Nodes below the grafting height do not have a corresponding peak tree node.
         return None;
@@ -302,60 +302,6 @@ impl<H: CHasher, S: Storage<H::Digest>> Hasher<H> for Grafting<'_, H, S> {
     }
 }
 
-/// A [Storage] implementation that makes grafted trees look like a single MMR for conveniently
-/// generating inclusion proofs.
-pub struct GraftedStorage<'a, H: CHasher, S1: Storage<H::Digest>, S2: Storage<H::Digest>> {
-    peak_tree: &'a S1,
-    base_mmr: &'a S2,
-    height: u32,
-
-    _marker: std::marker::PhantomData<H>,
-}
-
-impl<'a, H: CHasher, S1: Storage<H::Digest>, S2: Storage<H::Digest>> GraftedStorage<'a, H, S1, S2> {
-    /// Creates a new [GraftedStorage] instance.
-    pub fn new(peak_tree: &'a S1, base_mmr: &'a S2, height: u32) -> Self {
-        Self {
-            peak_tree,
-            base_mmr,
-            height,
-            _marker: std::marker::PhantomData,
-        }
-    }
-
-    pub async fn root(&self, hasher: &mut H) -> Result<H::Digest, Error> {
-        let size = self.size();
-        let peak_futures = PeakIterator::new(size).map(|(peak_pos, _)| self.get_node(peak_pos));
-        let peaks = try_join_all(peak_futures).await?;
-        let unwrapped_peaks = peaks.iter().map(|p| p.as_ref().unwrap());
-        let mut standard = Standard::new(hasher);
-        let digest = standard.root_digest(self.base_mmr.size(), unwrapped_peaks);
-
-        Ok(digest)
-    }
-}
-
-impl<H: CHasher, S1: Storage<H::Digest>, S2: Storage<H::Digest>> Storage<H::Digest>
-    for GraftedStorage<'_, H, S1, S2>
-{
-    fn size(&self) -> u64 {
-        self.base_mmr.size()
-    }
-
-    async fn get_node(&self, pos: u64) -> Result<Option<H::Digest>, Error> {
-        let height = pos_to_height(pos);
-        if height < self.height {
-            return self.base_mmr.get_node(pos).await;
-        }
-
-        let source_pos = source_pos(pos, self.height);
-        let Some(source_pos) = source_pos else {
-            return Ok(None);
-        };
-        self.peak_tree.get_node(source_pos).await
-    }
-}
-
 /// A [Hasher] implementation to use when verifying proofs over GraftedStorage.
 pub struct GraftingVerifier<'a, H: CHasher> {
     hasher: Standard<'a, H>,
@@ -405,24 +351,24 @@ impl<H: CHasher> Hasher<H> for GraftingVerifier<'_, H> {
         let source_pos = source_pos(pos, self.height);
         let Some(source_pos) = source_pos else {
             // malformed proof input
-            warn!(pos, "no grafting source pos");
+            debug!(pos, "no grafting source pos");
             return digest;
         };
         let index = leaf_pos_to_num(source_pos);
         let Some(mut index) = index else {
             // malformed proof input
-            warn!(pos = source_pos, "grafting source pos is not a leaf");
+            debug!(pos = source_pos, "grafting source pos is not a leaf");
             return digest;
         };
         if index < self.num {
             // malformed proof input
-            warn!(index, num = self.num, "grafting index is negative");
+            debug!(index, num = self.num, "grafting index is negative");
             return digest;
         };
         index -= self.num;
         if index >= self.elements.len() as u64 {
             // malformed proof input
-            warn!(
+            debug!(
                 index,
                 len = self.elements.len(),
                 "grafting index is out of bounds"
@@ -459,6 +405,7 @@ mod tests {
     use crate::mmr::{
         iterator::leaf_num_to_pos,
         mem::Mmr,
+        storage::Grafting as GStorage,
         tests::{build_test_mmr, ROOTS},
         verification::Proof,
     };
@@ -726,7 +673,7 @@ mod tests {
             assert_ne!(peak_root, base_root);
 
             {
-                let grafted_mmr = GraftedStorage::new(&peak_tree, &base_mmr, GRAFTING_HEIGHT);
+                let grafted_mmr = GStorage::new(&peak_tree, &base_mmr, GRAFTING_HEIGHT);
                 assert_eq!(grafted_mmr.size(), base_mmr.size());
 
                 let grafted_storage_root = grafted_mmr.root(&mut hasher).await.unwrap();
@@ -861,7 +808,7 @@ mod tests {
                 let mut standard = Standard::new(&mut hasher);
                 base_mmr.add(&mut standard, &b5).await.unwrap();
             }
-            let grafted_mmr = GraftedStorage::new(&peak_tree, &base_mmr, GRAFTING_HEIGHT);
+            let grafted_mmr = GStorage::new(&peak_tree, &base_mmr, GRAFTING_HEIGHT);
             assert_eq!(grafted_mmr.size(), base_mmr.size());
 
             // Confirm we can generate and verify inclusion proofs for the "orphaned" leaf as well as an existing one.

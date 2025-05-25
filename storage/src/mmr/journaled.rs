@@ -11,7 +11,6 @@ use crate::journal::{
 use crate::metadata::{Config as MConfig, Metadata};
 use crate::mmr::{
     iterator::PeakIterator, mem::Mmr as MemMmr, verification::Proof, Builder, Error, Hasher,
-    Storage,
 };
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Hasher as CHasher;
@@ -68,24 +67,6 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Builder<H> for Mmr<E, H> {
 
     fn root(&self, hasher: &mut impl Hasher<H>) -> H::Digest {
         self.root(hasher)
-    }
-}
-
-impl<E: RStorage + Clock + Metrics, H: CHasher> Storage<H::Digest> for Mmr<E, H> {
-    fn size(&self) -> u64 {
-        self.size()
-    }
-
-    async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, Error> {
-        if let Some(node) = self.mem_mmr.get_node(position) {
-            return Ok(Some(node));
-        }
-
-        match self.journal.read(position).await {
-            Ok(item) => Ok(Some(item)),
-            Err(JError::ItemPruned(_)) => Ok(None),
-            Err(e) => Err(Error::JournalError(e)),
-        }
     }
 }
 
@@ -212,6 +193,18 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     /// element's position will have this value.
     pub fn size(&self) -> u64 {
         self.mem_mmr.size()
+    }
+
+    pub async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, Error> {
+        if let Some(node) = self.mem_mmr.get_node(position) {
+            return Ok(Some(node));
+        }
+
+        match self.journal.read(position).await {
+            Ok(item) => Ok(Some(item)),
+            Err(JError::ItemPruned(_)) => Ok(None),
+            Err(e) => Err(Error::JournalError(e)),
+        }
     }
 
     /// Return the position of the last leaf in an MMR with this MMR's size, or None if the MMR is
