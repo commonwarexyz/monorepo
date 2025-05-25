@@ -2,10 +2,11 @@
 //! the `Storage` trait, and functions for verifying them against a root hash.
 
 use crate::mmr::{
-    iterator::{PathIterator, PeakIterator},
+    iterator::{leaf_pos_to_num, PathIterator, PeakIterator},
+    storage::Storage,
     Error,
     Error::*,
-    Hasher, Storage,
+    Hasher,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{FixedSize, ReadExt};
@@ -66,6 +67,14 @@ impl<H: CHasher> Proof<H> {
     where
         T: IntoIterator<Item: AsRef<[u8]>>,
     {
+        if leaf_pos_to_num(start_element_pos).is_none() {
+            debug!(pos = start_element_pos, "start pos is not a leaf");
+            return Ok(false);
+        }
+        if end_element_pos != start_element_pos && leaf_pos_to_num(end_element_pos).is_none() {
+            debug!(pos = end_element_pos, "end pos is not a leaf");
+            return Ok(false);
+        }
         match self
             .reconstruct_root(hasher, elements, start_element_pos, end_element_pos)
             .await

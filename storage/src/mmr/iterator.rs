@@ -201,6 +201,23 @@ pub(crate) const fn leaf_num_to_pos(leaf_num: u64) -> u64 {
     pos
 }
 
+/// Returns the height of the node at position `pos` in an MMR.
+pub(crate) const fn pos_to_height(mut pos: u64) -> u32 {
+    if pos == 0 {
+        return 0;
+    }
+
+    let mut size = u64::MAX >> pos.leading_zeros();
+    while size != 0 {
+        if pos >= size {
+            pos -= size;
+        }
+        size >>= 1;
+    }
+
+    pos as u32
+}
+
 /// A PathIterator returns a (parent_pos, sibling_pos) tuple for the sibling of each node along the
 /// path from a given perfect binary tree peak to a designated leaf, not including the peak itself.
 ///
@@ -247,7 +264,7 @@ impl Iterator for PathIterator {
         }
 
         let left_pos = self.node_pos - self.two_h;
-        let right_pos = left_pos + self.two_h - 1;
+        let right_pos = self.node_pos - 1;
         self.two_h >>= 1;
 
         if left_pos < self.leaf_pos {
