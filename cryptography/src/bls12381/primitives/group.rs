@@ -300,6 +300,18 @@ impl Hash for Scalar {
     }
 }
 
+impl PartialOrd for Scalar {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Scalar {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_slice().cmp(&other.as_slice())
+    }
+}
+
 impl Debug for Scalar {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", hex(&self.as_slice()))
@@ -327,7 +339,7 @@ impl Drop for Scalar {
 impl ZeroizeOnDrop for Scalar {}
 
 /// A share of a threshold signing key.
-#[derive(Clone, PartialEq, Hash)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Share {
     /// The share's index in the polynomial.
     pub index: u32,
@@ -483,6 +495,18 @@ impl Hash for G1 {
     fn hash<H: Hasher>(&self, state: &mut H) {
         let slice = self.as_slice();
         state.write(&slice);
+    }
+}
+
+impl PartialOrd for G1 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for G1 {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_slice().cmp(&other.as_slice())
     }
 }
 
@@ -680,6 +704,18 @@ impl Hash for G2 {
     fn hash<H: Hasher>(&self, state: &mut H) {
         let slice = self.as_slice();
         state.write(&slice);
+    }
+}
+
+impl PartialOrd for G2 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for G2 {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_slice().cmp(&other.as_slice())
     }
 }
 
@@ -1044,5 +1080,197 @@ mod tests {
         let expected_g2 = naive_msm(&points_g2, &scalars);
         let result_g2 = G2::msm(&points_g2, &scalars);
         assert_eq!(expected_g2, result_g2, "G2 MSM basic case failed");
+    }
+
+    #[test]
+    fn test_scalar_ord() {
+        let mut rng = thread_rng();
+        let a = Scalar::rand(&mut rng);
+        let b = Scalar::rand(&mut rng);
+        let c = a.clone();
+
+        // Test reflexivity: a == a
+        assert_eq!(a.cmp(&c), std::cmp::Ordering::Equal);
+        assert_eq!(a.partial_cmp(&c), Some(std::cmp::Ordering::Equal));
+
+        // Test consistency with Eq
+        assert_eq!(a == c, a.cmp(&c) == std::cmp::Ordering::Equal);
+
+        // Test that ordering is deterministic
+        let ord1 = a.cmp(&b);
+        let ord2 = a.cmp(&b);
+        assert_eq!(ord1, ord2);
+
+        // Test antisymmetry: if a < b, then b > a
+        match a.cmp(&b) {
+            std::cmp::Ordering::Less => assert_eq!(b.cmp(&a), std::cmp::Ordering::Greater),
+            std::cmp::Ordering::Greater => assert_eq!(b.cmp(&a), std::cmp::Ordering::Less),
+            std::cmp::Ordering::Equal => assert_eq!(b.cmp(&a), std::cmp::Ordering::Equal),
+        }
+    }
+
+    #[test]
+    fn test_g1_ord() {
+        let mut rng = thread_rng();
+        let mut a = G1::one();
+        a.mul(&Scalar::rand(&mut rng));
+        let mut b = G1::one();
+        b.mul(&Scalar::rand(&mut rng));
+        let c = a.clone();
+
+        // Test reflexivity: a == a
+        assert_eq!(a.cmp(&c), std::cmp::Ordering::Equal);
+        assert_eq!(a.partial_cmp(&c), Some(std::cmp::Ordering::Equal));
+
+        // Test consistency with Eq
+        assert_eq!(a == c, a.cmp(&c) == std::cmp::Ordering::Equal);
+
+        // Test that ordering is deterministic
+        let ord1 = a.cmp(&b);
+        let ord2 = a.cmp(&b);
+        assert_eq!(ord1, ord2);
+
+        // Test antisymmetry: if a < b, then b > a
+        match a.cmp(&b) {
+            std::cmp::Ordering::Less => assert_eq!(b.cmp(&a), std::cmp::Ordering::Greater),
+            std::cmp::Ordering::Greater => assert_eq!(b.cmp(&a), std::cmp::Ordering::Less),
+            std::cmp::Ordering::Equal => assert_eq!(b.cmp(&a), std::cmp::Ordering::Equal),
+        }
+    }
+
+    #[test]
+    fn test_g2_ord() {
+        let mut rng = thread_rng();
+        let mut a = G2::one();
+        a.mul(&Scalar::rand(&mut rng));
+        let mut b = G2::one();
+        b.mul(&Scalar::rand(&mut rng));
+        let c = a.clone();
+
+        // Test reflexivity: a == a
+        assert_eq!(a.cmp(&c), std::cmp::Ordering::Equal);
+        assert_eq!(a.partial_cmp(&c), Some(std::cmp::Ordering::Equal));
+
+        // Test consistency with Eq
+        assert_eq!(a == c, a.cmp(&c) == std::cmp::Ordering::Equal);
+
+        // Test that ordering is deterministic
+        let ord1 = a.cmp(&b);
+        let ord2 = a.cmp(&b);
+        assert_eq!(ord1, ord2);
+
+        // Test antisymmetry: if a < b, then b > a
+        match a.cmp(&b) {
+            std::cmp::Ordering::Less => assert_eq!(b.cmp(&a), std::cmp::Ordering::Greater),
+            std::cmp::Ordering::Greater => assert_eq!(b.cmp(&a), std::cmp::Ordering::Less),
+            std::cmp::Ordering::Equal => assert_eq!(b.cmp(&a), std::cmp::Ordering::Equal),
+        }
+    }
+
+    #[test]
+    fn test_hash_ord_consistency() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut rng = thread_rng();
+
+        // Test Scalar
+        let s1 = Scalar::rand(&mut rng);
+        let s2 = s1.clone();
+        assert_eq!(s1.cmp(&s2), std::cmp::Ordering::Equal);
+
+        let mut h1 = DefaultHasher::new();
+        let mut h2 = DefaultHasher::new();
+        s1.hash(&mut h1);
+        s2.hash(&mut h2);
+        assert_eq!(h1.finish(), h2.finish());
+
+        // Test G1
+        let mut g1_1 = G1::one();
+        g1_1.mul(&Scalar::rand(&mut rng));
+        let g1_2 = g1_1.clone();
+        assert_eq!(g1_1.cmp(&g1_2), std::cmp::Ordering::Equal);
+
+        let mut h1 = DefaultHasher::new();
+        let mut h2 = DefaultHasher::new();
+        g1_1.hash(&mut h1);
+        g1_2.hash(&mut h2);
+        assert_eq!(h1.finish(), h2.finish());
+
+        // Test G2
+        let mut g2_1 = G2::one();
+        g2_1.mul(&Scalar::rand(&mut rng));
+        let g2_2 = g2_1.clone();
+        assert_eq!(g2_1.cmp(&g2_2), std::cmp::Ordering::Equal);
+
+        let mut h1 = DefaultHasher::new();
+        let mut h2 = DefaultHasher::new();
+        g2_1.hash(&mut h1);
+        g2_2.hash(&mut h2);
+        assert_eq!(h1.finish(), h2.finish());
+    }
+
+    #[test]
+    fn test_collections_usage() {
+        use std::collections::{BTreeSet, HashMap};
+
+        let mut rng = thread_rng();
+
+        // Test that we can use these types in sorted collections
+        let mut scalar_set = BTreeSet::new();
+        let mut g1_set = BTreeSet::new();
+        let mut g2_set = BTreeSet::new();
+        let mut share_set = BTreeSet::new();
+
+        for i in 0..10 {
+            let scalar = Scalar::rand(&mut rng);
+            scalar_set.insert(scalar.clone());
+
+            let mut g1 = G1::one();
+            g1.mul(&scalar);
+            g1_set.insert(g1);
+
+            let mut g2 = G2::one();
+            g2.mul(&scalar);
+            g2_set.insert(g2);
+
+            let share = Share {
+                index: i,
+                private: scalar,
+            };
+            share_set.insert(share);
+        }
+
+        // Test that we can use these types as keys in hash maps
+        let mut scalar_map = HashMap::new();
+        let mut g1_map = HashMap::new();
+        let mut g2_map = HashMap::new();
+        let mut share_map = HashMap::new();
+
+        for (i, scalar) in scalar_set.iter().enumerate() {
+            scalar_map.insert(scalar.clone(), i);
+
+            let mut g1 = G1::one();
+            g1.mul(scalar);
+            g1_map.insert(g1, i);
+
+            let mut g2 = G2::one();
+            g2.mul(scalar);
+            g2_map.insert(g2, i);
+        }
+
+        for (i, share) in share_set.iter().enumerate() {
+            share_map.insert(share.clone(), i);
+        }
+
+        // Verify the collections work as expected
+        assert_eq!(scalar_set.len(), 10);
+        assert_eq!(g1_set.len(), 10);
+        assert_eq!(g2_set.len(), 10);
+        assert_eq!(share_set.len(), 10);
+        assert_eq!(scalar_map.len(), 10);
+        assert_eq!(g1_map.len(), 10);
+        assert_eq!(g2_map.len(), 10);
+        assert_eq!(share_map.len(), 10);
     }
 }
