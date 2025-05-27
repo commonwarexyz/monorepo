@@ -209,8 +209,6 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
         };
         jobs.push(job);
     }
-
-    // Wait for all jobs to finish (or error)
     try_join_all(jobs).await?;
 
     // Second pass: Delete VPCs after dependencies are removed
