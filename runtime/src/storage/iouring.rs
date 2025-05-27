@@ -27,16 +27,22 @@ pub struct Config {
 #[derive(Clone)]
 pub struct Storage {
     storage_directory: PathBuf,
-    io_sender: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>, Arc<dyn StableBuf>)>,
+    #[allow(clippy::type_complexity)]
+    io_sender: mpsc::Sender<(
+        SqueueEntry,
+        oneshot::Sender<i32>,
+        Option<Arc<dyn StableBuf>>,
+    )>,
 }
 
 impl Storage {
     /// Returns a new `Storage` instance.
     pub fn start(cfg: Config) -> Self {
-        let (io_sender, receiver) =
-            mpsc::channel::<(SqueueEntry, oneshot::Sender<i32>, Arc<dyn StableBuf>)>(
-                cfg.ring_config.size as usize,
-            );
+        let (io_sender, receiver) = mpsc::channel::<(
+            SqueueEntry,
+            oneshot::Sender<i32>,
+            Option<Arc<dyn StableBuf>>,
+        )>(cfg.ring_config.size as usize);
 
         let storage = Storage {
             storage_directory: cfg.storage_directory.clone(),
@@ -123,7 +129,12 @@ pub struct Blob {
     /// The underlying file
     file: Arc<File>,
     /// Where to send IO operations to be executed
-    io_sender: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>, Arc<dyn StableBuf>)>,
+    #[allow(clippy::type_complexity)]
+    io_sender: mpsc::Sender<(
+        SqueueEntry,
+        oneshot::Sender<i32>,
+        Option<Arc<dyn StableBuf>>,
+    )>,
 }
 
 impl Clone for Blob {
@@ -138,11 +149,16 @@ impl Clone for Blob {
 }
 
 impl Blob {
+    #[allow(clippy::type_complexity)]
     fn new(
         partition: String,
         name: &[u8],
         file: File,
-        io_sender: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>, Arc<dyn StableBuf>)>,
+        io_sender: mpsc::Sender<(
+            SqueueEntry,
+            oneshot::Sender<i32>,
+            Option<Arc<dyn StableBuf>>,
+        )>,
     ) -> Self {
         Self {
             partition,
@@ -161,9 +177,7 @@ impl crate::Blob for Blob {
         let buf_arc = Arc::new(buf);
         let mut io_sender = self.io_sender.clone();
         while total_read < len {
-            // // Figure out how much is left to read and where to read into
-            // let remaining = &mut buf_ref[total_read..];
-            // let offset = offset + total_read as u64;
+            // Figure out how much is left to read and where to read into
             let ptr = unsafe { (buf_arc.as_ref().stable_ptr().add(total_read)) as *mut u8 };
             let remaining = len - total_read;
             let offset = offset + total_read as u64;
@@ -176,7 +190,7 @@ impl crate::Blob for Blob {
             // Submit the operation
             let (sender, receiver) = oneshot::channel();
             io_sender
-                .send((op, sender, buf_arc.clone()))
+                .send((op, sender, Some(buf_arc.clone())))
                 .await
                 .map_err(|_| Error::ReadFailed)?;
 
@@ -218,7 +232,7 @@ impl crate::Blob for Blob {
             // Submit the operation
             let (sender, receiver) = oneshot::channel();
             io_sender
-                .send((op, sender, buf_arc.clone()))
+                .send((op, sender, Some(buf_arc.clone())))
                 .await
                 .map_err(|_| Error::WriteFailed)?;
 
@@ -256,7 +270,7 @@ impl crate::Blob for Blob {
             let (sender, receiver) = oneshot::channel();
             self.io_sender
                 .clone()
-                .send((op, sender, Arc::new("")))
+                .send((op, sender, None))
                 .await
                 .map_err(|_| {
                     Error::BlobSyncFailed(

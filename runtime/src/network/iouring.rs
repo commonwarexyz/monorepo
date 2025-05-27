@@ -19,11 +19,19 @@ pub struct Network {
     /// Used to submit send operations to the send io_uring event loop.
     /// In addition to the operation, we sent a channel to receive the result and a
     /// reference to the buffer being sent to ensure it remains valid until the operation completes.
-    send_submitter: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>, Arc<dyn StableBuf>)>,
+    send_submitter: mpsc::Sender<(
+        SqueueEntry,
+        oneshot::Sender<i32>,
+        Option<Arc<dyn StableBuf>>,
+    )>,
     /// Used to submit recv operations to the recv io_uring event loop.
     /// In addition to the operation, we sent a channel to receive the result and a
     /// reference to the buffer being read into to ensure it remains valid until the operation completes.
-    recv_submitter: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>, Arc<dyn StableBuf>)>,
+    recv_submitter: mpsc::Sender<(
+        SqueueEntry,
+        oneshot::Sender<i32>,
+        Option<Arc<dyn StableBuf>>,
+    )>,
 }
 
 impl Network {
@@ -103,11 +111,19 @@ pub struct Listener {
     /// Used to submit send operations to the send io_uring event loop.
     /// In addition to the operation, we sent a channel to receive the result and a
     /// reference to the buffer being sent to ensure it remains valid until the operation completes.
-    send_submitter: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>, Arc<dyn StableBuf>)>,
+    send_submitter: mpsc::Sender<(
+        SqueueEntry,
+        oneshot::Sender<i32>,
+        Option<Arc<dyn StableBuf>>,
+    )>,
     /// Used to submit recv operations to the recv io_uring event loop.
     /// In addition to the operation, we sent a channel to receive the result and a
     /// reference to the buffer being read into to ensure it remains valid until the operation completes.
-    recv_submitter: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>, Arc<dyn StableBuf>)>,
+    recv_submitter: mpsc::Sender<(
+        SqueueEntry,
+        oneshot::Sender<i32>,
+        Option<Arc<dyn StableBuf>>,
+    )>,
 }
 
 impl crate::Listener for Listener {
@@ -156,7 +172,11 @@ pub struct Sink {
     /// Used to submit send operations to the io_uring event loop.
     /// In addition to the operation, we sent a channel to receive the result and a
     /// reference to the buffer being read into to ensure it remains valid until the operation completes.
-    submitter: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>, Arc<dyn StableBuf>)>,
+    submitter: mpsc::Sender<(
+        SqueueEntry,
+        oneshot::Sender<i32>,
+        Option<Arc<dyn StableBuf>>,
+    )>,
 }
 
 impl Sink {
@@ -185,7 +205,7 @@ impl crate::Sink for Sink {
             // Submit the operation to the io_uring event loop
             let (tx, rx) = oneshot::channel();
             self.submitter
-                .send((op, tx, msg_arc.clone()))
+                .send((op, tx, Some(msg_arc.clone())))
                 .await
                 .map_err(|_| crate::Error::SendFailed)?;
 
@@ -213,7 +233,11 @@ pub struct Stream {
     /// Used to submit recv operations to the io_uring event loop.
     /// In addition to the operation, we sent a channel to receive the result and a
     /// reference to the buffer being read into to ensure it remains valid until the operation completes.
-    submitter: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>, Arc<dyn StableBuf>)>,
+    submitter: mpsc::Sender<(
+        SqueueEntry,
+        oneshot::Sender<i32>,
+        Option<Arc<dyn StableBuf>>,
+    )>,
 }
 
 impl Stream {
@@ -242,7 +266,7 @@ impl crate::Stream for Stream {
             // Submit the operation to the io_uring event loop
             let (tx, rx) = oneshot::channel();
             self.submitter
-                .send((op, tx, buf_arc.clone()))
+                .send((op, tx, Some(buf_arc.clone())))
                 .await
                 .map_err(|_| crate::Error::RecvFailed)?;
 

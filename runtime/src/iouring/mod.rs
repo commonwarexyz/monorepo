@@ -91,16 +91,24 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
 ///
 /// This function will block until `receiver` is closed or an error occurs.
 /// It should be run in a separate task.
+#[allow(clippy::type_complexity)]
 pub(crate) async fn run(
     cfg: Config,
-    mut receiver: mpsc::Receiver<(SqueueEntry, oneshot::Sender<i32>, Arc<dyn StableBuf>)>,
+    mut receiver: mpsc::Receiver<(
+        SqueueEntry,
+        oneshot::Sender<i32>,
+        Option<Arc<dyn StableBuf>>,
+    )>,
 ) {
     let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
     let mut next_work_id: u64 = 0;
     // Maps a work ID to the sender that we will send the result to
     // and the buffer used for the operation.
-    let mut waiters: std::collections::HashMap<_, (oneshot::Sender<i32>, Arc<dyn StableBuf>)> =
-        std::collections::HashMap::with_capacity(cfg.size as usize);
+    #[allow(clippy::type_complexity)]
+    let mut waiters: std::collections::HashMap<
+        _,
+        (oneshot::Sender<i32>, Option<Arc<dyn StableBuf>>),
+    > = std::collections::HashMap::with_capacity(cfg.size as usize);
 
     loop {
         // Try to get a completion
@@ -259,7 +267,7 @@ mod tests {
             opcode::Recv::new(Fd(left_pipe.as_raw_fd()), buf.as_mut_ptr(), buf.len() as _).build();
         let (recv_tx, recv_rx) = oneshot::channel();
         submitter
-            .send((recv, recv_tx, Arc::new(buf)))
+            .send((recv, recv_tx, Some(Arc::new(buf))))
             .await
             .expect("failed to send work");
 
@@ -271,7 +279,7 @@ mod tests {
             opcode::Write::new(Fd(right_pipe.as_raw_fd()), msg.as_ptr(), msg.len() as _).build();
         let (write_tx, write_rx) = oneshot::channel();
         submitter
-            .send((write, write_tx, Arc::new(msg)))
+            .send((write, write_tx, Some(Arc::new(msg))))
             .await
             .expect("failed to send work");
 
@@ -328,7 +336,7 @@ mod tests {
             opcode::Recv::new(Fd(pipe.as_raw_fd()), buf.as_mut_ptr(), buf.len() as _).build();
         let (tx, rx) = oneshot::channel();
         submitter
-            .send((work, tx, Arc::new(buf)))
+            .send((work, tx, Some(Arc::new(buf))))
             .await
             .expect("failed to send work");
         // Wait for the timeout
