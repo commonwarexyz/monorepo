@@ -33,7 +33,9 @@ pub struct Bitmap<H: CHasher, const N: usize> {
     /// given by `self.next_bit`. Within each byte, lowest order bits are treated as coming before
     /// higher order bits in the bit ordering.
     ///
-    /// Invariant: The last chunk in the bitmap always has room for at least one more bit.
+    /// Invariant: The last chunk in the bitmap always has room for at least one more bit. This
+    /// implies there is always at least one chunk in the bitmap, it's just empty if no bits have
+    /// been added yet.
     bitmap: VecDeque<[u8; N]>,
 
     /// The position within the last chunk of the bitmap where the next bit is to be appended.
@@ -43,11 +45,13 @@ pub struct Bitmap<H: CHasher, const N: usize> {
 
     /// A Merkle tree with each leaf representing N*8 bits of the bitmap.
     ///
-    /// When a chunk of N*8 bits is accumulated by the bitmap, it is added to this tree. Because
-    /// leaf elements can be updated when bits in the bitmap are flipped, this tree, while based on
-    /// an MMR structure, is not an MMR but a Merkle tree. The MMR structure results in reduced
-    /// update overhead for elements being appended or updated near the tip compared to a more
-    /// typical balanced Merkle tree.
+    /// When a chunk of N*8 bits is accumulated by the bitmap, it is added to this tree. This means
+    /// the last chunk of the bitmap is never part of the tree.
+    ///
+    /// Because leaf elements can be updated when bits in the bitmap are flipped, this tree, while
+    /// based on an MMR structure, is not an MMR but a Merkle tree. The MMR structure results in
+    /// reduced update overhead for elements being appended or updated near the tip compared to a
+    /// more typical balanced Merkle tree.
     mmr: Mmr<H>,
 
     /// The number of bitmap chunks that have been pruned.
@@ -212,10 +216,11 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         self.mmr.prune_to_pos(mmr_pos);
     }
 
-    /// Return the last chunk of the bitmap.
+    /// Return the last chunk of the bitmap and its size in bits. The size can be 0 (meaning the
+    /// last chunk is empty).
     #[inline]
-    fn last_chunk(&self) -> &[u8; N] {
-        &self.bitmap[self.bitmap.len() - 1]
+    pub fn last_chunk(&self) -> (&[u8; N], u64) {
+        (&self.bitmap[self.bitmap.len() - 1], self.next_bit)
     }
 
     /// Return the last chunk of the bitmap as a mutable slice.
@@ -228,7 +233,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     /// Returns the bitmap chunk containing the specified bit. Panics if the bit doesn't exist or
     /// has been pruned.
     #[inline]
-    fn get_chunk(&self, bit_offset: u64) -> &[u8; N] {
+    pub fn get_chunk(&self, bit_offset: u64) -> &[u8; N] {
         &self.bitmap[self.chunk_index(bit_offset)]
     }
 
@@ -343,8 +348,14 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     /// Get the value of a bit. Panics if the bit doesn't exist or has been pruned.
     #[inline]
     pub fn get_bit(&self, bit_offset: u64) -> bool {
+        Self::get_bit_from_chunk(self.get_chunk(bit_offset), bit_offset)
+    }
+
+    #[inline]
+    /// Get the value of a bit from its chunk.
+    pub fn get_bit_from_chunk(chunk: &[u8; N], bit_offset: u64) -> bool {
         let byte_offset = Self::chunk_byte_offset(bit_offset);
-        let byte = self.get_chunk(bit_offset)[byte_offset];
+        let byte = chunk[byte_offset];
         let mask = Self::chunk_byte_bitmask(bit_offset);
 
         (byte & mask) != 0
@@ -385,8 +396,10 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     /// # Format
     ///
     /// The root digest is simply that of the underlying MMR whenever the bit count falls on a chunk
-    /// boundary. Otherwise, the root is computed as: hash(next_bit || mmr_root ||
-    /// last_chunk_digest).
+    /// boundary. Otherwise, the root is computed as follows in order to capture the bits that are
+    /// not yet part of the MMR:
+    ///
+    /// hash(mmr_root || next_bit as u64 be_bytes || last_chunk_digest)
     pub async fn root(&self, hasher: &mut impl Hasher<H>) -> Result<H::Digest, Error> {
         let mmr_root = self.mmr.root(hasher);
         if self.next_bit == 0 {
@@ -394,25 +407,27 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         }
 
         // We must add the partial chunk to the digest for its bits to be provable.
-        let last_chunk_digest = hasher.digest(self.last_chunk());
+        let last_chunk_digest = hasher.digest(self.last_chunk().0);
         Ok(Self::partial_chunk_root(
             hasher.inner(),
-            self.next_bit,
             &mmr_root,
+            self.next_bit,
             &last_chunk_digest,
         ))
     }
 
-    fn partial_chunk_root(
+    /// Returns a root digest that incorporates bits that aren't part of the MMR yet because they
+    /// belong to the last (unfilled) chunk.
+    pub fn partial_chunk_root(
         hasher: &mut H,
-        next_bit: u64,
         mmr_root: &H::Digest,
+        next_bit: u64,
         last_chunk_digest: &H::Digest,
     ) -> H::Digest {
         assert!(next_bit > 0);
         assert!(next_bit < Self::CHUNK_SIZE_BITS);
-        hasher.update(&next_bit.to_be_bytes());
         hasher.update(mmr_root);
+        hasher.update(&next_bit.to_be_bytes());
         hasher.update(last_chunk_digest);
         hasher.finalize()
     }
@@ -451,7 +466,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 
         // Since the bitmap wasn't chunk aligned, we'll need to include the digest of the last chunk
         // in the proof to be able to re-derive the root.
-        let last_chunk_digest = hasher.digest(self.last_chunk());
+        let last_chunk_digest = hasher.digest(self.last_chunk().0);
         proof.digests.push(last_chunk_digest);
 
         Ok((proof, *chunk))
@@ -500,9 +515,10 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
             let last_chunk_digest = hasher.digest(chunk);
             let next_bit = bit_count % Self::CHUNK_SIZE_BITS;
             let reconstructed_root =
-                Self::partial_chunk_root(hasher.inner(), next_bit, &mmr_root, &last_chunk_digest);
+                Self::partial_chunk_root(hasher.inner(), &mmr_root, next_bit, &last_chunk_digest);
             return Ok(reconstructed_root == *root_digest);
         };
+
         let last_chunk_digest = mmr_proof.digests.pop().unwrap();
 
         // Reconstruct the MMR root.
@@ -524,7 +540,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 
         let next_bit = bit_count % Self::CHUNK_SIZE_BITS;
         let reconstructed_root =
-            Self::partial_chunk_root(hasher.inner(), next_bit, &mmr_root, &last_chunk_digest);
+            Self::partial_chunk_root(hasher.inner(), &mmr_root, next_bit, &last_chunk_digest);
 
         Ok(reconstructed_root == *root_digest)
     }
@@ -560,7 +576,8 @@ mod tests {
             assert_eq!(bitmap.pruned_chunks, 0);
             bitmap.prune_to_bit(0);
             assert_eq!(bitmap.pruned_chunks, 0);
-            assert_eq!(bitmap.last_chunk(), &[0u8; SHA256_SIZE]);
+            assert_eq!(bitmap.last_chunk().0, &[0u8; SHA256_SIZE]);
+            assert_eq!(bitmap.last_chunk().1, 0);
 
             // Add a single bit
             let mut hasher = Sha256::new();
@@ -572,7 +589,8 @@ mod tests {
             let root = bitmap.root(&mut hasher).await.unwrap();
             bitmap.prune_to_bit(1);
             assert_eq!(bitmap.bit_count(), 1);
-            assert_ne!(bitmap.last_chunk(), &[0u8; SHA256_SIZE]);
+            assert_ne!(bitmap.last_chunk().0, &[0u8; SHA256_SIZE]);
+            assert_eq!(bitmap.last_chunk().1, 1);
             // Pruning should be a no-op since we're not beyond a chunk boundary.
             assert_eq!(bitmap.pruned_chunks, 0);
             assert_eq!(root, bitmap.root(&mut hasher).await.unwrap());
@@ -607,7 +625,8 @@ mod tests {
             assert_eq!(bitmap.pruned_chunks, 1);
             assert_eq!(root, bitmap.root(&mut hasher).await.unwrap());
             // Last chunk should be empty again
-            assert_eq!(bitmap.last_chunk(), &[0u8; SHA256_SIZE]);
+            assert_eq!(bitmap.last_chunk().0, &[0u8; SHA256_SIZE]);
+            assert_eq!(bitmap.last_chunk().1, 0);
 
             // Pruning to an earlier point should be a no-op.
             bitmap.prune_to_bit(10);
