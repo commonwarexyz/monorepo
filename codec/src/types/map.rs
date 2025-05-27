@@ -419,6 +419,85 @@ mod tests {
         assert_eq!(map1.encode(), map2.encode());
     }
 
+    #[test]
+    fn test_btreemap_conformity() {
+        // Case 1: Empty BTreeMap<u8, u16>
+        let map1 = BTreeMap::<u8, u16>::new();
+        let mut expected1 = BytesMut::new();
+        0usize.write(&mut expected1); // Length 0
+        assert_eq!(map1.encode(), expected1.freeze());
+        assert_eq!(map1.encode_size(), 1);
+
+        // Case 2: Simple BTreeMap<u8, u16>
+        // BTreeMap will store and encode keys in sorted order: 1, 2
+        let mut map2 = BTreeMap::<u8, u16>::new();
+        map2.insert(2u8, 0xBBBBu16); // Inserted out of order
+        map2.insert(1u8, 0xAAAAu16);
+
+        let mut expected2 = BytesMut::new();
+        2usize.write(&mut expected2); // Length 2
+        1u8.write(&mut expected2); // Key 1
+        0xAAAAu16.write(&mut expected2); // Value for key 1
+        2u8.write(&mut expected2); // Key 2
+        0xBBBBu16.write(&mut expected2); // Value for key 2
+        assert_eq!(map2.encode(), expected2.freeze());
+        // Expected size: 1 (len) + (1 (u8) + 2 (u16)) * 2 entries = 1 + 3*2 = 7
+        assert_eq!(map2.encode_size(), 1 + (u8::SIZE + u16::SIZE) * 2);
+
+        // Case 3: BTreeMap<u16, bool>
+        // BTreeMap will store and encode keys in sorted order: 0x0101, 0x0202, 0x0303
+        let mut map3 = BTreeMap::<u16, bool>::new();
+        map3.insert(0x0303u16, true);
+        map3.insert(0x0101u16, false);
+        map3.insert(0x0202u16, true);
+
+        let mut expected3 = BytesMut::new();
+        3usize.write(&mut expected3); // Length 3
+        0x0101u16.write(&mut expected3); // Key 0x0101
+        false.write(&mut expected3); // Value false (0x00)
+        0x0202u16.write(&mut expected3); // Key 0x0202
+        true.write(&mut expected3); // Value true (0x01)
+        0x0303u16.write(&mut expected3); // Key 0x0303
+        true.write(&mut expected3); // Value true (0x01)
+        assert_eq!(map3.encode(), expected3.freeze());
+        // Expected size: 1 (len) + (2 (u16) + 1 (bool)) * 3 entries = 1 + 3*3 = 10
+        assert_eq!(map3.encode_size(), 1 + (u16::SIZE + bool::SIZE) * 3);
+
+        // Case 4: BTreeMap with Bytes as key and Vec<u8> as value
+        // BTreeMap sorts keys: "a", "b"
+        let mut map4 = BTreeMap::<Bytes, Vec<u8>>::new();
+        map4.insert(Bytes::from_static(b"b"), vec![20u8, 21u8]);
+        map4.insert(Bytes::from_static(b"a"), vec![10u8]);
+
+        let mut expected4 = BytesMut::new();
+        2usize.write(&mut expected4); // Map length = 2
+
+        // Key "a" (length 1, 'a')
+        Bytes::from_static(b"a").write(&mut expected4);
+        // Value vec![10u8] (length 1, 10u8)
+        vec![10u8].write(&mut expected4);
+
+        // Key "b" (length 1, 'b')
+        Bytes::from_static(b"b").write(&mut expected4);
+        // Value vec![20u8, 21u8] (length 2, 20u8, 21u8)
+        vec![20u8, 21u8].write(&mut expected4);
+
+        assert_eq!(map4.encode(), expected4.freeze());
+        // Expected size:
+        // map_len_size = 1
+        // key_a_size = 1 (len) + 1 (char) = 2
+        // val_a_size = 1 (len) + 1 (byte) = 2
+        // key_b_size = 1 (len) + 1 (char) = 2
+        // val_b_size = 1 (len) + 2 (bytes) = 3
+        // total = 1 + 2 + 2 + 2 + 3 = 10
+        let expected_size = 1usize.encode_size()
+            + Bytes::from_static(b"a").encode_size()
+            + vec![10u8].encode_size()
+            + Bytes::from_static(b"b").encode_size()
+            + vec![20u8, 21u8].encode_size();
+        assert_eq!(map4.encode_size(), expected_size);
+    }
+
     // --- HashMap Tests ---
 
     #[test]
@@ -581,10 +660,8 @@ mod tests {
         let mut encoded = map.encode();
         encoded.put_u8(0xFF); // Add extra byte
 
-        let range = RangeCfg::from(..);
-        let config_tuple = (range, ((), ()));
-
         // Use decode_cfg which enforces buffer is fully consumed
+        let config_tuple = ((..).into(), ((), ()));
         let result = HashMap::<u32, u64>::decode_cfg(encoded.clone(), &config_tuple);
         assert!(matches!(result, Err(Error::ExtraData(1))));
 
@@ -615,47 +692,62 @@ mod tests {
 
     #[test]
     fn test_hashmap_conformity() {
-        let mut map1 = HashMap::<u8, u16>::new();
-        assert_eq!(map1.encode(), &[0x00][..]); // Empty map
+        // Case 1: Empty HashMap<u8, u16>
+        let map1 = HashMap::<u8, u16>::new();
+        let mut expected1 = BytesMut::new();
+        0usize.write(&mut expected1); // Length 0
+        assert_eq!(map1.encode(), expected1.freeze());
 
-        map1.insert(1u8, 0xAAAAu16);
-        map1.insert(2u8, 0xBBBBu16);
-        // Expected: len=2 (0x02)
-        // Key 1 (0x01), Value 0xAAAA (0xAA, 0xAA)
-        // Key 2 (0x02), Value 0xBBBB (0xBB, 0xBB)
-        // Keys are sorted for encoding.
-        assert_eq!(
-            map1.encode(),
-            &[0x02, 0x01, 0xAA, 0xAA, 0x02, 0xBB, 0xBB][..]
-        );
+        // Case 2: Simple HashMap<u8, u16>
+        // Keys are sorted for encoding: 1, 2
+        let mut map2 = HashMap::<u8, u16>::new();
+        map2.insert(2u8, 0xBBBBu16); // Inserted out of order
+        map2.insert(1u8, 0xAAAAu16);
 
-        let mut map2 = HashMap::<u16, bool>::new();
-        map2.insert(0x0303u16, true);
-        map2.insert(0x0101u16, false);
-        map2.insert(0x0202u16, true);
-        // Expected: len=3 (0x03)
-        // Key 0x0101, Value false (0x00)
-        // Key 0x0202, Value true (0x01)
-        // Key 0x0303, Value true (0x01)
-        assert_eq!(
-            map2.encode(),
-            &[0x03, 0x01, 0x01, 0x00, 0x02, 0x02, 0x01, 0x03, 0x03, 0x01][..]
-        );
+        let mut expected2 = BytesMut::new();
+        2usize.write(&mut expected2); // Length 2
+        1u8.write(&mut expected2); // Key 1
+        0xAAAAu16.write(&mut expected2); // Value for key 1
+        2u8.write(&mut expected2); // Key 2
+        0xBBBBu16.write(&mut expected2); // Value for key 2
+        assert_eq!(map2.encode(), expected2.freeze());
 
-        // Map with Bytes as key and Vec<u8> as value
-        let mut map3 = HashMap::<Bytes, Vec<u8>>::new();
-        map3.insert(Bytes::from_static(b"b"), vec![20u8, 21u8]);
-        map3.insert(Bytes::from_static(b"a"), vec![10u8]);
-        // Expected: len=2 (0x02)
-        // Key "a": len=1 (0x01), 'a' (0x61)
-        // Value vec![10u8]: len=1 (0x01), 10u8 (0x0A)
-        // Key "b": len=1 (0x01), 'b' (0x62)
-        // Value vec![20u8, 21u8]: len=2 (0x02), 20u8 (0x14), 21u8 (0x15)
-        let mut expected_map3 = vec![0x02]; // Map length
-        expected_map3.extend_from_slice(&[0x01, 0x61]); // Key "a"
-        expected_map3.extend_from_slice(&[0x01, 0x0A]); // Value vec![10u8]
-        expected_map3.extend_from_slice(&[0x01, 0x62]); // Key "b"
-        expected_map3.extend_from_slice(&[0x02, 0x14, 0x15]); // Value vec![20u8, 21u8]
-        assert_eq!(map3.encode(), expected_map3.as_slice());
+        // Case 3: HashMap<u16, bool>
+        // Keys are sorted for encoding: 0x0101, 0x0202, 0x0303
+        let mut map3 = HashMap::<u16, bool>::new();
+        map3.insert(0x0303u16, true);
+        map3.insert(0x0101u16, false);
+        map3.insert(0x0202u16, true);
+
+        let mut expected3 = BytesMut::new();
+        3usize.write(&mut expected3); // Length 3
+        0x0101u16.write(&mut expected3); // Key 0x0101
+        false.write(&mut expected3); // Value false (0x00)
+        0x0202u16.write(&mut expected3); // Key 0x0202
+        true.write(&mut expected3); // Value true (0x01)
+        0x0303u16.write(&mut expected3); // Key 0x0303
+        true.write(&mut expected3); // Value true (0x01)
+        assert_eq!(map3.encode(), expected3.freeze());
+
+        // Case 4: HashMap with Bytes as key and Vec<u8> as value
+        // Keys are sorted for encoding: "a", "b"
+        let mut map4 = HashMap::<Bytes, Vec<u8>>::new();
+        map4.insert(Bytes::from_static(b"b"), vec![20u8, 21u8]);
+        map4.insert(Bytes::from_static(b"a"), vec![10u8]);
+
+        let mut expected4 = BytesMut::new();
+        2usize.write(&mut expected4); // Map length = 2
+
+        // Key "a" (length 1, 'a')
+        Bytes::from_static(b"a").write(&mut expected4);
+        // Value vec![10u8] (length 1, 10u8)
+        vec![10u8].write(&mut expected4);
+
+        // Key "b" (length 1, 'b')
+        Bytes::from_static(b"b").write(&mut expected4);
+        // Value vec![20u8, 21u8] (length 2, 20u8, 21u8)
+        vec![20u8, 21u8].write(&mut expected4);
+
+        assert_eq!(map4.encode(), expected4.freeze());
     }
 }

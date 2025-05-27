@@ -325,6 +325,50 @@ mod tests {
         assert_eq!(set1.encode(), set2.encode());
     }
 
+    #[test]
+    fn test_btreeset_conformity() {
+        // Case 1: Empty BTreeSet<u8>
+        let set1 = BTreeSet::<u8>::new();
+        let mut expected1 = BytesMut::new();
+        0usize.write(&mut expected1); // Length 0
+        assert_eq!(set1.encode(), expected1.freeze());
+        assert_eq!(set1.encode_size(), 1);
+
+        // Case 2: Simple BTreeSet<u8>
+        // BTreeSet will store and encode items in sorted order: 1, 2, 5
+        let mut set2 = BTreeSet::<u8>::new();
+        set2.insert(5u8);
+        set2.insert(1u8);
+        set2.insert(2u8);
+
+        let mut expected2 = BytesMut::new();
+        3usize.write(&mut expected2); // Length 3
+        1u8.write(&mut expected2); // Item 1
+        2u8.write(&mut expected2); // Item 2
+        5u8.write(&mut expected2); // Item 5
+        assert_eq!(set2.encode(), expected2.freeze());
+        assert_eq!(set2.encode_size(), 1 + 3 * u8::SIZE);
+
+        // Case 3: BTreeSet<Bytes>
+        // BTreeSet sorts items: "apple", "banana", "cherry"
+        let mut set3 = BTreeSet::<Bytes>::new();
+        set3.insert(Bytes::from_static(b"cherry"));
+        set3.insert(Bytes::from_static(b"apple"));
+        set3.insert(Bytes::from_static(b"banana"));
+
+        let mut expected3 = BytesMut::new();
+        3usize.write(&mut expected3); // Length 3
+        Bytes::from_static(b"apple").write(&mut expected3);
+        Bytes::from_static(b"banana").write(&mut expected3);
+        Bytes::from_static(b"cherry").write(&mut expected3);
+        assert_eq!(set3.encode(), expected3.freeze());
+        let expected_size = 1usize.encode_size()
+            + Bytes::from_static(b"apple").encode_size()
+            + Bytes::from_static(b"banana").encode_size()
+            + Bytes::from_static(b"cherry").encode_size();
+        assert_eq!(set3.encode_size(), expected_size);
+    }
+
     // --- HashSet Tests ---
 
     #[test]
@@ -485,5 +529,49 @@ mod tests {
         });
 
         assert_eq!(set1.encode(), set2.encode());
+    }
+
+    #[test]
+    fn test_hashset_conformity() {
+        // Case 1: Empty HashSet<u8>
+        let set1 = HashSet::<u8>::new();
+        let mut expected1 = BytesMut::new();
+        0usize.write(&mut expected1); // Length 0
+        assert_eq!(set1.encode(), expected1.freeze());
+        assert_eq!(set1.encode_size(), 1);
+
+        // Case 2: Simple HashSet<u8>
+        // HashSet will sort items for encoding: 1, 2, 5
+        let mut set2 = HashSet::<u8>::new();
+        set2.insert(5u8);
+        set2.insert(1u8);
+        set2.insert(2u8);
+
+        let mut expected2 = BytesMut::new();
+        3usize.write(&mut expected2); // Length 3
+        1u8.write(&mut expected2); // Item 1
+        2u8.write(&mut expected2); // Item 2
+        5u8.write(&mut expected2); // Item 5
+        assert_eq!(set2.encode(), expected2.freeze());
+        assert_eq!(set2.encode_size(), 1 + 3 * u8::SIZE);
+
+        // Case 3: HashSet<Bytes>
+        // HashSet sorts items for encoding: "apple", "banana", "cherry"
+        let mut set3 = HashSet::<Bytes>::new();
+        set3.insert(Bytes::from_static(b"cherry"));
+        set3.insert(Bytes::from_static(b"apple"));
+        set3.insert(Bytes::from_static(b"banana"));
+
+        let mut expected3 = BytesMut::new();
+        3usize.write(&mut expected3); // Length 3
+        Bytes::from_static(b"apple").write(&mut expected3);
+        Bytes::from_static(b"banana").write(&mut expected3);
+        Bytes::from_static(b"cherry").write(&mut expected3);
+        assert_eq!(set3.encode(), expected3.freeze());
+        let expected_size = 1usize.encode_size()
+            + Bytes::from_static(b"apple").encode_size()
+            + Bytes::from_static(b"banana").encode_size()
+            + Bytes::from_static(b"cherry").encode_size();
+        assert_eq!(set3.encode_size(), expected_size);
     }
 }
