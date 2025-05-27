@@ -108,6 +108,7 @@ pub struct Op {
 
 // Returns false iff we received a shutdown timeout
 // and we should stop processing completions.
+#[allow(clippy::type_complexity)]
 fn handle_cqe(
     waiters: &mut HashMap<u64, (oneshot::Sender<i32>, Option<Arc<dyn StableBuf>>)>,
     cqe: CqueueEntry,
@@ -269,6 +270,7 @@ pub(crate) async fn run(cfg: Config, mut receiver: mpsc::Receiver<Op>) {
 
 /// Process `ring` completions until all pending operations are complete or
 /// until `timeout` fires. If `timeout` is None, wait indefinitely.
+#[allow(clippy::type_complexity)]
 async fn drain(
     ring: &mut IoUring,
     waiters: &mut HashMap<u64, (oneshot::Sender<i32>, Option<Arc<dyn StableBuf>>)>,
