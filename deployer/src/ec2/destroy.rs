@@ -44,7 +44,8 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
     info!(regions=?all_regions, "removing resources");
     let mut destructions = Vec::with_capacity(all_regions.len());
     for region in all_regions.clone() {
-        let future = async move {
+        // Stage destruction
+        let destruction = async move {
             let ec2_client = create_ec2_client(Region::new(region.clone())).await;
             info!(region = region.as_str(), "created EC2 client");
 
@@ -206,8 +207,10 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
             info!(region = region.as_str(), key_name, "deleted key pair");
             Ok::<(), Error>(())
         };
-        destructions.push(future);
+        destructions.push(destruction);
     }
+
+    // Wait for all destruction to finish (or error)
     try_join_all(destructions).await?;
 
     // Second pass: Delete VPCs after dependencies are removed
