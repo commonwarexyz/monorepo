@@ -95,7 +95,6 @@ pub struct Op {
 }
 
 /// Creates a new io_uring instance that listens for incoming work on `receiver`.
-///
 /// This function will block until `receiver` is closed or an error occurs.
 /// It should be run in a separate task.
 pub(crate) async fn run(cfg: Config, mut receiver: mpsc::Receiver<Op>) {
