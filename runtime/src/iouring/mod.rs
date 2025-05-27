@@ -93,8 +93,6 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
 // and we should stop processing completions.
 fn handle_cqe(waiters: &mut HashMap<u64, oneshot::Sender<i32>>, cqe: CqueueEntry, cfg: &Config) {
     let work_id = cqe.user_data();
-    let result = cqe.result();
-
     match work_id {
         TIMEOUT_WORK_ID => {
             assert!(
@@ -112,14 +110,16 @@ fn handle_cqe(waiters: &mut HashMap<u64, oneshot::Sender<i32>>, cqe: CqueueEntry
             unreachable!("received SHUTDOWN_TIMEOUT_WORK_ID, should be handled in drain");
         }
         _ => {
-            let sender = waiters.remove(&work_id).expect("missing sender");
-            if result == -libc::ECANCELED && cfg.op_timeout.is_some() {
-                // Send a timeout error code to the caller
-                let _ = sender.send(-libc::ETIMEDOUT);
+            let result = cqe.result();
+            let result = if result == -libc::ECANCELED && cfg.op_timeout.is_some() {
+                // This operation timed out
+                -libc::ETIMEDOUT
             } else {
-                // Send the actual result
-                let _ = sender.send(result);
-            }
+                result
+            };
+
+            let result_sender = waiters.remove(&work_id).expect("missing sender");
+            let _ = result_sender.send(result);
         }
     }
 }
