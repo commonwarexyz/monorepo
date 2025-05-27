@@ -82,7 +82,7 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
 ///
 /// Each incoming work is `(work, sender, buffer)`, where:
 /// * `work` is the submission queue entry to be submitted to the ring.
-///   Its user buffer field will be overwritten. Users shouldn't rely on it.
+///   Its user data field will be overwritten. Users shouldn't rely on it.
 /// * `sender` is where we send the return value of the work.
 /// * `buffer` is an Arc of the buffer used during the operation.
 ///   E.g. For read, this is the buffer being read into.
