@@ -80,10 +80,14 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
 
 /// Creates a new io_uring instance that listens for incoming work on `receiver`.
 ///
-/// Each incoming work is `(work, sender)`, where:
+/// Each incoming work is `(work, sender, buffer)`, where:
 /// * `work` is the submission queue entry to be submitted to the ring.
-///   Its user data field will be overwritten. Users shouldn't rely on it.
+///   Its user buffer field will be overwritten. Users shouldn't rely on it.
 /// * `sender` is where we send the return value of the work.
+/// * `buffer` is an Arc of the buffer used during the operation.
+///   E.g. For read, this is the buffer being read into.
+///   It's guaranteed that all references to this Arc are dropped after
+///   the operation completes and before we send the result to `sender`.
 ///
 /// This function will block until `receiver` is closed or an error occurs.
 /// It should be run in a separate task.
@@ -93,7 +97,8 @@ pub(crate) async fn run(
 ) {
     let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
     let mut next_work_id: u64 = 0;
-    // Maps a work ID to the sender that we will send the result to.
+    // Maps a work ID to the sender that we will send the result to
+    // and the buffer used for the operation.
     let mut waiters: std::collections::HashMap<_, (oneshot::Sender<i32>, Arc<dyn StableBuf>)> =
         std::collections::HashMap::with_capacity(cfg.size as usize);
 
@@ -122,7 +127,10 @@ pub(crate) async fn run(
                         result
                     };
 
-                    let (result_sender, _buf) =
+                    // The assignment to _ drops the Arc<dyn StableBuf> used for the operation.
+                    // This is important: we guarantee we drop our references to the buffer
+                    // before we send the result to the submitter.
+                    let (result_sender, _) =
                         waiters.remove(&work_id).expect("result sender not found");
                     result_sender.send(result).expect("failed to send result");
                 }
@@ -245,7 +253,7 @@ mod tests {
         let (left_pipe, right_pipe) = UnixStream::pair().unwrap();
 
         // Submit a read
-        let msg = b"hello";
+        let msg = b"hello".to_vec();
         let mut buf = vec![0; msg.len()];
         let recv =
             opcode::Recv::new(Fd(left_pipe.as_raw_fd()), buf.as_mut_ptr(), buf.len() as _).build();
@@ -263,7 +271,7 @@ mod tests {
             opcode::Write::new(Fd(right_pipe.as_raw_fd()), msg.as_ptr(), msg.len() as _).build();
         let (write_tx, write_rx) = oneshot::channel();
         submitter
-            .send((write, write_tx, Arc::new(msg.to_vec())))
+            .send((write, write_tx, Arc::new(msg)))
             .await
             .expect("failed to send work");
 

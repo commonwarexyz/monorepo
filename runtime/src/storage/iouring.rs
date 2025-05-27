@@ -195,7 +195,7 @@ impl crate::Blob for Blob {
             }
             total_read += bytes_read;
         }
-        Ok(Arc::into_inner(buf_arc).unwrap())
+        Ok(Arc::into_inner(buf_arc).expect("should have only one reference"))
     }
 
     async fn write_at<B: StableBuf>(&self, buf: B, offset: u64) -> Result<(), Error> {
