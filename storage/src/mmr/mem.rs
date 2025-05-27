@@ -13,7 +13,7 @@ use crate::mmr::{
     verification::Proof,
     Builder, Error,
     Error::{ElementPruned, Empty},
-    Hasher, Storage,
+    Hasher,
 };
 use commonware_cryptography::Hasher as CHasher;
 use std::collections::{HashMap, VecDeque};
@@ -40,19 +40,6 @@ pub struct Mmr<H: CHasher> {
 impl<H: CHasher> Default for Mmr<H> {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl<H: CHasher> Storage<H::Digest> for Mmr<H>
-where
-    H: CHasher,
-{
-    fn size(&self) -> u64 {
-        self.size()
-    }
-
-    async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, Error> {
-        Ok(self.get_node(position))
     }
 }
 

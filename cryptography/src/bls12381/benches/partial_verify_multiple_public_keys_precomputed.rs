@@ -71,7 +71,8 @@ fn benchmark_partial_verify_multiple_public_keys_precomputed(c: &mut Criterion) 
     }
 }
 
-criterion_group!(
-    benches,
-    benchmark_partial_verify_multiple_public_keys_precomputed
-);
+criterion_group! {
+    name = benches;
+    config = Criterion::default().sample_size(10);
+    targets = benchmark_partial_verify_multiple_public_keys_precomputed
+}

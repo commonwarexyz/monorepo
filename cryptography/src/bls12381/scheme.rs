@@ -78,12 +78,6 @@ impl Signer for Bls12381 {
         Self { private, public }
     }
 
-    fn from(private_key: PrivateKey) -> Option<Self> {
-        let private = private_key.key.clone();
-        let public = ops::compute_public::<MinPk>(&private);
-        Some(Self { private, public })
-    }
-
     fn private_key(&self) -> PrivateKey {
         PrivateKey::from(self.private.clone())
     }
@@ -95,6 +89,14 @@ impl Signer for Bls12381 {
     fn sign(&mut self, namespace: Option<&[u8]>, message: &[u8]) -> Signature {
         let signature = ops::sign_message::<MinPk>(&self.private, namespace, message);
         Signature::from(signature)
+    }
+}
+
+impl From<PrivateKey> for Bls12381 {
+    fn from(private_key: PrivateKey) -> Self {
+        let private = private_key.key.clone();
+        let public = ops::compute_public::<MinPk>(&private);
+        Self { private, public }
     }
 }
 
@@ -448,8 +450,7 @@ mod tests {
         ];
         for (index, test) in cases.into_iter().enumerate() {
             let (private_key, message, expected) = test;
-            let mut signer =
-                <Bls12381 as Signer>::from(private_key).expect("unable to deserialize private key");
+            let mut signer = Bls12381::from(private_key);
             let signature = signer.sign(None, &message);
             assert_eq!(signature, expected, "vector_sign_{}", index + 1);
         }
