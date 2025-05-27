@@ -162,6 +162,7 @@ impl crate::Blob for Blob {
             let remaining = unsafe {
                 std::slice::from_raw_parts_mut(ptr.add(bytes_read) as *mut u8, buf_len - bytes_read)
             };
+            let offset = offset + bytes_read as u64;
 
             // Create an operation to do the read
             let op = opcode::Read::new(fd, remaining.as_mut_ptr(), remaining.len() as _)
