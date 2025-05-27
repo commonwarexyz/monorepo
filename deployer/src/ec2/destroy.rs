@@ -42,10 +42,10 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
 
     // First pass: Delete instances, security groups, subnets, route tables, peering, IGWs, and key pairs
     info!(regions=?all_regions, "removing resources");
-    let mut destructions = Vec::with_capacity(all_regions.len());
+    let mut jobs = Vec::with_capacity(all_regions.len());
     for region in all_regions.clone() {
-        // Stage destruction
-        let destruction = async move {
+        // Stage region teardown
+        let job = async move {
             let ec2_client = create_ec2_client(Region::new(region.clone())).await;
             info!(region = region.as_str(), "created EC2 client");
 
@@ -207,11 +207,11 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
             info!(region = region.as_str(), key_name, "deleted key pair");
             Ok::<(), Error>(())
         };
-        destructions.push(destruction);
+        jobs.push(job);
     }
 
-    // Wait for all destruction to finish (or error)
-    try_join_all(destructions).await?;
+    // Wait for all jobs to finish (or error)
+    try_join_all(jobs).await?;
 
     // Second pass: Delete VPCs after dependencies are removed
     for region in &all_regions {
