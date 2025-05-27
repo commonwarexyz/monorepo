@@ -52,7 +52,7 @@ impl<H: CHasher, const N: usize> Storage<H::Digest> for Bitmap<H, N> {
     }
 
     async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, Error> {
-        Bitmap::get_node(self, position).await
+        Ok(Bitmap::get_node(self, position))
     }
 }
 

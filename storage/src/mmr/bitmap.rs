@@ -18,7 +18,7 @@ use commonware_codec::DecodeExt;
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::array::prefixed_u64::U64;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use tracing::{debug, error, warn};
 
 /// A bitmap supporting inclusion proofs through Merkelization.
@@ -56,6 +56,9 @@ pub struct Bitmap<H: CHasher, const N: usize> {
 
     /// The number of bitmap chunks that have been pruned.
     pruned_chunks: usize,
+
+    /// Chunks that have been modified but not committed to the MMR, identified by chunk_pos.
+    dirty_chunks: HashSet<usize>,
 }
 
 impl<H: CHasher, const N: usize> Default for Bitmap<H, N> {
@@ -86,6 +89,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
             next_bit: 0,
             mmr: Mmr::new(),
             pruned_chunks: 0,
+            dirty_chunks: HashSet::new(),
         }
     }
 
@@ -93,8 +97,8 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         self.mmr.size()
     }
 
-    pub async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, Error> {
-        Ok(self.mmr.get_node(position))
+    pub fn get_node(&self, position: u64) -> Option<H::Digest> {
+        self.mmr.get_node(position)
     }
 
     /// Restore the fully pruned state of a bitmap from the metadata in the given partition. (The
@@ -155,6 +159,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
             next_bit: 0,
             mmr,
             pruned_chunks,
+            dirty_chunks: HashSet::new(),
         })
     }
 
@@ -207,6 +212,10 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         if chunk_pos < self.pruned_chunks {
             return;
         }
+        assert!(
+            self.dirty_chunks.is_empty(),
+            "cannot prune with unprocessed updates"
+        );
 
         let chunk_index = chunk_pos - self.pruned_chunks;
         self.bitmap.drain(0..chunk_index);
@@ -237,40 +246,29 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         &self.bitmap[self.chunk_index(bit_offset)]
     }
 
-    /// Commit the last chunk of the bitmap to the Merkle tree and initialize the next chunk.
-    async fn commit_last_chunk(&mut self, hasher: &mut impl Hasher<H>) -> Result<(), Error> {
-        self.mmr
-            .add(hasher, &self.bitmap[self.bitmap.len() - 1])
-            .await?;
+    /// Commit the last chunk of the bitmap and initialize the next chunk.
+    fn commit_last_chunk(&mut self) {
+        self.dirty_chunks
+            .insert(self.bitmap.len() - 1 + self.pruned_chunks);
         self.next_bit = 0;
         self.bitmap.push_back([0u8; N]);
-
-        Ok(())
     }
 
     /// Efficiently add a chunk of bits to the bitmap. Assumes we are at a chunk boundary (that is,
     /// `self.next_bit` is 0) and panics otherwise.
-    pub async fn append_chunk_unchecked(
-        &mut self,
-        hasher: &mut impl Hasher<H>,
-        chunk: &[u8; N],
-    ) -> Result<(), Error> {
+    pub fn append_chunk_unchecked(&mut self, chunk: &[u8; N]) {
         assert!(
             self.next_bit == 0,
             "cannot add chunk when not chunk aligned"
         );
 
         self.last_chunk_mut().copy_from_slice(chunk.as_ref());
-        self.commit_last_chunk(hasher).await
+        self.commit_last_chunk();
     }
 
     /// Efficiently add a byte's worth of bits to the bitmap. Assumes self.next_bit is currently
     /// byte aligned, and panics otherwise.
-    pub async fn append_byte_unchecked(
-        &mut self,
-        hasher: &mut impl Hasher<H>,
-        byte: u8,
-    ) -> Result<(), Error> {
+    pub fn append_byte_unchecked(&mut self, byte: u8) {
         assert!(
             self.next_bit % 8 == 0,
             "cannot add byte when not byte aligned"
@@ -282,13 +280,12 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         assert!(self.next_bit <= Self::CHUNK_SIZE_BITS);
 
         if self.next_bit == Self::CHUNK_SIZE_BITS {
-            self.commit_last_chunk(hasher).await?;
+            self.commit_last_chunk();
         }
-        Ok(())
     }
 
     /// Add a single bit to the bitmap.
-    pub async fn append(&mut self, hasher: &mut impl Hasher<H>, bit: bool) -> Result<(), Error> {
+    pub fn append(&mut self, bit: bool) {
         if bit {
             let chunk_byte = (self.next_bit / 8) as usize;
             self.last_chunk_mut()[chunk_byte] |= Self::chunk_byte_bitmask(self.next_bit);
@@ -297,9 +294,8 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         assert!(self.next_bit <= Self::CHUNK_SIZE_BITS);
 
         if self.next_bit == Self::CHUNK_SIZE_BITS {
-            self.commit_last_chunk(hasher).await?;
+            self.commit_last_chunk();
         }
-        Ok(())
     }
 
     /// Convert a bit offset into a bitmask for the byte containing that bit.
@@ -361,13 +357,9 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         (byte & mask) != 0
     }
 
-    /// Set the value of the referenced bit. Panics if the bit doesn't exist or has been pruned.
-    pub async fn set_bit(
-        &mut self,
-        hasher: &mut impl Hasher<H>,
-        bit_offset: u64,
-        bit: bool,
-    ) -> Result<(), Error> {
+    /// Set the value of the referenced bit, without committing the result until `process_updates`
+    /// is called. Panics if the bit doesn't exist or has been pruned.
+    pub fn set_bit(&mut self, bit_offset: u64, bit: bool) {
         let chunk_index = self.chunk_index(bit_offset);
         let is_last = chunk_index == self.bitmap.len() - 1;
         let chunk = &mut self.bitmap[chunk_index];
@@ -381,14 +373,37 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
             chunk[byte_offset] &= !mask;
         }
         if is_last {
-            // No need to update the Merkle tree since this bit is within the last (yet to be
+            // No need to insert into dirty_chunks since this bit is within the last (yet to be
             // committed) chunk.
-            return Ok(());
+            return;
         }
+        self.dirty_chunks.insert(Self::chunk_pos(bit_offset));
+    }
 
-        let leaf_pos = Self::leaf_pos(bit_offset);
+    pub async fn process_updates(&mut self, hasher: &mut impl Hasher<H>) -> Result<(), Error> {
+        let mut chunk_positions = self.dirty_chunks.iter().copied().collect::<Vec<_>>();
+        self.dirty_chunks.clear();
+        // We must process chunks in sorted order to ensure the underlying MMR is updated
+        // appropriately.
+        chunk_positions.sort_unstable();
 
-        self.mmr.update_leaf(hasher, leaf_pos, chunk).await
+        for pos in chunk_positions {
+            let chunk_index = pos - self.pruned_chunks;
+            let leaf_pos = leaf_num_to_pos(pos as u64);
+            if leaf_pos < self.mmr.size() {
+                self.mmr
+                    .update_leaf_batched(hasher, leaf_pos, &self.bitmap[chunk_index])
+                    .await?;
+                continue;
+            }
+            assert_eq!(leaf_pos, self.mmr.size(), "invalid leaf pos");
+            self.mmr
+                .add_batched(hasher, &self.bitmap[chunk_index])
+                .await?;
+        }
+        self.mmr.process_updates(hasher);
+
+        Ok(())
     }
 
     /// Return the root digest against which inclusion proofs can be verified.
@@ -615,10 +630,12 @@ mod tests {
             let mut hasher = Sha256::new();
             let mut hasher = Standard::new(&mut hasher);
             let root = bitmap.root(&mut hasher).await.unwrap();
-            bitmap.append(&mut hasher, true).await.unwrap();
+            bitmap.append(true);
+            bitmap.process_updates(&mut hasher).await.unwrap();
             // Root should change
-            assert_ne!(root, bitmap.root(&mut hasher).await.unwrap());
-            let root = bitmap.root(&mut hasher).await.unwrap();
+            let new_root = bitmap.root(&mut hasher).await.unwrap();
+            assert_ne!(root, new_root);
+            let root = new_root;
             bitmap.prune_to_bit(1);
             assert_eq!(bitmap.bit_count(), 1);
             assert_ne!(bitmap.last_chunk().0, &[0u8; SHA256_SIZE]);
@@ -629,8 +646,9 @@ mod tests {
 
             // Fill up a full chunk
             for i in 0..(Bitmap::<Sha256, SHA256_SIZE>::CHUNK_SIZE_BITS - 1) {
-                bitmap.append(&mut hasher, i % 2 != 0).await.unwrap();
+                bitmap.append(i % 2 != 0);
             }
+            bitmap.process_updates(&mut hasher).await.unwrap();
             assert_eq!(bitmap.bit_count(), 256);
             assert_ne!(root, bitmap.root(&mut hasher).await.unwrap());
             let root = bitmap.root(&mut hasher).await.unwrap();
@@ -678,20 +696,17 @@ mod tests {
 
             // Add each bit one at a time after the first chunk.
             let mut bitmap = Bitmap::<_, SHA256_SIZE>::new();
-            bitmap
-                .append_chunk_unchecked(&mut hasher, &test_chunk)
-                .await
-                .unwrap();
+            bitmap.append_chunk_unchecked(&test_chunk);
             for b in test_chunk {
                 for j in 0..8 {
                     let mask = 1 << j;
                     let bit = (b & mask) != 0;
-                    bitmap.append(&mut hasher, bit).await.unwrap();
+                    bitmap.append(bit);
                 }
             }
-
             assert_eq!(bitmap.bit_count(), 256 * 2);
 
+            bitmap.process_updates(&mut hasher).await.unwrap();
             let root = bitmap.root(&mut hasher).await.unwrap();
             let inner_root = bitmap.mmr.root(&mut hasher);
             assert_eq!(root, inner_root);
@@ -700,27 +715,20 @@ mod tests {
                 // Repeat the above MMR build only using append_chunk_unchecked instead, and make
                 // sure root digests match.
                 let mut bitmap = Bitmap::<_, SHA256_SIZE>::default();
-                bitmap
-                    .append_chunk_unchecked(&mut hasher, &test_chunk)
-                    .await
-                    .unwrap();
-                bitmap
-                    .append_chunk_unchecked(&mut hasher, &test_chunk)
-                    .await
-                    .unwrap();
+                bitmap.append_chunk_unchecked(&test_chunk);
+                bitmap.append_chunk_unchecked(&test_chunk);
+                bitmap.process_updates(&mut hasher).await.unwrap();
                 let same_root = bitmap.root(&mut hasher).await.unwrap();
                 assert_eq!(root, same_root);
             }
             {
                 // Repeat build again using append_byte_unchecked this time.
                 let mut bitmap = Bitmap::<_, SHA256_SIZE>::default();
-                bitmap
-                    .append_chunk_unchecked(&mut hasher, &test_chunk)
-                    .await
-                    .unwrap();
+                bitmap.append_chunk_unchecked(&test_chunk);
                 for b in test_chunk {
-                    bitmap.append_byte_unchecked(&mut hasher, b).await.unwrap();
+                    bitmap.append_byte_unchecked(b);
                 }
+                bitmap.process_updates(&mut hasher).await.unwrap();
                 let same_root = bitmap.root(&mut hasher).await.unwrap();
                 assert_eq!(root, same_root);
             }
@@ -732,18 +740,10 @@ mod tests {
     fn test_bitmap_build_chunked_panic() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut hasher = Sha256::new();
-            let mut hasher = Standard::new(&mut hasher);
-            let mut bitmap = Bitmap::<_, SHA256_SIZE>::new();
-            bitmap
-                .append_chunk_unchecked(&mut hasher, &test_chunk(b"test"))
-                .await
-                .unwrap();
-            bitmap.append(&mut hasher, true).await.unwrap();
-            bitmap
-                .append_chunk_unchecked(&mut hasher, &test_chunk(b"panic"))
-                .await
-                .unwrap();
+            let mut bitmap = Bitmap::<Sha256, SHA256_SIZE>::new();
+            bitmap.append_chunk_unchecked(&test_chunk(b"test"));
+            bitmap.append(true);
+            bitmap.append_chunk_unchecked(&test_chunk(b"panic"));
         });
     }
 
@@ -752,18 +752,10 @@ mod tests {
     fn test_bitmap_build_byte_panic() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut hasher = Sha256::new();
-            let mut hasher = Standard::new(&mut hasher);
-            let mut bitmap = Bitmap::<_, SHA256_SIZE>::new();
-            bitmap
-                .append_chunk_unchecked(&mut hasher, &test_chunk(b"test"))
-                .await
-                .unwrap();
-            bitmap.append(&mut hasher, true).await.unwrap();
-            bitmap
-                .append_byte_unchecked(&mut hasher, 0x01)
-                .await
-                .unwrap();
+            let mut bitmap = Bitmap::<Sha256, SHA256_SIZE>::new();
+            bitmap.append_chunk_unchecked(&test_chunk(b"test"));
+            bitmap.append(true);
+            bitmap.append_byte_unchecked(0x01);
         });
     }
 
@@ -771,33 +763,25 @@ mod tests {
     #[should_panic(expected = "out of bounds")]
     fn test_bitmap_get_out_of_bounds_bit_panic() {
         let executor = deterministic::Runner::default();
-        let mut hasher = Sha256::new();
-        let mut hasher = Standard::new(&mut hasher);
         executor.start(|_| async move {
-            let mut bitmap = Bitmap::<_, SHA256_SIZE>::new();
-            bitmap
-                .append_chunk_unchecked(&mut hasher, &test_chunk(b"test"))
-                .await
-                .unwrap();
+            let mut bitmap = Bitmap::<Sha256, SHA256_SIZE>::new();
+            bitmap.append_chunk_unchecked(&test_chunk(b"test"));
             bitmap.get_bit(256);
         });
     }
+
     #[test_traced]
     #[should_panic(expected = "pruned")]
     fn test_bitmap_get_pruned_bit_panic() {
         let executor = deterministic::Runner::default();
-        let mut hasher = Sha256::new();
-        let mut hasher = Standard::new(&mut hasher);
         executor.start(|_| async move {
             let mut bitmap = Bitmap::<_, SHA256_SIZE>::new();
-            bitmap
-                .append_chunk_unchecked(&mut hasher, &test_chunk(b"test"))
-                .await
-                .unwrap();
-            bitmap
-                .append_chunk_unchecked(&mut hasher, &test_chunk(b"test2"))
-                .await
-                .unwrap();
+            bitmap.append_chunk_unchecked(&test_chunk(b"test"));
+            bitmap.append_chunk_unchecked(&test_chunk(b"test2"));
+            let mut hasher = Sha256::new();
+            let mut hasher = Standard::new(&mut hasher);
+            bitmap.process_updates(&mut hasher).await.unwrap();
+
             bitmap.prune_to_bit(256);
             bitmap.get_bit(255);
         });
@@ -811,35 +795,33 @@ mod tests {
             let mut bitmap = Bitmap::<_, SHA256_SIZE>::default();
             let mut hasher = Sha256::new();
             let mut hasher = Standard::new(&mut hasher);
-            bitmap
-                .append_chunk_unchecked(&mut hasher, &test_chunk(b"test"))
-                .await
-                .unwrap();
-            bitmap
-                .append_chunk_unchecked(&mut hasher, &test_chunk(b"test2"))
-                .await
-                .unwrap();
+            bitmap.append_chunk_unchecked(&test_chunk(b"test"));
+            bitmap.append_chunk_unchecked(&test_chunk(b"test2"));
+            bitmap.process_updates(&mut hasher).await.unwrap();
 
             let root = bitmap.root(&mut hasher).await.unwrap();
 
             // Confirm that root changes if we add a 1 bit, even though we won't fill a chunk.
-            bitmap.append(&mut hasher, true).await.unwrap();
+            bitmap.append(true);
+            bitmap.process_updates(&mut hasher).await.unwrap();
             let new_root = bitmap.root(&mut hasher).await.unwrap();
             assert_ne!(root, new_root);
             assert_eq!(bitmap.mmr.size(), 3); // shouldn't include the trailing bits
 
             // Add 0 bits to fill up entire chunk.
             for _ in 0..(Bitmap::<Sha256, SHA256_SIZE>::CHUNK_SIZE * 8 - 1) {
-                bitmap.append(&mut hasher, false).await.unwrap();
+                bitmap.append(false);
                 let newer_root = bitmap.root(&mut hasher).await.unwrap();
                 // root will change when adding 0s within the same chunk
                 assert_ne!(new_root, newer_root);
             }
+            bitmap.process_updates(&mut hasher).await.unwrap();
             assert_eq!(bitmap.mmr.size(), 4); // chunk we filled should have been added to mmr
 
             // Confirm the root changes when we add the next 0 bit since it's part of a new chunk.
-            bitmap.append(&mut hasher, false).await.unwrap();
+            bitmap.append(false);
             assert_eq!(bitmap.bit_count(), 256 * 3 + 1);
+            bitmap.process_updates(&mut hasher).await.unwrap();
             let newer_root = bitmap.root(&mut hasher).await.unwrap();
             assert_ne!(new_root, newer_root);
 
@@ -859,34 +841,28 @@ mod tests {
             let mut bitmap = Bitmap::<_, SHA256_SIZE>::default();
             let mut hasher = Sha256::new();
             let mut hasher = Standard::new(&mut hasher);
-            bitmap
-                .append_chunk_unchecked(&mut hasher, &test_chunk(b"test"))
-                .await
-                .unwrap();
-            bitmap
-                .append_chunk_unchecked(&mut hasher, &test_chunk(b"test2"))
-                .await
-                .unwrap();
+            bitmap.append_chunk_unchecked(&test_chunk(b"test"));
+            bitmap.append_chunk_unchecked(&test_chunk(b"test2"));
             // Add a few extra bits to exercise not being on a chunk or byte boundary.
-            bitmap
-                .append_byte_unchecked(&mut hasher, 0xF1)
-                .await
-                .unwrap();
-            bitmap.append(&mut hasher, true).await.unwrap();
-            bitmap.append(&mut hasher, false).await.unwrap();
-            bitmap.append(&mut hasher, true).await.unwrap();
+            bitmap.append_byte_unchecked(0xF1);
+            bitmap.append(true);
+            bitmap.append(false);
+            bitmap.append(true);
 
+            bitmap.process_updates(&mut hasher).await.unwrap();
             let root = bitmap.root(&mut hasher).await.unwrap();
 
             // Flip each bit and confirm the root changes, then flip it back to confirm it is safely
             // restored.
             for bit_pos in (0..bitmap.bit_count()).rev() {
                 let bit = bitmap.get_bit(bit_pos);
-                bitmap.set_bit(&mut hasher, bit_pos, !bit).await.unwrap();
+                bitmap.set_bit(bit_pos, !bit);
+                bitmap.process_updates(&mut hasher).await.unwrap();
                 let new_root = bitmap.root(&mut hasher).await.unwrap();
                 assert_ne!(root, new_root, "failed at bit {}", bit_pos);
-                bitmap.set_bit(&mut hasher, bit_pos, bit).await.unwrap();
                 // flip it back
+                bitmap.set_bit(bit_pos, bit);
+                bitmap.process_updates(&mut hasher).await.unwrap();
                 let new_root = bitmap.root(&mut hasher).await.unwrap();
                 assert_eq!(root, new_root);
             }
@@ -915,25 +891,17 @@ mod tests {
             let mut hasher = Standard::new(&mut hasher);
             let mut bitmap = Bitmap::<_, N>::new();
             for i in 0u32..10 {
-                bitmap
-                    .append_chunk_unchecked(
-                        &mut hasher,
-                        &test_chunk(format!("test{}", i).as_bytes()),
-                    )
-                    .await
-                    .unwrap();
+                bitmap.append_chunk_unchecked(&test_chunk(format!("test{}", i).as_bytes()));
             }
             // Add a few extra bits to exercise not being on a chunk or byte boundary.
-            bitmap
-                .append_byte_unchecked(&mut hasher, 0xA6)
-                .await
-                .unwrap();
-            bitmap.append(&mut hasher, true).await.unwrap();
-            bitmap.append(&mut hasher, false).await.unwrap();
-            bitmap.append(&mut hasher, true).await.unwrap();
-            bitmap.append(&mut hasher, true).await.unwrap();
-            bitmap.append(&mut hasher, false).await.unwrap();
+            bitmap.append_byte_unchecked(0xA6);
+            bitmap.append(true);
+            bitmap.append(false);
+            bitmap.append(true);
+            bitmap.append(true);
+            bitmap.append(false);
 
+            bitmap.process_updates(&mut hasher).await.unwrap();
             let root = bitmap.root(&mut hasher).await.unwrap();
 
             // Make sure every bit is provable, even after pruning in intervals of 251 bits (251 is
@@ -990,24 +958,17 @@ mod tests {
             let mut hasher = Sha256::new();
             let mut hasher = Standard::new(&mut hasher);
             for i in 0..FULL_CHUNK_COUNT {
-                bitmap
-                    .append_chunk_unchecked(
-                        &mut hasher,
-                        &test_chunk(format!("test{}", i).as_bytes()),
-                    )
-                    .await
-                    .unwrap();
+                bitmap.append_chunk_unchecked(&test_chunk(format!("test{}", i).as_bytes()));
             }
+            bitmap.process_updates(&mut hasher).await.unwrap();
             let chunk_aligned_root = bitmap.root(&mut hasher).await.unwrap();
 
             // Add a few extra bits beyond the last chunk boundary.
-            bitmap
-                .append_byte_unchecked(&mut hasher, 0xA6)
-                .await
-                .unwrap();
-            bitmap.append(&mut hasher, true).await.unwrap();
-            bitmap.append(&mut hasher, false).await.unwrap();
-            bitmap.append(&mut hasher, true).await.unwrap();
+            bitmap.append_byte_unchecked(0xA6);
+            bitmap.append(true);
+            bitmap.append(false);
+            bitmap.append(true);
+            bitmap.process_updates(&mut hasher).await.unwrap();
             let root = bitmap.root(&mut hasher).await.unwrap();
 
             // prune 10 chunks at a time and make sure replay will restore the bitmap every time.
@@ -1024,27 +985,18 @@ mod tests {
 
                 // Replay missing chunks.
                 for j in i..FULL_CHUNK_COUNT {
-                    bitmap
-                        .append_chunk_unchecked(
-                            &mut hasher,
-                            &test_chunk(format!("test{}", j).as_bytes()),
-                        )
-                        .await
-                        .unwrap();
-                    let _ = bitmap.root(&mut hasher).await.unwrap();
+                    bitmap.append_chunk_unchecked(&test_chunk(format!("test{}", j).as_bytes()));
                 }
                 assert_eq!(bitmap.pruned_chunks, i);
                 assert_eq!(bitmap.bit_count(), FULL_CHUNK_COUNT as u64 * 256);
+                bitmap.process_updates(&mut hasher).await.unwrap();
                 assert_eq!(bitmap.root(&mut hasher).await.unwrap(), chunk_aligned_root);
 
                 // Replay missing partial chunk.
-                bitmap
-                    .append_byte_unchecked(&mut hasher, 0xA6)
-                    .await
-                    .unwrap();
-                bitmap.append(&mut hasher, true).await.unwrap();
-                bitmap.append(&mut hasher, false).await.unwrap();
-                bitmap.append(&mut hasher, true).await.unwrap();
+                bitmap.append_byte_unchecked(0xA6);
+                bitmap.append(true);
+                bitmap.append(false);
+                bitmap.append(true);
                 assert_eq!(bitmap.root(&mut hasher).await.unwrap(), root);
             }
         });

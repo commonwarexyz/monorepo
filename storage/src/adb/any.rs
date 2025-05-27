@@ -205,9 +205,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             while next_mmr_leaf_num < log_size {
                 let op = log.read(next_mmr_leaf_num).await?;
                 let digest = Self::op_digest(&mut hasher, &op);
-                mmr.add(&mut hasher, &digest).await?;
+                mmr.add_batched(&mut hasher, &digest).await?;
                 next_mmr_leaf_num += 1;
             }
+            mmr.sync(&mut hasher).await.map_err(Error::MmrError)?;
         }
 
         // At this point the MMR and log should be consistent.
@@ -254,8 +255,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                             }
 
                             // The mapped key is the same; delete it from the snapshot.
-                            if let Some((ref mut hasher, ref mut bitmap)) = bitmap {
-                                bitmap.set_bit(*hasher, *loc, false).await?;
+                            if let Some((_, ref mut bitmap)) = bitmap {
+                                bitmap.set_bit(*loc, false);
                             }
                             cursor.delete();
                             break;
@@ -265,28 +266,31 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 Operation::Update(key, _) => {
                     let update_result =
                         Any::<E, K, V, H, T>::update_loc(snapshot, log, key, None, i).await?;
-                    if let Some((ref mut hasher, ref mut bitmap)) = bitmap {
+                    if let Some((_, ref mut bitmap)) = bitmap {
                         match update_result {
                             UpdateResult::NoOp => unreachable!("unexpected no-op update"),
                             UpdateResult::Inserted(_) => {
-                                bitmap.append(*hasher, true).await?;
+                                bitmap.append(true);
                             }
                             UpdateResult::Updated(old_loc, _) => {
-                                bitmap.set_bit(*hasher, old_loc, false).await?;
-                                bitmap.append(*hasher, true).await?;
+                                bitmap.set_bit(old_loc, false);
+                                bitmap.append(true);
                             }
                         }
                     }
                 }
                 Operation::Commit(loc) => inactivity_floor_loc = loc,
             }
-            if let Some((ref mut hasher, ref mut bitmap)) = bitmap {
+            if let Some((_, ref mut bitmap)) = bitmap {
                 // If we reach this point and a bit hasn't been added for the operation, then it's
                 // an inactive operation and we need to tag it as such in the bitmap.
                 if bitmap.bit_count() == i {
-                    bitmap.append(*hasher, false).await?;
+                    bitmap.append(false);
                 }
             }
+        }
+        if let Some((ref mut hasher, ref mut bitmap)) = bitmap {
+            bitmap.process_updates(*hasher).await?;
         }
 
         Ok(inactivity_floor_loc)
@@ -452,7 +456,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         Ok(None)
     }
 
-    /// Return the root of the db.
+    /// Return the root of the db. Panics if there are uncommitted operations.
     pub fn root(&self, hasher: &mut Standard<H>) -> H::Digest {
         self.ops.root(hasher)
     }
@@ -463,7 +467,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         // Update the ops MMR.
         let mut hasher = Standard::new(&mut self.hasher);
         let digest = Self::op_digest(&mut hasher, &op);
-        self.ops.add(&mut hasher, &digest).await?;
+        self.ops.add_batched(&mut hasher, &digest).await?;
         self.uncommitted_ops += 1;
 
         // Append the operation to the log.
@@ -548,25 +552,27 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
     /// Sync the db to disk ensuring the current state is persisted.
     pub(super) async fn sync(&mut self) -> Result<(), Error> {
+        let mut hasher = Standard::new(&mut self.hasher);
         try_join!(
             self.log.sync().map_err(Error::JournalError),
-            self.ops.sync().map_err(Error::MmrError),
+            self.ops.sync(&mut hasher).map_err(Error::MmrError),
         )?;
 
         Ok(())
     }
 
     /// Close the db. Operations that have not been committed will be lost.
-    pub async fn close(self) -> Result<(), Error> {
+    pub async fn close(mut self) -> Result<(), Error> {
         if self.uncommitted_ops > 0 {
             warn!(
                 op_count = self.uncommitted_ops,
                 "closing db with uncommitted operations"
             );
         }
+        let mut hasher = Standard::new(&mut self.hasher);
         try_join!(
             self.log.close().map_err(Error::JournalError),
-            self.ops.close().map_err(Error::MmrError),
+            self.ops.close(&mut hasher).map_err(Error::MmrError),
         )?;
 
         Ok(())
@@ -645,7 +651,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
         // Prune the MMR, whose pruning boundary serves as the "source of truth" for proving.
         let prune_to_pos = leaf_num_to_pos(self.inactivity_floor_loc);
-        self.ops.prune_to_pos(prune_to_pos).await?;
+        let mut hasher = Standard::new(&mut self.hasher);
+        self.ops.prune_to_pos(&mut hasher, prune_to_pos).await?;
 
         // Because the log's pruning boundary will be blob-size aligned, we cannot use it as a
         // source of truth for the min provable element.
@@ -666,6 +673,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         self.apply_op(Operation::Commit(self.inactivity_floor_loc))
             .await?;
         let mut hasher = Standard::new(hasher);
+        self.ops.process_updates(&mut hasher);
         let root = self.root(&mut hasher);
         self.log.close().await?;
         self.ops.simulate_partial_sync(write_limit).await?;
@@ -679,7 +687,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     pub async fn simulate_failed_commit_log(mut self) -> Result<(), Error> {
         self.apply_op(Operation::Commit(self.inactivity_floor_loc))
             .await?;
-        self.ops.close().await?;
+        let mut hasher = Standard::new(&mut self.hasher);
+        self.ops.close(&mut hasher).await?;
         // Rewind the operation log over the commit op to force rollback to the previous commit.
         self.log.rewind(self.log.size().await? - 1).await?;
         self.log.close().await?;
@@ -821,6 +830,7 @@ mod test {
             db.raise_inactivity_floor(3).await.unwrap();
             assert_eq!(db.inactivity_floor_loc, 3);
             assert_eq!(db.log.size().await.unwrap(), 6); // 4 updates, 1 deletion, 1 commit
+            db.sync().await.unwrap();
             let root = db.root(&mut hasher);
 
             // Multiple assignments of the same value should be a no-op.
@@ -834,6 +844,7 @@ mod test {
             ));
             // Log and root should be unchanged.
             assert_eq!(db.log.size().await.unwrap(), 6);
+            db.sync().await.unwrap();
             assert_eq!(db.root(&mut hasher), root);
 
             // Delete all keys.
@@ -844,6 +855,7 @@ mod test {
             assert_eq!(db.log.size().await.unwrap(), 8); // 4 updates, 3 deletions, 1 commit
             assert_eq!(db.inactivity_floor_loc, 3);
 
+            db.sync().await.unwrap();
             let root = db.root(&mut hasher);
 
             // Multiple deletions of the same key should be a no-op.
@@ -993,6 +1005,7 @@ mod test {
             let start_loc = leaf_pos_to_num(start_pos).unwrap();
             // Raise the inactivity floor and make sure historical inactive operations are still provable.
             db.raise_inactivity_floor(100).await.unwrap();
+            db.sync().await.unwrap();
             let root = db.root(&mut hasher);
             assert!(start_loc < db.inactivity_floor_loc);
 
@@ -1176,8 +1189,9 @@ mod test {
             // Create a bitmap based on the current db's pruned/inactive state.
             let mut bitmap = Bitmap::<_, SHA256_SIZE>::new();
             for _ in 0..db.inactivity_floor_loc {
-                bitmap.append(&mut hasher, false).await.unwrap();
+                bitmap.append(false);
             }
+            bitmap.process_updates(&mut hasher).await.unwrap();
             assert_eq!(bitmap.bit_count(), db.inactivity_floor_loc);
             db.close().await.unwrap();
 
