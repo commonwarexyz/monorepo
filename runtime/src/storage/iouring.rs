@@ -172,14 +172,14 @@ impl Blob {
 impl crate::Blob for Blob {
     async fn read_at<B: StableBufMut>(&self, mut buf: B, offset: u64) -> Result<B, Error> {
         let fd = types::Fd(self.file.as_raw_fd());
-        let mut byte_read = 0;
-        let len = buf.len();
-        let buf_ref = unsafe { std::slice::from_raw_parts_mut(buf.stable_mut_ptr(), len) };
+        let mut bytes_read = 0;
+        let buf_len = buf.len();
+        let buf_ref = unsafe { std::slice::from_raw_parts_mut(buf.stable_mut_ptr(), buf_len) };
         let buf_arc = Arc::new(buf);
         let mut io_sender = self.io_sender.clone();
-        while byte_read < len {
+        while bytes_read < buf_len {
             // Figure out how much is left to read and where to read into
-            let remaining = &mut buf_ref[byte_read..];
+            let remaining = &mut buf_ref[bytes_read..];
 
             // Create an operation to do the read
             let op = opcode::Read::new(fd, remaining.as_mut_ptr(), remaining.len() as _)
@@ -194,19 +194,19 @@ impl crate::Blob for Blob {
                 .map_err(|_| Error::ReadFailed)?;
 
             // Wait for the result
-            let bytes_read = receiver.await.map_err(|_| Error::ReadFailed)?;
-            if should_retry(bytes_read) {
+            let result = receiver.await.map_err(|_| Error::ReadFailed)?;
+            if should_retry(result) {
                 continue;
             }
 
             // A non-positive return value indicates an error.
-            let bytes_read: usize = bytes_read.try_into().map_err(|_| Error::ReadFailed)?;
-            if bytes_read == 0 {
+            let bytes_read_inner: usize = result.try_into().map_err(|_| Error::ReadFailed)?;
+            if bytes_read_inner == 0 {
                 // A return value of 0 indicates EOF, which shouldn't happen because we
                 // aren't done reading into `buf`. See `man pread`.
                 return Err(Error::BlobInsufficientLength);
             }
-            byte_read += bytes_read;
+            bytes_read += bytes_read_inner;
         }
         Ok(Arc::into_inner(buf_arc).expect("should have only one reference"))
     }
