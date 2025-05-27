@@ -88,6 +88,7 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
 ///   E.g. For read, this is the buffer being read into.
 ///   It's guaranteed that all references to this Arc are dropped after
 ///   the operation completes and before we send the result to `sender`.
+///   If None, the operation doesn't use a buffer (e.g. a sync operation).
 ///
 /// This function will block until `receiver` is closed or an error occurs.
 /// It should be run in a separate task.
