@@ -113,21 +113,16 @@ fn handle_cqe(waiters: &mut HashMap<u64, oneshot::Sender<i32>>, cqe: CqueueEntry
         SHUTDOWN_TIMEOUT_WORK_ID => {
             unreachable!("received SHUTDOWN_TIMEOUT_WORK_ID, should be handled in drain");
         }
-        _ => {}
-    }
-
-    if let Some(sender) = waiters.remove(&work_id) {
-        if result == -libc::ECANCELED && cfg.op_timeout.is_some() {
-            // Send a timeout error code to the caller
-            let _ = sender.send(-libc::ETIMEDOUT);
-        } else {
-            // Send the actual result
-            let _ = sender.send(result);
+        _ => {
+            let sender = waiters.remove(&work_id).expect("missing sender");
+            if result == -libc::ECANCELED && cfg.op_timeout.is_some() {
+                // Send a timeout error code to the caller
+                let _ = sender.send(-libc::ETIMEDOUT);
+            } else {
+                // Send the actual result
+                let _ = sender.send(result);
+            }
         }
-    } else {
-        // This is a timeout. Make sure timeouts are enabled.
-        assert!(cfg.op_timeout.is_some(), "{:?}", cqe);
-        assert_eq!(work_id, TIMEOUT_WORK_ID);
     }
 }
 
