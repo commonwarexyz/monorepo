@@ -78,29 +78,27 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
     builder.build(cfg.size)
 }
 
+/// An operation submitted to the io_uring event loop which will be processed
+/// asynchronously by the event loop in `run`.
+pub struct Op {
+    /// The submission queue entry to be submitted to the ring.
+    /// Its user data field will be overwritten. Users shouldn't rely on it.
+    pub work: SqueueEntry,
+    /// The sender to send the result of the operation to.
+    pub sender: oneshot::Sender<i32>,
+    /// Reference to the buffer used for the operation, if any.
+    /// E.g. For read, this is the buffer being read into.
+    /// It's guaranteed that all references to this Arc are dropped
+    /// after the operation completes and before we send the result to `sender`.
+    /// If None, the operation doesn't use a buffer (e.g. a sync operation).
+    pub buffer: Option<Arc<dyn StableBuf>>,
+}
+
 /// Creates a new io_uring instance that listens for incoming work on `receiver`.
-///
-/// Each incoming work is `(work, sender, buffer)`, where:
-/// * `work` is the submission queue entry to be submitted to the ring.
-///   Its user data field will be overwritten. Users shouldn't rely on it.
-/// * `sender` is where we send the return value of the work.
-/// * `buffer` is an Arc of the buffer used during the operation.
-///   E.g. For read, this is the buffer being read into.
-///   It's guaranteed that all references to this Arc are dropped after
-///   the operation completes and before we send the result to `sender`.
-///   If None, the operation doesn't use a buffer (e.g. a sync operation).
 ///
 /// This function will block until `receiver` is closed or an error occurs.
 /// It should be run in a separate task.
-#[allow(clippy::type_complexity)]
-pub(crate) async fn run(
-    cfg: Config,
-    mut receiver: mpsc::Receiver<(
-        SqueueEntry,
-        oneshot::Sender<i32>,
-        Option<Arc<dyn StableBuf>>,
-    )>,
-) {
+pub(crate) async fn run(cfg: Config, mut receiver: mpsc::Receiver<Op>) {
     let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
     let mut next_work_id: u64 = 0;
     // Maps a work ID to the sender that we will send the result to
@@ -150,7 +148,7 @@ pub(crate) async fn run(
         // Stop if we are at the max number of processing work.
         while waiters.len() < cfg.size as usize {
             // Wait for more work
-            let (mut work, sender, buf) = if waiters.is_empty() {
+            let op = if waiters.is_empty() {
                 // Block until there is something to do
                 match receiver.next().await {
                     Some(work) => work,
@@ -167,6 +165,12 @@ pub(crate) async fn run(
                     Err(_) => break,
                 }
             };
+
+            let Op {
+                mut work,
+                sender,
+                buffer: buf,
+            } = op;
 
             // Assign a unique id
             let work_id = next_work_id;
@@ -268,7 +272,11 @@ mod tests {
             opcode::Recv::new(Fd(left_pipe.as_raw_fd()), buf.as_mut_ptr(), buf.len() as _).build();
         let (recv_tx, recv_rx) = oneshot::channel();
         submitter
-            .send((recv, recv_tx, Some(Arc::new(buf))))
+            .send(crate::iouring::Op {
+                work: recv,
+                sender: recv_tx,
+                buffer: Some(Arc::new(buf)),
+            })
             .await
             .expect("failed to send work");
 
@@ -280,7 +288,11 @@ mod tests {
             opcode::Write::new(Fd(right_pipe.as_raw_fd()), msg.as_ptr(), msg.len() as _).build();
         let (write_tx, write_rx) = oneshot::channel();
         submitter
-            .send((write, write_tx, Some(Arc::new(msg))))
+            .send(crate::iouring::Op {
+                work: write,
+                sender: write_tx,
+                buffer: Some(Arc::new(msg)),
+            })
             .await
             .expect("failed to send work");
 
@@ -337,7 +349,11 @@ mod tests {
             opcode::Recv::new(Fd(pipe.as_raw_fd()), buf.as_mut_ptr(), buf.len() as _).build();
         let (tx, rx) = oneshot::channel();
         submitter
-            .send((work, tx, Some(Arc::new(buf))))
+            .send(crate::iouring::Op {
+                work,
+                sender: tx,
+                buffer: Some(Arc::new(buf)),
+            })
             .await
             .expect("failed to send work");
         // Wait for the timeout

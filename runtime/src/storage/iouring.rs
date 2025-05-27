@@ -8,7 +8,7 @@ use futures::{
     executor::block_on,
     SinkExt as _,
 };
-use io_uring::{opcode, squeue::Entry as SqueueEntry, types};
+use io_uring::{opcode, types};
 use std::fs::{self, File};
 use std::io::{Error as IoError, ErrorKind};
 use std::os::fd::AsRawFd;
@@ -27,22 +27,13 @@ pub struct Config {
 #[derive(Clone)]
 pub struct Storage {
     storage_directory: PathBuf,
-    #[allow(clippy::type_complexity)]
-    io_sender: mpsc::Sender<(
-        SqueueEntry,
-        oneshot::Sender<i32>,
-        Option<Arc<dyn StableBuf>>,
-    )>,
+    io_sender: mpsc::Sender<iouring::Op>,
 }
 
 impl Storage {
     /// Returns a new `Storage` instance.
     pub fn start(cfg: Config) -> Self {
-        let (io_sender, receiver) = mpsc::channel::<(
-            SqueueEntry,
-            oneshot::Sender<i32>,
-            Option<Arc<dyn StableBuf>>,
-        )>(cfg.ring_config.size as usize);
+        let (io_sender, receiver) = mpsc::channel::<iouring::Op>(cfg.ring_config.size as usize);
 
         let storage = Storage {
             storage_directory: cfg.storage_directory.clone(),
@@ -129,12 +120,7 @@ pub struct Blob {
     /// The underlying file
     file: Arc<File>,
     /// Where to send IO operations to be executed
-    #[allow(clippy::type_complexity)]
-    io_sender: mpsc::Sender<(
-        SqueueEntry,
-        oneshot::Sender<i32>,
-        Option<Arc<dyn StableBuf>>,
-    )>,
+    io_sender: mpsc::Sender<iouring::Op>,
 }
 
 impl Clone for Blob {
@@ -149,16 +135,11 @@ impl Clone for Blob {
 }
 
 impl Blob {
-    #[allow(clippy::type_complexity)]
     fn new(
         partition: String,
         name: &[u8],
         file: File,
-        io_sender: mpsc::Sender<(
-            SqueueEntry,
-            oneshot::Sender<i32>,
-            Option<Arc<dyn StableBuf>>,
-        )>,
+        io_sender: mpsc::Sender<iouring::Op>,
     ) -> Self {
         Self {
             partition,
@@ -189,7 +170,11 @@ impl crate::Blob for Blob {
             // Submit the operation
             let (sender, receiver) = oneshot::channel();
             io_sender
-                .send((op, sender, Some(buf_arc.clone())))
+                .send(iouring::Op {
+                    work: op,
+                    sender,
+                    buffer: Some(buf_arc.clone()),
+                })
                 .await
                 .map_err(|_| Error::ReadFailed)?;
 
@@ -231,7 +216,11 @@ impl crate::Blob for Blob {
             // Submit the operation
             let (sender, receiver) = oneshot::channel();
             io_sender
-                .send((op, sender, Some(buf_arc.clone())))
+                .send(iouring::Op {
+                    work: op,
+                    sender,
+                    buffer: Some(buf_arc.clone()),
+                })
                 .await
                 .map_err(|_| Error::WriteFailed)?;
 
@@ -269,7 +258,11 @@ impl crate::Blob for Blob {
             let (sender, receiver) = oneshot::channel();
             self.io_sender
                 .clone()
-                .send((op, sender, None))
+                .send(iouring::Op {
+                    work: op,
+                    sender,
+                    buffer: None,
+                })
                 .await
                 .map_err(|_| {
                     Error::BlobSyncFailed(

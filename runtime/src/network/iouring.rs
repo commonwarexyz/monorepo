@@ -5,7 +5,7 @@ use futures::{
     executor::block_on,
     SinkExt as _,
 };
-use io_uring::{squeue::Entry as SqueueEntry, types::Fd};
+use io_uring::types::Fd;
 use std::{
     net::SocketAddr,
     os::fd::{AsRawFd, OwnedFd},
@@ -19,19 +19,11 @@ pub struct Network {
     /// Used to submit send operations to the send io_uring event loop.
     /// In addition to the operation, we send a channel to receive the result and a
     /// reference to the buffer being sent to ensure it remains valid until the operation completes.
-    send_submitter: mpsc::Sender<(
-        SqueueEntry,
-        oneshot::Sender<i32>,
-        Option<Arc<dyn StableBuf>>,
-    )>,
+    send_submitter: mpsc::Sender<iouring::Op>,
     /// Used to submit recv operations to the recv io_uring event loop.
     /// In addition to the operation, we send a channel to receive the result and a
     /// reference to the buffer being read into to ensure it remains valid until the operation completes.
-    recv_submitter: mpsc::Sender<(
-        SqueueEntry,
-        oneshot::Sender<i32>,
-        Option<Arc<dyn StableBuf>>,
-    )>,
+    recv_submitter: mpsc::Sender<iouring::Op>,
 }
 
 impl Network {
@@ -111,19 +103,11 @@ pub struct Listener {
     /// Used to submit send operations to the send io_uring event loop.
     /// In addition to the operation, we send a channel to receive the result and a
     /// reference to the buffer being sent to ensure it remains valid until the operation completes.
-    send_submitter: mpsc::Sender<(
-        SqueueEntry,
-        oneshot::Sender<i32>,
-        Option<Arc<dyn StableBuf>>,
-    )>,
+    send_submitter: mpsc::Sender<iouring::Op>,
     /// Used to submit recv operations to the recv io_uring event loop.
     /// In addition to the operation, we send a channel to receive the result and a
     /// reference to the buffer being read into to ensure it remains valid until the operation completes.
-    recv_submitter: mpsc::Sender<(
-        SqueueEntry,
-        oneshot::Sender<i32>,
-        Option<Arc<dyn StableBuf>>,
-    )>,
+    recv_submitter: mpsc::Sender<iouring::Op>,
 }
 
 impl crate::Listener for Listener {
@@ -172,11 +156,7 @@ pub struct Sink {
     /// Used to submit send operations to the io_uring event loop.
     /// In addition to the operation, we send a channel to receive the result and a
     /// reference to the buffer being read into to ensure it remains valid until the operation completes.
-    submitter: mpsc::Sender<(
-        SqueueEntry,
-        oneshot::Sender<i32>,
-        Option<Arc<dyn StableBuf>>,
-    )>,
+    submitter: mpsc::Sender<iouring::Op>,
 }
 
 impl Sink {
@@ -205,7 +185,11 @@ impl crate::Sink for Sink {
             // Submit the operation to the io_uring event loop
             let (tx, rx) = oneshot::channel();
             self.submitter
-                .send((op, tx, Some(msg_arc.clone())))
+                .send(crate::iouring::Op {
+                    work: op,
+                    sender: tx,
+                    buffer: Some(msg_arc.clone()),
+                })
                 .await
                 .map_err(|_| crate::Error::SendFailed)?;
 
@@ -233,11 +217,7 @@ pub struct Stream {
     /// Used to submit recv operations to the io_uring event loop.
     /// In addition to the operation, we send a channel to receive the result and a
     /// reference to the buffer being read into to ensure it remains valid until the operation completes.
-    submitter: mpsc::Sender<(
-        SqueueEntry,
-        oneshot::Sender<i32>,
-        Option<Arc<dyn StableBuf>>,
-    )>,
+    submitter: mpsc::Sender<iouring::Op>,
 }
 
 impl Stream {
@@ -266,7 +246,11 @@ impl crate::Stream for Stream {
             // Submit the operation to the io_uring event loop
             let (tx, rx) = oneshot::channel();
             self.submitter
-                .send((op, tx, Some(buf_arc.clone())))
+                .send(crate::iouring::Op {
+                    work: op,
+                    sender: tx,
+                    buffer: Some(buf_arc.clone()),
+                })
                 .await
                 .map_err(|_| crate::Error::RecvFailed)?;
 
