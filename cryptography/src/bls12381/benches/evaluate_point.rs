@@ -25,4 +25,8 @@ fn benchmark_evaluate_point(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, benchmark_evaluate_point);
+criterion_group! {
+    name = benches;
+    config = Criterion::default().sample_size(10);
+    targets = benchmark_evaluate_point
+}

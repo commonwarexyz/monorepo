@@ -346,12 +346,18 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
+        Ok(self.get_with_loc(key).await?.map(|(v, _)| v))
+    }
+
+    /// Get the value & location of the active operation for `key` in the db, or None if it has no
+    /// value.
+    pub(super) async fn get_with_loc(&self, key: &K) -> Result<Option<(V, u64)>, Error> {
         for loc in self.snapshot.get(key) {
             let op = self.log.read(*loc).await?;
             match op {
                 Operation::Update(k, v) => {
                     if k == *key {
-                        return Ok(Some(v));
+                        return Ok(Some((v, *loc)));
                     }
                 }
                 _ => {

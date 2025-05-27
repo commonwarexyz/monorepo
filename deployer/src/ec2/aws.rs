@@ -21,8 +21,13 @@ use tokio::time::sleep;
 
 /// Creates an EC2 client for the specified AWS region
 pub async fn create_ec2_client(region: Region) -> Ec2Client {
+    let retry = aws_config::retry::RetryConfig::adaptive()
+        .with_max_attempts(10)
+        .with_initial_backoff(Duration::from_millis(500))
+        .with_max_backoff(Duration::from_secs(30));
     let config = aws_config::defaults(BehaviorVersion::v2025_01_17())
         .region(region)
+        .retry_config(retry)
         .load()
         .await;
     Ec2Client::new(&config)
@@ -842,7 +847,7 @@ pub async fn assert_arm64_support(
             }
         }
 
-        // Check if there’s another page
+        // Check if there's another page
         next_token = response.next_token;
         if next_token.is_none() {
             break;

@@ -13,7 +13,7 @@ use governor::{clock::ReasonablyRealtime, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
 use rand::{CryptoRng, Rng};
 use std::time::Duration;
-use tracing::{debug, info};
+use tracing::debug;
 
 pub struct Actor<
     E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
@@ -119,7 +119,7 @@ impl<
                         .with_label("peer")
                         .spawn(move |context| async move {
                             // Create peer
-                            info!(?peer, "peer started");
+                            debug!(?peer, "peer started");
                             let (actor, messenger) = peer::Actor::new(
                                 context,
                                 peer::Config {
@@ -144,7 +144,7 @@ impl<
                             connections.dec();
 
                             // Let the router know the peer has exited
-                            info!(error = ?e, ?peer, "peer shutdown");
+                            debug!(error = ?e, ?peer, "peer shutdown");
                             router.release(peer).await;
                         });
                 }
