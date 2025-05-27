@@ -1,3 +1,4 @@
+use commonware_utils::StableBuf;
 use futures::{
     channel::{mpsc, oneshot},
     StreamExt as _,
@@ -8,7 +9,7 @@ use io_uring::{
     types::Timespec,
     IoUring,
 };
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 /// Reserved ID for a CQE that indicates an operation timed out.
 const TIMEOUT_WORK_ID: u64 = u64::MAX;
@@ -88,12 +89,12 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
 /// It should be run in a separate task.
 pub(crate) async fn run(
     cfg: Config,
-    mut receiver: mpsc::Receiver<(SqueueEntry, oneshot::Sender<i32>)>,
+    mut receiver: mpsc::Receiver<(SqueueEntry, oneshot::Sender<i32>, Arc<dyn StableBuf>)>,
 ) {
     let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
     let mut next_work_id: u64 = 0;
     // Maps a work ID to the sender that we will send the result to.
-    let mut waiters: std::collections::HashMap<_, oneshot::Sender<i32>> =
+    let mut waiters: std::collections::HashMap<_, (oneshot::Sender<i32>, Arc<dyn StableBuf>)> =
         std::collections::HashMap::with_capacity(cfg.size as usize);
 
     loop {
@@ -121,7 +122,8 @@ pub(crate) async fn run(
                         result
                     };
 
-                    let result_sender = waiters.remove(&work_id).expect("result sender not found");
+                    let (result_sender, _buf) =
+                        waiters.remove(&work_id).expect("result sender not found");
                     result_sender.send(result).expect("failed to send result");
                 }
             }
@@ -131,7 +133,7 @@ pub(crate) async fn run(
         // Stop if we are at the max number of processing work.
         while waiters.len() < cfg.size as usize {
             // Wait for more work
-            let (mut work, sender) = if waiters.is_empty() {
+            let (mut work, sender, buf) = if waiters.is_empty() {
                 // Block until there is something to do
                 match receiver.next().await {
                     Some(work) => work,
@@ -159,7 +161,7 @@ pub(crate) async fn run(
             work = work.user_data(work_id);
 
             // We'll send the result of this operation to `sender`.
-            waiters.insert(work_id, sender);
+            waiters.insert(work_id, (sender, buf));
 
             // Submit the operation to the ring, with timeout if configured
             if let Some(timeout) = &cfg.op_timeout {
@@ -229,8 +231,11 @@ mod tests {
         SinkExt as _,
     };
     use io_uring::{opcode, types::Fd};
-    use std::os::{fd::AsRawFd, unix::net::UnixStream};
     use std::time::Duration;
+    use std::{
+        os::{fd::AsRawFd, unix::net::UnixStream},
+        sync::Arc,
+    };
 
     async fn recv_then_send(cfg: Config) {
         // Create a new io_uring instance
@@ -246,7 +251,7 @@ mod tests {
             opcode::Recv::new(Fd(left_pipe.as_raw_fd()), buf.as_mut_ptr(), buf.len() as _).build();
         let (recv_tx, recv_rx) = oneshot::channel();
         submitter
-            .send((recv, recv_tx))
+            .send((recv, recv_tx, Arc::new(buf)))
             .await
             .expect("failed to send work");
 
@@ -258,7 +263,7 @@ mod tests {
             opcode::Write::new(Fd(right_pipe.as_raw_fd()), msg.as_ptr(), msg.len() as _).build();
         let (write_tx, write_rx) = oneshot::channel();
         submitter
-            .send((write, write_tx))
+            .send((write, write_tx, Arc::new(msg.to_vec())))
             .await
             .expect("failed to send work");
 
@@ -315,7 +320,7 @@ mod tests {
             opcode::Recv::new(Fd(pipe.as_raw_fd()), buf.as_mut_ptr(), buf.len() as _).build();
         let (tx, rx) = oneshot::channel();
         submitter
-            .send((work, tx))
+            .send((work, tx, Arc::new(buf)))
             .await
             .expect("failed to send work");
         // Wait for the timeout

@@ -7,7 +7,7 @@
 /// The implementor must guarantee that the pointer remains valid
 /// and unchanged while the buffer is being used.
 #[allow(clippy::len_without_is_empty)]
-pub unsafe trait StableBuf: Unpin + Send + 'static {
+pub unsafe trait StableBuf: Unpin + Send + Sync + 'static {
     /// Returns a raw pointer to this buffer.
     fn stable_ptr(&self) -> *const u8;
 
