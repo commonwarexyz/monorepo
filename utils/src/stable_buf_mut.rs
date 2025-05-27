@@ -2,6 +2,8 @@
 //!
 //! This code is inspired by [tokio-uring](https://github.com/tokio-rs/tokio-uring>) at commit 7761222.
 
+use std::ops::{Deref, DerefMut};
+
 use crate::stable_buf::StableBuf;
 
 /// A mutable buffer with a stable memory address.
@@ -37,5 +39,19 @@ unsafe impl StableBufMut for Vec<u8> {
 unsafe impl StableBufMut for bytes::BytesMut {
     fn stable_mut_ptr(&mut self) -> *mut u8 {
         self.as_mut_ptr()
+    }
+}
+
+impl Deref for dyn StableBufMut {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { std::slice::from_raw_parts(self.stable_ptr(), self.len()) }
+    }
+}
+
+impl DerefMut for dyn StableBufMut {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        unsafe { std::slice::from_raw_parts_mut(self.stable_mut_ptr(), self.len()) }
     }
 }

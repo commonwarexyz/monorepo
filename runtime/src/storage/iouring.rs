@@ -151,16 +151,17 @@ impl Blob {
 }
 
 impl crate::Blob for Blob {
-    async fn read_at<B: StableBufMut>(&self, mut buf: B, offset: u64) -> Result<B, Error> {
+    async fn read_at<B: StableBufMut>(&self, buf: B, offset: u64) -> Result<B, Error> {
         let fd = types::Fd(self.file.as_raw_fd());
         let mut bytes_read = 0;
         let buf_len = buf.len();
-        let buf_ref = unsafe { std::slice::from_raw_parts_mut(buf.stable_mut_ptr(), buf_len) };
         let buf_arc = Arc::new(buf);
         let mut io_sender = self.io_sender.clone();
         while bytes_read < buf_len {
-            // Figure out how much is left to read and where to read into
-            let remaining = &mut buf_ref[bytes_read..];
+            let ptr = buf_arc.as_ref().stable_ptr();
+            let remaining = unsafe {
+                std::slice::from_raw_parts_mut(ptr.add(bytes_read) as *mut u8, buf_len - bytes_read)
+            };
 
             // Create an operation to do the read
             let op = opcode::Read::new(fd, remaining.as_mut_ptr(), remaining.len() as _)
