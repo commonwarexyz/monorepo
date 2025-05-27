@@ -170,20 +170,19 @@ impl Blob {
 }
 
 impl crate::Blob for Blob {
-    async fn read_at<B: StableBufMut>(&self, buf: B, offset: u64) -> Result<B, Error> {
+    async fn read_at<B: StableBufMut>(&self, mut buf: B, offset: u64) -> Result<B, Error> {
         let fd = types::Fd(self.file.as_raw_fd());
-        let mut total_read = 0;
+        let mut byte_read = 0;
         let len = buf.len();
+        let buf_ref = unsafe { std::slice::from_raw_parts_mut(buf.stable_mut_ptr(), len) };
         let buf_arc = Arc::new(buf);
         let mut io_sender = self.io_sender.clone();
-        while total_read < len {
+        while byte_read < len {
             // Figure out how much is left to read and where to read into
-            let ptr = unsafe { (buf_arc.as_ref().stable_ptr().add(total_read)) as *mut u8 };
-            let remaining = len - total_read;
-            let offset = offset + total_read as u64;
+            let remaining = &mut buf_ref[byte_read..];
 
             // Create an operation to do the read
-            let op = opcode::Read::new(fd, ptr, remaining as _)
+            let op = opcode::Read::new(fd, remaining.as_mut_ptr(), remaining.len() as _)
                 .offset(offset as _)
                 .build();
 
@@ -207,7 +206,7 @@ impl crate::Blob for Blob {
                 // aren't done reading into `buf`. See `man pread`.
                 return Err(Error::BlobInsufficientLength);
             }
-            total_read += bytes_read;
+            byte_read += bytes_read;
         }
         Ok(Arc::into_inner(buf_arc).expect("should have only one reference"))
     }

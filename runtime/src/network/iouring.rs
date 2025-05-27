@@ -17,7 +17,7 @@ use tokio::net::{TcpListener, TcpStream};
 /// [crate::Network] implementation that uses io_uring to do async I/O.
 pub struct Network {
     /// Used to submit send operations to the send io_uring event loop.
-    /// In addition to the operation, we sent a channel to receive the result and a
+    /// In addition to the operation, we send a channel to receive the result and a
     /// reference to the buffer being sent to ensure it remains valid until the operation completes.
     send_submitter: mpsc::Sender<(
         SqueueEntry,
@@ -25,7 +25,7 @@ pub struct Network {
         Option<Arc<dyn StableBuf>>,
     )>,
     /// Used to submit recv operations to the recv io_uring event loop.
-    /// In addition to the operation, we sent a channel to receive the result and a
+    /// In addition to the operation, we send a channel to receive the result and a
     /// reference to the buffer being read into to ensure it remains valid until the operation completes.
     recv_submitter: mpsc::Sender<(
         SqueueEntry,
@@ -109,7 +109,7 @@ impl crate::Network for Network {
 pub struct Listener {
     inner: TcpListener,
     /// Used to submit send operations to the send io_uring event loop.
-    /// In addition to the operation, we sent a channel to receive the result and a
+    /// In addition to the operation, we send a channel to receive the result and a
     /// reference to the buffer being sent to ensure it remains valid until the operation completes.
     send_submitter: mpsc::Sender<(
         SqueueEntry,
@@ -117,7 +117,7 @@ pub struct Listener {
         Option<Arc<dyn StableBuf>>,
     )>,
     /// Used to submit recv operations to the recv io_uring event loop.
-    /// In addition to the operation, we sent a channel to receive the result and a
+    /// In addition to the operation, we send a channel to receive the result and a
     /// reference to the buffer being read into to ensure it remains valid until the operation completes.
     recv_submitter: mpsc::Sender<(
         SqueueEntry,
@@ -170,7 +170,7 @@ impl crate::Listener for Listener {
 pub struct Sink {
     fd: Arc<OwnedFd>,
     /// Used to submit send operations to the io_uring event loop.
-    /// In addition to the operation, we sent a channel to receive the result and a
+    /// In addition to the operation, we send a channel to receive the result and a
     /// reference to the buffer being read into to ensure it remains valid until the operation completes.
     submitter: mpsc::Sender<(
         SqueueEntry,
@@ -231,7 +231,7 @@ impl crate::Sink for Sink {
 pub struct Stream {
     fd: Arc<OwnedFd>,
     /// Used to submit recv operations to the io_uring event loop.
-    /// In addition to the operation, we sent a channel to receive the result and a
+    /// In addition to the operation, we send a channel to receive the result and a
     /// reference to the buffer being read into to ensure it remains valid until the operation completes.
     submitter: mpsc::Sender<(
         SqueueEntry,
