@@ -101,14 +101,12 @@ fn handle_cqe(waiters: &mut HashMap<u64, oneshot::Sender<i32>>, cqe: CqueueEntry
                 cfg.op_timeout.is_some(),
                 "received TIMEOUT_WORK_ID with op_timeout disabled"
             );
-            return;
         }
         POLL_WORK_ID => {
             assert!(
                 cfg.force_poll.is_some(),
                 "received POLL_WORK_ID without force_poll enabled"
             );
-            return;
         }
         SHUTDOWN_TIMEOUT_WORK_ID => {
             unreachable!("received SHUTDOWN_TIMEOUT_WORK_ID, should be handled in drain");
