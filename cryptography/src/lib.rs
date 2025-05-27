@@ -138,6 +138,7 @@ pub trait Digest: Array + Copy {
 
 /// An object that can be uniquely represented as a [Digest].
 pub trait Digestible: Clone + Sized + Send + Sync + 'static {
+    /// The type of digest produced by this object.
     type Digest: Digest;
     /// Returns a unique representation of the object as a [Digest].
     ///
@@ -148,6 +149,7 @@ pub trait Digestible: Clone + Sized + Send + Sync + 'static {
 
 /// An object that can produce a commitment of itself.
 pub trait Committable: Digestible + Clone + Sized + Send + Sync + 'static {
+    /// The type of commitment produced by this object.
     type Commitment: Digest;
 
     /// Returns the unique commitment of the object as a [Digest].
