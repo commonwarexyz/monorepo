@@ -108,13 +108,13 @@
             <img src="../imgs/bisection.png" alt="Search for invalid signatures via repeated bisection">
             <div class="image-caption">Figure 3: Search for invalid signatures via repeated bisection</div>
         </div>
-        <h2>The Numbers Don't Lie</h2>
-        <p>The results speak for themselves. By moving from ~50 individual signature verifications per view to just 1-2 batch/aggregate verifications, we've transformed the performance profile of consensus:</p>
+        <h2>Reducing Block Time (and Resource Usage)</h2>
+        <p>The data speaks for itself. By transitioning from ~50 individual signature verifications per message to 1-2 aggregate verifications, performance has improved meaningfully (while using less resources):</p>
         <ul>
             <li><b>Block time</b>: 250ms → 200ms (20% reduction)</li>
             <li><b>Finality</b>: 375ms → 300ms (20% reduction)</li>
             <li><b>CPU usage</b>: 26% → 9% on a <a href="https://github.com/commonwarexyz/alto/tree/main/chain#create-artifacts-1">c7g.xlarge</a> (65% reduction)</li>
-            <li><b>Bandwidth</b>: 27% reduction through more efficient message handling</li>
+            <li><b>Bandwidth</b>: 27% reduction with <a href="https://github.com/commonwarexyz/monorepo/blob/19d70176b4127400d29c656a327df1d744a75dca/cryptography/src/bls12381/primitives/variant.rs#L181-L182">G1 signatures</a></li>
         </ul>
         <p>That 9% CPU usage is particularly striking. On a 4-core instance, consensus now consumes less than half a core, leaving 91% of the compute available for your application. This isn't just an optimization—it's a fundamental reframing of what consensus should cost.</p>
         <h2>Consensus as a Sideshow</h2>
