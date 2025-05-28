@@ -8,7 +8,7 @@ use futures::{
     executor::block_on,
     SinkExt as _,
 };
-use io_uring::{opcode, squeue::Entry as SqueueEntry, types};
+use io_uring::{opcode, types};
 use std::fs::{self, File};
 use std::io::{Error as IoError, ErrorKind};
 use std::os::fd::AsRawFd;
@@ -27,14 +27,13 @@ pub struct Config {
 #[derive(Clone)]
 pub struct Storage {
     storage_directory: PathBuf,
-    io_sender: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
+    io_sender: mpsc::Sender<iouring::Op>,
 }
 
 impl Storage {
     /// Returns a new `Storage` instance.
     pub fn start(cfg: Config) -> Self {
-        let (io_sender, receiver) =
-            mpsc::channel::<(SqueueEntry, oneshot::Sender<i32>)>(cfg.ring_config.size as usize);
+        let (io_sender, receiver) = mpsc::channel::<iouring::Op>(cfg.ring_config.size as usize);
 
         let storage = Storage {
             storage_directory: cfg.storage_directory.clone(),
@@ -121,7 +120,7 @@ pub struct Blob {
     /// The underlying file
     file: Arc<File>,
     /// Where to send IO operations to be executed
-    io_sender: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
+    io_sender: mpsc::Sender<iouring::Op>,
 }
 
 impl Clone for Blob {
@@ -140,7 +139,7 @@ impl Blob {
         partition: String,
         name: &[u8],
         file: File,
-        io_sender: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
+        io_sender: mpsc::Sender<iouring::Op>,
     ) -> Self {
         Self {
             partition,
@@ -152,17 +151,18 @@ impl Blob {
 }
 
 impl crate::Blob for Blob {
-    async fn read_at<B: StableBufMut>(&self, mut buf: B, offset: u64) -> Result<B, Error> {
+    async fn read_at<B: StableBufMut>(&self, buf: B, offset: u64) -> Result<B, Error> {
         let fd = types::Fd(self.file.as_raw_fd());
-        let mut total_read = 0;
-        let len = buf.len();
-        let buf_ref = buf.deref_mut();
-
+        let mut bytes_read = 0;
+        let buf_len = buf.len();
+        let buf_arc = Arc::new(buf);
         let mut io_sender = self.io_sender.clone();
-        while total_read < len {
-            // Figure out how much is left to read and where to read into
-            let remaining = &mut buf_ref[total_read..];
-            let offset = offset + total_read as u64;
+        while bytes_read < buf_len {
+            let ptr = buf_arc.as_ref().stable_ptr();
+            let remaining = unsafe {
+                std::slice::from_raw_parts_mut(ptr.add(bytes_read) as *mut u8, buf_len - bytes_read)
+            };
+            let offset = offset + bytes_read as u64;
 
             // Create an operation to do the read
             let op = opcode::Read::new(fd, remaining.as_mut_ptr(), remaining.len() as _)
@@ -172,35 +172,40 @@ impl crate::Blob for Blob {
             // Submit the operation
             let (sender, receiver) = oneshot::channel();
             io_sender
-                .send((op, sender))
+                .send(iouring::Op {
+                    work: op,
+                    sender,
+                    buffer: Some(buf_arc.clone()),
+                })
                 .await
                 .map_err(|_| Error::ReadFailed)?;
 
             // Wait for the result
-            let bytes_read = receiver.await.map_err(|_| Error::ReadFailed)?;
-            if should_retry(bytes_read) {
+            let result = receiver.await.map_err(|_| Error::ReadFailed)?;
+            if should_retry(result) {
                 continue;
             }
 
             // A non-positive return value indicates an error.
-            let bytes_read: usize = bytes_read.try_into().map_err(|_| Error::ReadFailed)?;
-            if bytes_read == 0 {
+            let bytes_read_inner: usize = result.try_into().map_err(|_| Error::ReadFailed)?;
+            if bytes_read_inner == 0 {
                 // A return value of 0 indicates EOF, which shouldn't happen because we
                 // aren't done reading into `buf`. See `man pread`.
                 return Err(Error::BlobInsufficientLength);
             }
-            total_read += bytes_read;
+            bytes_read += bytes_read_inner;
         }
-        Ok(buf)
+        Ok(Arc::into_inner(buf_arc).expect("should have only one reference"))
     }
 
     async fn write_at<B: StableBuf>(&self, buf: B, offset: u64) -> Result<(), Error> {
         let fd = types::Fd(self.file.as_raw_fd());
         let mut total_written = 0;
-        let buf_ref = buf.as_ref();
+        let buf_arc = Arc::new(buf);
+        let buf_ref = buf_arc.as_ref().as_ref();
 
         let mut io_sender = self.io_sender.clone();
-        while total_written < buf.len() {
+        while total_written < buf_ref.len() {
             // Figure out how much is left to write and where to write from
             let remaining = &buf_ref[total_written..];
             let offset = offset + total_written as u64;
@@ -213,7 +218,11 @@ impl crate::Blob for Blob {
             // Submit the operation
             let (sender, receiver) = oneshot::channel();
             io_sender
-                .send((op, sender))
+                .send(iouring::Op {
+                    work: op,
+                    sender,
+                    buffer: Some(buf_arc.clone()),
+                })
                 .await
                 .map_err(|_| Error::WriteFailed)?;
 
@@ -251,7 +260,11 @@ impl crate::Blob for Blob {
             let (sender, receiver) = oneshot::channel();
             self.io_sender
                 .clone()
-                .send((op, sender))
+                .send(iouring::Op {
+                    work: op,
+                    sender,
+                    buffer: None,
+                })
                 .await
                 .map_err(|_| {
                     Error::BlobSyncFailed(

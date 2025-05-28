@@ -5,7 +5,7 @@ use futures::{
     executor::block_on,
     SinkExt as _,
 };
-use io_uring::{squeue::Entry as SqueueEntry, types::Fd};
+use io_uring::types::Fd;
 use std::{
     net::SocketAddr,
     os::fd::{AsRawFd, OwnedFd},
@@ -16,10 +16,14 @@ use tokio::net::{TcpListener, TcpStream};
 #[derive(Clone, Debug)]
 /// [crate::Network] implementation that uses io_uring to do async I/O.
 pub struct Network {
-    /// Sends send operations to the send io_uring event loop.
-    send_submitter: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
-    /// Sends recv operations to the recv io_uring event loop.
-    recv_submitter: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
+    /// Used to submit send operations to the send io_uring event loop.
+    /// In addition to the operation, we send a channel to receive the result and a
+    /// reference to the buffer being sent to ensure it remains valid until the operation completes.
+    send_submitter: mpsc::Sender<iouring::Op>,
+    /// Used to submit recv operations to the recv io_uring event loop.
+    /// In addition to the operation, we send a channel to receive the result and a
+    /// reference to the buffer being read into to ensure it remains valid until the operation completes.
+    recv_submitter: mpsc::Sender<iouring::Op>,
 }
 
 impl Network {
@@ -96,8 +100,14 @@ impl crate::Network for Network {
 /// Implementation of [crate::Listener] for an io-uring [Network].
 pub struct Listener {
     inner: TcpListener,
-    send_submitter: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
-    recv_submitter: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
+    /// Used to submit send operations to the send io_uring event loop.
+    /// In addition to the operation, we send a channel to receive the result and a
+    /// reference to the buffer being sent to ensure it remains valid until the operation completes.
+    send_submitter: mpsc::Sender<iouring::Op>,
+    /// Used to submit recv operations to the recv io_uring event loop.
+    /// In addition to the operation, we send a channel to receive the result and a
+    /// reference to the buffer being read into to ensure it remains valid until the operation completes.
+    recv_submitter: mpsc::Sender<iouring::Op>,
 }
 
 impl crate::Listener for Listener {
@@ -143,7 +153,10 @@ impl crate::Listener for Listener {
 /// Implementation of [crate::Sink] for an io-uring [Network].
 pub struct Sink {
     fd: Arc<OwnedFd>,
-    submitter: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
+    /// Used to submit send operations to the io_uring event loop.
+    /// In addition to the operation, we send a channel to receive the result and a
+    /// reference to the buffer being sent to ensure it remains valid until the operation completes.
+    submitter: mpsc::Sender<iouring::Op>,
 }
 
 impl Sink {
@@ -155,8 +168,10 @@ impl Sink {
 impl crate::Sink for Sink {
     async fn send<B: StableBuf>(&mut self, msg: B) -> Result<(), crate::Error> {
         let mut bytes_sent = 0;
-        let msg = msg.as_ref();
-        while bytes_sent < msg.len() {
+        let msg_len = msg.len();
+        let msg_arc = Arc::new(msg);
+        let msg = msg_arc.as_ref().as_ref();
+        while bytes_sent < msg_len {
             let remaining = &msg[bytes_sent..];
 
             // Create the io_uring send operation
@@ -170,7 +185,11 @@ impl crate::Sink for Sink {
             // Submit the operation to the io_uring event loop
             let (tx, rx) = oneshot::channel();
             self.submitter
-                .send((op, tx))
+                .send(crate::iouring::Op {
+                    work: op,
+                    sender: tx,
+                    buffer: Some(msg_arc.clone()),
+                })
                 .await
                 .map_err(|_| crate::Error::SendFailed)?;
 
@@ -195,7 +214,10 @@ impl crate::Sink for Sink {
 /// Implementation of [crate::Stream] for an io-uring [Network].
 pub struct Stream {
     fd: Arc<OwnedFd>,
-    submitter: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
+    /// Used to submit recv operations to the io_uring event loop.
+    /// In addition to the operation, we send a channel to receive the result and a
+    /// reference to the buffer being read into to ensure it remains valid until the operation completes.
+    submitter: mpsc::Sender<iouring::Op>,
 }
 
 impl Stream {
@@ -205,12 +227,18 @@ impl Stream {
 }
 
 impl crate::Stream for Stream {
-    async fn recv<B: StableBufMut>(&mut self, mut buf: B) -> Result<B, crate::Error> {
+    async fn recv<B: StableBufMut>(&mut self, buf: B) -> Result<B, crate::Error> {
         let mut bytes_received = 0;
         let buf_len = buf.len();
-        let buf_ref = buf.deref_mut();
+        let buf_arc = Arc::new(buf);
         while bytes_received < buf_len {
-            let remaining = &mut buf_ref[bytes_received..];
+            let ptr = buf_arc.as_ref().stable_ptr();
+            let remaining = unsafe {
+                std::slice::from_raw_parts_mut(
+                    ptr.add(bytes_received) as *mut u8,
+                    buf_len - bytes_received,
+                )
+            };
 
             // Create the io_uring recv operation
             let op = io_uring::opcode::Recv::new(
@@ -223,7 +251,11 @@ impl crate::Stream for Stream {
             // Submit the operation to the io_uring event loop
             let (tx, rx) = oneshot::channel();
             self.submitter
-                .send((op, tx))
+                .send(crate::iouring::Op {
+                    work: op,
+                    sender: tx,
+                    buffer: Some(buf_arc.clone()),
+                })
                 .await
                 .map_err(|_| crate::Error::RecvFailed)?;
 
@@ -239,7 +271,7 @@ impl crate::Stream for Stream {
             }
             bytes_received += result as usize;
         }
-        Ok(buf)
+        Ok(Arc::into_inner(buf_arc).expect("should have only one reference"))
     }
 }
 
