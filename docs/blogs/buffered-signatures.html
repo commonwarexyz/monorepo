@@ -6,17 +6,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
     <link rel="icon" href="../favicon.ico" type="image/x-icon">
 
-    <title>commonware > TBD</title>
-    <meta name="description" content="TBD">
+    <title>commonware > Reducing Block Time (and Resource Usage) with Buffered Signatures</title>
+    <meta name="description" content="How we achieved a 20% reduction in block time, 65% reduction in CPU usage, and 27% reduction in bandwidth by rethinking when and how we verify signatures.">
     <meta name="author" content="Patrick O'Grady">
     <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
 
     <meta property="og:url" content="https://commonware.xyz/blogs/buffered-signatures.html" />
     <meta property="og:type" content="article" />
     <meta property="og:site_name" content="commonware" />
-    <meta property="og:image" content="TBD" />
-    <meta property="og:title" content="TBD" />
-    <meta property="og:description" content="TBD" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/buffering.png" />
+    <meta property="og:title" content="Reducing Block Time (and Resource Usage) with Buffered Signatures" />
+    <meta property="og:description" content="How we achieved a 20% reduction in block time, 65% reduction in CPU usage, and 27% reduction in bandwidth by rethinking when and how we verify signatures." />
     <meta property="article:author" content="https://x.com/_patrickogrady" />
     <meta property="article:published_time" content="2025-05-28T00:00:00Z" />
     <meta property="article:modified_time" content="2025-05-28T00:00:00Z" />
@@ -24,9 +24,9 @@
     <meta name="twitter:card" content="summary_large_image" />
     <meta property="twitter:domain" content="commonware.xyz" />
     <meta property="twitter:url" content="https://commonware.xyz/blogs/buffered-signatures.html" />
-    <meta property="twitter:title" content="TBD" />
-    <meta property="twitter:description" content="TBD" />
-    <meta property="twitter:image" content="TBD" />
+    <meta property="twitter:title" content="Reducing Block Time (and Resource Usage) with Buffered Signatures" />
+    <meta property="twitter:description" content="How we achieved a 20% reduction in block time, 65% reduction in CPU usage, and 27% reduction in bandwidth by rethinking when and how we verify signatures." />
+    <meta property="twitter:image" content="https://commonware.xyz/imgs/buffering.png" />
     <meta property="twitter:site" content="@commonwarexyz" />
     <meta property="twitter:creator" content="@_patrickogrady" />
 
@@ -80,30 +80,51 @@
             <div class="date">May 28, 2025</div>
         </div>
         <p>A few months ago, we launched <a href="https://x.com/_patrickogrady/status/1901645720823935341">Alto</a>, a minimal (and wicked fast) blockchain for continuously benchmarking the <a href="https://github.com/commonwarexyz/monorepo">Commonware Library</a>. Today, I'm thrilled <a href="https://alto.commonware.xyz">to share</a> that this benchmarking drove a 20% reduction in block time (to ~200ms), a 20% reduction in block finality (to ~300ms), a 65% reduction in CPU usage, and a 27% reduction in bandwidth usage.</p>
-        <p>Let's take a step back (all the way back). <a href="https://commonware.xyz/blogs/introducing-commonware.html">Last August</a>, we released the first <a href="https://github.com/commonwarexyz/monorepo">Commonware Library</a> primitive: <a href="https://docs.rs/commonware-p2p/latest/commonware_p2p/authenticated/index.html">p2p::authenticated</a>. <i>p2p::authenticated</i>, unlike other commonly used p2p libraries, focuses only on providing point-to-point communication between fully-connected peers (authenticated by some previously known public key).</p>
+        <p>It turns out procrastinating (or buffering) can indeed be a great strategy.</p>
+        <h2>The Road to 200ms</h2>
+        <p><a href="https://commonware.xyz/blogs/introducing-commonware.html">Last August</a>, we released the first <a href="https://github.com/commonwarexyz/monorepo">Commonware Library</a> primitive: <a href="https://docs.rs/commonware-p2p/latest/commonware_p2p/authenticated/index.html">p2p::authenticated</a>. Unlike traditional p2p libraries that focus on gossip-based messaging over a subset of randomly connected peers, <i>p2p::authenticated</i> provides point-to-point communication between fully-connected peers (where each connection is authenticated by a previously known public key, like the one a validator registered when staking).</p>
         <div class="image-container">
             <img src="../imgs/gossip-models.png" alt="Comparing gossip models">
             <div class="image-caption">Figure 1: Comparing gossip models</div>
         </div>
         <p>The consensus primitives <a href="https://commonware.xyz/blogs/commonware-the-anti-framework.html">we released in December</a> (<a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html">simplex</a>) and <a href="https://commonware.xyz/blogs/threshold-simplex.html">January</a> (<a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/threshold_simplex/index.html">threshold_simplex</a>) built on top of <i>p2p::authenticated</i> but didn't do anything particularly clever with its unique functionality (it turns out point-to-point messaging alone was enough of an improvement to reach the ~250ms block time in the original Alto launch).</p>
         <p>So, what would something clever look like?</p>
-        <p>Typically, any validator in consensus verifies all incoming messages it receives as soon as it receives it. The sooner a message is verified, the sooner a validator may have a quorum of verified messages and thus the sooner they are able to enter a new view or finalize a block. Let's wait to verify signatures instead. Instead of verifying each message as soon as it is received, we can buffer signatures over a message until a quorum (2f+1) is reached and then perform a multi-signature verification of all collected partial signatures (or perform a batch verification in the case of simplex). Because we know each consensus participant can only send 1 signature of over a small set of messages per view (and we are connected to that participant directly over <i>p2p::authenticated</i>), we just cache their message in a slot allocated to exclusively that peer (something we cannot do with "traditional" gossip where a peer may forward the messages of any number of other peers).</p>
+        <h2>Rethinking Signature Verification</h2>
+        <p>Here's how signature verification typically works in consensus: a validator receives a message, immediately verifies the signature, and only then processes it. This eager verification makes intuitive sense—you want to know as soon as possible whether you have enough valid messages to progress.</p>
+        <p>But what if we flipped this on its head?</p>
+        <p>Instead of verifying each signature individually as it arrives, we buffer them. When we collect a quorum (2f+1) of signatures over the same message, we perform a single multi-signature verification (or batch verification in the case of simplex). This is only possible because <i>p2p::authenticated</i> guarantees that each peer can only send us their own messages—we can allocate a dedicated slot for each peer and trust that slot contains only their signatures.</p>
         <div class="image-container">
             <img src="../imgs/buffering.png" alt="Buffer signatures until a quorum is reached">
             <div class="image-caption">Figure 2: Buffer signatures until a quorum is reached</div>
         </div>
-        <p>But not all signatures may be valid, is all lost? We can perform a binary search over the buffered signatures to find any invalid signatures. TODO: worst case?</p>
+        <p>With traditional gossip, this approach would be impossible. When any peer can forward any other peer's messages, you can't maintain clean per-peer state. You must verify everything immediately or risk accepting invalid signatures.</p>
+        <h2>Handling Invalid Signatures</h2>
+        <p>But wait—what happens when someone sends an invalid signature? If we're batch verifying, doesn't one bad apple spoil the whole bunch?</p>
+        <p>Not quite. When a batch verification fails, we perform a binary search over the buffered signatures to identify the culprit. In the worst case (where half the signatures are invalid), this requires O(n log n) individual verifications. But here's the key: Byzantine nodes that send invalid signatures get permanently blocked.</p>
         <div class="image-container">
             <img src="../imgs/bisection.png" alt="Search for invalid signatures via repeated bisection">
             <div class="image-caption">Figure 3: Search for invalid signatures via repeated bisection</div>
         </div>
-        <p>Because we have authenticated messaging, we can (and need to) also persistently block peers that send invalid signatures (prohibiting them from ever sending us a message again). With "traditional" gossip, this isn't safe to do (because the peer forwarding the message may simply tamper with a valid signature inflight). You can block a "traditional" peer but they can just move to a new address/identity (often not affiliated with a consensus identity) and restart the attack (not to mention an honest peer would still have to verify all incoming messages to avoid being blocked, or risk delaying propagation of messages).</p>
+        <p>This permanent blocking is another advantage of authenticated connections. In traditional gossip networks, you can't safely block peers for forwarding invalid signatures—they might just be innocent relays of someone else's malicious message. Even if you block them, they can spin up a new identity and continue the attack.</p>
         <div class="image-container">
             <img src="../imgs/invalid-signature-gossip.png" alt="Block peers that send invalid signatures">
             <div class="image-caption">Figure 4: Block peers that send invalid signatures</div>
         </div>
-        <p>The result? Faster views and faster finality (1-2 batch/aggregate verifications instead of 50 individual verifications). Now running at just 9% of CPU on a <a href="https://github.com/commonwarexyz/alto/tree/main/chain#create-artifacts-1">c7g.xlarge</a>, there is 91% of CPU free for your application to use.</p>
-        <p>Consensus should be a sideshow, don't let it be the show.</p>
+        <p>With <i>p2p::authenticated</i>, identity is tied to consensus participation. Once blocked, a Byzantine node can't reconnect without changing their consensus identity—a much higher bar.</p>
+        <h2>The Numbers Don't Lie</h2>
+        <p>The results speak for themselves. By moving from ~50 individual signature verifications per view to just 1-2 batch/aggregate verifications, we've transformed the performance profile of consensus:</p>
+        <ul>
+            <li><b>Block time</b>: 250ms → 200ms (20% reduction)</li>
+            <li><b>Finality</b>: 375ms → 300ms (20% reduction)</li>
+            <li><b>CPU usage</b>: 26% → 9% on a <a href="https://github.com/commonwarexyz/alto/tree/main/chain#create-artifacts-1">c7g.xlarge</a> (65% reduction)</li>
+            <li><b>Bandwidth</b>: 27% reduction through more efficient message handling</li>
+        </ul>
+        <p>That 9% CPU usage is particularly striking. On a 4-core instance, consensus now consumes less than half a core, leaving 91% of the compute available for your application. This isn't just an optimization—it's a fundamental reframing of what consensus should cost.</p>
+        <h2>Consensus as a Sideshow</h2>
+        <p>Too often, consensus dominates the resource profile of blockchain applications. Validators spend most of their cycles verifying signatures, gossiping messages, and managing peer connections. The actual application—the thing users care about—gets whatever scraps remain.</p>
+        <p>Buffered signatures flip this dynamic. By dramatically reducing the cost of agreement, we free applications to use the resources they're paying for. Whether you're building a high-frequency DEX, a social network, or an onchain game, those extra cores are now yours to use.</p>
+        <p>This is what we mean when we say consensus should be a sideshow. The main event is your application. Don't let the infrastructure steal the spotlight.</p>
+        <p><i>Want to see buffered signatures in action? Check out <a href="https://alto.commonware.xyz">Alto's live metrics</a> or dive into the <a href="https://github.com/commonwarexyz/monorepo">implementation</a>. And if you're building something that could benefit from sub-second finality with minimal resource usage, reach out to partners@commonware.xyz.</i></p>
     </div>
 
     <div id="footer-placeholder"></div>
