@@ -93,29 +93,29 @@
         <p>Seeking to progress through consensus as fast as possible, most consensus implementations verify signatures as soon as they are available (often in parallel to avoid slowing down the consensus state machine). This eager verification makes intuitive sense—you want to either enter a new view or finalize a block as soon as possible (and verifying a signature is a prerequisite for either). In fact, doing anything else over traditional gossip is questionable.</p>
         <div class="image-container">
             <img src="../imgs/invalid-signature-gossip.png" alt="Block peers that send invalid signatures">
-            <div class="image-caption">Figure 4: Block peers that send invalid signatures</div>
+            <div class="image-caption">Figure 2: Block peers that send invalid signatures</div>
         </div>
         <p>When peers are tasked with forwarding messages, the recipient (i.e. a validator) can never be sure what they have (and what they have from whom) until verification. A malicious peer could forward a message with a valid signature, tamper with a signature over a message that someone did send (invalid signature), or even hallucinate a message that was never sent (invalid signature). Not to mention, they could block valid peers from sending any messages <a href="https://www.gemini.com/cryptopedia/eclipse-attacks-defense-bitcoin">if they eclipse you</a>.</p>
         <p>With <i>p2p::authenticated</i>, we have the necessary functionality to do something novel: dedicated peer slots. Instead of verifying each peer signature individually as it arrives, we buffer messages in slots dedicated to each registered peer. When we collect a quorum (<i>2f+1</i>) of signatures over the same message, we perform a single multi-signature verification (or batch verification if not using BLS12-381 signatures).</p>
         <div class="image-container">
             <img src="../imgs/buffering.png" alt="Buffer signatures until a quorum is reached">
-            <div class="image-caption">Figure 2: Buffer signatures until a quorum is reached</div>
+            <div class="image-caption">Figure 3: Buffer signatures until a quorum is reached</div>
         </div>
         <h2>Handling Invalid Signatures</h2>
         <p>Now that we aren't verifying messages when they arrive over the wire, one bad apple can spoil the whole bunch. Fortunately, we have one more new tool from <i>p2p::authenticated</i> to help us: identity blocking.</p>
         <p>When a verification fails, a binary search is performed over the buffered signatures to identify the bad apple(s). In the worst case (where <i>f</i> the signatures are invalid), this can lead to more verifications than the original eager approach. However, once identified as malicious, that peer is permanently blocked by its staking identity (and until the binary restarts, unable to send new messages from a new identity or address). Without this blocking, it would indeed be trivial for a set of malicious peers to undermine this optimization (and make it worse than the original eager approach on each view). With identity blocking, however, bisection will only ever happen on a very small number of views over the course of a typical epoch. In a week-long 3,000,000 view epoch, a validator set of 1000 could at most cause disruption in ~333 views (0.011% of views).</p>
         <div class="image-container">
             <img src="../imgs/bisection.png" alt="Search for invalid signatures via repeated bisection">
-            <div class="image-caption">Figure 3: Search for invalid signatures via repeated bisection</div>
+            <div class="image-caption">Figure 4: Search for invalid signatures via repeated bisection</div>
         </div>
         <h2>Reducing Block Time (and Resource Usage)</h2>
-        <p>By transitioning from ~50 individual signature verifications per message to 1-2 aggregate verifications, performance has improved meaningfully (while using less resources):</p>
+        <p>By transitioning from individual signature verifications to 1-2 aggregate verifications per message, the performance of <a href="https://alto.commonware.xyz">Alto</a> improved meaningfully (while using less resources):</p>
         <ul>
             <li><b>Block time</b>: 250ms → 200ms (20% reduction)</li>
             <li><b>Finality</b>: 375ms → 300ms (20% reduction)</li>
             <li><b>CPU usage</b>: 26% → 9% on a <a href="https://github.com/commonwarexyz/alto/tree/main/chain#create-artifacts-1">c7g.xlarge</a> (65% reduction)</li>
         </ul>
-        <p>On a 4-core instance, consensus now consumes less than half a core, leaving 91% of compute available for your application (or for increasing the size of the validator set on the same hardware).</p>
+        <p>On a 4-core instance, the entire overhead of <i>p2p::authenticated</i> and <i>consensus::threshold-simplex</i> is now less than half a core, leaving 91% of compute available for your application (or for increasing the size of the validator set on the same hardware).</p>
         <p>Consensus should be a sideshow, don't let it be the show.</p>
     </div>
 
