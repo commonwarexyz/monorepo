@@ -92,8 +92,16 @@
             <img src="../imgs/buffering.png" alt="Buffer signatures until a quorum is reached">
             <div class="image-caption">Figure 2: Buffer signatures until a quorum is reached</div>
         </div>
-        <p>Instead of verifying each message as soon as it is received, we can buffer signatures over a message until a quorum is reached and then perform a batch/aggregate verification (often dramatically more efficient than verifying all signatures individually). Because we know each consensus participant should only send 1 message of a given variety per view (and we are connected to that peer directly over <i>p2p::authenticated</i>), we just store their message in a slot allocated to exclusively that peer (something we cannot do with "traditional" gossip where a peer may forward the messages of any number of other peers).</p>
-        <p>But not all signatures may be valid, is all lost? We can perform a binary search over
+        <p>Instead of verifying each message as soon as it is received, we can buffer signatures over a message until a quorum is reached and then perform a batch/aggregate verification (often dramatically more efficient than verifying all signatures individually). Because we know each consensus participant should only send 1 message of a given variety per view (and we are connected to that peer directly over <i>p2p::authenticated</i>), we just store their message in a slot allocated to exclusively that peer (something we cannot do with "traditional" gossip where a peer may forward the messages of any number of other peers). But not all signatures may be valid, is all lost?</p>
+        <div class="image-container">
+            <img src="../imgs/bisection.png" alt="Search for invalid signatures via repeated bisection">
+            <div class="image-caption">Figure 3: Search for invalid signatures via repeated bisection</div>
+        </div>
+        <p>We can perform a binary search over the buffered signatures to find any invalid signatures. Because we have authenticated messaging, we can also </p>
+        <div class="image-container">
+            <img src="../imgs/blocking-peers.png" alt="Block peers that send invalid signatures">
+            <div class="image-caption">Figure 4: Block peers that send invalid signatures</div>
+        </div>
 
         <p>As a wise man once said, "If you ain't first, you're last."</p>
         <p>Normally, need to verify each message incoming because you don't know who/where its coming from.</p>
