@@ -109,13 +109,13 @@
             <div class="image-caption">Figure 4: Search for invalid signatures via repeated bisection</div>
         </div>
         <h2>Reducing Block Time (and Resource Usage)</h2>
-        <p>By transitioning from individual signature verifications to 1-2 aggregate verifications per message, the performance of <a href="https://alto.commonware.xyz">Alto</a> improved meaningfully (while using less resources):</p>
+        <p>By transitioning from individual signature verifications to 1-2 aggregate verifications per message, the performance of <a href="https://alto.commonware.xyz">Alto</a> improved significantly (while using less resources):</p>
         <ul>
             <li><b>Block time</b>: 250ms → 200ms (20% reduction)</li>
             <li><b>Finality</b>: 375ms → 300ms (20% reduction)</li>
             <li><b>CPU usage</b>: 26% → 9% on a <a href="https://github.com/commonwarexyz/alto/tree/main/chain#create-artifacts-1">c7g.xlarge</a> (65% reduction)</li>
         </ul>
-        <p>The entire footprint of <i>p2p::authenticated</i> and <i>consensus::threshold-simplex</i> is now less than half a core, leaving plenty of compute available for your application (or for increasing the size of the validator set on the same hardware).</p>
+        <p>The entire footprint of <i>p2p::authenticated</i> and <i>consensus::threshold-simplex</i> is now less than half a core, leaving plenty of compute available for your application to do whatever it does (or for increasing the size of the validator set on the same hardware).</p>
         <p>Consensus should be a sideshow, don't let it be the show.</p>
     </div>
 
