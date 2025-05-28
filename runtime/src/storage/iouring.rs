@@ -10,7 +10,7 @@ use futures::{
 };
 use io_uring::{opcode, squeue::Entry as SqueueEntry, types};
 use std::fs::{self, File};
-use std::io::{Error as IoError, ErrorKind};
+use std::io::Error as IoError;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -234,11 +234,7 @@ impl crate::Blob for Blob {
     // TODO: Make this async. See https://github.com/commonwarexyz/monorepo/issues/831
     async fn truncate(&self, len: u64) -> Result<(), Error> {
         self.file.set_len(len).map_err(|e| {
-            Error::BlobTruncateFailed(
-                self.partition.clone(),
-                hex(&self.name),
-                IoError::new(ErrorKind::Other, e),
-            )
+            Error::BlobTruncateFailed(self.partition.clone(), hex(&self.name), IoError::other(e))
         })
     }
 
@@ -257,7 +253,7 @@ impl crate::Blob for Blob {
                     Error::BlobSyncFailed(
                         self.partition.clone(),
                         hex(&self.name),
-                        IoError::new(ErrorKind::Other, "failed to send work"),
+                        IoError::other("failed to send work"),
                     )
                 })?;
 
@@ -266,7 +262,7 @@ impl crate::Blob for Blob {
                 Error::BlobSyncFailed(
                     self.partition.clone(),
                     hex(&self.name),
-                    IoError::new(ErrorKind::Other, "failed to read result"),
+                    IoError::other("failed to read result"),
                 )
             })?;
             if should_retry(return_value) {
@@ -278,7 +274,7 @@ impl crate::Blob for Blob {
                 return Err(Error::BlobSyncFailed(
                     self.partition.clone(),
                     hex(&self.name),
-                    IoError::new(ErrorKind::Other, format!("error code: {}", return_value)),
+                    IoError::other(format!("error code: {}", return_value)),
                 ));
             }
 
