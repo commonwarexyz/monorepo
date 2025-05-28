@@ -52,24 +52,35 @@ impl<K: Read + Clone + Ord + Hash + Eq, V: Read + Clone> Read for BTreeMap<K, V>
         let mut map = BTreeMap::new(); // BTreeMap does not have a capacity method
 
         // Keep track of the last key read
-        let mut last_key: Option<K> = None;
+        let mut last: Option<(K, V)> = None;
 
         // Read each key-value pair
         for _ in 0..len {
+            // Read key
             let key = K::read_cfg(buf, k_cfg)?;
 
             // Check if keys are in ascending order relative to the previous key
-            if let Some(ref last) = last_key {
-                match key.cmp(last) {
+            if let Some((ref last_key, _)) = last {
+                match key.cmp(last_key) {
                     Ordering::Equal => return Err(Error::Invalid("BTreeMap", "Duplicate key")),
                     Ordering::Less => return Err(Error::Invalid("BTreeMap", "Keys must ascend")),
                     _ => {}
                 }
             }
-            last_key = Some(key.clone());
 
+            // Read value
             let value = V::read_cfg(buf, v_cfg)?;
-            map.insert(key, value);
+
+            // Add last item, if exists
+            if let Some((last_key, last_value)) = last.take() {
+                map.insert(last_key, last_value);
+            }
+            last = Some((key, value));
+        }
+
+        // Add last item, if exists
+        if let Some((last_key, last_value)) = last.take() {
+            map.insert(last_key, last_value);
         }
 
         Ok(map)
@@ -117,24 +128,35 @@ impl<K: Read + Clone + Ord + Hash + Eq, V: Read + Clone> Read for HashMap<K, V> 
         let mut map = HashMap::with_capacity(len);
 
         // Keep track of the last key read
-        let mut last_key: Option<K> = None;
+        let mut last: Option<(K, V)> = None;
 
         // Read each key-value pair
         for _ in 0..len {
+            // Read key
             let key = K::read_cfg(buf, k_cfg)?;
 
             // Check if keys are in ascending order relative to the previous key
-            if let Some(ref last) = last_key {
-                match key.cmp(last) {
+            if let Some((ref last_key, _)) = last {
+                match key.cmp(last_key) {
                     Ordering::Equal => return Err(Error::Invalid("HashMap", "Duplicate key")),
                     Ordering::Less => return Err(Error::Invalid("HashMap", "Keys must ascend")),
                     _ => {}
                 }
             }
-            last_key = Some(key.clone());
 
+            // Read value
             let value = V::read_cfg(buf, v_cfg)?;
-            map.insert(key, value);
+
+            // Add last item, if exists
+            if let Some((last_key, last_value)) = last.take() {
+                map.insert(last_key, last_value);
+            }
+            last = Some((key, value));
+        }
+
+        // Add last item, if exists
+        if let Some((last_key, last_value)) = last.take() {
+            map.insert(last_key, last_value);
         }
 
         Ok(map)

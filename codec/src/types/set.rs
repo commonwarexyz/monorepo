@@ -51,6 +51,7 @@ impl<K: Read + Clone + Ord + Hash + Eq> Read for BTreeSet<K> {
 
         // Read each item
         for _ in 0..len {
+            // Read item
             let item = K::read_cfg(buf, cfg)?;
 
             // Check if items are in ascending order
@@ -61,8 +62,17 @@ impl<K: Read + Clone + Ord + Hash + Eq> Read for BTreeSet<K> {
                     _ => {}
                 }
             }
-            last = Some(item.clone());
-            set.insert(item);
+
+            // Add last item, if exists
+            if let Some(last) = last.take() {
+                set.insert(last);
+            }
+            last = Some(item);
+        }
+
+        // Add last item, if exists
+        if let Some(last) = last.take() {
+            set.insert(last);
         }
 
         Ok(set)
@@ -109,6 +119,7 @@ impl<K: Read + Clone + Ord + Hash + Eq> Read for HashSet<K> {
 
         // Read each item
         for _ in 0..len {
+            // Read item
             let item = K::read_cfg(buf, cfg)?;
 
             // Check if items are in ascending order
@@ -119,8 +130,17 @@ impl<K: Read + Clone + Ord + Hash + Eq> Read for HashSet<K> {
                     _ => {}
                 }
             }
-            last = Some(item.clone());
-            set.insert(item);
+
+            // Add last item, if exists
+            if let Some(last) = last.take() {
+                set.insert(last);
+            }
+            last = Some(item);
+        }
+
+        // Add last item, if exists
+        if let Some(last) = last.take() {
+            set.insert(last);
         }
 
         Ok(set)
