@@ -96,7 +96,7 @@
             <img src="../imgs/invalid-signature-gossip.png" alt="Block peers that send invalid signatures">
             <div class="image-caption">Figure 2: Block peers that send invalid signatures</div>
         </div>
-        <p>With <i>p2p::authenticated</i>, we have the necessary functionality to do something novel: dedicated peer slots. Instead of verifying each peer signature individually as it arrives, we now buffer messages in slots dedicated to each authenticated peer. When we collect a quorum (<i>2f+1</i>) of signatures over some message, we perform a single multi-signature verification (or batch verification if using BLS12-381 signatures) instead of verifying each signature individually (<a href="https://commonware.xyz/benchmarks.html">dramatically reducing the time spent verifying each signature</a>).</p>
+        <p>With <i>p2p::authenticated</i>, we have the necessary functionality to do something novel: dedicated peer slots. Instead of verifying each peer signature individually as it arrives, we now buffer messages in slots dedicated to each authenticated peer. When we collect a quorum (<i>2f+1</i>) of signatures over some message, we perform a single multi-signature verification (with plans to support batch verification if not using BLS12-381 signatures) instead of verifying each signature individually (<a href="https://commonware.xyz/benchmarks.html">dramatically reducing the time spent verifying each signature</a>).</p>
         <div class="image-container">
             <img src="../imgs/buffering.png" alt="Buffer signatures until a quorum is reached">
             <div class="image-caption">Figure 3: Buffer signatures until a quorum is reached</div>
