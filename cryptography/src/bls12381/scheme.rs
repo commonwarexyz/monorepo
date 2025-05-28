@@ -258,9 +258,7 @@ pub struct Signature {
     signature: <MinPk as Variant>::Signature,
 }
 
-impl crate::Signature for Signature {
-    type Public = PublicKey;
-}
+impl crate::Signature for Signature {}
 
 impl AsRef<<MinPk as Variant>::Signature> for Signature {
     fn as_ref(&self) -> &<MinPk as Variant>::Signature {

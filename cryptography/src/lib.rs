@@ -20,7 +20,7 @@ pub trait PrivateKey: Sized + Array {
     /// The corresponding public key type.
     type PublicKey: PublicKey<Private = Self, Signature = Self::Signature>;
     /// The signature type produced by this keypair.
-    type Signature: Signature<Public = Self::PublicKey>;
+    type Signature: Signature;
 
     /// Derive the public key.
     fn public_key(&self) -> Self::PublicKey;
@@ -44,17 +44,14 @@ pub trait PublicKey: Sized + From<Self::Private> + ReadExt + Encode + PartialEq 
     /// The private key it came from.
     type Private: PrivateKey<PublicKey = Self>;
     /// The signature type it verifies.
-    type Signature: Signature<Public = Self>;
+    type Signature;
 
     /// Verify that `sig` is a valid signature over `msg`.
     fn verify(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Self::Signature) -> bool;
 }
 
 /// A signature over a message by some private key.
-pub trait Signature: Sized + Clone + ReadExt + Encode + PartialEq + Array {
-    /// The public key type that can verify this signature.
-    type Public: PublicKey<Signature = Self>;
-}
+pub trait Signature: Sized + Clone + ReadExt + Encode + PartialEq + Array {}
 
 // /// Implementation that can indicate whether all `Signatures` are correct or that some `Signature`
 // /// is incorrect.

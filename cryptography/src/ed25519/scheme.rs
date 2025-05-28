@@ -222,9 +222,7 @@ pub struct Signature {
     signature: ed25519_consensus::Signature,
 }
 
-impl crate::Signature for Signature {
-    type Public = PublicKey;
-}
+impl crate::Signature for Signature {}
 
 impl Write for Signature {
     fn write(&self, buf: &mut impl BufMut) {

@@ -237,9 +237,7 @@ pub struct Signature {
     signature: p256::ecdsa::Signature,
 }
 
-impl crate::Signature for Signature {
-    type Public = PublicKey;
-}
+impl crate::Signature for Signature {}
 
 impl Write for Signature {
     fn write(&self, buf: &mut impl BufMut) {
