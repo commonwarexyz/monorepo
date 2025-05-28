@@ -90,7 +90,12 @@
         <p>The consensus primitives <a href="https://commonware.xyz/blogs/commonware-the-anti-framework.html">we released in December</a> (<a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html">simplex</a>) and <a href="https://commonware.xyz/blogs/threshold-simplex.html">January</a> (<a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/threshold_simplex/index.html">threshold_simplex</a>) built on top of <i>p2p::authenticated</i> but didn't do anything particularly clever with it (the point-to-point messaging alone was enough of an improvement to reach the ~250ms block time in the original Alto launch).</p>
         <p>So, what would something clever look like?</p>
         <h2>Lazy Signature Verification</h2>
-        <p>Here's how signature verification typically works in consensus: a validator receives a message, immediately verifies the signature (possibly in parallel), and then processes it. This eager verification makes intuitive sense as you want to know as soon as possible whether you have enough valid messages to progress.</p>
+        <p>Seeking to progress through consensus as fast as possible, validators typically verify signatures as soon as they receive them (sometimes even in parallel). This eager verification makes intuitive sense—you want to either enter a new view or finalize a block as soon as possible. In fact, doing anything else with a traditional gossip messaging doesn't work.</p>
+        <div class="image-container">
+            <img src="../imgs/invalid-signature-gossip.png" alt="Block peers that send invalid signatures">
+            <div class="image-caption">Figure 4: Block peers that send invalid signatures</div>
+        </div>
+        <p>When peers are tasked with forwarding another's messages, the recipient can never be sure what they have until said messages are verified. A malicious peer could forward a message with a valid signature or tamper with it. They could hallucinate a message that a valid peer never sent. Or even block valid peers from sending any messages <a href="https://www.gemini.com/cryptopedia/eclipse-attacks-defense-bitcoin">if they eclipse you.</a></p>
         <p>But what if we flipped this on its head?</p>
         <p>Instead of verifying each signature individually as it arrives, we buffer them. When we collect a quorum (2f+1) of signatures over the same message, we perform a single multi-signature verification (or batch verification in the case of simplex). This is only possible because <i>p2p::authenticated</i> guarantees that each peer can only send us their own messages—we can allocate a dedicated slot for each peer and trust that slot contains only their signatures.</p>
         <div class="image-container">
@@ -106,10 +111,6 @@
             <div class="image-caption">Figure 3: Search for invalid signatures via repeated bisection</div>
         </div>
         <p>This permanent blocking is another advantage of authenticated connections. In traditional gossip networks, you can't safely block peers for forwarding invalid signatures—they might just be innocent relays of someone else's malicious message. Even if you block them, they can spin up a new identity and continue the attack.</p>
-        <div class="image-container">
-            <img src="../imgs/invalid-signature-gossip.png" alt="Block peers that send invalid signatures">
-            <div class="image-caption">Figure 4: Block peers that send invalid signatures</div>
-        </div>
         <p>With <i>p2p::authenticated</i>, identity is tied to consensus participation. Once blocked, a Byzantine node can't reconnect without changing their consensus identity—a much higher bar.</p>
         <h2>The Numbers Don't Lie</h2>
         <p>The results speak for themselves. By moving from ~50 individual signature verifications per view to just 1-2 batch/aggregate verifications, we've transformed the performance profile of consensus:</p>
