@@ -28,7 +28,7 @@ fn read_ordered_set<K, F>(
 ) -> Result<(), Error>
 where
     K: Read + Ord,
-    F: FnMut(K),
+    F: FnMut(K) -> bool,
 {
     let mut last: Option<K> = None;
     for _ in 0..len {
@@ -91,15 +91,7 @@ impl<K: Read + Clone + Ord + Hash + Eq> Read for BTreeSet<K> {
         let mut set = BTreeSet::new();
 
         // Read items in ascending order
-        read_ordered_set(
-            buf,
-            len,
-            cfg,
-            |item| {
-                set.insert(item);
-            },
-            BTREESET_TYPE,
-        )?;
+        read_ordered_set(buf, len, cfg, |item| set.insert(item), BTREESET_TYPE)?;
 
         Ok(set)
     }
@@ -141,15 +133,7 @@ impl<K: Read + Clone + Ord + Hash + Eq> Read for HashSet<K> {
         let mut set = HashSet::with_capacity(len);
 
         // Read items in ascending order
-        read_ordered_set(
-            buf,
-            len,
-            cfg,
-            |item| {
-                set.insert(item);
-            },
-            HASHSET_TYPE,
-        )?;
+        read_ordered_set(buf, len, cfg, |item| set.insert(item), HASHSET_TYPE)?;
 
         Ok(set)
     }

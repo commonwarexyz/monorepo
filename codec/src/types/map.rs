@@ -30,7 +30,7 @@ fn read_ordered_map<K, V, F>(
 where
     K: Read + Ord,
     V: Read,
-    F: FnMut(K, V),
+    F: FnMut(K, V) -> Option<V>,
 {
     let mut last: Option<(K, V)> = None;
     for _ in 0..len {
@@ -106,9 +106,7 @@ impl<K: Read + Clone + Ord + Hash + Eq, V: Read + Clone> Read for BTreeMap<K, V>
             len,
             k_cfg,
             v_cfg,
-            |k, v| {
-                map.insert(k, v);
-            },
+            |k, v| map.insert(k, v),
             BTREEMAP_TYPE,
         )?;
 
@@ -162,9 +160,7 @@ impl<K: Read + Clone + Ord + Hash + Eq, V: Read + Clone> Read for HashMap<K, V> 
             len,
             k_cfg,
             v_cfg,
-            |k, v| {
-                map.insert(k, v);
-            },
+            |k, v| map.insert(k, v),
             HASHMAP_TYPE,
         )?;
 
