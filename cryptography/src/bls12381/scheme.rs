@@ -133,8 +133,7 @@ impl crate::PrivateKey for PrivateKey {
 
     // TODO remove duplicate impl
     fn public_key(&self) -> Self::PublicKey {
-        let public = ops::compute_public::<MinPk>(&self.key);
-        PublicKey::from(public)
+        PublicKey::from(ops::compute_public::<MinPk>(&self.key))
     }
 
     fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Self::Signature {
@@ -151,7 +150,6 @@ impl crate::PrivateKey for PrivateKey {
 
 impl crate::PublicKey for PublicKey {
     type Private = PrivateKey;
-
     type Signature = Signature;
 
     fn verify(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Self::Signature) -> bool {
@@ -168,8 +166,7 @@ pub struct PublicKey {
 
 impl From<PrivateKey> for PublicKey {
     fn from(private_key: PrivateKey) -> Self {
-        let public = ops::compute_public::<MinPk>(&private_key.key);
-        PublicKey::from(public)
+        PublicKey::from(ops::compute_public::<MinPk>(&private_key.key))
     }
 }
 

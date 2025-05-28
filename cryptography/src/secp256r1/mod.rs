@@ -21,7 +21,8 @@
 //!
 //! // Verify the signature
 //! assert!(signer.public_key().verify(namespace, msg, &signature));
-// ```
+//! ```
+
 mod scheme;
 
 pub use scheme::{PrivateKey, PublicKey, Signature};

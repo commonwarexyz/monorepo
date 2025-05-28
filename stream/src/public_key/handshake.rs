@@ -45,7 +45,6 @@ impl<K: PublicKey> Read for Info<K> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        // let recipient = K::read(buf)?;
         let recipient = K::read(buf)?;
         let ephemeral_public_key = x25519::PublicKey::read(buf)?;
         let timestamp = UInt::read(buf)?.into();

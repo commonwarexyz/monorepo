@@ -155,7 +155,6 @@ impl From<PrivateKey> for PublicKey {
 
 impl crate::PublicKey for PublicKey {
     type Private = PrivateKey;
-
     type Signature = Signature;
 
     fn verify(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Self::Signature) -> bool {
