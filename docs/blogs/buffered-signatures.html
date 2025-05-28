@@ -90,14 +90,14 @@
         <p>The consensus primitives <a href="https://commonware.xyz/blogs/commonware-the-anti-framework.html">we released in December</a> (<a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html">simplex</a>) and <a href="https://commonware.xyz/blogs/threshold-simplex.html">January</a> (<a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/threshold_simplex/index.html">threshold_simplex</a>) built on top of <i>p2p::authenticated</i> but didn't do anything particularly clever with its unique functionality (it turns out point-to-point messaging alone was enough of an improvement to reach the ~250ms block time in the original Alto launch).</p>
         <p>So, what would something clever look like?</p>
         <h2>Rethinking Signature Verification</h2>
-        <p>Here's how signature verification typically works in consensus: a validator receives a message, immediately verifies the signature, and only then processes it. This eager verification makes intuitive sense—you want to know as soon as possible whether you have enough valid messages to progress.</p>
+        <p>Here's how signature verification typically works in consensus: a validator receives a message, immediately verifies the signature (possibly in parallel), and then processes it. This eager verification makes intuitive sense as you want to know as soon as possible whether you have enough valid messages to progress.</p>
         <p>But what if we flipped this on its head?</p>
         <p>Instead of verifying each signature individually as it arrives, we buffer them. When we collect a quorum (2f+1) of signatures over the same message, we perform a single multi-signature verification (or batch verification in the case of simplex). This is only possible because <i>p2p::authenticated</i> guarantees that each peer can only send us their own messages—we can allocate a dedicated slot for each peer and trust that slot contains only their signatures.</p>
         <div class="image-container">
             <img src="../imgs/buffering.png" alt="Buffer signatures until a quorum is reached">
             <div class="image-caption">Figure 2: Buffer signatures until a quorum is reached</div>
         </div>
-        <p>With traditional gossip, this approach would be impossible. When any peer can forward any other peer's messages, you can't maintain clean per-peer state. You must verify everything immediately or risk accepting invalid signatures.</p>
+        <p>With traditional gossip, this approach would be much more difficult (if not impossible). When any peer can forward any other peer's messages, you can't maintain clean per-peer state. You must verify everything immediately or risk a malicious peer stuffing a slot with junk (before an actual peer can communicate).</p>
         <h2>Handling Invalid Signatures</h2>
         <p>But wait—what happens when someone sends an invalid signature? If we're batch verifying, doesn't one bad apple spoil the whole bunch?</p>
         <p>Not quite. When a batch verification fails, we perform a binary search over the buffered signatures to identify the culprit. In the worst case (where half the signatures are invalid), this requires O(n log n) individual verifications. But here's the key: Byzantine nodes that send invalid signatures get permanently blocked.</p>
