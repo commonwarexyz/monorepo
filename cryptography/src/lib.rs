@@ -16,12 +16,9 @@ pub use sha256::{hash, Sha256};
 pub mod secp256r1;
 
 /// A private key, able to derive its public key and sign messages.
-pub trait PrivateKey: Sized + Clone + Array
-where
-    Self::PublicKey: PublicKey<Private = Self, Signature = Self::Signature>,
-{
+pub trait PrivateKey: Sized + Array {
     /// The corresponding public key type.
-    type PublicKey: PublicKey<Private = Self>;
+    type PublicKey: PublicKey<Private = Self, Signature = Self::Signature>;
     /// The signature type produced by this keypair.
     type Signature: Signature<Public = Self::PublicKey>;
 
@@ -41,9 +38,7 @@ where
 }
 
 /// A public key, able to verify signatures.
-pub trait PublicKey:
-    Sized + Clone + From<Self::Private> + ReadExt + Encode + PartialEq + Array
-{
+pub trait PublicKey: Sized + From<Self::Private> + ReadExt + Encode + PartialEq + Array {
     /// The private key it came from.
     type Private: PrivateKey<PublicKey = Self>;
     /// The signature type it verifies.
