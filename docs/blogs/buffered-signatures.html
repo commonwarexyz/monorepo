@@ -90,7 +90,7 @@
         <p>The consensus primitives <a href="https://commonware.xyz/blogs/commonware-the-anti-framework.html">we released in December</a> (<a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html">simplex</a>) and <a href="https://commonware.xyz/blogs/threshold-simplex.html">January</a> (<a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/threshold_simplex/index.html">threshold_simplex</a>) built on top of <i>p2p::authenticated</i> but didn't do anything particularly clever with it (the point-to-point messaging alone was enough of an improvement to reach the ~250ms block time in the original Alto launch).</p>
         <p>So, what would something clever look like?</p>
         <h2>Lazy Signature Verification</h2>
-        <p>Seeking to progress through consensus as fast as possible, validators typically verify signatures as soon as they receive them (sometimes even in parallel). This eager verification makes intuitive sense—you want to either enter a new view or finalize a block as soon as possible. In fact, doing anything else with a traditional gossip messaging doesn't work.</p>
+        <p>Seeking to progress through consensus as fast as possible, validators typically verify signatures as soon as they receive them (sometimes even in parallel). This eager verification makes intuitive sense—you want to either enter a new view or finalize a block as soon as possible. In fact, doing anything else with a traditional gossip messaging won't work.</p>
         <div class="image-container">
             <img src="../imgs/invalid-signature-gossip.png" alt="Block peers that send invalid signatures">
             <div class="image-caption">Figure 4: Block peers that send invalid signatures</div>
@@ -102,8 +102,8 @@
             <div class="image-caption">Figure 2: Buffer signatures until a quorum is reached</div>
         </div>
         <h2>Handling Invalid Signatures</h2>
-        <p>But wait—what happens when someone sends an invalid signature? If we're batch verifying, doesn't one bad apple spoil the whole bunch?</p>
-        <p>Not quite. When a batch verification fails, we perform a binary search over the buffered signatures to identify the culprit. In the worst case (where half the signatures are invalid), this requires O(n log n) individual verifications. But here's the key: Byzantine nodes that send invalid signatures get permanently blocked.</p>
+        <p>This lazy aggregate verification is nice and all but now that we aren't verifying messages when they arrive over the wire, one bad apple can spoil the whole bunch. Fortunately, we have one more new tool from <i>p2p::authenticated</i> to help us: identity blocking.</p>
+        <p>When a verification fails, the validator performs a binary search over the buffered signatures to identify the culprit(s). In the worst case (where f the signatures are invalid), this can lead to more verifications than the original eager approach. However, once identified as malicious, that peer is permanently blocked by its staking identity (and can't from a new address or bombard said validator with invalid signatures via some forwarded channel).</p>
         <div class="image-container">
             <img src="../imgs/bisection.png" alt="Search for invalid signatures via repeated bisection">
             <div class="image-caption">Figure 3: Search for invalid signatures via repeated bisection</div>
