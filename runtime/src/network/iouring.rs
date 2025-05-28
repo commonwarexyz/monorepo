@@ -281,6 +281,7 @@ mod tests {
         iouring::Config,
         network::{iouring::Network, tests},
     };
+    use std::time::Duration;
 
     #[tokio::test]
     async fn test_trait() {
@@ -294,7 +295,12 @@ mod tests {
     #[ignore]
     async fn stress_test_trait() {
         tests::stress_test_network_trait(|| {
-            Network::start(Config::default()).expect("Failed to start io_uring")
+            Network::start(Config {
+                size: 256,
+                force_poll: Some(Duration::from_millis(100)),
+                ..Default::default()
+            })
+            .expect("Failed to start io_uring")
         })
         .await;
     }
