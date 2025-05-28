@@ -15,6 +15,55 @@ use std::{
     hash::Hash,
 };
 
+const BTREEMAP_TYPE: &str = "BTreeMap";
+const HASHMAP_TYPE: &str = "HashMap";
+
+/// Read keyed items from [Buf] in ascending order.
+fn read_ordered_map<K, V, F>(
+    buf: &mut impl Buf,
+    len: usize,
+    k_cfg: &K::Cfg,
+    v_cfg: &V::Cfg,
+    mut insert: F,
+    map_type: &'static str,
+) -> Result<(), Error>
+where
+    K: Read + Ord,
+    V: Read,
+    F: FnMut(K, V) -> Option<V>,
+{
+    let mut last: Option<(K, V)> = None;
+    for _ in 0..len {
+        // Read key
+        let key = K::read_cfg(buf, k_cfg)?;
+
+        // Check if keys are in ascending order relative to the previous key
+        if let Some((ref last_key, _)) = last {
+            match key.cmp(last_key) {
+                Ordering::Equal => return Err(Error::Invalid(map_type, "Duplicate key")),
+                Ordering::Less => return Err(Error::Invalid(map_type, "Keys must ascend")),
+                _ => {}
+            }
+        }
+
+        // Read value
+        let value = V::read_cfg(buf, v_cfg)?;
+
+        // Add previous item, if exists
+        if let Some((last_key, last_value)) = last.take() {
+            insert(last_key, last_value);
+        }
+        last = Some((key, value));
+    }
+
+    // Add last item, if exists
+    if let Some((last_key, last_value)) = last {
+        insert(last_key, last_value);
+    }
+
+    Ok(())
+}
+
 // ---------- BTreeMap ----------
 
 impl<K: Ord + Hash + Eq + Write, V: Write> Write for BTreeMap<K, V> {
@@ -49,28 +98,17 @@ impl<K: Read + Clone + Ord + Hash + Eq, V: Read + Clone> Read for BTreeMap<K, V>
     fn read_cfg(buf: &mut impl Buf, (range, (k_cfg, v_cfg)): &Self::Cfg) -> Result<Self, Error> {
         // Read and validate the length prefix
         let len = usize::read_cfg(buf, range)?;
-        let mut map = BTreeMap::new(); // BTreeMap does not have a capacity method
+        let mut map = BTreeMap::new();
 
-        // Keep track of the last key read
-        let mut last_key: Option<K> = None;
-
-        // Read each key-value pair
-        for _ in 0..len {
-            let key = K::read_cfg(buf, k_cfg)?;
-
-            // Check if keys are in ascending order relative to the previous key
-            if let Some(ref last) = last_key {
-                match key.cmp(last) {
-                    Ordering::Equal => return Err(Error::Invalid("BTreeMap", "Duplicate key")),
-                    Ordering::Less => return Err(Error::Invalid("BTreeMap", "Keys must ascend")),
-                    _ => {}
-                }
-            }
-            last_key = Some(key.clone());
-
-            let value = V::read_cfg(buf, v_cfg)?;
-            map.insert(key, value);
-        }
+        // Read items in ascending order
+        read_ordered_map(
+            buf,
+            len,
+            k_cfg,
+            v_cfg,
+            |k, v| map.insert(k, v),
+            BTREEMAP_TYPE,
+        )?;
 
         Ok(map)
     }
@@ -116,26 +154,15 @@ impl<K: Read + Clone + Ord + Hash + Eq, V: Read + Clone> Read for HashMap<K, V> 
         let len = usize::read_cfg(buf, range)?;
         let mut map = HashMap::with_capacity(len);
 
-        // Keep track of the last key read
-        let mut last_key: Option<K> = None;
-
-        // Read each key-value pair
-        for _ in 0..len {
-            let key = K::read_cfg(buf, k_cfg)?;
-
-            // Check if keys are in ascending order relative to the previous key
-            if let Some(ref last) = last_key {
-                match key.cmp(last) {
-                    Ordering::Equal => return Err(Error::Invalid("HashMap", "Duplicate key")),
-                    Ordering::Less => return Err(Error::Invalid("HashMap", "Keys must ascend")),
-                    _ => {}
-                }
-            }
-            last_key = Some(key.clone());
-
-            let value = V::read_cfg(buf, v_cfg)?;
-            map.insert(key, value);
-        }
+        // Read items in ascending order
+        read_ordered_map(
+            buf,
+            len,
+            k_cfg,
+            v_cfg,
+            |k, v| map.insert(k, v),
+            HASHMAP_TYPE,
+        )?;
 
         Ok(map)
     }
