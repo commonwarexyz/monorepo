@@ -320,7 +320,7 @@ impl<St: Stream> crate::Receiver for Receiver<St> {
 mod tests {
     use super::*;
     use crate::{Receiver as _, Sender as _};
-    use commonware_cryptography::ed25519;
+    use commonware_cryptography::{ed25519, PrivateKeyGen as _};
     use commonware_runtime::{deterministic, mocks, Metrics, Runner};
     use std::time::Duration;
 

@@ -215,7 +215,7 @@ mod tests {
             dkg::ops,
             primitives::variant::{MinPk, MinSig, Variant},
         },
-        ed25519, PrivateKey as _, Sha256,
+        ed25519, PrivateKey as _, PrivateKeyGen as _, Sha256,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};

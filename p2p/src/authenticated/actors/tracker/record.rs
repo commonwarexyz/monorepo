@@ -292,13 +292,13 @@ mod tests {
     use super::*;
     use crate::authenticated::types::PeerInfo;
     use commonware_codec::Encode;
-    use commonware_cryptography::secp256r1;
+    use commonware_cryptography::{secp256r1, PrivateKeyGen};
     use std::net::SocketAddr;
 
     // Helper function to create signed peer info for testing
     fn create_peer_info<S>(signer_seed: u64, socket: SocketAddr, timestamp: u64) -> PeerInfo<S>
     where
-        S: PrivateKey,
+        S: PrivateKeyGen,
         S::PublicKey: Clone + PartialEq + std::fmt::Debug,
         S::Signature: Clone + PartialEq + std::fmt::Debug,
     {

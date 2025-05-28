@@ -248,7 +248,7 @@ mod tests {
     use super::*;
     use bytes::BytesMut;
     use commonware_codec::{Decode, DecodeRangeExt};
-    use commonware_cryptography::secp256r1;
+    use commonware_cryptography::{secp256r1, PrivateKeyGen as _};
 
     fn signed_peer_info() -> PeerInfo<secp256r1::PrivateKey> {
         let mut rng = rand::thread_rng();

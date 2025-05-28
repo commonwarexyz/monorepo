@@ -135,7 +135,7 @@ mod tests {
     use super::*;
     use crate::Monitor;
     use commonware_cryptography::{
-        ed25519, sha256::Digest as Sha256Digest, PrivateKey as _, Sha256,
+        ed25519, sha256::Digest as Sha256Digest, PrivateKey as _, PrivateKeyGen as _, Sha256,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};

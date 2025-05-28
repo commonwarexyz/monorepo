@@ -702,7 +702,7 @@ impl Link {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{ed25519, PrivateKey as _};
+    use commonware_cryptography::{ed25519, PrivateKey as _, PrivateKeyGen as _};
     use commonware_runtime::{deterministic, Runner};
 
     const MAX_MESSAGE_SIZE: usize = 1024 * 1024;

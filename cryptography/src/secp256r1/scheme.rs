@@ -1,4 +1,4 @@
-use crate::Array;
+use crate::{Array, PrivateKeyGen};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_utils::{hex, union_unique};
@@ -54,7 +54,9 @@ impl crate::PrivateKey for PrivateKey {
     fn public_key(&self) -> Self::PublicKey {
         PublicKey::from(self.key.verifying_key().to_owned())
     }
+}
 
+impl PrivateKeyGen for PrivateKey {
     fn from_rng<R: Rng + CryptoRng>(rng: &mut R) -> Self {
         let key = SigningKey::random(rng);
         let raw = key.to_bytes().into();

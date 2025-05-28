@@ -825,6 +825,7 @@ mod tests {
         },
         ed25519::{self, PublicKey},
         sha256::Digest as Sha256Digest,
+        PrivateKeyGen as _,
     };
     use commonware_utils::quorum;
     use rand::{rngs::StdRng, SeedableRng};

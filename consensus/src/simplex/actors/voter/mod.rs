@@ -47,7 +47,7 @@ mod tests {
         types::{Finalization, Finalize, Notarization, Notarize, Proposal, Viewable, Voter},
     };
     use commonware_codec::Encode;
-    use commonware_cryptography::{ed25519, hash, Sha256};
+    use commonware_cryptography::{ed25519, hash, PrivateKeyGen as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_p2p::{
         simulated::{Config as NConfig, Link, Network},

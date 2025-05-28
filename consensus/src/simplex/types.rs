@@ -1508,7 +1508,7 @@ impl<S: Array, D: Digest> Attributable for NullifyFinalize<S, D> {
 mod tests {
     use super::*;
     use commonware_codec::{Decode, DecodeExt, Encode};
-    use commonware_cryptography::{ed25519, sha256::Digest as Sha256Digest};
+    use commonware_cryptography::{ed25519, sha256::Digest as Sha256Digest, PrivateKeyGen as _};
     use commonware_utils::array::U64;
 
     const NAMESPACE: &[u8] = b"test";
