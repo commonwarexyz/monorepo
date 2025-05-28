@@ -99,7 +99,7 @@
         </div>
         <p>We can perform a binary search over the buffered signatures to find any invalid signatures. Because we have authenticated messaging, we can also persistently block peers that send invalid signatures (prohibiting them from ever sending us a message again). With "traditional" gossip, this isn't safe to do (because the peer forwarding the message may simply tamper with a valid signature inflight). You can block a "traditional" peer but they can just move to a new address/identity (often not affiliated with a consensus identity) and restart the attack (not to mention an honest peer would still have to verify all incoming messages to avoid being blocked, or risk delaying propagation of messages).</p>
         <div class="image-container">
-            <img src="../imgs/blocking-peers.png" alt="Block peers that send invalid signatures">
+            <img src="../imgs/invalid-signature-gossip.png" alt="Block peers that send invalid signatures">
             <div class="image-caption">Figure 4: Block peers that send invalid signatures</div>
         </div>
         <p>The result? Faster views and faster finality (1-2 batch/aggregate verifications instead of 50 individual verifications). Now running at just 9% of CPU on a <a href="https://github.com/commonwarexyz/alto/tree/main/chain#create-artifacts-1">c7g.xlarge</a>, there is 91% of CPU free for your application to use.</p>
