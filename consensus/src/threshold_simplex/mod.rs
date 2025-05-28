@@ -164,6 +164,8 @@
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 
+use types::View;
+
 pub mod types;
 
 cfg_if::cfg_if! {
@@ -173,11 +175,36 @@ cfg_if::cfg_if! {
         pub use config::Config;
         mod engine;
         pub use engine::Engine;
+        mod metrics;
     }
 }
 
 #[cfg(test)]
 pub mod mocks;
+
+/// The minimum view we are tracking both in-memory and on-disk.
+pub(crate) fn min_active(activity_timeout: View, last_finalized: View) -> View {
+    last_finalized.saturating_sub(activity_timeout)
+}
+
+/// Whether or not a view is interesting to us. This is a function
+/// of both `min_active` and whether or not the view is too far
+/// in the future (based on the view we are currently in).
+pub(crate) fn interesting(
+    activity_timeout: View,
+    last_finalized: View,
+    current: View,
+    pending: View,
+    allow_future: bool,
+) -> bool {
+    if pending < min_active(activity_timeout, last_finalized) {
+        return false;
+    }
+    if !allow_future && pending > current + 1 {
+        return false;
+    }
+    true
+}
 
 #[cfg(test)]
 mod tests {

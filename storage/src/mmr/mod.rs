@@ -68,7 +68,7 @@
 //! ```
 
 use crate::mmr::hasher::Hasher;
-use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_cryptography::Hasher as CHasher;
 use commonware_utils::array::prefixed_u64::U64;
 use std::future::Future;
 use thiserror::Error;
@@ -78,18 +78,10 @@ pub mod hasher;
 pub mod iterator;
 pub mod journaled;
 pub mod mem;
+pub mod storage;
 #[cfg(test)]
 mod tests;
 pub mod verification;
-
-/// A trait for accessing MMR digests from storage.
-pub trait Storage<D: Digest>: Send + Sync {
-    /// Return the number of elements in the MMR.
-    fn size(&self) -> u64;
-
-    /// Return the specified node of the MMR if it exists & hasn't been pruned.
-    fn get_node(&self, position: u64) -> impl Future<Output = Result<Option<D>, Error>> + Send;
-}
 
 /// A trait for building an MMR and computing the root.
 pub trait Builder<H: CHasher>: Send + Sync {

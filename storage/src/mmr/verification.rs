@@ -1,11 +1,12 @@
 //! Defines the inclusion `Proof` structure, functions for generating them from any MMR implementing
-//! the `Storage` trait, and functions for verifying them against a root hash.
+//! the `Storage` trait, and functions for verifying them against a root digest.
 
 use crate::mmr::{
-    iterator::{PathIterator, PeakIterator},
+    iterator::{leaf_pos_to_num, PathIterator, PeakIterator},
+    storage::Storage,
     Error,
     Error::*,
-    Hasher, Storage,
+    Hasher,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{FixedSize, ReadExt};
@@ -14,7 +15,7 @@ use futures::future::try_join_all;
 use tracing::debug;
 
 /// Contains the information necessary for proving the inclusion of an element, or some range of
-/// elements, in the MMR from its root hash.
+/// elements, in the MMR from its root digest.
 ///
 /// The `digests` vector contains:
 ///
@@ -53,7 +54,7 @@ impl<H: CHasher> Proof<H> {
     }
 
     /// Return true if `proof` proves that the `elements` appear consecutively between positions
-    /// `start_element_pos` through `end_element_pos` (inclusive) within the MMR with root hash
+    /// `start_element_pos` through `end_element_pos` (inclusive) within the MMR with root
     /// `root_digest`.
     pub async fn verify_range_inclusion<M: Hasher<H>, T>(
         &self,
@@ -66,6 +67,14 @@ impl<H: CHasher> Proof<H> {
     where
         T: IntoIterator<Item: AsRef<[u8]>>,
     {
+        if leaf_pos_to_num(start_element_pos).is_none() {
+            debug!(pos = start_element_pos, "start pos is not a leaf");
+            return Ok(false);
+        }
+        if end_element_pos != start_element_pos && leaf_pos_to_num(end_element_pos).is_none() {
+            debug!(pos = end_element_pos, "end pos is not a leaf");
+            return Ok(false);
+        }
         match self
             .reconstruct_root(hasher, elements, start_element_pos, end_element_pos)
             .await
@@ -83,7 +92,9 @@ impl<H: CHasher> Proof<H> {
         }
     }
 
-    pub(super) async fn reconstruct_root<M: Hasher<H>, T>(
+    /// Reconstructs the root digest of the MMR from the digests in the proof and the provided range
+    /// of elements.
+    pub async fn reconstruct_root<M: Hasher<H>, T>(
         &self,
         hasher: &mut M,
         elements: T,
@@ -239,25 +250,25 @@ impl<H: CHasher> Proof<H> {
         let mut start_tree_with_element = (u64::MAX, 0);
         let mut end_tree_with_element = (u64::MAX, 0);
         let mut peak_iterator = PeakIterator::new(size);
-        while let Some(item) = peak_iterator.next() {
-            if start_tree_with_element.0 == u64::MAX && item.0 >= start_element_pos {
+        while let Some(peak) = peak_iterator.next() {
+            if start_tree_with_element.0 == u64::MAX && peak.0 >= start_element_pos {
                 // Found the first tree to contain an element in the range
-                start_tree_with_element = item;
-                if item.0 >= end_element_pos {
+                start_tree_with_element = peak;
+                if peak.0 >= end_element_pos {
                     // Start and end tree are the same
-                    end_tree_with_element = item;
+                    end_tree_with_element = peak;
                     continue;
                 }
-                for item in peak_iterator.by_ref() {
-                    if item.0 >= end_element_pos {
+                for peak in peak_iterator.by_ref() {
+                    if peak.0 >= end_element_pos {
                         // Found the last tree to contain an element in the range
-                        end_tree_with_element = item;
+                        end_tree_with_element = peak;
                         break;
                     }
                 }
             } else {
                 // Tree is outside the range, its peak is thus required.
-                positions.push(item.0);
+                positions.push(peak.0);
             }
         }
         assert!(start_tree_with_element.0 != u64::MAX);
@@ -298,9 +309,8 @@ impl<H: CHasher> Proof<H> {
         positions
     }
 
-    /// Return an inclusion proof for the specified range of elements, inclusive of both endpoints.
-    ///
-    /// Returns ElementPruned error if some element needed to generate the proof has been pruned.
+    /// Return an inclusion proof for the specified range of elements, inclusive of both endpoints. Returns
+    /// ElementPruned error if some element needed to generate the proof has been pruned.
     pub async fn range_proof<S: Storage<H::Digest>>(
         mmr: &S,
         start_element_pos: u64,
@@ -639,7 +649,7 @@ mod tests {
                     );
                 }
             }
-            // confirm proof fails with invalid root hash
+            // confirm proof fails with invalid root
             let invalid_root_digest = test_digest(1);
             assert!(
                 !range_proof
@@ -652,7 +662,7 @@ mod tests {
                     )
                     .await
                     .unwrap(),
-                "range proof with invalid root hash should fail"
+                "range proof with invalid root should fail"
             );
             // mangle the proof and confirm it fails
             let mut invalid_proof = range_proof.clone();

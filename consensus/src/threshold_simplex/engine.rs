@@ -70,6 +70,20 @@ impl<
         // Ensure configuration is valid
         cfg.assert();
 
+        // Create batcher
+        let (batcher, batcher_mailbox) = batcher::Actor::new(
+            context.with_label("batcher"),
+            batcher::Config {
+                blocker: cfg.blocker.clone(),
+                reporter: cfg.reporter.clone(),
+                supervisor: cfg.supervisor.clone(),
+                namespace: cfg.namespace.clone(),
+                mailbox_size: cfg.mailbox_size,
+                activity_timeout: cfg.activity_timeout,
+                skip_timeout: cfg.skip_timeout,
+            },
+        );
+
         // Create voter
         let (voter, voter_mailbox) = voter::Actor::new(
             context.with_label("voter"),
@@ -78,7 +92,7 @@ impl<
                 blocker: cfg.blocker.clone(),
                 automaton: cfg.automaton,
                 relay: cfg.relay,
-                reporter: cfg.reporter.clone(),
+                reporter: cfg.reporter,
                 supervisor: cfg.supervisor.clone(),
                 partition: cfg.partition,
                 compression: cfg.compression,
@@ -91,20 +105,6 @@ impl<
                 replay_concurrency: cfg.replay_concurrency,
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,
-            },
-        );
-
-        // Create batcher
-        let (batcher, batcher_mailbox) = batcher::Actor::new(
-            context.with_label("batcher"),
-            batcher::Config {
-                blocker: cfg.blocker.clone(),
-                reporter: cfg.reporter,
-                supervisor: cfg.supervisor.clone(),
-                namespace: cfg.namespace.clone(),
-                mailbox_size: cfg.mailbox_size,
-                activity_timeout: cfg.activity_timeout,
-                skip_timeout: cfg.skip_timeout,
             },
         );
 

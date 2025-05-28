@@ -1,11 +1,13 @@
 //! Decorator for a cryptographic hasher that implements the MMR-specific hashing logic.
 
 use crate::mmr::{
-    iterator::{leaf_num_to_pos, leaf_pos_to_num},
-    Error, Storage,
+    iterator::{leaf_pos_to_num, pos_to_height},
+    storage::Storage,
+    Error,
 };
 use commonware_cryptography::Hasher as CHasher;
 use std::future::Future;
+use tracing::debug;
 
 /// A trait for computing the various digests of an MMR.
 pub trait Hasher<H: CHasher>: Send + Sync {
@@ -23,7 +25,7 @@ pub trait Hasher<H: CHasher>: Send + Sync {
     /// decreasing order of height.
     fn root_digest<'b>(
         &mut self,
-        pos: u64,
+        size: u64,
         peak_digests: impl Iterator<Item = &'b H::Digest>,
     ) -> H::Digest;
 
@@ -83,10 +85,10 @@ impl<H: CHasher> Hasher<H> for Standard<'_, H> {
 
     fn root_digest<'b>(
         &mut self,
-        pos: u64,
+        size: u64,
         peak_digests: impl Iterator<Item = &'b H::Digest>,
     ) -> H::Digest {
-        self.update_with_pos(pos);
+        self.update_with_pos(size);
         for digest in peak_digests {
             self.update_with_digest(digest);
         }
@@ -181,36 +183,94 @@ impl<'a, H: CHasher, S: Storage<H::Digest>> Grafting<'a, H, S> {
 
     /// Compute the position of the leaf in the base tree onto which we should graft the leaf at
     /// position `pos` in the source tree.
-    ///
-    /// This position is computed by walking up the MMR exactly self.height steps from the leaf.
-    /// Since we don't know exactly where in the subtree this leaf falls, we map it to the
-    /// right-most leaf in the subtree and walk up from there. Runtime is O(log2(n)) in the given
-    /// position.
     fn destination_pos(&self, pos: u64) -> u64 {
-        let peak_leaf_num = leaf_pos_to_num(pos).unwrap();
-        let chunk_size_bits = 1 << self.height;
-
-        // The rightmost-leaf in the corresponding segment of the peak tree:
-        let base_leaf_num = (peak_leaf_num * chunk_size_bits) + chunk_size_bits - 1;
-
-        // Walking up self.height levels from the rightmost leaf involves simply adding self.height
-        // to its position.
-        leaf_num_to_pos(base_leaf_num) + self.height as u64
+        destination_pos(pos, self.height)
     }
+}
+
+/// Compute the position of the node in the base tree onto which we should graft the node at
+/// position `pos` in the source tree.
+///
+/// This algorithm performs walks down corresponding branches of the peak and base trees. When we
+/// find the node in the peak tree we are looking for, we return the position of the corresponding
+/// node reached in the base tree.
+fn destination_pos(peak_node_pos: u64, height: u32) -> u64 {
+    let leading_zeros = (peak_node_pos + 1).leading_zeros();
+    let mut peak_pos = u64::MAX >> leading_zeros;
+    let mut base_pos = u64::MAX >> (leading_zeros - height);
+    let mut peak_height = peak_pos.trailing_ones() - 1;
+    let mut base_height = peak_height + height;
+    peak_pos -= 1;
+    base_pos -= 1;
+
+    while base_height >= height {
+        if peak_pos == peak_node_pos {
+            break;
+        }
+
+        let left_pos = peak_pos - (1 << peak_height);
+        if left_pos < peak_node_pos {
+            peak_pos -= 1;
+            base_pos -= 1;
+        } else {
+            peak_pos = left_pos;
+            base_pos -= 1 << base_height;
+        }
+
+        peak_height -= 1;
+        base_height -= 1;
+    }
+
+    base_pos
+}
+
+/// Inverse computation of destination_pos, with an analogous implementation involving walks down
+/// corresponding branches of both trees. Returns none if there is no corresponding node.
+pub(super) fn source_pos(base_node_pos: u64, height: u32) -> Option<u64> {
+    if pos_to_height(base_node_pos) < height {
+        // Nodes below the grafting height do not have a corresponding peak tree node.
+        return None;
+    }
+
+    let leading_zeros = (base_node_pos + 1).leading_zeros();
+    let mut base_pos = u64::MAX >> leading_zeros;
+    let mut peak_pos = u64::MAX >> (leading_zeros + height);
+    let mut base_height = base_pos.trailing_ones() - 1;
+    let mut peak_height = base_height - height;
+    base_pos -= 1;
+    peak_pos -= 1;
+
+    while base_pos != base_node_pos {
+        let left_pos = base_pos - (1 << base_height);
+        if left_pos < base_node_pos {
+            base_pos -= 1;
+            peak_pos -= 1;
+        } else {
+            base_pos = left_pos;
+            peak_pos -= 1 << peak_height;
+        }
+
+        base_height -= 1;
+        peak_height -= 1;
+    }
+
+    Some(peak_pos)
 }
 
 impl<H: CHasher, S: Storage<H::Digest>> Hasher<H> for Grafting<'_, H, S> {
     async fn leaf_digest(&mut self, pos: u64, element: &[u8]) -> Result<H::Digest, Error> {
         let base_node_pos = self.destination_pos(pos);
-        if base_node_pos >= self.base_mmr.size() {
-            // The base tree doesn't yet have a node where we can graft this position.
-            return self.hasher.leaf_digest(pos, element).await;
-        }
-
+        assert!(
+            base_node_pos < self.base_mmr.size(),
+            "grafting destination out of bounds"
+        );
         let base_node_digest = self.base_mmr.get_node(base_node_pos).await?.unwrap();
-        self.hasher.update_with_pos(pos);
+
+        // We do not include position in the digest material here since the position information is
+        // already captured in the base_node_digest.
         self.hasher.update_with_element(element);
         self.hasher.update_with_digest(&base_node_digest);
+
         Ok(self.hasher.finalize())
     }
 
@@ -220,15 +280,114 @@ impl<H: CHasher, S: Storage<H::Digest>> Hasher<H> for Grafting<'_, H, S> {
         left_digest: &H::Digest,
         right_digest: &H::Digest,
     ) -> H::Digest {
-        self.hasher.node_digest(pos, left_digest, right_digest)
+        self.hasher
+            .node_digest(self.destination_pos(pos), left_digest, right_digest)
     }
 
     fn root_digest<'a>(
         &mut self,
-        pos: u64,
+        size: u64,
         peak_digests: impl Iterator<Item = &'a H::Digest>,
     ) -> H::Digest {
-        self.hasher.root_digest(pos, peak_digests)
+        self.hasher
+            .root_digest(self.destination_pos(size), peak_digests)
+    }
+
+    fn digest(&mut self, data: &[u8]) -> H::Digest {
+        self.hasher.digest(data)
+    }
+
+    fn inner(&mut self) -> &mut H {
+        self.hasher.inner()
+    }
+}
+
+/// A [Hasher] implementation to use when verifying proofs over GraftedStorage.
+pub struct GraftingVerifier<'a, H: CHasher> {
+    hasher: Standard<'a, H>,
+    height: u32,
+
+    /// The required leaf elements from the peak tree that we are verifying.
+    elements: Vec<&'a [u8]>,
+
+    /// The leaf number of the first element we are verifying
+    num: u64,
+}
+
+impl<'a, H: CHasher> GraftingVerifier<'a, H> {
+    pub fn new(hasher: &'a mut H, height: u32, num: u64, elements: Vec<&'a [u8]>) -> Self {
+        Self {
+            hasher: Standard::new(hasher),
+            height,
+            elements,
+            num,
+        }
+    }
+
+    pub fn standard(&mut self) -> &mut Standard<'a, H> {
+        &mut self.hasher
+    }
+}
+
+impl<H: CHasher> Hasher<H> for GraftingVerifier<'_, H> {
+    async fn leaf_digest(&mut self, pos: u64, element: &[u8]) -> Result<H::Digest, Error> {
+        self.hasher.leaf_digest(pos, element).await
+    }
+
+    fn node_digest(
+        &mut self,
+        pos: u64,
+        left_digest: &H::Digest,
+        right_digest: &H::Digest,
+    ) -> H::Digest {
+        let digest = self.hasher.node_digest(pos, left_digest, right_digest);
+        if pos_to_height(pos) != self.height {
+            // If we're not at the grafting boundary we use the digest as-is.
+            return digest;
+        }
+
+        // This base tree node corresponds to a peak-tree leaf, so we need to perform the peak-tree
+        // leaf digest computation.
+        let source_pos = source_pos(pos, self.height);
+        let Some(source_pos) = source_pos else {
+            // malformed proof input
+            debug!(pos, "no grafting source pos");
+            return digest;
+        };
+        let index = leaf_pos_to_num(source_pos);
+        let Some(mut index) = index else {
+            // malformed proof input
+            debug!(pos = source_pos, "grafting source pos is not a leaf");
+            return digest;
+        };
+        if index < self.num {
+            // malformed proof input
+            debug!(index, num = self.num, "grafting index is negative");
+            return digest;
+        };
+        index -= self.num;
+        if index >= self.elements.len() as u64 {
+            // malformed proof input
+            debug!(
+                index,
+                len = self.elements.len(),
+                "grafting index is out of bounds"
+            );
+            return digest;
+        }
+        self.hasher
+            .update_with_element(self.elements[index as usize]);
+        self.hasher.update_with_digest(&digest);
+
+        self.hasher.finalize()
+    }
+
+    fn root_digest<'a>(
+        &mut self,
+        size: u64,
+        peak_digests: impl Iterator<Item = &'a H::Digest>,
+    ) -> H::Digest {
+        self.hasher.root_digest(size, peak_digests)
     }
 
     fn digest(&mut self, data: &[u8]) -> H::Digest {
@@ -242,13 +401,16 @@ impl<H: CHasher, S: Storage<H::Digest>> Hasher<H> for Grafting<'_, H, S> {
 
 #[cfg(test)]
 mod tests {
-    use crate::mmr::{
-        mem::Mmr,
-        tests::{build_test_mmr, ROOTS},
-    };
-
     use super::*;
+    use crate::mmr::{
+        iterator::leaf_num_to_pos,
+        mem::Mmr,
+        storage::Grafting as GStorage,
+        tests::{build_test_mmr, ROOTS},
+        verification::Proof,
+    };
     use commonware_cryptography::{Hasher as CHasher, Sha256};
+    use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
     use commonware_utils::hex;
 
@@ -373,6 +535,36 @@ mod tests {
         );
     }
 
+    /// For a variety of grafting heights and node positions, check that destination_pos and
+    /// source_pos are inverse functions.
+    #[test]
+    fn test_hasher_dest_source_pos_conversion() {
+        for grafting_height in 1..10 {
+            for pos in 0..10000 {
+                let dest_pos = destination_pos(pos, grafting_height);
+                let source_pos = source_pos(dest_pos, grafting_height).unwrap();
+                assert_eq!(pos, source_pos);
+            }
+        }
+    }
+
+    #[test]
+    fn test_hasher_source_dest_pos_conversion() {
+        for grafting_height in 1..10 {
+            for pos in 0..10000 {
+                if pos_to_height(pos) < grafting_height {
+                    // Base tree nodes below the grafting height do not have a corresponding peak
+                    // tree node.
+                    assert!(source_pos(pos, grafting_height).is_none());
+                    continue;
+                }
+                let source_pos = source_pos(pos, grafting_height).unwrap();
+                let dest_pos = destination_pos(source_pos, grafting_height);
+                assert_eq!(pos, dest_pos);
+            }
+        }
+    }
+
     #[test]
     fn test_hasher_grafting() {
         let executor = deterministic::Runner::default();
@@ -437,6 +629,210 @@ mod tests {
             let mut hasher = Sha256::new();
             let hasher = Grafting::new(&mut hasher, 3, &base_mmr);
             assert_eq!(hasher.destination_pos(leaf_num_to_pos(0)), 14);
+        });
+    }
+
+    /// Builds a small grafted MMR, then generates & verifies proofs over it.
+    #[test_traced]
+    fn test_hasher_grafted_storage() {
+        let executor = deterministic::Runner::default();
+        const GRAFTING_HEIGHT: u32 = 1;
+        executor.start(|_| async move {
+            let mut hasher = Sha256::new();
+
+            let b1 = Sha256::fill(0x01);
+            let b2 = Sha256::fill(0x02);
+            let b3 = Sha256::fill(0x03);
+            let b4 = Sha256::fill(0x04);
+
+            // Make a base MMR with 4 leaves.
+            let mut base_mmr = Mmr::new();
+            {
+                let mut standard = Standard::new(&mut hasher);
+
+                base_mmr.add(&mut standard, &b1).await.unwrap();
+                base_mmr.add(&mut standard, &b2).await.unwrap();
+                base_mmr.add(&mut standard, &b3).await.unwrap();
+                base_mmr.add(&mut standard, &b4).await.unwrap();
+            }
+
+            let p1 = Sha256::fill(0xF1);
+            let p2 = Sha256::fill(0xF2);
+
+            // Since we are using grafting height of 1, peak tree must have half the leaves of the base (2).
+            let mut peak_tree = Mmr::new();
+            {
+                let mut grafter = Grafting::new(&mut hasher, GRAFTING_HEIGHT, &base_mmr);
+                peak_tree.add(&mut grafter, &p1).await.unwrap();
+                peak_tree.add(&mut grafter, &p2).await.unwrap();
+            }
+
+            let peak_root =
+                peak_tree.root(&mut Grafting::new(&mut hasher, GRAFTING_HEIGHT, &base_mmr));
+            let base_root = base_mmr.root(&mut Standard::new(&mut hasher));
+            assert_ne!(peak_root, base_root);
+
+            {
+                let grafted_mmr = GStorage::new(&peak_tree, &base_mmr, GRAFTING_HEIGHT);
+                assert_eq!(grafted_mmr.size(), base_mmr.size());
+
+                let grafted_storage_root = grafted_mmr.root(&mut hasher).await.unwrap();
+                assert_ne!(grafted_storage_root, base_root);
+
+                // Grafted storage root uses the size of the base MMR in its digest, so it will differ
+                // than the peak tree root even though these particular trees would otherwise produce
+                // the same root.
+                assert_ne!(grafted_storage_root, peak_root);
+
+                // Confirm we can generate and verify an inclusion proofs for each of the 4 leafs of the grafted MMR.
+                {
+                    let pos = 0;
+                    let proof = Proof::<Sha256>::range_proof(&grafted_mmr, pos, pos)
+                        .await
+                        .unwrap();
+
+                    let mut verifier =
+                        GraftingVerifier::new(&mut hasher, GRAFTING_HEIGHT, 0, vec![&p1]);
+                    assert!(proof
+                        .verify_element_inclusion(&mut verifier, &b1, pos, &grafted_storage_root)
+                        .await
+                        .unwrap());
+
+                    let pos = 1;
+                    let proof = Proof::<Sha256>::range_proof(&grafted_mmr, pos, pos)
+                        .await
+                        .unwrap();
+                    assert!(proof
+                        .verify_element_inclusion(&mut verifier, &b2, pos, &grafted_storage_root)
+                        .await
+                        .unwrap());
+
+                    let pos = 3;
+                    let proof = Proof::<Sha256>::range_proof(&grafted_mmr, pos, pos)
+                        .await
+                        .unwrap();
+                    let mut verifier =
+                        GraftingVerifier::new(&mut hasher, GRAFTING_HEIGHT, 1, vec![&p2]);
+                    assert!(proof
+                        .verify_element_inclusion(&mut verifier, &b3, pos, &grafted_storage_root)
+                        .await
+                        .unwrap());
+
+                    let pos = 4;
+                    let proof = Proof::<Sha256>::range_proof(&grafted_mmr, pos, pos)
+                        .await
+                        .unwrap();
+                    assert!(proof
+                        .verify_element_inclusion(&mut verifier, &b4, pos, &grafted_storage_root)
+                        .await
+                        .unwrap());
+                }
+
+                // Confirm element inclusion proof verification fails for various manipulations of the input.
+                {
+                    // Valid proof of the last element.
+                    let pos = 4;
+                    let proof = Proof::<Sha256>::range_proof(&grafted_mmr, pos, pos)
+                        .await
+                        .unwrap();
+                    let mut verifier =
+                        GraftingVerifier::new(&mut hasher, GRAFTING_HEIGHT, 1, vec![&p2]);
+                    assert!(proof
+                        .verify_element_inclusion(&mut verifier, &b4, pos, &grafted_storage_root)
+                        .await
+                        .unwrap());
+
+                    // Proof should fail if we try to verify the wrong leaf element.
+                    assert!(!proof
+                        .verify_element_inclusion(&mut verifier, &b3, pos, &grafted_storage_root)
+                        .await
+                        .unwrap());
+
+                    // Proof should fail if we use the wrong root.
+                    assert!(!proof
+                        .verify_element_inclusion(&mut verifier, &b4, pos, &peak_root)
+                        .await
+                        .unwrap());
+
+                    // Proof should fail if we use the wrong position
+                    assert!(!proof
+                        .verify_element_inclusion(&mut verifier, &b4, 3, &grafted_storage_root)
+                        .await
+                        .unwrap());
+
+                    // Proof should fail if we inject the wrong peak element into the verifier.
+                    let mut verifier =
+                        GraftingVerifier::new(&mut hasher, GRAFTING_HEIGHT, 1, vec![&p1]);
+                    assert!(!proof
+                        .verify_element_inclusion(&mut verifier, &b4, pos, &grafted_storage_root)
+                        .await
+                        .unwrap());
+
+                    // Proof should fail if we give the verifier the wrong peak tree leaf number.
+                    let mut verifier =
+                        GraftingVerifier::new(&mut hasher, GRAFTING_HEIGHT, 2, vec![&p1]);
+                    assert!(!proof
+                        .verify_element_inclusion(&mut verifier, &b4, pos, &grafted_storage_root)
+                        .await
+                        .unwrap());
+                }
+
+                // test range proving
+                {
+                    // Confirm we can prove the entire range.
+                    let proof = Proof::<Sha256>::range_proof(&grafted_mmr, 0, 4)
+                        .await
+                        .unwrap();
+                    let range = vec![&b1, &b2, &b3, &b4];
+                    let mut verifier =
+                        GraftingVerifier::new(&mut hasher, GRAFTING_HEIGHT, 0, vec![&p1, &p2]);
+                    assert!(proof
+                        .verify_range_inclusion(&mut verifier, &range, 0, 4, &grafted_storage_root)
+                        .await
+                        .unwrap());
+
+                    // Confirm same proof fails with shortened verifier range.
+                    let mut verifier =
+                        GraftingVerifier::new(&mut hasher, GRAFTING_HEIGHT, 0, vec![&p1]);
+                    assert!(!proof
+                        .verify_range_inclusion(&mut verifier, &range, 0, 4, &grafted_storage_root)
+                        .await
+                        .unwrap());
+                }
+            }
+
+            // Add one more leaf to our base MMR, which will not have any corresponding peak tree
+            // leaf since it will have no ancestors at or above the grafting height.
+            let b5 = Sha256::fill(0x05);
+            {
+                let mut standard = Standard::new(&mut hasher);
+                base_mmr.add(&mut standard, &b5).await.unwrap();
+            }
+            let grafted_mmr = GStorage::new(&peak_tree, &base_mmr, GRAFTING_HEIGHT);
+            assert_eq!(grafted_mmr.size(), base_mmr.size());
+
+            // Confirm we can generate and verify inclusion proofs for the "orphaned" leaf as well as an existing one.
+            let grafted_storage_root = grafted_mmr.root(&mut hasher).await.unwrap();
+            let pos = 0;
+            let proof = Proof::<Sha256>::range_proof(&grafted_mmr, pos, pos)
+                .await
+                .unwrap();
+
+            let mut verifier = GraftingVerifier::new(&mut hasher, GRAFTING_HEIGHT, 0, vec![&p1]);
+            assert!(proof
+                .verify_element_inclusion(&mut verifier, &b1, pos, &grafted_storage_root)
+                .await
+                .unwrap());
+
+            let mut verifier = GraftingVerifier::new(&mut hasher, GRAFTING_HEIGHT, 0, vec![]);
+            let pos = 7;
+            let proof = Proof::<Sha256>::range_proof(&grafted_mmr, pos, pos)
+                .await
+                .unwrap();
+            assert!(proof
+                .verify_element_inclusion(&mut verifier, &b5, pos, &grafted_storage_root)
+                .await
+                .unwrap());
         });
     }
 }

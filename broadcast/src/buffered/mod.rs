@@ -38,7 +38,6 @@ mod tests {
     use commonware_codec::RangeCfg;
     use commonware_cryptography::{
         ed25519::{self, PublicKey},
-        sha256::Digest as Sha256Digest,
         Committable, Digestible, PrivateKey as _,
     };
     use commonware_macros::{select, test_traced};
@@ -113,7 +112,7 @@ mod tests {
     fn spawn_peer_engines(
         context: deterministic::Context,
         registrations: &mut Registrations,
-    ) -> BTreeMap<PublicKey, Mailbox<PublicKey, Sha256Digest, Sha256Digest, TestMessage>> {
+    ) -> BTreeMap<PublicKey, Mailbox<PublicKey, TestMessage>> {
         let mut mailboxes = BTreeMap::new();
         while let Some((peer, network)) = registrations.pop_first() {
             let context = context.with_label(&peer.to_string());
@@ -125,10 +124,7 @@ mod tests {
                 codec_config: RangeCfg::from(..),
             };
             let (engine, engine_mailbox) =
-                Engine::<_, PublicKey, Sha256Digest, Sha256Digest, TestMessage>::new(
-                    context.clone(),
-                    config,
-                );
+                Engine::<_, PublicKey, TestMessage>::new(context.clone(), config);
             mailboxes.insert(peer.clone(), engine_mailbox);
             engine.start(network);
         }

@@ -2,6 +2,9 @@ use super::{Config, Mailbox, Message};
 use crate::{
     threshold_simplex::{
         actors::{batcher, resolver},
+        interesting,
+        metrics::{self, Inbound, Outbound},
+        min_active,
         types::{
             Activity, Attributable, Context, Finalization, Finalize, Notarization, Notarize,
             Nullification, Nullify, Proposal, View, Viewable, Voter,
@@ -34,7 +37,9 @@ use futures::{
     future::Either,
     pin_mut, StreamExt,
 };
-use prometheus_client::metrics::{counter::Counter, gauge::Gauge, histogram::Histogram};
+use prometheus_client::metrics::{
+    counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
+};
 use rand::Rng;
 use std::{
     collections::BTreeMap,
@@ -470,6 +475,8 @@ pub struct Actor<
     current_view: Gauge,
     tracked_views: Gauge,
     skipped_views: Counter,
+    inbound_messages: Family<Inbound, Counter>,
+    outbound_messages: Family<Outbound, Counter>,
     notarization_latency: Histogram,
     finalization_latency: Histogram,
     recover_latency: histogram::Timed<E>,
@@ -504,12 +511,24 @@ impl<
         let current_view = Gauge::<i64, AtomicI64>::default();
         let tracked_views = Gauge::<i64, AtomicI64>::default();
         let skipped_views = Counter::default();
+        let inbound_messages = Family::<Inbound, Counter>::default();
+        let outbound_messages = Family::<Outbound, Counter>::default();
         let notarization_latency = Histogram::new(LATENCY.into_iter());
         let finalization_latency = Histogram::new(LATENCY.into_iter());
         let recover_latency = Histogram::new(Buckets::CRYPTOGRAPHY.into_iter());
         context.register("current_view", "current view", current_view.clone());
         context.register("tracked_views", "tracked views", tracked_views.clone());
         context.register("skipped_views", "skipped views", skipped_views.clone());
+        context.register(
+            "inbound_messages",
+            "number of inbound messages",
+            inbound_messages.clone(),
+        );
+        context.register(
+            "outbound_messages",
+            "number of outbound messages",
+            outbound_messages.clone(),
+        );
         context.register(
             "notarization_latency",
             "notarization latency",
@@ -565,6 +584,8 @@ impl<
                 current_view,
                 tracked_views,
                 skipped_views,
+                inbound_messages,
+                outbound_messages,
                 notarization_latency,
                 finalization_latency,
                 recover_latency: histogram::Timed::new(recover_latency, Arc::new(context)),
@@ -754,6 +775,9 @@ impl<
         let past_view = self.view - 1;
         if retry && past_view > 0 {
             if let Some(notarization) = self.construct_notarization(past_view, true).await {
+                self.outbound_messages
+                    .get_or_create(&metrics::NOTARIZATION)
+                    .inc();
                 let msg = Voter::Notarization(notarization);
                 recovered_sender
                     .send(Recipients::All, msg, true)
@@ -762,6 +786,9 @@ impl<
                 debug!(view = past_view, "rebroadcast entry notarization");
             } else if let Some(nullification) = self.construct_nullification(past_view, true).await
             {
+                self.outbound_messages
+                    .get_or_create(&metrics::NULLIFICATION)
+                    .inc();
                 let msg = Voter::Nullification(nullification);
                 recovered_sender
                     .send(Recipients::All, msg, true)
@@ -795,6 +822,9 @@ impl<
         }
 
         // Broadcast nullify
+        self.outbound_messages
+            .get_or_create(&metrics::NULLIFY)
+            .inc();
         let msg = Voter::Nullify(nullify);
         pending_sender
             .send(Recipients::All, msg, true)
@@ -1023,46 +1053,36 @@ impl<
         self.current_view.set(view as i64);
     }
 
-    fn interesting(&self, view: View, allow_future: bool) -> bool {
-        if view + self.activity_timeout < self.last_finalized {
-            return false;
-        }
-        if !allow_future && view > self.view + 1 {
-            return false;
-        }
-        true
-    }
-
     async fn prune_views(&mut self) {
         // Get last min
+        let min = min_active(self.activity_timeout, self.last_finalized);
         let mut pruned = false;
-        let oldest = loop {
+        loop {
             // Get next key
             let next = match self.views.keys().next() {
                 Some(next) => *next,
                 None => return,
             };
 
-            // Compare to last finalized
-            if !self.interesting(next, false) {
-                self.views.remove(&next);
-                debug!(
-                    view = next,
-                    last_finalized = self.last_finalized,
-                    "pruned view"
-                );
-                pruned = true;
-            } else {
-                break next;
+            // If less than min, prune
+            if next >= min {
+                break;
             }
-        };
+            self.views.remove(&next);
+            debug!(
+                view = next,
+                last_finalized = self.last_finalized,
+                "pruned view"
+            );
+            pruned = true;
+        }
 
         // Prune journal up to min
         if pruned {
             self.journal
                 .as_mut()
                 .unwrap()
-                .prune(oldest)
+                .prune(min)
                 .await
                 .expect("unable to prune journal");
         }
@@ -1097,7 +1117,13 @@ impl<
     async fn notarization(&mut self, notarization: Notarization<V, D>) -> Action {
         // Check if we are still in a view where this notarization could help
         let view = notarization.view();
-        if !self.interesting(view, true) {
+        if !interesting(
+            self.activity_timeout,
+            self.last_finalized,
+            self.view,
+            view,
+            true,
+        ) {
             return Action::Skip;
         }
 
@@ -1148,7 +1174,13 @@ impl<
 
     async fn nullification(&mut self, nullification: Nullification<V>) -> Action {
         // Check if we are still in a view where this notarization could help
-        if !self.interesting(nullification.view, true) {
+        if !interesting(
+            self.activity_timeout,
+            self.last_finalized,
+            self.view,
+            nullification.view,
+            true,
+        ) {
             return Action::Skip;
         }
 
@@ -1223,7 +1255,13 @@ impl<
     async fn finalization(&mut self, finalization: Finalization<V, D>) -> Action {
         // Check if we are still in a view where this finalization could help
         let view = finalization.view();
-        if !self.interesting(view, true) {
+        if !interesting(
+            self.activity_timeout,
+            self.last_finalized,
+            self.view,
+            view,
+            true,
+        ) {
             return Action::Skip;
         }
 
@@ -1374,6 +1412,9 @@ impl<
         // Attempt to notarize
         if let Some(notarize) = self.construct_notarize(view) {
             // Handle the notarize
+            self.outbound_messages
+                .get_or_create(&metrics::NOTARIZE)
+                .inc();
             batcher.constructed(Voter::Notarize(notarize.clone())).await;
             self.handle_notarize(notarize.clone()).await;
 
@@ -1406,6 +1447,9 @@ impl<
             resolver.notarized(notarization.clone()).await;
 
             // Handle the notarization
+            self.outbound_messages
+                .get_or_create(&metrics::NOTARIZATION)
+                .inc();
             self.handle_notarization(notarization.clone()).await;
 
             // Sync the journal
@@ -1437,6 +1481,9 @@ impl<
             resolver.nullified(nullification.clone()).await;
 
             // Handle the nullification
+            self.outbound_messages
+                .get_or_create(&metrics::NULLIFICATION)
+                .inc();
             self.handle_nullification(nullification.clone()).await;
 
             // Sync the journal
@@ -1512,6 +1559,9 @@ impl<
         // Attempt to finalize
         if let Some(finalize) = self.construct_finalize(view) {
             // Handle the finalize
+            self.outbound_messages
+                .get_or_create(&metrics::FINALIZE)
+                .inc();
             batcher.constructed(Voter::Finalize(finalize.clone())).await;
             self.handle_finalize(finalize.clone()).await;
 
@@ -1544,6 +1594,9 @@ impl<
             resolver.finalized(view).await;
 
             // Handle the finalization
+            self.outbound_messages
+                .get_or_create(&metrics::FINALIZATION)
+                .inc();
             self.handle_finalization(finalization.clone()).await;
 
             // Sync the journal
@@ -1859,13 +1912,22 @@ impl<
                     };
                     let Message::Verified(msg) = msg;
 
-                    // Ensure view is still useful
+                    // Ensure view is still useful.
                     //
                     // It is possible that we make a request to the resolver and prune the view
                     // before we receive the response. In this case, we should ignore the response (not
                     // doing so may result in attempting to store before the prune boundary).
+                    //
+                    // We do not need to allow `future` here because any notarization or nullification we see
+                    // here must've been requested by us (something we only do when ahead of said view).
                     view = msg.view();
-                    if !self.interesting(view, false) {
+                    if !interesting(
+                        self.activity_timeout,
+                        self.last_finalized,
+                        self.view,
+                        view,
+                        false,
+                    ) {
                         debug!(view, "verified message is not interesting");
                         continue;
                     }
@@ -1914,12 +1976,21 @@ impl<
                     view = msg.view();
                     let action = match msg {
                         Voter::Notarization(notarization) => {
+                            self.inbound_messages
+                                .get_or_create(&Inbound::notarization(&s))
+                                .inc();
                             self.notarization(notarization).await
                         }
                         Voter::Nullification(nullification) => {
+                            self.inbound_messages
+                                .get_or_create(&Inbound::nullification(&s))
+                                .inc();
                             self.nullification(nullification).await
                         }
                         Voter::Finalization(finalization) => {
+                            self.inbound_messages
+                                .get_or_create(&Inbound::finalization(&s))
+                                .inc();
                             self.finalization(finalization).await
                         }
                         Voter::Notarize(_) | Voter::Nullify(_) | Voter::Finalize(_) => {

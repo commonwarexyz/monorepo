@@ -351,7 +351,7 @@ mod tests {
         message: &[u8],
         signature: Signature,
     ) {
-        let computed_signature = crate::PrivateKey::sign(&private_key, None, message);
+        let computed_signature = private_key.sign(None, message);
         assert_eq!(computed_signature, signature);
         assert!(public_key.verify(None, message, &computed_signature));
     }
