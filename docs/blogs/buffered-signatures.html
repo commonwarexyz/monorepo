@@ -96,7 +96,7 @@
             <div class="image-caption">Figure 2: Block peers that send invalid signatures</div>
         </div>
         <p>When peers are tasked with forwarding messages (as in traditional gossip), the recipient of a message can never be sure what they have (and what they have from whom) until verification. A malicious peer could forward a message with a valid signature, tamper with a signature over a message that someone did send (invalid signature), or even hallucinate a message that was never sent by a different peer (invalid signature).</p>
-        <p>With <i>p2p::authenticated</i>, we have the necessary functionality to do something novel: dedicated peer slots. Instead of verifying each peer signature individually as it arrives, we buffer messages in slots dedicated to each registered peer. When we collect a quorum (<i>2f+1</i>) of signatures over the same message, we perform a single multi-signature verification (or batch verification if not using BLS12-381 signatures).</p>
+        <p>With <i>p2p::authenticated</i>, we have the necessary functionality to do something novel: dedicated peer slots. Instead of verifying each peer signature individually as it arrives, we buffer messages in slots dedicated to each authenticated peer. When we collect a quorum (<i>2f+1</i>) of signatures over the same message, we perform a single multi-signature verification (or batch verification if not using BLS12-381 signatures) instead of verifying each signature as it arrives.</p>
         <div class="image-container">
             <img src="../imgs/buffering.png" alt="Buffer signatures until a quorum is reached">
             <div class="image-caption">Figure 3: Buffer signatures until a quorum is reached</div>
