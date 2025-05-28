@@ -292,8 +292,8 @@ mod tests {
             let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
 
             // Initialize voter actor
-            let scheme = private_keys[0].clone();
-            let validator = scheme.public_key();
+            let private_key = private_keys[0].clone();
+            let validator = private_key.public_key();
             let supervisor_config: mocks::supervisor::Config<ed25519::PrivateKey> =
                 mocks::supervisor::Config {
                     namespace: namespace.clone(),
@@ -314,7 +314,7 @@ mod tests {
             );
             actor.start();
             let cfg = Config {
-                crypto: scheme,
+                crypto: private_key,
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: supervisor.clone(),

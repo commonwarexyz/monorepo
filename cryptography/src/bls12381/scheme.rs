@@ -7,11 +7,11 @@
 //!
 //! # Example
 //! ```rust
-//! use commonware_cryptography::{Bls12381, Signer, Verifier};
+//! use commonware_cryptography::{bls12381, PrivateKey, PublicKey, Signature};
 //! use rand::rngs::OsRng;
 //!
 //! // Generate a new private key
-//! let mut signer = Bls12381::new(&mut OsRng);
+//! let mut signer = bls12381::PrivateKey::from_rng(&mut OsRng);
 //!
 //! // Create a message to sign
 //! let namespace = Some(&b"demo"[..]);
@@ -21,7 +21,7 @@
 //! let signature = signer.sign(namespace, msg);
 //!
 //! // Verify the signature
-//! assert!(Bls12381::verify(namespace, msg, &signer.public_key(), &signature));
+//! assert!(signer.public_key().verify(namespace, msg, &signature));
 //! ```
 
 use super::primitives::{

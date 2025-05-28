@@ -13,15 +13,15 @@
 //!
 //! ```rust
 //! use commonware_p2p::simulated::{Config, Link, Network};
-//! use commonware_cryptography::{Ed25519, Signer, Verifier};
+//! use commonware_cryptography::{ed25519, PrivateKey as _, PublicKey as _};
 //! use commonware_runtime::{deterministic, Spawner, Runner, Metrics};
 //!
 //! // Generate peers
 //! let peers = vec![
-//!     Ed25519::from_seed(0).public_key(),
-//!     Ed25519::from_seed(1).public_key(),
-//!     Ed25519::from_seed(2).public_key(),
-//!     Ed25519::from_seed(3).public_key(),
+//!     ed25519::PrivateKey::from_seed(0).public_key(),
+//!     ed25519::PrivateKey::from_seed(1).public_key(),
+//!     ed25519::PrivateKey::from_seed(2).public_key(),
+//!     ed25519::PrivateKey::from_seed(3).public_key(),
 //! ];
 //!
 //! // Configure network

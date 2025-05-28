@@ -100,7 +100,7 @@
 //!
 //! ```rust
 //! use commonware_p2p::{authenticated::{self, Network}, Sender, Recipients};
-//! use commonware_cryptography::{Ed25519, Signer, Verifier};
+//! use commonware_cryptography::{ed25519, PrivateKey as _, PublicKey as _};
 //! use commonware_runtime::{tokio, Spawner, Runner, Metrics};
 //! use commonware_utils::NZU32;
 //! use governor::Quota;
@@ -113,15 +113,15 @@
 //! // Generate identity
 //! //
 //! // In production, the signer should be generated from a secure source of entropy.
-//! let signer = Ed25519::from_seed(0);
+//! let signer = ed25519::PrivateKey::from_seed(0);
 //!
 //! // Generate peers
 //! //
 //! // In production, peer identities will be provided by some external source of truth
 //! // (like the staking set of a blockchain).
-//! let peer1 = Ed25519::from_seed(1).public_key();
-//! let peer2 = Ed25519::from_seed(2).public_key();
-//! let peer3 = Ed25519::from_seed(3).public_key();
+//! let peer1 = ed25519::PrivateKey::from_seed(1).public_key();
+//! let peer2 = ed25519::PrivateKey::from_seed(2).public_key();
+//! let peer3 = ed25519::PrivateKey::from_seed(3).public_key();
 //!
 //! // Configure bootstrappers
 //! //
