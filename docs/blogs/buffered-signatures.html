@@ -103,13 +103,11 @@
         </div>
         <h2>Handling Invalid Signatures</h2>
         <p>This lazy aggregate verification is nice and all but now that we aren't verifying messages when they arrive over the wire, one bad apple can spoil the whole bunch. Fortunately, we have one more new tool from <i>p2p::authenticated</i> to help us: identity blocking.</p>
-        <p>When a verification fails, the validator performs a binary search over the buffered signatures to identify the culprit(s). In the worst case (where f the signatures are invalid), this can lead to more verifications than the original eager approach. However, once identified as malicious, that peer is permanently blocked by its staking identity (and can't from a new address or bombard said validator with invalid signatures via some forwarded channel).</p>
+        <p>When a verification fails, the validator performs a binary search over the buffered signatures to identify the culprit(s). In the worst case (where f the signatures are invalid), this can lead to more verifications than the original eager approach. However, once identified as malicious, that peer is permanently blocked by its staking identity (and can't from a new address or bombard said validator with invalid signatures via some forwarded channel). An invalid signature is not a slashable offense, so network-focused remediation (based on local observation) is the best we can do.</p>
         <div class="image-container">
             <img src="../imgs/bisection.png" alt="Search for invalid signatures via repeated bisection">
             <div class="image-caption">Figure 3: Search for invalid signatures via repeated bisection</div>
         </div>
-        <p>This permanent blocking is another advantage of authenticated connections. In traditional gossip networks, you can't safely block peers for forwarding invalid signatures—they might just be innocent relays of someone else's malicious message. Even if you block them, they can spin up a new identity and continue the attack.</p>
-        <p>With <i>p2p::authenticated</i>, identity is tied to consensus participation. Once blocked, a Byzantine node can't reconnect without changing their consensus identity—a much higher bar.</p>
         <h2>The Numbers Don't Lie</h2>
         <p>The results speak for themselves. By moving from ~50 individual signature verifications per view to just 1-2 batch/aggregate verifications, we've transformed the performance profile of consensus:</p>
         <ul>
