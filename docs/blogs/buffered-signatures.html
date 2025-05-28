@@ -102,7 +102,8 @@
             <img src="../imgs/blocking-peers.png" alt="Block peers that send invalid signatures">
             <div class="image-caption">Figure 4: Block peers that send invalid signatures</div>
         </div>
-        <p>The result? Faster views and faster finality (1 batch verification of 2ms instead of 50 individual verifications of ~1ms). Could we have done parallelism? Yeah, but then we wouldn't have been able to scale as the network grows. Now running at 9% of CPU on a c7g.xlarge, there is 91% of CPU for your application to use. Consensus should be a sideshow.</p>
+        <p>The result? Faster views and faster finality (1 batch verification of 2ms instead of 50 individual verifications of ~1ms). Could we have done parallelism? Yeah, but then we wouldn't have been able to scale as the network grows. Now running at 9% of CPU on a c7g.xlarge, there is 91% of CPU for your application to use.</p>
+        <p>Consensus should be a sideshow.</p>
     </div>
 
     <div id="footer-placeholder"></div>
