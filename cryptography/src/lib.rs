@@ -44,7 +44,7 @@ pub trait PublicKey: Sized + From<Self::Private> + ReadExt + Encode + PartialEq 
     /// The private key it came from.
     type Private: PrivateKey<PublicKey = Self>;
     /// The signature type it verifies.
-    type Signature;
+    type Signature: Signature;
 
     /// Verify that `sig` is a valid signature over `msg`.
     fn verify(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Self::Signature) -> bool;
