@@ -219,14 +219,18 @@ impl<V: Variant, D: Digest> EncodeSize for Ack<V, D> {
 }
 
 /// Used as [`Reporter::Activity`](crate::Reporter::Activity) to report activities that occur during
-/// aggregation.
+/// aggregation. Also used to journal events that are needed to initialize the aggregation engine
+/// when the node restarts.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Activity<V: Variant, D: Digest> {
     /// Received an ack from a participant.
     Ack(Ack<V, D>),
 
     /// Created a threshold signature.
-    Lock(Lock<V, D>),
+    Lock(Item<D>, V::Signature),
+
+    /// Moved the tip to a new index.
+    Tip(Index),
 }
 
 impl<V: Variant, D: Digest> Write for Activity<V, D> {
@@ -236,9 +240,14 @@ impl<V: Variant, D: Digest> Write for Activity<V, D> {
                 0u8.write(writer);
                 proposal.write(writer);
             }
-            Activity::Lock(lock) => {
+            Activity::Lock(item, signature) => {
                 1u8.write(writer);
-                lock.write(writer);
+                item.write(writer);
+                signature.write(writer);
+            }
+            Activity::Tip(index) => {
+                2u8.write(writer);
+                UInt(*index).write(writer);
             }
         }
     }
@@ -250,9 +259,13 @@ impl<V: Variant, D: Digest> Read for Activity<V, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         match u8::read(reader)? {
             0 => Ok(Activity::Ack(Ack::read(reader)?)),
-            1 => Ok(Activity::Lock(Lock::read(reader)?)),
+            1 => Ok(Activity::Lock(
+                Item::read(reader)?,
+                V::Signature::read(reader)?,
+            )),
+            2 => Ok(Activity::Tip(UInt::read(reader)?.into())),
             _ => Err(CodecError::Invalid(
-                "consensus::aggregationActivity",
+                "consensus::aggregation::Activity",
                 "Invalid type",
             )),
         }
@@ -263,52 +276,8 @@ impl<V: Variant, D: Digest> EncodeSize for Activity<V, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Activity::Ack(proposal) => proposal.encode_size(),
-            Activity::Lock(lock) => lock.encode_size(),
+            Activity::Lock(item, signature) => item.encode_size() + signature.encode_size(),
+            Activity::Tip(index) => UInt(*index).encode_size(),
         }
-    }
-}
-
-/// A threshold signature over some item, representing consensus over it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Lock<V: Variant, D: Digest> {
-    /// The item that was locked.
-    pub item: Item<D>,
-
-    /// The threshold signature.
-    pub signature: V::Signature,
-}
-
-impl<V: Variant, D: Digest> Lock<V, D> {
-    pub fn verify(&self, namespace: &[u8], public_key: &V::Public) -> bool {
-        ops::verify_message::<V>(
-            public_key,
-            Some(ack_namespace(namespace).as_ref()),
-            self.item.encode().as_ref(),
-            &self.signature,
-        )
-        .is_ok()
-    }
-}
-
-impl<V: Variant, D: Digest> Write for Lock<V, D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.item.write(writer);
-        self.signature.write(writer);
-    }
-}
-
-impl<V: Variant, D: Digest> Read for Lock<V, D> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let item = Item::read(reader)?;
-        let signature = V::Signature::read(reader)?;
-        Ok(Self { item, signature })
-    }
-}
-
-impl<V: Variant, D: Digest> EncodeSize for Lock<V, D> {
-    fn encode_size(&self) -> usize {
-        self.item.encode_size() + self.signature.encode_size()
     }
 }

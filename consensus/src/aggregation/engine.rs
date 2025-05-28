@@ -10,7 +10,7 @@
 use super::{
     metrics,
     safe_tip::SafeTip,
-    types::{Ack, Activity, Epoch, Error, Index, Item, Lock},
+    types::{Ack, Activity, Epoch, Error, Index, Item},
     Config,
 };
 use crate::{aggregation::wire::PeerAck, Automaton, Monitor, Reporter, ThresholdSupervisor};
@@ -30,10 +30,11 @@ use commonware_runtime::{
     },
     Clock, Handle, Metrics, Spawner, Storage,
 };
+use commonware_storage::journal::variable::{Config as JConfig, Journal};
 use commonware_utils::{futures::Pool as FuturesPool, Array, PrioritySet};
 use futures::{
     future::{self, Either},
-    StreamExt,
+    pin_mut, StreamExt,
 };
 use std::{
     cmp::max,
@@ -89,24 +90,18 @@ pub struct Engine<
     NetS: Sender<PublicKey = P>,
     NetR: Receiver<PublicKey = P>,
 > {
-    ////////////////////////////////////////
-    // Interfaces
-    ////////////////////////////////////////
+    // ---------- Interfaces ----------
     context: E,
     automaton: A,
     monitor: M,
     validators: TSu,
     reporter: Z,
 
-    ////////////////////////////////////////
-    // Namespace Constants
-    ////////////////////////////////////////
+    // ---------- Namespace Constants ----------
     /// The namespace signatures.
     namespace: Vec<u8>,
 
-    ////////////////////////////////////////
     // Pruning
-    ////////////////////////////////////////
     /// A tuple representing the epochs to keep in memory.
     /// The first element is the number of old epochs to keep.
     /// The second element is the number of future epochs to accept.
@@ -120,15 +115,11 @@ pub struct Engine<
     /// This is used to prevent spam of acks for arbitrary heights.
     window: u64,
 
-    ////////////////////////////////////////
     // Messaging
-    ////////////////////////////////////////
     /// Pool of pending futures.
     verifies: FuturesPool<Verify<D, E>>,
 
-    ////////////////////////////////////////
     // State
-    ////////////////////////////////////////
     /// The current epoch.
     epoch: Epoch,
 
@@ -146,27 +137,31 @@ pub struct Engine<
     /// A map of indices with a threshold signature. Cached in memory if needed to send to other peers.
     confirmed: BTreeMap<Index, (D, V::Signature)>,
 
-    ////////////////////////////////////////
-    // Rebroadcasting
-    ////////////////////////////////////////
+    // ---------- Rebroadcasting ----------
     /// The frequency at which to rebroadcast pending indices.
     rebroadcast_timeout: Duration,
 
     /// A set of deadlines for rebroadcasting `Index` values that do not have a threshold signature.
     rebroadcast_deadlines: PrioritySet<Index, SystemTime>,
 
-    ////////////////////////////////////////
-    // Network
-    ////////////////////////////////////////
+    // ---------- Journal ----------
+    /// Journal for storing acks signed by this node.
+    journal: Option<Journal<E, Activity<V, D>>>,
+    journal_name: String,
+    journal_write_buffer: usize,
+    journal_replay_buffer: usize,
+    journal_heights_per_section: u64,
+    journal_replay_concurrency: usize,
+    journal_compression: Option<u8>,
+
+    // ---------- Network ----------
     /// Whether to send acks as priority messages.
     priority_acks: bool,
 
     /// The network sender and receiver types.
     _phantom: PhantomData<(NetS, NetR)>,
 
-    ////////////////////////////////////////
-    // Metrics
-    ////////////////////////////////////////
+    // ---------- Metrics ----------
     /// Metrics
     metrics: metrics::Metrics<E>,
 }
@@ -210,6 +205,13 @@ impl<
             confirmed: BTreeMap::new(),
             rebroadcast_timeout: cfg.rebroadcast_timeout,
             rebroadcast_deadlines: PrioritySet::new(),
+            journal: None,
+            journal_name: cfg.journal_name,
+            journal_write_buffer: cfg.journal_write_buffer,
+            journal_replay_buffer: cfg.journal_replay_buffer,
+            journal_heights_per_section: cfg.journal_heights_per_section,
+            journal_replay_concurrency: cfg.journal_replay_concurrency,
+            journal_compression: cfg.journal_compression,
             priority_acks: cfg.priority_acks,
             _phantom: PhantomData,
             metrics,
@@ -229,6 +231,19 @@ impl<
         // Initialize the epoch
         let (latest, mut epoch_updates) = self.monitor.subscribe().await;
         self.epoch = latest;
+
+        // Initialize Journal
+        let journal_cfg = JConfig {
+            partition: self.journal_name.clone(),
+            compression: self.journal_compression,
+            codec_config: (),
+            write_buffer: self.journal_write_buffer,
+        };
+        let journal = Journal::init(self.context.with_label("journal"), journal_cfg)
+            .await
+            .expect("init failed");
+        self.journal_replay(&journal).await;
+        self.journal = Some(journal);
 
         // Initialize the tip manager
         self.safe_tip
@@ -333,7 +348,7 @@ impl<
                         // Fast-forward our tip if needed
                         let safe_tip = self.safe_tip.get();
                         if safe_tip > self.tip {
-                           self.fast_forward_tip(safe_tip);
+                           self.fast_forward_tip(safe_tip).await;
                         }
                     }
 
@@ -366,12 +381,16 @@ impl<
             }
         }
 
-        // TODO: Close journal
+        // Close journal on shutdown
+        if let Some(journal) = self.journal.take() {
+            journal
+                .close()
+                .await
+                .expect("unable to close aggregation journal");
+        }
     }
 
-    ////////////////////////////////////////
-    // Handling
-    ////////////////////////////////////////
+    // ---------- Handling ----------
 
     async fn handle_verify(
         &mut self,
@@ -404,14 +423,10 @@ impl<
         }
 
         // Sign my own ack
-        let Some(share) = self.validators.share(self.epoch) else {
-            return Err(Error::UnknownShare(self.epoch));
-        };
-        let ack = Ack::sign(&self.namespace, self.epoch, share, Item { index, digest });
+        let ack = self.sign_ack(index, digest).await?;
 
         // Set the rebroadcast deadline for this index
-        self.rebroadcast_deadlines
-            .put(index, self.context.current() + self.rebroadcast_timeout);
+        self.set_rebroadcast_deadline(index);
 
         // Handle ack as if it was received over the network
         self.handle_ack(&ack).await?;
@@ -476,16 +491,13 @@ impl<
 
         // Increase the tip if needed
         if item.index == self.tip {
-            self.fast_forward_tip(item.index);
+            self.fast_forward_tip(item.index).await;
         }
 
-        // Notify the automaton
-        self.reporter
-            .report(Activity::Lock(Lock {
-                item,
-                signature: threshold,
-            }))
-            .await;
+        // Journal and notify the automaton
+        let lock = Activity::Lock(item, threshold);
+        self.journal_append(lock.clone()).await;
+        self.reporter.report(lock).await;
     }
 
     /// Handles a rebroadcast request for the given index.
@@ -502,38 +514,23 @@ impl<
             // The index may already be confirmed; continue silently
             return Ok(());
         };
-        let ack = match acks
+        let ack = acks
             .get(&self.epoch)
-            .and_then(|acks| acks.get(&share.index).cloned())
-        {
+            .and_then(|acks| acks.get(&share.index).cloned());
+        let ack = match ack {
             Some(ack) => ack,
-            None => {
-                // If we don't have an ack for this epoch, create one
-                let ack = Ack::sign(
-                    &self.namespace,
-                    self.epoch,
-                    share,
-                    Item {
-                        index,
-                        digest: *digest,
-                    },
-                );
-                self.handle_ack(&ack).await?;
-                ack
-            }
+            // unwrap is safe here; we checked that the share exists above
+            None => self.sign_ack(index, *digest).await.unwrap(),
         };
 
         // Reinsert the index with a new deadline
-        self.rebroadcast_deadlines
-            .put(index, self.context.current() + self.rebroadcast_timeout);
+        self.set_rebroadcast_deadline(index);
 
         // Broadcast the ack to all peers
         self.broadcast(ack, sender).await
     }
 
-    ////////////////////////////////////////
-    // Validation
-    ////////////////////////////////////////
+    // ---------- Validation ----------
 
     /// Sets `index` as pending and sends a verify request to the automaton.
     fn verify(&mut self, index: Index) {
@@ -610,9 +607,31 @@ impl<
         Ok(())
     }
 
-    ////////////////////////////////////////
-    // Helpers
-    ////////////////////////////////////////
+    // ---------- Helpers ----------
+
+    // Sets the rebroadcast deadline for the given `index`.
+    fn set_rebroadcast_deadline(&mut self, index: Index) {
+        self.rebroadcast_deadlines
+            .put(index, self.context.current() + self.rebroadcast_timeout);
+    }
+
+    /// Signs an ack for the given index, and digest. Stores the ack in the journal and returns it.
+    /// Returns an error if the share is unknown at the current epoch.
+    async fn sign_ack(&mut self, index: Index, digest: D) -> Result<Ack<V, D>, Error> {
+        let Some(share) = self.validators.share(self.epoch) else {
+            return Err(Error::UnknownShare(self.epoch));
+        };
+
+        // Sign the item
+        let item = Item { index, digest };
+        let ack = Ack::sign(&self.namespace, self.epoch, share, item);
+
+        // Journal the ack
+        self.journal_append(Activity::Ack(ack.clone())).await;
+        self.journal_sync(index).await;
+
+        Ok(ack)
+    }
 
     /// Broadcasts an ack to all peers with the appropriate priority.
     ///
@@ -657,10 +676,110 @@ impl<
     /// # Panics
     ///
     /// Panics if the given tip is less-than-or-equal-to the current tip.
-    fn fast_forward_tip(&mut self, tip: Index) {
+    async fn fast_forward_tip(&mut self, tip: Index) {
         assert!(tip > self.tip);
+
+        // Prune data structures
         self.pending.retain(|index, _| *index >= tip);
         self.confirmed.retain(|index, _| *index >= tip);
+
+        // Add tip to journal
+        self.journal_append(Activity::Tip(tip)).await;
+
+        // Update the tip
         self.tip = tip;
+    }
+
+    // ---------- Journal ----------
+
+    /// Returns the section of the journal for the given `index`.
+    fn get_journal_section(&self, index: Index) -> u64 {
+        index / self.journal_heights_per_section
+    }
+
+    /// Replays the journal, updating the state of the engine.
+    async fn journal_replay(&mut self, journal: &Journal<E, Activity<V, D>>) {
+        let mut tip = Index::default();
+        let mut locks = Vec::new();
+        let mut acks = Vec::new();
+        let stream = journal
+            .replay(self.journal_replay_concurrency, self.journal_replay_buffer)
+            .await
+            .expect("replay failed");
+        pin_mut!(stream);
+        while let Some(msg_result) = stream.next().await {
+            let (_, _, _, activity) = msg_result.unwrap();
+            match activity {
+                Activity::Tip(index) => {
+                    tip = max(tip, index);
+                }
+                Activity::Lock(item, signature) => {
+                    locks.push((item, signature));
+                }
+                Activity::Ack(ack) => {
+                    acks.push(ack);
+                }
+            }
+        }
+        self.tip = tip;
+        // Add locks
+        locks
+            .iter()
+            .filter(|(item, _)| item.index > tip)
+            .for_each(|(item, signature)| {
+                self.confirmed.insert(item.index, (item.digest, *signature));
+            });
+        // Add any acks that haven't resulted in a threshold signature
+        acks = acks
+            .into_iter()
+            .filter(|ack| ack.item.index > tip && !self.confirmed.contains_key(&ack.item.index))
+            .collect::<Vec<_>>();
+        acks.iter()
+            .for_each(|ack| {
+                self.set_rebroadcast_deadline(ack.item.index);
+                assert!(self
+                    .pending
+                    .insert(
+                        ack.item.index,
+                        Pending::Verified(
+                            ack.item.digest,
+                            HashMap::from([(
+                                ack.epoch,
+                                HashMap::from([(ack.signature.index, ack.clone())]),
+                            )]),
+                        ),
+                    )
+                    .is_none());
+            });
+    }
+
+    /// Appends an activity to the journal.
+    async fn journal_append(&mut self, activity: Activity<V, D>) {
+        let index = match activity {
+            Activity::Ack(ref ack) => ack.item.index,
+            Activity::Lock(ref item, _) => item.index,
+            Activity::Tip(index) => index,
+        };
+        let section = self.get_journal_section(index);
+        self.journal
+            .as_mut()
+            .expect("journal must be initialized")
+            .append(section, activity)
+            .await
+            .expect("unable to append to journal");
+    }
+
+    /// Syncs (ensures all data is written to disk) and prunes the journal.
+    async fn journal_sync(&mut self, index: Index) {
+        let section = self.get_journal_section(index);
+
+        // Get journal
+        let journal = self.journal.as_mut().expect("journal must be initialized");
+
+        // Sync journal
+        journal.sync(section).await.expect("unable to sync journal");
+
+        // Prune journal, ignoring errors
+        let _ = journal.prune(section).await;
     }
 }

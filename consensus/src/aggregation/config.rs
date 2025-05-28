@@ -53,6 +53,12 @@ pub struct Config<
     /// A unique name for the journal.
     pub journal_name: String,
 
+    /// The size of the write buffer to use for each blob in the journal.
+    pub journal_write_buffer: usize,
+
+    /// Number of bytes to buffer when replaying a journal.
+    pub journal_replay_buffer: usize,
+
     /// The number of entries to keep per journal section.
     pub journal_heights_per_section: u64,
 
