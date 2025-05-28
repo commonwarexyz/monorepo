@@ -10,7 +10,7 @@ use futures::{
 };
 use io_uring::{opcode, squeue::Entry as SqueueEntry, types};
 use std::fs::{self, File};
-use std::io::{Error as IoError, ErrorKind};
+use std::io::Error as IoError;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::Arc;
