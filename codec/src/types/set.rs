@@ -15,6 +15,50 @@ use std::{
     hash::Hash,
 };
 
+const BTREESET_TYPE: &str = "BTreeSet";
+const HASHSET_TYPE: &str = "HashSet";
+
+/// Read items from [Buf] in ascending order.
+fn read_ordered_set<K, F>(
+    buf: &mut impl Buf,
+    len: usize,
+    cfg: &K::Cfg,
+    mut insert: F,
+    set_type: &'static str,
+) -> Result<(), Error>
+where
+    K: Read + Ord,
+    F: FnMut(K),
+{
+    let mut last: Option<K> = None;
+    for _ in 0..len {
+        // Read item
+        let item = K::read_cfg(buf, cfg)?;
+
+        // Check if items are in ascending order
+        if let Some(ref last) = last {
+            match item.cmp(last) {
+                Ordering::Equal => return Err(Error::Invalid(set_type, "Duplicate item")),
+                Ordering::Less => return Err(Error::Invalid(set_type, "Items must ascend")),
+                _ => {}
+            }
+        }
+
+        // Add previous item, if exists
+        if let Some(last) = last.take() {
+            insert(last);
+        }
+        last = Some(item);
+    }
+
+    // Add last item, if exists
+    if let Some(last) = last {
+        insert(last);
+    }
+
+    Ok(())
+}
+
 // ---------- BTreeSet ----------
 
 impl<K: Ord + Hash + Eq + Write> Write for BTreeSet<K> {
@@ -44,36 +88,18 @@ impl<K: Read + Clone + Ord + Hash + Eq> Read for BTreeSet<K> {
     fn read_cfg(buf: &mut impl Buf, (range, cfg): &Self::Cfg) -> Result<Self, Error> {
         // Read and validate the length prefix
         let len = usize::read_cfg(buf, range)?;
-        let mut set = BTreeSet::new(); // BTreeSet does not have a capacity method
+        let mut set = BTreeSet::new();
 
-        // Keep track of the last item read
-        let mut last: Option<K> = None;
-
-        // Read each item
-        for _ in 0..len {
-            // Read item
-            let item = K::read_cfg(buf, cfg)?;
-
-            // Check if items are in ascending order
-            if let Some(ref last) = last {
-                match item.cmp(last) {
-                    Ordering::Equal => return Err(Error::Invalid("BTreeSet", "Duplicate item")),
-                    Ordering::Less => return Err(Error::Invalid("BTreeSet", "Items must ascend")),
-                    _ => {}
-                }
-            }
-
-            // Add last item, if exists
-            if let Some(last) = last.take() {
-                set.insert(last);
-            }
-            last = Some(item);
-        }
-
-        // Add last item, if exists
-        if let Some(last) = last.take() {
-            set.insert(last);
-        }
+        // Read items in ascending order
+        read_ordered_set(
+            buf,
+            len,
+            cfg,
+            |item| {
+                set.insert(item);
+            },
+            BTREESET_TYPE,
+        )?;
 
         Ok(set)
     }
@@ -114,34 +140,16 @@ impl<K: Read + Clone + Ord + Hash + Eq> Read for HashSet<K> {
         let len = usize::read_cfg(buf, range)?;
         let mut set = HashSet::with_capacity(len);
 
-        // Keep track of the last item read
-        let mut last: Option<K> = None;
-
-        // Read each item
-        for _ in 0..len {
-            // Read item
-            let item = K::read_cfg(buf, cfg)?;
-
-            // Check if items are in ascending order
-            if let Some(ref last) = last {
-                match item.cmp(last) {
-                    Ordering::Equal => return Err(Error::Invalid("HashSet", "Duplicate item")),
-                    Ordering::Less => return Err(Error::Invalid("HashSet", "Items must ascend")),
-                    _ => {}
-                }
-            }
-
-            // Add last item, if exists
-            if let Some(last) = last.take() {
-                set.insert(last);
-            }
-            last = Some(item);
-        }
-
-        // Add last item, if exists
-        if let Some(last) = last.take() {
-            set.insert(last);
-        }
+        // Read items in ascending order
+        read_ordered_set(
+            buf,
+            len,
+            cfg,
+            |item| {
+                set.insert(item);
+            },
+            HASHSET_TYPE,
+        )?;
 
         Ok(set)
     }
