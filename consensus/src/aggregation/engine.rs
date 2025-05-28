@@ -30,12 +30,16 @@ use commonware_runtime::{
     },
     Clock, Handle, Metrics, Spawner, Storage,
 };
-use commonware_utils::{futures::Pool as FuturesPool, Array};
-use futures::StreamExt;
+use commonware_utils::{futures::Pool as FuturesPool, Array, PrioritySet};
+use futures::{
+    future::{self, Either},
+    StreamExt,
+};
 use std::{
     cmp::max,
     collections::{BTreeMap, HashMap},
     marker::PhantomData,
+    time::{Duration, SystemTime},
 };
 use tracing::{debug, error, warn};
 
@@ -143,6 +147,15 @@ pub struct Engine<
     confirmed: BTreeMap<Index, (D, V::Signature)>,
 
     ////////////////////////////////////////
+    // Rebroadcasting
+    ////////////////////////////////////////
+    /// The frequency at which to rebroadcast pending indices.
+    rebroadcast_timeout: Duration,
+
+    /// A set of deadlines for rebroadcasting `Index` values that do not have a threshold signature.
+    rebroadcast_deadlines: PrioritySet<Index, SystemTime>,
+
+    ////////////////////////////////////////
     // Network
     ////////////////////////////////////////
     /// Whether to send acks as priority messages.
@@ -195,6 +208,8 @@ impl<
             verifies: FuturesPool::default(),
             pending: BTreeMap::new(),
             confirmed: BTreeMap::new(),
+            rebroadcast_timeout: cfg.rebroadcast_timeout,
+            rebroadcast_deadlines: PrioritySet::new(),
             priority_acks: cfg.priority_acks,
             _phantom: PhantomData,
             metrics,
@@ -228,6 +243,12 @@ impl<
                 self.verify(next);
                 continue;
             }
+
+            // Get the rebroadcast deadline for the next index
+            let rebroadcast = match self.rebroadcast_deadlines.peek() {
+                Some((_, &deadline)) => Either::Left(self.context.sleep_until(deadline)),
+                None => Either::Right(future::pending()),
+            };
 
             // Process the next event
             select! {
@@ -333,6 +354,15 @@ impl<
                     debug!(?sender, epoch=ack.epoch, index=ack.item.index, "ack");
                     guard.set(Status::Success);
                 },
+
+                // Rebroadcast
+                _ = rebroadcast => {
+                    // Get the next index to rebroadcast
+                    let (index, _) = self.rebroadcast_deadlines.pop().expect("no rebroadcast deadline");
+                    if let Err(err) = self.handle_rebroadcast(index, &mut net_sender).await {
+                        warn!(?err, ?index, "rebroadcast failed");
+                    };
+                }
             }
         }
 
@@ -379,23 +409,15 @@ impl<
         };
         let ack = Ack::sign(&self.namespace, self.epoch, share, Item { index, digest });
 
+        // Set the rebroadcast deadline for this index
+        self.rebroadcast_deadlines
+            .put(index, self.context.current() + self.rebroadcast_timeout);
+
         // Handle ack as if it was received over the network
         self.handle_ack(&ack).await?;
 
         // Send ack over the network.
-        sender
-            .send(
-                Recipients::All,
-                PeerAck { ack, tip: self.tip },
-                self.priority_acks,
-            )
-            .await
-            .map_err(|err| {
-                warn!(?err, "failed to send ack");
-                Error::UnableToSendMessage
-            })?;
-
-        Ok(())
+        self.broadcast(ack, sender).await
     }
 
     /// Handles an ack
@@ -464,6 +486,49 @@ impl<
                 signature: threshold,
             }))
             .await;
+    }
+
+    /// Handles a rebroadcast request for the given index.
+    async fn handle_rebroadcast(
+        &mut self,
+        index: Index,
+        sender: &mut WrappedSender<NetS, PeerAck<V, D>>,
+    ) -> Result<(), Error> {
+        // Get our signature
+        let Some(share) = self.validators.share(self.epoch) else {
+            return Err(Error::UnknownShare(self.epoch));
+        };
+        let Some(Pending::Verified(digest, acks)) = self.pending.get(&index) else {
+            // The index may already be confirmed; continue silently
+            return Ok(());
+        };
+        let ack = match acks
+            .get(&self.epoch)
+            .and_then(|acks| acks.get(&share.index).cloned())
+        {
+            Some(ack) => ack,
+            None => {
+                // If we don't have an ack for this epoch, create one
+                let ack = Ack::sign(
+                    &self.namespace,
+                    self.epoch,
+                    share,
+                    Item {
+                        index,
+                        digest: *digest,
+                    },
+                );
+                self.handle_ack(&ack).await?;
+                ack
+            }
+        };
+
+        // Reinsert the index with a new deadline
+        self.rebroadcast_deadlines
+            .put(index, self.context.current() + self.rebroadcast_timeout);
+
+        // Broadcast the ack to all peers
+        self.broadcast(ack, sender).await
     }
 
     ////////////////////////////////////////
@@ -548,6 +613,28 @@ impl<
     ////////////////////////////////////////
     // Helpers
     ////////////////////////////////////////
+
+    /// Broadcasts an ack to all peers with the appropriate priority.
+    ///
+    /// Returns an error if the sender returns an error.
+    async fn broadcast(
+        &mut self,
+        ack: Ack<V, D>,
+        sender: &mut WrappedSender<NetS, PeerAck<V, D>>,
+    ) -> Result<(), Error> {
+        sender
+            .send(
+                Recipients::All,
+                PeerAck { ack, tip: self.tip },
+                self.priority_acks,
+            )
+            .await
+            .map_err(|err| {
+                warn!(?err, "failed to send ack");
+                Error::UnableToSendMessage
+            })?;
+        Ok(())
+    }
 
     /// Returns the next index that we should request the digest for. This is the minimum index for
     /// which we do not have a digest or an outstanding request to the automaton for the digest.

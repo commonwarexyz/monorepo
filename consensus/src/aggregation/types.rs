@@ -218,9 +218,14 @@ impl<V: Variant, D: Digest> EncodeSize for Ack<V, D> {
     }
 }
 
+/// Used as [`Reporter::Activity`](crate::Reporter::Activity) to report activities that occur during
+/// aggregation.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Activity<V: Variant, D: Digest> {
+    /// Received an ack from a participant.
     Ack(Ack<V, D>),
+
+    /// Created a threshold signature.
     Lock(Lock<V, D>),
 }
 
@@ -263,9 +268,13 @@ impl<V: Variant, D: Digest> EncodeSize for Activity<V, D> {
     }
 }
 
+/// A threshold signature over some item, representing consensus over it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Lock<V: Variant, D: Digest> {
+    /// The item that was locked.
     pub item: Item<D>,
+
+    /// The threshold signature.
     pub signature: V::Signature,
 }
 
