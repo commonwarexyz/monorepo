@@ -92,7 +92,8 @@
             <img src="../imgs/buffering.png" alt="Buffer signatures until a quorum is reached">
             <div class="image-caption">Figure 2: Buffer signatures until a quorum is reached</div>
         </div>
-        <p>Instead of verifying each message as soon as it is received, we can buffer signatures over a message until a quorum is reached (when verifying something becomes useful). Because we know each consensus participant should only send 1 message of a given variety per view (and we are connected to that peer directly over <i>p2p::authenticated</i>), we just store their message in a slot allocated to exclusively that peer (something we cannot do with "traditional" gossip where a peer may forward the messages of any number of other peers).</p>
+        <p>Instead of verifying each message as soon as it is received, we can buffer signatures over a message until a quorum is reached and then perform a batch/aggregate verification (often dramatically more efficient than verifying all signatures individually). Because we know each consensus participant should only send 1 message of a given variety per view (and we are connected to that peer directly over <i>p2p::authenticated</i>), we just store their message in a slot allocated to exclusively that peer (something we cannot do with "traditional" gossip where a peer may forward the messages of any number of other peers).</p>
+        <p>But not all signatures may be valid, is all lost? We can perform a binary search over
 
         <p>As a wise man once said, "If you ain't first, you're last."</p>
         <p>Normally, need to verify each message incoming because you don't know who/where its coming from.</p>
