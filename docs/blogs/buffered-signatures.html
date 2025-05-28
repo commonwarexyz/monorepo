@@ -102,13 +102,7 @@
             <img src="../imgs/blocking-peers.png" alt="Block peers that send invalid signatures">
             <div class="image-caption">Figure 4: Block peers that send invalid signatures</div>
         </div>
-
-        <p>As a wise man once said, "If you ain't first, you're last."</p>
-        <p>Normally, need to verify each message incoming because you don't know who/where its coming from.</p>
-        <p>With authenticated peers, can buffer and block (can block with normal gossip p2p but peer can just get a new address and continue).</p>
-        <p>Wait for quorum of messages to be buffered and then verify.</p>
-        <p>If invalid, perform bisection over buffered messages until find invalid signature and block.</p>
-        <p>65% reduction in CPU (while still lowering block time).</p>
+        <p>The result? Faster views and faster finality (1 batch verification of 2ms instead of 50 individual verifications of ~1ms). Could we have done parallelism? Yeah, but then we wouldn't have been able to scale as the network grows. Now running at 9% of CPU on a c7g.xlarge, there is 91% of CPU for your application to use. Consensus should be a sideshow.</p>
     </div>
 
     <div id="footer-placeholder"></div>
