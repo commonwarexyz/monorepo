@@ -80,13 +80,14 @@
             <div class="date">May 28, 2025</div>
         </div>
         <p>A few months ago, we launched <a href="https://x.com/_patrickogrady/status/1901645720823935341">Alto</a>, a minimal (and wicked fast) blockchain for continuously benchmarking the <a href="https://github.com/commonwarexyz/monorepo">Commonware Library.</a> Today, I'm excited to share that this benchmarking drove a 20% reduction in block time (to ~200ms), a 20% reduction in finality (to ~300ms), a 65% reduction in CPU usage, and a 27% reduction in bandwidth usage.</p>
+        <p>To reason about these improvements, let's first take a step back (all the way back). <a href="https://commonware.xyz/blogs/introducing-commonware.html">Last August, the first Commonware Library primitive was released: commonware-p2p.
 
-        <p>As a wise man once said, "If you ain't first, you're last."</p>
-        <p>Normally, need to verify each message incoming because you don't know who/where its coming from.</p>
-        <p>With authenticated peers, can buffer and block (can block with normal gossip p2p but peer can just get a new address and continue).</p>
-        <p>Wait for quorum of messages to be buffered and then verify.</p>
-        <p>If invalid, perform bisection over buffered messages until find invalid signature and block.</p>
-        <p>65% reduction in CPU (while still lowering block time).</p>
+                <p>As a wise man once said, "If you ain't first, you're last."</p>
+                <p>Normally, need to verify each message incoming because you don't know who/where its coming from.</p>
+                <p>With authenticated peers, can buffer and block (can block with normal gossip p2p but peer can just get a new address and continue).</p>
+                <p>Wait for quorum of messages to be buffered and then verify.</p>
+                <p>If invalid, perform bisection over buffered messages until find invalid signature and block.</p>
+                <p>65% reduction in CPU (while still lowering block time).</p>
     </div>
 
     <div id="footer-placeholder"></div>
