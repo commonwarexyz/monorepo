@@ -97,7 +97,8 @@
             <img src="../imgs/bisection.png" alt="Search for invalid signatures via repeated bisection">
             <div class="image-caption">Figure 3: Search for invalid signatures via repeated bisection</div>
         </div>
-        <p>We can perform a binary search over the buffered signatures to find any invalid signatures. Because we have authenticated messaging, we can also persistently block peers that send invalid signatures (prohibiting them from ever sending us a message again). With "traditional" gossip, this isn't safe to do (because the peer forwarding the message may simply tamper with a valid signature inflight). You can block a "traditional" peer but they can just move to a new address/identity (often not affiliated with a consensus identity) and restart the attack (not to mention an honest peer would still have to verify all incoming messages to avoid being blocked, or risk delaying propagation of messages).</p>
+        <p>We can perform a binary search over the buffered signatures to find any invalid signatures. TODO: worst case?</p>
+        <p>Because we have authenticated messaging, we can (and need to) also persistently block peers that send invalid signatures (prohibiting them from ever sending us a message again). With "traditional" gossip, this isn't safe to do (because the peer forwarding the message may simply tamper with a valid signature inflight). You can block a "traditional" peer but they can just move to a new address/identity (often not affiliated with a consensus identity) and restart the attack (not to mention an honest peer would still have to verify all incoming messages to avoid being blocked, or risk delaying propagation of messages).</p>
         <div class="image-container">
             <img src="../imgs/invalid-signature-gossip.png" alt="Block peers that send invalid signatures">
             <div class="image-caption">Figure 4: Block peers that send invalid signatures</div>
