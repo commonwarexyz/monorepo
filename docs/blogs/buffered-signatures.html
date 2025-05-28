@@ -89,8 +89,8 @@
         </div>
         <p>The consensus primitives <a href="https://commonware.xyz/blogs/commonware-the-anti-framework.html">we released in December</a> (<a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html">simplex</a>) and <a href="https://commonware.xyz/blogs/threshold-simplex.html">January</a> (<a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/threshold_simplex/index.html">threshold_simplex</a>) built on top of <i>p2p::authenticated</i> but didn't do anything particularly clever with it (the point-to-point messaging alone was enough of an improvement to reach the ~250ms block time in the original Alto launch).</p>
         <p>So, what would something clever look like?</p>
-        <h2>Lazy Signature Verification</h2>
-        <p>Seeking to progress through consensus as fast as possible, validators typically verify signatures as soon as they receive them (sometimes even in parallel). This eager verification makes intuitive sense—you want to either enter a new view or finalize a block as soon as possible. In fact, doing anything else with a traditional gossip messaging won't work.</p>
+        <h2>Buffered Signature Verification</h2>
+        <p>Seeking to progress through consensus as fast as possible, most consensus implementations verify signatures as soon as they are available (often in parallel to avoid slowing down the consensus state machine). This eager verification makes intuitive sense—you want to either enter a new view or finalize a block as soon as possible. In fact, doing anything else with a traditional gossip messaging won't work.</p>
         <div class="image-container">
             <img src="../imgs/invalid-signature-gossip.png" alt="Block peers that send invalid signatures">
             <div class="image-caption">Figure 4: Block peers that send invalid signatures</div>
