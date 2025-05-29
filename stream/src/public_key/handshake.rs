@@ -12,26 +12,26 @@ use std::time::Duration;
 /// Handshake information that is signed over by the sender.
 pub struct Info<C: Scheme> {
     /// The public key of the recipient.
-    pub recipient: C::PublicKey,
+    recipient: C::PublicKey,
 
     /// The ephemeral public key of the sender.
     ///
     /// This is used to derive the shared secret for the encrypted connection.
-    pub ephemeral_public_key: x25519::PublicKey,
+    ephemeral_public_key: x25519::PublicKey,
 
     /// Timestamp of the handshake (in epoch milliseconds).
-    pub timestamp: u64,
+    timestamp: u64,
 }
 
 impl<C: Scheme> Info<C> {
     pub fn new(
         recipient: C::PublicKey,
-        secret: &x25519_dalek::EphemeralSecret,
+        ephemeral_public_key: x25519::PublicKey,
         timestamp: u64,
     ) -> Self {
         Self {
             recipient,
-            ephemeral_public_key: x25519::PublicKey::from_secret(secret),
+            ephemeral_public_key,
             timestamp,
         }
     }
@@ -80,13 +80,13 @@ impl<C: Scheme> EncodeSize for Info<C> {
 // it should connect to them.
 pub struct Signed<C: Scheme> {
     // The handshake info that was signed over
-    pub info: Info<C>,
+    info: Info<C>,
 
     // The public key of the sender
-    pub signer: C::PublicKey,
+    signer: C::PublicKey,
 
     // The signature of the sender
-    pub signature: C::Signature,
+    signature: C::Signature,
 }
 
 impl<C: Scheme> Signed<C> {

@@ -128,7 +128,11 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let msg = handshake::Signed::sign(
             &mut config.crypto,
             &config.namespace,
-            handshake::Info::<C>::new(peer.clone(), &secret, timestamp),
+            handshake::Info::<C>::new(
+                peer.clone(),
+                x25519::PublicKey::from_secret(&secret),
+                timestamp,
+            ),
         )
         .encode();
 
@@ -212,7 +216,11 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let msg = handshake::Signed::sign(
             &mut crypto,
             &namespace,
-            handshake::Info::<C>::new(incoming.peer_public_key, &secret, timestamp),
+            handshake::Info::<C>::new(
+                incoming.peer_public_key,
+                x25519::PublicKey::from_secret(&secret),
+                timestamp,
+            ),
         )
         .encode();
 
@@ -586,8 +594,11 @@ mod tests {
                     // Create and send own handshake
                     let secret = x25519::new(&mut context);
                     let timestamp = context.current().epoch_millis();
-                    let info =
-                        handshake::Info::new(peer_config.crypto.public_key(), &secret, timestamp);
+                    let info = handshake::Info::new(
+                        peer_config.crypto.public_key(),
+                        x25519::PublicKey::from_secret(&secret),
+                        timestamp,
+                    );
                     let signed_handshake =
                         handshake::Signed::sign(&mut actual_peer, &peer_config.namespace, info);
                     send_frame(&mut peer_sink, &signed_handshake.encode(), 1024)
@@ -644,11 +655,11 @@ mod tests {
                     let _ = handshake::Signed::<Ed25519>::decode(msg).unwrap();
 
                     // Create a custom handshake info bytes with zero ephemeral key
-                    let info = handshake::Info {
+                    let info = handshake::Info::new(
                         recipient,
-                        ephemeral_public_key: x25519::PublicKey::from_bytes([0u8; 32]),
-                        timestamp: context.current().epoch_millis(),
-                    };
+                        x25519::PublicKey::from_bytes([0u8; 32]),
+                        context.current().epoch_millis(),
+                    );
 
                     // Create the signed handshake
                     let signed_handshake =
@@ -699,11 +710,11 @@ mod tests {
             };
 
             // Encode all-zero ephemeral public key (32 bytes)
-            let info = handshake::Info {
-                recipient: listener_config.crypto.public_key(),
-                ephemeral_public_key: x25519::PublicKey::from_bytes([0u8; 32]),
-                timestamp: context.current().epoch_millis(),
-            };
+            let info = handshake::Info::new(
+                listener_config.crypto.public_key(),
+                x25519::PublicKey::from_bytes([0u8; 32]),
+                context.current().epoch_millis(),
+            );
 
             // Create the signed handshake
             let signed_handshake =
