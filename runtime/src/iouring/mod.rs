@@ -101,6 +101,8 @@ pub struct Op {
     /// The buffer used for the operation, if any.
     /// E.g. For read, this is the buffer being read into.
     /// If None, the operation doesn't use a buffer (e.g. a sync operation).
+    /// We hold the buffer here so it's guaranteed to live until the operation
+    /// completes, preventing write-after-free issues.
     pub buffer: Option<StableBuf>,
 }
 
