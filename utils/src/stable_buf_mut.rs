@@ -4,6 +4,51 @@
 
 use crate::stable_buf::StableBuf;
 
+pub enum StableBufMut2 {
+    Vec(Vec<u8>),
+    BytesMut(bytes::BytesMut),
+}
+
+impl StableBufMut2 {
+    /// Returns a raw pointer to this buffer.
+    pub fn stable_mut_ptr(&mut self) -> *mut u8 {
+        match self {
+            StableBufMut2::Vec(v) => v.as_mut_ptr(),
+            StableBufMut2::BytesMut(b) => b.as_mut_ptr(),
+        }
+    }
+
+    /// Returns the length of the buffer.
+    pub fn len(&self) -> usize {
+        match self {
+            StableBufMut2::Vec(v) => v.len(),
+            StableBufMut2::BytesMut(b) => b.len(),
+        }
+    }
+
+    /// Copies the given byte slice into this buffer.
+    /// `src` must not overlap with this buffer.
+    /// Panics if `src` exceeds this buffer's length.
+    pub fn put_slice(&mut self, src: &[u8]) {
+        let dst = self.stable_mut_ptr();
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
+        }
+    }
+
+    /// Returns the buffer as a mutable slice.
+    pub fn deref_mut(&mut self) -> &mut [u8] {
+        unsafe {
+            match self {
+                StableBufMut2::Vec(v) => std::slice::from_raw_parts_mut(v.as_mut_ptr(), v.len()),
+                StableBufMut2::BytesMut(b) => {
+                    std::slice::from_raw_parts_mut(b.as_mut_ptr(), b.len())
+                }
+            }
+        }
+    }
+}
+
 /// A mutable buffer with a stable memory address.
 /// # Safety
 /// The implementor must guarantee that the pointer remains valid
