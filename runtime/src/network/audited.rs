@@ -11,7 +11,8 @@ pub struct Sink<S: crate::Sink> {
 }
 
 impl<S: crate::Sink> crate::Sink for Sink<S> {
-    async fn send(&mut self, data: StableBufMut) -> Result<(), Error> {
+    async fn send(&mut self, data: impl Into<StableBufMut> + Send) -> Result<(), Error> {
+        let data = data.into();
         self.auditor.event(b"send_attempt", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
             hasher.update(data.as_ref());
@@ -246,7 +247,7 @@ mod tests {
                 assert_eq!(buf.as_ref(), CLIENT_MSG.as_bytes());
 
                 // Send response
-                sink.send(Vec::from(SERVER_MSG).into()).await.unwrap();
+                sink.send(Vec::from(SERVER_MSG)).await.unwrap();
             });
             server_handles.push(handle);
         }
@@ -260,7 +261,7 @@ mod tests {
                 let (mut sink, mut stream) = network.dial(listener_addr).await.unwrap();
 
                 // Send data to server
-                sink.send(Vec::from(CLIENT_MSG).into()).await.unwrap();
+                sink.send(Vec::from(CLIENT_MSG)).await.unwrap();
 
                 // Receive response
                 let buf = stream.recv(vec![0; SERVER_MSG.len()]).await.unwrap();

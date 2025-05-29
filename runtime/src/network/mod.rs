@@ -50,7 +50,7 @@ mod tests {
                 .await
                 .expect("Failed to receive");
             assert_eq!(read.as_ref(), CLIENT_SEND_DATA.as_bytes());
-            sink.send(Vec::from(SERVER_SEND_DATA).into())
+            sink.send(Vec::from(SERVER_SEND_DATA))
                 .await
                 .expect("Failed to send");
         });
@@ -63,7 +63,7 @@ mod tests {
                 .await
                 .expect("Failed to dial server");
 
-            sink.send(Vec::from(CLIENT_SEND_DATA).into())
+            sink.send(Vec::from(CLIENT_SEND_DATA))
                 .await
                 .expect("Failed to send data");
 
@@ -104,7 +104,7 @@ mod tests {
                     .expect("Failed to receive");
                 assert_eq!(read.as_ref(), CLIENT_SEND_DATA.as_bytes());
 
-                sink.send(Vec::from(SERVER_SEND_DATA).into())
+                sink.send(Vec::from(SERVER_SEND_DATA))
                     .await
                     .expect("Failed to send");
             }
@@ -120,7 +120,7 @@ mod tests {
                     .expect("Failed to dial server");
 
                 // Send a message to the server
-                sink.send(Vec::from(CLIENT_SEND_DATA).into())
+                sink.send(Vec::from(CLIENT_SEND_DATA))
                     .await
                     .expect("Failed to send data");
 
@@ -178,7 +178,7 @@ mod tests {
 
             // Send and verify data in chunks
             for _ in 0..NUM_CHUNKS {
-                sink.send(pattern.clone().into())
+                sink.send(pattern.clone())
                     .await
                     .expect("Failed to send chunk");
                 let read = stream

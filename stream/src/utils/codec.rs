@@ -23,9 +23,7 @@ pub async fn send_frame<S: Sink>(
     let len: u32 = n.try_into().map_err(|_| Error::SendTooLarge(n))?;
     prefixed_buf.put_u32(len);
     prefixed_buf.extend_from_slice(buf);
-    sink.send(prefixed_buf.into())
-        .await
-        .map_err(Error::SendFailed)
+    sink.send(prefixed_buf).await.map_err(Error::SendFailed)
 }
 
 /// Receives data from the stream with a 4-byte length prefix.
@@ -164,7 +162,7 @@ mod tests {
             let mut buf = BytesMut::with_capacity(4 + msg.len());
             buf.put_u32(MAX_MESSAGE_SIZE as u32);
             buf.extend_from_slice(&msg);
-            sink.send(buf.into()).await.unwrap();
+            sink.send(buf).await.unwrap();
 
             let data = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await.unwrap();
             assert_eq!(data.len(), MAX_MESSAGE_SIZE);
@@ -181,7 +179,7 @@ mod tests {
             // Manually insert a frame that gives MAX_MESSAGE_SIZE as the size
             let mut buf = BytesMut::with_capacity(4);
             buf.put_u32(MAX_MESSAGE_SIZE as u32);
-            sink.send(buf.into()).await.unwrap();
+            sink.send(buf).await.unwrap();
 
             let result = recv_frame(&mut stream, MAX_MESSAGE_SIZE - 1).await;
             assert!(matches!(&result, Err(Error::RecvTooLarge(n)) if *n == MAX_MESSAGE_SIZE));
@@ -197,7 +195,7 @@ mod tests {
             // Manually insert a frame that gives zero as the size
             let mut buf = BytesMut::with_capacity(4);
             buf.put_u32(0);
-            sink.send(buf.into()).await.unwrap();
+            sink.send(buf).await.unwrap();
 
             let result = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await;
             assert!(matches!(&result, Err(Error::StreamClosed)));

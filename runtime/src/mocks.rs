@@ -42,7 +42,8 @@ pub struct Sink {
 }
 
 impl SinkTrait for Sink {
-    async fn send(&mut self, msg: StableBufMut) -> Result<(), Error> {
+    async fn send(&mut self, msg: impl Into<StableBufMut> + Send) -> Result<(), Error> {
+        let msg = msg.into();
         let (os_send, data) = {
             let mut channel = self.channel.lock().unwrap();
             channel.buffer.extend(msg.as_ref());
@@ -117,7 +118,7 @@ mod tests {
         let data = b"hello world".to_vec();
 
         block_on(async {
-            sink.send(data.clone().into()).await.unwrap();
+            sink.send(data.clone()).await.unwrap();
             let buf = stream.recv(vec![0; data.len()]).await.unwrap();
             assert_eq!(buf.as_ref(), data);
         });
@@ -130,8 +131,8 @@ mod tests {
         let data2 = b" world".to_vec();
 
         block_on(async {
-            sink.send(data.into()).await.unwrap();
-            sink.send(data2.into()).await.unwrap();
+            sink.send(data).await.unwrap();
+            sink.send(data2).await.unwrap();
             let buf = stream.recv(vec![0; 5]).await.unwrap();
             assert_eq!(buf.as_ref(), b"hello");
             let buf = stream.recv(buf).await.unwrap();
@@ -149,7 +150,7 @@ mod tests {
         let buf = block_on(async {
             futures::try_join!(stream.recv(vec![0; data.len()]), async {
                 sleep(Duration::from_millis(10_000));
-                sink.send(data.to_vec().into()).await
+                sink.send(data.to_vec()).await
             },)
             .unwrap()
             .0
@@ -195,7 +196,7 @@ mod tests {
             drop(stream);
 
             // Try to send a message (longer than the requested amount), but the receiver is dropped.
-            let result = sink.send(b"hello world".to_vec().into()).await;
+            let result = sink.send(b"hello world".to_vec()).await;
             assert!(matches!(result, Err(Error::SendFailed)));
         });
     }

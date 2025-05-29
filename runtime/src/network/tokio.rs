@@ -18,9 +18,9 @@ pub struct Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, msg: StableBufMut) -> Result<(), Error> {
+    async fn send(&mut self, msg: impl Into<StableBufMut> + Send) -> Result<(), Error> {
         // Time out if we take too long to write
-        timeout(self.write_timeout, self.sink.write_all(msg.as_ref()))
+        timeout(self.write_timeout, self.sink.write_all(msg.into().as_ref()))
             .await
             .map_err(|_| Error::Timeout)?
             .map_err(|_| Error::SendFailed)?;

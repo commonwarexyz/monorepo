@@ -299,7 +299,10 @@ pub trait Listener: Sync + Send + 'static {
 /// messages over a network connection.
 pub trait Sink: Sync + Send + 'static {
     /// Send a message to the sink.
-    fn send(&mut self, msg: StableBufMut) -> impl Future<Output = Result<(), Error>> + Send;
+    fn send(
+        &mut self,
+        msg: impl Into<StableBufMut> + Send,
+    ) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 /// Interface that any runtime must implement to receive
@@ -1486,9 +1489,7 @@ mod tests {
                         "GET /metrics HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
                         address
                     );
-                    sink.send(Bytes::from(request).to_vec().into())
-                        .await
-                        .unwrap();
+                    sink.send(Bytes::from(request).to_vec()).await.unwrap();
 
                     // Read and verify the HTTP status line
                     let status_line = read_line(&mut stream).await.unwrap();

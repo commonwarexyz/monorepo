@@ -55,7 +55,8 @@ pub struct Sink<S: crate::Sink> {
 }
 
 impl<S: crate::Sink> crate::Sink for Sink<S> {
-    async fn send(&mut self, data: StableBufMut) -> Result<(), crate::Error> {
+    async fn send(&mut self, data: impl Into<StableBufMut> + Send) -> Result<(), crate::Error> {
+        let data = data.into();
         let len = data.len();
         self.inner.send(data).await?;
         self.metrics.outbound_bandwidth.inc_by(len as u64);
@@ -212,7 +213,7 @@ mod tests {
 
         // Send fixed-size data and receive response
         let msg = vec![42u8; MSG_SIZE as usize];
-        client_sink.send(msg.clone().into()).await.unwrap();
+        client_sink.send(msg.clone()).await.unwrap();
 
         let response = client_stream
             .recv(vec![0; MSG_SIZE as usize])

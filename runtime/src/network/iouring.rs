@@ -166,7 +166,8 @@ impl Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, mut msg: StableBufMut) -> Result<(), crate::Error> {
+    async fn send(&mut self, msg: impl Into<StableBufMut> + Send) -> Result<(), crate::Error> {
+        let mut msg = msg.into();
         let mut bytes_sent = 0;
         let msg_len = msg.len();
         while bytes_sent < msg_len {
