@@ -29,7 +29,13 @@ const BASE_KDF_PREFIX: &[u8] = b"commonware-stream/KDF/v1/";
 const D2L: u8 = 0x01; // Dialer-to-Listener
 const L2D: u8 = 0x02; // Listener-to-Dialer
 
-/// Helper function to derive directional keys using HKDF-SHA256.
+/// Key Derivation Function (KDF) to derive directional ChaCha20Poly1305 ciphers using HKDF-SHA256.
+///
+/// This function derives two ChaCha20Poly1305 ciphers based on:
+/// - A shared secret from the Diffie-Hellman key exchange
+/// - The unique application namespace
+/// - The dialer handshake message bytes
+/// - The listener handshake message bytes
 ///
 /// Returns a tuple of the:
 /// - dialer-to-listener cipher
