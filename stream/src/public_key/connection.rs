@@ -330,7 +330,6 @@ impl<St: Stream> crate::Receiver for Receiver<St> {
 mod tests {
     use super::*;
     use crate::{Receiver as _, Sender as _};
-    use commonware_codec::{varint::UInt, Write};
     use commonware_cryptography::{Ed25519, Signer};
     use commonware_runtime::{deterministic, mocks, Metrics, Runner};
     use std::time::Duration;
@@ -645,31 +644,18 @@ mod tests {
                     let _ = handshake::Signed::<Ed25519>::decode(msg).unwrap();
 
                     // Create a custom handshake info bytes with zero ephemeral key
-                    // We need to manually encode the handshake::Info structure
-                    let mut info_bytes = Vec::new();
+                    let info = handshake::Info {
+                        recipient,
+                        ephemeral_public_key: x25519::PublicKey::from_bytes([0u8; 32]),
+                        timestamp: context.current().epoch_millis(),
+                    };
 
-                    // Encode recipient public key
-                    info_bytes.extend_from_slice(&recipient.encode());
+                    // Create the signed handshake
+                    let signed_handshake =
+                        handshake::Signed::sign(&mut peer_crypto, &namespace, info);
 
-                    // Encode all-zero ephemeral public key (32 bytes)
-                    info_bytes.extend_from_slice(&[0u8; 32]);
-
-                    // Encode timestamp as varint
-                    let timestamp = context.current().epoch_millis();
-                    let mut timestamp_bytes = Vec::new();
-                    UInt(timestamp).write(&mut timestamp_bytes);
-                    info_bytes.extend_from_slice(&timestamp_bytes);
-
-                    // Sign the info
-                    let signature = peer_crypto.sign(Some(&namespace), &info_bytes);
-
-                    // Encode the complete signed handshake
-                    let mut signed_bytes = Vec::new();
-                    signed_bytes.extend_from_slice(&info_bytes);
-                    signed_bytes.extend_from_slice(&peer_crypto.public_key().encode());
-                    signed_bytes.extend_from_slice(&signature.encode());
-
-                    send_frame(&mut peer_sink, &signed_bytes, 1024)
+                    // Send the signed handshake
+                    send_frame(&mut peer_sink, &signed_handshake.encode(), 1024)
                         .await
                         .unwrap();
                 }
@@ -712,32 +698,19 @@ mod tests {
                 handshake_timeout: Duration::from_secs(5),
             };
 
-            // Create a handshake with an all-zero ephemeral key
-            let timestamp = context.current().epoch_millis();
-            let mut info_bytes = Vec::new();
+            // Encode all-zero ephemeral public key (32 bytes)
+            let info = handshake::Info {
+                recipient: listener_config.crypto.public_key(),
+                ephemeral_public_key: x25519::PublicKey::from_bytes([0u8; 32]),
+                timestamp: context.current().epoch_millis(),
+            };
 
-            // Encode recipient public key
-            info_bytes.extend_from_slice(&listener_crypto.public_key().encode());
-
-            // Encode all-zero ephemeral public key (32 bytes) - this will cause non-contributory DH
-            info_bytes.extend_from_slice(&[0u8; 32]);
-
-            // Encode timestamp as varint
-            let mut timestamp_bytes = Vec::new();
-            UInt(timestamp).write(&mut timestamp_bytes);
-            info_bytes.extend_from_slice(&timestamp_bytes);
-
-            // Sign the info
-            let signature = dialer_crypto.sign(Some(&listener_config.namespace), &info_bytes);
-
-            // Encode the complete signed handshake
-            let mut signed_bytes = Vec::new();
-            signed_bytes.extend_from_slice(&info_bytes);
-            signed_bytes.extend_from_slice(&dialer_crypto.public_key().encode());
-            signed_bytes.extend_from_slice(&signature.encode());
+            // Create the signed handshake
+            let signed_handshake =
+                handshake::Signed::sign(&mut dialer_crypto, &listener_config.namespace, info);
 
             // Send the handshake
-            send_frame(&mut dialer_sink, &signed_bytes, 1024)
+            send_frame(&mut dialer_sink, &signed_handshake.encode(), 1024)
                 .await
                 .unwrap();
 
