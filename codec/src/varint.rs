@@ -600,9 +600,8 @@ mod tests {
                     continue;
                 };
 
-                // Calculate expected size
+                // Compute expected size
                 let expected_size = (bits as usize).div_ceil(DATA_BITS_PER_BYTE);
-
                 let calculated_size = size(value);
                 assert_eq!(
                     calculated_size, expected_size,
@@ -610,20 +609,13 @@ mod tests {
                     val, bits
                 );
 
+                // Compare encoded size
                 let mut buf = Vec::new();
                 write(value, &mut buf);
                 assert_eq!(
                     buf.len(),
                     expected_size,
                     "Encoded size wrong for {} with {} bits",
-                    val,
-                    bits
-                );
-
-                assert_eq!(
-                    buf.len(),
-                    calculated_size,
-                    "Size mismatch for {} with {} bits",
                     val,
                     bits
                 );
@@ -646,18 +638,18 @@ mod tests {
                     continue;
                 };
 
-                // Expected size is based on which bit is set
+                // Compute expected size
                 let expected_size = ((bit_pos + 1) as usize).div_ceil(DATA_BITS_PER_BYTE);
-
                 let calculated_size = size(value);
-                let mut buf = Vec::new();
-                write(value, &mut buf);
-
                 assert_eq!(
                     calculated_size, expected_size,
                     "Size wrong for 1<<{} = {}",
                     bit_pos, val
                 );
+
+                // Compare encoded size
+                let mut buf = Vec::new();
+                write(value, &mut buf);
                 assert_eq!(
                     buf.len(),
                     expected_size,
