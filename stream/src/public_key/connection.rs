@@ -1,84 +1,21 @@
-use super::{handshake, nonce, x25519, Config};
+use super::{cipher, handshake, nonce, x25519, Config};
 use crate::{
     utils::codec::{recv_frame, send_frame},
     Error,
 };
 use bytes::Bytes;
-use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit, KeySizeUser};
+use chacha20poly1305::{aead::Aead, ChaCha20Poly1305};
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{Hasher, Scheme, Sha256};
+use commonware_cryptography::Scheme;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
 use commonware_utils::SystemTimeExt as _;
-use hkdf::Hkdf;
 use rand::{CryptoRng, Rng};
-use sha2::{digest::typenum::Unsigned, Sha256 as ISha256};
 use std::time::SystemTime;
 
 // When encrypting data, an encryption tag is appended to the ciphertext.
 // This constant represents the size of the encryption tag in bytes.
 const ENCRYPTION_TAG_LENGTH: usize = 16;
-
-// The size of the key used by the ChaCha20Poly1305 cipher.
-const CHACHA_KEY_SIZE: usize = <ChaCha20Poly1305 as KeySizeUser>::KeySize::USIZE;
-
-// A constant prefix used for the salt hash in the HKDF key derivation.
-const BASE_KDF_PREFIX: &[u8] = b"commonware-stream/KDF/v1/";
-
-// Info values used for deriving directional keys in the KDF.
-const D2L: u8 = 0x01; // Dialer-to-Listener
-const L2D: u8 = 0x02; // Listener-to-Dialer
-
-/// Key Derivation Function (KDF) to derive directional ChaCha20Poly1305 ciphers using HKDF-SHA256.
-///
-/// This function derives two ChaCha20Poly1305 ciphers based on:
-/// - A shared secret from the Diffie-Hellman key exchange
-/// - The unique application namespace
-/// - The dialer handshake message bytes
-/// - The listener handshake message bytes
-///
-/// Returns a tuple of the:
-/// - dialer-to-listener cipher
-/// - listener-to-dialer cipher
-fn derive_ciphers(
-    shared_secret: &[u8],
-    namespace: &[u8],
-    dialer_handshake_bytes: &[u8],
-    listener_handshake_bytes: &[u8],
-) -> Result<(ChaCha20Poly1305, ChaCha20Poly1305), Error> {
-    // Create a unique hash from:
-    // - A commonware-specific prefix
-    // - The unique application namespace
-    // - The dialer handshake
-    // - The listener handshake
-    // This hash serves as the salt for HKDF expansion.
-    let mut hasher = Sha256::default();
-    hasher.update(BASE_KDF_PREFIX);
-    hasher.update(namespace);
-    hasher.update(dialer_handshake_bytes);
-    hasher.update(listener_handshake_bytes);
-    let salt = hasher.finalize();
-
-    // HKDF-Extract: Create a pseudorandom key (PRK) based on:
-    // - The salt
-    // - The shared secret from the Diffie-Hellman key exchange
-    let prk = Hkdf::<ISha256>::new(Some(salt.as_ref()), shared_secret);
-
-    // Reusable buffer for derived keys
-    let mut buf = [0u8; CHACHA_KEY_SIZE];
-
-    // Dialer-to-Listener cipher
-    prk.expand(&[D2L], &mut buf)
-        .map_err(|_| Error::HKDFExpansion)?;
-    let d2l_cipher = ChaCha20Poly1305::new_from_slice(&buf).map_err(|_| Error::CipherCreation)?;
-
-    // Listener-to-Dialer cipher
-    prk.expand(&[L2D], &mut buf)
-        .map_err(|_| Error::HKDFExpansion)?;
-    let l2d_cipher = ChaCha20Poly1305::new_from_slice(&buf).map_err(|_| Error::CipherCreation)?;
-
-    Ok((d2l_cipher, l2d_cipher))
-}
 
 /// An incoming connection with a verified peer handshake.
 pub struct IncomingConnection<C: Scheme, Si: Sink, St: Stream> {
@@ -250,11 +187,9 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         }
 
         // Create ciphers
-        let (d2l_cipher, l2d_cipher) = derive_ciphers(
+        let (d2l_cipher, l2d_cipher) = cipher::derive(
             shared_secret.as_bytes(),
-            &config.namespace,
-            &d2l_msg,
-            &l2d_msg,
+            &[&config.namespace, &d2l_msg, &l2d_msg],
         )?;
 
         // We keep track of dialer to determine who adds a bit to their nonce (to prevent reuse)
@@ -318,7 +253,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
 
         // Create ciphers
         let (d2l_cipher, l2d_cipher) =
-            derive_ciphers(shared_secret.as_bytes(), &namespace, &d2l_msg, &l2d_msg)?;
+            cipher::derive(shared_secret.as_bytes(), &[&namespace, &d2l_msg, &l2d_msg])?;
 
         // Track whether or not we are the dialer to ensure we send correctly formatted nonces.
         Ok(Connection {
@@ -412,6 +347,7 @@ impl<St: Stream> crate::Receiver for Receiver<St> {
 mod tests {
     use super::*;
     use crate::{Receiver as _, Sender as _};
+    use chacha20poly1305::KeyInit;
     use commonware_cryptography::{Ed25519, Signer};
     use commonware_runtime::{deterministic, mocks, Metrics, Runner};
     use std::time::Duration;

@@ -63,6 +63,7 @@
 use commonware_cryptography::Scheme;
 use std::time::Duration;
 
+mod cipher;
 mod connection;
 pub use connection::{Connection, IncomingConnection, Receiver, Sender};
 mod handshake;
