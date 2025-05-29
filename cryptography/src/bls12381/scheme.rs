@@ -135,8 +135,10 @@ impl crate::PrivateKey for PrivateKey {
     fn public_key(&self) -> Self::PublicKey {
         PublicKey::from(ops::compute_public::<MinPk>(&self.key))
     }
+}
 
-    fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Self::Signature {
+impl crate::Signer<Signature> for PrivateKey {
+    fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Signature {
         let signature = ops::sign_message::<MinPk>(&self.key, namespace, msg);
         Signature::from(signature)
     }
@@ -381,7 +383,7 @@ impl crate::BatchScheme<PrivateKey> for Batch {
 /// Test vectors sourced from https://github.com/ethereum/bls12-381-tests/releases/tag/v0.1.2.
 #[cfg(test)]
 mod tests {
-    use crate::{bls12381, BatchScheme as _, PrivateKey as _, PublicKey as _};
+    use crate::{bls12381, BatchScheme as _, PublicKey as _, Signer as _};
 
     use super::*;
     use commonware_codec::{DecodeExt, Encode};

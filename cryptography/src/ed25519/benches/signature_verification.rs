@@ -1,4 +1,6 @@
-use commonware_cryptography::{ed25519, PrivateKey as _, PrivateKeyGen as _, PublicKey as _};
+use commonware_cryptography::{
+    ed25519, PrivateKey as _, PrivateKeyGen as _, PublicKey as _, Signer as _,
+};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
 use std::hint::black_box;

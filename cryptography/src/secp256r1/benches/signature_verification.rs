@@ -1,4 +1,6 @@
-use commonware_cryptography::{secp256r1, PrivateKey, PrivateKeyGen as _, PublicKey as _};
+use commonware_cryptography::{
+    secp256r1, PrivateKey, PrivateKeyGen as _, PublicKey as _, Signer as _,
+};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
 use std::hint::black_box;

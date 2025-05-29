@@ -30,8 +30,10 @@ impl crate::PrivateKey for PrivateKey {
     fn public_key(&self) -> Self::PublicKey {
         PublicKey::from(self.key.verification_key())
     }
+}
 
-    fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Self::Signature {
+impl crate::Signer<Signature> for PrivateKey {
+    fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Signature {
         let sig = match namespace {
             Some(namespace) => self.key.sign(&union_unique(namespace, msg)),
             None => self.key.sign(msg),
@@ -340,7 +342,7 @@ impl crate::BatchScheme<PrivateKey> for Batch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ed25519, BatchScheme as _, PrivateKey as _, PublicKey as _};
+    use crate::{ed25519, BatchScheme as _, PublicKey as _, Signer as _};
     use commonware_codec::{DecodeExt, Encode};
     use rand::rngs::OsRng;
 

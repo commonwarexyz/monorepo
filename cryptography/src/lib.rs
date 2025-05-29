@@ -15,8 +15,12 @@ pub mod sha256;
 pub use sha256::{hash, Sha256};
 pub mod secp256r1;
 
+pub trait Signer<S: Signature> {
+    fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> S;
+}
+
 /// A private key, able to derive its public key and sign messages.
-pub trait PrivateKey: Sized + Array {
+pub trait PrivateKey: Signer<Self::Signature> + Sized + Array {
     /// The corresponding public key type.
     type PublicKey: PublicKey<Private = Self, Signature = Self::Signature>;
     /// The signature type produced by this keypair.
@@ -24,9 +28,6 @@ pub trait PrivateKey: Sized + Array {
 
     /// Derive the public key.
     fn public_key(&self) -> Self::PublicKey;
-
-    /// Sign a message, returning a signature.
-    fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Self::Signature;
 }
 
 pub trait PrivateKeyGen: PrivateKey {

@@ -39,7 +39,13 @@ impl crate::PrivateKey for PrivateKey {
 
     type Signature = Signature;
 
-    fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Self::Signature {
+    fn public_key(&self) -> Self::PublicKey {
+        PublicKey::from(self.key.verifying_key().to_owned())
+    }
+}
+
+impl crate::Signer<Signature> for PrivateKey {
+    fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Signature {
         let signature: p256::ecdsa::Signature = match namespace {
             Some(namespace) => self.key.sign(&union_unique(namespace, msg)),
             None => self.key.sign(msg),
@@ -49,10 +55,6 @@ impl crate::PrivateKey for PrivateKey {
             None => signature,
         };
         Signature::from(signature)
-    }
-
-    fn public_key(&self) -> Self::PublicKey {
-        PublicKey::from(self.key.verifying_key().to_owned())
     }
 }
 
@@ -320,7 +322,7 @@ impl Display for Signature {
 /// https://csrc.nist.gov/projects/cryptographic-algorithm-validation-program/digital-signatures.
 #[cfg(test)]
 mod tests {
-    use crate::{PrivateKey as _, PublicKey as _};
+    use crate::{PublicKey as _, Signer as _};
 
     use super::*;
     use bytes::Bytes;
