@@ -330,6 +330,7 @@ impl<St: Stream> crate::Receiver for Receiver<St> {
 mod tests {
     use super::*;
     use crate::{Receiver as _, Sender as _};
+    use commonware_codec::{varint::UInt, Write};
     use commonware_cryptography::{Ed25519, Signer};
     use commonware_runtime::{deterministic, mocks, Metrics, Runner};
     use std::time::Duration;
@@ -608,6 +609,153 @@ mod tests {
 
             // Verify the error
             assert!(matches!(result, Err(Error::WrongPeer)));
+        });
+    }
+
+    #[test]
+    fn test_upgrade_dialer_non_contributory_secret() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create cryptographic identities
+            let dialer_crypto = Ed25519::from_seed(0);
+            let mut peer_crypto = Ed25519::from_seed(1);
+            let peer_public_key = peer_crypto.public_key();
+
+            // Set up mock channels
+            let (dialer_sink, mut peer_stream) = mocks::Channel::init();
+            let (mut peer_sink, dialer_stream) = mocks::Channel::init();
+
+            // Dialer configuration
+            let dialer_config = Config {
+                crypto: dialer_crypto,
+                namespace: b"test_namespace".to_vec(),
+                max_message_size: 1024,
+                synchrony_bound: Duration::from_secs(5),
+                max_handshake_age: Duration::from_secs(5),
+                handshake_timeout: Duration::from_secs(5),
+            };
+
+            // Spawn a mock peer that responds with a handshake containing an all-zero ephemeral key
+            context.with_label("mock_peer").spawn({
+                let namespace = dialer_config.namespace.clone();
+                let recipient = dialer_config.crypto.public_key();
+                move |context| async move {
+                    // Read the handshake from dialer
+                    let msg = recv_frame(&mut peer_stream, 1024).await.unwrap();
+                    let _ = handshake::Signed::<Ed25519>::decode(msg).unwrap();
+
+                    // Create a custom handshake info bytes with zero ephemeral key
+                    // We need to manually encode the handshake::Info structure
+                    let mut info_bytes = Vec::new();
+
+                    // Encode recipient public key
+                    info_bytes.extend_from_slice(&recipient.encode());
+
+                    // Encode all-zero ephemeral public key (32 bytes)
+                    info_bytes.extend_from_slice(&[0u8; 32]);
+
+                    // Encode timestamp as varint
+                    let timestamp = context.current().epoch_millis();
+                    let mut timestamp_bytes = Vec::new();
+                    UInt(timestamp).write(&mut timestamp_bytes);
+                    info_bytes.extend_from_slice(&timestamp_bytes);
+
+                    // Sign the info
+                    let signature = peer_crypto.sign(Some(&namespace), &info_bytes);
+
+                    // Encode the complete signed handshake
+                    let mut signed_bytes = Vec::new();
+                    signed_bytes.extend_from_slice(&info_bytes);
+                    signed_bytes.extend_from_slice(&peer_crypto.public_key().encode());
+                    signed_bytes.extend_from_slice(&signature.encode());
+
+                    send_frame(&mut peer_sink, &signed_bytes, 1024)
+                        .await
+                        .unwrap();
+                }
+            });
+
+            // Attempt connection - should fail due to non-contributory shared secret
+            let result = Connection::upgrade_dialer(
+                context,
+                dialer_config,
+                dialer_sink,
+                dialer_stream,
+                peer_public_key,
+            )
+            .await;
+
+            // Verify the error
+            assert!(matches!(result, Err(Error::SharedSecretNotContributory)));
+        });
+    }
+
+    #[test]
+    fn test_upgrade_listener_non_contributory_secret() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create cryptographic identities
+            let listener_crypto = Ed25519::from_seed(0);
+            let mut dialer_crypto = Ed25519::from_seed(1);
+
+            // Set up mock channels
+            let (mut dialer_sink, listener_stream) = mocks::Channel::init();
+            let (listener_sink, _dialer_stream) = mocks::Channel::init();
+
+            // Listener configuration
+            let listener_config = Config {
+                crypto: listener_crypto.clone(),
+                namespace: b"test_namespace".to_vec(),
+                max_message_size: 1024,
+                synchrony_bound: Duration::from_secs(5),
+                max_handshake_age: Duration::from_secs(5),
+                handshake_timeout: Duration::from_secs(5),
+            };
+
+            // Create a handshake with an all-zero ephemeral key
+            let timestamp = context.current().epoch_millis();
+            let mut info_bytes = Vec::new();
+
+            // Encode recipient public key
+            info_bytes.extend_from_slice(&listener_crypto.public_key().encode());
+
+            // Encode all-zero ephemeral public key (32 bytes) - this will cause non-contributory DH
+            info_bytes.extend_from_slice(&[0u8; 32]);
+
+            // Encode timestamp as varint
+            let mut timestamp_bytes = Vec::new();
+            UInt(timestamp).write(&mut timestamp_bytes);
+            info_bytes.extend_from_slice(&timestamp_bytes);
+
+            // Sign the info
+            let signature = dialer_crypto.sign(Some(&listener_config.namespace), &info_bytes);
+
+            // Encode the complete signed handshake
+            let mut signed_bytes = Vec::new();
+            signed_bytes.extend_from_slice(&info_bytes);
+            signed_bytes.extend_from_slice(&dialer_crypto.public_key().encode());
+            signed_bytes.extend_from_slice(&signature.encode());
+
+            // Send the handshake
+            send_frame(&mut dialer_sink, &signed_bytes, 1024)
+                .await
+                .unwrap();
+
+            // Verify the incoming connection
+            let incoming = IncomingConnection::verify(
+                &context,
+                listener_config,
+                listener_sink,
+                listener_stream,
+            )
+            .await
+            .unwrap();
+
+            // Attempt to upgrade - should fail due to non-contributory shared secret
+            let result = Connection::upgrade_listener(context, incoming).await;
+
+            // Verify the error
+            assert!(matches!(result, Err(Error::SharedSecretNotContributory)));
         });
     }
 }
