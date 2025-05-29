@@ -584,7 +584,7 @@ mod tests {
     }
 
     #[test]
-    fn test_edge_case_bit_boundaries() {
+    fn test_exact_bit_boundaries() {
         // Test values with exactly N bits set
         fn test_exact_bits<T: UPrim + TryFrom<u128> + std::fmt::Display>() {
             for bits in 1..=128 {
@@ -637,7 +637,7 @@ mod tests {
     }
 
     #[test]
-    fn test_single_bit_values() {
+    fn test_single_bit_boundaries() {
         // Test values with only a single bit set at different positions
         fn test_single_bits<T: UPrim + TryFrom<u128> + std::fmt::Display>() {
             for bit_pos in 0..128 {
