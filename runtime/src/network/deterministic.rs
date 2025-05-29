@@ -16,7 +16,7 @@ pub struct Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send<B: StableBuf>(&mut self, msg: B) -> Result<(), Error> {
+    async fn send(&mut self, msg: StableBufMut) -> Result<(), Error> {
         self.sender.send(msg).await.map_err(|_| Error::SendFailed)
     }
 }
@@ -27,7 +27,7 @@ pub struct Stream {
 }
 
 impl crate::Stream for Stream {
-    async fn recv<B: StableBufMut>(&mut self, buf: B) -> Result<B, Error> {
+    async fn recv(&mut self, buf: StableBufMut) -> Result<StableBufMut, Error> {
         self.receiver.recv(buf).await.map_err(|_| Error::RecvFailed)
     }
 }

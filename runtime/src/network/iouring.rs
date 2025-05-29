@@ -166,13 +166,17 @@ impl Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send<B: StableBuf>(&mut self, msg: B) -> Result<(), crate::Error> {
+    async fn send(&mut self, mut msg: StableBufMut) -> Result<(), crate::Error> {
         let mut bytes_sent = 0;
         let msg_len = msg.len();
-        let msg_arc = Arc::new(msg);
-        let msg = msg_arc.as_ref().as_ref();
         while bytes_sent < msg_len {
-            let remaining = &msg[bytes_sent..];
+            let msg_ptr = msg.stable_mut_ptr();
+            let remaining = unsafe {
+                std::slice::from_raw_parts(
+                    msg_ptr.add(bytes_sent) as *const u8,
+                    msg_len - bytes_sent,
+                )
+            };
 
             // Create the io_uring send operation
             let op = io_uring::opcode::Send::new(
@@ -188,13 +192,14 @@ impl crate::Sink for Sink {
                 .send(crate::iouring::Op {
                     work: op,
                     sender: tx,
-                    buffer: Some(msg_arc.clone()),
+                    buffer: Some(msg.into()),
                 })
                 .await
                 .map_err(|_| crate::Error::SendFailed)?;
 
             // Wait for the operation to complete
-            let result = rx.await.map_err(|_| crate::Error::SendFailed)?;
+            let (result, got_msg) = rx.await.map_err(|_| crate::Error::SendFailed)?;
+            msg = got_msg.unwrap();
             if should_retry(result) {
                 continue;
             }
@@ -227,15 +232,13 @@ impl Stream {
 }
 
 impl crate::Stream for Stream {
-    async fn recv<B: StableBufMut>(&mut self, buf: B) -> Result<B, crate::Error> {
+    async fn recv(&mut self, mut buf: StableBufMut) -> Result<StableBufMut, crate::Error> {
         let mut bytes_received = 0;
         let buf_len = buf.len();
-        let buf_arc = Arc::new(buf);
         while bytes_received < buf_len {
-            let ptr = buf_arc.as_ref().stable_ptr();
             let remaining = unsafe {
                 std::slice::from_raw_parts_mut(
-                    ptr.add(bytes_received) as *mut u8,
+                    buf.stable_mut_ptr().add(bytes_received) as *mut u8,
                     buf_len - bytes_received,
                 )
             };
@@ -254,13 +257,14 @@ impl crate::Stream for Stream {
                 .send(crate::iouring::Op {
                     work: op,
                     sender: tx,
-                    buffer: Some(buf_arc.clone()),
+                    buffer: Some(buf.into()),
                 })
                 .await
                 .map_err(|_| crate::Error::RecvFailed)?;
 
             // Wait for the operation to complete
-            let result = rx.await.map_err(|_| crate::Error::RecvFailed)?;
+            let (result, got_buf) = rx.await.map_err(|_| crate::Error::RecvFailed)?;
+            buf = got_buf.unwrap();
             if should_retry(result) {
                 continue;
             }
@@ -271,6 +275,6 @@ impl crate::Stream for Stream {
             }
             bytes_received += result as usize;
         }
-        Ok(Arc::into_inner(buf_arc).expect("should have only one reference"))
+        Ok(buf)
     }
 }

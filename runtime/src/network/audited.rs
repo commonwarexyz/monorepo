@@ -11,7 +11,7 @@ pub struct Sink<S: crate::Sink> {
 }
 
 impl<S: crate::Sink> crate::Sink for Sink<S> {
-    async fn send<B: StableBuf>(&mut self, data: B) -> Result<(), Error> {
+    async fn send(&mut self, data: StableBufMut) -> Result<(), Error> {
         self.auditor.event(b"send_attempt", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
             hasher.update(data.as_ref());
@@ -39,7 +39,7 @@ pub struct Stream<S: crate::Stream> {
 }
 
 impl<S: crate::Stream> crate::Stream for Stream<S> {
-    async fn recv<B: StableBufMut>(&mut self, buf: B) -> Result<B, Error> {
+    async fn recv(&mut self, buf: StableBufMut) -> Result<StableBufMut, Error> {
         self.auditor.event(b"recv_attempt", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
         });
@@ -242,11 +242,11 @@ mod tests {
                 let (_, mut sink, mut stream) = listener.accept().await.unwrap();
 
                 // Receive data from client
-                let buf = stream.recv(vec![0; CLIENT_MSG.len()]).await.unwrap();
-                assert_eq!(&buf, CLIENT_MSG.as_bytes());
+                let buf = stream.recv(vec![0; CLIENT_MSG.len()].into()).await.unwrap();
+                assert_eq!(buf.as_ref(), CLIENT_MSG.as_bytes());
 
                 // Send response
-                sink.send(Vec::from(SERVER_MSG)).await.unwrap();
+                sink.send(Vec::from(SERVER_MSG).into()).await.unwrap();
             });
             server_handles.push(handle);
         }
@@ -260,11 +260,11 @@ mod tests {
                 let (mut sink, mut stream) = network.dial(listener_addr).await.unwrap();
 
                 // Send data to server
-                sink.send(Vec::from(CLIENT_MSG)).await.unwrap();
+                sink.send(Vec::from(CLIENT_MSG).into()).await.unwrap();
 
                 // Receive response
-                let buf = stream.recv(vec![0; SERVER_MSG.len()]).await.unwrap();
-                assert_eq!(&buf, SERVER_MSG.as_bytes());
+                let buf = stream.recv(vec![0; SERVER_MSG.len()].into()).await.unwrap();
+                assert_eq!(buf.as_ref(), SERVER_MSG.as_bytes());
             });
             client_handles.push(handle);
         }

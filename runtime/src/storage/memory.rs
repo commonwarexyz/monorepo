@@ -94,7 +94,11 @@ impl Blob {
 }
 
 impl crate::Blob for Blob {
-    async fn read_at<B: StableBufMut>(&self, mut buf: B, offset: u64) -> Result<B, crate::Error> {
+    async fn read_at(
+        &self,
+        mut buf: StableBufMut,
+        offset: u64,
+    ) -> Result<StableBufMut, crate::Error> {
         let offset = offset
             .try_into()
             .map_err(|_| crate::Error::OffsetOverflow)?;
@@ -107,7 +111,7 @@ impl crate::Blob for Blob {
         Ok(buf)
     }
 
-    async fn write_at<B: StableBuf>(&self, buf: B, offset: u64) -> Result<(), crate::Error> {
+    async fn write_at(&self, buf: StableBufMut, offset: u64) -> Result<(), crate::Error> {
         let offset = offset
             .try_into()
             .map_err(|_| crate::Error::OffsetOverflow)?;

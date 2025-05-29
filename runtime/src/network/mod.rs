@@ -46,11 +46,11 @@ mod tests {
             let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
 
             let read = stream
-                .recv(vec![0; CLIENT_SEND_DATA.len()])
+                .recv(vec![0; CLIENT_SEND_DATA.len()].into())
                 .await
                 .expect("Failed to receive");
-            assert_eq!(&read, CLIENT_SEND_DATA.as_bytes());
-            sink.send(Vec::from(SERVER_SEND_DATA))
+            assert_eq!(read.as_ref(), CLIENT_SEND_DATA.as_bytes());
+            sink.send(Vec::from(SERVER_SEND_DATA).into())
                 .await
                 .expect("Failed to send");
         });
@@ -63,15 +63,15 @@ mod tests {
                 .await
                 .expect("Failed to dial server");
 
-            sink.send(Vec::from(CLIENT_SEND_DATA))
+            sink.send(Vec::from(CLIENT_SEND_DATA).into())
                 .await
                 .expect("Failed to send data");
 
             let read = stream
-                .recv(vec![0; SERVER_SEND_DATA.len()])
+                .recv(vec![0; SERVER_SEND_DATA.len()].into())
                 .await
                 .expect("Failed to receive data");
-            assert_eq!(&read, SERVER_SEND_DATA.as_bytes());
+            assert_eq!(read.as_ref(), SERVER_SEND_DATA.as_bytes());
         });
 
         // Wait for both tasks to complete
@@ -99,12 +99,12 @@ mod tests {
 
                 // runtime.spawn(async move {
                 let read = stream
-                    .recv(vec![0; CLIENT_SEND_DATA.len()])
+                    .recv(vec![0; CLIENT_SEND_DATA.len()].into())
                     .await
                     .expect("Failed to receive");
-                assert_eq!(&read, CLIENT_SEND_DATA.as_bytes());
+                assert_eq!(read.as_ref(), CLIENT_SEND_DATA.as_bytes());
 
-                sink.send(Vec::from(SERVER_SEND_DATA))
+                sink.send(Vec::from(SERVER_SEND_DATA).into())
                     .await
                     .expect("Failed to send");
             }
@@ -120,17 +120,17 @@ mod tests {
                     .expect("Failed to dial server");
 
                 // Send a message to the server
-                sink.send(Vec::from(CLIENT_SEND_DATA))
+                sink.send(Vec::from(CLIENT_SEND_DATA).into())
                     .await
                     .expect("Failed to send data");
 
                 // Receive a message from the server
                 let read = stream
-                    .recv(vec![0; SERVER_SEND_DATA.len()])
+                    .recv(vec![0; SERVER_SEND_DATA.len()].into())
                     .await
                     .expect("Failed to receive data");
                 // Verify the received data
-                assert_eq!(&read, SERVER_SEND_DATA.as_bytes());
+                assert_eq!(read.as_ref(), SERVER_SEND_DATA.as_bytes());
             }
         });
 
@@ -158,10 +158,10 @@ mod tests {
             // Receive and echo large data in chunks
             for _ in 0..NUM_CHUNKS {
                 let read = stream
-                    .recv(vec![0; CHUNK_SIZE])
+                    .recv(vec![0; CHUNK_SIZE].into())
                     .await
                     .expect("Failed to receive chunk");
-                sink.send(read).await.expect("Failed to send chunk");
+                sink.send(read.into()).await.expect("Failed to send chunk");
             }
         });
 
@@ -178,14 +178,14 @@ mod tests {
 
             // Send and verify data in chunks
             for _ in 0..NUM_CHUNKS {
-                sink.send(pattern.clone())
+                sink.send(pattern.clone().into())
                     .await
                     .expect("Failed to send chunk");
                 let read = stream
-                    .recv(vec![0; CHUNK_SIZE])
+                    .recv(vec![0; CHUNK_SIZE].into())
                     .await
                     .expect("Failed to receive chunk");
-                assert_eq!(&read, &pattern);
+                assert_eq!(read.as_ref(), pattern.as_slice());
             }
         });
 

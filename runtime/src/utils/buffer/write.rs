@@ -25,8 +25,9 @@ impl<B: Blob> Inner<B> {
     ///
     /// Returns an error if the write to the underlying [Blob] fails (may be due to a `flush` of data not
     /// related to the data being written).
-    async fn write<Buf: StableBuf>(&mut self, buf: Buf) -> Result<(), Error> {
+    async fn write<S: Into<StableBufMut>>(&mut self, buf: S) -> Result<(), Error> {
         // If the buffer capacity will be exceeded, flush the buffer first
+        let buf: StableBufMut = buf.into();
         let buf_len = buf.len();
         if self.buffer.len() + buf_len > self.capacity {
             self.flush().await?;
@@ -57,7 +58,7 @@ impl<B: Blob> Inner<B> {
         // Take the buffer and write it to the blob
         let buf = std::mem::take(&mut self.buffer);
         let len = buf.len() as u64;
-        self.blob.write_at(buf, self.position).await?;
+        self.blob.write_at(buf.into(), self.position).await?;
 
         // If successful, update the position and allocate a new buffer
         self.position += len;
@@ -145,11 +146,12 @@ impl<B: Blob> Write<B> {
 }
 
 impl<B: Blob> Blob for Write<B> {
-    async fn read_at<T: StableBufMut>(&self, mut buf: T, offset: u64) -> Result<T, Error> {
+    async fn read_at(&self, buf: StableBufMut, offset: u64) -> Result<StableBufMut, Error> {
         // Acquire a read lock on the inner state
         let inner = self.inner.read().await;
 
         // Ensure offset read doesn't overflow
+        let mut buf: StableBufMut = buf.into();
         let data_len = buf.len();
         let data_end = offset
             .checked_add(data_len as u64)
@@ -180,14 +182,14 @@ impl<B: Blob> Blob for Write<B> {
         // If the data is a combination of blob and buffer, read from both
         let blob_bytes = (buffer_start - offset) as usize;
         let blob_part = vec![0u8; blob_bytes];
-        let blob_part = inner.blob.read_at(blob_part, offset).await?;
-        buf.deref_mut()[..blob_bytes].copy_from_slice(&blob_part);
+        let blob_part = inner.blob.read_at(blob_part.into(), offset).await?;
+        buf.deref_mut()[..blob_bytes].copy_from_slice(blob_part.as_ref());
         let buf_bytes = data_len - blob_bytes;
         buf.deref_mut()[blob_bytes..].copy_from_slice(&inner.buffer[..buf_bytes]);
         Ok(buf)
     }
 
-    async fn write_at<T: StableBuf>(&self, buf: T, offset: u64) -> Result<(), Error> {
+    async fn write_at(&self, buf: StableBufMut, offset: u64) -> Result<(), Error> {
         // Acquire a write lock on the inner state
         let mut inner = self.inner.write().await;
 

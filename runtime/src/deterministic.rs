@@ -1134,7 +1134,7 @@ mod tests {
         // Run some tasks, sync storage, and recover the runtime
         let (context, state) = executor1.start(|context| async move {
             let (blob, _) = context.open(partition, name).await.unwrap();
-            blob.write_at(Vec::from(data), 0).await.unwrap();
+            blob.write_at(Vec::from(data).into(), 0).await.unwrap();
             blob.sync().await.unwrap();
             let state = context.auditor().state();
             (context, state)
@@ -1149,8 +1149,8 @@ mod tests {
         executor.start(|context| async move {
             let (blob, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, data.len() as u64);
-            let read = blob.read_at(vec![0; data.len()], 0).await.unwrap();
-            assert_eq!(read, data);
+            let read = blob.read_at(vec![0; data.len()].into(), 0).await.unwrap();
+            assert_eq!(read.as_ref(), data.as_ref());
         });
     }
 
@@ -1166,7 +1166,7 @@ mod tests {
         let context = executor.start(|context| async move {
             let context = context.clone();
             let (blob, _) = context.open(partition, name).await.unwrap();
-            blob.write_at(data, 0).await.unwrap();
+            blob.write_at(data.into(), 0).await.unwrap();
             // Intentionally do not call sync() here
             context
         });

@@ -231,7 +231,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         buf.put_u32(checksum);
 
         let item_pos = (*len / Self::CHUNK_SIZE_U64) + self.cfg.items_per_blob * newest_blob_index;
-        newest_blob.write_at(buf, *len).await?;
+        newest_blob.write_at(buf.into(), *len).await?;
         trace!(blob = newest_blob_index, pos = item_pos, "appended item");
         *len += Self::CHUNK_SIZE_U64;
 
@@ -331,8 +331,10 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
 
         let item_index = item_pos % self.cfg.items_per_blob;
         let offset = item_index * Self::CHUNK_SIZE_U64;
-        let read = blob.read_at(vec![0u8; Self::CHUNK_SIZE], offset).await?;
-        Self::verify_integrity(&read)
+        let read = blob
+            .read_at(vec![0u8; Self::CHUNK_SIZE].into(), offset)
+            .await?;
+        Self::verify_integrity(read.as_ref())
     }
 
     /// Verify the integrity of the Array + checksum in `buf`, returning the array if it is valid.

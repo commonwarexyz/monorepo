@@ -42,7 +42,7 @@ pub struct Sink {
 }
 
 impl SinkTrait for Sink {
-    async fn send<B: StableBuf>(&mut self, msg: B) -> Result<(), Error> {
+    async fn send(&mut self, msg: StableBufMut) -> Result<(), Error> {
         let (os_send, data) = {
             let mut channel = self.channel.lock().unwrap();
             channel.buffer.extend(msg.as_ref());
@@ -75,7 +75,7 @@ pub struct Stream {
 }
 
 impl StreamTrait for Stream {
-    async fn recv<B: StableBufMut>(&mut self, mut buf: B) -> Result<B, Error> {
+    async fn recv(&mut self, mut buf: StableBufMut) -> Result<StableBufMut, Error> {
         let os_recv = {
             let mut channel = self.channel.lock().unwrap();
 
@@ -116,9 +116,9 @@ mod tests {
         let data = b"hello world".to_vec();
 
         block_on(async {
-            sink.send(data.clone()).await.unwrap();
-            let buf = stream.recv(vec![0; data.len()]).await.unwrap();
-            assert_eq!(buf, data);
+            sink.send(data.clone().into()).await.unwrap();
+            let buf = stream.recv(vec![0; data.len()].into()).await.unwrap();
+            assert_eq!(buf.as_ref(), data);
         });
     }
 
@@ -129,14 +129,14 @@ mod tests {
         let data2 = b" world".to_vec();
 
         block_on(async {
-            sink.send(data).await.unwrap();
-            sink.send(data2).await.unwrap();
-            let buf = stream.recv(vec![0; 5]).await.unwrap();
-            assert_eq!(buf, b"hello");
+            sink.send(data.into()).await.unwrap();
+            sink.send(data2.into()).await.unwrap();
+            let buf = stream.recv(vec![0; 5].into()).await.unwrap();
+            assert_eq!(buf.as_ref(), b"hello");
             let buf = stream.recv(buf).await.unwrap();
-            assert_eq!(buf, b" worl");
-            let buf = stream.recv(vec![0; 1]).await.unwrap();
-            assert_eq!(buf, b"d");
+            assert_eq!(buf.as_ref(), b" worl");
+            let buf = stream.recv(vec![0; 1].into()).await.unwrap();
+            assert_eq!(buf.as_ref(), b"d");
         });
     }
 
@@ -146,15 +146,15 @@ mod tests {
 
         let data = b"hello world";
         let buf = block_on(async {
-            futures::try_join!(stream.recv(vec![0; data.len()]), async {
+            futures::try_join!(stream.recv(vec![0; data.len()].into()), async {
                 sleep(Duration::from_millis(10_000));
-                sink.send(data.to_vec()).await
+                sink.send(data.to_vec().into()).await
             },)
             .unwrap()
             .0
         });
 
-        assert_eq!(buf, data);
+        assert_eq!(buf.as_ref(), data);
     }
 
     #[test]
@@ -165,7 +165,7 @@ mod tests {
         // If the oneshot sender is dropped before the oneshot receiver is resolved,
         // the recv function should return an error.
         executor.start(|_| async move {
-            let (v, _) = join!(stream.recv(vec![0; 5]), async {
+            let (v, _) = join!(stream.recv(vec![0; 5].into()), async {
                 // Take the waiter and drop it.
                 sink.channel.lock().unwrap().waiter.take();
             },);
@@ -184,7 +184,7 @@ mod tests {
             // Create a waiter using a recv call.
             // But then drop the receiver.
             select! {
-                v = stream.recv( vec![0;5]) => {
+                v = stream.recv( vec![0;5].into()) => {
                     panic!("unexpected value: {:?}", v);
                 },
                 _ = context.sleep(Duration::from_millis(100)) => {
@@ -194,7 +194,7 @@ mod tests {
             drop(stream);
 
             // Try to send a message (longer than the requested amount), but the receiver is dropped.
-            let result = sink.send(b"hello world".to_vec()).await;
+            let result = sink.send(b"hello world".to_vec().into()).await;
             assert!(matches!(result, Err(Error::SendFailed)));
         });
     }
@@ -207,7 +207,7 @@ mod tests {
         // If there is no data to read, test that the recv function just blocks. A timeout should return first.
         executor.start(|context| async move {
             select! {
-                v = stream.recv(vec![0;5]) => {
+                v = stream.recv(vec![0;5].into()) => {
                     panic!("unexpected value: {:?}", v);
                 },
                 _ = context.sleep(Duration::from_millis(100)) => {

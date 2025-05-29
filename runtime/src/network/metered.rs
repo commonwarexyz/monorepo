@@ -55,7 +55,8 @@ pub struct Sink<S: crate::Sink> {
 }
 
 impl<S: crate::Sink> crate::Sink for Sink<S> {
-    async fn send<B: StableBuf>(&mut self, data: B) -> Result<(), crate::Error> {
+    async fn send(&mut self, data: StableBufMut) -> Result<(), crate::Error> {
+        let data: StableBufMut = data.into();
         let len = data.len();
         self.inner.send(data).await?;
         self.metrics.outbound_bandwidth.inc_by(len as u64);
@@ -70,7 +71,7 @@ pub struct Stream<S: crate::Stream> {
 }
 
 impl<S: crate::Stream> crate::Stream for Stream<S> {
-    async fn recv<B: StableBufMut>(&mut self, buf: B) -> Result<B, crate::Error> {
+    async fn recv(&mut self, buf: StableBufMut) -> Result<StableBufMut, crate::Error> {
         let buf = self.inner.recv(buf).await?;
         self.metrics.inbound_bandwidth.inc_by(buf.len() as u64);
         Ok(buf)
@@ -200,7 +201,10 @@ mod tests {
         // Create a server task that accepts one connection and echoes data
         let server = tokio::spawn(async move {
             let (_, mut sink, mut stream) = listener.accept().await.unwrap();
-            let buf = stream.recv(vec![0; MSG_SIZE as usize]).await.unwrap();
+            let buf = stream
+                .recv(vec![0; MSG_SIZE as usize].into())
+                .await
+                .unwrap();
             sink.send(buf).await.unwrap();
         });
 
@@ -209,14 +213,14 @@ mod tests {
 
         // Send fixed-size data and receive response
         let msg = vec![42u8; MSG_SIZE as usize];
-        client_sink.send(msg.clone()).await.unwrap();
+        client_sink.send(msg.clone().into()).await.unwrap();
 
         let response = client_stream
-            .recv(vec![0; MSG_SIZE as usize])
+            .recv(vec![0; MSG_SIZE as usize].into())
             .await
             .unwrap();
         assert_eq!(response.len(), MSG_SIZE as usize);
-        assert_eq!(response, msg);
+        assert_eq!(response.as_ref(), msg);
 
         // Wait for server to complete
         server.await.unwrap();

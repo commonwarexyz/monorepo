@@ -1,4 +1,4 @@
-use commonware_utils::StableBuf;
+use commonware_utils::StableBufMut;
 use futures::{
     channel::{mpsc, oneshot},
     StreamExt as _,
@@ -10,7 +10,7 @@ use io_uring::{
     types::Timespec,
     IoUring,
 };
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, time::Duration};
 
 /// Reserved ID for a CQE that indicates an operation timed out.
 const TIMEOUT_WORK_ID: u64 = u64::MAX;
@@ -97,20 +97,26 @@ pub struct Op {
     /// Its user data field will be overwritten. Users shouldn't rely on it.
     pub work: SqueueEntry,
     /// The sender to send the result of the operation to.
-    pub sender: oneshot::Sender<i32>,
+    pub sender: oneshot::Sender<(i32, Option<StableBufMut>)>,
     /// Reference to the buffer used for the operation, if any.
     /// E.g. For read, this is the buffer being read into.
     /// It's guaranteed that all references to this Arc are dropped
     /// after the operation completes and before we send the result to `sender`.
     /// If None, the operation doesn't use a buffer (e.g. a sync operation).
-    pub buffer: Option<Arc<dyn StableBuf>>,
+    pub buffer: Option<StableBufMut>,
 }
 
 // Returns false iff we received a shutdown timeout
 // and we should stop processing completions.
 #[allow(clippy::type_complexity)]
 fn handle_cqe(
-    waiters: &mut HashMap<u64, (oneshot::Sender<i32>, Option<Arc<dyn StableBuf>>)>,
+    waiters: &mut HashMap<
+        u64,
+        (
+            oneshot::Sender<(i32, Option<StableBufMut>)>,
+            Option<StableBufMut>,
+        ),
+    >,
     cqe: CqueueEntry,
     cfg: &Config,
 ) {
@@ -143,8 +149,8 @@ fn handle_cqe(
             // The assignment to _ drops the Arc<dyn StableBuf> used for the operation.
             // This is important: we guarantee we drop our references to the buffer
             // before we send the result to the submitter.
-            let (result_sender, _) = waiters.remove(&work_id).expect("missing sender");
-            let _ = result_sender.send(result);
+            let (result_sender, buffer) = waiters.remove(&work_id).expect("missing sender");
+            let _ = result_sender.send((result, buffer));
         }
     }
 }
@@ -160,7 +166,10 @@ pub(crate) async fn run(cfg: Config, mut receiver: mpsc::Receiver<Op>) {
     #[allow(clippy::type_complexity)]
     let mut waiters: std::collections::HashMap<
         _,
-        (oneshot::Sender<i32>, Option<Arc<dyn StableBuf>>),
+        (
+            oneshot::Sender<(i32, Option<StableBufMut>)>,
+            Option<StableBufMut>,
+        ),
     > = std::collections::HashMap::with_capacity(cfg.size as usize);
 
     loop {
@@ -273,7 +282,13 @@ pub(crate) async fn run(cfg: Config, mut receiver: mpsc::Receiver<Op>) {
 #[allow(clippy::type_complexity)]
 async fn drain(
     ring: &mut IoUring,
-    waiters: &mut HashMap<u64, (oneshot::Sender<i32>, Option<Arc<dyn StableBuf>>)>,
+    waiters: &mut HashMap<
+        u64,
+        (
+            oneshot::Sender<(i32, Option<StableBufMut>)>,
+            Option<StableBufMut>,
+        ),
+    >,
     cfg: &Config,
 ) {
     if let Some(timeout) = cfg.shutdown_timeout {
@@ -328,11 +343,8 @@ mod tests {
         opcode,
         types::{Fd, Timespec},
     };
+    use std::os::{fd::AsRawFd, unix::net::UnixStream};
     use std::time::Duration;
-    use std::{
-        os::{fd::AsRawFd, unix::net::UnixStream},
-        sync::Arc,
-    };
 
     async fn recv_then_send(cfg: Config, should_succeed: bool) {
         // Create a new io_uring instance
@@ -351,7 +363,7 @@ mod tests {
             .send(crate::iouring::Op {
                 work: recv,
                 sender: recv_tx,
-                buffer: Some(Arc::new(buf)),
+                buffer: Some(buf.into()),
             })
             .await
             .expect("failed to send work");
@@ -367,16 +379,16 @@ mod tests {
             .send(crate::iouring::Op {
                 work: write,
                 sender: write_tx,
-                buffer: Some(Arc::new(msg)),
+                buffer: Some(msg.into()),
             })
             .await
             .expect("failed to send work");
 
         // Wait for the read and write operations to complete.
         if should_succeed {
-            let result = recv_rx.await.expect("failed to receive result");
+            let (result, _) = recv_rx.await.expect("failed to receive result");
             assert!(result > 0, "recv failed: {}", result);
-            let result = write_rx.await.expect("failed to receive result");
+            let (result, _) = write_rx.await.expect("failed to receive result");
             assert!(result > 0, "write failed: {}", result);
         } else {
             let _ = recv_rx.await;
@@ -436,12 +448,12 @@ mod tests {
             .send(crate::iouring::Op {
                 work,
                 sender: tx,
-                buffer: Some(Arc::new(buf)),
+                buffer: Some(buf.into()),
             })
             .await
             .expect("failed to send work");
         // Wait for the timeout
-        let result = rx.await.expect("failed to receive result");
+        let (result, _) = rx.await.expect("failed to receive result");
         assert_eq!(result, -libc::ETIMEDOUT);
         drop(submitter);
         handle.await.unwrap();
@@ -474,7 +486,7 @@ mod tests {
         drop(submitter);
 
         // Wait for the operation `timeout` to fire.
-        let result = rx.await.unwrap();
+        let (result, _) = rx.await.unwrap();
         assert_eq!(result, -libc::ETIME);
         handle.await.unwrap();
     }

@@ -1,3 +1,5 @@
+use commonware_utils::StableBufMut;
+
 use crate::{Blob, Error};
 
 /// A reader that buffers content from a [Blob] to optimize the performance
@@ -33,7 +35,7 @@ pub struct Read<B: Blob> {
     /// The underlying blob to read from.
     blob: B,
     /// The buffer storing the data read from the blob.
-    buffer: Vec<u8>,
+    buffer: StableBufMut,
     /// The current position in the blob from where the buffer was filled.
     blob_position: u64,
     /// The size of the blob.
@@ -56,7 +58,7 @@ impl<B: Blob> Read<B> {
         assert!(buffer_size > 0, "buffer size must be greater than zero");
         Self {
             blob,
-            buffer: vec![0; buffer_size],
+            buffer: vec![0; buffer_size].into(),
             blob_position: 0,
             blob_size,
             buffer_position: 0,
@@ -98,7 +100,7 @@ impl<B: Blob> Read<B> {
         // because `bytes_to_read` < `self.buffer_size`.
         let mut buffer = std::mem::take(&mut self.buffer);
         buffer.truncate(bytes_to_read);
-        self.buffer = self.blob.read_at(buffer, self.blob_position).await?;
+        self.buffer = self.blob.read_at(buffer.into(), self.blob_position).await?;
         self.buffer_valid_len = bytes_to_read;
         Ok(bytes_to_read)
     }
@@ -127,7 +129,7 @@ impl<B: Blob> Read<B> {
 
             // Copy bytes from buffer to output
             buf[bytes_read..(bytes_read + bytes_to_copy)].copy_from_slice(
-                &self.buffer[self.buffer_position..(self.buffer_position + bytes_to_copy)],
+                &self.buffer.as_ref()[self.buffer_position..(self.buffer_position + bytes_to_copy)],
             );
 
             self.buffer_position += bytes_to_copy;
