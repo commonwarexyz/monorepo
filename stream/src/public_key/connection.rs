@@ -22,6 +22,8 @@ use std::time::SystemTime;
 // This constant represents the size of the encryption tag in bytes.
 const ENCRYPTION_TAG_LENGTH: usize = 16;
 
+const BASE_KDF_PREFIX: &[u8] = b"commonware-stream/KDF/v1/";
+
 /// Helper function to derive directional keys using HKDF-SHA256.
 ///
 /// Returns the dialer-to-listener and listener-to-dialer ciphers (in that order).
@@ -38,12 +40,12 @@ fn derive_directional_ciphers(
     let prk = Hkdf::<Sha256>::new(salt, shared_secret);
 
     // Base info for KDF-Expand (protocol name + transcript hash)
-    let mut transcript = Vec::with_capacity(dialer_transcript.len() + listener_transcript.len());
-    transcript.extend_from_slice(dialer_transcript);
-    transcript.extend_from_slice(listener_transcript);
-    let transcript_hash = Sha256::digest(&transcript);
-    let mut base_kdf_info = Vec::new();
-    base_kdf_info.extend_from_slice(b"commonware-stream/KDF/v1/");
+    let mut hasher = Sha256::new();
+    hasher.update(dialer_transcript);
+    hasher.update(listener_transcript);
+    let transcript_hash = hasher.finalize();
+    let mut base_kdf_info = Vec::with_capacity(BASE_KDF_PREFIX.len() + transcript_hash.len());
+    base_kdf_info.extend_from_slice(BASE_KDF_PREFIX);
     base_kdf_info.extend_from_slice(&transcript_hash);
 
     // Derive Dialer-to-Listener Key
@@ -409,7 +411,7 @@ mod tests {
                 cipher,
                 stream,
                 max_message_size: 1024,
-                nonce: nonce::Info::new(false),
+                nonce: nonce::Info::default(),
             };
 
             // Send invalid ciphertext
@@ -433,7 +435,7 @@ mod tests {
                 cipher,
                 sink,
                 max_message_size: message.len() - 1,
-                nonce: nonce::Info::new(true),
+                nonce: nonce::Info::default(),
             };
 
             let result = sender.send(message).await;
@@ -454,13 +456,13 @@ mod tests {
                 cipher: cipher.clone(),
                 sink,
                 max_message_size: message.len(),
-                nonce: nonce::Info::new(true),
+                nonce: nonce::Info::default(),
             };
             let mut receiver = Receiver {
                 cipher,
                 stream,
                 max_message_size: message.len() - 1,
-                nonce: nonce::Info::new(false),
+                nonce: nonce::Info::default(),
             };
 
             sender.send(message).await.unwrap();
@@ -483,20 +485,20 @@ mod tests {
 
             // Create dialer connection
             let connection_dialer = Connection::from_preestablished(
-                true, // dialer
                 dialer_sink,
                 dialer_stream,
-                cipher.clone(),
                 max_message_size,
+                cipher.clone(),
+                cipher.clone(),
             );
 
             // Create listener connection
             let connection_listener = Connection::from_preestablished(
-                false, // listener
                 listener_sink,
                 listener_stream,
-                cipher,
                 max_message_size,
+                cipher.clone(),
+                cipher,
             );
 
             // Split into sender and receiver for both connections

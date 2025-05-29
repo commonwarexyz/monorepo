@@ -91,19 +91,11 @@ mod tests {
         // Incrementing again should succeed
         assert!(nonce.inc().is_ok());
         assert_eq!(nonce.counter, 2);
-
-        // Incrementing to the overflow value should succeed
-        nonce.counter = OVERFLOW_VALUE - 1;
-        assert!(nonce.inc().is_ok());
-        assert_eq!(nonce.counter, OVERFLOW_VALUE);
-
-        // Incrementing again should overflow
-        assert!(matches!(nonce.inc(), Err(Error::NonceOverflow)));
     }
 
     #[test]
-    fn test_inc_overflow_even() {
-        let initial = (1 << 96) - 2;
+    fn test_inc_overflow() {
+        let initial = OVERFLOW_VALUE - 2;
         let mut nonce = Info { counter: initial };
 
         // Incrementing should succeed
