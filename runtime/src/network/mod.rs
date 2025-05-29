@@ -258,7 +258,7 @@ mod tests {
                 for _ in 0..NUM_MESSAGES {
                     sink.send(payload.clone()).await.unwrap();
                     let echo = stream.recv(vec![0; MESSAGE_SIZE]).await.unwrap();
-                    assert_eq!(echo, payload);
+                    assert_eq!(echo.as_ref(), payload);
                 }
             }));
         }
