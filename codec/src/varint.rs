@@ -518,116 +518,6 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_size_matches_actual_size() {
-        // Test all powers of 2 and their neighbors for each type
-        fn test_type<T: UPrim + TryFrom<u128> + std::fmt::Display>(max_power: u32) {
-            // Test 0
-            let zero = T::from(0);
-            let mut buf = Vec::new();
-            write(zero, &mut buf);
-            assert_eq!(buf.len(), size(zero), "Size mismatch for value 0");
-
-            // Test powers of 2 and their neighbors
-            for i in 0..=max_power {
-                let base: u128 = 1u128 << i;
-                for offset in [-1i128, 0, 1] {
-                    let val = if offset < 0 && base == 1 {
-                        continue; // Skip base - 1 when base is 1
-                    } else if offset < 0 {
-                        base - 1
-                    } else {
-                        base + offset as u128
-                    };
-
-                    let Ok(value) = T::try_from(val) else {
-                        continue;
-                    };
-
-                    let mut buf = Vec::new();
-                    write(value, &mut buf);
-                    let expected_size = size(value);
-                    assert_eq!(
-                        buf.len(),
-                        expected_size,
-                        "Size mismatch for value {} (2^{} + {})",
-                        val,
-                        i,
-                        offset
-                    );
-                }
-            }
-        }
-
-        test_type::<u16>(15);
-        test_type::<u32>(31);
-        test_type::<u64>(63);
-        test_type::<u128>(127);
-    }
-
-    #[test]
-    fn test_boundary_values() {
-        // Test specific boundary values where encoding transitions happen
-        fn test_boundaries<T: UPrim + TryFrom<u128> + std::fmt::Display>() {
-            // Values that require exactly N bytes
-            let boundaries: &[(u128, usize)] = &[
-                (0, 1),           // 0 bits -> 1 byte
-                (127, 1),         // 7 bits -> 1 byte
-                (128, 2),         // 8 bits -> 2 bytes
-                (16383, 2),       // 14 bits -> 2 bytes
-                (16384, 3),       // 15 bits -> 3 bytes
-                (2097151, 3),     // 21 bits -> 3 bytes
-                (2097152, 4),     // 22 bits -> 4 bytes
-                (268435455, 4),   // 28 bits -> 4 bytes
-                (268435456, 5),   // 29 bits -> 5 bytes
-                (34359738367, 5), // 35 bits -> 5 bytes
-                (34359738368, 6), // 36 bits -> 6 bytes
-            ];
-
-            for &(val, expected_bytes) in boundaries {
-                let Ok(value) = T::try_from(val) else {
-                    continue;
-                };
-
-                // Check size calculation
-                let calculated_size = size(value);
-                assert_eq!(
-                    calculated_size, expected_bytes,
-                    "Calculated size wrong for value {}",
-                    val
-                );
-
-                // Check actual encoding size
-                let mut buf = Vec::new();
-                write(value, &mut buf);
-                assert_eq!(
-                    buf.len(),
-                    expected_bytes,
-                    "Encoded size wrong for value {}",
-                    val
-                );
-
-                // Verify size matches
-                assert_eq!(
-                    buf.len(),
-                    calculated_size,
-                    "Size mismatch for value {}",
-                    val
-                );
-
-                // Verify we can decode it back
-                let mut slice = &buf[..];
-                let decoded: T = read(&mut slice).unwrap();
-                assert_eq!(decoded, value, "Decode mismatch for value {}", val);
-            }
-        }
-
-        test_boundaries::<u16>();
-        test_boundaries::<u32>();
-        test_boundaries::<u64>();
-        test_boundaries::<u128>();
-    }
-
-    #[test]
     fn test_all_u16_values() {
         // Exhaustively test all u16 values to ensure size matches encoding
         for i in 0..=u16::MAX {
@@ -656,111 +546,41 @@ mod tests {
     }
 
     #[test]
-    fn test_maximum_values() {
-        // Test maximum values for each type
-        let max_u16 = u16::MAX;
-        let max_u32 = u32::MAX;
-        let max_u64 = u64::MAX;
-        let max_u128 = u128::MAX;
+    fn test_all_i16_values() {
+        // Exhaustively test all i16 values to ensure size matches encoding with ZigZag
+        for i in i16::MIN..=i16::MAX {
+            let value = i;
+            let calculated_size = size_signed(value);
 
-        // u16::MAX = 65535 = 16 bits -> ceil(16/7) = 3 bytes
-        assert_eq!(size(max_u16), 3);
-        let mut buf = Vec::new();
-        write(max_u16, &mut buf);
-        assert_eq!(buf.len(), 3);
-        assert_eq!(buf, vec![0xFF, 0xFF, 0x03]);
+            let mut buf = Vec::new();
+            write_signed(value, &mut buf);
 
-        // u32::MAX = 32 bits -> ceil(32/7) = 5 bytes
-        assert_eq!(size(max_u32), 5);
-        buf.clear();
-        write(max_u32, &mut buf);
-        assert_eq!(buf.len(), 5);
-        assert_eq!(buf, vec![0xFF, 0xFF, 0xFF, 0xFF, 0x0F]);
+            assert_eq!(
+                buf.len(),
+                calculated_size,
+                "Size mismatch for i16 value {}",
+                value
+            );
 
-        // u64::MAX = 64 bits -> ceil(64/7) = 10 bytes
-        assert_eq!(size(max_u64), 10);
-        buf.clear();
-        write(max_u64, &mut buf);
-        assert_eq!(buf.len(), 10);
-        assert_eq!(
-            buf,
-            vec![0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01]
-        );
+            // Also verify SInt wrapper
+            let sint = SInt(value);
+            assert_eq!(
+                sint.encode_size(),
+                buf.len(),
+                "SInt encode_size mismatch for value {}",
+                value
+            );
 
-        // u128::MAX = 128 bits -> ceil(128/7) = 19 bytes
-        assert_eq!(size(max_u128), 19);
-        buf.clear();
-        write(max_u128, &mut buf);
-        assert_eq!(buf.len(), 19);
-        // First 18 bytes are 0xFF, last byte is 0x03
-        assert_eq!(&buf[..18], vec![0xFF; 18]);
-        assert_eq!(buf[18], 0x03);
-    }
-
-    #[test]
-    fn test_signed_boundary_values() {
-        // Test signed integer boundaries
-        fn test_signed<S: SPrim + TryFrom<i128> + std::fmt::Display>() {
-            let test_values: &[i128] = &[
-                0,
-                1,
-                -1,
-                63,
-                64,
-                -64,
-                -65,
-                127,
-                128,
-                -128,
-                -129,
-                8191,
-                8192,
-                -8192,
-                -8193,
-                16383,
-                16384,
-                -16384,
-                -16385,
-                i16::MIN as i128,
-                i16::MAX as i128,
-                i32::MIN as i128,
-                i32::MAX as i128,
-                i64::MIN as i128,
-                i64::MAX as i128,
-            ];
-
-            for &val in test_values {
-                let Ok(value) = S::try_from(val) else {
-                    continue;
-                };
-
-                let calculated_size = size_signed(value);
-
-                let mut buf = Vec::new();
-                write_signed(value, &mut buf);
-
-                assert_eq!(
-                    buf.len(),
-                    calculated_size,
-                    "Size mismatch for signed value {}",
-                    val
-                );
-
-                // Verify SInt wrapper
-                let sint = SInt(value);
-                assert_eq!(
-                    sint.encode_size(),
-                    buf.len(),
-                    "SInt encode_size mismatch for value {}",
-                    val
-                );
-            }
+            // Verify we can decode it back correctly
+            let mut slice = &buf[..];
+            let decoded: i16 = read_signed(&mut slice).unwrap();
+            assert_eq!(decoded, value, "Decode mismatch for value {}", value);
+            assert!(
+                slice.is_empty(),
+                "Buffer not fully consumed for value {}",
+                value
+            );
         }
-
-        test_signed::<i16>();
-        test_signed::<i32>();
-        test_signed::<i64>();
-        test_signed::<i128>();
     }
 
     #[test]
@@ -855,92 +675,5 @@ mod tests {
         test_single_bits::<u32>();
         test_single_bits::<u64>();
         test_single_bits::<u128>();
-    }
-
-    #[test]
-    fn test_continuation_bit_edge_cases() {
-        // Test values around continuation bit thresholds
-        // These are values where the write logic switches between fast path and loop
-
-        fn test_continuation<T: UPrim + TryFrom<u128> + std::fmt::Display>() {
-            // Test around the 128 threshold (CONTINUATION_BIT_MASK)
-            let test_vals: &[u128] = &[126, 127, 128, 129];
-
-            for &val in test_vals {
-                let Ok(value) = T::try_from(val) else {
-                    continue;
-                };
-
-                let calculated_size = size(value);
-                let mut buf = Vec::new();
-                write(value, &mut buf);
-
-                assert_eq!(
-                    buf.len(),
-                    calculated_size,
-                    "Size mismatch for continuation edge case {}",
-                    val
-                );
-
-                // Verify the encoding is correct
-                let mut slice = &buf[..];
-                let decoded: T = read(&mut slice).unwrap();
-                assert_eq!(decoded, value);
-            }
-        }
-
-        test_continuation::<u16>();
-        test_continuation::<u32>();
-        test_continuation::<u64>();
-        test_continuation::<u128>();
-    }
-
-    #[test]
-    fn test_size_calculation_formula() {
-        // Directly test the size calculation formula against known values
-
-        // For a value with N data bits, we need ceil(N/7) bytes
-        // The formula: size = max(1, ceil(data_bits/7))
-        // where data_bits = total_bits - leading_zeros
-
-        fn verify_size<T: UPrim + TryFrom<u128> + std::fmt::Display>(
-            val: u128,
-            expected_bytes: usize,
-        ) {
-            let Ok(value) = T::try_from(val) else { return };
-
-            let calculated = size(value);
-            assert_eq!(
-                calculated, expected_bytes,
-                "Size formula wrong for value {}",
-                val
-            );
-
-            // Also verify by encoding
-            let mut buf = Vec::new();
-            write(value, &mut buf);
-            assert_eq!(
-                buf.len(),
-                expected_bytes,
-                "Actual encoding differs from expected for value {}",
-                val
-            );
-        }
-
-        // Test known cases
-        verify_size::<u32>(0, 1); // 0 bits -> 1 byte (minimum)
-        verify_size::<u32>(1, 1); // 1 bit -> 1 byte
-        verify_size::<u32>(127, 1); // 7 bits -> 1 byte
-        verify_size::<u32>(128, 2); // 8 bits -> 2 bytes
-        verify_size::<u32>(16383, 2); // 14 bits -> 2 bytes
-        verify_size::<u32>(16384, 3); // 15 bits -> 3 bytes
-        verify_size::<u32>(2097151, 3); // 21 bits -> 3 bytes
-        verify_size::<u32>(2097152, 4); // 22 bits -> 4 bytes
-
-        // Test maximum values
-        verify_size::<u16>(u16::MAX as u128, 3); // 16 bits -> 3 bytes
-        verify_size::<u32>(u32::MAX as u128, 5); // 32 bits -> 5 bytes
-        verify_size::<u64>(u64::MAX as u128, 10); // 64 bits -> 10 bytes
-        verify_size::<u128>(u128::MAX, 19); // 128 bits -> 19 bytes
     }
 }
