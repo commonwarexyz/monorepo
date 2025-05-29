@@ -4,7 +4,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
-use commonware_cryptography::{PrivateKey, PublicKey};
+use commonware_cryptography::{PrivateKey, PublicKey, Verifier as _};
 use commonware_runtime::Clock;
 use commonware_utils::SystemTimeExt;
 use std::time::Duration;
@@ -184,7 +184,7 @@ mod tests {
         utils::codec::send_frame,
     };
     use commonware_codec::DecodeExt;
-    use commonware_cryptography::{ed25519, PrivateKeyGen as _, PublicKey as _};
+    use commonware_cryptography::{ed25519, PrivateKeyGen as _};
     use commonware_runtime::{deterministic, mocks, Metrics, Runner, Spawner};
     use x25519::PublicKey;
 

@@ -8,7 +8,7 @@ use commonware_cryptography::{
         dkg::{player::Output, Dealer, Player},
         primitives::{group, variant::MinSig},
     },
-    PrivateKey, PublicKey as _,
+    PrivateKey, Verifier as _,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};

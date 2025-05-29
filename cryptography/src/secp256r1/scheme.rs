@@ -36,7 +36,6 @@ pub struct PrivateKey {
 
 impl crate::PrivateKey for PrivateKey {
     type PublicKey = PublicKey;
-
     type Signature = Signature;
 
     fn public_key(&self) -> Self::PublicKey {
@@ -160,8 +159,10 @@ impl From<PrivateKey> for PublicKey {
 impl crate::PublicKey for PublicKey {
     type Private = PrivateKey;
     type Signature = Signature;
+}
 
-    fn verify(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Self::Signature) -> bool {
+impl crate::Verifier<Signature> for PublicKey {
+    fn verify(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Signature) -> bool {
         let payload = match namespace {
             Some(namespace) => Cow::Owned(union_unique(namespace, msg)),
             None => Cow::Borrowed(msg),
@@ -322,7 +323,7 @@ impl Display for Signature {
 /// https://csrc.nist.gov/projects/cryptographic-algorithm-validation-program/digital-signatures.
 #[cfg(test)]
 mod tests {
-    use crate::{PublicKey as _, Signer as _};
+    use crate::{Signer as _, Verifier as _};
 
     use super::*;
     use bytes::Bytes;

@@ -2,7 +2,7 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, ReadRangeExt, Write,
 };
-use commonware_cryptography::{PrivateKey, PublicKey as _};
+use commonware_cryptography::{PrivateKey, Verifier as _};
 use commonware_utils::BitVec as UtilsBitVec;
 use std::net::SocketAddr;
 

@@ -155,8 +155,10 @@ impl PrivateKeyGen for PrivateKey {
 impl crate::PublicKey for PublicKey {
     type Private = PrivateKey;
     type Signature = Signature;
+}
 
-    fn verify(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Self::Signature) -> bool {
+impl crate::Verifier<Signature> for PublicKey {
+    fn verify(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Signature) -> bool {
         ops::verify_message::<MinPk>(&self.key, namespace, msg, &sig.signature).is_ok()
     }
 }
@@ -383,7 +385,7 @@ impl crate::BatchScheme<PrivateKey> for Batch {
 /// Test vectors sourced from https://github.com/ethereum/bls12-381-tests/releases/tag/v0.1.2.
 #[cfg(test)]
 mod tests {
-    use crate::{bls12381, BatchScheme as _, PublicKey as _, Signer as _};
+    use crate::{bls12381, BatchScheme as _, Signer as _, Verifier as _};
 
     use super::*;
     use commonware_codec::{DecodeExt, Encode};

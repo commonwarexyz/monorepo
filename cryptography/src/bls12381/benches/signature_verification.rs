@@ -1,5 +1,5 @@
 use commonware_cryptography::{
-    bls12381, PrivateKey, PrivateKeyGen as _, PublicKey as _, Signer as _,
+    bls12381, PrivateKey, PrivateKeyGen as _, Signer as _, Verifier as _,
 };
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};

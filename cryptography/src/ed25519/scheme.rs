@@ -24,7 +24,6 @@ pub struct PrivateKey {
 
 impl crate::PrivateKey for PrivateKey {
     type PublicKey = PublicKey;
-
     type Signature = Signature;
 
     fn public_key(&self) -> Self::PublicKey {
@@ -150,8 +149,10 @@ impl From<PrivateKey> for PublicKey {
 impl crate::PublicKey for PublicKey {
     type Private = PrivateKey;
     type Signature = Signature;
+}
 
-    fn verify(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Self::Signature) -> bool {
+impl crate::Verifier<Signature> for PublicKey {
+    fn verify(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Signature) -> bool {
         match namespace {
             Some(namespace) => {
                 let payload = union_unique(namespace, msg);
@@ -342,7 +343,7 @@ impl crate::BatchScheme<PrivateKey> for Batch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ed25519, BatchScheme as _, PublicKey as _, Signer as _};
+    use crate::{ed25519, BatchScheme as _, Signer as _, Verifier as _};
     use commonware_codec::{DecodeExt, Encode};
     use rand::rngs::OsRng;
 
@@ -713,12 +714,7 @@ mod tests {
     fn test_zero_signature_fails() {
         let (_, public_key, message, _) = vector_1();
         let zero_sig = Signature::decode(vec![0u8; Signature::SIZE].as_ref()).unwrap();
-        assert!(!crate::PublicKey::verify(
-            &public_key,
-            None,
-            &message,
-            &zero_sig
-        ));
+        assert!(!public_key.verify(None, &message, &zero_sig));
     }
 
     #[test]

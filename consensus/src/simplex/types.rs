@@ -4,7 +4,9 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write,
 };
-use commonware_cryptography::{Digest, PrivateKey, PublicKey, Signature as SigTrait};
+use commonware_cryptography::{
+    Digest, PrivateKey, PublicKey, Signature as SigTrait, Verifier as _,
+};
 use commonware_utils::{quorum, union, Array};
 
 /// View is a monotonically increasing counter that represents the current focus of consensus.

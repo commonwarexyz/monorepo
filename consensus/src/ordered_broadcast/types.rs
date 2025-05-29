@@ -11,7 +11,7 @@ use commonware_cryptography::{
         poly::{self, PartialSignature},
         variant::Variant,
     },
-    Digest, PrivateKey, PublicKey,
+    Digest, PrivateKey, Verifier as _,
 };
 use commonware_utils::{union, Array};
 use futures::channel::oneshot;

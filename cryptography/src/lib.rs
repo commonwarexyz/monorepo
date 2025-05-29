@@ -40,15 +40,19 @@ pub trait PrivateKeyGen: PrivateKey {
     fn from_rng<R: Rng + CryptoRng>(rng: &mut R) -> Self;
 }
 
+pub trait Verifier<S: Signature> {
+    /// Verify that `sig` is a valid signature over `msg`.
+    fn verify(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &S) -> bool;
+}
+
 /// A public key, able to verify signatures.
-pub trait PublicKey: Sized + From<Self::Private> + ReadExt + Encode + PartialEq + Array {
+pub trait PublicKey:
+    Verifier<Self::Signature> + Sized + From<Self::Private> + ReadExt + Encode + PartialEq + Array
+{
     /// The private key it came from.
     type Private: PrivateKey<PublicKey = Self>;
     /// The signature type it verifies.
     type Signature: Signature;
-
-    /// Verify that `sig` is a valid signature over `msg`.
-    fn verify(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Self::Signature) -> bool;
 }
 
 /// A signature over a message by some private key.

@@ -1,5 +1,5 @@
 use commonware_cryptography::{
-    secp256r1, PrivateKey, PrivateKeyGen as _, PublicKey as _, Signer as _,
+    secp256r1, PrivateKey, PrivateKeyGen as _, Signer as _, Verifier as _,
 };
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
