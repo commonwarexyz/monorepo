@@ -1,6 +1,5 @@
-use commonware_utils::StableBuf;
-
 use crate::{Blob, Error};
+use commonware_utils::StableBuf;
 
 /// A reader that buffers content from a [Blob] to optimize the performance
 /// of a full scan of contents.
