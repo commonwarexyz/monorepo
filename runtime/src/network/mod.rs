@@ -49,7 +49,7 @@ mod tests {
                 .recv(vec![0; CLIENT_SEND_DATA.len()])
                 .await
                 .expect("Failed to receive");
-            assert_eq!(&read, CLIENT_SEND_DATA.as_bytes());
+            assert_eq!(read.as_ref(), CLIENT_SEND_DATA.as_bytes());
             sink.send(Vec::from(SERVER_SEND_DATA))
                 .await
                 .expect("Failed to send");
@@ -71,7 +71,7 @@ mod tests {
                 .recv(vec![0; SERVER_SEND_DATA.len()])
                 .await
                 .expect("Failed to receive data");
-            assert_eq!(&read, SERVER_SEND_DATA.as_bytes());
+            assert_eq!(read.as_ref(), SERVER_SEND_DATA.as_bytes());
         });
 
         // Wait for both tasks to complete
@@ -102,7 +102,7 @@ mod tests {
                     .recv(vec![0; CLIENT_SEND_DATA.len()])
                     .await
                     .expect("Failed to receive");
-                assert_eq!(&read, CLIENT_SEND_DATA.as_bytes());
+                assert_eq!(read.as_ref(), CLIENT_SEND_DATA.as_bytes());
 
                 sink.send(Vec::from(SERVER_SEND_DATA))
                     .await
@@ -130,7 +130,7 @@ mod tests {
                     .await
                     .expect("Failed to receive data");
                 // Verify the received data
-                assert_eq!(&read, SERVER_SEND_DATA.as_bytes());
+                assert_eq!(read.as_ref(), SERVER_SEND_DATA.as_bytes());
             }
         });
 
@@ -185,7 +185,7 @@ mod tests {
                     .recv(vec![0; CHUNK_SIZE])
                     .await
                     .expect("Failed to receive chunk");
-                assert_eq!(&read, &pattern);
+                assert_eq!(read.as_ref(), pattern);
             }
         });
 

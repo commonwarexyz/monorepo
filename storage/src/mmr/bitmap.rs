@@ -499,29 +499,36 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
                 .await;
         }
 
-        // The proof must contain the partial chunk digest as its last hash.
         if proof.digests.is_empty() {
             debug!("proof has no digests");
             return Ok(false);
         }
+        let last_digest = mmr_proof.digests.pop().unwrap();
+
         if mmr_proof.size == leaf_pos {
-            // The proof is over a bit in the partial chunk. In this case the proof's digests should
-            // contain only a single digest: the mmr root.
-            if mmr_proof.digests.len() != 1 {
-                debug!("proof has more than one digest");
+            // The proof is over a bit in the partial chunk. In this case the proof's only digest
+            // should be the MMR's root, otherwise it is invalid. Since we've popped off the last
+            // digest already, there should be no remaining digests.
+            if !mmr_proof.digests.is_empty() {
+                debug!(
+                    digests = mmr_proof.digests.len() + 1,
+                    "proof over partial chunk should have exactly 1 digest"
+                );
                 return Ok(false);
             }
-            let mmr_root = mmr_proof.digests.pop().unwrap();
             let last_chunk_digest = hasher.digest(chunk);
             let next_bit = bit_count % Self::CHUNK_SIZE_BITS;
-            let reconstructed_root =
-                Self::partial_chunk_root(hasher.inner(), &mmr_root, next_bit, &last_chunk_digest);
+            let reconstructed_root = Self::partial_chunk_root(
+                hasher.inner(),
+                &last_digest,
+                next_bit,
+                &last_chunk_digest,
+            );
             return Ok(reconstructed_root == *root_digest);
         };
 
-        let last_chunk_digest = mmr_proof.digests.pop().unwrap();
-
-        // Reconstruct the MMR root.
+        // For the case where the proof is over a bit in a full chunk, `last_digest` contains the
+        // digest of that chunk.
         let mmr_root = match mmr_proof
             .reconstruct_root(hasher, &[chunk], leaf_pos, leaf_pos)
             .await
@@ -540,7 +547,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 
         let next_bit = bit_count % Self::CHUNK_SIZE_BITS;
         let reconstructed_root =
-            Self::partial_chunk_root(hasher.inner(), &mmr_root, next_bit, &last_chunk_digest);
+            Self::partial_chunk_root(hasher.inner(), &mmr_root, next_bit, &last_digest);
 
         Ok(reconstructed_root == *root_digest)
     }
@@ -565,6 +572,31 @@ mod tests {
         }
 
         vec.try_into().unwrap()
+    }
+
+    #[test_traced]
+    fn test_bitmap_verify_empty_proof() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher = Sha256::new();
+            let mut hasher = Standard::new(&mut hasher);
+            let proof = Proof {
+                size: 100,
+                digests: Vec::new(),
+            };
+            assert!(
+                !Bitmap::<Sha256, SHA256_SIZE>::verify_bit_inclusion(
+                    &mut hasher,
+                    &proof,
+                    &[0u8; SHA256_SIZE],
+                    0,
+                    &Sha256::fill(0x00),
+                )
+                .await
+                .unwrap(),
+                "proof without digests shouldn't verify or panic"
+            );
+        });
     }
 
     #[test_traced]

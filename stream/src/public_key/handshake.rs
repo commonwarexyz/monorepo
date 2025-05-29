@@ -26,12 +26,12 @@ pub struct Info<C: Scheme> {
 impl<C: Scheme> Info<C> {
     pub fn new(
         recipient: C::PublicKey,
-        secret: &x25519_dalek::EphemeralSecret,
+        ephemeral_public_key: x25519::PublicKey,
         timestamp: u64,
     ) -> Self {
         Self {
             recipient,
-            ephemeral_public_key: x25519::PublicKey::from_secret(secret),
+            ephemeral_public_key,
             timestamp,
         }
     }

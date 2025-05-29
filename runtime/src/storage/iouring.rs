@@ -2,7 +2,7 @@ use crate::{
     iouring::{self, should_retry},
     Error,
 };
-use commonware_utils::{from_hex, hex, StableBuf, StableBufMut};
+use commonware_utils::{from_hex, hex, StableBuf};
 use futures::{
     channel::{mpsc, oneshot},
     executor::block_on,
@@ -10,7 +10,7 @@ use futures::{
 };
 use io_uring::{opcode, types};
 use std::fs::{self, File};
-use std::io::{Error as IoError, ErrorKind};
+use std::io::Error as IoError;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -151,16 +151,23 @@ impl Blob {
 }
 
 impl crate::Blob for Blob {
-    async fn read_at<B: StableBufMut>(&self, buf: B, offset: u64) -> Result<B, Error> {
+    async fn read_at(
+        &self,
+        buf: impl Into<StableBuf> + Send,
+        offset: u64,
+    ) -> Result<StableBuf, Error> {
+        let mut buf = buf.into();
         let fd = types::Fd(self.file.as_raw_fd());
         let mut bytes_read = 0;
         let buf_len = buf.len();
-        let buf_arc = Arc::new(buf);
         let mut io_sender = self.io_sender.clone();
         while bytes_read < buf_len {
-            let ptr = buf_arc.as_ref().stable_ptr();
+            // Figure out how much is left to read and where to read into
             let remaining = unsafe {
-                std::slice::from_raw_parts_mut(ptr.add(bytes_read) as *mut u8, buf_len - bytes_read)
+                std::slice::from_raw_parts_mut(
+                    buf.as_mut_ptr().add(bytes_read),
+                    buf_len - bytes_read,
+                )
             };
             let offset = offset + bytes_read as u64;
 
@@ -175,40 +182,45 @@ impl crate::Blob for Blob {
                 .send(iouring::Op {
                     work: op,
                     sender,
-                    buffer: Some(buf_arc.clone()),
+                    buffer: Some(buf),
                 })
                 .await
                 .map_err(|_| Error::ReadFailed)?;
 
             // Wait for the result
-            let result = receiver.await.map_err(|_| Error::ReadFailed)?;
+            let (result, got_buf) = receiver.await.map_err(|_| Error::ReadFailed)?;
+            buf = got_buf.unwrap();
             if should_retry(result) {
                 continue;
             }
 
             // A non-positive return value indicates an error.
-            let bytes_read_inner: usize = result.try_into().map_err(|_| Error::ReadFailed)?;
-            if bytes_read_inner == 0 {
+            let op_bytes_read: usize = result.try_into().map_err(|_| Error::ReadFailed)?;
+            if op_bytes_read == 0 {
                 // A return value of 0 indicates EOF, which shouldn't happen because we
                 // aren't done reading into `buf`. See `man pread`.
                 return Err(Error::BlobInsufficientLength);
             }
-            bytes_read += bytes_read_inner;
+            bytes_read += op_bytes_read;
         }
-        Ok(Arc::into_inner(buf_arc).expect("should have only one reference"))
+        Ok(buf)
     }
 
-    async fn write_at<B: StableBuf>(&self, buf: B, offset: u64) -> Result<(), Error> {
+    async fn write_at(&self, buf: impl Into<StableBuf> + Send, offset: u64) -> Result<(), Error> {
+        let mut buf = buf.into();
         let fd = types::Fd(self.file.as_raw_fd());
-        let mut total_written = 0;
-        let buf_arc = Arc::new(buf);
-        let buf_ref = buf_arc.as_ref().as_ref();
-
+        let mut bytes_written = 0;
+        let buf_len = buf.len();
         let mut io_sender = self.io_sender.clone();
-        while total_written < buf_ref.len() {
+        while bytes_written < buf_len {
             // Figure out how much is left to write and where to write from
-            let remaining = &buf_ref[total_written..];
-            let offset = offset + total_written as u64;
+            let remaining = unsafe {
+                std::slice::from_raw_parts(
+                    buf.as_mut_ptr().add(bytes_written) as *const u8,
+                    buf_len - bytes_written,
+                )
+            };
+            let offset = offset + bytes_written as u64;
 
             // Create an operation to do the write
             let op = opcode::Write::new(fd, remaining.as_ptr(), remaining.len() as _)
@@ -221,21 +233,23 @@ impl crate::Blob for Blob {
                 .send(iouring::Op {
                     work: op,
                     sender,
-                    buffer: Some(buf_arc.clone()),
+                    buffer: Some(buf),
                 })
                 .await
                 .map_err(|_| Error::WriteFailed)?;
 
             // Wait for the result
-            let return_value = receiver.await.map_err(|_| Error::WriteFailed)?;
+            let (return_value, got_buf) = receiver.await.map_err(|_| Error::WriteFailed)?;
+            buf = got_buf.unwrap();
             if should_retry(return_value) {
                 continue;
             }
 
             // A negative return value indicates an error.
-            let bytes_written: usize = return_value.try_into().map_err(|_| Error::WriteFailed)?;
+            let op_bytes_written: usize =
+                return_value.try_into().map_err(|_| Error::WriteFailed)?;
 
-            total_written += bytes_written;
+            bytes_written += op_bytes_written;
         }
         Ok(())
     }
@@ -243,11 +257,7 @@ impl crate::Blob for Blob {
     // TODO: Make this async. See https://github.com/commonwarexyz/monorepo/issues/831
     async fn truncate(&self, len: u64) -> Result<(), Error> {
         self.file.set_len(len).map_err(|e| {
-            Error::BlobTruncateFailed(
-                self.partition.clone(),
-                hex(&self.name),
-                IoError::new(ErrorKind::Other, e),
-            )
+            Error::BlobTruncateFailed(self.partition.clone(), hex(&self.name), IoError::other(e))
         })
     }
 
@@ -270,16 +280,16 @@ impl crate::Blob for Blob {
                     Error::BlobSyncFailed(
                         self.partition.clone(),
                         hex(&self.name),
-                        IoError::new(ErrorKind::Other, "failed to send work"),
+                        IoError::other("failed to send work"),
                     )
                 })?;
 
             // Wait for the result
-            let return_value = receiver.await.map_err(|_| {
+            let (return_value, _) = receiver.await.map_err(|_| {
                 Error::BlobSyncFailed(
                     self.partition.clone(),
                     hex(&self.name),
-                    IoError::new(ErrorKind::Other, "failed to read result"),
+                    IoError::other("failed to read result"),
                 )
             })?;
             if should_retry(return_value) {
@@ -291,7 +301,7 @@ impl crate::Blob for Blob {
                 return Err(Error::BlobSyncFailed(
                     self.partition.clone(),
                     hex(&self.name),
-                    IoError::new(ErrorKind::Other, format!("error code: {}", return_value)),
+                    IoError::other(format!("error code: {}", return_value)),
                 ));
             }
 
