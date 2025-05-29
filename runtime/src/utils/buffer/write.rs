@@ -146,12 +146,11 @@ impl<B: Blob> Write<B> {
 }
 
 impl<B: Blob> Blob for Write<B> {
-    async fn read_at(&self, buf: StableBufMut, offset: u64) -> Result<StableBufMut, Error> {
+    async fn read_at(&self, mut buf: StableBufMut, offset: u64) -> Result<StableBufMut, Error> {
         // Acquire a read lock on the inner state
         let inner = self.inner.read().await;
 
         // Ensure offset read doesn't overflow
-        let mut buf: StableBufMut = buf.into();
         let data_len = buf.len();
         let data_end = offset
             .checked_add(data_len as u64)
@@ -183,9 +182,9 @@ impl<B: Blob> Blob for Write<B> {
         let blob_bytes = (buffer_start - offset) as usize;
         let blob_part = vec![0u8; blob_bytes];
         let blob_part = inner.blob.read_at(blob_part.into(), offset).await?;
-        buf.deref_mut()[..blob_bytes].copy_from_slice(blob_part.as_ref());
+        buf.as_mut()[..blob_bytes].copy_from_slice(blob_part.as_ref());
         let buf_bytes = data_len - blob_bytes;
-        buf.deref_mut()[blob_bytes..].copy_from_slice(&inner.buffer[..buf_bytes]);
+        buf.as_mut()[blob_bytes..].copy_from_slice(&inner.buffer[..buf_bytes]);
         Ok(buf)
     }
 

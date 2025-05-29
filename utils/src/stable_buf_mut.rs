@@ -53,16 +53,6 @@ impl Index<usize> for StableBufMut {
 }
 
 impl StableBufMut {
-    /// Returns the buffer as a slice.
-    pub fn as_ref(&self) -> &[u8] {
-        unsafe {
-            match self {
-                StableBufMut::Vec(v) => std::slice::from_raw_parts(v.as_ptr(), v.len()),
-                StableBufMut::BytesMut(b) => std::slice::from_raw_parts(b.as_ptr(), b.len()),
-            }
-        }
-    }
-
     /// Returns a raw pointer to this buffer.
     pub fn stable_mut_ptr(&mut self) -> *mut u8 {
         match self {
@@ -79,6 +69,7 @@ impl StableBufMut {
         }
     }
 
+    /// Returns whether this buffer is empty.
     pub fn is_empty(&self) -> bool {
         match self {
             StableBufMut::Vec(v) => v.is_empty(),
@@ -96,22 +87,29 @@ impl StableBufMut {
         }
     }
 
-    /// Returns the buffer as a mutable slice.
-    pub fn deref_mut(&mut self) -> &mut [u8] {
-        unsafe {
-            match self {
-                StableBufMut::Vec(v) => std::slice::from_raw_parts_mut(v.as_mut_ptr(), v.len()),
-                StableBufMut::BytesMut(b) => {
-                    std::slice::from_raw_parts_mut(b.as_mut_ptr(), b.len())
-                }
-            }
-        }
-    }
-
+    /// Truncates the buffer to the specified length.
     pub fn truncate(&mut self, len: usize) {
         match self {
             StableBufMut::Vec(v) => v.truncate(len),
             StableBufMut::BytesMut(b) => b.truncate(len),
+        }
+    }
+}
+
+impl AsRef<[u8]> for StableBufMut {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            StableBufMut::Vec(v) => v.as_ref(),
+            StableBufMut::BytesMut(b) => b.as_ref(),
+        }
+    }
+}
+
+impl AsMut<[u8]> for StableBufMut {
+    fn as_mut(&mut self) -> &mut [u8] {
+        match self {
+            StableBufMut::Vec(v) => v.as_mut(),
+            StableBufMut::BytesMut(b) => b.as_mut(),
         }
     }
 }

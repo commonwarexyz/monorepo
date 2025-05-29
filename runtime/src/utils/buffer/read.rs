@@ -100,7 +100,7 @@ impl<B: Blob> Read<B> {
         // because `bytes_to_read` < `self.buffer_size`.
         let mut buffer = std::mem::take(&mut self.buffer);
         buffer.truncate(bytes_to_read);
-        self.buffer = self.blob.read_at(buffer.into(), self.blob_position).await?;
+        self.buffer = self.blob.read_at(buffer, self.blob_position).await?;
         self.buffer_valid_len = bytes_to_read;
         Ok(bytes_to_read)
     }

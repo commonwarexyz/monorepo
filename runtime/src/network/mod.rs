@@ -161,7 +161,7 @@ mod tests {
                     .recv(vec![0; CHUNK_SIZE].into())
                     .await
                     .expect("Failed to receive chunk");
-                sink.send(read.into()).await.expect("Failed to send chunk");
+                sink.send(read).await.expect("Failed to send chunk");
             }
         });
 

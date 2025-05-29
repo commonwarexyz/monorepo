@@ -159,7 +159,7 @@ impl crate::Blob for Blob {
         while bytes_read < buf_len {
             let remaining = unsafe {
                 std::slice::from_raw_parts_mut(
-                    buf.stable_mut_ptr().add(bytes_read) as *mut u8,
+                    buf.stable_mut_ptr().add(bytes_read),
                     buf_len - bytes_read,
                 )
             };
@@ -176,7 +176,7 @@ impl crate::Blob for Blob {
                 .send(iouring::Op {
                     work: op,
                     sender,
-                    buffer: Some(buf.into()),
+                    buffer: Some(buf),
                 })
                 .await
                 .map_err(|_| Error::ReadFailed)?;
@@ -226,7 +226,7 @@ impl crate::Blob for Blob {
                 .send(iouring::Op {
                     work: op,
                     sender,
-                    buffer: Some(buf.into()),
+                    buffer: Some(buf),
                 })
                 .await
                 .map_err(|_| Error::WriteFailed)?;

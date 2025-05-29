@@ -36,12 +36,12 @@ pub struct Stream {
 
 impl crate::Stream for Stream {
     async fn recv(&mut self, mut buf: StableBufMut) -> Result<StableBufMut, Error> {
-        if buf.len() == 0 {
+        if buf.is_empty() {
             return Ok(buf);
         }
 
         // Time out if we take too long to read
-        timeout(self.read_timeout, self.stream.read_exact(buf.deref_mut()))
+        timeout(self.read_timeout, self.stream.read_exact(buf.as_mut()))
             .await
             .map_err(|_| Error::Timeout)?
             .map_err(|_| Error::RecvFailed)?;

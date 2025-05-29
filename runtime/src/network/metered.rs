@@ -56,7 +56,6 @@ pub struct Sink<S: crate::Sink> {
 
 impl<S: crate::Sink> crate::Sink for Sink<S> {
     async fn send(&mut self, data: StableBufMut) -> Result<(), crate::Error> {
-        let data: StableBufMut = data.into();
         let len = data.len();
         self.inner.send(data).await?;
         self.metrics.outbound_bandwidth.inc_by(len as u64);
