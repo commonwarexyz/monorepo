@@ -24,15 +24,16 @@ pub struct PrivateKey {
 
 impl crate::PrivateKey for PrivateKey {
     type PublicKey = PublicKey;
-    type Signature = Signature;
 
     fn public_key(&self) -> Self::PublicKey {
         PublicKey::from(self.key.verification_key())
     }
 }
 
-impl crate::Signer<Signature> for PrivateKey {
-    fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Signature {
+impl crate::Signer for PrivateKey {
+    type Signature = Signature;
+
+    fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Self::Signature {
         let sig = match namespace {
             Some(namespace) => self.key.sign(&union_unique(namespace, msg)),
             None => self.key.sign(msg),
@@ -148,11 +149,12 @@ impl From<PrivateKey> for PublicKey {
 
 impl crate::PublicKey for PublicKey {
     type Private = PrivateKey;
-    type Signature = Signature;
 }
 
-impl crate::Verifier<Signature> for PublicKey {
-    fn verify(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Signature) -> bool {
+impl crate::Verifier for PublicKey {
+    type Signature = Signature;
+
+    fn verify(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Self::Signature) -> bool {
         match namespace {
             Some(namespace) => {
                 let payload = union_unique(namespace, msg);

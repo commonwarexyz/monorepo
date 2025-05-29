@@ -15,16 +15,17 @@ pub mod sha256;
 pub use sha256::{hash, Sha256};
 pub mod secp256r1;
 
-pub trait Signer<S: Signature> {
-    fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> S;
+pub trait Signer {
+    type Signature: Signature;
+
+    /// Sign a message with the given namespace.
+    fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Self::Signature;
 }
 
 /// A private key, able to derive its public key and sign messages.
-pub trait PrivateKey: Signer<Self::Signature> + Sized + Array {
+pub trait PrivateKey: Signer + Sized + Array {
     /// The corresponding public key type.
     type PublicKey: PublicKey<Private = Self, Signature = Self::Signature>;
-    /// The signature type produced by this keypair.
-    type Signature: Signature;
 
     /// Derive the public key.
     fn public_key(&self) -> Self::PublicKey;
@@ -40,19 +41,19 @@ pub trait PrivateKeyGen: PrivateKey {
     fn from_rng<R: Rng + CryptoRng>(rng: &mut R) -> Self;
 }
 
-pub trait Verifier<S: Signature> {
+pub trait Verifier {
+    type Signature: Signature;
+
     /// Verify that `sig` is a valid signature over `msg`.
-    fn verify(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &S) -> bool;
+    fn verify(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Self::Signature) -> bool;
 }
 
 /// A public key, able to verify signatures.
 pub trait PublicKey:
-    Verifier<Self::Signature> + Sized + From<Self::Private> + ReadExt + Encode + PartialEq + Array
+    Verifier + Sized + From<Self::Private> + ReadExt + Encode + PartialEq + Array
 {
     /// The private key it came from.
     type Private: PrivateKey<PublicKey = Self>;
-    /// The signature type it verifies.
-    type Signature: Signature;
 }
 
 /// A signature over a message by some private key.

@@ -129,16 +129,16 @@ impl Display for PrivateKey {
 impl crate::PrivateKey for PrivateKey {
     type PublicKey = PublicKey;
 
-    type Signature = Signature;
-
     // TODO remove duplicate impl
     fn public_key(&self) -> Self::PublicKey {
         PublicKey::from(ops::compute_public::<MinPk>(&self.key))
     }
 }
 
-impl crate::Signer<Signature> for PrivateKey {
-    fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Signature {
+impl crate::Signer for PrivateKey {
+    type Signature = Signature;
+
+    fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Self::Signature {
         let signature = ops::sign_message::<MinPk>(&self.key, namespace, msg);
         Signature::from(signature)
     }
@@ -154,11 +154,12 @@ impl PrivateKeyGen for PrivateKey {
 
 impl crate::PublicKey for PublicKey {
     type Private = PrivateKey;
-    type Signature = Signature;
 }
 
-impl crate::Verifier<Signature> for PublicKey {
-    fn verify(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Signature) -> bool {
+impl crate::Verifier for PublicKey {
+    type Signature = Signature;
+
+    fn verify(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Self::Signature) -> bool {
         ops::verify_message::<MinPk>(&self.key, namespace, msg, &sig.signature).is_ok()
     }
 }
