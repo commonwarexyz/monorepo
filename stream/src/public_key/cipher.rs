@@ -1,8 +1,8 @@
 use crate::Error;
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, KeySizeUser};
 use commonware_cryptography::{Hasher, Sha256};
-use hkdf::Hkdf;
-use sha2::{digest::typenum::Unsigned, Sha256 as ISha256};
+use hkdf::{hmac::digest::typenum::Unsigned, Hkdf};
+use sha2::Sha256 as ISha256;
 use zeroize::Zeroize;
 
 // The size of the key used by the ChaCha20Poly1305 cipher.
