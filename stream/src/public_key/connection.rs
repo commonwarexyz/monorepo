@@ -22,25 +22,12 @@ const ENCRYPTION_TAG_LENGTH: usize = 16;
 // The size of the key used by the ChaCha20Poly1305 cipher.
 const CHACHA_KEY_SIZE: usize = <ChaCha20Poly1305 as KeySizeUser>::KeySize::USIZE;
 
-// A constant prefix used for HKDF key derivation.
+// A constant prefix used for the salt hash in the HKDF key derivation.
 const BASE_KDF_PREFIX: &[u8] = b"commonware-stream/KDF/v1/";
 
-// Suffixes used for deriving directional keys in the KDF.
-const D2L_KDF_SUFFIX: &[u8] = b"/d2l"; // Dialer-to-Listener
-const L2D_KDF_SUFFIX: &[u8] = b"/l2d"; // Listener-to-Dialer
-
-/// Helper to generate a cipher for a specific direction.
-fn generate_cipher(
-    prk: &Hkdf<Sha256>,
-    mut info: Vec<u8>,
-    suffix: &[u8],
-) -> Result<ChaCha20Poly1305, Error> {
-    let mut buf = [0u8; CHACHA_KEY_SIZE];
-    info.extend_from_slice(suffix);
-    prk.expand(&info, &mut buf)
-        .map_err(|_| Error::HKDFExpansionFailed)?;
-    ChaCha20Poly1305::new_from_slice(&buf).map_err(|_| Error::CipherCreationFailed)
-}
+// Info values used for deriving directional keys in the KDF.
+const D2L: u8 = 0x01; // Dialer-to-Listener
+const L2D: u8 = 0x02; // Listener-to-Dialer
 
 /// Helper function to derive directional keys using HKDF-SHA256.
 ///
@@ -50,30 +37,40 @@ fn generate_cipher(
 fn derive_ciphers(
     shared_secret: &[u8],
     namespace: &[u8],
-    dialer_transcript: &[u8],
-    listener_transcript: &[u8],
+    dialer_handshake_bytes: &[u8],
+    listener_handshake_bytes: &[u8],
 ) -> Result<(ChaCha20Poly1305, ChaCha20Poly1305), Error> {
     // Create a unique hash from:
     // - A commonware-specific prefix
     // - The unique application namespace
-    // - The dialer handshake transcript
-    // - The listener handshake transcript
-    // This hash serves as both the salt for HKDF expansion as-well-as the info for HKDF extraction.
+    // - The dialer handshake
+    // - The listener handshake
+    // This hash serves as the salt for HKDF expansion.
     let mut hasher = Sha256::default();
     hasher.update(BASE_KDF_PREFIX);
     hasher.update(namespace);
-    hasher.update(dialer_transcript);
-    hasher.update(listener_transcript);
-    let transcript_hash = hasher.finalize();
-    let hash = transcript_hash.as_slice();
+    hasher.update(dialer_handshake_bytes);
+    hasher.update(listener_handshake_bytes);
+    let salt = hasher.finalize();
 
-    // HKDF-Extract: Create a pseudorandom key (PRK) based on the shared secret
-    let salt: Option<&[u8]> = Some(hash);
-    let prk = Hkdf::<Sha256>::new(salt, shared_secret);
+    // HKDF-Extract: Create a pseudorandom key (PRK) based on:
+    // - The salt
+    // - The shared secret from the Diffie-Hellman key exchange
+    let prk = Hkdf::<Sha256>::new(Some(salt.as_slice()), shared_secret);
 
-    // Derive ciphers for both directions
-    let d2l_cipher = generate_cipher(&prk, hash.to_vec(), D2L_KDF_SUFFIX)?;
-    let l2d_cipher = generate_cipher(&prk, hash.to_vec(), L2D_KDF_SUFFIX)?;
+    // Reusable buffer for derived keys
+    let mut buf = [0u8; CHACHA_KEY_SIZE];
+
+    // Dialer-to-Listener cipher
+    prk.expand(&[D2L], &mut buf)
+        .map_err(|_| Error::HKDFExpansion)?;
+    let d2l_cipher = ChaCha20Poly1305::new_from_slice(&buf).map_err(|_| Error::CipherCreation)?;
+
+    // Listener-to-Dialer cipher
+    prk.expand(&[L2D], &mut buf)
+        .map_err(|_| Error::HKDFExpansion)?;
+    let l2d_cipher = ChaCha20Poly1305::new_from_slice(&buf).map_err(|_| Error::CipherCreation)?;
+
     Ok((d2l_cipher, l2d_cipher))
 }
 
@@ -86,9 +83,9 @@ pub struct IncomingConnection<C: Scheme, Si: Sink, St: Stream> {
     ephemeral_public_key: x25519::PublicKey,
     peer_public_key: C::PublicKey,
 
-    /// Stores the raw transcript message bytes from the dialer.
+    /// Stores the raw bytes of the dialer handshake message.
     /// Necessary for the cipher derivation.
-    dialer_transcript: Bytes,
+    dialer_handshake_bytes: Bytes,
 }
 
 impl<C: Scheme, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
@@ -124,7 +121,7 @@ impl<C: Scheme, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
             deadline,
             ephemeral_public_key: signed_handshake.ephemeral(),
             peer_public_key: signed_handshake.signer(),
-            dialer_transcript: msg,
+            dialer_handshake_bytes: msg,
         })
     }
 
@@ -279,7 +276,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let namespace = incoming.config.namespace;
         let mut sink = incoming.sink;
         let stream = incoming.stream;
-        let d2l_msg = incoming.dialer_transcript;
+        let d2l_msg = incoming.dialer_handshake_bytes;
 
         // Generate personal secret
         let secret = x25519::new(&mut context);

@@ -37,9 +37,9 @@ pub enum Error {
     #[error("shared secret was not contributory")]
     SharedSecretNotContributory,
     #[error("cipher creation failed")]
-    CipherCreationFailed,
+    CipherCreation,
     #[error("HKDF expansion failed")]
-    HKDFExpansionFailed,
+    HKDFExpansion,
     #[error("nonce overflow")]
     NonceOverflow,
     #[error("encryption failed")]
