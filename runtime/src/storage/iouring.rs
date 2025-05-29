@@ -162,6 +162,7 @@ impl crate::Blob for Blob {
         let buf_len = buf.len();
         let mut io_sender = self.io_sender.clone();
         while bytes_read < buf_len {
+            // Figure out how much is left to read and where to read into
             let remaining = unsafe {
                 std::slice::from_raw_parts_mut(
                     buf.as_mut_ptr().add(bytes_read),

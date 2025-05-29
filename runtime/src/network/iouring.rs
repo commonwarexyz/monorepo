@@ -162,6 +162,7 @@ impl crate::Sink for Sink {
         let msg_len = msg.len();
 
         while bytes_sent < msg_len {
+            // Figure out how much is left to read and where to read into
             let remaining = unsafe {
                 std::slice::from_raw_parts(
                     msg.as_mut_ptr().add(bytes_sent) as *const u8,
@@ -226,6 +227,7 @@ impl crate::Stream for Stream {
         let mut buf = buf.into();
         let buf_len = buf.len();
         while bytes_received < buf_len {
+            // Figure out how much is left to read and where to read into
             let remaining = unsafe {
                 std::slice::from_raw_parts_mut(
                     buf.as_mut_ptr().add(bytes_received) as *mut u8,
