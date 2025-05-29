@@ -180,7 +180,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             // Recover the orphaned leaf and any missing parents.
             let pos = s.mem_mmr.size();
             warn!(pos, "recovering orphaned leaf");
-            s.mem_mmr.add_leaf_digest(hasher, leaf).await.unwrap();
+            s.mem_mmr.add_leaf_digest(hasher, leaf);
             assert_eq!(pos, journal_size);
             s.sync().await?;
             assert_eq!(s.size(), s.journal.size().await?);
