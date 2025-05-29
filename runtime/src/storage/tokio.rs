@@ -1,5 +1,5 @@
 use crate::Error;
-use commonware_utils::{from_hex, hex, StableBuf, StableBufMut};
+use commonware_utils::{from_hex, hex, StableBufMut};
 use std::sync::Arc;
 use std::{io::SeekFrom, path::PathBuf};
 use tokio::{
@@ -149,7 +149,7 @@ impl crate::Blob for Blob {
         file.seek(SeekFrom::Start(offset))
             .await
             .map_err(|_| Error::ReadFailed)?;
-        file.read_exact(buf.deref_mut())
+        file.read_exact(buf.as_mut())
             .await
             .map_err(|_| Error::ReadFailed)?;
         Ok(buf)
