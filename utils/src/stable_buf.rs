@@ -7,6 +7,7 @@ use std::ops::Index;
 use bytes::Bytes;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// A buffer whose memory is stable as long as its not reallocated.
 pub enum StableBuf {
     Vec(Vec<u8>),
     BytesMut(bytes::BytesMut),
