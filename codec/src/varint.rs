@@ -547,7 +547,7 @@ mod tests {
 
     #[test]
     fn test_all_i16_values() {
-        // Exhaustively test all i16 values to ensure size matches encoding with ZigZag
+        // Exhaustively test all i16 values to ensure size matches encoding
         for i in i16::MIN..=i16::MAX {
             let value = i;
             let calculated_size = size_signed(value);
@@ -585,9 +585,6 @@ mod tests {
 
     #[test]
     fn test_edge_case_bit_boundaries() {
-        // Test values that are exactly at bit boundaries
-        // These are values where leading_zeros calculation might be tricky
-
         // Test values with exactly N bits set
         fn test_exact_bits<T: UPrim + TryFrom<u128> + std::fmt::Display>() {
             for bits in 1..=128 {
