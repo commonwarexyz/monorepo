@@ -168,8 +168,13 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             return Err(Error::WrongPeer);
         }
 
-        // Create cipher
+        // Derive shared secret and ensure it is contributory
         let shared_secret = secret.diffie_hellman(signed_handshake.ephemeral().as_ref());
+        if !shared_secret.was_contributory() {
+            return Err(Error::SharedSecretNotContributory);
+        }
+
+        // Create cipher
         let cipher = ChaCha20Poly1305::new_from_slice(shared_secret.as_bytes())
             .map_err(|_| Error::CipherCreationFailed)?;
 
@@ -221,8 +226,13 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             },
         }
 
-        // Create cipher based on the shared secret
+        // Derive shared secret and ensure it is contributory
         let shared_secret = secret.diffie_hellman(incoming.ephemeral_public_key.as_ref());
+        if !shared_secret.was_contributory() {
+            return Err(Error::SharedSecretNotContributory);
+        }
+
+        // Create cipher
         let cipher = ChaCha20Poly1305::new_from_slice(shared_secret.as_bytes())
             .map_err(|_| Error::CipherCreationFailed)?;
 
