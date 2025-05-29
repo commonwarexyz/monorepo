@@ -184,7 +184,7 @@ impl crate::Sink for Sink {
                 .send(crate::iouring::Op {
                     work: op,
                     sender: tx,
-                    buffer: Some(msg.into()),
+                    buffer: Some(msg),
                 })
                 .await
                 .map_err(|_| crate::Error::SendFailed)?;
@@ -230,7 +230,7 @@ impl crate::Stream for Stream {
             // Figure out how much is left to read and where to read into
             let remaining = unsafe {
                 std::slice::from_raw_parts_mut(
-                    buf.as_mut_ptr().add(bytes_received) as *mut u8,
+                    buf.as_mut_ptr().add(bytes_received),
                     buf_len - bytes_received,
                 )
             };
@@ -249,7 +249,7 @@ impl crate::Stream for Stream {
                 .send(crate::iouring::Op {
                     work: op,
                     sender: tx,
-                    buffer: Some(buf.into()),
+                    buffer: Some(buf),
                 })
                 .await
                 .map_err(|_| crate::Error::RecvFailed)?;
