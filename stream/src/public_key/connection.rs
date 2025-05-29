@@ -6,13 +6,13 @@ use crate::{
 use bytes::Bytes;
 use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit, KeySizeUser};
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::Scheme;
+use commonware_cryptography::{Hasher, Scheme, Sha256};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
 use commonware_utils::SystemTimeExt as _;
 use hkdf::Hkdf;
 use rand::{CryptoRng, Rng};
-use sha2::{digest::typenum::Unsigned, Digest, Sha256};
+use sha2::{digest::typenum::Unsigned, Sha256 as ISha256};
 use std::time::SystemTime;
 
 // When encrypting data, an encryption tag is appended to the ciphertext.
@@ -62,7 +62,7 @@ fn derive_ciphers(
     // HKDF-Extract: Create a pseudorandom key (PRK) based on:
     // - The salt
     // - The shared secret from the Diffie-Hellman key exchange
-    let prk = Hkdf::<Sha256>::new(Some(salt.as_slice()), shared_secret);
+    let prk = Hkdf::<ISha256>::new(Some(salt.as_ref()), shared_secret);
 
     // Reusable buffer for derived keys
     let mut buf = [0u8; CHACHA_KEY_SIZE];
