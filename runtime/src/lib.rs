@@ -17,7 +17,7 @@
 //! `commonware-runtime` is **ALPHA** software and is not yet recommended for production use. Developers should
 //! expect breaking changes and occasional instability.
 
-use commonware_utils::StableBufMut;
+use commonware_utils::StableBuf;
 use prometheus_client::registry::Metric;
 use std::io::Error as IoError;
 use std::{
@@ -301,7 +301,7 @@ pub trait Sink: Sync + Send + 'static {
     /// Send a message to the sink.
     fn send(
         &mut self,
-        msg: impl Into<StableBufMut> + Send,
+        msg: impl Into<StableBuf> + Send,
     ) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
@@ -312,8 +312,8 @@ pub trait Stream: Sync + Send + 'static {
     /// Reads exactly the number of bytes that fit in the buffer.
     fn recv(
         &mut self,
-        buf: impl Into<StableBufMut> + Send,
-    ) -> impl Future<Output = Result<StableBufMut, Error>> + Send;
+        buf: impl Into<StableBuf> + Send,
+    ) -> impl Future<Output = Result<StableBuf, Error>> + Send;
 }
 
 /// Interface to interact with storage.
@@ -369,14 +369,14 @@ pub trait Blob: Clone + Send + Sync + 'static {
     /// only returns once the entire buffer has been filled.
     fn read_at(
         &self,
-        buf: impl Into<StableBufMut> + Send,
+        buf: impl Into<StableBuf> + Send,
         offset: u64,
-    ) -> impl Future<Output = Result<StableBufMut, Error>> + Send;
+    ) -> impl Future<Output = Result<StableBuf, Error>> + Send;
 
     /// Write `buf` to the blob at the given offset.
     fn write_at(
         &self,
-        buf: impl Into<StableBufMut> + Send,
+        buf: impl Into<StableBuf> + Send,
         offset: u64,
     ) -> impl Future<Output = Result<(), Error>> + Send;
 

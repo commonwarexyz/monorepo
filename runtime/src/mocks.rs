@@ -2,7 +2,7 @@
 
 use crate::{Error, Sink as SinkTrait, Stream as StreamTrait};
 use bytes::Bytes;
-use commonware_utils::StableBufMut;
+use commonware_utils::StableBuf;
 use futures::channel::oneshot;
 use std::{
     collections::VecDeque,
@@ -42,7 +42,7 @@ pub struct Sink {
 }
 
 impl SinkTrait for Sink {
-    async fn send(&mut self, msg: impl Into<StableBufMut> + Send) -> Result<(), Error> {
+    async fn send(&mut self, msg: impl Into<StableBuf> + Send) -> Result<(), Error> {
         let msg = msg.into();
         let (os_send, data) = {
             let mut channel = self.channel.lock().unwrap();
@@ -76,7 +76,7 @@ pub struct Stream {
 }
 
 impl StreamTrait for Stream {
-    async fn recv(&mut self, buf: impl Into<StableBufMut> + Send) -> Result<StableBufMut, Error> {
+    async fn recv(&mut self, buf: impl Into<StableBuf> + Send) -> Result<StableBuf, Error> {
         let mut buf = buf.into();
         let os_recv = {
             let mut channel = self.channel.lock().unwrap();

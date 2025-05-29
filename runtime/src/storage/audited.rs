@@ -1,5 +1,5 @@
 use crate::{deterministic::Auditor, Error};
-use commonware_utils::StableBufMut;
+use commonware_utils::StableBuf;
 use sha2::digest::Update;
 use std::sync::Arc;
 
@@ -65,9 +65,9 @@ pub struct Blob<B: crate::Blob> {
 impl<B: crate::Blob> crate::Blob for Blob<B> {
     async fn read_at(
         &self,
-        buf: impl Into<StableBufMut>,
+        buf: impl Into<StableBuf>,
         offset: u64,
-    ) -> Result<StableBufMut, Error> {
+    ) -> Result<StableBuf, Error> {
         let buf = buf.into();
         self.auditor.event(b"read_at", |hasher| {
             hasher.update(self.partition.as_bytes());
@@ -78,7 +78,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.inner.read_at(buf, offset).await
     }
 
-    async fn write_at(&self, buf: impl Into<StableBufMut>, offset: u64) -> Result<(), Error> {
+    async fn write_at(&self, buf: impl Into<StableBuf>, offset: u64) -> Result<(), Error> {
         let buf = buf.into();
         self.auditor.event(b"write_at", |hasher| {
             hasher.update(self.partition.as_bytes());

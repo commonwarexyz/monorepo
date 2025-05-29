@@ -1,4 +1,4 @@
-use commonware_utils::StableBufMut;
+use commonware_utils::StableBuf;
 use futures::{
     channel::{mpsc, oneshot},
     StreamExt as _,
@@ -97,13 +97,13 @@ pub struct Op {
     /// Its user data field will be overwritten. Users shouldn't rely on it.
     pub work: SqueueEntry,
     /// The sender to send the result of the operation to.
-    pub sender: oneshot::Sender<(i32, Option<StableBufMut>)>,
+    pub sender: oneshot::Sender<(i32, Option<StableBuf>)>,
     /// Reference to the buffer used for the operation, if any.
     /// E.g. For read, this is the buffer being read into.
     /// It's guaranteed that all references to this Arc are dropped
     /// after the operation completes and before we send the result to `sender`.
     /// If None, the operation doesn't use a buffer (e.g. a sync operation).
-    pub buffer: Option<StableBufMut>,
+    pub buffer: Option<StableBuf>,
 }
 
 // Returns false iff we received a shutdown timeout
@@ -113,8 +113,8 @@ fn handle_cqe(
     waiters: &mut HashMap<
         u64,
         (
-            oneshot::Sender<(i32, Option<StableBufMut>)>,
-            Option<StableBufMut>,
+            oneshot::Sender<(i32, Option<StableBuf>)>,
+            Option<StableBuf>,
         ),
     >,
     cqe: CqueueEntry,
@@ -167,8 +167,8 @@ pub(crate) async fn run(cfg: Config, mut receiver: mpsc::Receiver<Op>) {
     let mut waiters: std::collections::HashMap<
         _,
         (
-            oneshot::Sender<(i32, Option<StableBufMut>)>,
-            Option<StableBufMut>,
+            oneshot::Sender<(i32, Option<StableBuf>)>,
+            Option<StableBuf>,
         ),
     > = std::collections::HashMap::with_capacity(cfg.size as usize);
 
@@ -285,8 +285,8 @@ async fn drain(
     waiters: &mut HashMap<
         u64,
         (
-            oneshot::Sender<(i32, Option<StableBufMut>)>,
-            Option<StableBufMut>,
+            oneshot::Sender<(i32, Option<StableBuf>)>,
+            Option<StableBuf>,
         ),
     >,
     cfg: &Config,

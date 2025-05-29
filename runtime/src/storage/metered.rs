@@ -1,5 +1,5 @@
 use crate::Error;
-use commonware_utils::StableBufMut;
+use commonware_utils::StableBuf;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use prometheus_client::registry::Registry;
 use std::sync::Arc;
@@ -103,9 +103,9 @@ pub struct Blob<B> {
 impl<B: crate::Blob> crate::Blob for Blob<B> {
     async fn read_at(
         &self,
-        buf: impl Into<StableBufMut> + Send,
+        buf: impl Into<StableBuf> + Send,
         offset: u64,
-    ) -> Result<StableBufMut, Error> {
+    ) -> Result<StableBuf, Error> {
         let read = self.inner.read_at(buf, offset).await?;
         self.metrics.storage_reads.inc();
         self.metrics.storage_read_bytes.inc_by(read.len() as u64);
@@ -114,7 +114,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 
     async fn write_at(
         &self,
-        buf: impl Into<StableBufMut> + Send,
+        buf: impl Into<StableBuf> + Send,
         offset: u64,
     ) -> Result<(), Error> {
         let buf = buf.into();

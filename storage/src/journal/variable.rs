@@ -655,7 +655,7 @@ mod tests {
     use bytes::BufMut;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Error as RError, Runner, Storage};
-    use commonware_utils::StableBufMut;
+    use commonware_utils::StableBuf;
     use futures::{pin_mut, StreamExt};
     use prometheus_client::registry::Metric;
 
@@ -1263,15 +1263,15 @@ mod tests {
     impl Blob for MockBlob {
         async fn read_at(
             &self,
-            buf: impl Into<StableBufMut> + Send,
+            buf: impl Into<StableBuf> + Send,
             _offset: u64,
-        ) -> Result<StableBufMut, RError> {
+        ) -> Result<StableBuf, RError> {
             Ok(buf.into())
         }
 
         async fn write_at(
             &self,
-            _buf: impl Into<StableBufMut> + Send,
+            _buf: impl Into<StableBuf> + Send,
             _offset: u64,
         ) -> Result<(), RError> {
             Ok(())

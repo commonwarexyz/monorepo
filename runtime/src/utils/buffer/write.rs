@@ -1,5 +1,5 @@
 use crate::{Blob, Error, RwLock};
-use commonware_utils::StableBufMut;
+use commonware_utils::StableBuf;
 use std::sync::Arc;
 
 /// The internal state of a [Write] buffer.
@@ -25,7 +25,7 @@ impl<B: Blob> Inner<B> {
     ///
     /// Returns an error if the write to the underlying [Blob] fails (may be due to a `flush` of data not
     /// related to the data being written).
-    async fn write<S: Into<StableBufMut>>(&mut self, buf: S) -> Result<(), Error> {
+    async fn write<S: Into<StableBuf>>(&mut self, buf: S) -> Result<(), Error> {
         // If the buffer capacity will be exceeded, flush the buffer first
         let buf = buf.into();
         let buf_len = buf.len();
@@ -148,9 +148,9 @@ impl<B: Blob> Write<B> {
 impl<B: Blob> Blob for Write<B> {
     async fn read_at(
         &self,
-        buf: impl Into<StableBufMut> + Send,
+        buf: impl Into<StableBuf> + Send,
         offset: u64,
-    ) -> Result<StableBufMut, Error> {
+    ) -> Result<StableBuf, Error> {
         // Acquire a read lock on the inner state
         let inner = self.inner.read().await;
 
@@ -195,7 +195,7 @@ impl<B: Blob> Blob for Write<B> {
 
     async fn write_at(
         &self,
-        buf: impl Into<StableBufMut> + Send,
+        buf: impl Into<StableBuf> + Send,
         offset: u64,
     ) -> Result<(), Error> {
         // Acquire a write lock on the inner state

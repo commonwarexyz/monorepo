@@ -2,7 +2,7 @@ use crate::{
     iouring::{self, should_retry},
     Error,
 };
-use commonware_utils::{from_hex, hex, StableBufMut};
+use commonware_utils::{from_hex, hex, StableBuf};
 use futures::{
     channel::{mpsc, oneshot},
     executor::block_on,
@@ -153,9 +153,9 @@ impl Blob {
 impl crate::Blob for Blob {
     async fn read_at(
         &self,
-        buf: impl Into<StableBufMut> + Send,
+        buf: impl Into<StableBuf> + Send,
         offset: u64,
-    ) -> Result<StableBufMut, Error> {
+    ) -> Result<StableBuf, Error> {
         let mut buf = buf.into();
         let fd = types::Fd(self.file.as_raw_fd());
         let mut bytes_read = 0;
@@ -205,11 +205,7 @@ impl crate::Blob for Blob {
         Ok(buf)
     }
 
-    async fn write_at(
-        &self,
-        buf: impl Into<StableBufMut> + Send,
-        offset: u64,
-    ) -> Result<(), Error> {
+    async fn write_at(&self, buf: impl Into<StableBuf> + Send, offset: u64) -> Result<(), Error> {
         let mut buf = buf.into();
         let fd = types::Fd(self.file.as_raw_fd());
         let mut total_written = 0;

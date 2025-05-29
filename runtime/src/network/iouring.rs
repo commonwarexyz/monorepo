@@ -1,5 +1,5 @@
 use crate::iouring::{self, should_retry};
-use commonware_utils::StableBufMut;
+use commonware_utils::StableBuf;
 use futures::{
     channel::{mpsc, oneshot},
     executor::block_on,
@@ -166,7 +166,7 @@ impl Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, msg: impl Into<StableBufMut> + Send) -> Result<(), crate::Error> {
+    async fn send(&mut self, msg: impl Into<StableBuf> + Send) -> Result<(), crate::Error> {
         let mut msg = msg.into();
         let mut bytes_sent = 0;
         let msg_len = msg.len();
@@ -235,8 +235,8 @@ impl Stream {
 impl crate::Stream for Stream {
     async fn recv(
         &mut self,
-        buf: impl Into<StableBufMut> + Send,
-    ) -> Result<StableBufMut, crate::Error> {
+        buf: impl Into<StableBuf> + Send,
+    ) -> Result<StableBuf, crate::Error> {
         let mut bytes_received = 0;
         let mut buf = buf.into();
         let buf_len = buf.len();

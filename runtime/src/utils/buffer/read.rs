@@ -1,4 +1,4 @@
-use commonware_utils::StableBufMut;
+use commonware_utils::StableBuf;
 
 use crate::{Blob, Error};
 
@@ -35,7 +35,7 @@ pub struct Read<B: Blob> {
     /// The underlying blob to read from.
     blob: B,
     /// The buffer storing the data read from the blob.
-    buffer: StableBufMut,
+    buffer: StableBuf,
     /// The current position in the blob from where the buffer was filled.
     blob_position: u64,
     /// The size of the blob.

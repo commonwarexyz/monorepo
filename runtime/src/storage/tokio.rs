@@ -1,5 +1,5 @@
 use crate::Error;
-use commonware_utils::{from_hex, hex, StableBufMut};
+use commonware_utils::{from_hex, hex, StableBuf};
 use std::sync::Arc;
 use std::{io::SeekFrom, path::PathBuf};
 use tokio::{
@@ -141,10 +141,14 @@ impl crate::Storage for Storage {
 }
 
 impl crate::Blob for Blob {
-    async fn read_at(&self, mut buf: impl Into<StableBufMut> + Send, offset: u64) -> Result<StableBufMut, Error> {
+    async fn read_at(
+        &self,
+        buf: impl Into<StableBuf> + Send,
+        offset: u64,
+    ) -> Result<StableBuf, Error> {
         // Ensure the read is within bounds
         let mut file = self.file.lock().await;
-
+        let mut buf = buf.into();
         // Perform the read
         file.seek(SeekFrom::Start(offset))
             .await
@@ -155,13 +159,13 @@ impl crate::Blob for Blob {
         Ok(buf)
     }
 
-    async fn write_at(&self, buf: impl Into<StableBufMut> + Send, offset: u64) -> Result<(), Error> {
+    async fn write_at(&self, buf: impl Into<StableBuf> + Send, offset: u64) -> Result<(), Error> {
         // Perform the write
         let mut file = self.file.lock().await;
         file.seek(SeekFrom::Start(offset))
             .await
             .map_err(|_| Error::WriteFailed)?;
-        file.write_all(buf.as_ref())
+        file.write_all(buf.into().as_ref())
             .await
             .map_err(|_| Error::WriteFailed)?;
         Ok(())
