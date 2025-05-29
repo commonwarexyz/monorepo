@@ -34,6 +34,8 @@ pub enum Error {
     SendTooLarge(usize),
     #[error("connection closed")]
     StreamClosed,
+    #[error("shared secret was not contributory")]
+    SharedSecretNotContributory,
     #[error("cipher creation failed")]
     CipherCreationFailed,
     #[error("nonce overflow")]

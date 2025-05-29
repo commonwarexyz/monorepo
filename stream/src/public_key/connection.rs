@@ -128,7 +128,11 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let msg = handshake::Signed::sign(
             &mut config.crypto,
             &config.namespace,
-            handshake::Info::<C>::new(peer.clone(), &secret, timestamp),
+            handshake::Info::<C>::new(
+                peer.clone(),
+                x25519::PublicKey::from_secret(&secret),
+                timestamp,
+            ),
         )
         .encode();
 
@@ -168,8 +172,13 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             return Err(Error::WrongPeer);
         }
 
-        // Create cipher
+        // Derive shared secret and ensure it is contributory
         let shared_secret = secret.diffie_hellman(signed_handshake.ephemeral().as_ref());
+        if !shared_secret.was_contributory() {
+            return Err(Error::SharedSecretNotContributory);
+        }
+
+        // Create cipher
         let cipher = ChaCha20Poly1305::new_from_slice(shared_secret.as_bytes())
             .map_err(|_| Error::CipherCreationFailed)?;
 
@@ -207,7 +216,11 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let msg = handshake::Signed::sign(
             &mut crypto,
             &namespace,
-            handshake::Info::<C>::new(incoming.peer_public_key, &secret, timestamp),
+            handshake::Info::<C>::new(
+                incoming.peer_public_key,
+                x25519::PublicKey::from_secret(&secret),
+                timestamp,
+            ),
         )
         .encode();
 
@@ -221,8 +234,13 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             },
         }
 
-        // Create cipher based on the shared secret
+        // Derive shared secret and ensure it is contributory
         let shared_secret = secret.diffie_hellman(incoming.ephemeral_public_key.as_ref());
+        if !shared_secret.was_contributory() {
+            return Err(Error::SharedSecretNotContributory);
+        }
+
+        // Create cipher
         let cipher = ChaCha20Poly1305::new_from_slice(shared_secret.as_bytes())
             .map_err(|_| Error::CipherCreationFailed)?;
 
@@ -576,8 +594,11 @@ mod tests {
                     // Create and send own handshake
                     let secret = x25519::new(&mut context);
                     let timestamp = context.current().epoch_millis();
-                    let info =
-                        handshake::Info::new(peer_config.crypto.public_key(), &secret, timestamp);
+                    let info = handshake::Info::new(
+                        peer_config.crypto.public_key(),
+                        x25519::PublicKey::from_secret(&secret),
+                        timestamp,
+                    );
                     let signed_handshake =
                         handshake::Signed::sign(&mut actual_peer, &peer_config.namespace, info);
                     send_frame(&mut peer_sink, &signed_handshake.encode(), 1024)
@@ -598,6 +619,127 @@ mod tests {
 
             // Verify the error
             assert!(matches!(result, Err(Error::WrongPeer)));
+        });
+    }
+
+    #[test]
+    fn test_upgrade_dialer_non_contributory_secret() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create cryptographic identities
+            let dialer_crypto = Ed25519::from_seed(0);
+            let mut peer_crypto = Ed25519::from_seed(1);
+            let peer_public_key = peer_crypto.public_key();
+
+            // Set up mock channels
+            let (dialer_sink, mut peer_stream) = mocks::Channel::init();
+            let (mut peer_sink, dialer_stream) = mocks::Channel::init();
+
+            // Dialer configuration
+            let dialer_config = Config {
+                crypto: dialer_crypto,
+                namespace: b"test_namespace".to_vec(),
+                max_message_size: 1024,
+                synchrony_bound: Duration::from_secs(5),
+                max_handshake_age: Duration::from_secs(5),
+                handshake_timeout: Duration::from_secs(5),
+            };
+
+            // Spawn a mock peer that responds with a handshake containing an all-zero ephemeral key
+            context.with_label("mock_peer").spawn({
+                let namespace = dialer_config.namespace.clone();
+                let recipient = dialer_config.crypto.public_key();
+                move |context| async move {
+                    // Read the handshake from dialer
+                    let msg = recv_frame(&mut peer_stream, 1024).await.unwrap();
+                    let _ = handshake::Signed::<Ed25519>::decode(msg).unwrap();
+
+                    // Create a custom handshake info bytes with zero ephemeral key
+                    let info = handshake::Info::new(
+                        recipient,
+                        x25519::PublicKey::from_bytes([0u8; 32]),
+                        context.current().epoch_millis(),
+                    );
+
+                    // Create the signed handshake
+                    let signed_handshake =
+                        handshake::Signed::sign(&mut peer_crypto, &namespace, info);
+
+                    // Send the signed handshake
+                    send_frame(&mut peer_sink, &signed_handshake.encode(), 1024)
+                        .await
+                        .unwrap();
+                }
+            });
+
+            // Attempt connection - should fail due to non-contributory shared secret
+            let result = Connection::upgrade_dialer(
+                context,
+                dialer_config,
+                dialer_sink,
+                dialer_stream,
+                peer_public_key,
+            )
+            .await;
+
+            // Verify the error
+            assert!(matches!(result, Err(Error::SharedSecretNotContributory)));
+        });
+    }
+
+    #[test]
+    fn test_upgrade_listener_non_contributory_secret() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create cryptographic identities
+            let listener_crypto = Ed25519::from_seed(0);
+            let mut dialer_crypto = Ed25519::from_seed(1);
+
+            // Set up mock channels
+            let (mut dialer_sink, listener_stream) = mocks::Channel::init();
+            let (listener_sink, _dialer_stream) = mocks::Channel::init();
+
+            // Listener configuration
+            let listener_config = Config {
+                crypto: listener_crypto.clone(),
+                namespace: b"test_namespace".to_vec(),
+                max_message_size: 1024,
+                synchrony_bound: Duration::from_secs(5),
+                max_handshake_age: Duration::from_secs(5),
+                handshake_timeout: Duration::from_secs(5),
+            };
+
+            // Encode all-zero ephemeral public key (32 bytes)
+            let info = handshake::Info::new(
+                listener_config.crypto.public_key(),
+                x25519::PublicKey::from_bytes([0u8; 32]),
+                context.current().epoch_millis(),
+            );
+
+            // Create the signed handshake
+            let signed_handshake =
+                handshake::Signed::sign(&mut dialer_crypto, &listener_config.namespace, info);
+
+            // Send the handshake
+            send_frame(&mut dialer_sink, &signed_handshake.encode(), 1024)
+                .await
+                .unwrap();
+
+            // Verify the incoming connection
+            let incoming = IncomingConnection::verify(
+                &context,
+                listener_config,
+                listener_sink,
+                listener_stream,
+            )
+            .await
+            .unwrap();
+
+            // Attempt to upgrade - should fail due to non-contributory shared secret
+            let result = Connection::upgrade_listener(context, incoming).await;
+
+            // Verify the error
+            assert!(matches!(result, Err(Error::SharedSecretNotContributory)));
         });
     }
 }
