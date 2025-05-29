@@ -112,11 +112,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         Ok(read)
     }
 
-    async fn write_at(
-        &self,
-        buf: impl Into<StableBuf> + Send,
-        offset: u64,
-    ) -> Result<(), Error> {
+    async fn write_at(&self, buf: impl Into<StableBuf> + Send, offset: u64) -> Result<(), Error> {
         let buf = buf.into();
         let buf_len = buf.len();
         self.inner.write_at(buf, offset).await?;

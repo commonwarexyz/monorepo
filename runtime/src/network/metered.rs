@@ -71,10 +71,7 @@ pub struct Stream<S: crate::Stream> {
 }
 
 impl<S: crate::Stream> crate::Stream for Stream<S> {
-    async fn recv(
-        &mut self,
-        buf: impl Into<StableBuf> + Send,
-    ) -> Result<StableBuf, crate::Error> {
+    async fn recv(&mut self, buf: impl Into<StableBuf> + Send) -> Result<StableBuf, crate::Error> {
         let buf = self.inner.recv(buf).await?;
         self.metrics.inbound_bandwidth.inc_by(buf.len() as u64);
         Ok(buf)

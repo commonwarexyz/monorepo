@@ -63,11 +63,7 @@ pub struct Blob<B: crate::Blob> {
 }
 
 impl<B: crate::Blob> crate::Blob for Blob<B> {
-    async fn read_at(
-        &self,
-        buf: impl Into<StableBuf>,
-        offset: u64,
-    ) -> Result<StableBuf, Error> {
+    async fn read_at(&self, buf: impl Into<StableBuf>, offset: u64) -> Result<StableBuf, Error> {
         let buf = buf.into();
         self.auditor.event(b"read_at", |hasher| {
             hasher.update(self.partition.as_bytes());
