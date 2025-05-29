@@ -599,7 +599,7 @@ mod tests {
                 .read_at(vec![0; data.len()], 0)
                 .await
                 .expect("Failed to read from blob");
-            assert_eq!(read.as_ref(), data.as_ref());
+            assert_eq!(read.as_ref(), data);
 
             // Close the blob
             blob.close().await.expect("Failed to close blob");

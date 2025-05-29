@@ -164,7 +164,7 @@ impl crate::Blob for Blob {
         while bytes_read < buf_len {
             let remaining = unsafe {
                 std::slice::from_raw_parts_mut(
-                    buf.stable_mut_ptr().add(bytes_read),
+                    buf.as_mut_ptr().add(bytes_read),
                     buf_len - bytes_read,
                 )
             };
@@ -208,18 +208,18 @@ impl crate::Blob for Blob {
     async fn write_at(&self, buf: impl Into<StableBuf> + Send, offset: u64) -> Result<(), Error> {
         let mut buf = buf.into();
         let fd = types::Fd(self.file.as_raw_fd());
-        let mut total_written = 0;
+        let mut bytes_written = 0;
         let buf_len = buf.len();
         let mut io_sender = self.io_sender.clone();
-        while total_written < buf_len {
+        while bytes_written < buf_len {
             // Figure out how much is left to write and where to write from
             let remaining = unsafe {
                 std::slice::from_raw_parts(
-                    buf.stable_mut_ptr().add(total_written) as *const u8,
-                    buf_len - total_written,
+                    buf.as_mut_ptr().add(bytes_written) as *const u8,
+                    buf_len - bytes_written,
                 )
             };
-            let offset = offset + total_written as u64;
+            let offset = offset + bytes_written as u64;
 
             // Create an operation to do the write
             let op = opcode::Write::new(fd, remaining.as_ptr(), remaining.len() as _)
@@ -245,9 +245,10 @@ impl crate::Blob for Blob {
             }
 
             // A negative return value indicates an error.
-            let bytes_written: usize = return_value.try_into().map_err(|_| Error::WriteFailed)?;
+            let op_bytes_written: usize =
+                return_value.try_into().map_err(|_| Error::WriteFailed)?;
 
-            total_written += bytes_written;
+            bytes_written += op_bytes_written;
         }
         Ok(())
     }

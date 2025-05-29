@@ -185,7 +185,7 @@ mod tests {
                     .recv(vec![0; CHUNK_SIZE])
                     .await
                     .expect("Failed to receive chunk");
-                assert_eq!(read.as_ref(), pattern.as_slice());
+                assert_eq!(read.as_ref(), pattern);
             }
         });
 

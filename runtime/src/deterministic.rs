@@ -1150,7 +1150,7 @@ mod tests {
             let (blob, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, data.len() as u64);
             let read = blob.read_at(vec![0; data.len()], 0).await.unwrap();
-            assert_eq!(read.as_ref(), data.as_ref());
+            assert_eq!(read.as_ref(), data);
         });
     }
 

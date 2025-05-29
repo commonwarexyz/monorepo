@@ -98,10 +98,8 @@ pub struct Op {
     pub work: SqueueEntry,
     /// The sender to send the result of the operation to.
     pub sender: oneshot::Sender<(i32, Option<StableBuf>)>,
-    /// Reference to the buffer used for the operation, if any.
+    /// The buffer used for the operation, if any.
     /// E.g. For read, this is the buffer being read into.
-    /// It's guaranteed that all references to this Arc are dropped
-    /// after the operation completes and before we send the result to `sender`.
     /// If None, the operation doesn't use a buffer (e.g. a sync operation).
     pub buffer: Option<StableBuf>,
 }
@@ -110,13 +108,7 @@ pub struct Op {
 // and we should stop processing completions.
 #[allow(clippy::type_complexity)]
 fn handle_cqe(
-    waiters: &mut HashMap<
-        u64,
-        (
-            oneshot::Sender<(i32, Option<StableBuf>)>,
-            Option<StableBuf>,
-        ),
-    >,
+    waiters: &mut HashMap<u64, (oneshot::Sender<(i32, Option<StableBuf>)>, Option<StableBuf>)>,
     cqe: CqueueEntry,
     cfg: &Config,
 ) {
@@ -146,9 +138,6 @@ fn handle_cqe(
                 result
             };
 
-            // The assignment to _ drops the Arc<dyn StableBuf> used for the operation.
-            // This is important: we guarantee we drop our references to the buffer
-            // before we send the result to the submitter.
             let (result_sender, buffer) = waiters.remove(&work_id).expect("missing sender");
             let _ = result_sender.send((result, buffer));
         }
@@ -166,10 +155,7 @@ pub(crate) async fn run(cfg: Config, mut receiver: mpsc::Receiver<Op>) {
     #[allow(clippy::type_complexity)]
     let mut waiters: std::collections::HashMap<
         _,
-        (
-            oneshot::Sender<(i32, Option<StableBuf>)>,
-            Option<StableBuf>,
-        ),
+        (oneshot::Sender<(i32, Option<StableBuf>)>, Option<StableBuf>),
     > = std::collections::HashMap::with_capacity(cfg.size as usize);
 
     loop {
@@ -282,13 +268,7 @@ pub(crate) async fn run(cfg: Config, mut receiver: mpsc::Receiver<Op>) {
 #[allow(clippy::type_complexity)]
 async fn drain(
     ring: &mut IoUring,
-    waiters: &mut HashMap<
-        u64,
-        (
-            oneshot::Sender<(i32, Option<StableBuf>)>,
-            Option<StableBuf>,
-        ),
-    >,
+    waiters: &mut HashMap<u64, (oneshot::Sender<(i32, Option<StableBuf>)>, Option<StableBuf>)>,
     cfg: &Config,
 ) {
     if let Some(timeout) = cfg.shutdown_timeout {

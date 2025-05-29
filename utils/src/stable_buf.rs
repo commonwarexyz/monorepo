@@ -52,7 +52,7 @@ impl Index<usize> for StableBuf {
 
 impl StableBuf {
     /// Returns a raw pointer to this buffer.
-    pub fn stable_mut_ptr(&mut self) -> *mut u8 {
+    pub fn as_mut_ptr(&mut self) -> *mut u8 {
         match self {
             StableBuf::Vec(v) => v.as_mut_ptr(),
             StableBuf::BytesMut(b) => b.as_mut_ptr(),
@@ -79,7 +79,7 @@ impl StableBuf {
     /// `src` must not overlap with this buffer.
     /// Panics if `src` exceeds this buffer's length.
     pub fn put_slice(&mut self, src: &[u8]) {
-        let dst = self.stable_mut_ptr();
+        let dst = self.as_mut_ptr();
         unsafe {
             std::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
         }
