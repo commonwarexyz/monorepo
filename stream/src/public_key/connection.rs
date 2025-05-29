@@ -4,10 +4,7 @@ use crate::{
     Error,
 };
 use bytes::Bytes;
-use chacha20poly1305::{
-    aead::{Aead, KeyInit},
-    ChaCha20Poly1305,
-};
+use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit, KeySizeUser};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::Scheme;
 use commonware_macros::select;
@@ -15,57 +12,68 @@ use commonware_runtime::{Clock, Sink, Spawner, Stream};
 use commonware_utils::SystemTimeExt as _;
 use hkdf::Hkdf;
 use rand::{CryptoRng, Rng};
-use sha2::{Digest, Sha256};
+use sha2::{digest::typenum::Unsigned, Digest, Sha256};
 use std::time::SystemTime;
 
 // When encrypting data, an encryption tag is appended to the ciphertext.
 // This constant represents the size of the encryption tag in bytes.
 const ENCRYPTION_TAG_LENGTH: usize = 16;
 
+// The size of the key used by the ChaCha20Poly1305 cipher.
+const CHACHA_KEY_SIZE: usize = <ChaCha20Poly1305 as KeySizeUser>::KeySize::USIZE;
+
+// A constant prefix used for HKDF key derivation.
 const BASE_KDF_PREFIX: &[u8] = b"commonware-stream/KDF/v1/";
+
+// Suffixes used for deriving directional keys in the KDF.
+const D2L_KDF_SUFFIX: &[u8] = b"/d2l"; // Dialer-to-Listener
+const L2D_KDF_SUFFIX: &[u8] = b"/l2d"; // Listener-to-Dialer
+
+/// Helper to generate a cipher for a specific direction.
+fn generate_cipher(
+    prk: &Hkdf<Sha256>,
+    mut info: Vec<u8>,
+    suffix: &[u8],
+) -> Result<ChaCha20Poly1305, Error> {
+    let mut buf = [0u8; CHACHA_KEY_SIZE];
+    info.extend_from_slice(suffix);
+    prk.expand(&info, &mut buf)
+        .map_err(|_| Error::HKDFExpansionFailed)?;
+    ChaCha20Poly1305::new_from_slice(&buf).map_err(|_| Error::CipherCreationFailed)
+}
 
 /// Helper function to derive directional keys using HKDF-SHA256.
 ///
-/// Returns the dialer-to-listener and listener-to-dialer ciphers (in that order).
-fn derive_directional_ciphers(
+/// Returns a tuple of the:
+/// - dialer-to-listener cipher
+/// - listener-to-dialer cipher
+fn derive_ciphers(
     shared_secret: &[u8],
+    namespace: &[u8],
     dialer_transcript: &[u8],
     listener_transcript: &[u8],
 ) -> Result<(ChaCha20Poly1305, ChaCha20Poly1305), Error> {
-    // For ChaCha20Poly1305, key length is 32 bytes.
-    const KEY_LEN: usize = 32;
-
-    // HKDF-Extract: Create a pseudorandom key (PRK)
-    let salt: Option<&[u8]> = None; // TODO: derive salt
-    let prk = Hkdf::<Sha256>::new(salt, shared_secret);
-
-    // Base info for KDF-Expand (protocol name + transcript hash)
-    let mut hasher = Sha256::new();
+    // Create a unique hash from:
+    // - A commonware-specific prefix
+    // - The unique application namespace
+    // - The dialer handshake transcript
+    // - The listener handshake transcript
+    // This hash serves as both the salt for HKDF expansion as-well-as the info for HKDF extraction.
+    let mut hasher = Sha256::default();
+    hasher.update(BASE_KDF_PREFIX);
+    hasher.update(namespace);
     hasher.update(dialer_transcript);
     hasher.update(listener_transcript);
     let transcript_hash = hasher.finalize();
-    let mut base_kdf_info = Vec::with_capacity(BASE_KDF_PREFIX.len() + transcript_hash.len());
-    base_kdf_info.extend_from_slice(BASE_KDF_PREFIX);
-    base_kdf_info.extend_from_slice(&transcript_hash);
+    let hash = transcript_hash.as_slice();
 
-    // Derive Dialer-to-Listener Key
-    let mut d2l_info = base_kdf_info.clone();
-    d2l_info.extend_from_slice(b"/d2l");
-    let mut d2l_key_material = [0u8; KEY_LEN];
-    prk.expand(&d2l_info, &mut d2l_key_material)
-        .map_err(|_| Error::HKDFExpansionFailed)?;
-    let d2l_cipher = ChaCha20Poly1305::new_from_slice(&d2l_key_material)
-        .map_err(|_| Error::CipherCreationFailed)?;
+    // HKDF-Extract: Create a pseudorandom key (PRK) based on the shared secret
+    let salt: Option<&[u8]> = Some(hash);
+    let prk = Hkdf::<Sha256>::new(salt, shared_secret);
 
-    // Derive Listener-to-Dialer Key
-    let mut l2d_info = base_kdf_info;
-    l2d_info.extend_from_slice(b"/l2d");
-    let mut l2d_key_material = [0u8; KEY_LEN];
-    prk.expand(&l2d_info, &mut l2d_key_material)
-        .map_err(|_| Error::HKDFExpansionFailed)?;
-    let l2d_cipher = ChaCha20Poly1305::new_from_slice(&l2d_key_material)
-        .map_err(|_| Error::CipherCreationFailed)?;
-
+    // Derive ciphers for both directions
+    let d2l_cipher = generate_cipher(&prk, hash.to_vec(), D2L_KDF_SUFFIX)?;
+    let l2d_cipher = generate_cipher(&prk, hash.to_vec(), L2D_KDF_SUFFIX)?;
     Ok((d2l_cipher, l2d_cipher))
 }
 
@@ -239,8 +247,12 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         }
 
         // Create ciphers
-        let (d2l_cipher, l2d_cipher) =
-            derive_directional_ciphers(shared_secret.as_bytes(), &d2l_msg, &l2d_msg)?;
+        let (d2l_cipher, l2d_cipher) = derive_ciphers(
+            shared_secret.as_bytes(),
+            &config.namespace,
+            &d2l_msg,
+            &l2d_msg,
+        )?;
 
         // We keep track of dialer to determine who adds a bit to their nonce (to prevent reuse)
         Ok(Self {
@@ -303,7 +315,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
 
         // Create ciphers
         let (d2l_cipher, l2d_cipher) =
-            derive_directional_ciphers(shared_secret.as_bytes(), &d2l_msg, &l2d_msg)?;
+            derive_ciphers(shared_secret.as_bytes(), &namespace, &d2l_msg, &l2d_msg)?;
 
         // Track whether or not we are the dialer to ensure we send correctly formatted nonces.
         Ok(Connection {
