@@ -27,7 +27,7 @@ pub struct Stream {
 }
 
 impl crate::Stream for Stream {
-    async fn recv(&mut self, buf: StableBufMut) -> Result<StableBufMut, Error> {
+    async fn recv(&mut self, buf: impl Into<StableBufMut> + Send) -> Result<StableBufMut, Error> {
         self.receiver.recv(buf).await.map_err(|_| Error::RecvFailed)
     }
 }

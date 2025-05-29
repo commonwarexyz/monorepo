@@ -309,7 +309,7 @@ pub trait Stream: Sync + Send + 'static {
     /// Reads exactly the number of bytes that fit in the buffer.
     fn recv(
         &mut self,
-        buf: StableBufMut,
+        buf: impl Into<StableBufMut> + Send,
     ) -> impl Future<Output = Result<StableBufMut, Error>> + Send;
 }
 
@@ -366,14 +366,14 @@ pub trait Blob: Clone + Send + Sync + 'static {
     /// only returns once the entire buffer has been filled.
     fn read_at(
         &self,
-        buf: StableBufMut,
+        buf: impl Into<StableBufMut> + Send,
         offset: u64,
     ) -> impl Future<Output = Result<StableBufMut, Error>> + Send;
 
     /// Write `buf` to the blob at the given offset.
     fn write_at(
         &self,
-        buf: StableBufMut,
+        buf: impl Into<StableBufMut> + Send,
         offset: u64,
     ) -> impl Future<Output = Result<(), Error>> + Send;
 
@@ -584,7 +584,7 @@ mod tests {
 
             // Write data to the blob
             let data = b"Hello, Storage!";
-            blob.write_at(Vec::from(data).into(), 0)
+            blob.write_at(Vec::from(data), 0)
                 .await
                 .expect("Failed to write to blob");
 
@@ -593,7 +593,7 @@ mod tests {
 
             // Read data from the blob
             let read = blob
-                .read_at(vec![0; data.len()].into(), 0)
+                .read_at(vec![0; data.len()], 0)
                 .await
                 .expect("Failed to read from blob");
             assert_eq!(read.as_ref(), data.as_ref());
@@ -617,7 +617,7 @@ mod tests {
 
             // Read data part of message back
             let read = blob
-                .read_at(vec![0u8; 7].into(), 7)
+                .read_at(vec![0u8; 7], 7)
                 .await
                 .expect("Failed to read data");
             assert_eq!(read.as_ref(), b"Storage");
@@ -667,16 +667,16 @@ mod tests {
             // Write data at different offsets
             let data1 = b"Hello";
             let data2 = b"World";
-            blob.write_at(Vec::from(data1).into(), 0)
+            blob.write_at(Vec::from(data1), 0)
                 .await
                 .expect("Failed to write data1");
-            blob.write_at(Vec::from(data2).into(), 5)
+            blob.write_at(Vec::from(data2), 5)
                 .await
                 .expect("Failed to write data2");
 
             // Read data back
             let read = blob
-                .read_at(vec![0u8; 10].into(), 0)
+                .read_at(vec![0u8; 10], 0)
                 .await
                 .expect("Failed to read data");
             assert_eq!(&read.as_ref()[..5], data1);
@@ -684,20 +684,20 @@ mod tests {
 
             // Rewrite data without affecting length
             let data3 = b"Store";
-            blob.write_at(Vec::from(data3).into(), 5)
+            blob.write_at(Vec::from(data3), 5)
                 .await
                 .expect("Failed to write data3");
 
             // Truncate the blob
             blob.truncate(5).await.expect("Failed to truncate blob");
             let read = blob
-                .read_at(vec![0; 5].into(), 0)
+                .read_at(vec![0; 5], 0)
                 .await
                 .expect("Failed to read data");
             assert_eq!(&read.as_ref()[..5], data1);
 
             // Full read after truncation
-            let result = blob.read_at(vec![0u8; 10].into(), 0).await;
+            let result = blob.read_at(vec![0u8; 10], 0).await;
             assert!(result.is_err());
 
             // Close the blob
@@ -723,10 +723,10 @@ mod tests {
                     .expect("Failed to open blob");
 
                 // Write data at different offsets
-                blob.write_at(Vec::from(data1).into(), 0)
+                blob.write_at(Vec::from(data1), 0)
                     .await
                     .expect("Failed to write data1");
-                blob.write_at(Vec::from(data2).into(), 5 + additional as u64)
+                blob.write_at(Vec::from(data2), 5 + additional as u64)
                     .await
                     .expect("Failed to write data2");
 
@@ -744,7 +744,7 @@ mod tests {
 
                 // Read data back
                 let read = blob
-                    .read_at(vec![0u8; 10 + additional].into(), 0)
+                    .read_at(vec![0u8; 10 + additional], 0)
                     .await
                     .expect("Failed to read data");
                 assert_eq!(&read.as_ref()[..5], b"Hello");
@@ -771,17 +771,17 @@ mod tests {
                 .expect("Failed to open blob");
 
             // Read data past file length (empty file)
-            let result = blob.read_at(vec![0u8; 10].into(), 0).await;
+            let result = blob.read_at(vec![0u8; 10], 0).await;
             assert!(result.is_err());
 
             // Write data to the blob
             let data = b"Hello, Storage!".to_vec();
-            blob.write_at(data.into(), 0)
+            blob.write_at(data, 0)
                 .await
                 .expect("Failed to write to blob");
 
             // Read data past file length (non-empty file)
-            let result = blob.read_at(vec![0u8; 20].into(), 0).await;
+            let result = blob.read_at(vec![0u8; 20], 0).await;
             assert!(result.is_err());
         })
     }
@@ -802,7 +802,7 @@ mod tests {
 
             // Write data to the blob
             let data = b"Hello, Storage!";
-            blob.write_at(Vec::from(data).into(), 0)
+            blob.write_at(Vec::from(data), 0)
                 .await
                 .expect("Failed to write to blob");
 
@@ -814,7 +814,7 @@ mod tests {
                 let blob = blob.clone();
                 move |_| async move {
                     let read = blob
-                        .read_at(vec![0u8; data.len()].into(), 0)
+                        .read_at(vec![0u8; data.len()], 0)
                         .await
                         .expect("Failed to read from blob");
                     assert_eq!(read.as_ref(), data);
@@ -824,7 +824,7 @@ mod tests {
                 let blob = blob.clone();
                 move |_| async move {
                     let read = blob
-                        .read_at(vec![0; data.len()].into(), 0)
+                        .read_at(vec![0; data.len()], 0)
                         .await
                         .expect("Failed to read from blob");
                     assert_eq!(read.as_ref(), data);
@@ -838,7 +838,7 @@ mod tests {
 
             // Read data from the blob
             let read = blob
-                .read_at(vec![0; data.len()].into(), 0)
+                .read_at(vec![0; data.len()], 0)
                 .await
                 .expect("Failed to read from blob");
             assert_eq!(read.as_ref(), data);
@@ -1429,7 +1429,7 @@ mod tests {
             async fn read_line<St: Stream>(stream: &mut St) -> Result<String, Error> {
                 let mut line = Vec::new();
                 loop {
-                    let byte = stream.recv(vec![0; 1].into()).await?;
+                    let byte = stream.recv(vec![0; 1]).await?;
                     if byte[0] == b'\n' {
                         if line.last() == Some(&b'\r') {
                             line.pop(); // Remove trailing \r
@@ -1462,7 +1462,7 @@ mod tests {
                 stream: &mut St,
                 content_length: usize,
             ) -> Result<String, Error> {
-                let read = stream.recv(vec![0; content_length].into()).await?;
+                let read = stream.recv(vec![0; content_length]).await?;
                 String::from_utf8(read.as_ref().to_vec()).map_err(|_| Error::ReadFailed)
             }
 

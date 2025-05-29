@@ -42,10 +42,8 @@ pub(crate) mod tests {
         let (blob, len) = storage.open("partition", b"test_blob").await.unwrap();
         assert_eq!(len, 0);
 
-        blob.write_at(Vec::from("hello world").into(), 0)
-            .await
-            .unwrap();
-        let read = blob.read_at(vec![0; 11].into(), 0).await.unwrap();
+        blob.write_at(Vec::from("hello world"), 0).await.unwrap();
+        let read = blob.read_at(vec![0; 11], 0).await.unwrap();
 
         assert_eq!(
             read.as_ref(),
@@ -104,7 +102,7 @@ pub(crate) mod tests {
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
 
         // Initialize blob with data of sufficient length first
-        blob.write_at(b"concurrent write".to_vec().into(), 0)
+        blob.write_at(b"concurrent write".to_vec(), 0)
             .await
             .unwrap();
 
@@ -112,7 +110,7 @@ pub(crate) mod tests {
         let write_task = tokio::spawn({
             let blob = blob.clone();
             async move {
-                blob.write_at(b"concurrent write".to_vec().into(), 0)
+                blob.write_at(b"concurrent write".to_vec(), 0)
                     .await
                     .unwrap();
             }
@@ -120,7 +118,7 @@ pub(crate) mod tests {
 
         let read_task = tokio::spawn({
             let blob = blob.clone();
-            async move { blob.read_at(vec![0; 16].into(), 0).await.unwrap() }
+            async move { blob.read_at(vec![0; 16], 0).await.unwrap() }
         });
 
         write_task.await.unwrap();
@@ -142,12 +140,9 @@ pub(crate) mod tests {
         let (blob, _) = storage.open("partition", b"large_blob").await.unwrap();
 
         let large_data = vec![42u8; 10 * 1024 * 1024]; // 10 MB
-        blob.write_at(large_data.clone().into(), 0).await.unwrap();
+        blob.write_at(large_data.clone(), 0).await.unwrap();
 
-        let read = blob
-            .read_at(vec![0; 10 * 1024 * 1024].into(), 0)
-            .await
-            .unwrap();
+        let read = blob.read_at(vec![0; 10 * 1024 * 1024], 0).await.unwrap();
 
         assert_eq!(read.as_ref(), large_data, "Large data read/write failed");
     }
@@ -164,17 +159,13 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write initial data
-        blob.write_at(b"initial data".to_vec().into(), 0)
-            .await
-            .unwrap();
+        blob.write_at(b"initial data".to_vec(), 0).await.unwrap();
 
         // Overwrite part of the data
-        blob.write_at(b"overwrite".to_vec().into(), 8)
-            .await
-            .unwrap();
+        blob.write_at(b"overwrite".to_vec(), 8).await.unwrap();
 
         // Read back the data
-        let read = blob.read_at(vec![0; 17].into(), 0).await.unwrap();
+        let read = blob.read_at(vec![0; 17], 0).await.unwrap();
 
         assert_eq!(
             read.as_ref(),
@@ -195,10 +186,10 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write some data
-        blob.write_at(b"hello".to_vec().into(), 0).await.unwrap();
+        blob.write_at(b"hello".to_vec(), 0).await.unwrap();
 
         // Attempt to read beyond the written data
-        let result = blob.read_at(vec![0; 10].into(), 6).await;
+        let result = blob.read_at(vec![0; 10], 6).await;
 
         assert!(
             result.is_err(),
@@ -218,12 +209,12 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write data at a large offset
-        blob.write_at(b"offset data".to_vec().into(), 10_000)
+        blob.write_at(b"offset data".to_vec(), 10_000)
             .await
             .unwrap();
 
         // Read back the data
-        let read = blob.read_at(vec![0; 11].into(), 10_000).await.unwrap();
+        let read = blob.read_at(vec![0; 11], 10_000).await.unwrap();
         assert_eq!(
             read.as_ref(),
             b"offset data",
@@ -243,13 +234,13 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write initial data
-        blob.write_at(b"first".to_vec().into(), 0).await.unwrap();
+        blob.write_at(b"first".to_vec(), 0).await.unwrap();
 
         // Append data
-        blob.write_at(b"second".to_vec().into(), 5).await.unwrap();
+        blob.write_at(b"second".to_vec(), 5).await.unwrap();
 
         // Read back the data
-        let read = blob.read_at(vec![0; 11].into(), 0).await.unwrap();
+        let read = blob.read_at(vec![0; 11], 0).await.unwrap();
         assert_eq!(read.as_ref(), b"firstsecond", "Appended data is incorrect");
     }
 
@@ -262,14 +253,14 @@ pub(crate) mod tests {
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
 
         // Write data at different offsets
-        blob.write_at(b"first".to_vec().into(), 0).await.unwrap();
-        blob.write_at(b"second".to_vec().into(), 10).await.unwrap();
+        blob.write_at(b"first".to_vec(), 0).await.unwrap();
+        blob.write_at(b"second".to_vec(), 10).await.unwrap();
 
         // Read back the data
-        let read = blob.read_at(vec![0; 5].into(), 0).await.unwrap();
+        let read = blob.read_at(vec![0; 5], 0).await.unwrap();
         assert_eq!(read.as_ref(), b"first", "Data at offset 0 is incorrect");
 
-        let read = blob.read_at(vec![0; 6].into(), 10).await.unwrap();
+        let read = blob.read_at(vec![0; 6], 10).await.unwrap();
         assert_eq!(read.as_ref(), b"second", "Data at offset 10 is incorrect");
     }
 
@@ -290,7 +281,7 @@ pub(crate) mod tests {
 
         // Write data in chunks
         for i in 0..num_chunks {
-            blob.write_at(data.clone().into(), (i * chunk_size) as u64)
+            blob.write_at(data.clone(), (i * chunk_size) as u64)
                 .await
                 .unwrap();
         }
@@ -314,7 +305,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let result = blob.read_at(vec![0; 1].into(), 0).await;
+        let result = blob.read_at(vec![0; 1], 0).await;
         assert!(
             result.is_err(),
             "Reading from an empty blob should return an error"
@@ -333,11 +324,11 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write overlapping data
-        blob.write_at(b"overlap".to_vec().into(), 0).await.unwrap();
-        blob.write_at(b"map".to_vec().into(), 4).await.unwrap();
+        blob.write_at(b"overlap".to_vec(), 0).await.unwrap();
+        blob.write_at(b"map".to_vec(), 4).await.unwrap();
 
         // Read back the data
-        let read = blob.read_at(vec![0; 7].into(), 0).await.unwrap();
+        let read = blob.read_at(vec![0; 7], 0).await.unwrap();
         assert_eq!(
             read.as_ref(),
             b"overmap",
@@ -357,9 +348,7 @@ pub(crate) mod tests {
                 .unwrap();
 
             // Write some data
-            blob.write_at(b"hello world".to_vec().into(), 0)
-                .await
-                .unwrap();
+            blob.write_at(b"hello world".to_vec(), 0).await.unwrap();
 
             // Truncate the blob
             blob.truncate(5).await.unwrap();
@@ -375,7 +364,7 @@ pub(crate) mod tests {
         assert_eq!(len, 5, "Blob length after truncate is incorrect");
 
         // Read back the data
-        let read = blob.read_at(vec![0; 5].into(), 0).await.unwrap();
+        let read = blob.read_at(vec![0; 5], 0).await.unwrap();
         assert_eq!(read.as_ref(), b"hello", "Truncated data is incorrect");
     }
 }

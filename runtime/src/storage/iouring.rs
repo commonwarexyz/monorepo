@@ -151,7 +151,12 @@ impl Blob {
 }
 
 impl crate::Blob for Blob {
-    async fn read_at(&self, mut buf: StableBufMut, offset: u64) -> Result<StableBufMut, Error> {
+    async fn read_at(
+        &self,
+        buf: impl Into<StableBufMut> + Send,
+        offset: u64,
+    ) -> Result<StableBufMut, Error> {
+        let mut buf = buf.into();
         let fd = types::Fd(self.file.as_raw_fd());
         let mut bytes_read = 0;
         let buf_len = buf.len();
@@ -200,7 +205,12 @@ impl crate::Blob for Blob {
         Ok(buf)
     }
 
-    async fn write_at(&self, mut buf: StableBufMut, offset: u64) -> Result<(), Error> {
+    async fn write_at(
+        &self,
+        buf: impl Into<StableBufMut> + Send,
+        offset: u64,
+    ) -> Result<(), Error> {
+        let mut buf = buf.into();
         let fd = types::Fd(self.file.as_raw_fd());
         let mut total_written = 0;
         let buf_len = buf.len();

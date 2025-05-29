@@ -35,7 +35,8 @@ pub struct Stream {
 }
 
 impl crate::Stream for Stream {
-    async fn recv(&mut self, mut buf: StableBufMut) -> Result<StableBufMut, Error> {
+    async fn recv(&mut self, buf: impl Into<StableBufMut> + Send) -> Result<StableBufMut, Error> {
+        let mut buf = buf.into();
         if buf.is_empty() {
             return Ok(buf);
         }

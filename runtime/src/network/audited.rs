@@ -39,7 +39,7 @@ pub struct Stream<S: crate::Stream> {
 }
 
 impl<S: crate::Stream> crate::Stream for Stream<S> {
-    async fn recv(&mut self, buf: StableBufMut) -> Result<StableBufMut, Error> {
+    async fn recv(&mut self, buf: impl Into<StableBufMut> + Send) -> Result<StableBufMut, Error> {
         self.auditor.event(b"recv_attempt", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
         });
@@ -242,7 +242,7 @@ mod tests {
                 let (_, mut sink, mut stream) = listener.accept().await.unwrap();
 
                 // Receive data from client
-                let buf = stream.recv(vec![0; CLIENT_MSG.len()].into()).await.unwrap();
+                let buf = stream.recv(vec![0; CLIENT_MSG.len()]).await.unwrap();
                 assert_eq!(buf.as_ref(), CLIENT_MSG.as_bytes());
 
                 // Send response
@@ -263,7 +263,7 @@ mod tests {
                 sink.send(Vec::from(CLIENT_MSG).into()).await.unwrap();
 
                 // Receive response
-                let buf = stream.recv(vec![0; SERVER_MSG.len()].into()).await.unwrap();
+                let buf = stream.recv(vec![0; SERVER_MSG.len()]).await.unwrap();
                 assert_eq!(buf.as_ref(), SERVER_MSG.as_bytes());
             });
             client_handles.push(handle);

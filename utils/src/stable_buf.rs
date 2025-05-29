@@ -13,7 +13,7 @@ pub enum StableBuf {
 }
 
 // impl From<StableBufMut> for StableBuf {
-//     fn from(buf: StableBufMut) -> Self {
+//     fn from(buf: impl Into<StableBufMut> + Send) -> Self {
 //         match buf {
 //             StableBufMut::Vec(v) => StableBuf::Vec(v),
 //             StableBufMut::BytesMut(b) => StableBuf::BytesMut(b),

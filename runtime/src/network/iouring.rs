@@ -232,8 +232,12 @@ impl Stream {
 }
 
 impl crate::Stream for Stream {
-    async fn recv(&mut self, mut buf: StableBufMut) -> Result<StableBufMut, crate::Error> {
+    async fn recv(
+        &mut self,
+        buf: impl Into<StableBufMut> + Send,
+    ) -> Result<StableBufMut, crate::Error> {
         let mut bytes_received = 0;
+        let mut buf = buf.into();
         let buf_len = buf.len();
         while bytes_received < buf_len {
             let remaining = unsafe {

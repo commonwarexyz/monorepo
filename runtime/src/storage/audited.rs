@@ -63,7 +63,12 @@ pub struct Blob<B: crate::Blob> {
 }
 
 impl<B: crate::Blob> crate::Blob for Blob<B> {
-    async fn read_at(&self, buf: StableBufMut, offset: u64) -> Result<StableBufMut, Error> {
+    async fn read_at(
+        &self,
+        buf: impl Into<StableBufMut>,
+        offset: u64,
+    ) -> Result<StableBufMut, Error> {
+        let buf = buf.into();
         self.auditor.event(b"read_at", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
@@ -73,7 +78,8 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.inner.read_at(buf, offset).await
     }
 
-    async fn write_at(&self, buf: StableBufMut, offset: u64) -> Result<(), Error> {
+    async fn write_at(&self, buf: impl Into<StableBufMut>, offset: u64) -> Result<(), Error> {
+        let buf = buf.into();
         self.auditor.event(b"write_at", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
@@ -148,14 +154,8 @@ mod tests {
         let (blob2, _) = storage2.open("partition", b"test_blob").await.unwrap();
 
         // Write data to the blobs
-        blob1
-            .write_at(b"hello world".to_vec().into(), 0)
-            .await
-            .unwrap();
-        blob2
-            .write_at(b"hello world".to_vec().into(), 0)
-            .await
-            .unwrap();
+        blob1.write_at(b"hello world".to_vec(), 0).await.unwrap();
+        blob2.write_at(b"hello world".to_vec(), 0).await.unwrap();
         assert_eq!(
             auditor1.state(),
             auditor2.state(),
@@ -163,13 +163,13 @@ mod tests {
         );
 
         // Read data from the blobs
-        let read = blob1.read_at(vec![0; 11].into(), 0).await.unwrap();
+        let read = blob1.read_at(vec![0; 11], 0).await.unwrap();
         assert_eq!(
             read.as_ref(),
             b"hello world",
             "Blob1 content does not match"
         );
-        let read = blob2.read_at(vec![0; 11].into(), 0).await.unwrap();
+        let read = blob2.read_at(vec![0; 11], 0).await.unwrap();
         assert_eq!(
             read.as_ref(),
             b"hello world",

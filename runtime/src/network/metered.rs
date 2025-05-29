@@ -70,7 +70,10 @@ pub struct Stream<S: crate::Stream> {
 }
 
 impl<S: crate::Stream> crate::Stream for Stream<S> {
-    async fn recv(&mut self, buf: StableBufMut) -> Result<StableBufMut, crate::Error> {
+    async fn recv(
+        &mut self,
+        buf: impl Into<StableBufMut> + Send,
+    ) -> Result<StableBufMut, crate::Error> {
         let buf = self.inner.recv(buf).await?;
         self.metrics.inbound_bandwidth.inc_by(buf.len() as u64);
         Ok(buf)
@@ -200,10 +203,7 @@ mod tests {
         // Create a server task that accepts one connection and echoes data
         let server = tokio::spawn(async move {
             let (_, mut sink, mut stream) = listener.accept().await.unwrap();
-            let buf = stream
-                .recv(vec![0; MSG_SIZE as usize].into())
-                .await
-                .unwrap();
+            let buf = stream.recv(vec![0; MSG_SIZE as usize]).await.unwrap();
             sink.send(buf).await.unwrap();
         });
 
@@ -215,7 +215,7 @@ mod tests {
         client_sink.send(msg.clone().into()).await.unwrap();
 
         let response = client_stream
-            .recv(vec![0; MSG_SIZE as usize].into())
+            .recv(vec![0; MSG_SIZE as usize])
             .await
             .unwrap();
         assert_eq!(response.len(), MSG_SIZE as usize);

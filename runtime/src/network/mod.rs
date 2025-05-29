@@ -46,7 +46,7 @@ mod tests {
             let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
 
             let read = stream
-                .recv(vec![0; CLIENT_SEND_DATA.len()].into())
+                .recv(vec![0; CLIENT_SEND_DATA.len()])
                 .await
                 .expect("Failed to receive");
             assert_eq!(read.as_ref(), CLIENT_SEND_DATA.as_bytes());
@@ -68,7 +68,7 @@ mod tests {
                 .expect("Failed to send data");
 
             let read = stream
-                .recv(vec![0; SERVER_SEND_DATA.len()].into())
+                .recv(vec![0; SERVER_SEND_DATA.len()])
                 .await
                 .expect("Failed to receive data");
             assert_eq!(read.as_ref(), SERVER_SEND_DATA.as_bytes());
@@ -99,7 +99,7 @@ mod tests {
 
                 // runtime.spawn(async move {
                 let read = stream
-                    .recv(vec![0; CLIENT_SEND_DATA.len()].into())
+                    .recv(vec![0; CLIENT_SEND_DATA.len()])
                     .await
                     .expect("Failed to receive");
                 assert_eq!(read.as_ref(), CLIENT_SEND_DATA.as_bytes());
@@ -126,7 +126,7 @@ mod tests {
 
                 // Receive a message from the server
                 let read = stream
-                    .recv(vec![0; SERVER_SEND_DATA.len()].into())
+                    .recv(vec![0; SERVER_SEND_DATA.len()])
                     .await
                     .expect("Failed to receive data");
                 // Verify the received data
@@ -158,7 +158,7 @@ mod tests {
             // Receive and echo large data in chunks
             for _ in 0..NUM_CHUNKS {
                 let read = stream
-                    .recv(vec![0; CHUNK_SIZE].into())
+                    .recv(vec![0; CHUNK_SIZE])
                     .await
                     .expect("Failed to receive chunk");
                 sink.send(read).await.expect("Failed to send chunk");
@@ -182,7 +182,7 @@ mod tests {
                     .await
                     .expect("Failed to send chunk");
                 let read = stream
-                    .recv(vec![0; CHUNK_SIZE].into())
+                    .recv(vec![0; CHUNK_SIZE])
                     .await
                     .expect("Failed to receive chunk");
                 assert_eq!(read.as_ref(), pattern.as_slice());
