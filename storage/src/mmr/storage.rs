@@ -48,11 +48,11 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Storage<H::Digest> for Journaled
 
 impl<H: CHasher, const N: usize> Storage<H::Digest> for Bitmap<H, N> {
     fn size(&self) -> u64 {
-        Bitmap::size(self)
+        self.size()
     }
 
     async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, Error> {
-        Bitmap::get_node(self, position).await
+        Ok(self.get_node(position))
     }
 }
 
