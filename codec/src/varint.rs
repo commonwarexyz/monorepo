@@ -595,7 +595,6 @@ mod tests {
                 } else {
                     (1u128 << bits) - 1
                 };
-
                 let Ok(value) = T::try_from(val) else {
                     continue;
                 };
@@ -633,6 +632,7 @@ mod tests {
         // Test values with only a single bit set at different positions
         fn test_single_bits<T: UPrim + TryFrom<u128> + std::fmt::Display>() {
             for bit_pos in 0..128 {
+                // Create a value with only a single bit set at the given position
                 let val = 1u128 << bit_pos;
                 let Ok(value) = T::try_from(val) else {
                     continue;
