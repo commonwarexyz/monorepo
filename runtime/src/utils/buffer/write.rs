@@ -105,12 +105,12 @@ impl<B: Blob> Inner<B> {
 ///
 ///     // Create a buffered writer with 16-byte buffer
 ///     let mut blob = Write::new(blob, 0, 16);
-///     blob.write_at(b"hello".to_vec().into(), 0).await.expect("write failed");
+///     blob.write_at(b"hello".to_vec(), 0).await.expect("write failed");
 ///     blob.sync().await.expect("sync failed");
 ///
 ///     // Write more data in multiple flushes
-///     blob.write_at(b" world".to_vec().into(), 5).await.expect("write failed");
-///     blob.write_at(b"!".to_vec().into(), 11).await.expect("write failed");
+///     blob.write_at(b" world".to_vec(), 5).await.expect("write failed");
+///     blob.write_at(b"!".to_vec(), 11).await.expect("write failed");
 ///     blob.sync().await.expect("sync failed");
 ///
 ///     // Read back the data to verify
@@ -193,11 +193,7 @@ impl<B: Blob> Blob for Write<B> {
         Ok(buf)
     }
 
-    async fn write_at(
-        &self,
-        buf: impl Into<StableBuf> + Send,
-        offset: u64,
-    ) -> Result<(), Error> {
+    async fn write_at(&self, buf: impl Into<StableBuf> + Send, offset: u64) -> Result<(), Error> {
         // Acquire a write lock on the inner state
         let mut inner = self.inner.write().await;
 
