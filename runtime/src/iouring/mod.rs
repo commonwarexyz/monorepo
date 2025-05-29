@@ -96,7 +96,7 @@ pub struct Op {
     /// The submission queue entry to be submitted to the ring.
     /// Its user data field will be overwritten. Users shouldn't rely on it.
     pub work: SqueueEntry,
-    /// The sender to send the result of the operation to.
+    /// Sends the result of the operation and `buffer`.
     pub sender: oneshot::Sender<(i32, Option<StableBuf>)>,
     /// The buffer used for the operation, if any.
     /// E.g. For read, this is the buffer being read into.
