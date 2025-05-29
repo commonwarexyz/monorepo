@@ -1,4 +1,4 @@
-use crate::{mocks, Error, StableBuf, StableBufMut};
+use crate::{mocks, Error, StableBufMut};
 use futures::{channel::mpsc, SinkExt as _, StreamExt as _};
 use std::{
     collections::HashMap,

@@ -1,4 +1,4 @@
-use commonware_utils::{hex, StableBuf, StableBufMut};
+use commonware_utils::{hex, StableBufMut};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 

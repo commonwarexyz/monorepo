@@ -2,7 +2,7 @@ use crate::{
     iouring::{self, should_retry},
     Error,
 };
-use commonware_utils::{from_hex, hex, StableBuf, StableBufMut};
+use commonware_utils::{from_hex, hex, StableBufMut};
 use futures::{
     channel::{mpsc, oneshot},
     executor::block_on,

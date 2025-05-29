@@ -711,7 +711,7 @@ mod tests {
                 .expect("Failed to open blob");
             // Write incorrect checksum
             let bad_checksum = 123456789u32;
-            blob.write_at(bad_checksum.to_be_bytes().to_vec(), checksum_offset)
+            blob.write_at(bad_checksum.to_be_bytes().to_vec().into(), checksum_offset)
                 .await
                 .expect("Failed to write incorrect checksum");
             let corrupted_item_pos = 40 * ITEMS_PER_BLOB + ITEMS_PER_BLOB / 2;

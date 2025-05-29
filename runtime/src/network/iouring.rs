@@ -1,5 +1,5 @@
 use crate::iouring::{self, should_retry};
-use commonware_utils::{StableBuf, StableBufMut};
+use commonware_utils::StableBufMut;
 use futures::{
     channel::{mpsc, oneshot},
     executor::block_on,

@@ -2,7 +2,7 @@
 
 use crate::{Error, Sink as SinkTrait, Stream as StreamTrait};
 use bytes::Bytes;
-use commonware_utils::{StableBuf, StableBufMut};
+use commonware_utils::StableBufMut;
 use futures::channel::oneshot;
 use std::{
     collections::VecDeque,

@@ -4,6 +4,8 @@
 
 use std::ops::Index;
 
+use bytes::Bytes;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StableBufMut {
     Vec(Vec<u8>),
@@ -27,6 +29,15 @@ impl From<Vec<u8>> for StableBufMut {
 impl From<bytes::BytesMut> for StableBufMut {
     fn from(b: bytes::BytesMut) -> Self {
         StableBufMut::BytesMut(b)
+    }
+}
+
+impl From<StableBufMut> for Bytes {
+    fn from(buf: StableBufMut) -> Self {
+        match buf {
+            StableBufMut::Vec(v) => Bytes::from(v),
+            StableBufMut::BytesMut(b) => b.freeze(),
+        }
     }
 }
 
@@ -65,6 +76,13 @@ impl StableBufMut {
         match self {
             StableBufMut::Vec(v) => v.len(),
             StableBufMut::BytesMut(b) => b.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        match self {
+            StableBufMut::Vec(v) => v.is_empty(),
+            StableBufMut::BytesMut(b) => b.is_empty(),
         }
     }
 

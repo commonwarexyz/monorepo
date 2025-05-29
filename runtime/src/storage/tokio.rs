@@ -141,7 +141,7 @@ impl crate::Storage for Storage {
 }
 
 impl crate::Blob for Blob {
-    async fn read_at<B: StableBufMut>(&self, mut buf: B, offset: u64) -> Result<B, Error> {
+    async fn read_at(&self, mut buf: StableBufMut, offset: u64) -> Result<StableBufMut, Error> {
         // Ensure the read is within bounds
         let mut file = self.file.lock().await;
 
@@ -155,7 +155,7 @@ impl crate::Blob for Blob {
         Ok(buf)
     }
 
-    async fn write_at<B: StableBuf>(&self, buf: B, offset: u64) -> Result<(), Error> {
+    async fn write_at(&self, buf: StableBufMut, offset: u64) -> Result<(), Error> {
         // Perform the write
         let mut file = self.file.lock().await;
         file.seek(SeekFrom::Start(offset))

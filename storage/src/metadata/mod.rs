@@ -308,7 +308,9 @@ mod tests {
 
             // Corrupt the metadata store
             let (blob, _) = context.open("test", b"left").await.unwrap();
-            blob.write_at(b"corrupted".to_vec(), 0).await.unwrap();
+            blob.write_at(b"corrupted".to_vec().into(), 0)
+                .await
+                .unwrap();
             blob.close().await.unwrap();
 
             // Reopen the metadata store
@@ -354,10 +356,14 @@ mod tests {
 
             // Corrupt the metadata store
             let (blob, _) = context.open("test", b"left").await.unwrap();
-            blob.write_at(b"corrupted".to_vec(), 0).await.unwrap();
+            blob.write_at(b"corrupted".to_vec().into(), 0)
+                .await
+                .unwrap();
             blob.close().await.unwrap();
             let (blob, _) = context.open("test", b"right").await.unwrap();
-            blob.write_at(b"corrupted".to_vec(), 0).await.unwrap();
+            blob.write_at(b"corrupted".to_vec().into(), 0)
+                .await
+                .unwrap();
             blob.close().await.unwrap();
 
             // Reopen the metadata store

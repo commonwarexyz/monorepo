@@ -23,7 +23,7 @@ pub async fn send_frame<S: Sink>(
     let len: u32 = n.try_into().map_err(|_| Error::SendTooLarge(n))?;
     prefixed_buf.put_u32(len);
     prefixed_buf.extend_from_slice(buf);
-    sink.send(prefixed_buf.freeze())
+    sink.send(prefixed_buf.into())
         .await
         .map_err(Error::SendFailed)
 }
@@ -35,10 +35,13 @@ pub async fn recv_frame<T: Stream>(
     max_message_size: usize,
 ) -> Result<Bytes, Error> {
     // Read the first 4 bytes to get the length of the message
-    let len_buf = stream.recv(vec![0; 4]).await.map_err(Error::RecvFailed)?;
+    let len_buf = stream
+        .recv(vec![0; 4].into())
+        .await
+        .map_err(Error::RecvFailed)?;
 
     // Validate frame size
-    let len = u32::from_be_bytes(len_buf[..4].try_into().unwrap()) as usize;
+    let len = u32::from_be_bytes(len_buf.as_ref()[..4].try_into().unwrap()) as usize;
     if len > max_message_size {
         return Err(Error::RecvTooLarge(len));
     }
@@ -47,7 +50,10 @@ pub async fn recv_frame<T: Stream>(
     }
 
     // Read the rest of the message
-    let read = stream.recv(vec![0; len]).await.map_err(Error::RecvFailed)?;
+    let read = stream
+        .recv(vec![0; len].into())
+        .await
+        .map_err(Error::RecvFailed)?;
     Ok(read.into())
 }
 
@@ -117,10 +123,10 @@ mod tests {
             assert!(result.is_ok());
 
             // Do the reading manually without using recv_frame
-            let read = stream.recv(vec![0; 4]).await.unwrap();
-            assert_eq!(read, (buf.len() as u32).to_be_bytes());
-            let read = stream.recv(vec![0; MAX_MESSAGE_SIZE]).await.unwrap();
-            assert_eq!(read, buf);
+            let read = stream.recv(vec![0; 4].into()).await.unwrap();
+            assert_eq!(read.as_ref(), (buf.len() as u32).to_be_bytes());
+            let read = stream.recv(vec![0; MAX_MESSAGE_SIZE].into()).await.unwrap();
+            assert_eq!(read.as_ref(), buf);
         });
     }
 
@@ -164,7 +170,7 @@ mod tests {
             let mut buf = BytesMut::with_capacity(4 + msg.len());
             buf.put_u32(MAX_MESSAGE_SIZE as u32);
             buf.extend_from_slice(&msg);
-            sink.send(buf.freeze()).await.unwrap();
+            sink.send(buf.into()).await.unwrap();
 
             let data = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await.unwrap();
             assert_eq!(data.len(), MAX_MESSAGE_SIZE);
@@ -181,7 +187,7 @@ mod tests {
             // Manually insert a frame that gives MAX_MESSAGE_SIZE as the size
             let mut buf = BytesMut::with_capacity(4);
             buf.put_u32(MAX_MESSAGE_SIZE as u32);
-            sink.send(buf.freeze()).await.unwrap();
+            sink.send(buf.into()).await.unwrap();
 
             let result = recv_frame(&mut stream, MAX_MESSAGE_SIZE - 1).await;
             assert!(matches!(&result, Err(Error::RecvTooLarge(n)) if *n == MAX_MESSAGE_SIZE));
@@ -197,7 +203,7 @@ mod tests {
             // Manually insert a frame that gives zero as the size
             let mut buf = BytesMut::with_capacity(4);
             buf.put_u32(0);
-            sink.send(buf.freeze()).await.unwrap();
+            sink.send(buf.into()).await.unwrap();
 
             let result = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await;
             assert!(matches!(&result, Err(Error::StreamClosed)));

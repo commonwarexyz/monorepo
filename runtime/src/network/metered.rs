@@ -1,5 +1,5 @@
 use crate::{SinkOf, StreamOf};
-use commonware_utils::{StableBuf, StableBufMut};
+use commonware_utils::StableBufMut;
 use prometheus_client::{metrics::counter::Counter, registry::Registry};
 use std::{net::SocketAddr, sync::Arc};
 

@@ -1,5 +1,5 @@
 use crate::{Blob, Error, RwLock};
-use commonware_utils::{StableBuf, StableBufMut};
+use commonware_utils::StableBufMut;
 use std::sync::Arc;
 
 /// The internal state of a [Write] buffer.

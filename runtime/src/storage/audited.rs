@@ -1,5 +1,5 @@
 use crate::{deterministic::Auditor, Error};
-use commonware_utils::{StableBuf, StableBufMut};
+use commonware_utils::StableBufMut;
 use sha2::digest::Update;
 use std::sync::Arc;
 
