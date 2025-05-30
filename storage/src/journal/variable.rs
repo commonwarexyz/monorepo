@@ -1254,6 +1254,73 @@ mod tests {
         });
     }
 
+    #[test_traced]
+    fn test_journal_handling_extra_data() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+
+        // Start the test within the executor
+        executor.start(|context| async move {
+            // Create a journal configuration
+            let cfg = Config {
+                partition: "test_partition".into(),
+                compression: None,
+                codec_config: (),
+                write_buffer: 1024,
+            };
+
+            // Initialize the journal
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize journal");
+
+            // Append 1 item to the first index
+            journal.append(1, 1).await.expect("Failed to append data");
+
+            // Append multiple items to the second index
+            let data_items = vec![(2u64, 2), (2u64, 3), (2u64, 4)];
+            for (index, data) in &data_items {
+                journal
+                    .append(*index, *data)
+                    .await
+                    .expect("Failed to append data");
+                journal.sync(*index).await.expect("Failed to sync blob");
+            }
+
+            // Close the journal
+            journal.close().await.expect("Failed to close journal");
+
+            // Manually add extra data to the end of the second blob
+            let (blob, blob_len) = context
+                .open(&cfg.partition, &2u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            blob.write_at(vec![0u8; 12], blob_len)
+                .await
+                .expect("Failed to add extra data");
+            blob.close().await.expect("Failed to close blob");
+
+            // Re-initialize the journal to simulate a restart
+            let journal = Journal::init(context, cfg)
+                .await
+                .expect("Failed to re-initialize journal");
+
+            // Attempt to replay the journal
+            let mut items = Vec::<(u64, u64)>::new();
+            let stream = journal
+                .replay(1, 1024)
+                .await
+                .expect("unable to setup replay");
+            pin_mut!(stream);
+            while let Some(result) = stream.next().await {
+                match result {
+                    Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
+                    Err(err) => panic!("Failed to read item: {}", err),
+                }
+            }
+        });
+    }
+
     // Define `MockBlob` that returns an offset length that should overflow
     #[derive(Clone)]
     struct MockBlob {}
