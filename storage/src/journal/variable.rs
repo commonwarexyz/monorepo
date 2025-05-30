@@ -332,6 +332,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                 *section,
                 blob,
                 aligned_len,
+                *len,
                 codec_config.clone(),
                 compressed,
             ));
@@ -341,7 +342,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         // occupying too much memory with buffered data)
         Ok(stream::iter(blobs)
             .map(
-                move |(section, blob, len, codec_config, compressed)| async move {
+                move |(section, blob, len, blob_len, codec_config, compressed)| async move {
                     stream::unfold(
                         (section, blob, 0u32, codec_config, compressed),
                         move |(section, blob, offset, codec_config, compressed)| async move {
@@ -406,6 +407,14 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                         ?err,
                                         "unable to read item"
                                     );
+                                    // Read remaining bytes
+                                    let offset = offset as u64 * ITEM_ALIGNMENT;
+                                    let mut buf = vec![0u8; (blob_len - offset) as usize];
+                                    if let Err(e) = blob.read_at(&mut buf, offset).await {
+                                        println!("error: {:?}", e);
+                                    } else {
+                                        println!("remaining: {:?}", buf);
+                                    }
                                     Some((Err(err), (section, blob, len, codec_config, compressed)))
                                 }
                             }
