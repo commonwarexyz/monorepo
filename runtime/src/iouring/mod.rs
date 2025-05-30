@@ -56,6 +56,12 @@ pub struct Config {
     /// If true, use IOPOLL mode.
     pub io_poll: bool,
     /// If true, use single issuer mode.
+    /// Warning: when enabled, user must guarantee that the same thread
+    /// that creates the io_uring instance is the only thread that submits
+    /// work to it. Since the `run` event loop is a future that may move
+    /// between threads, this means in practice that `single_issuer` should
+    /// only be used in a single-threaded context.
+    /// See IORING_SETUP_SINGLE_ISSUER in <https://man7.org/linux/man-pages/man2/io_uring_setup.2.html>.
     pub single_issuer: bool,
     /// In the io_uring event loop (`run`), wait at most this long for a new
     /// completion before checking for new work to submit to the io_ring.
@@ -96,7 +102,7 @@ impl Default for Config {
         Self {
             size: 128,
             io_poll: false,
-            single_issuer: true,
+            single_issuer: false,
             force_poll: None,
             op_timeout: None,
             shutdown_timeout: None,
