@@ -10,10 +10,6 @@ const CHACHA_KEY_SIZE: usize = <ChaCha20Poly1305 as KeySizeUser>::KeySize::USIZE
 // A constant prefix used for the salt hash in the HKDF key derivation.
 const BASE_KDF_PREFIX: &[u8] = b"commonware-stream/KDF/v1/";
 
-// Info values used for deriving directional keys in the KDF.
-const D2L: u8 = 0x01; // Dialer-to-Listener
-const L2D: u8 = 0x02; // Listener-to-Dialer
-
 /// Key Derivation Function (KDF) to derive directional ChaCha20Poly1305 ciphers using HKDF-SHA256.
 ///
 /// This function derives two ChaCha20Poly1305 ciphers based on:
@@ -34,25 +30,20 @@ pub fn derive(ikm: &[u8], salts: &[&[u8]]) -> Result<(ChaCha20Poly1305, ChaCha20
     for salt in salts {
         hasher.update(salt);
     }
-    let salt = hasher.finalize();
+    let mut salt = hasher.finalize();
 
     // HKDF-Extract: creates a pseudorandom key (PRK)
     let prk = Hkdf::<CoreSha256>::new(Some(salt.as_ref()), ikm);
+    salt.zeroize();
 
-    // Reusable buffer for derived keys
-    let mut buf = [0u8; CHACHA_KEY_SIZE];
-
-    // Dialer-to-Listener cipher
-    prk.expand(&[D2L], &mut buf)
+    // Expand the PRK to derive two ChaCha20Poly1305 keys.
+    let mut buf = [0u8; CHACHA_KEY_SIZE * 2];
+    prk.expand(&[], &mut buf)
         .map_err(|_| Error::HKDFExpansion)?;
-    let d2l_cipher = ChaCha20Poly1305::new_from_slice(&buf).map_err(|_| Error::CipherCreation)?;
-
-    // Listener-to-Dialer cipher
-    prk.expand(&[L2D], &mut buf)
-        .map_err(|_| Error::HKDFExpansion)?;
-    let l2d_cipher = ChaCha20Poly1305::new_from_slice(&buf).map_err(|_| Error::CipherCreation)?;
-
-    // Clear the buffer for security
+    let d2l_cipher = ChaCha20Poly1305::new_from_slice(&buf[..CHACHA_KEY_SIZE])
+        .map_err(|_| Error::CipherCreation)?;
+    let l2d_cipher = ChaCha20Poly1305::new_from_slice(&buf[CHACHA_KEY_SIZE..])
+        .map_err(|_| Error::CipherCreation)?;
     buf.zeroize();
 
     Ok((d2l_cipher, l2d_cipher))
