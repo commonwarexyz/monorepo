@@ -772,6 +772,7 @@ mod tests {
             assert!(matches!(err, Error::Runtime(_)));
 
             // Replay all items, making sure the partial read error is handled correctly
+            let expected_items = ITEMS_PER_BLOB as usize * 100 + ITEMS_PER_BLOB as usize / 2 - 4;
             {
                 let stream = journal
                     .replay(10, 1024)
@@ -794,10 +795,7 @@ mod tests {
                 }
                 assert_eq!(error_count, 1);
                 // Result will be missing the 4 items following the truncation
-                assert_eq!(
-                    items.len(),
-                    ITEMS_PER_BLOB as usize * 100 + ITEMS_PER_BLOB as usize / 2 - 4
-                );
+                assert_eq!(items.len(), expected_items);
             }
             journal.close().await.expect("Failed to close journal");
 
@@ -823,12 +821,7 @@ mod tests {
                         Err(err) => panic!("Failed to read item: {}", err),
                     }
                 }
-
-                // Result will be missing the 4 items following the truncation
-                assert_eq!(
-                    items.len(),
-                    ITEMS_PER_BLOB as usize * 100 + ITEMS_PER_BLOB as usize / 2 - 4
-                );
+                assert_eq!(items.len(), expected_items);
             }
 
             // Add extra data to the end of the blob
@@ -863,12 +856,7 @@ mod tests {
                         Err(err) => panic!("Failed to read item: {}", err),
                     }
                 }
-
-                // Result will be missing the 4 items following the truncation
-                assert_eq!(
-                    items.len(),
-                    ITEMS_PER_BLOB as usize * 100 + ITEMS_PER_BLOB as usize / 2 - 4
-                );
+                assert_eq!(items.len(), expected_items);
             }
 
             // Delete a blob and make sure the gap is detected
