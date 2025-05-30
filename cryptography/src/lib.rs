@@ -28,8 +28,9 @@ pub trait PrivateKey: Signer + Sized + ReadExt + Encode + PartialEq + Array {
     /// The corresponding public key type.
     type PublicKey: PublicKey<Private = Self, Signature = Self::Signature>;
 
-    /// Derive the public key.
-    fn public_key(&self) -> Self::PublicKey;
+    fn public_key(&self) -> Self::PublicKey {
+        Self::PublicKey::from(self.clone())
+    }
 }
 
 pub trait PrivateKeyGen: PrivateKey {

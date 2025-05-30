@@ -24,10 +24,6 @@ pub struct PrivateKey {
 
 impl crate::PrivateKey for PrivateKey {
     type PublicKey = PublicKey;
-
-    fn public_key(&self) -> Self::PublicKey {
-        PublicKey::from(self.key.verification_key())
-    }
 }
 
 impl crate::Signer for PrivateKey {

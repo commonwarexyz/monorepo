@@ -128,11 +128,6 @@ impl Display for PrivateKey {
 
 impl crate::PrivateKey for PrivateKey {
     type PublicKey = PublicKey;
-
-    // TODO remove duplicate impl
-    fn public_key(&self) -> Self::PublicKey {
-        PublicKey::from(ops::compute_public::<MinPk>(&self.key))
-    }
 }
 
 impl crate::Signer for PrivateKey {
