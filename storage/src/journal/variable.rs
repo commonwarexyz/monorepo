@@ -1255,6 +1255,13 @@ mod tests {
             assert_eq!(items[2].0, data_items[1].0);
             assert_eq!(items[2].1, data_items[1].1);
 
+            // Confirm blob is expected length
+            let (_, blob_len) = context
+                .open(&cfg.partition, &2u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            assert_eq!(blob_len, 28);
+
             // Attempt to replay journal after truncation
             let journal = Journal::init(context, cfg)
                 .await
@@ -1364,6 +1371,13 @@ mod tests {
             assert_eq!(items[1].1, data_items[0].1);
             assert_eq!(items[2].0, data_items[1].0);
             assert_eq!(items[2].1, data_items[1].1);
+
+            // Confirm blob is expected length
+            let (_, blob_len) = context
+                .open(&cfg.partition, &2u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            assert_eq!(blob_len, 32);
 
             // Attempt to replay journal after truncation
             let journal = Journal::init(context, cfg)
