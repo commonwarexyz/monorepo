@@ -15,6 +15,7 @@ pub mod sha256;
 pub use sha256::{hash, Sha256};
 pub mod secp256r1;
 
+/// Produces signatures over messages.
 pub trait Signer {
     type Signature: Signature;
 
@@ -23,7 +24,7 @@ pub trait Signer {
 }
 
 /// A private key, able to derive its public key and sign messages.
-pub trait PrivateKey: Signer + Sized + Array {
+pub trait PrivateKey: Signer + Sized + ReadExt + Encode + PartialEq + Array {
     /// The corresponding public key type.
     type PublicKey: PublicKey<Private = Self, Signature = Self::Signature>;
 
