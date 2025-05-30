@@ -469,7 +469,11 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     #[cfg(test)]
     /// Sync elements to disk until `write_limit` elements have been written, then abort to simulate
     /// a partial write for testing failure scenarios.
-    pub async fn simulate_partial_sync(mut self, write_limit: usize) -> Result<(), Error> {
+    pub async fn simulate_partial_sync(
+        mut self,
+        hasher: &mut impl Hasher<H>,
+        write_limit: usize,
+    ) -> Result<(), Error> {
         if write_limit == 0 {
             return Ok(());
         }
@@ -477,6 +481,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         // Write the nodes cached in the memory-resident MMR to the journal, aborting after
         // write_count nodes have been written.
         let mut written_count = 0usize;
+        self.mem_mmr.sync(hasher);
         for i in self.journal_size..self.size() {
             let node = *self.mem_mmr.get_node_unchecked(i);
             self.journal.append(node).await?;
@@ -516,7 +521,9 @@ mod tests {
     use crate::mmr::{
         hasher::Standard,
         iterator::leaf_num_to_pos,
-        tests::{build_and_check_test_roots_mmr, ROOTS},
+        tests::{
+            build_and_check_test_roots_mmr, build_batched_and_check_test_roots_journaled, ROOTS,
+        },
     };
     use commonware_cryptography::{hash, sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
@@ -547,6 +554,27 @@ mod tests {
             .await
             .unwrap();
             build_and_check_test_roots_mmr(&mut mmr).await;
+        });
+    }
+
+    /// Test that the MMR root computation remains stable by comparing against previously computed
+    /// roots.
+    #[test]
+    fn test_journaled_mmr_root_stability_batched() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                journal_partition: "journal_partition".into(),
+                metadata_partition: "metadata_partition".into(),
+                items_per_blob: 7,
+                write_buffer: 1024,
+            };
+            let mut hasher = Sha256::new();
+            let mut std_hasher = Standard::new(&mut hasher);
+            let mut mmr = Mmr::init(context.clone(), &mut std_hasher, cfg.clone())
+                .await
+                .unwrap();
+            build_batched_and_check_test_roots_journaled(&mut std_hasher, &mut mmr).await;
         });
     }
 
@@ -987,7 +1015,7 @@ mod tests {
                 let end_size = mmr.size();
                 let total_to_write = (end_size - start_size) as usize;
                 let partial_write_limit = i % total_to_write;
-                mmr.simulate_partial_sync(partial_write_limit)
+                mmr.simulate_partial_sync(&mut hasher, partial_write_limit)
                     .await
                     .unwrap();
             }

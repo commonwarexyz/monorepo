@@ -730,7 +730,7 @@ mod tests {
     }
 
     /// Test that the MMR root computation remains stable by comparing against previously computed
-    /// tes.
+    /// roots.
     #[test]
     fn test_mem_mmr_root_stability() {
         let executor = deterministic::Runner::default();
