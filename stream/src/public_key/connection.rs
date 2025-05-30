@@ -759,7 +759,7 @@ mod tests {
     }
 
     #[test]
-    fn test_listener_rejects_our_key() {
+    fn test_listener_rejects_handshake_signed_with_own_key() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let self_crypto = Ed25519::from_seed(0);
