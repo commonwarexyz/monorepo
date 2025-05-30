@@ -1,8 +1,11 @@
 use crate::mmr::{
     hasher::{Hasher, Standard},
+    journaled::Mmr as JournaledMmr,
+    mem::Mmr as MemMmr,
     Builder,
 };
 use commonware_cryptography::{Hasher as CHasher, Sha256};
+use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::hex;
 
 /// Build the MMR corresponding to the stability test `ROOTS` and confirm the
@@ -18,6 +21,11 @@ pub async fn build_and_check_test_roots_mmr(mmr: &mut impl Builder<Sha256>) {
         assert_eq!(hex(&root), expected_root, "at: {}", i);
         mmr.add(&mut hasher, &element).await.unwrap();
     }
+    assert_eq!(
+        hex(&mmr.root(&mut hasher)),
+        ROOTS[199],
+        "Root after 200 elements"
+    );
 }
 
 /// Build an MMR for testing with 199 elements.
@@ -27,6 +35,43 @@ pub async fn build_test_mmr<H: CHasher>(hasher: &mut impl Hasher<H>, mmr: &mut i
         let element = hasher.inner().finalize();
         mmr.add(hasher, &element).await.unwrap();
     }
+}
+
+pub async fn build_batched_and_check_test_roots<H: CHasher>(
+    hasher: &mut impl Hasher<H>,
+    mem_mmr: &mut MemMmr<H>,
+) {
+    for i in 0u64..199 {
+        hasher.inner().update(&i.to_be_bytes());
+        let element = hasher.inner().finalize();
+        mem_mmr.add_batched(hasher, &element).await.unwrap();
+    }
+    mem_mmr.sync(hasher);
+    assert_eq!(
+        hex(&mem_mmr.root(hasher)),
+        ROOTS[199],
+        "Root after 200 elements"
+    );
+}
+
+pub async fn build_batched_and_check_test_roots_journaled<
+    H: CHasher,
+    E: RStorage + Clock + Metrics,
+>(
+    hasher: &mut impl Hasher<H>,
+    journaled_mmr: &mut JournaledMmr<E, H>,
+) {
+    for i in 0u64..199 {
+        hasher.inner().update(&i.to_be_bytes());
+        let element = hasher.inner().finalize();
+        journaled_mmr.add_batched(hasher, &element).await.unwrap();
+    }
+    journaled_mmr.sync(hasher).await.unwrap();
+    assert_eq!(
+        hex(&journaled_mmr.root(hasher)),
+        ROOTS[199],
+        "Root after 200 elements"
+    );
 }
 
 /// Roots for all MMRs with 0..200 elements for testing stability in

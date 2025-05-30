@@ -24,10 +24,10 @@ pub struct Info<K: PublicKey> {
 }
 
 impl<K: PublicKey> Info<K> {
-    pub fn new(recipient: K, secret: &x25519_dalek::EphemeralSecret, timestamp: u64) -> Self {
+    pub fn new(recipient: K, ephemeral_public_key: x25519::PublicKey, timestamp: u64) -> Self {
         Self {
             recipient,
-            ephemeral_public_key: x25519::PublicKey::from_secret(secret),
+            ephemeral_public_key,
             timestamp,
         }
     }
