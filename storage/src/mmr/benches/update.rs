@@ -14,7 +14,7 @@ fn bench_update(c: &mut Criterion) {
             for batched in [true, false] {
                 c.bench_function(
                     &format!(
-                        "{}/updates={} leaves={}, batched={}",
+                        "{}/updates={} leaves={} batched={}",
                         module_path!(),
                         updates,
                         leaves,
