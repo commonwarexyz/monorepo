@@ -265,12 +265,12 @@ impl<H: CHasher> Mmr<H> {
         Ok(self.size())
     }
 
-    /// Change the digest of any retained leaf.
+    /// Change the digest of any retained leaf. This is useful if you want to use the MMR
+    /// implementation as an updatable binary Merkle tree, and otherwise should be avoided.
     ///
     /// # Warning
     ///
-    /// - Panics if `pos` does not correspond to a leaf.  This is useful if you want to use the MMR
-    ///   implementation as an updatable binary Merkle tree, and otherwise should be avoided.
+    /// - Panics if `pos` does not correspond to a leaf.
     ///
     /// - This method will change the root and invalidate any previous inclusion proofs.
     ///

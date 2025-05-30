@@ -175,8 +175,9 @@ impl<
             // Prepend the missing (inactive) bits needed to align the bitmap, which can only be
             // pruned to a chunk boundary, with the MMR's pruning boundary.
             for _ in pruned_bits..mmr_pruned_leaves {
-                status.append(&mut grafter, false).await?;
+                status.append(false);
             }
+            status.sync(&mut grafter).await?;
         }
 
         // Replay the log to generate the snapshot & populate the retained portion of the bitmap.
@@ -250,16 +251,14 @@ impl<
     /// next successful `commit`.
     pub async fn update(&mut self, key: K, value: V) -> Result<UpdateResult, Error> {
         let update_result = self.any.update(key, value).await?;
-        let mut grafter =
-            Grafter::new(&mut self.any.hasher, Self::grafting_height(), &self.any.ops);
         match update_result {
             UpdateResult::NoOp => return Ok(update_result),
             UpdateResult::Inserted(_) => (),
             UpdateResult::Updated(old_loc, _) => {
-                self.status.set_bit(&mut grafter, old_loc, false).await?;
+                self.status.set_bit(old_loc, false);
             }
         }
-        self.status.append(&mut grafter, true).await?;
+        self.status.append(true);
 
         Ok(update_result)
     }
@@ -272,10 +271,8 @@ impl<
             return Ok(());
         };
 
-        let mut grafter =
-            Grafter::new(&mut self.any.hasher, Self::grafting_height(), &self.any.ops);
-        self.status.append(&mut grafter, false).await?;
-        self.status.set_bit(&mut grafter, old_loc, false).await?;
+        self.status.append(false);
+        self.status.set_bit(old_loc, false);
 
         Ok(())
     }
@@ -308,10 +305,8 @@ impl<
                 .move_op_if_active(op, self.any.inactivity_floor_loc)
                 .await?;
             if let Some(old_loc) = old_loc {
-                let mut grafter =
-                    Grafter::new(&mut self.any.hasher, Self::grafting_height(), &self.any.ops);
-                self.status.set_bit(&mut grafter, old_loc, false).await?;
-                self.status.append(&mut grafter, true).await?;
+                self.status.set_bit(old_loc, false);
+                self.status.append(true);
             }
             self.any.inactivity_floor_loc += 1;
         }
@@ -319,9 +314,7 @@ impl<
         self.any
             .apply_op(Operation::Commit(self.any.inactivity_floor_loc))
             .await?;
-        let mut grafter =
-            Grafter::new(&mut self.any.hasher, Self::grafting_height(), &self.any.ops);
-        self.status.append(&mut grafter, false).await?;
+        self.status.append(false);
 
         Ok(())
     }
@@ -336,6 +329,9 @@ impl<
         //  (3) prune the any db of inactive operations.
         self.commit_ops().await?; // (1)
 
+        let mut grafter =
+            Grafter::new(&mut self.any.hasher, Self::grafting_height(), &self.any.ops);
+        self.status.sync(&mut grafter).await?;
         self.status.prune_to_bit(self.any.inactivity_floor_loc);
         self.status
             .write_pruned(
@@ -353,6 +349,10 @@ impl<
 
     /// Return the root of the db.
     pub async fn root(&self, hasher: &mut H) -> Result<H::Digest, Error> {
+        assert!(
+            !self.status.is_dirty(),
+            "must process updates before computing root"
+        );
         let ops = &self.any.ops;
         let height = Self::grafting_height();
         let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, ops, height);
@@ -391,6 +391,10 @@ impl<
         start_loc: u64,
         max_ops: u64,
     ) -> Result<(Proof<H>, Vec<Operation<K, V>>, Vec<[u8; N]>), Error> {
+        assert!(
+            !self.status.is_dirty(),
+            "must process updates before computing proofs"
+        );
         let mmr = &self.any.ops;
         let start_pos = leaf_num_to_pos(start_loc);
         let end_pos_last = mmr.last_leaf_pos().unwrap();
@@ -528,6 +532,10 @@ impl<
         hasher: &mut H,
         key: K,
     ) -> Result<(Proof<H>, KeyValueProofInfo<K, V, N>), Error> {
+        assert!(
+            !self.status.is_dirty(),
+            "must process updates before computing proofs"
+        );
         let op = self.any.get_with_loc(&key).await?;
         let Some((value, loc)) = op else {
             return Err(Error::KeyNotFound());
@@ -692,6 +700,9 @@ impl<
         // Only successfully complete operations (1) and (2) of the commit process.
         self.commit_ops().await?; // (1)
 
+        let mut grafter =
+            Grafter::new(&mut self.any.hasher, Self::grafting_height(), &self.any.ops);
+        self.status.sync(&mut grafter).await?;
         self.status.prune_to_bit(self.any.inactivity_floor_loc);
         self.status
             .write_pruned(
@@ -768,6 +779,7 @@ pub mod test {
             db.close().await.unwrap();
             db = open_db(context.clone(), partition).await;
             assert_eq!(db.op_count(), 4); // 1 update, 1 commit, 2 moves.
+            assert_eq!(db.root(&mut hasher).await.unwrap(), root1);
 
             // Repeated update should be no-op.
             assert!(matches!(
@@ -1205,8 +1217,6 @@ pub mod test {
             apply_random_ops(ELEMENTS, false, rng_seed + 1, &mut db)
                 .await
                 .unwrap();
-            let uncommitted_root = db.root(&mut hasher).await.unwrap();
-            assert!(uncommitted_root != committed_root);
 
             // SCENARIO #1: Simulate a crash that happens before any writes. Upon reopening, the
             // state of the DB should be as of the last commit.
@@ -1219,7 +1229,6 @@ pub mod test {
             apply_random_ops(ELEMENTS, false, rng_seed + 1, &mut db)
                 .await
                 .unwrap();
-            assert_eq!(db.root(&mut hasher).await.unwrap(), uncommitted_root);
 
             // SCENARIO #2: Simulate a crash that happens after the any db has been committed, but
             // before the state of the pruned bitmap can be written to disk.
@@ -1231,7 +1240,6 @@ pub mod test {
             // the op count should be greater than before.
             let db = open_db(context.clone(), partition).await;
             let scenario_2_root = db.root(&mut hasher).await.unwrap();
-            assert!(scenario_2_root != uncommitted_root);
             let scenario_2_pruning_loc = db.any.oldest_retained_loc().unwrap();
 
             // To confirm the second committed hash is correct we'll re-build the DB in a new

@@ -254,8 +254,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                             }
 
                             // The mapped key is the same; delete it from the snapshot.
-                            if let Some((ref mut hasher, ref mut bitmap)) = bitmap {
-                                bitmap.set_bit(*hasher, *loc, false).await?;
+                            if let Some((_, ref mut bitmap)) = bitmap {
+                                bitmap.set_bit(*loc, false);
                             }
                             cursor.delete();
                             break;
@@ -265,28 +265,29 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 Operation::Update(key, _) => {
                     let update_result =
                         Any::<E, K, V, H, T>::update_loc(snapshot, log, key, None, i).await?;
-                    if let Some((ref mut hasher, ref mut bitmap)) = bitmap {
+                    if let Some((_, ref mut bitmap)) = bitmap {
                         match update_result {
                             UpdateResult::NoOp => unreachable!("unexpected no-op update"),
-                            UpdateResult::Inserted(_) => {
-                                bitmap.append(*hasher, true).await?;
-                            }
+                            UpdateResult::Inserted(_) => bitmap.append(true),
                             UpdateResult::Updated(old_loc, _) => {
-                                bitmap.set_bit(*hasher, old_loc, false).await?;
-                                bitmap.append(*hasher, true).await?;
+                                bitmap.set_bit(old_loc, false);
+                                bitmap.append(true);
                             }
                         }
                     }
                 }
                 Operation::Commit(loc) => inactivity_floor_loc = loc,
             }
-            if let Some((ref mut hasher, ref mut bitmap)) = bitmap {
+            if let Some((_, ref mut bitmap)) = bitmap {
                 // If we reach this point and a bit hasn't been added for the operation, then it's
                 // an inactive operation and we need to tag it as such in the bitmap.
                 if bitmap.bit_count() == i {
-                    bitmap.append(*hasher, false).await?;
+                    bitmap.append(false);
                 }
             }
+        }
+        if let Some((ref mut hasher, ref mut bitmap)) = bitmap {
+            bitmap.sync(*hasher).await?;
         }
 
         Ok(inactivity_floor_loc)
@@ -1176,8 +1177,9 @@ mod test {
             // Create a bitmap based on the current db's pruned/inactive state.
             let mut bitmap = Bitmap::<_, SHA256_SIZE>::new();
             for _ in 0..db.inactivity_floor_loc {
-                bitmap.append(&mut hasher, false).await.unwrap();
+                bitmap.append(false);
             }
+            bitmap.sync(&mut hasher).await.unwrap();
             assert_eq!(bitmap.bit_count(), db.inactivity_floor_loc);
             db.close().await.unwrap();
 
