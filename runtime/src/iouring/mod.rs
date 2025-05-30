@@ -317,10 +317,14 @@ mod tests {
             .await
             .expect("failed to send work");
 
+        // Sleep a short time so that the io_uring `run` event loop is probably
+        // parked in `submit_and_wait` and waiting for the `recv` to complete.
+        // Note that this doesn't _guarantee_ that the event loop is parked.
+        // If this test flakes, this is the first place to look.
+        // In that case, consider increasing the sleep duration.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
         // Submit a write that satisfies the read.
-        // Note that since the channel capacity is 0, we can only successfully send
-        // the write after the event loop has reached receiver.await(), which implies
-        // the event loop is parked in submit_and_wait when the send below is called.
         let write =
             opcode::Write::new(Fd(right_pipe.as_raw_fd()), msg.as_ptr(), msg.len() as _).build();
         let (write_tx, write_rx) = oneshot::channel();
