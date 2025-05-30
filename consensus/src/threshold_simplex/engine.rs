@@ -6,7 +6,7 @@ use super::{
 use crate::{Automaton, Relay, Reporter, ThresholdSupervisor};
 use commonware_cryptography::{
     bls12381::primitives::{group, variant::Variant},
-    Digest, Scheme,
+    Digest, PrivateKey,
 };
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
@@ -18,7 +18,7 @@ use tracing::debug;
 /// Instance of `threshold-simplex` consensus engine.
 pub struct Engine<
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
-    C: Scheme,
+    C: PrivateKey,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     D: Digest,
@@ -48,7 +48,7 @@ pub struct Engine<
 
 impl<
         E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
-        C: Scheme,
+        C: PrivateKey,
         B: Blocker<PublicKey = C::PublicKey>,
         V: Variant,
         D: Digest,

@@ -9,7 +9,7 @@ use chacha20poly1305::{
     ChaCha20Poly1305,
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::Scheme;
+use commonware_cryptography::PrivateKey;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
 use commonware_utils::SystemTimeExt as _;
@@ -21,7 +21,7 @@ use std::time::SystemTime;
 const ENCRYPTION_TAG_LENGTH: usize = 16;
 
 /// An incoming connection with a verified peer handshake.
-pub struct IncomingConnection<C: Scheme, Si: Sink, St: Stream> {
+pub struct IncomingConnection<C: PrivateKey, Si: Sink, St: Stream> {
     config: Config<C>,
     sink: Si,
     stream: St,
@@ -30,7 +30,7 @@ pub struct IncomingConnection<C: Scheme, Si: Sink, St: Stream> {
     peer_public_key: C::PublicKey,
 }
 
-impl<C: Scheme, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
+impl<C: PrivateKey, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
     pub async fn verify<E: Clock + Spawner>(
         context: &E,
         config: Config<C>,
@@ -110,7 +110,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
     ///
     /// This will send a handshake message to the peer, wait for a response,
     /// and verify the peer's handshake message.
-    pub async fn upgrade_dialer<R: Rng + CryptoRng + Spawner + Clock, C: Scheme>(
+    pub async fn upgrade_dialer<R: Rng + CryptoRng + Spawner + Clock, C: PrivateKey>(
         mut context: R,
         mut config: Config<C>,
         mut sink: Si,
@@ -128,7 +128,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let msg = handshake::Signed::sign(
             &mut config.crypto,
             &config.namespace,
-            handshake::Info::<C>::new(
+            handshake::Info::<C::PublicKey>::new(
                 peer.clone(),
                 x25519::PublicKey::from_secret(&secret),
                 timestamp,
@@ -197,7 +197,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
     /// Because we already verified the peer's handshake, this function
     /// only needs to send our handshake message for the connection to be fully
     /// initialized.
-    pub async fn upgrade_listener<R: Rng + CryptoRng + Spawner + Clock, C: Scheme>(
+    pub async fn upgrade_listener<R: Rng + CryptoRng + Spawner + Clock, C: PrivateKey>(
         mut context: R,
         incoming: IncomingConnection<C, Si, St>,
     ) -> Result<Self, Error> {
@@ -216,7 +216,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let msg = handshake::Signed::sign(
             &mut crypto,
             &namespace,
-            handshake::Info::<C>::new(
+            handshake::Info::<C::PublicKey>::new(
                 incoming.peer_public_key,
                 x25519::PublicKey::from_secret(&secret),
                 timestamp,
@@ -338,7 +338,7 @@ impl<St: Stream> crate::Receiver for Receiver<St> {
 mod tests {
     use super::*;
     use crate::{Receiver as _, Sender as _};
-    use commonware_cryptography::{Ed25519, Signer};
+    use commonware_cryptography::{ed25519, PrivateKeyGen as _};
     use commonware_runtime::{deterministic, mocks, Metrics, Runner};
     use std::time::Duration;
 
@@ -478,8 +478,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create cryptographic identities
-            let dialer_crypto = Ed25519::from_seed(0);
-            let listener_crypto = Ed25519::from_seed(1);
+            let dialer_crypto = ed25519::PrivateKey::from_seed(0);
+            let listener_crypto = ed25519::PrivateKey::from_seed(1);
 
             // Set up mock channels for transport simulation
             let (dialer_sink, listener_stream) = mocks::Channel::init();
@@ -565,9 +565,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create cryptographic identities
-            let dialer_crypto = Ed25519::from_seed(0);
-            let expected_peer = Ed25519::from_seed(1).public_key();
-            let mut actual_peer = Ed25519::from_seed(2);
+            let dialer_crypto = ed25519::PrivateKey::from_seed(0);
+            let expected_peer = ed25519::PrivateKey::from_seed(1).public_key();
+            let mut actual_peer = ed25519::PrivateKey::from_seed(2);
 
             // Set up mock channels
             let (dialer_sink, mut peer_stream) = mocks::Channel::init();
@@ -589,7 +589,7 @@ mod tests {
                 move |mut context| async move {
                     // Read the handshake from dialer
                     let msg = recv_frame(&mut peer_stream, 1024).await.unwrap();
-                    let _ = handshake::Signed::<Ed25519>::decode(msg).unwrap(); // Simulate reading
+                    let _ = handshake::Signed::<ed25519::PrivateKey>::decode(msg).unwrap(); // Simulate reading
 
                     // Create and send own handshake
                     let secret = x25519::new(&mut context);
@@ -627,8 +627,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create cryptographic identities
-            let dialer_crypto = Ed25519::from_seed(0);
-            let mut peer_crypto = Ed25519::from_seed(1);
+            let dialer_crypto = ed25519::PrivateKey::from_seed(0);
+            let mut peer_crypto = ed25519::PrivateKey::from_seed(1);
             let peer_public_key = peer_crypto.public_key();
 
             // Set up mock channels
@@ -652,7 +652,7 @@ mod tests {
                 move |context| async move {
                     // Read the handshake from dialer
                     let msg = recv_frame(&mut peer_stream, 1024).await.unwrap();
-                    let _ = handshake::Signed::<Ed25519>::decode(msg).unwrap();
+                    let _ = handshake::Signed::<ed25519::PrivateKey>::decode(msg).unwrap();
 
                     // Create a custom handshake info bytes with zero ephemeral key
                     let info = handshake::Info::new(
@@ -692,8 +692,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create cryptographic identities
-            let listener_crypto = Ed25519::from_seed(0);
-            let mut dialer_crypto = Ed25519::from_seed(1);
+            let listener_crypto = ed25519::PrivateKey::from_seed(0);
+            let mut dialer_crypto = ed25519::PrivateKey::from_seed(1);
 
             // Set up mock channels
             let (mut dialer_sink, listener_stream) = mocks::Channel::init();

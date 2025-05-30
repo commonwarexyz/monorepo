@@ -5,7 +5,7 @@ use crate::authenticated::{
     metrics, types,
 };
 use commonware_codec::{Decode, Encode};
-use commonware_cryptography::Verifier;
+use commonware_cryptography::PrivateKey;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
 use commonware_stream::{
@@ -19,7 +19,7 @@ use rand::{CryptoRng, Rng};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::{debug, info};
 
-pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: Verifier> {
+pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PrivateKey> {
     context: E,
 
     gossip_bit_vec_frequency: Duration,
@@ -41,7 +41,9 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: Verifier>
     reservation: Reservation<E, C::PublicKey>,
 }
 
-impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Verifier> Actor<E, C> {
+impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: PrivateKey>
+    Actor<E, C>
+{
     pub fn new(
         context: E,
         cfg: Config,

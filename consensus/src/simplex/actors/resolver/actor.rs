@@ -9,7 +9,7 @@ use crate::{
     },
     Supervisor,
 };
-use commonware_cryptography::{Digest, Scheme};
+use commonware_cryptography::{Digest, PrivateKey};
 use commonware_macros::select;
 use commonware_p2p::{
     utils::{
@@ -99,7 +99,7 @@ impl Inflight {
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
     E: Clock + GClock + Rng + Metrics + Spawner,
-    C: Scheme,
+    C: PrivateKey,
     D: Digest,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
@@ -131,7 +131,7 @@ pub struct Actor<
 
 impl<
         E: Clock + GClock + Rng + Metrics + Spawner,
-        C: Scheme,
+        C: PrivateKey,
         D: Digest,
         S: Supervisor<Index = View, PublicKey = C::PublicKey>,
     > Actor<E, C, D, S>
@@ -516,7 +516,7 @@ impl<
                                     debug!(view, sender = ?s, "unknown view");
                                     continue;
                                 };
-                                if !notarization.verify::<C>(&self.namespace, participants) {
+                                if !notarization.verify::<C::PublicKey>(&self.namespace, participants) {
                                     warn!(view, sender = ?s, "invalid notarization");
                                     self.requester.block(s.clone());
                                     continue;

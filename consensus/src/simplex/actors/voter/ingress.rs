@@ -1,15 +1,14 @@
 use crate::simplex::types::{Notarization, Nullification, View, Viewable};
-use commonware_cryptography::Digest;
-use commonware_utils::Array;
+use commonware_cryptography::{Digest, Signature};
 use futures::{channel::mpsc, SinkExt};
 
 // If either of these requests fails, it will not send a reply.
-pub enum Message<S: Array, D: Digest> {
+pub enum Message<S: Signature, D: Digest> {
     Notarization(Notarization<S, D>),
     Nullification(Nullification<S>),
 }
 
-impl<S: Array, D: Digest> Viewable for Message<S, D> {
+impl<S: Signature, D: Digest> Viewable for Message<S, D> {
     fn view(&self) -> View {
         match self {
             Message::Notarization(notarization) => notarization.view(),
@@ -19,11 +18,11 @@ impl<S: Array, D: Digest> Viewable for Message<S, D> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<S: Array, D: Digest> {
+pub struct Mailbox<S: Signature, D: Digest> {
     sender: mpsc::Sender<Message<S, D>>,
 }
 
-impl<S: Array, D: Digest> Mailbox<S, D> {
+impl<S: Signature, D: Digest> Mailbox<S, D> {
     pub fn new(sender: mpsc::Sender<Message<S, D>>) -> Self {
         Self { sender }
     }

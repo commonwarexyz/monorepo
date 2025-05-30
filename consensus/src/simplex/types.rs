@@ -4,7 +4,9 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write,
 };
-use commonware_cryptography::{Digest, Scheme, Verifier};
+use commonware_cryptography::{
+    Digest, PrivateKey, PublicKey, Signature as SigTrait, Verifier as _,
+};
 use commonware_utils::{quorum, union, Array};
 
 /// View is a monotonically increasing counter that represents the current focus of consensus.
@@ -83,7 +85,7 @@ pub fn threshold<P: Array>(validators: &[P]) -> (u32, u32) {
 /// Voter represents all possible message types that can be sent by validators
 /// in the consensus protocol.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Voter<S: Array, D: Digest> {
+pub enum Voter<S: SigTrait, D: Digest> {
     /// A single validator notarize over a proposal
     Notarize(Notarize<S, D>),
     /// An aggregated set of validator notarizes that meets quorum
@@ -98,7 +100,7 @@ pub enum Voter<S: Array, D: Digest> {
     Finalization(Finalization<S, D>),
 }
 
-impl<S: Array, D: Digest> Write for Voter<S, D> {
+impl<S: SigTrait, D: Digest> Write for Voter<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Voter::Notarize(notarize) => {
@@ -129,7 +131,7 @@ impl<S: Array, D: Digest> Write for Voter<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> Read for Voter<S, D> {
+impl<S: SigTrait, D: Digest> Read for Voter<S, D> {
     type Cfg = usize;
 
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
@@ -152,7 +154,7 @@ impl<S: Array, D: Digest> Read for Voter<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> EncodeSize for Voter<S, D> {
+impl<S: SigTrait, D: Digest> EncodeSize for Voter<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Voter::Notarize(notarize) => notarize.encode_size(),
@@ -165,7 +167,7 @@ impl<S: Array, D: Digest> EncodeSize for Voter<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> Viewable for Voter<S, D> {
+impl<S: SigTrait, D: Digest> Viewable for Voter<S, D> {
     fn view(&self) -> View {
         match self {
             Voter::Notarize(notarize) => notarize.view(),
@@ -239,14 +241,14 @@ impl<D: Digest> Viewable for Proposal<D> {
 /// Signature represents a validator's cryptographic signature with their identifier.
 /// This combines the validator's public key index with their actual signature.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Signature<S: Array> {
+pub struct Signature<S: SigTrait> {
     /// Index of the validator's public key in the validator set
     pub public_key: u32,
     /// The cryptographic signature produced by the validator
     pub signature: S,
 }
 
-impl<S: Array> Signature<S> {
+impl<S: SigTrait> Signature<S> {
     /// Creates a new signature with the given public key index and signature data.
     pub fn new(public_key: u32, signature: S) -> Self {
         Self {
@@ -256,14 +258,14 @@ impl<S: Array> Signature<S> {
     }
 }
 
-impl<S: Array> Write for Signature<S> {
+impl<S: SigTrait> Write for Signature<S> {
     fn write(&self, writer: &mut impl BufMut) {
         UInt(self.public_key).write(writer);
         self.signature.write(writer);
     }
 }
 
-impl<S: Array> Read for Signature<S> {
+impl<S: SigTrait> Read for Signature<S> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
@@ -276,13 +278,13 @@ impl<S: Array> Read for Signature<S> {
     }
 }
 
-impl<S: Array> EncodeSize for Signature<S> {
+impl<S: SigTrait> EncodeSize for Signature<S> {
     fn encode_size(&self) -> usize {
         UInt(self.public_key).encode_size() + self.signature.encode_size()
     }
 }
 
-impl<S: Array> Attributable for Signature<S> {
+impl<S: SigTrait> Attributable for Signature<S> {
     fn signer(&self) -> u32 {
         self.public_key
     }
@@ -290,14 +292,14 @@ impl<S: Array> Attributable for Signature<S> {
 
 /// Notarize represents a validator's notarize over a proposal.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Notarize<S: Array, D: Digest> {
+pub struct Notarize<S: SigTrait, D: Digest> {
     /// The proposal that is being notarized
     pub proposal: Proposal<D>,
     /// The validator's signature
     pub signature: Signature<S>,
 }
 
-impl<S: Array, D: Digest> Notarize<S, D> {
+impl<S: SigTrait, D: Digest> Notarize<S, D> {
     /// Creates a new notarize with the given proposal and signature.
     pub fn new(proposal: Proposal<D>, signature: Signature<S>) -> Self {
         Self {
@@ -309,23 +311,18 @@ impl<S: Array, D: Digest> Notarize<S, D> {
     /// Verifies the signature on this notarize using the provided verifier.
     ///
     /// This ensures that the notarize was actually produced by the claimed validator.
-    pub fn verify<V: Verifier<Signature = S>>(
-        &self,
-        namespace: &[u8],
-        public_key: &V::PublicKey,
-    ) -> bool {
+    pub fn verify<K: PublicKey<Signature = S>>(&self, namespace: &[u8], public_key: &K) -> bool {
         let notarize_namespace = notarize_namespace(namespace);
         let message = self.proposal.encode();
-        V::verify(
+        public_key.verify(
             Some(notarize_namespace.as_ref()),
             &message,
-            public_key,
             &self.signature.signature,
         )
     }
 
     /// Creates a new signed notarize using the provided cryptographic scheme.
-    pub fn sign<C: Scheme<Signature = S>>(
+    pub fn sign<C: PrivateKey<Signature = S>>(
         namespace: &[u8],
         scheme: &mut C,
         public_key_index: u32,
@@ -341,14 +338,14 @@ impl<S: Array, D: Digest> Notarize<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> Write for Notarize<S, D> {
+impl<S: SigTrait, D: Digest> Write for Notarize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
         self.signature.write(writer);
     }
 }
 
-impl<S: Array, D: Digest> Read for Notarize<S, D> {
+impl<S: SigTrait, D: Digest> Read for Notarize<S, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
@@ -361,19 +358,19 @@ impl<S: Array, D: Digest> Read for Notarize<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> EncodeSize for Notarize<S, D> {
+impl<S: SigTrait, D: Digest> EncodeSize for Notarize<S, D> {
     fn encode_size(&self) -> usize {
         self.proposal.encode_size() + self.signature.encode_size()
     }
 }
 
-impl<S: Array, D: Digest> Viewable for Notarize<S, D> {
+impl<S: SigTrait, D: Digest> Viewable for Notarize<S, D> {
     fn view(&self) -> View {
         self.proposal.view()
     }
 }
 
-impl<S: Array, D: Digest> Attributable for Notarize<S, D> {
+impl<S: SigTrait, D: Digest> Attributable for Notarize<S, D> {
     fn signer(&self) -> u32 {
         self.signature.signer()
     }
@@ -382,14 +379,14 @@ impl<S: Array, D: Digest> Attributable for Notarize<S, D> {
 /// Notarization represents an aggregated set of notarizes that meets the quorum threshold.
 /// It includes the proposal and the set of signatures from validators.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Notarization<S: Array, D: Digest> {
+pub struct Notarization<S: SigTrait, D: Digest> {
     /// The proposal that has been notarized
     pub proposal: Proposal<D>,
     /// The set of signatures from validators (must meet quorum threshold)
     pub signatures: Vec<Signature<S>>,
 }
 
-impl<S: Array, D: Digest> Notarization<S, D> {
+impl<S: SigTrait, D: Digest> Notarization<S, D> {
     /// Creates a new notarization with the given proposal and set of signatures.
     ///
     /// # Warning
@@ -410,10 +407,10 @@ impl<S: Array, D: Digest> Notarization<S, D> {
     /// 3. All signers are in the validator set
     ///
     /// In `read_cfg`, we ensure that the signatures are sorted by public key index and are unique.
-    pub fn verify<V: Verifier<Signature = S>>(
+    pub fn verify<K: PublicKey<Signature = S>>(
         &self,
         namespace: &[u8],
-        participants: &[V::PublicKey],
+        participants: &[K],
     ) -> bool {
         // Get allowed signers
         let (threshold, count) = threshold(participants);
@@ -434,10 +431,9 @@ impl<S: Array, D: Digest> Notarization<S, D> {
             };
 
             // Verify signature
-            if !V::verify(
+            if !public_key.verify(
                 Some(notarize_namespace.as_ref()),
                 &message,
-                public_key,
                 &signature.signature,
             ) {
                 return false;
@@ -447,14 +443,14 @@ impl<S: Array, D: Digest> Notarization<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> Write for Notarization<S, D> {
+impl<S: SigTrait, D: Digest> Write for Notarization<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
         self.signatures.write(writer);
     }
 }
 
-impl<S: Array, D: Digest> Read for Notarization<S, D> {
+impl<S: SigTrait, D: Digest> Read for Notarization<S, D> {
     type Cfg = usize;
 
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
@@ -477,13 +473,13 @@ impl<S: Array, D: Digest> Read for Notarization<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> EncodeSize for Notarization<S, D> {
+impl<S: SigTrait, D: Digest> EncodeSize for Notarization<S, D> {
     fn encode_size(&self) -> usize {
         self.proposal.encode_size() + self.signatures.encode_size()
     }
 }
 
-impl<S: Array, D: Digest> Viewable for Notarization<S, D> {
+impl<S: SigTrait, D: Digest> Viewable for Notarization<S, D> {
     fn view(&self) -> View {
         self.proposal.view()
     }
@@ -492,37 +488,36 @@ impl<S: Array, D: Digest> Viewable for Notarization<S, D> {
 /// Nullify represents a validator's nullify to skip the current view.
 /// This is typically used when the leader is unresponsive or fails to propose a valid block.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Nullify<S: Array> {
+pub struct Nullify<S: SigTrait> {
     /// The view to be nullified (skipped)
     pub view: View,
     /// The validator's signature on the view
     pub signature: Signature<S>,
 }
 
-impl<S: Array> Nullify<S> {
+impl<S: SigTrait> Nullify<S> {
     /// Creates a new nullify with the given view and signature.
     pub fn new(view: View, signature: Signature<S>) -> Self {
         Self { view, signature }
     }
 
     /// Verifies the signature on this nullify using the provided verifier.
-    pub fn verify<V: Verifier<Signature = S>>(
+    pub fn verify<K: PrivateKey<Signature = S>>(
         &self,
         namespace: &[u8],
-        public_key: &V::PublicKey,
+        public_key: &K::PublicKey,
     ) -> bool {
         let nullify_namespace = nullify_namespace(namespace);
         let message = view_message(self.view);
-        V::verify(
+        public_key.verify(
             Some(nullify_namespace.as_ref()),
             &message,
-            public_key,
             &self.signature.signature,
         )
     }
 
     /// Creates a new signed nullify using the provided cryptographic scheme.
-    pub fn sign<C: Scheme<Signature = S>>(
+    pub fn sign<C: PrivateKey<Signature = S>>(
         namespace: &[u8],
         scheme: &mut C,
         public_key_index: u32,
@@ -538,14 +533,14 @@ impl<S: Array> Nullify<S> {
     }
 }
 
-impl<S: Array> Write for Nullify<S> {
+impl<S: SigTrait> Write for Nullify<S> {
     fn write(&self, writer: &mut impl BufMut) {
         UInt(self.view).write(writer);
         self.signature.write(writer);
     }
 }
 
-impl<S: Array> Read for Nullify<S> {
+impl<S: SigTrait> Read for Nullify<S> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
@@ -555,19 +550,19 @@ impl<S: Array> Read for Nullify<S> {
     }
 }
 
-impl<S: Array> EncodeSize for Nullify<S> {
+impl<S: SigTrait> EncodeSize for Nullify<S> {
     fn encode_size(&self) -> usize {
         UInt(self.view).encode_size() + self.signature.encode_size()
     }
 }
 
-impl<S: Array> Viewable for Nullify<S> {
+impl<S: SigTrait> Viewable for Nullify<S> {
     fn view(&self) -> View {
         self.view
     }
 }
 
-impl<S: Array> Attributable for Nullify<S> {
+impl<S: SigTrait> Attributable for Nullify<S> {
     fn signer(&self) -> u32 {
         self.signature.signer()
     }
@@ -576,14 +571,14 @@ impl<S: Array> Attributable for Nullify<S> {
 /// Nullification represents an aggregated set of nullifies that meets the quorum threshold.
 /// When a view is nullified, the consensus moves to the next view.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Nullification<S: Array> {
+pub struct Nullification<S: SigTrait> {
     /// The view that has been nullified
     pub view: View,
     /// The set of signatures from validators (must meet quorum threshold)
     pub signatures: Vec<Signature<S>>,
 }
 
-impl<S: Array> Nullification<S> {
+impl<S: SigTrait> Nullification<S> {
     /// Creates a new nullification with the given view and set of signatures.
     ///
     /// # Warning
@@ -596,10 +591,10 @@ impl<S: Array> Nullification<S> {
     /// Verifies all signatures in this nullification using the provided verifier.
     ///
     /// Similar to Notarization::verify, ensures quorum of valid signatures from validators.
-    pub fn verify<V: Verifier<Signature = S>>(
+    pub fn verify<K: PrivateKey<Signature = S>>(
         &self,
         namespace: &[u8],
-        participants: &[V::PublicKey],
+        participants: &[K::PublicKey],
     ) -> bool {
         // Get allowed signers
         let (threshold, count) = threshold(participants);
@@ -620,10 +615,9 @@ impl<S: Array> Nullification<S> {
             };
 
             // Verify signature
-            if !V::verify(
+            if !public_key.verify(
                 Some(nullify_namespace.as_ref()),
                 &message,
-                public_key,
                 &signature.signature,
             ) {
                 return false;
@@ -633,14 +627,14 @@ impl<S: Array> Nullification<S> {
     }
 }
 
-impl<S: Array> Write for Nullification<S> {
+impl<S: SigTrait> Write for Nullification<S> {
     fn write(&self, writer: &mut impl BufMut) {
         UInt(self.view).write(writer);
         self.signatures.write(writer);
     }
 }
 
-impl<S: Array> Read for Nullification<S> {
+impl<S: SigTrait> Read for Nullification<S> {
     type Cfg = usize;
 
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
@@ -660,13 +654,13 @@ impl<S: Array> Read for Nullification<S> {
     }
 }
 
-impl<S: Array> EncodeSize for Nullification<S> {
+impl<S: SigTrait> EncodeSize for Nullification<S> {
     fn encode_size(&self) -> usize {
         UInt(self.view).encode_size() + self.signatures.encode_size()
     }
 }
 
-impl<S: Array> Viewable for Nullification<S> {
+impl<S: SigTrait> Viewable for Nullification<S> {
     fn view(&self) -> View {
         self.view
     }
@@ -676,14 +670,14 @@ impl<S: Array> Viewable for Nullification<S> {
 /// This happens after a proposal has been notarized, confirming it as the canonical block
 /// for this view.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Finalize<S: Array, D: Digest> {
+pub struct Finalize<S: SigTrait, D: Digest> {
     /// The proposal to be finalized
     pub proposal: Proposal<D>,
     /// The validator's signature on the proposal
     pub signature: Signature<S>,
 }
 
-impl<S: Array, D: Digest> Finalize<S, D> {
+impl<S: SigTrait, D: Digest> Finalize<S, D> {
     /// Creates a new finalize with the given proposal and signature.
     pub fn new(proposal: Proposal<D>, signature: Signature<S>) -> Self {
         Self {
@@ -693,23 +687,22 @@ impl<S: Array, D: Digest> Finalize<S, D> {
     }
 
     /// Verifies the signature on this finalize using the provided verifier.
-    pub fn verify<V: Verifier<Signature = S>>(
+    pub fn verify<K: PrivateKey<Signature = S>>(
         &self,
         namespace: &[u8],
-        public_key: &V::PublicKey,
+        public_key: &K::PublicKey,
     ) -> bool {
         let finalize_namespace = finalize_namespace(namespace);
         let message = self.proposal.encode();
-        V::verify(
+        public_key.verify(
             Some(finalize_namespace.as_ref()),
             &message,
-            public_key,
             &self.signature.signature,
         )
     }
 
     /// Creates a new signed finalize using the provided cryptographic scheme.
-    pub fn sign<C: Scheme<Signature = S>>(
+    pub fn sign<C: PrivateKey<Signature = S>>(
         namespace: &[u8],
         scheme: &mut C,
         public_key_index: u32,
@@ -725,14 +718,14 @@ impl<S: Array, D: Digest> Finalize<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> Write for Finalize<S, D> {
+impl<S: SigTrait, D: Digest> Write for Finalize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
         self.signature.write(writer);
     }
 }
 
-impl<S: Array, D: Digest> Read for Finalize<S, D> {
+impl<S: SigTrait, D: Digest> Read for Finalize<S, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
@@ -745,19 +738,19 @@ impl<S: Array, D: Digest> Read for Finalize<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> EncodeSize for Finalize<S, D> {
+impl<S: SigTrait, D: Digest> EncodeSize for Finalize<S, D> {
     fn encode_size(&self) -> usize {
         self.proposal.encode_size() + self.signature.encode_size()
     }
 }
 
-impl<S: Array, D: Digest> Viewable for Finalize<S, D> {
+impl<S: SigTrait, D: Digest> Viewable for Finalize<S, D> {
     fn view(&self) -> View {
         self.proposal.view()
     }
 }
 
-impl<S: Array, D: Digest> Attributable for Finalize<S, D> {
+impl<S: SigTrait, D: Digest> Attributable for Finalize<S, D> {
     fn signer(&self) -> u32 {
         self.signature.signer()
     }
@@ -766,14 +759,14 @@ impl<S: Array, D: Digest> Attributable for Finalize<S, D> {
 /// Finalization represents an aggregated set of finalizes that meets the quorum threshold.
 /// When a proposal is finalized, it becomes the canonical block for its view.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Finalization<S: Array, D: Digest> {
+pub struct Finalization<S: SigTrait, D: Digest> {
     /// The proposal that has been finalized
     pub proposal: Proposal<D>,
     /// The set of signatures from validators (must meet quorum threshold)
     pub signatures: Vec<Signature<S>>,
 }
 
-impl<S: Array, D: Digest> Finalization<S, D> {
+impl<S: SigTrait, D: Digest> Finalization<S, D> {
     /// Creates a new finalization with the given proposal and set of signatures.
     ///
     /// # Warning
@@ -789,7 +782,7 @@ impl<S: Array, D: Digest> Finalization<S, D> {
     /// Verifies all signatures in this finalization using the provided verifier.
     ///
     /// Similar to Notarization::verify, ensures quorum of valid signatures from validators.
-    pub fn verify<V: Verifier<Signature = S>>(
+    pub fn verify<V: PrivateKey<Signature = S>>(
         &self,
         namespace: &[u8],
         participants: &[V::PublicKey],
@@ -813,10 +806,9 @@ impl<S: Array, D: Digest> Finalization<S, D> {
             };
 
             // Verify signature
-            if !V::verify(
+            if !public_key.verify(
                 Some(finalize_namespace.as_ref()),
                 &message,
-                public_key,
                 &signature.signature,
             ) {
                 return false;
@@ -826,14 +818,14 @@ impl<S: Array, D: Digest> Finalization<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> Write for Finalization<S, D> {
+impl<S: SigTrait, D: Digest> Write for Finalization<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
         self.signatures.write(writer);
     }
 }
 
-impl<S: Array, D: Digest> Read for Finalization<S, D> {
+impl<S: SigTrait, D: Digest> Read for Finalization<S, D> {
     type Cfg = usize;
 
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
@@ -856,13 +848,13 @@ impl<S: Array, D: Digest> Read for Finalization<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> EncodeSize for Finalization<S, D> {
+impl<S: SigTrait, D: Digest> EncodeSize for Finalization<S, D> {
     fn encode_size(&self) -> usize {
         self.proposal.encode_size() + self.signatures.encode_size()
     }
 }
 
-impl<S: Array, D: Digest> Viewable for Finalization<S, D> {
+impl<S: SigTrait, D: Digest> Viewable for Finalization<S, D> {
     fn view(&self) -> View {
         self.proposal.view()
     }
@@ -871,14 +863,14 @@ impl<S: Array, D: Digest> Viewable for Finalization<S, D> {
 /// Backfiller is a message type for requesting and receiving missing consensus artifacts.
 /// This is used to synchronize validators that have fallen behind or just joined the network.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Backfiller<S: Array, D: Digest> {
+pub enum Backfiller<S: SigTrait, D: Digest> {
     /// Request for missing notarizations and nullifications
     Request(Request),
     /// Response containing requested notarizations and nullifications
     Response(Response<S, D>),
 }
 
-impl<S: Array, D: Digest> Write for Backfiller<S, D> {
+impl<S: SigTrait, D: Digest> Write for Backfiller<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Backfiller::Request(request) => {
@@ -893,7 +885,7 @@ impl<S: Array, D: Digest> Write for Backfiller<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> Read for Backfiller<S, D> {
+impl<S: SigTrait, D: Digest> Read for Backfiller<S, D> {
     type Cfg = (usize, usize);
 
     fn read_cfg(reader: &mut impl Buf, cfg: &(usize, usize)) -> Result<Self, Error> {
@@ -911,7 +903,7 @@ impl<S: Array, D: Digest> Read for Backfiller<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> EncodeSize for Backfiller<S, D> {
+impl<S: SigTrait, D: Digest> EncodeSize for Backfiller<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Backfiller::Request(request) => request.encode_size(),
@@ -978,7 +970,7 @@ impl EncodeSize for Request {
 /// Response is a message containing the requested notarizations and nullifications.
 /// This is sent in response to a Request message.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Response<S: Array, D: Digest> {
+pub struct Response<S: SigTrait, D: Digest> {
     /// Identifier matching the original request
     pub id: u64,
     /// Notarizations for the requested views
@@ -987,7 +979,7 @@ pub struct Response<S: Array, D: Digest> {
     pub nullifications: Vec<Nullification<S>>,
 }
 
-impl<S: Array, D: Digest> Response<S, D> {
+impl<S: SigTrait, D: Digest> Response<S, D> {
     /// Creates a new response with the given id, notarizations, and nullifications.
     pub fn new(
         id: u64,
@@ -1002,7 +994,7 @@ impl<S: Array, D: Digest> Response<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> Write for Response<S, D> {
+impl<S: SigTrait, D: Digest> Write for Response<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         UInt(self.id).write(writer);
         self.notarizations.write(writer);
@@ -1010,7 +1002,7 @@ impl<S: Array, D: Digest> Write for Response<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> Read for Response<S, D> {
+impl<S: SigTrait, D: Digest> Read for Response<S, D> {
     type Cfg = (usize, usize);
 
     fn read_cfg(reader: &mut impl Buf, (total, max_sigs): &(usize, usize)) -> Result<Self, Error> {
@@ -1028,7 +1020,7 @@ impl<S: Array, D: Digest> Read for Response<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> EncodeSize for Response<S, D> {
+impl<S: SigTrait, D: Digest> EncodeSize for Response<S, D> {
     fn encode_size(&self) -> usize {
         UInt(self.id).encode_size()
             + self.notarizations.encode_size()
@@ -1039,7 +1031,7 @@ impl<S: Array, D: Digest> EncodeSize for Response<S, D> {
 /// Activity represents all possible activities that can occur in the consensus protocol.
 /// This includes both regular consensus messages and fault evidence.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
-pub enum Activity<S: Array, D: Digest> {
+pub enum Activity<S: SigTrait, D: Digest> {
     /// A single notarize over a proposal
     Notarize(Notarize<S, D>),
     /// An aggregated set of validator notarizes that meets quorum
@@ -1060,7 +1052,7 @@ pub enum Activity<S: Array, D: Digest> {
     NullifyFinalize(NullifyFinalize<S, D>),
 }
 
-impl<S: Array, D: Digest> Write for Activity<S, D> {
+impl<S: SigTrait, D: Digest> Write for Activity<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Activity::Notarize(notarize) => {
@@ -1103,7 +1095,7 @@ impl<S: Array, D: Digest> Write for Activity<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> Read for Activity<S, D> {
+impl<S: SigTrait, D: Digest> Read for Activity<S, D> {
     type Cfg = usize;
 
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
@@ -1138,7 +1130,7 @@ impl<S: Array, D: Digest> Read for Activity<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> EncodeSize for Activity<S, D> {
+impl<S: SigTrait, D: Digest> EncodeSize for Activity<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Activity::Notarize(notarize) => notarize.encode_size(),
@@ -1158,7 +1150,7 @@ impl<S: Array, D: Digest> EncodeSize for Activity<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> Viewable for Activity<S, D> {
+impl<S: SigTrait, D: Digest> Viewable for Activity<S, D> {
     fn view(&self) -> View {
         match self {
             Activity::Notarize(notarize) => notarize.view(),
@@ -1177,7 +1169,7 @@ impl<S: Array, D: Digest> Viewable for Activity<S, D> {
 /// ConflictingNotarize represents evidence of a Byzantine validator sending conflicting notarizes.
 /// This is used to prove that a validator has equivocated (voted for different proposals in the same view).
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
-pub struct ConflictingNotarize<S: Array, D: Digest> {
+pub struct ConflictingNotarize<S: SigTrait, D: Digest> {
     /// The view in which the conflict occurred
     pub view: View,
     /// The parent view of the first conflicting proposal
@@ -1194,7 +1186,7 @@ pub struct ConflictingNotarize<S: Array, D: Digest> {
     pub signature_2: Signature<S>,
 }
 
-impl<S: Array, D: Digest> ConflictingNotarize<S, D> {
+impl<S: SigTrait, D: Digest> ConflictingNotarize<S, D> {
     /// Creates a new conflicting notarize evidence from two conflicting notarizes.
     pub fn new(notarize_1: Notarize<S, D>, notarize_2: Notarize<S, D>) -> Self {
         assert_eq!(notarize_1.view(), notarize_2.view());
@@ -1225,18 +1217,18 @@ impl<S: Array, D: Digest> ConflictingNotarize<S, D> {
     }
 
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
-    pub fn verify<V: Verifier<Signature = S>>(
+    pub fn verify<V: PrivateKey<Signature = S>>(
         &self,
         namespace: &[u8],
         public_key: &V::PublicKey,
     ) -> bool {
         let (notarize_1, notarize_2) = self.notarizes();
-        notarize_1.verify::<V>(namespace, public_key)
-            && notarize_2.verify::<V>(namespace, public_key)
+        notarize_1.verify::<V::PublicKey>(namespace, public_key)
+            && notarize_2.verify::<V::PublicKey>(namespace, public_key)
     }
 }
 
-impl<S: Array, D: Digest> Write for ConflictingNotarize<S, D> {
+impl<S: SigTrait, D: Digest> Write for ConflictingNotarize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         UInt(self.view).write(writer);
         UInt(self.parent_1).write(writer);
@@ -1248,7 +1240,7 @@ impl<S: Array, D: Digest> Write for ConflictingNotarize<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> Read for ConflictingNotarize<S, D> {
+impl<S: SigTrait, D: Digest> Read for ConflictingNotarize<S, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
@@ -1277,7 +1269,7 @@ impl<S: Array, D: Digest> Read for ConflictingNotarize<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> EncodeSize for ConflictingNotarize<S, D> {
+impl<S: SigTrait, D: Digest> EncodeSize for ConflictingNotarize<S, D> {
     fn encode_size(&self) -> usize {
         UInt(self.view).encode_size()
             + UInt(self.parent_1).encode_size()
@@ -1289,13 +1281,13 @@ impl<S: Array, D: Digest> EncodeSize for ConflictingNotarize<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> Viewable for ConflictingNotarize<S, D> {
+impl<S: SigTrait, D: Digest> Viewable for ConflictingNotarize<S, D> {
     fn view(&self) -> View {
         self.view
     }
 }
 
-impl<S: Array, D: Digest> Attributable for ConflictingNotarize<S, D> {
+impl<S: SigTrait, D: Digest> Attributable for ConflictingNotarize<S, D> {
     fn signer(&self) -> u32 {
         self.signature_1.signer()
     }
@@ -1304,7 +1296,7 @@ impl<S: Array, D: Digest> Attributable for ConflictingNotarize<S, D> {
 /// ConflictingFinalize represents evidence of a Byzantine validator sending conflicting finalizes.
 /// Similar to ConflictingNotarize, but for finalizes.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
-pub struct ConflictingFinalize<S: Array, D: Digest> {
+pub struct ConflictingFinalize<S: SigTrait, D: Digest> {
     /// The view in which the conflict occurred
     pub view: View,
     /// The parent view of the first conflicting proposal
@@ -1321,7 +1313,7 @@ pub struct ConflictingFinalize<S: Array, D: Digest> {
     pub signature_2: Signature<S>,
 }
 
-impl<S: Array, D: Digest> ConflictingFinalize<S, D> {
+impl<S: SigTrait, D: Digest> ConflictingFinalize<S, D> {
     /// Creates a new conflicting finalize evidence from two conflicting finalizes.
     pub fn new(finalize_1: Finalize<S, D>, finalize_2: Finalize<S, D>) -> Self {
         assert_eq!(finalize_1.view(), finalize_2.view());
@@ -1352,7 +1344,7 @@ impl<S: Array, D: Digest> ConflictingFinalize<S, D> {
     }
 
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
-    pub fn verify<V: Verifier<Signature = S>>(
+    pub fn verify<V: PrivateKey<Signature = S>>(
         &self,
         namespace: &[u8],
         public_key: &V::PublicKey,
@@ -1363,7 +1355,7 @@ impl<S: Array, D: Digest> ConflictingFinalize<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> Write for ConflictingFinalize<S, D> {
+impl<S: SigTrait, D: Digest> Write for ConflictingFinalize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         UInt(self.view).write(writer);
         UInt(self.parent_1).write(writer);
@@ -1375,7 +1367,7 @@ impl<S: Array, D: Digest> Write for ConflictingFinalize<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> Read for ConflictingFinalize<S, D> {
+impl<S: SigTrait, D: Digest> Read for ConflictingFinalize<S, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
@@ -1404,7 +1396,7 @@ impl<S: Array, D: Digest> Read for ConflictingFinalize<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> EncodeSize for ConflictingFinalize<S, D> {
+impl<S: SigTrait, D: Digest> EncodeSize for ConflictingFinalize<S, D> {
     fn encode_size(&self) -> usize {
         UInt(self.view).encode_size()
             + UInt(self.parent_1).encode_size()
@@ -1416,13 +1408,13 @@ impl<S: Array, D: Digest> EncodeSize for ConflictingFinalize<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> Viewable for ConflictingFinalize<S, D> {
+impl<S: SigTrait, D: Digest> Viewable for ConflictingFinalize<S, D> {
     fn view(&self) -> View {
         self.view
     }
 }
 
-impl<S: Array, D: Digest> Attributable for ConflictingFinalize<S, D> {
+impl<S: SigTrait, D: Digest> Attributable for ConflictingFinalize<S, D> {
     fn signer(&self) -> u32 {
         self.signature_1.signer()
     }
@@ -1432,7 +1424,7 @@ impl<S: Array, D: Digest> Attributable for ConflictingFinalize<S, D> {
 /// for the same view, which is contradictory behavior (a validator should either try to skip a view OR
 /// finalize a proposal, not both).
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
-pub struct NullifyFinalize<S: Array, D: Digest> {
+pub struct NullifyFinalize<S: SigTrait, D: Digest> {
     /// The proposal that the validator tried to finalize
     pub proposal: Proposal<D>,
     /// The signature on the nullify
@@ -1441,7 +1433,7 @@ pub struct NullifyFinalize<S: Array, D: Digest> {
     pub finalize_signature: Signature<S>,
 }
 
-impl<S: Array, D: Digest> NullifyFinalize<S, D> {
+impl<S: SigTrait, D: Digest> NullifyFinalize<S, D> {
     /// Creates a new nullify-finalize evidence from a nullify and a finalize.
     pub fn new(nullify: Nullify<S>, finalize: Finalize<S, D>) -> Self {
         assert_eq!(nullify.view(), finalize.view());
@@ -1454,7 +1446,7 @@ impl<S: Array, D: Digest> NullifyFinalize<S, D> {
     }
 
     /// Verifies that both the nullify and finalize signatures are valid, proving Byzantine behavior.
-    pub fn verify<V: Verifier<Signature = S>>(
+    pub fn verify<V: PrivateKey<Signature = S>>(
         &self,
         namespace: &[u8],
         public_key: &V::PublicKey,
@@ -1465,7 +1457,7 @@ impl<S: Array, D: Digest> NullifyFinalize<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> Write for NullifyFinalize<S, D> {
+impl<S: SigTrait, D: Digest> Write for NullifyFinalize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
         self.view_signature.write(writer);
@@ -1473,7 +1465,7 @@ impl<S: Array, D: Digest> Write for NullifyFinalize<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> Read for NullifyFinalize<S, D> {
+impl<S: SigTrait, D: Digest> Read for NullifyFinalize<S, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
@@ -1494,7 +1486,7 @@ impl<S: Array, D: Digest> Read for NullifyFinalize<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> EncodeSize for NullifyFinalize<S, D> {
+impl<S: SigTrait, D: Digest> EncodeSize for NullifyFinalize<S, D> {
     fn encode_size(&self) -> usize {
         self.proposal.encode_size()
             + self.view_signature.encode_size()
@@ -1502,13 +1494,13 @@ impl<S: Array, D: Digest> EncodeSize for NullifyFinalize<S, D> {
     }
 }
 
-impl<S: Array, D: Digest> Viewable for NullifyFinalize<S, D> {
+impl<S: SigTrait, D: Digest> Viewable for NullifyFinalize<S, D> {
     fn view(&self) -> View {
         self.proposal.view()
     }
 }
 
-impl<S: Array, D: Digest> Attributable for NullifyFinalize<S, D> {
+impl<S: SigTrait, D: Digest> Attributable for NullifyFinalize<S, D> {
     fn signer(&self) -> u32 {
         self.view_signature.signer()
     }
@@ -1518,8 +1510,9 @@ impl<S: Array, D: Digest> Attributable for NullifyFinalize<S, D> {
 mod tests {
     use super::*;
     use commonware_codec::{Decode, DecodeExt, Encode};
-    use commonware_cryptography::{ed25519, sha256::Digest as Sha256Digest, Ed25519, Signer};
-    use commonware_utils::array::U64;
+    use commonware_cryptography::{
+        ed25519, sha256::Digest as Sha256Digest, PrivateKeyGen as _, Signer as _,
+    };
 
     const NAMESPACE: &[u8] = b"test";
 
@@ -1528,8 +1521,8 @@ mod tests {
         Sha256Digest::from([v; 32]) // Simple fixed digest for testing
     }
 
-    fn sample_scheme(v: u64) -> Ed25519 {
-        Ed25519::from_seed(v)
+    fn sample_scheme(v: u64) -> ed25519::PrivateKey {
+        ed25519::PrivateKey::from_seed(v)
     }
 
     #[test]
@@ -1548,7 +1541,7 @@ mod tests {
         let encoded = notarize.encode();
         let decoded = Notarize::<ed25519::Signature, Sha256Digest>::decode(encoded).unwrap();
         assert_eq!(notarize, decoded);
-        assert!(decoded.verify::<Ed25519>(NAMESPACE, &scheme.public_key()));
+        assert!(decoded.verify::<ed25519::PublicKey>(NAMESPACE, &scheme.public_key()));
     }
 
     #[test]
@@ -1565,9 +1558,10 @@ mod tests {
             Notarization::<ed25519::Signature, Sha256Digest>::decode_cfg(encoded, &usize::MAX)
                 .unwrap();
         assert_eq!(notarization, decoded);
-        assert!(
-            decoded.verify::<Ed25519>(NAMESPACE, &[scheme_1.public_key(), scheme_2.public_key()])
-        );
+        assert!(decoded.verify::<ed25519::PublicKey>(
+            NAMESPACE,
+            &[scheme_1.public_key(), scheme_2.public_key()]
+        ));
     }
 
     #[test]
@@ -1577,7 +1571,7 @@ mod tests {
         let encoded = nullify.encode();
         let decoded = Nullify::<ed25519::Signature>::decode(encoded).unwrap();
         assert_eq!(nullify, decoded);
-        assert!(decoded.verify::<Ed25519>(NAMESPACE, &scheme.public_key()));
+        assert!(decoded.verify::<ed25519::PrivateKey>(NAMESPACE, &scheme.public_key()));
     }
 
     #[test]
@@ -1592,9 +1586,10 @@ mod tests {
         let decoded =
             Nullification::<ed25519::Signature>::decode_cfg(encoded, &usize::MAX).unwrap();
         assert_eq!(nullification, decoded);
-        assert!(
-            decoded.verify::<Ed25519>(NAMESPACE, &[scheme_1.public_key(), scheme_2.public_key()])
-        );
+        assert!(decoded.verify::<ed25519::PrivateKey>(
+            NAMESPACE,
+            &[scheme_1.public_key(), scheme_2.public_key()]
+        ));
     }
 
     #[test]
@@ -1621,19 +1616,22 @@ mod tests {
             Finalization::<ed25519::Signature, Sha256Digest>::decode_cfg(encoded, &usize::MAX)
                 .unwrap();
         assert_eq!(finalization, decoded);
-        assert!(
-            decoded.verify::<Ed25519>(NAMESPACE, &[scheme_1.public_key(), scheme_2.public_key()])
-        );
+        assert!(decoded.verify::<ed25519::PrivateKey>(
+            NAMESPACE,
+            &[scheme_1.public_key(), scheme_2.public_key()]
+        ));
     }
 
     #[test]
     fn test_backfiller_encode_decode() {
         let request = Request::new(1, vec![10, 11], vec![12, 13]);
-        let backfiller = Backfiller::Request::<U64, Sha256Digest>(request.clone());
+        let backfiller = Backfiller::Request::<ed25519::Signature, Sha256Digest>(request.clone());
         let encoded = backfiller.encode();
-        let decoded =
-            Backfiller::<U64, Sha256Digest>::decode_cfg(encoded, &(usize::MAX, usize::MAX))
-                .unwrap();
+        let decoded = Backfiller::<ed25519::Signature, Sha256Digest>::decode_cfg(
+            encoded,
+            &(usize::MAX, usize::MAX),
+        )
+        .unwrap();
         assert!(matches!(decoded, Backfiller::Request(r) if r == request));
     }
 
@@ -1673,7 +1671,7 @@ mod tests {
         let decoded =
             ConflictingNotarize::<ed25519::Signature, Sha256Digest>::decode(encoded).unwrap();
         assert_eq!(conflicting, decoded);
-        assert!(conflicting.verify::<Ed25519>(NAMESPACE, &scheme.public_key()));
+        assert!(conflicting.verify::<ed25519::PrivateKey>(NAMESPACE, &scheme.public_key()));
     }
 
     #[test]
@@ -1688,7 +1686,7 @@ mod tests {
         let decoded =
             ConflictingFinalize::<ed25519::Signature, Sha256Digest>::decode(encoded).unwrap();
         assert_eq!(conflicting, decoded);
-        assert!(conflicting.verify::<Ed25519>(NAMESPACE, &scheme.public_key()));
+        assert!(conflicting.verify::<ed25519::PrivateKey>(NAMESPACE, &scheme.public_key()));
     }
 
     #[test]
@@ -1701,7 +1699,7 @@ mod tests {
         let encoded = nullify_finalize.encode();
         let decoded = NullifyFinalize::<ed25519::Signature, Sha256Digest>::decode(encoded).unwrap();
         assert_eq!(nullify_finalize, decoded);
-        assert!(nullify_finalize.verify::<Ed25519>(NAMESPACE, &scheme.public_key()));
+        assert!(nullify_finalize.verify::<ed25519::PrivateKey>(NAMESPACE, &scheme.public_key()));
     }
 
     #[test]
@@ -1711,7 +1709,7 @@ mod tests {
         let notarize = Notarize::sign(NAMESPACE, &mut scheme, 0, proposal);
 
         // Verify with wrong namespace - should fail
-        assert!(!notarize.verify::<Ed25519>(b"wrong_namespace", &scheme.public_key()));
+        assert!(!notarize.verify::<ed25519::PublicKey>(b"wrong_namespace", &scheme.public_key()));
     }
 
     #[test]
@@ -1722,7 +1720,7 @@ mod tests {
         let notarize = Notarize::sign(NAMESPACE, &mut scheme1, 0, proposal);
 
         // Verify with wrong public key - should fail
-        assert!(!notarize.verify::<Ed25519>(NAMESPACE, &scheme2.public_key()));
+        assert!(!notarize.verify::<ed25519::PublicKey>(NAMESPACE, &scheme2.public_key()));
     }
 
     #[test]
@@ -1746,13 +1744,13 @@ mod tests {
         ];
 
         // Should fail because we only have 2 signatures but need 3 for quorum
-        assert!(!notarization.verify::<Ed25519>(NAMESPACE, &validators));
+        assert!(!notarization.verify::<ed25519::PublicKey>(NAMESPACE, &validators));
     }
 
     #[test]
     fn test_notarization_verify_invalid_validator_index() {
         let mut scheme_1 = sample_scheme(0);
-        let mut scheme_2 = sample_scheme(1);
+        let scheme_2 = sample_scheme(1);
         let proposal = Proposal::new(10, 5, sample_digest(1));
 
         // Create notarize with invalid public key index (3, which is out of bounds)
@@ -1767,7 +1765,7 @@ mod tests {
         let validators = vec![scheme_1.public_key(), scheme_2.public_key()];
 
         // Should fail because the second signature refers to an invalid validator index
-        assert!(!notarization.verify::<Ed25519>(NAMESPACE, &validators));
+        assert!(!notarization.verify::<ed25519::PublicKey>(NAMESPACE, &validators));
     }
 
     #[test]
@@ -1786,7 +1784,7 @@ mod tests {
         let conflict = ConflictingNotarize::new(notarize1, notarize2);
 
         // Verify the evidence is valid - both signatures should be valid
-        assert!(conflict.verify::<Ed25519>(NAMESPACE, &scheme.public_key()));
+        assert!(conflict.verify::<ed25519::PrivateKey>(NAMESPACE, &scheme.public_key()));
 
         // Now create invalid evidence
         let mut scheme2 = sample_scheme(1);
@@ -1805,8 +1803,8 @@ mod tests {
         };
 
         // Verify should fail with either key because the signatures are from different validators
-        assert!(!invalid_conflict.verify::<Ed25519>(NAMESPACE, &scheme.public_key()));
-        assert!(!invalid_conflict.verify::<Ed25519>(NAMESPACE, &scheme2.public_key()));
+        assert!(!invalid_conflict.verify::<ed25519::PrivateKey>(NAMESPACE, &scheme.public_key()));
+        assert!(!invalid_conflict.verify::<ed25519::PrivateKey>(NAMESPACE, &scheme2.public_key()));
     }
 
     #[test]
@@ -1825,7 +1823,7 @@ mod tests {
         let conflict = NullifyFinalize::new(nullify, finalize);
 
         // Verify the evidence is valid
-        assert!(conflict.verify::<Ed25519>(NAMESPACE, &scheme.public_key()));
+        assert!(conflict.verify::<ed25519::PrivateKey>(NAMESPACE, &scheme.public_key()));
 
         // Now create invalid evidence with different validators
         let mut scheme2 = sample_scheme(1);
@@ -1834,7 +1832,8 @@ mod tests {
 
         // This will compile but verification with wrong key should fail
         let conflict2 = NullifyFinalize::new(nullify2, finalize2);
-        assert!(!conflict2.verify::<Ed25519>(NAMESPACE, &scheme.public_key())); // Wrong key
+        assert!(!conflict2.verify::<ed25519::PrivateKey>(NAMESPACE, &scheme.public_key()));
+        // Wrong key
     }
 
     #[test]
@@ -1854,7 +1853,7 @@ mod tests {
         let validators = vec![scheme_1.public_key(), scheme_2.public_key()];
 
         // Valid verification
-        assert!(nullification.verify::<Ed25519>(NAMESPACE, &validators));
+        assert!(nullification.verify::<ed25519::PrivateKey>(NAMESPACE, &validators));
 
         // Create a nullification with tampered signature
         let tampered_sig = Signature::new(2, scheme_1.sign(Some(NAMESPACE), &nullify_1.encode()));
@@ -1863,6 +1862,6 @@ mod tests {
         let invalid_nullification = Nullification::new(10, invalid_signatures);
 
         // Verification should fail with tampered signature
-        assert!(!invalid_nullification.verify::<Ed25519>(NAMESPACE, &validators));
+        assert!(!invalid_nullification.verify::<ed25519::PrivateKey>(NAMESPACE, &validators));
     }
 }
