@@ -40,14 +40,14 @@ impl Network {
         let (send_submitter, rx) = mpsc::channel(cfg.size as usize);
         std::thread::spawn({
             let cfg = cfg.clone();
-            let registry = registry.sub_registry_with_prefix("io_uring_send");
+            let registry = registry.sub_registry_with_prefix("iouring_sender");
             let metrics = Arc::new(iouring::Metrics::new(registry));
             move || block_on(iouring::run(cfg, metrics, rx))
         });
 
         // Create an io_uring instance to handle receive operations.
         let (recv_submitter, rx) = mpsc::channel(cfg.size as usize);
-        let registry = registry.sub_registry_with_prefix("io_uring_recv");
+        let registry = registry.sub_registry_with_prefix("iouring_receiver");
         let metrics = Arc::new(iouring::Metrics::new(registry));
         std::thread::spawn(|| block_on(iouring::run(cfg, metrics, rx)));
 

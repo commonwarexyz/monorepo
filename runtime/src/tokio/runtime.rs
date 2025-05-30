@@ -242,7 +242,7 @@ impl crate::Runner for Runner {
 
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-storage")] {
-                let iouring_registry = runtime_registry.sub_registry_with_prefix("io_uring_storage");
+                let iouring_registry = runtime_registry.sub_registry_with_prefix("iouring_storage");
                 let storage = MeteredStorage::new(
                     IoUringStorage::start(IoUringConfig {
                         storage_directory: self.cfg.storage_directory.clone(),
