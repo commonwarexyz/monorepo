@@ -5,7 +5,7 @@ use futures::{
     executor::block_on,
     SinkExt as _,
 };
-use io_uring::{squeue::Entry as SqueueEntry, types::Fd};
+use io_uring::types::Fd;
 use prometheus_client::registry::Registry;
 use std::{
     net::SocketAddr,
