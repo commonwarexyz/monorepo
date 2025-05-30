@@ -35,7 +35,7 @@ pub struct Config {
     /// work to it. Since the `run` event loop is a future that may move
     /// between threads, this means in practice that `single_issuer` should
     /// only be used in a single-threaded context.
-    /// See IORING_SETUP_SINGLE_ISSUER in https://man7.org/linux/man-pages/man2/io_uring_setup.2.html
+    /// See IORING_SETUP_SINGLE_ISSUER in <https://man7.org/linux/man-pages/man2/io_uring_setup.2.html>.
     pub single_issuer: bool,
     /// In the io_uring event loop (`run`), wait at most this long for a new
     /// completion before checking for new work to submit to the io_ring.
