@@ -263,8 +263,9 @@ impl crate::Runner for Runner {
 
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-network")] {
+                let iouring_registry = runtime_registry.sub_registry_with_prefix("iouring_network");
                 let network = MeteredNetwork::new(
-                    IoUringNetwork::start(crate::iouring::Config::default(),runtime_registry).unwrap(),
+                    IoUringNetwork::start(crate::iouring::Config::default(),iouring_registry).unwrap(),
                     runtime_registry,
                 );
             } else {
