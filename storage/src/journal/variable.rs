@@ -1439,7 +1439,7 @@ mod tests {
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            blob.write_at(vec![0u8; 12], blob_len)
+            blob.write_at(vec![0u8; 16], blob_len)
                 .await
                 .expect("Failed to add extra data");
             blob.close().await.expect("Failed to close blob");
