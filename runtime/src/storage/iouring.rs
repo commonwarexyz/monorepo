@@ -8,7 +8,8 @@ use futures::{
     executor::block_on,
     SinkExt as _,
 };
-use io_uring::{opcode, types};
+use io_uring::{opcode, squeue::Entry as SqueueEntry, types};
+use prometheus_client::registry::Registry;
 use std::fs::{self, File};
 use std::io::Error as IoError;
 use std::os::fd::AsRawFd;
@@ -39,7 +40,8 @@ impl Storage {
             storage_directory: cfg.storage_directory.clone(),
             io_sender,
         };
-        std::thread::spawn(|| block_on(iouring::run(cfg.ring_config, receiver)));
+        let metrics = Arc::new(iouring::Metrics::new(registry));
+        std::thread::spawn(|| block_on(iouring::run(cfg.ring_config, metrics, receiver)));
         storage
     }
 }
@@ -328,10 +330,13 @@ mod tests {
         let storage_directory =
             env::temp_dir().join(format!("commonware_iouring_storage_{}", rng.gen::<u64>()));
 
-        let storage = Storage::start(Config {
-            storage_directory: storage_directory.clone(),
-            ring_config: Default::default(),
-        });
+        let storage = Storage::start(
+            Config {
+                storage_directory: storage_directory.clone(),
+                ring_config: Default::default(),
+            },
+            &mut Registry::default(),
+        );
         (storage, storage_directory)
     }
 

@@ -10,7 +10,8 @@ use io_uring::{
     types::Timespec,
     IoUring,
 };
-use std::{collections::HashMap, time::Duration};
+use prometheus_client::{metrics::gauge::Gauge, registry::Registry};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 /// Reserved ID for a CQE that indicates an operation timed out.
 const TIMEOUT_WORK_ID: u64 = u64::MAX;
@@ -22,6 +23,31 @@ const SHUTDOWN_TIMEOUT_WORK_ID: u64 = u64::MAX - 1;
 /// wake up to check for new work.
 const POLL_WORK_ID: u64 = u64::MAX - 2;
 
+#[derive(Debug)]
+/// Tracks io_uring metrics.
+pub struct Metrics {
+    /// Number of operations submitted to the io_uring whose CQEs haven't
+    /// yet been processed. Note this metric doesn't include timeouts,
+    /// which are generated internally by the io_uring event loop.
+    /// It's only updated before `submit_and_wait` is called, so it may
+    /// temporarily vary from the actual number of pending operations.
+    pending_operations: Gauge,
+}
+
+impl Metrics {
+    pub fn new(registry: &mut Registry) -> Self {
+        let metrics = Self {
+            pending_operations: Gauge::default(),
+        };
+        registry.register(
+            "pending_operations",
+            "Number of operations submitted to the io_uring whose CQEs haven't yet been processed",
+            metrics.pending_operations.clone(),
+        );
+        metrics
+    }
+}
+
 #[derive(Clone, Debug)]
 /// Configuration for an io_uring instance.
 /// See `man io_uring`.
@@ -31,6 +57,12 @@ pub struct Config {
     /// If true, use IOPOLL mode.
     pub io_poll: bool,
     /// If true, use single issuer mode.
+    /// Warning: when enabled, user must guarantee that the same thread
+    /// that creates the io_uring instance is the only thread that submits
+    /// work to it. Since the `run` event loop is a future that may move
+    /// between threads, this means in practice that `single_issuer` should
+    /// only be used in a single-threaded context.
+    /// See IORING_SETUP_SINGLE_ISSUER in <https://man7.org/linux/man-pages/man2/io_uring_setup.2.html>.
     pub single_issuer: bool,
     /// In the io_uring event loop (`run`), wait at most this long for a new
     /// completion before checking for new work to submit to the io_ring.
@@ -71,7 +103,7 @@ impl Default for Config {
         Self {
             size: 128,
             io_poll: false,
-            single_issuer: true,
+            single_issuer: false,
             force_poll: None,
             op_timeout: None,
             shutdown_timeout: None,
@@ -149,7 +181,7 @@ fn handle_cqe(
 /// Creates a new io_uring instance that listens for incoming work on `receiver`.
 /// This function will block until `receiver` is closed or an error occurs.
 /// It should be run in a separate task.
-pub(crate) async fn run(cfg: Config, mut receiver: mpsc::Receiver<Op>) {
+pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::Receiver<Op>) {
     let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
     let mut next_work_id: u64 = 0;
     // Maps a work ID to the sender that we will send the result to
@@ -261,6 +293,7 @@ pub(crate) async fn run(cfg: Config, mut receiver: mpsc::Receiver<Op>) {
         // even if it's there before this call. That is, a completion
         // that arrived before this call will be counted and cause this
         // call to return. Note that waiters.len() > 0 here.
+        metrics.pending_operations.set(waiters.len() as _);
         ring.submit_and_wait(1).expect("unable to submit to ring");
     }
 }
@@ -325,13 +358,18 @@ mod tests {
         opcode,
         types::{Fd, Timespec},
     };
-    use std::os::{fd::AsRawFd, unix::net::UnixStream};
+    use prometheus_client::registry::Registry;
     use std::time::Duration;
+    use std::{
+        os::{fd::AsRawFd, unix::net::UnixStream},
+        sync::Arc,
+    };
 
     async fn recv_then_send(cfg: Config, should_succeed: bool) {
         // Create a new io_uring instance
         let (mut submitter, receiver) = channel(0);
-        let handle = tokio::spawn(super::run(cfg, receiver));
+        let metrics = Arc::new(super::Metrics::new(&mut Registry::default()));
+        let handle = tokio::spawn(super::run(cfg, metrics.clone(), receiver));
 
         let (left_pipe, right_pipe) = UnixStream::pair().unwrap();
 
@@ -350,10 +388,12 @@ mod tests {
             .await
             .expect("failed to send work");
 
+        while metrics.pending_operations.get() == 0 {
+            // Wait for the read to be submitted
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
         // Submit a write that satisfies the read.
-        // Note that since the channel capacity is 0, we can only successfully send
-        // the write after the event loop has reached receiver.await(), which implies
-        // the event loop is parked in submit_and_wait when the send below is called.
         let write =
             opcode::Write::new(Fd(right_pipe.as_raw_fd()), msg.as_ptr(), msg.len() as _).build();
         let (write_tx, write_rx) = oneshot::channel();
@@ -418,7 +458,8 @@ mod tests {
             ..Default::default()
         };
         let (mut submitter, receiver) = channel(1);
-        let handle = tokio::spawn(super::run(cfg, receiver));
+        let metrics = Arc::new(super::Metrics::new(&mut Registry::default()));
+        let handle = tokio::spawn(super::run(cfg, metrics, receiver));
 
         // Submit a work item that will time out (because we don't write to the pipe)
         let (pipe_left, _pipe_right) = UnixStream::pair().unwrap();
@@ -449,7 +490,8 @@ mod tests {
             ..Default::default()
         };
         let (mut submitter, receiver) = channel(1);
-        let handle = tokio::spawn(super::run(cfg, receiver));
+        let metrics = Arc::new(super::Metrics::new(&mut Registry::default()));
+        let handle = tokio::spawn(super::run(cfg, metrics, receiver));
 
         // Submit an operation that will complete after shutdown
         let timeout = Timespec::new().sec(3);
@@ -481,7 +523,8 @@ mod tests {
             ..Default::default()
         };
         let (mut submitter, receiver) = channel(1);
-        let handle = tokio::spawn(super::run(cfg, receiver));
+        let metrics = Arc::new(super::Metrics::new(&mut Registry::default()));
+        let handle = tokio::spawn(super::run(cfg, metrics, receiver));
 
         // Submit an operation that will complete long after shutdown starts
         let timeout = Timespec::new().sec(5_000);

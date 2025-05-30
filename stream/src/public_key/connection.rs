@@ -1,13 +1,10 @@
-use super::{handshake, nonce, x25519, Config};
+use super::{cipher, handshake, nonce, x25519, Config};
 use crate::{
     utils::codec::{recv_frame, send_frame},
     Error,
 };
 use bytes::Bytes;
-use chacha20poly1305::{
-    aead::{Aead, KeyInit},
-    ChaCha20Poly1305,
-};
+use chacha20poly1305::{aead::Aead, ChaCha20Poly1305};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::Scheme;
 use commonware_macros::select;
@@ -28,6 +25,10 @@ pub struct IncomingConnection<C: Scheme, Si: Sink, St: Stream> {
     deadline: SystemTime,
     ephemeral_public_key: x25519::PublicKey,
     peer_public_key: C::PublicKey,
+
+    /// Stores the raw bytes of the dialer handshake message.
+    /// Necessary for the cipher derivation.
+    dialer_handshake_bytes: Bytes,
 }
 
 impl<C: Scheme, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
@@ -48,7 +49,7 @@ impl<C: Scheme, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
 
         // Verify handshake message from peer
         let signed_handshake =
-            handshake::Signed::<C>::decode(msg).map_err(Error::UnableToDecode)?;
+            handshake::Signed::<C>::decode(msg.as_ref()).map_err(Error::UnableToDecode)?;
         signed_handshake.verify(
             context,
             &config.crypto,
@@ -63,6 +64,7 @@ impl<C: Scheme, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
             deadline,
             ephemeral_public_key: signed_handshake.ephemeral(),
             peer_public_key: signed_handshake.signer(),
+            dialer_handshake_bytes: msg,
         })
     }
 
@@ -79,11 +81,17 @@ impl<C: Scheme, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
 
 /// A fully initialized connection with some peer.
 pub struct Connection<Si: Sink, St: Stream> {
-    dialer: bool,
     sink: Si,
     stream: St,
-    cipher: ChaCha20Poly1305,
+
+    /// The maximum size of a message that can be sent or received.
     max_message_size: usize,
+
+    /// The cipher used for sending messages.
+    cipher_send: ChaCha20Poly1305,
+
+    /// The cipher used for receiving messages.
+    cipher_recv: ChaCha20Poly1305,
 }
 
 impl<Si: Sink, St: Stream> Connection<Si, St> {
@@ -91,18 +99,18 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
     ///
     /// This is useful in tests, or when upgrading a connection that has already been verified.
     pub fn from_preestablished(
-        dialer: bool,
         sink: Si,
         stream: St,
-        cipher: ChaCha20Poly1305,
         max_message_size: usize,
+        cipher_send: ChaCha20Poly1305,
+        cipher_recv: ChaCha20Poly1305,
     ) -> Self {
         Self {
-            dialer,
             sink,
             stream,
-            cipher,
             max_message_size,
+            cipher_send,
+            cipher_recv,
         }
     }
 
@@ -125,7 +133,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
 
         // Send handshake
         let timestamp = context.current().epoch_millis();
-        let msg = handshake::Signed::sign(
+        let d2l_msg = handshake::Signed::sign(
             &mut config.crypto,
             &config.namespace,
             handshake::Info::<C>::new(
@@ -141,13 +149,13 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             _ = context.sleep_until(deadline) => {
                 return Err(Error::HandshakeTimeout)
             },
-            result = send_frame(&mut sink, &msg, config.max_message_size) => {
+            result = send_frame(&mut sink, &d2l_msg, config.max_message_size) => {
                 result?;
             },
         }
 
         // Wait for up to handshake timeout for response
-        let msg = select! {
+        let l2d_msg = select! {
             _ = context.sleep_until(deadline) => {
                 return Err(Error::HandshakeTimeout)
             },
@@ -158,7 +166,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
 
         // Verify handshake message from peer
         let signed_handshake =
-            handshake::Signed::<C>::decode(msg).map_err(Error::UnableToDecode)?;
+            handshake::Signed::<C>::decode(l2d_msg.as_ref()).map_err(Error::UnableToDecode)?;
         signed_handshake.verify(
             &context,
             &config.crypto,
@@ -178,16 +186,18 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             return Err(Error::SharedSecretNotContributory);
         }
 
-        // Create cipher
-        let cipher = ChaCha20Poly1305::new_from_slice(shared_secret.as_bytes())
-            .map_err(|_| Error::CipherCreationFailed)?;
+        // Create ciphers
+        let (d2l_cipher, l2d_cipher) = cipher::derive(
+            shared_secret.as_bytes(),
+            &[&config.namespace, &d2l_msg, &l2d_msg],
+        )?;
 
         // We keep track of dialer to determine who adds a bit to their nonce (to prevent reuse)
         Ok(Self {
-            dialer: true,
             sink,
             stream,
-            cipher,
+            cipher_send: d2l_cipher,
+            cipher_recv: l2d_cipher,
             max_message_size: config.max_message_size,
         })
     }
@@ -207,13 +217,14 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let namespace = incoming.config.namespace;
         let mut sink = incoming.sink;
         let stream = incoming.stream;
+        let d2l_msg = incoming.dialer_handshake_bytes;
 
         // Generate personal secret
         let secret = x25519::new(&mut context);
 
         // Send handshake
         let timestamp = context.current().epoch_millis();
-        let msg = handshake::Signed::sign(
+        let l2d_msg = handshake::Signed::sign(
             &mut crypto,
             &namespace,
             handshake::Info::<C>::new(
@@ -229,7 +240,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             _ = context.sleep_until(incoming.deadline) => {
                 return Err(Error::HandshakeTimeout)
             },
-            result = send_frame(&mut sink, &msg, max_message_size) => {
+            result = send_frame(&mut sink, &l2d_msg, max_message_size) => {
                 result?;
             },
         }
@@ -240,17 +251,17 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             return Err(Error::SharedSecretNotContributory);
         }
 
-        // Create cipher
-        let cipher = ChaCha20Poly1305::new_from_slice(shared_secret.as_bytes())
-            .map_err(|_| Error::CipherCreationFailed)?;
+        // Create ciphers
+        let (d2l_cipher, l2d_cipher) =
+            cipher::derive(shared_secret.as_bytes(), &[&namespace, &d2l_msg, &l2d_msg])?;
 
         // Track whether or not we are the dialer to ensure we send correctly formatted nonces.
         Ok(Connection {
-            dialer: false,
             sink,
             stream,
-            cipher,
             max_message_size,
+            cipher_send: l2d_cipher,
+            cipher_recv: d2l_cipher,
         })
     }
 
@@ -261,16 +272,16 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
     pub fn split(self) -> (Sender<Si>, Receiver<St>) {
         (
             Sender {
-                cipher: self.cipher.clone(),
                 sink: self.sink,
                 max_message_size: self.max_message_size,
-                nonce: nonce::Info::new(self.dialer),
+                cipher: self.cipher_send,
+                nonce: nonce::Info::default(),
             },
             Receiver {
-                cipher: self.cipher,
                 stream: self.stream,
                 max_message_size: self.max_message_size,
-                nonce: nonce::Info::new(!self.dialer),
+                cipher: self.cipher_recv,
+                nonce: nonce::Info::default(),
             },
         )
     }
@@ -278,10 +289,9 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
 
 /// The half of the `Connection` that implements `crate::Sender`.
 pub struct Sender<Si: Sink> {
-    cipher: ChaCha20Poly1305,
     sink: Si,
-
     max_message_size: usize,
+    cipher: ChaCha20Poly1305,
     nonce: nonce::Info,
 }
 
@@ -307,10 +317,9 @@ impl<Si: Sink> crate::Sender for Sender<Si> {
 
 /// The half of a `Connection` that implements `crate::Receiver`.
 pub struct Receiver<St: Stream> {
-    cipher: ChaCha20Poly1305,
     stream: St,
-
     max_message_size: usize,
+    cipher: ChaCha20Poly1305,
     nonce: nonce::Info,
 }
 
@@ -338,6 +347,7 @@ impl<St: Stream> crate::Receiver for Receiver<St> {
 mod tests {
     use super::*;
     use crate::{Receiver as _, Sender as _};
+    use chacha20poly1305::KeyInit;
     use commonware_cryptography::{Ed25519, Signer};
     use commonware_runtime::{deterministic, mocks, Metrics, Runner};
     use std::time::Duration;
@@ -352,7 +362,7 @@ mod tests {
                 cipher,
                 stream,
                 max_message_size: 1024,
-                nonce: nonce::Info::new(false),
+                nonce: nonce::Info::default(),
             };
 
             // Send invalid ciphertext
@@ -376,7 +386,7 @@ mod tests {
                 cipher,
                 sink,
                 max_message_size: message.len() - 1,
-                nonce: nonce::Info::new(true),
+                nonce: nonce::Info::default(),
             };
 
             let result = sender.send(message).await;
@@ -397,13 +407,13 @@ mod tests {
                 cipher: cipher.clone(),
                 sink,
                 max_message_size: message.len(),
-                nonce: nonce::Info::new(true),
+                nonce: nonce::Info::default(),
             };
             let mut receiver = Receiver {
                 cipher,
                 stream,
                 max_message_size: message.len() - 1,
-                nonce: nonce::Info::new(false),
+                nonce: nonce::Info::default(),
             };
 
             sender.send(message).await.unwrap();
@@ -426,20 +436,20 @@ mod tests {
 
             // Create dialer connection
             let connection_dialer = Connection::from_preestablished(
-                true, // dialer
                 dialer_sink,
                 dialer_stream,
-                cipher.clone(),
                 max_message_size,
+                cipher.clone(),
+                cipher.clone(),
             );
 
             // Create listener connection
             let connection_listener = Connection::from_preestablished(
-                false, // listener
                 listener_sink,
                 listener_stream,
-                cipher,
                 max_message_size,
+                cipher.clone(),
+                cipher,
             );
 
             // Split into sender and receiver for both connections

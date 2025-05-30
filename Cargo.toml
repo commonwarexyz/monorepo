@@ -70,6 +70,7 @@ io-uring = "0.7.4"
 rayon = "1.10.0"
 async-lock = "3.4.0"
 libc = "0.2.172"
+zeroize = "1.5.7"
 
 [profile.bench]
 # Because we enable overflow checks in "release," we should benchmark with them.
