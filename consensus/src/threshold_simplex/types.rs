@@ -165,7 +165,9 @@ impl<D: Digest> Read for Voter<D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        println!("Voter::read_cfg remaining: {}", reader.remaining());
         let tag = <u8>::read(reader)?;
+        println!("tag: {}", tag);
         match tag {
             0 => {
                 let v = Notarize::read(reader)?;

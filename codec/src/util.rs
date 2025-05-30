@@ -8,6 +8,7 @@ use bytes::Buf;
 pub fn at_least<B: Buf>(buf: &mut B, len: usize) -> Result<(), Error> {
     let rem = buf.remaining();
     if rem < len {
+        println!("at_least: rem < len: {} < {}", rem, len);
         return Err(Error::EndOfBuffer);
     }
     Ok(())

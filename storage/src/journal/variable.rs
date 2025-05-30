@@ -227,6 +227,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         blob.read_at(&mut size, offset).await?;
         let size = u32::from_be_bytes(size);
         let offset = offset.checked_add(4).ok_or(Error::OffsetOverflow)?;
+        println!("read_at size: {}", size);
 
         // Read item
         let mut item = vec![0u8; size as usize];
@@ -234,12 +235,14 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         let offset = offset
             .checked_add(size as u64)
             .ok_or(Error::OffsetOverflow)?;
+        println!("read_at item: {}", item.len());
 
         // Read checksum
         let mut stored_checksum = [0u8; 4];
         blob.read_at(&mut stored_checksum, offset).await?;
         let stored_checksum = u32::from_be_bytes(stored_checksum);
         let checksum = crc32fast::hash(&item);
+        println!("read_at stored: {} checksum: {}", stored_checksum, checksum);
         if checksum != stored_checksum {
             return Err(Error::ChecksumMismatch(stored_checksum, checksum));
         }
@@ -348,6 +351,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                             }
 
                             // Get next item
+                            println!("replay: offset: {} len: {}", offset, len);
                             let mut read =
                                 Self::read(compressed, &codec_config, blob, offset).await;
 
@@ -396,6 +400,12 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                     None
                                 }
                                 Err(err) => {
+                                    warn!(
+                                        blob = section,
+                                        cursor = offset,
+                                        ?err,
+                                        "unable to read item"
+                                    );
                                     Some((Err(err), (section, blob, len, codec_config, compressed)))
                                 }
                             }
