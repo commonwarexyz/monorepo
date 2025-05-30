@@ -51,9 +51,11 @@
 //!
 //! Each direction of communication also uses a 12-byte nonce derived from a counter that is
 //! incremented for each message sent. This provides for a maximum of 2^96 messages per sender,
-//! which is sufficient for all practical use cases. This approach ensures well-behaving peers, as
-//! long as they both stay online, remain connected indefinitely (maximizing the stability of any
-//! p2p construction). In an unlikely case of overflow, a new connection should be established.
+//! which would be sufficient for over 2.5 trillion years of continuous communication at a rate of
+//! 1 billion messages per second. In other words, sufficient for all practical use cases. This
+//! approach ensures well-behaving peers, as long as they both stay online, remain connected
+//! indefinitely (maximizing the stability of any p2p construction). In an unlikely case of
+//! overflow, a new connection should be established.
 //!
 //! This simple coordination prevents nonce reuse (which would allow for messages to be decrypted)
 //! and saves a small amount of bandwidth (no need to send the nonce alongside the encrypted

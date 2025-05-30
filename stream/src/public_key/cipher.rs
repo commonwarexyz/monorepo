@@ -13,15 +13,19 @@ const BASE_KDF_PREFIX: &[u8] = b"commonware-stream/KDF/v1/";
 /// Key Derivation Function (KDF) to derive directional ChaCha20Poly1305 ciphers using HKDF-SHA256.
 ///
 /// This function derives two ChaCha20Poly1305 ciphers based on:
-/// - A list of salts, usually containing:
+/// - The input key material (IKM), usually the shared secret from the Diffie-Hellman key exchange
+/// - An ordered list of byte slices (salts), where the order is critical for consistent derivation
+///   between the dialer and the listener. The list usually contains:
 ///   - The unique application namespace
 ///   - The dialer handshake message bytes
 ///   - The listener handshake message bytes
-/// - The input key material (IKM), usually the shared secret from the Diffie-Hellman key exchange
 ///
 /// Returns two ChaCha20Poly1305 ciphers, intended for use as:
 /// - The dialer-to-listener cipher
 /// - The listener-to-dialer cipher
+///
+/// The dialer and listener must use the ciphers in the same order to ensure proper encryption and
+/// decryption.
 pub fn derive(ikm: &[u8], salts: &[&[u8]]) -> Result<(ChaCha20Poly1305, ChaCha20Poly1305), Error> {
     // Create a unique salt for the HKDF expansion.
     // The salt is generated from a commonware-specific prefix and the list of salts provided.
