@@ -16,6 +16,8 @@ pub enum Error {
     UnableToDecode(CodecError),
     #[error("handshake not for us")]
     HandshakeNotForUs,
+    #[error("handshake uses our public key")]
+    HandshakeUsesOurKey,
     #[error("handshake timeout")]
     HandshakeTimeout,
     #[error("invalid signature")]

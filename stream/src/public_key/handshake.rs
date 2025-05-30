@@ -124,6 +124,15 @@ impl<C: Scheme> Signed<C> {
             return Err(Error::HandshakeNotForUs);
         }
 
+        // Verify that the handshake is not signed by us
+        //
+        // This could indicate a self-connection attempt, which is not allowed.
+        // It could also indicate a replay attack or a malformed message.
+        // Either way, fail early to avoid any potential issues.
+        if crypto.public_key() == self.signer {
+            return Err(Error::HandshakeUsesOurKey);
+        }
+
         // Verify that the timestamp in the handshake is recent
         //
         // This prevents an adversary from reopening an encrypted connection
