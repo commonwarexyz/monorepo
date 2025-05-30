@@ -201,7 +201,8 @@ impl<
                 inactivity_floor_loc,
                 "pruning any db to the current inactivity floor"
             );
-            mmr.prune_to_pos(leaf_num_to_pos(inactivity_floor_loc))
+            let mut hasher = Standard::new(&mut hasher);
+            mmr.prune_to_pos(&mut hasher, leaf_num_to_pos(inactivity_floor_loc))
                 .await?;
         }
 
@@ -348,6 +349,10 @@ impl<
     }
 
     /// Return the root of the db.
+    ///
+    /// # Warning
+    ///
+    /// Panics if there are uncommitted operations.
     pub async fn root(&self, hasher: &mut H) -> Result<H::Digest, Error> {
         assert!(
             !self.status.is_dirty(),
@@ -385,6 +390,10 @@ impl<
     /// the operations from the range. A truncated range (from hitting the max) can be detected by
     /// looking at the length of the returned operations vector. Also returns the bitmap chunks
     /// required to verify the proof.
+    ///
+    /// # Warning
+    ///
+    /// Panics if there are uncommitted operations.
     pub async fn range_proof(
         &self,
         hasher: &mut H,
@@ -527,6 +536,10 @@ impl<
     /// Generate and return a proof of the current value of `key`, along with the other
     /// [KeyValueProofInfo] required to verify the proof. Returns KeyNotFound error if the key is
     /// not currently assigned any value.
+    ///
+    /// # Warning
+    ///
+    /// Panics if there are uncommitted operations.
     pub async fn key_value_proof(
         &self,
         hasher: &mut H,

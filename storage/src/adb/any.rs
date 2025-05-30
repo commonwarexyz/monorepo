@@ -205,9 +205,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             while next_mmr_leaf_num < log_size {
                 let op = log.read(next_mmr_leaf_num).await?;
                 let digest = Self::op_digest(&mut hasher, &op);
-                mmr.add(&mut hasher, &digest).await?;
+                mmr.add_batched(&mut hasher, &digest).await?;
                 next_mmr_leaf_num += 1;
             }
+            mmr.sync(&mut hasher).await.map_err(Error::MmrError)?;
         }
 
         // At this point the MMR and log should be consistent.
@@ -454,6 +455,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     }
 
     /// Return the root of the db.
+    ///
+    /// # Warning
+    ///
+    /// Panics if there are uncommitted operations.
     pub fn root(&self, hasher: &mut Standard<H>) -> H::Digest {
         self.ops.root(hasher)
     }
@@ -464,7 +469,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         // Update the ops MMR.
         let mut hasher = Standard::new(&mut self.hasher);
         let digest = Self::op_digest(&mut hasher, &op);
-        self.ops.add(&mut hasher, &digest).await?;
+        self.ops.add_batched(&mut hasher, &digest).await?;
         self.uncommitted_ops += 1;
 
         // Append the operation to the log.
@@ -477,6 +482,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     ///     - the last operation performed, or
     ///     - the operation `max_ops` from the start.
     ///  2. the operations corresponding to the leaves in this range.
+    ///
+    /// # Warning
+    ///
+    /// Panics if there are uncommitted operations.
     pub async fn proof(
         &self,
         start_loc: u64,
@@ -549,25 +558,28 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
     /// Sync the db to disk ensuring the current state is persisted.
     pub(super) async fn sync(&mut self) -> Result<(), Error> {
+        let mut hasher = Standard::new(&mut self.hasher);
         try_join!(
             self.log.sync().map_err(Error::JournalError),
-            self.ops.sync().map_err(Error::MmrError),
+            self.ops.sync(&mut hasher).map_err(Error::MmrError),
         )?;
 
         Ok(())
     }
 
     /// Close the db. Operations that have not been committed will be lost.
-    pub async fn close(self) -> Result<(), Error> {
+    pub async fn close(mut self) -> Result<(), Error> {
         if self.uncommitted_ops > 0 {
             warn!(
                 op_count = self.uncommitted_ops,
                 "closing db with uncommitted operations"
             );
         }
+
+        let mut hasher = Standard::new(&mut self.hasher);
         try_join!(
             self.log.close().map_err(Error::JournalError),
-            self.ops.close().map_err(Error::MmrError),
+            self.ops.close(&mut hasher).map_err(Error::MmrError),
         )?;
 
         Ok(())
@@ -646,7 +658,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
         // Prune the MMR, whose pruning boundary serves as the "source of truth" for proving.
         let prune_to_pos = leaf_num_to_pos(self.inactivity_floor_loc);
-        self.ops.prune_to_pos(prune_to_pos).await?;
+        let mut hasher = Standard::new(&mut self.hasher);
+        self.ops.prune_to_pos(&mut hasher, prune_to_pos).await?;
 
         // Because the log's pruning boundary will be blob-size aligned, we cannot use it as a
         // source of truth for the min provable element.
@@ -656,22 +669,18 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     }
 
     /// Simulate a failed commit that successfully writes the log to the commit point, but without
-    /// fully committing the MMR's cached elements to trigger MMR node recovery on reopening. The
-    /// root of the db at the point of a successful commit will be returned in the result.
+    /// fully committing the MMR's cached elements to trigger MMR node recovery on reopening.
     #[cfg(test)]
-    pub async fn simulate_failed_commit_mmr(
-        mut self,
-        hasher: &mut H,
-        write_limit: usize,
-    ) -> Result<H::Digest, Error> {
+    pub async fn simulate_failed_commit_mmr(mut self, write_limit: usize) -> Result<(), Error> {
         self.apply_op(Operation::Commit(self.inactivity_floor_loc))
             .await?;
-        let mut hasher = Standard::new(hasher);
-        let root = self.root(&mut hasher);
         self.log.close().await?;
-        self.ops.simulate_partial_sync(write_limit).await?;
+        let mut hasher = Standard::new(&mut self.hasher);
+        self.ops
+            .simulate_partial_sync(&mut hasher, write_limit)
+            .await?;
 
-        Ok(root)
+        Ok(())
     }
 
     /// Simulate a failed commit that successfully writes the MMR to the commit point, but without
@@ -680,7 +689,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     pub async fn simulate_failed_commit_log(mut self) -> Result<(), Error> {
         self.apply_op(Operation::Commit(self.inactivity_floor_loc))
             .await?;
-        self.ops.close().await?;
+        let mut hasher = Standard::new(&mut self.hasher);
+        self.ops.close(&mut hasher).await?;
         // Rewind the operation log over the commit op to force rollback to the previous commit.
         self.log.rewind(self.log.size().await? - 1).await?;
         self.log.close().await?;
@@ -708,13 +718,13 @@ mod test {
 
     const SHA256_SIZE: usize = <Sha256 as CHasher>::Digest::SIZE;
 
-    fn any_db_config() -> Config {
+    fn any_db_config(suffix: &str) -> Config {
         Config {
-            mmr_journal_partition: "journal_partition".into(),
-            mmr_metadata_partition: "metadata_partition".into(),
+            mmr_journal_partition: format!("journal_{}", suffix),
+            mmr_metadata_partition: format!("metadata_{}", suffix),
             mmr_items_per_blob: 11,
             mmr_write_buffer: 1024,
-            log_journal_partition: "log_journal_partition".into(),
+            log_journal_partition: format!("log_journal_{}", suffix),
             log_items_per_blob: 7,
             log_write_buffer: 1024,
         }
@@ -724,9 +734,13 @@ mod test {
     async fn open_db<E: RStorage + Clock + Metrics>(
         context: E,
     ) -> Any<E, Digest, Digest, Sha256, EightCap> {
-        Any::<E, Digest, Digest, Sha256, EightCap>::init(context, any_db_config(), EightCap)
-            .await
-            .unwrap()
+        Any::<E, Digest, Digest, Sha256, EightCap>::init(
+            context,
+            any_db_config("partition"),
+            EightCap,
+        )
+        .await
+        .unwrap()
     }
 
     #[test_traced("WARN")]
@@ -822,6 +836,7 @@ mod test {
             db.raise_inactivity_floor(3).await.unwrap();
             assert_eq!(db.inactivity_floor_loc, 3);
             assert_eq!(db.log.size().await.unwrap(), 6); // 4 updates, 1 deletion, 1 commit
+            db.sync().await.unwrap();
             let root = db.root(&mut hasher);
 
             // Multiple assignments of the same value should be a no-op.
@@ -845,6 +860,7 @@ mod test {
             assert_eq!(db.log.size().await.unwrap(), 8); // 4 updates, 3 deletions, 1 commit
             assert_eq!(db.inactivity_floor_loc, 3);
 
+            db.sync().await.unwrap();
             let root = db.root(&mut hasher);
 
             // Multiple deletions of the same key should be a no-op.
@@ -856,6 +872,7 @@ mod test {
             let d3 = <Sha256 as CHasher>::Digest::decode(vec![2u8; SHA256_SIZE].as_ref()).unwrap();
             assert!(db.delete(d3).await.unwrap().is_none());
             assert_eq!(db.log.size().await.unwrap(), 8);
+            db.sync().await.unwrap();
             assert_eq!(db.root(&mut hasher), root);
 
             // Make sure closing/reopening gets us back to the same state.
@@ -994,6 +1011,7 @@ mod test {
             let start_loc = leaf_pos_to_num(start_pos).unwrap();
             // Raise the inactivity floor and make sure historical inactive operations are still provable.
             db.raise_inactivity_floor(100).await.unwrap();
+            db.sync().await.unwrap();
             let root = db.root(&mut hasher);
             assert!(start_loc < db.inactivity_floor_loc);
 
@@ -1031,6 +1049,7 @@ mod test {
                 db.update(k, v).await.unwrap();
             }
             db.sync().await.unwrap();
+            let halfway_root = db.root(&mut hasher);
 
             // Insert another 1000 keys then simulate a failed close and test recovery.
             for i in 0u64..ELEMENTS {
@@ -1041,16 +1060,14 @@ mod test {
 
             // We partially write 101 of the cached MMR nodes to simulate a failure that leaves the
             // MMR in a state with an orphaned leaf.
-            let mut c_hasher = Sha256::new();
-            let root = db
-                .simulate_failed_commit_mmr(&mut c_hasher, 101)
-                .await
-                .unwrap();
+            db.simulate_failed_commit_mmr(101).await.unwrap();
 
             // Journaled MMR recovery should read the orphaned leaf & its parents, then log
             // replaying will restore the rest.
             let mut db = open_db(context.clone()).await;
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.op_count(), 2001);
+            let root = db.root(&mut hasher);
+            assert_ne!(root, halfway_root);
 
             // Write some additional nodes, simulate failed log commit, and test we recover to the previous commit point.
             for i in 0u64..100 {
@@ -1060,7 +1077,38 @@ mod test {
             }
             db.simulate_failed_commit_log().await.unwrap();
             let db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), 2001);
             assert_eq!(db.root(&mut hasher), root);
+            db.close().await.unwrap();
+
+            // Recreate the database without any failures and make sure the roots match.
+            let mut new_db = Any::<_, Digest, Digest, Sha256, EightCap>::init(
+                context,
+                any_db_config("new_partition"),
+                EightCap,
+            )
+            .await
+            .unwrap();
+            assert_eq!(new_db.op_count(), 0);
+            // Insert 1000 keys then sync.
+            for i in 0u64..ELEMENTS {
+                let k = hash(&i.to_be_bytes());
+                let v = hash(&(i * 1000).to_be_bytes());
+                new_db.update(k, v).await.unwrap();
+            }
+            assert_eq!(new_db.op_count(), 1000);
+            for i in 0u64..ELEMENTS {
+                let k = hash(&i.to_be_bytes());
+                let v = hash(&((i + 1) * 10000).to_be_bytes());
+                new_db.update(k, v).await.unwrap();
+            }
+            new_db
+                .apply_op(Operation::Commit(new_db.inactivity_floor_loc))
+                .await
+                .unwrap();
+            new_db.sync().await.unwrap();
+            assert_eq!(new_db.op_count(), 2001);
+            assert_eq!(new_db.root(&mut hasher), root);
         });
     }
 
@@ -1184,7 +1232,7 @@ mod test {
             db.close().await.unwrap();
 
             // Initialize the db's mmr/log.
-            let cfg = any_db_config();
+            let cfg = any_db_config("partition");
             let (mmr, log) = Any::<_, Digest, Digest, _, TwoCap>::init_mmr_and_log(
                 context.clone(),
                 hasher.inner(),

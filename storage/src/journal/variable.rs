@@ -109,10 +109,11 @@ use futures::stream::{self, Stream, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{
     collections::{btree_map::Entry, BTreeMap},
+    io::Cursor,
     marker::PhantomData,
 };
 use tracing::{debug, trace, warn};
-use zstd::bulk::{compress, decompress};
+use zstd::{bulk::compress, decode_all};
 
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
@@ -255,8 +256,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
         // If compression is enabled, decompress the item
         let item = if compressed {
-            let decompressed = decompress(item.as_ref(), u32::MAX as usize)
-                .map_err(|_| Error::DecompressionFailed)?;
+            let decompressed =
+                decode_all(Cursor::new(&item)).map_err(|_| Error::DecompressionFailed)?;
             V::decode_cfg(decompressed.as_ref(), cfg).map_err(Error::Codec)?
         } else {
             V::decode_cfg(item.as_ref(), cfg).map_err(Error::Codec)?
@@ -314,8 +315,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
         // If compression is enabled, decompress the item
         let item = if compressed {
-            zstd::bulk::decompress(&item, u32::MAX as usize)
-                .map_err(|_| Error::DecompressionFailed)?
+            decode_all(Cursor::new(&item)).map_err(|_| Error::DecompressionFailed)?
         } else {
             item
         };
@@ -348,7 +348,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         let item = &buf.as_ref()[4..4 + len as usize];
         let checksum = crc32fast::hash(item);
         let item = if compressed {
-            decompress(item, u32::MAX as usize).map_err(|_| Error::DecompressionFailed)?
+            decode_all(Cursor::new(item)).map_err(|_| Error::DecompressionFailed)?
         } else {
             item.to_vec()
         };
