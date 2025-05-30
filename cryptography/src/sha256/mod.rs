@@ -31,6 +31,9 @@ use std::{
     ops::Deref,
 };
 
+/// Re-export `sha2::Sha256` as `CoreSha256` for external use if needed.
+pub type CoreSha256 = ISha256;
+
 const DIGEST_LENGTH: usize = 32;
 
 /// Generate a SHA-256 digest from a message.

@@ -1224,7 +1224,6 @@ dependencies = [
  "futures",
  "hkdf",
  "rand",
- "sha2 0.10.8",
  "thiserror 2.0.12",
  "x25519-dalek",
  "zeroize",

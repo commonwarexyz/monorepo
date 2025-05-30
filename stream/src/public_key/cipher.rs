@@ -1,8 +1,7 @@
 use crate::Error;
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, KeySizeUser};
-use commonware_cryptography::{Hasher, Sha256};
+use commonware_cryptography::{CoreSha256, Hasher, Sha256};
 use hkdf::{hmac::digest::typenum::Unsigned, Hkdf};
-use sha2::Sha256 as ISha256;
 use zeroize::Zeroize;
 
 // The size of the key used by the ChaCha20Poly1305 cipher.
@@ -38,7 +37,7 @@ pub fn derive(ikm: &[u8], salts: &[&[u8]]) -> Result<(ChaCha20Poly1305, ChaCha20
     let salt = hasher.finalize();
 
     // HKDF-Extract: creates a pseudorandom key (PRK)
-    let prk = Hkdf::<ISha256>::new(Some(salt.as_ref()), ikm);
+    let prk = Hkdf::<CoreSha256>::new(Some(salt.as_ref()), ikm);
 
     // Reusable buffer for derived keys
     let mut buf = [0u8; CHACHA_KEY_SIZE];
