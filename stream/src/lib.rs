@@ -20,6 +20,8 @@ pub enum Error {
     HandshakeUsesOurKey,
     #[error("handshake timeout")]
     HandshakeTimeout,
+    #[error("cannot dial self")]
+    DialSelf,
     #[error("invalid signature")]
     InvalidSignature,
     #[error("wrong peer")]

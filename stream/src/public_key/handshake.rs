@@ -425,16 +425,17 @@ mod tests {
     fn test_handshake_verify_invalid_signature() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut crypto = Ed25519::from_seed(0);
-            let recipient = crypto.public_key();
+            let crypto = Ed25519::from_seed(0);
+            let mut peer_crypto = Ed25519::from_seed(1);
             let ephemeral_public_key = x25519::PublicKey::from_bytes([0u8; 32]);
 
+            // The peer creates a valid handshake intended for us
             let handshake = Signed::sign(
-                &mut crypto,
+                &mut peer_crypto,
                 TEST_NAMESPACE,
                 Info {
                     timestamp: 0,
-                    recipient,
+                    recipient: crypto.public_key(),
                     ephemeral_public_key,
                 },
             );
@@ -460,20 +461,20 @@ mod tests {
     fn test_handshake_verify_invalid_timestamp_old() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut crypto = Ed25519::from_seed(0);
-            let recipient = crypto.public_key();
+            let crypto = Ed25519::from_seed(0);
+            let mut peer_crypto = Ed25519::from_seed(1);
             let ephemeral_public_key = x25519::PublicKey::from_bytes([0u8; 32]);
 
             let timeout_duration = Duration::from_secs(5);
             let synchrony_bound = Duration::from_secs(0);
 
-            // Create a handshake, setting the timestamp to 0.
+            // The peer creates a handshake, setting the timestamp to 0.
             let handshake = Signed::sign(
-                &mut crypto,
+                &mut peer_crypto,
                 TEST_NAMESPACE,
                 Info {
                     timestamp: 0,
-                    recipient,
+                    recipient: crypto.public_key(),
                     ephemeral_public_key,
                 },
             );
@@ -512,32 +513,32 @@ mod tests {
     fn test_handshake_verify_invalid_timestamp_future() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut crypto = Ed25519::from_seed(0);
-            let recipient = crypto.public_key();
+            let crypto = Ed25519::from_seed(0);
+            let mut peer_crypto = Ed25519::from_seed(1);
             let ephemeral_public_key = x25519::PublicKey::from_bytes([0u8; 32]);
 
             let timeout_duration = Duration::from_secs(0);
             const SYNCHRONY_BOUND_MILLIS: u64 = 5_000;
             let synchrony_bound = Duration::from_millis(SYNCHRONY_BOUND_MILLIS);
 
-            // Create a handshake at the synchrony bound.
+            // The peer creates a handshake at the synchrony bound.
             let handshake_ok = Signed::sign(
-                &mut crypto,
+                &mut peer_crypto,
                 TEST_NAMESPACE,
                 Info{
                     timestamp: SYNCHRONY_BOUND_MILLIS,
-                    recipient: recipient.clone(),
+                    recipient: crypto.public_key(),
                     ephemeral_public_key,
                 },
             );
 
             // Create a handshake 1ms too far into the future.
             let handshake_late = Signed::sign(
-                &mut crypto,
+                &mut peer_crypto,
                 TEST_NAMESPACE,
                 Info{
                     timestamp:SYNCHRONY_BOUND_MILLIS + 1,
-                    recipient,
+                    recipient: crypto.public_key(),
                     ephemeral_public_key,
                 },
             );
