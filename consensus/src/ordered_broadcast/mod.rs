@@ -193,7 +193,7 @@ mod tests {
         automatons: &mut BTreeMap<PublicKey, mocks::Automaton<PublicKey>>,
         reporters: &mut BTreeMap<
             PublicKey,
-            mocks::ReporterMailbox<ed25519::PrivateKey, V, Sha256Digest>,
+            mocks::ReporterMailbox<ed25519::PublicKey, V, Sha256Digest>,
         >,
         rebroadcast_timeout: Duration,
         invalid_when: fn(u64) -> bool,
@@ -216,7 +216,7 @@ mod tests {
             automatons.insert(validator.clone(), automaton.clone());
 
             let (reporter, reporter_mailbox) =
-                mocks::Reporter::<ed25519::PrivateKey, V, Sha256Digest>::new(
+                mocks::Reporter::<ed25519::PublicKey, V, Sha256Digest>::new(
                     namespace,
                     *poly::public::<V>(&polynomial),
                     misses_allowed,
@@ -260,7 +260,7 @@ mod tests {
         sequencers: Vec<PublicKey>,
         reporters: &BTreeMap<
             PublicKey,
-            mocks::ReporterMailbox<ed25519::PrivateKey, V, Sha256Digest>,
+            mocks::ReporterMailbox<ed25519::PublicKey, V, Sha256Digest>,
         >,
         threshold: (u64, Epoch, bool),
     ) {
@@ -312,7 +312,7 @@ mod tests {
     async fn get_max_height<V: Variant>(
         reporters: &mut BTreeMap<
             PublicKey,
-            mocks::ReporterMailbox<ed25519::PrivateKey, V, Sha256Digest>,
+            mocks::ReporterMailbox<ed25519::PublicKey, V, Sha256Digest>,
         >,
     ) -> u64 {
         let mut max_height = 0;
@@ -346,7 +346,7 @@ mod tests {
             ));
             let mut reporters = BTreeMap::<
                 PublicKey,
-                mocks::ReporterMailbox<ed25519::PrivateKey, V, Sha256Digest>,
+                mocks::ReporterMailbox<ed25519::PublicKey, V, Sha256Digest>,
             >::new();
             spawn_validator_engines::<V>(
                 context.with_label("validator"),
@@ -431,7 +431,7 @@ mod tests {
                 >::new()));
                 let mut reporters = BTreeMap::<
                     PublicKey,
-                    mocks::ReporterMailbox<ed25519::PrivateKey, V, Sha256Digest>,
+                    mocks::ReporterMailbox<ed25519::PublicKey, V, Sha256Digest>,
                 >::new();
                 spawn_validator_engines(
                     context.with_label("validator"),
@@ -449,7 +449,7 @@ mod tests {
 
                 let reporter_pairs: Vec<(
                     PublicKey,
-                    mocks::ReporterMailbox<ed25519::PrivateKey, V, Sha256Digest>,
+                    mocks::ReporterMailbox<ed25519::PublicKey, V, Sha256Digest>,
                 )> = reporters
                     .iter()
                     .map(|(v, m)| (v.clone(), m.clone()))
@@ -515,7 +515,7 @@ mod tests {
             ));
             let mut reporters = BTreeMap::<
                 PublicKey,
-                mocks::ReporterMailbox<ed25519::PrivateKey, V, Sha256Digest>,
+                mocks::ReporterMailbox<ed25519::PublicKey, V, Sha256Digest>,
             >::new();
             spawn_validator_engines(
                 context.with_label("validator"),
@@ -594,7 +594,7 @@ mod tests {
             ));
             let mut reporters = BTreeMap::<
                 PublicKey,
-                mocks::ReporterMailbox<ed25519::PrivateKey, V, Sha256Digest>,
+                mocks::ReporterMailbox<ed25519::PublicKey, V, Sha256Digest>,
             >::new();
             spawn_validator_engines(
                 context.with_label("validator"),
@@ -668,7 +668,7 @@ mod tests {
             ));
             let mut reporters = BTreeMap::<
                 PublicKey,
-                mocks::ReporterMailbox<ed25519::PrivateKey, V, Sha256Digest>,
+                mocks::ReporterMailbox<ed25519::PublicKey, V, Sha256Digest>,
             >::new();
             spawn_validator_engines::<V>(
                 context.with_label("validator"),
@@ -722,7 +722,7 @@ mod tests {
             ));
             let mut reporters = BTreeMap::<
                 PublicKey,
-                mocks::ReporterMailbox<ed25519::PrivateKey, V, Sha256Digest>,
+                mocks::ReporterMailbox<ed25519::PublicKey, V, Sha256Digest>,
             >::new();
             let monitors = spawn_validator_engines::<V>(
                 context.with_label("validator"),
@@ -842,7 +842,7 @@ mod tests {
             ));
             let mut reporters = BTreeMap::<
                 PublicKey,
-                mocks::ReporterMailbox<ed25519::PrivateKey, V, Sha256Digest>,
+                mocks::ReporterMailbox<ed25519::PublicKey, V, Sha256Digest>,
             >::new();
             let mut monitors = HashMap::new();
             let namespace = b"my testing namespace";
@@ -866,7 +866,7 @@ mod tests {
                     .insert(validator.clone(), automaton.clone());
 
                 let (reporter, reporter_mailbox) =
-                    mocks::Reporter::<ed25519::PrivateKey, V, Sha256Digest>::new(
+                    mocks::Reporter::<ed25519::PublicKey, V, Sha256Digest>::new(
                         namespace,
                         *poly::public::<V>(&polynomial),
                         Some(5),
@@ -912,7 +912,7 @@ mod tests {
                     .unwrap()
                     .insert(sequencer.public_key(), automaton.clone());
                 let (reporter, reporter_mailbox) =
-                    mocks::Reporter::<ed25519::PrivateKey, V, Sha256Digest>::new(
+                    mocks::Reporter::<ed25519::PublicKey, V, Sha256Digest>::new(
                         namespace,
                         *poly::public::<V>(&polynomial),
                         Some(5),
@@ -1004,7 +1004,7 @@ mod tests {
             ));
             let mut reporters = BTreeMap::<
                 PublicKey,
-                mocks::ReporterMailbox<ed25519::PrivateKey, V, Sha256Digest>,
+                mocks::ReporterMailbox<ed25519::PublicKey, V, Sha256Digest>,
             >::new();
             let sequencers = &pks[0..pks.len() / 2];
             spawn_validator_engines::<V>(

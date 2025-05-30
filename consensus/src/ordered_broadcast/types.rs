@@ -11,7 +11,7 @@ use commonware_cryptography::{
         poly::{self, PartialSignature},
         variant::Variant,
     },
-    Digest, PrivateKey, Verifier as _,
+    Digest, PrivateKey, PublicKey, Verifier as _,
 };
 use commonware_utils::{union, Array};
 use futures::channel::oneshot;
@@ -604,16 +604,16 @@ impl<P: Array, V: Variant, D: Digest> EncodeSize for Ack<P, V, D> {
 /// and provide the appropriate information to other components.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
-pub enum Activity<C: PrivateKey, V: Variant, D: Digest> {
+pub enum Activity<C: PublicKey, V: Variant, D: Digest> {
     /// A new tip for a sequencer
     ///
     /// This activity is only emitted when the application has verified some peer proposal.
     Tip(Proposal<C, D>),
     /// A threshold signature for a chunk, indicating it has been acknowledged by a quorum
-    Lock(Lock<C::PublicKey, V, D>),
+    Lock(Lock<C, V, D>),
 }
 
-impl<C: PrivateKey, V: Variant, D: Digest> Write for Activity<C, V, D> {
+impl<C: PublicKey, V: Variant, D: Digest> Write for Activity<C, V, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Activity::Tip(proposal) => {
@@ -628,7 +628,7 @@ impl<C: PrivateKey, V: Variant, D: Digest> Write for Activity<C, V, D> {
     }
 }
 
-impl<C: PrivateKey, V: Variant, D: Digest> Read for Activity<C, V, D> {
+impl<C: PublicKey, V: Variant, D: Digest> Read for Activity<C, V, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -643,7 +643,7 @@ impl<C: PrivateKey, V: Variant, D: Digest> Read for Activity<C, V, D> {
     }
 }
 
-impl<C: PrivateKey, V: Variant, D: Digest> EncodeSize for Activity<C, V, D> {
+impl<C: PublicKey, V: Variant, D: Digest> EncodeSize for Activity<C, V, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Activity::Tip(proposal) => proposal.encode_size(),
@@ -658,18 +658,18 @@ impl<C: PrivateKey, V: Variant, D: Digest> EncodeSize for Activity<C, V, D> {
 /// broadcast to validators for acknowledgment. It contains the chunk itself and the
 /// sequencer's signature over that chunk.
 #[derive(Clone, Debug)]
-pub struct Proposal<C: PrivateKey, D: Digest> {
+pub struct Proposal<Pk: PublicKey, D: Digest> {
     /// Chunk that is being proposed.
-    pub chunk: Chunk<C::PublicKey, D>,
+    pub chunk: Chunk<Pk, D>,
 
     /// Signature over the chunk.
     /// This is the sequencer's signature proving authenticity of the chunk.
-    pub signature: C::Signature,
+    pub signature: Pk::Signature,
 }
 
-impl<C: PrivateKey, D: Digest> Proposal<C, D> {
+impl<Pk: PublicKey, D: Digest> Proposal<Pk, D> {
     /// Create a new Proposal with the given chunk and signature.
-    pub fn new(chunk: Chunk<C::PublicKey, D>, signature: C::Signature) -> Self {
+    pub fn new(chunk: Chunk<Pk, D>, signature: Pk::Signature) -> Self {
         Self { chunk, signature }
     }
 
@@ -687,14 +687,14 @@ impl<C: PrivateKey, D: Digest> Proposal<C, D> {
     }
 }
 
-impl<C: PrivateKey, D: Digest> Write for Proposal<C, D> {
+impl<C: PublicKey, D: Digest> Write for Proposal<C, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.chunk.write(writer);
         self.signature.write(writer);
     }
 }
 
-impl<C: PrivateKey, D: Digest> Read for Proposal<C, D> {
+impl<C: PublicKey, D: Digest> Read for Proposal<C, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -704,27 +704,27 @@ impl<C: PrivateKey, D: Digest> Read for Proposal<C, D> {
     }
 }
 
-impl<C: PrivateKey, D: Digest> EncodeSize for Proposal<C, D> {
+impl<C: PublicKey, D: Digest> EncodeSize for Proposal<C, D> {
     fn encode_size(&self) -> usize {
         self.chunk.encode_size() + self.signature.encode_size()
     }
 }
 
-impl<C: PrivateKey, D: Digest> Hash for Proposal<C, D> {
+impl<C: PublicKey, D: Digest> Hash for Proposal<C, D> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.chunk.hash(state);
         self.signature.hash(state);
     }
 }
 
-impl<C: PrivateKey, D: Digest> PartialEq for Proposal<C, D> {
+impl<C: PublicKey, D: Digest> PartialEq for Proposal<C, D> {
     fn eq(&self, other: &Self) -> bool {
         self.chunk == other.chunk && self.signature == other.signature
     }
 }
 
 /// This is needed to implement `Eq` for `Proposal`.
-impl<C: PrivateKey, D: Digest> Eq for Proposal<C, D> {}
+impl<C: PublicKey, D: Digest> Eq for Proposal<C, D> {}
 
 /// Lock is a message that can be generated once `2f + 1` acks are received for a Chunk.
 ///
@@ -1010,10 +1010,10 @@ mod tests {
         let message = chunk.encode();
         let signature = scheme.sign(Some(chunk_namespace.as_ref()), &message);
         let proposal =
-            Proposal::<ed25519::PrivateKey, Sha256Digest>::new(chunk.clone(), signature.clone());
-        let activity = Activity::<_, V, _>::Tip(proposal);
+            Proposal::<ed25519::PublicKey, Sha256Digest>::new(chunk.clone(), signature.clone());
+        let activity = Activity::<ed25519::PublicKey, V, _>::Tip(proposal);
         let encoded = activity.encode();
-        let decoded = Activity::<ed25519::PrivateKey, V, Sha256Digest>::decode(encoded).unwrap();
+        let decoded = Activity::<ed25519::PublicKey, V, Sha256Digest>::decode(encoded).unwrap();
 
         match decoded {
             Activity::Tip(p) => {
@@ -1047,9 +1047,9 @@ mod tests {
         assert!(lock.verify(NAMESPACE, identity));
 
         // Test activity with the lock
-        let activity = Activity::<ed25519::PrivateKey, V, Sha256Digest>::Lock(lock);
+        let activity = Activity::<ed25519::PublicKey, V, Sha256Digest>::Lock(lock);
         let encoded = activity.encode();
-        let decoded = Activity::<ed25519::PrivateKey, V, Sha256Digest>::decode(encoded).unwrap();
+        let decoded = Activity::<ed25519::PublicKey, V, Sha256Digest>::decode(encoded).unwrap();
 
         match decoded {
             Activity::Lock(l) => {
@@ -1079,9 +1079,9 @@ mod tests {
         let message = chunk.encode();
         let signature = scheme.sign(Some(chunk_namespace.as_ref()), &message);
 
-        let proposal = Proposal::<ed25519::PrivateKey, Sha256Digest>::new(chunk, signature);
+        let proposal = Proposal::<ed25519::PublicKey, Sha256Digest>::new(chunk, signature);
         let encoded = proposal.encode();
-        let decoded = Proposal::<ed25519::PrivateKey, Sha256Digest>::decode(encoded).unwrap();
+        let decoded = Proposal::<ed25519::PublicKey, Sha256Digest>::decode(encoded).unwrap();
 
         assert_eq!(decoded.chunk, proposal.chunk);
         assert_eq!(decoded.signature, proposal.signature);
@@ -1292,7 +1292,7 @@ mod tests {
         let chunk_namespace = chunk_namespace(NAMESPACE);
         let message = chunk.encode();
         let signature = scheme.sign(Some(chunk_namespace.as_ref()), &message);
-        let proposal = Proposal::<ed25519::PrivateKey, Sha256Digest>::new(chunk, signature);
+        let proposal = Proposal::<ed25519::PublicKey, Sha256Digest>::new(chunk, signature);
 
         // Verify proposal
         assert!(proposal.verify(NAMESPACE));
@@ -1596,7 +1596,7 @@ mod tests {
         let chunk_namespace = chunk_namespace(NAMESPACE);
         let message = chunk.encode();
         let signature = scheme.sign(Some(chunk_namespace.as_ref()), &message);
-        let proposal = Proposal::<ed25519::PrivateKey, Sha256Digest>::new(chunk, signature);
+        let proposal = Proposal::<ed25519::PublicKey, Sha256Digest>::new(chunk, signature);
 
         // Verify with correct namespace - should pass
         assert!(proposal.verify(NAMESPACE));
@@ -1617,7 +1617,7 @@ mod tests {
         let chunk_namespace = chunk_namespace(NAMESPACE);
         let message = chunk.encode();
         let signature = scheme2.sign(Some(chunk_namespace.as_ref()), &message);
-        let proposal = Proposal::<ed25519::PrivateKey, Sha256Digest>::new(chunk, signature);
+        let proposal = Proposal::<ed25519::PublicKey, Sha256Digest>::new(chunk, signature);
 
         // Verification should fail because the signature doesn't match the sequencer's public key
         assert!(!proposal.verify(NAMESPACE));

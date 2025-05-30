@@ -3,7 +3,7 @@ use crate::{
     Reporter as Z,
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PrivateKey};
+use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PublicKey};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -11,15 +11,15 @@ use futures::{
 use std::collections::{btree_map::Entry, BTreeMap, HashMap, HashSet};
 
 #[allow(clippy::large_enum_variant)]
-enum Message<C: PrivateKey, V: Variant, D: Digest> {
+enum Message<C: PublicKey, V: Variant, D: Digest> {
     Proposal(Proposal<C, D>),
-    Locked(Lock<C::PublicKey, V, D>),
-    GetTip(C::PublicKey, oneshot::Sender<Option<(u64, Epoch)>>),
-    GetContiguousTip(C::PublicKey, oneshot::Sender<Option<u64>>),
-    Get(C::PublicKey, u64, oneshot::Sender<Option<(D, Epoch)>>),
+    Locked(Lock<C, V, D>),
+    GetTip(C, oneshot::Sender<Option<(u64, Epoch)>>),
+    GetContiguousTip(C, oneshot::Sender<Option<u64>>),
+    Get(C, u64, oneshot::Sender<Option<(D, Epoch)>>),
 }
 
-pub struct Reporter<C: PrivateKey, V: Variant, D: Digest> {
+pub struct Reporter<C: PublicKey, V: Variant, D: Digest> {
     mailbox: mpsc::Receiver<Message<C, V, D>>,
 
     // Application namespace
@@ -29,20 +29,20 @@ pub struct Reporter<C: PrivateKey, V: Variant, D: Digest> {
     public: V::Public,
 
     // Notified proposals
-    proposals: HashSet<Chunk<C::PublicKey, D>>,
+    proposals: HashSet<Chunk<C, D>>,
     limit_misses: Option<usize>,
 
     // All known digests
-    digests: HashMap<C::PublicKey, BTreeMap<u64, (D, Epoch)>>,
+    digests: HashMap<C, BTreeMap<u64, (D, Epoch)>>,
 
     // Highest contiguous known height for each sequencer
-    contiguous: HashMap<C::PublicKey, u64>,
+    contiguous: HashMap<C, u64>,
 
     // Highest known height (and epoch) for each sequencer
-    highest: HashMap<C::PublicKey, (u64, Epoch)>,
+    highest: HashMap<C, (u64, Epoch)>,
 }
 
-impl<C: PrivateKey, V: Variant, D: Digest> Reporter<C, V, D> {
+impl<C: PublicKey, V: Variant, D: Digest> Reporter<C, V, D> {
     pub fn new(
         namespace: &[u8],
         public: V::Public,
@@ -89,7 +89,7 @@ impl<C: PrivateKey, V: Variant, D: Digest> Reporter<C, V, D> {
 
                     // Test encoding/decoding
                     let encoded = lock.encode();
-                    Lock::<C::PublicKey, V, D>::decode(encoded).unwrap();
+                    Lock::<C, V, D>::decode(encoded).unwrap();
 
                     // Check if the proposal is known
                     if let Some(misses_allowed) = self.limit_misses {
@@ -166,11 +166,11 @@ impl<C: PrivateKey, V: Variant, D: Digest> Reporter<C, V, D> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<C: PrivateKey, V: Variant, D: Digest> {
+pub struct Mailbox<C: PublicKey, V: Variant, D: Digest> {
     sender: mpsc::Sender<Message<C, V, D>>,
 }
 
-impl<C: PrivateKey, V: Variant, D: Digest> Z for Mailbox<C, V, D> {
+impl<C: PublicKey, V: Variant, D: Digest> Z for Mailbox<C, V, D> {
     type Activity = Activity<C, V, D>;
 
     async fn report(&mut self, activity: Self::Activity) {
@@ -191,8 +191,8 @@ impl<C: PrivateKey, V: Variant, D: Digest> Z for Mailbox<C, V, D> {
     }
 }
 
-impl<C: PrivateKey, V: Variant, D: Digest> Mailbox<C, V, D> {
-    pub async fn get_tip(&mut self, sequencer: C::PublicKey) -> Option<(u64, Epoch)> {
+impl<C: PublicKey, V: Variant, D: Digest> Mailbox<C, V, D> {
+    pub async fn get_tip(&mut self, sequencer: C) -> Option<(u64, Epoch)> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::GetTip(sequencer, sender))
@@ -201,7 +201,7 @@ impl<C: PrivateKey, V: Variant, D: Digest> Mailbox<C, V, D> {
         receiver.await.unwrap()
     }
 
-    pub async fn get_contiguous_tip(&mut self, sequencer: C::PublicKey) -> Option<u64> {
+    pub async fn get_contiguous_tip(&mut self, sequencer: C) -> Option<u64> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::GetContiguousTip(sequencer, sender))
@@ -210,7 +210,7 @@ impl<C: PrivateKey, V: Variant, D: Digest> Mailbox<C, V, D> {
         receiver.await.unwrap()
     }
 
-    pub async fn get(&mut self, sequencer: C::PublicKey, height: u64) -> Option<(D, Epoch)> {
+    pub async fn get(&mut self, sequencer: C, height: u64) -> Option<(D, Epoch)> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::Get(sequencer, height, sender))

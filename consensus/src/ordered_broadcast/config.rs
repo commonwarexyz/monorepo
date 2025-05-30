@@ -10,7 +10,7 @@ pub struct Config<
     D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D>,
     R: Relay<Digest = D>,
-    Z: Reporter<Activity = Activity<C, V, D>>,
+    Z: Reporter<Activity = Activity<C::PublicKey, V, D>>,
     M: Monitor<Index = Epoch>,
     Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
     TSu: ThresholdSupervisor<Index = Epoch, PublicKey = C::PublicKey>,
