@@ -6,6 +6,7 @@ use futures::{
     SinkExt as _,
 };
 use io_uring::{squeue::Entry as SqueueEntry, types::Fd};
+use prometheus_client::registry::Registry;
 use std::{
     net::SocketAddr,
     os::fd::{AsRawFd, OwnedFd},
@@ -31,17 +32,24 @@ impl Network {
     /// large enough, given the number of connections that will be maintained.
     /// Each ongoing send/recv to/from each connection will consume a slot in the io_uring.
     /// The io_uring `size` should be a multiple of the number of expected connections.
-    pub(crate) fn start(cfg: iouring::Config) -> Result<Self, crate::Error> {
+    pub(crate) fn start(
+        cfg: iouring::Config,
+        registry: &mut Registry,
+    ) -> Result<Self, crate::Error> {
         // Create an io_uring instance to handle send operations.
         let (send_submitter, rx) = mpsc::channel(cfg.size as usize);
         std::thread::spawn({
             let cfg = cfg.clone();
-            move || block_on(iouring::run(cfg, rx))
+            let registry = registry.sub_registry_with_prefix("io_uring_send");
+            let metrics = Arc::new(iouring::Metrics::new(registry));
+            move || block_on(iouring::run(cfg, metrics, rx))
         });
 
         // Create an io_uring instance to handle receive operations.
         let (recv_submitter, rx) = mpsc::channel(cfg.size as usize);
-        std::thread::spawn(|| block_on(iouring::run(cfg, rx)));
+        let registry = registry.sub_registry_with_prefix("io_uring_recv");
+        let metrics = Arc::new(iouring::Metrics::new(registry));
+        std::thread::spawn(|| block_on(iouring::run(cfg, metrics, rx)));
 
         Ok(Self {
             send_submitter: send_submitter.clone(),

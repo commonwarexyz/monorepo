@@ -246,7 +246,7 @@ impl crate::Runner for Runner {
                     IoUringStorage::start(IoUringConfig {
                         storage_directory: self.cfg.storage_directory.clone(),
                         ring_config: Default::default(),
-                    }),
+                    }, runtime_registry),
                     runtime_registry,
                 );
             } else {
@@ -263,7 +263,7 @@ impl crate::Runner for Runner {
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-network")] {
                 let network = MeteredNetwork::new(
-                    IoUringNetwork::start(crate::iouring::Config::default()).unwrap(),
+                    IoUringNetwork::start(crate::iouring::Config::default(),runtime_registry).unwrap(),
                     runtime_registry,
                 );
             } else {

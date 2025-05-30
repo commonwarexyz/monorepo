@@ -9,7 +9,8 @@ use io_uring::{
     types::Timespec,
     IoUring,
 };
-use std::{collections::HashMap, time::Duration};
+use prometheus_client::{metrics::gauge::Gauge, registry::Registry};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 /// Reserved ID for a CQE that indicates an operation timed out.
 const TIMEOUT_WORK_ID: u64 = u64::MAX;
@@ -20,6 +21,29 @@ const SHUTDOWN_TIMEOUT_WORK_ID: u64 = u64::MAX - 1;
 /// Reserved ID for a CQE that indicates the event loop should
 /// wake up to check for new work.
 const POLL_WORK_ID: u64 = u64::MAX - 2;
+
+#[derive(Debug)]
+/// Tracks network metrics.
+pub struct Metrics {
+    /// Number of operations submitted to the io_uring whose CQEs haven't
+    /// yet been processed. Note this metric doesn't include timeouts,
+    /// which are generated internally by the io_uring event loop.
+    pending_operations: Gauge,
+}
+
+impl Metrics {
+    pub fn new(registry: &mut Registry) -> Self {
+        let metrics = Self {
+            pending_operations: Gauge::default(),
+        };
+        registry.register(
+            "pending_operations",
+            "Number of operations submitted to the io_uring whose CQEs haven't yet been processed",
+            metrics.pending_operations.clone(),
+        );
+        metrics
+    }
+}
 
 #[derive(Clone, Debug)]
 /// Configuration for an io_uring instance.
@@ -91,7 +115,12 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
 
 // Returns false iff we received a shutdown timeout
 // and we should stop processing completions.
-fn handle_cqe(waiters: &mut HashMap<u64, oneshot::Sender<i32>>, cqe: CqueueEntry, cfg: &Config) {
+fn handle_cqe(
+    waiters: &mut HashMap<u64, oneshot::Sender<i32>>,
+    cqe: CqueueEntry,
+    cfg: &Config,
+    metrics: &Metrics,
+) {
     let work_id = cqe.user_data();
     match work_id {
         TIMEOUT_WORK_ID => {
@@ -120,6 +149,7 @@ fn handle_cqe(waiters: &mut HashMap<u64, oneshot::Sender<i32>>, cqe: CqueueEntry
 
             let result_sender = waiters.remove(&work_id).expect("missing sender");
             let _ = result_sender.send(result);
+            metrics.pending_operations.set(waiters.len() as _);
         }
     }
 }
@@ -135,6 +165,7 @@ fn handle_cqe(waiters: &mut HashMap<u64, oneshot::Sender<i32>>, cqe: CqueueEntry
 /// It should be run in a separate task.
 pub(crate) async fn run(
     cfg: Config,
+    metrics: Arc<Metrics>,
     mut receiver: mpsc::Receiver<(SqueueEntry, oneshot::Sender<i32>)>,
 ) {
     let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
@@ -145,7 +176,7 @@ pub(crate) async fn run(
     loop {
         // Try to get a completion
         while let Some(cqe) = ring.completion().next() {
-            handle_cqe(&mut waiters, cqe, &cfg);
+            handle_cqe(&mut waiters, cqe, &cfg, &metrics);
         }
 
         // Try to fill the submission queue with incoming work.
@@ -159,7 +190,7 @@ pub(crate) async fn run(
                     Some(work) => work,
                     // Channel closed, shut down
                     None => {
-                        drain(&mut ring, &mut waiters, &cfg).await;
+                        drain(&mut ring, &mut waiters, &cfg, &metrics).await;
                         return;
                     }
                 }
@@ -170,7 +201,7 @@ pub(crate) async fn run(
                     Ok(Some(work_item)) => work_item,
                     // Channel closed, shut down
                     Ok(None) => {
-                        drain(&mut ring, &mut waiters, &cfg).await;
+                        drain(&mut ring, &mut waiters, &cfg, &metrics).await;
                         return;
                     }
                     // No new work available, wait for a completion
@@ -189,6 +220,7 @@ pub(crate) async fn run(
 
             // We'll send the result of this operation to `sender`.
             waiters.insert(work_id, sender);
+            metrics.pending_operations.set(waiters.len() as _);
 
             // Submit the operation to the ring, with timeout if configured
             if let Some(timeout) = &cfg.op_timeout {
@@ -243,7 +275,12 @@ pub(crate) async fn run(
 
 /// Process `ring` completions until all pending operations are complete or
 /// until `timeout` fires. If `timeout` is None, wait indefinitely.
-async fn drain(ring: &mut IoUring, waiters: &mut HashMap<u64, oneshot::Sender<i32>>, cfg: &Config) {
+async fn drain(
+    ring: &mut IoUring,
+    waiters: &mut HashMap<u64, oneshot::Sender<i32>>,
+    cfg: &Config,
+    metrics: &Metrics,
+) {
     if let Some(timeout) = cfg.shutdown_timeout {
         // Create a timeout that will fire if we can't clear all the inflight operations.
         let timeout = Timespec::new()
@@ -268,7 +305,7 @@ async fn drain(ring: &mut IoUring, waiters: &mut HashMap<u64, oneshot::Sender<i3
                 assert!(cfg.shutdown_timeout.is_some());
                 return;
             }
-            handle_cqe(waiters, cqe, cfg);
+            handle_cqe(waiters, cqe, cfg, metrics);
         }
     }
 }
@@ -296,13 +333,18 @@ mod tests {
         opcode,
         types::{Fd, Timespec},
     };
-    use std::os::{fd::AsRawFd, unix::net::UnixStream};
+    use prometheus_client::registry::Registry;
     use std::time::Duration;
+    use std::{
+        os::{fd::AsRawFd, unix::net::UnixStream},
+        sync::Arc,
+    };
 
     async fn recv_then_send(cfg: Config, should_succeed: bool) {
         // Create a new io_uring instance
         let (mut submitter, receiver) = channel(0);
-        let handle = tokio::spawn(super::run(cfg, receiver));
+        let metrics = Arc::new(super::Metrics::new(&mut Registry::default()));
+        let handle = tokio::spawn(super::run(cfg, metrics.clone(), receiver));
 
         let (left_pipe, right_pipe) = UnixStream::pair().unwrap();
 
@@ -317,12 +359,16 @@ mod tests {
             .await
             .expect("failed to send work");
 
-        // Sleep a short time so that the io_uring `run` event loop is probably
-        // parked in `submit_and_wait` and waiting for the `recv` to complete.
-        // Note that this doesn't _guarantee_ that the event loop is parked.
-        // If this test flakes, this is the first place to look.
-        // In that case, consider increasing the sleep duration.
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        while metrics.pending_operations.get() == 0 {
+            // Wait for the read to be submitted
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        // Sleep an additional short time so that event loop is (probably) parked
+        // in submit_and_wait. Note this may flake. In that case, consider
+        // increasing the sleep duration or changing metrics.pending_operations
+        // to only be incremented before submit_and_wait so that exiting the loop
+        // above means the event loop is definitely parked when we submit the write.
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Submit a write that satisfies the read.
         let write =
@@ -385,7 +431,8 @@ mod tests {
             ..Default::default()
         };
         let (mut submitter, receiver) = channel(1);
-        let handle = tokio::spawn(super::run(cfg, receiver));
+        let metrics = Arc::new(super::Metrics::new(&mut Registry::default()));
+        let handle = tokio::spawn(super::run(cfg, metrics, receiver));
 
         // Submit a work item that will time out (because we don't write to the pipe)
         let (pipe_left, _pipe_right) = UnixStream::pair().unwrap();
@@ -412,7 +459,8 @@ mod tests {
             ..Default::default()
         };
         let (mut submitter, receiver) = channel(1);
-        let handle = tokio::spawn(super::run(cfg, receiver));
+        let metrics = Arc::new(super::Metrics::new(&mut Registry::default()));
+        let handle = tokio::spawn(super::run(cfg, metrics, receiver));
 
         // Submit an operation that will complete after shutdown
         let timeout = Timespec::new().sec(3);
@@ -437,7 +485,8 @@ mod tests {
             ..Default::default()
         };
         let (mut submitter, receiver) = channel(1);
-        let handle = tokio::spawn(super::run(cfg, receiver));
+        let metrics = Arc::new(super::Metrics::new(&mut Registry::default()));
+        let handle = tokio::spawn(super::run(cfg, metrics, receiver));
 
         // Submit an operation that will complete long after shutdown starts
         let timeout = Timespec::new().sec(5_000);
