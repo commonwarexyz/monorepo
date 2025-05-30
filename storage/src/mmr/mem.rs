@@ -360,6 +360,11 @@ impl<H: CHasher> Mmr<H> {
         Ok(())
     }
 
+    /// Returns whether there are pending updates.
+    pub fn is_dirty(&self) -> bool {
+        !self.dirty_nodes.is_empty()
+    }
+
     /// Process any pending batched updates.
     pub fn sync(&mut self, hasher: &mut impl Hasher<H>) {
         if self.dirty_nodes.is_empty() {

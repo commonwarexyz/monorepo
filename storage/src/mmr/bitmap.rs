@@ -871,7 +871,6 @@ mod tests {
                 // root will change when adding 0s within the same chunk
                 assert_ne!(new_root, newer_root);
             }
-            bitmap.sync(&mut hasher).await.unwrap();
             assert_eq!(bitmap.mmr.size(), 4); // chunk we filled should have been added to mmr
 
             // Confirm the root changes when we add the next 0 bit since it's part of a new chunk.
