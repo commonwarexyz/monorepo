@@ -23,7 +23,7 @@ const SHUTDOWN_TIMEOUT_WORK_ID: u64 = u64::MAX - 1;
 const POLL_WORK_ID: u64 = u64::MAX - 2;
 
 #[derive(Debug)]
-/// Tracks network metrics.
+/// Tracks io_uring metrics.
 pub struct Metrics {
     /// Number of operations submitted to the io_uring whose CQEs haven't
     /// yet been processed. Note this metric doesn't include timeouts,
