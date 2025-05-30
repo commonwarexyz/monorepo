@@ -52,7 +52,7 @@ jobs:
 
   Slow:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     strategy:
       matrix:
         features:
