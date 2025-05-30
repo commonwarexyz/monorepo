@@ -28,6 +28,8 @@ pub struct Metrics {
     /// Number of operations submitted to the io_uring whose CQEs haven't
     /// yet been processed. Note this metric doesn't include timeouts,
     /// which are generated internally by the io_uring event loop.
+    /// It's only updated before `submit_and_wait` is called, so it may
+    /// temporarily vary from the actual number of pending operations.
     pending_operations: Gauge,
 }
 
@@ -115,12 +117,7 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
 
 // Returns false iff we received a shutdown timeout
 // and we should stop processing completions.
-fn handle_cqe(
-    waiters: &mut HashMap<u64, oneshot::Sender<i32>>,
-    cqe: CqueueEntry,
-    cfg: &Config,
-    metrics: &Metrics,
-) {
+fn handle_cqe(waiters: &mut HashMap<u64, oneshot::Sender<i32>>, cqe: CqueueEntry, cfg: &Config) {
     let work_id = cqe.user_data();
     match work_id {
         TIMEOUT_WORK_ID => {
@@ -149,7 +146,6 @@ fn handle_cqe(
 
             let result_sender = waiters.remove(&work_id).expect("missing sender");
             let _ = result_sender.send(result);
-            metrics.pending_operations.set(waiters.len() as _);
         }
     }
 }
@@ -176,7 +172,7 @@ pub(crate) async fn run(
     loop {
         // Try to get a completion
         while let Some(cqe) = ring.completion().next() {
-            handle_cqe(&mut waiters, cqe, &cfg, &metrics);
+            handle_cqe(&mut waiters, cqe, &cfg);
         }
 
         // Try to fill the submission queue with incoming work.
@@ -190,7 +186,7 @@ pub(crate) async fn run(
                     Some(work) => work,
                     // Channel closed, shut down
                     None => {
-                        drain(&mut ring, &mut waiters, &cfg, &metrics).await;
+                        drain(&mut ring, &mut waiters, &cfg).await;
                         return;
                     }
                 }
@@ -201,7 +197,7 @@ pub(crate) async fn run(
                     Ok(Some(work_item)) => work_item,
                     // Channel closed, shut down
                     Ok(None) => {
-                        drain(&mut ring, &mut waiters, &cfg, &metrics).await;
+                        drain(&mut ring, &mut waiters, &cfg).await;
                         return;
                     }
                     // No new work available, wait for a completion
@@ -275,12 +271,7 @@ pub(crate) async fn run(
 
 /// Process `ring` completions until all pending operations are complete or
 /// until `timeout` fires. If `timeout` is None, wait indefinitely.
-async fn drain(
-    ring: &mut IoUring,
-    waiters: &mut HashMap<u64, oneshot::Sender<i32>>,
-    cfg: &Config,
-    metrics: &Metrics,
-) {
+async fn drain(ring: &mut IoUring, waiters: &mut HashMap<u64, oneshot::Sender<i32>>, cfg: &Config) {
     if let Some(timeout) = cfg.shutdown_timeout {
         // Create a timeout that will fire if we can't clear all the inflight operations.
         let timeout = Timespec::new()
@@ -305,7 +296,7 @@ async fn drain(
                 assert!(cfg.shutdown_timeout.is_some());
                 return;
             }
-            handle_cqe(waiters, cqe, cfg, metrics);
+            handle_cqe(waiters, cqe, cfg);
         }
     }
 }
