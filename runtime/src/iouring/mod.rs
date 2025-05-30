@@ -220,7 +220,6 @@ pub(crate) async fn run(
 
             // We'll send the result of this operation to `sender`.
             waiters.insert(work_id, sender);
-            metrics.pending_operations.set(waiters.len() as _);
 
             // Submit the operation to the ring, with timeout if configured
             if let Some(timeout) = &cfg.op_timeout {
@@ -269,6 +268,7 @@ pub(crate) async fn run(
         // even if it's there before this call. That is, a completion
         // that arrived before this call will be counted and cause this
         // call to return. Note that waiters.len() > 0 here.
+        metrics.pending_operations.set(waiters.len() as _);
         ring.submit_and_wait(1).expect("unable to submit to ring");
     }
 }
@@ -363,12 +363,6 @@ mod tests {
             // Wait for the read to be submitted
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        // Sleep an additional short time so that event loop is (probably) parked
-        // in submit_and_wait. Note this may flake. In that case, consider
-        // increasing the sleep duration or changing metrics.pending_operations
-        // to only be incremented before submit_and_wait so that exiting the loop
-        // above means the event loop is definitely parked when we submit the write.
-        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Submit a write that satisfies the read.
         let write =
