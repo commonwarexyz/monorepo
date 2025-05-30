@@ -15,7 +15,7 @@ use super::{
 use crate::{Automaton, Monitor, Relay, Reporter, Supervisor, ThresholdSupervisor};
 use commonware_cryptography::{
     bls12381::primitives::{group, poly, variant::Variant},
-    Digest, PrivateKey,
+    Digest, PrivateKey, PublicKey,
 };
 use commonware_macros::select;
 use commonware_p2p::{
@@ -44,9 +44,9 @@ use std::{
 use tracing::{debug, error, info, warn};
 
 /// Represents a pending verification request to the automaton.
-struct Verify<C: PrivateKey, D: Digest, E: Clock> {
+struct Verify<C: PublicKey, D: Digest, E: Clock> {
     timer: histogram::Timer<E>,
-    context: Context<C::PublicKey>,
+    context: Context<C>,
     payload: D,
     result: Result<bool, Error>,
 }
@@ -130,7 +130,7 @@ pub struct Engine<
     //
     // There is no limit to the number of futures in this pool, so the automaton
     // can apply backpressure by dropping the verification requests if necessary.
-    pending_verifies: FuturesPool<Verify<C, D, E>>,
+    pending_verifies: FuturesPool<Verify<C::PublicKey, D, E>>,
 
     ////////////////////////////////////////
     // Storage
