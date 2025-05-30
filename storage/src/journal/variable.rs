@@ -413,7 +413,10 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                     if let Err(e) = blob.read_at(&mut buf, offset).await {
                                         println!("error: {:?}", e);
                                     } else {
-                                        println!("remaining: {:?}", buf);
+                                        println!(
+                                            "remaining: {:?} ({} -> {}) at ITEM_ALIGNMENT: {}",
+                                            buf, offset, blob_len, ITEM_ALIGNMENT
+                                        );
                                     }
                                     Some((Err(err), (section, blob, len, codec_config, compressed)))
                                 }
