@@ -281,17 +281,18 @@ impl crate::Stream for Stream {
 
 #[cfg(test)]
 mod tests {
-    use prometheus_client::registry::Registry;
     use crate::{
         iouring::Config,
         network::{iouring::Network, tests},
     };
+    use prometheus_client::registry::Registry;
     use std::time::Duration;
 
     #[tokio::test]
     async fn test_trait() {
         tests::test_network_trait(|| {
-            Network::start(Config::default(), &mut Registry::default()).expect("Failed to start io_uring")
+            Network::start(Config::default(), &mut Registry::default())
+                .expect("Failed to start io_uring")
         })
         .await;
     }
@@ -300,11 +301,14 @@ mod tests {
     #[ignore]
     async fn stress_test_trait() {
         tests::stress_test_network_trait(|| {
-            Network::start(Config {
-                size: 256,
-                force_poll: Some(Duration::from_millis(100)),
-                ..Default::default()
-            }, &mut Registry::default())
+            Network::start(
+                Config {
+                    size: 256,
+                    force_poll: Some(Duration::from_millis(100)),
+                    ..Default::default()
+                },
+                &mut Registry::default(),
+            )
             .expect("Failed to start io_uring")
         })
         .await;
