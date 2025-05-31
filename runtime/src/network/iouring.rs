@@ -1,11 +1,11 @@
 use crate::iouring::{self, should_retry};
-use commonware_utils::{StableBuf, StableBufMut};
+use commonware_utils::StableBuf;
 use futures::{
     channel::{mpsc, oneshot},
     executor::block_on,
     SinkExt as _,
 };
-use io_uring::{squeue::Entry as SqueueEntry, types::Fd};
+use io_uring::types::Fd;
 use prometheus_client::registry::Registry;
 use std::{
     net::SocketAddr,
@@ -17,10 +17,10 @@ use tokio::net::{TcpListener, TcpStream};
 #[derive(Clone, Debug)]
 /// [crate::Network] implementation that uses io_uring to do async I/O.
 pub struct Network {
-    /// Sends send operations to the send io_uring event loop.
-    send_submitter: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
-    /// Sends recv operations to the recv io_uring event loop.
-    recv_submitter: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
+    /// Used to submit send operations to the send io_uring event loop.
+    send_submitter: mpsc::Sender<iouring::Op>,
+    /// Used to submit recv operations to the recv io_uring event loop.
+    recv_submitter: mpsc::Sender<iouring::Op>,
 }
 
 impl Network {
@@ -52,8 +52,8 @@ impl Network {
         std::thread::spawn(|| block_on(iouring::run(cfg, metrics, rx)));
 
         Ok(Self {
-            send_submitter: send_submitter.clone(),
-            recv_submitter: recv_submitter.clone(),
+            send_submitter,
+            recv_submitter,
         })
     }
 }
@@ -104,8 +104,10 @@ impl crate::Network for Network {
 /// Implementation of [crate::Listener] for an io-uring [Network].
 pub struct Listener {
     inner: TcpListener,
-    send_submitter: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
-    recv_submitter: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
+    /// Used to submit send operations to the send io_uring event loop.
+    send_submitter: mpsc::Sender<iouring::Op>,
+    /// Used to submit recv operations to the recv io_uring event loop.
+    recv_submitter: mpsc::Sender<iouring::Op>,
 }
 
 impl crate::Listener for Listener {
@@ -151,7 +153,8 @@ impl crate::Listener for Listener {
 /// Implementation of [crate::Sink] for an io-uring [Network].
 pub struct Sink {
     fd: Arc<OwnedFd>,
-    submitter: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
+    /// Used to submit send operations to the io_uring event loop.
+    submitter: mpsc::Sender<iouring::Op>,
 }
 
 impl Sink {
@@ -161,11 +164,19 @@ impl Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send<B: StableBuf>(&mut self, msg: B) -> Result<(), crate::Error> {
+    async fn send(&mut self, msg: impl Into<StableBuf> + Send) -> Result<(), crate::Error> {
+        let mut msg = msg.into();
         let mut bytes_sent = 0;
-        let msg = msg.as_ref();
-        while bytes_sent < msg.len() {
-            let remaining = &msg[bytes_sent..];
+        let msg_len = msg.len();
+
+        while bytes_sent < msg_len {
+            // Figure out how much is left to read and where to read into
+            let remaining = unsafe {
+                std::slice::from_raw_parts(
+                    msg.as_mut_ptr().add(bytes_sent) as *const u8,
+                    msg_len - bytes_sent,
+                )
+            };
 
             // Create the io_uring send operation
             let op = io_uring::opcode::Send::new(
@@ -178,12 +189,17 @@ impl crate::Sink for Sink {
             // Submit the operation to the io_uring event loop
             let (tx, rx) = oneshot::channel();
             self.submitter
-                .send((op, tx))
+                .send(crate::iouring::Op {
+                    work: op,
+                    sender: tx,
+                    buffer: Some(msg),
+                })
                 .await
                 .map_err(|_| crate::Error::SendFailed)?;
 
             // Wait for the operation to complete
-            let result = rx.await.map_err(|_| crate::Error::SendFailed)?;
+            let (result, got_msg) = rx.await.map_err(|_| crate::Error::SendFailed)?;
+            msg = got_msg.unwrap();
             if should_retry(result) {
                 continue;
             }
@@ -203,7 +219,8 @@ impl crate::Sink for Sink {
 /// Implementation of [crate::Stream] for an io-uring [Network].
 pub struct Stream {
     fd: Arc<OwnedFd>,
-    submitter: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
+    /// Used to submit recv operations to the io_uring event loop.
+    submitter: mpsc::Sender<iouring::Op>,
 }
 
 impl Stream {
@@ -213,12 +230,18 @@ impl Stream {
 }
 
 impl crate::Stream for Stream {
-    async fn recv<B: StableBufMut>(&mut self, mut buf: B) -> Result<B, crate::Error> {
+    async fn recv(&mut self, buf: impl Into<StableBuf> + Send) -> Result<StableBuf, crate::Error> {
         let mut bytes_received = 0;
+        let mut buf = buf.into();
         let buf_len = buf.len();
-        let buf_ref = buf.deref_mut();
         while bytes_received < buf_len {
-            let remaining = &mut buf_ref[bytes_received..];
+            // Figure out how much is left to read and where to read into
+            let remaining = unsafe {
+                std::slice::from_raw_parts_mut(
+                    buf.as_mut_ptr().add(bytes_received),
+                    buf_len - bytes_received,
+                )
+            };
 
             // Create the io_uring recv operation
             let op = io_uring::opcode::Recv::new(
@@ -231,12 +254,17 @@ impl crate::Stream for Stream {
             // Submit the operation to the io_uring event loop
             let (tx, rx) = oneshot::channel();
             self.submitter
-                .send((op, tx))
+                .send(crate::iouring::Op {
+                    work: op,
+                    sender: tx,
+                    buffer: Some(buf),
+                })
                 .await
                 .map_err(|_| crate::Error::RecvFailed)?;
 
             // Wait for the operation to complete
-            let result = rx.await.map_err(|_| crate::Error::RecvFailed)?;
+            let (result, got_buf) = rx.await.map_err(|_| crate::Error::RecvFailed)?;
+            buf = got_buf.unwrap();
             if should_retry(result) {
                 continue;
             }
@@ -248,5 +276,41 @@ impl crate::Stream for Stream {
             bytes_received += result as usize;
         }
         Ok(buf)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        iouring::Config,
+        network::{iouring::Network, tests},
+    };
+    use prometheus_client::registry::Registry;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn test_trait() {
+        tests::test_network_trait(|| {
+            Network::start(Config::default(), &mut Registry::default())
+                .expect("Failed to start io_uring")
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn stress_test_trait() {
+        tests::stress_test_network_trait(|| {
+            Network::start(
+                Config {
+                    size: 256,
+                    force_poll: Some(Duration::from_millis(100)),
+                    ..Default::default()
+                },
+                &mut Registry::default(),
+            )
+            .expect("Failed to start io_uring")
+        })
+        .await;
     }
 }

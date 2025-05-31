@@ -1,5 +1,5 @@
 use crate::{Blob, Error, RwLock};
-use commonware_utils::{StableBuf, StableBufMut};
+use commonware_utils::StableBuf;
 use std::sync::Arc;
 
 /// The internal state of a [Write] buffer.
@@ -25,8 +25,9 @@ impl<B: Blob> Inner<B> {
     ///
     /// Returns an error if the write to the underlying [Blob] fails (may be due to a `flush` of data not
     /// related to the data being written).
-    async fn write<Buf: StableBuf>(&mut self, buf: Buf) -> Result<(), Error> {
+    async fn write<S: Into<StableBuf>>(&mut self, buf: S) -> Result<(), Error> {
         // If the buffer capacity will be exceeded, flush the buffer first
+        let buf = buf.into();
         let buf_len = buf.len();
         if self.buffer.len() + buf_len > self.capacity {
             self.flush().await?;
@@ -104,12 +105,12 @@ impl<B: Blob> Inner<B> {
 ///
 ///     // Create a buffered writer with 16-byte buffer
 ///     let mut blob = Write::new(blob, 0, 16);
-///     blob.write_at("hello".as_bytes(), 0).await.expect("write failed");
+///     blob.write_at(b"hello".to_vec(), 0).await.expect("write failed");
 ///     blob.sync().await.expect("sync failed");
 ///
 ///     // Write more data in multiple flushes
-///     blob.write_at(" world".as_bytes(), 5).await.expect("write failed");
-///     blob.write_at("!".as_bytes(), 11).await.expect("write failed");
+///     blob.write_at(b" world".to_vec(), 5).await.expect("write failed");
+///     blob.write_at(b"!".to_vec(), 11).await.expect("write failed");
 ///     blob.sync().await.expect("sync failed");
 ///
 ///     // Read back the data to verify
@@ -145,11 +146,16 @@ impl<B: Blob> Write<B> {
 }
 
 impl<B: Blob> Blob for Write<B> {
-    async fn read_at<T: StableBufMut>(&self, mut buf: T, offset: u64) -> Result<T, Error> {
+    async fn read_at(
+        &self,
+        buf: impl Into<StableBuf> + Send,
+        offset: u64,
+    ) -> Result<StableBuf, Error> {
         // Acquire a read lock on the inner state
         let inner = self.inner.read().await;
 
         // Ensure offset read doesn't overflow
+        let mut buf = buf.into();
         let data_len = buf.len();
         let data_end = offset
             .checked_add(data_len as u64)
@@ -181,17 +187,18 @@ impl<B: Blob> Blob for Write<B> {
         let blob_bytes = (buffer_start - offset) as usize;
         let blob_part = vec![0u8; blob_bytes];
         let blob_part = inner.blob.read_at(blob_part, offset).await?;
-        buf.deref_mut()[..blob_bytes].copy_from_slice(&blob_part);
+        buf.as_mut()[..blob_bytes].copy_from_slice(blob_part.as_ref());
         let buf_bytes = data_len - blob_bytes;
-        buf.deref_mut()[blob_bytes..].copy_from_slice(&inner.buffer[..buf_bytes]);
+        buf.as_mut()[blob_bytes..].copy_from_slice(&inner.buffer[..buf_bytes]);
         Ok(buf)
     }
 
-    async fn write_at<T: StableBuf>(&self, buf: T, offset: u64) -> Result<(), Error> {
+    async fn write_at(&self, buf: impl Into<StableBuf> + Send, offset: u64) -> Result<(), Error> {
         // Acquire a write lock on the inner state
         let mut inner = self.inner.write().await;
 
         // Prepare the buf to be written
+        let buf = buf.into();
         let data = buf.as_ref();
         let data_len = data.len();
 

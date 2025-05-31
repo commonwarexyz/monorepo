@@ -1,5 +1,5 @@
 use crate::{deterministic::Auditor, Error, SinkOf, StreamOf};
-use commonware_utils::{StableBuf, StableBufMut};
+use commonware_utils::StableBuf;
 use sha2::Digest;
 use std::{net::SocketAddr, sync::Arc};
 
@@ -11,7 +11,8 @@ pub struct Sink<S: crate::Sink> {
 }
 
 impl<S: crate::Sink> crate::Sink for Sink<S> {
-    async fn send<B: StableBuf>(&mut self, data: B) -> Result<(), Error> {
+    async fn send(&mut self, data: impl Into<StableBuf> + Send) -> Result<(), Error> {
+        let data = data.into();
         self.auditor.event(b"send_attempt", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
             hasher.update(data.as_ref());
@@ -39,7 +40,7 @@ pub struct Stream<S: crate::Stream> {
 }
 
 impl<S: crate::Stream> crate::Stream for Stream<S> {
-    async fn recv<B: StableBufMut>(&mut self, buf: B) -> Result<B, Error> {
+    async fn recv(&mut self, buf: impl Into<StableBuf> + Send) -> Result<StableBuf, Error> {
         self.auditor.event(b"recv_attempt", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
         });
@@ -200,6 +201,18 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
+    #[ignore]
+    async fn stress_test_trait() {
+        tests::stress_test_network_trait(|| {
+            AuditedNetwork::new(
+                DeterministicNetwork::default(),
+                Arc::new(Auditor::default()),
+            )
+        })
+        .await;
+    }
+
     // Test that running the same network operations on two audited networks
     // produces the same audit events.
     #[tokio::test]
@@ -243,7 +256,7 @@ mod tests {
 
                 // Receive data from client
                 let buf = stream.recv(vec![0; CLIENT_MSG.len()]).await.unwrap();
-                assert_eq!(&buf, CLIENT_MSG.as_bytes());
+                assert_eq!(buf.as_ref(), CLIENT_MSG.as_bytes());
 
                 // Send response
                 sink.send(Vec::from(SERVER_MSG)).await.unwrap();
@@ -264,7 +277,7 @@ mod tests {
 
                 // Receive response
                 let buf = stream.recv(vec![0; SERVER_MSG.len()]).await.unwrap();
-                assert_eq!(&buf, SERVER_MSG.as_bytes());
+                assert_eq!(buf.as_ref(), SERVER_MSG.as_bytes());
             });
             client_handles.push(handle);
         }

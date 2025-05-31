@@ -233,7 +233,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         // Read item size
         let offset = offset as u64 * ITEM_ALIGNMENT;
         let size = blob.read_at(vec![0; 4], offset).await?;
-        let size = u32::from_be_bytes(size.try_into().unwrap());
+        let size = u32::from_be_bytes(size.as_ref().try_into().unwrap());
         let offset = offset.checked_add(4).ok_or(Error::OffsetOverflow)?;
 
         // Read item
@@ -244,8 +244,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
         // Read checksum
         let stored_checksum = blob.read_at(vec![0; 4], offset).await?;
-        let stored_checksum = u32::from_be_bytes(stored_checksum.try_into().unwrap());
-        let checksum = crc32fast::hash(&item);
+        let stored_checksum = u32::from_be_bytes(stored_checksum.as_ref().try_into().unwrap());
+        let checksum = crc32fast::hash(item.as_ref());
         if checksum != stored_checksum {
             return Err(Error::ChecksumMismatch(stored_checksum, checksum));
         }
@@ -256,13 +256,14 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
         // If compression is enabled, decompress the item
         let item = if compressed {
-            decode_all(Cursor::new(&item)).map_err(|_| Error::DecompressionFailed)?
+            let decompressed =
+                decode_all(Cursor::new(&item)).map_err(|_| Error::DecompressionFailed)?;
+            V::decode_cfg(decompressed.as_ref(), cfg).map_err(Error::Codec)?
         } else {
-            item
+            V::decode_cfg(item.as_ref(), cfg).map_err(Error::Codec)?
         };
 
         // Return item
-        let item = V::decode_cfg(item.as_ref(), cfg).map_err(Error::Codec)?;
         Ok((aligned_offset, size, item))
     }
 
@@ -338,13 +339,13 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         let buf = blob.read_at(vec![0u8; entry_size], offset).await?;
 
         // Check size
-        let disk_size = u32::from_be_bytes(buf[..4].try_into().unwrap());
+        let disk_size = u32::from_be_bytes(buf.as_ref()[..4].try_into().unwrap());
         if disk_size != len {
             return Err(Error::UnexpectedSize(disk_size, len));
         }
 
         // Get item
-        let item = &buf[4..4 + len as usize];
+        let item = &buf.as_ref()[4..4 + len as usize];
         let checksum = crc32fast::hash(item);
         let item = if compressed {
             decode_all(Cursor::new(item)).map_err(|_| Error::DecompressionFailed)?
@@ -353,7 +354,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         };
 
         // Verify integrity
-        let stored_checksum = u32::from_be_bytes(buf[4 + len as usize..].try_into().unwrap());
+        let stored_checksum =
+            u32::from_be_bytes(buf.as_ref()[4 + len as usize..].try_into().unwrap());
         if checksum != stored_checksum {
             return Err(Error::ChecksumMismatch(stored_checksum, checksum));
         }
@@ -653,7 +655,7 @@ mod tests {
     use bytes::BufMut;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Error as RError, Runner, Storage};
-    use commonware_utils::{StableBuf, StableBufMut};
+    use commonware_utils::StableBuf;
     use futures::{pin_mut, StreamExt};
     use prometheus_client::registry::Metric;
 
@@ -1259,11 +1261,19 @@ mod tests {
     struct MockBlob {}
 
     impl Blob for MockBlob {
-        async fn read_at<B: StableBufMut>(&self, buf: B, _offset: u64) -> Result<B, RError> {
-            Ok(buf)
+        async fn read_at(
+            &self,
+            buf: impl Into<StableBuf> + Send,
+            _offset: u64,
+        ) -> Result<StableBuf, RError> {
+            Ok(buf.into())
         }
 
-        async fn write_at<B: StableBuf>(&self, _buf: B, _offset: u64) -> Result<(), RError> {
+        async fn write_at(
+            &self,
+            _buf: impl Into<StableBuf> + Send,
+            _offset: u64,
+        ) -> Result<(), RError> {
             Ok(())
         }
 

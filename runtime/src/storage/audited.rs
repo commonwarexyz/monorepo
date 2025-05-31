@@ -1,5 +1,5 @@
 use crate::{deterministic::Auditor, Error};
-use commonware_utils::{StableBuf, StableBufMut};
+use commonware_utils::StableBuf;
 use sha2::digest::Update;
 use std::sync::Arc;
 
@@ -63,7 +63,8 @@ pub struct Blob<B: crate::Blob> {
 }
 
 impl<B: crate::Blob> crate::Blob for Blob<B> {
-    async fn read_at<S: StableBufMut>(&self, buf: S, offset: u64) -> Result<S, Error> {
+    async fn read_at(&self, buf: impl Into<StableBuf>, offset: u64) -> Result<StableBuf, Error> {
+        let buf = buf.into();
         self.auditor.event(b"read_at", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
@@ -73,7 +74,8 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.inner.read_at(buf, offset).await
     }
 
-    async fn write_at<S: StableBuf>(&self, buf: S, offset: u64) -> Result<(), Error> {
+    async fn write_at(&self, buf: impl Into<StableBuf>, offset: u64) -> Result<(), Error> {
+        let buf = buf.into();
         self.auditor.event(b"write_at", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
@@ -158,9 +160,17 @@ mod tests {
 
         // Read data from the blobs
         let read = blob1.read_at(vec![0; 11], 0).await.unwrap();
-        assert_eq!(read, b"hello world", "Blob1 content does not match");
-        let read: Vec<u8> = blob2.read_at(vec![0; 11], 0).await.unwrap();
-        assert_eq!(read, b"hello world", "Blob2 content does not match");
+        assert_eq!(
+            read.as_ref(),
+            b"hello world",
+            "Blob1 content does not match"
+        );
+        let read = blob2.read_at(vec![0; 11], 0).await.unwrap();
+        assert_eq!(
+            read.as_ref(),
+            b"hello world",
+            "Blob2 content does not match"
+        );
         assert_eq!(
             auditor1.state(),
             auditor2.state(),

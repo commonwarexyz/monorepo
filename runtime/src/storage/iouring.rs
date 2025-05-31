@@ -2,13 +2,13 @@ use crate::{
     iouring::{self, should_retry},
     Error,
 };
-use commonware_utils::{from_hex, hex, StableBuf, StableBufMut};
+use commonware_utils::{from_hex, hex, StableBuf};
 use futures::{
     channel::{mpsc, oneshot},
     executor::block_on,
     SinkExt as _,
 };
-use io_uring::{opcode, squeue::Entry as SqueueEntry, types};
+use io_uring::{opcode, types};
 use prometheus_client::registry::Registry;
 use std::fs::{self, File};
 use std::io::Error as IoError;
@@ -28,14 +28,13 @@ pub struct Config {
 #[derive(Clone)]
 pub struct Storage {
     storage_directory: PathBuf,
-    io_sender: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
+    io_sender: mpsc::Sender<iouring::Op>,
 }
 
 impl Storage {
     /// Returns a new `Storage` instance.
     pub fn start(cfg: Config, registry: &mut Registry) -> Self {
-        let (io_sender, receiver) =
-            mpsc::channel::<(SqueueEntry, oneshot::Sender<i32>)>(cfg.ring_config.size as usize);
+        let (io_sender, receiver) = mpsc::channel::<iouring::Op>(cfg.ring_config.size as usize);
 
         let storage = Storage {
             storage_directory: cfg.storage_directory.clone(),
@@ -123,7 +122,7 @@ pub struct Blob {
     /// The underlying file
     file: Arc<File>,
     /// Where to send IO operations to be executed
-    io_sender: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
+    io_sender: mpsc::Sender<iouring::Op>,
 }
 
 impl Clone for Blob {
@@ -142,7 +141,7 @@ impl Blob {
         partition: String,
         name: &[u8],
         file: File,
-        io_sender: mpsc::Sender<(SqueueEntry, oneshot::Sender<i32>)>,
+        io_sender: mpsc::Sender<iouring::Op>,
     ) -> Self {
         Self {
             partition,
@@ -154,17 +153,25 @@ impl Blob {
 }
 
 impl crate::Blob for Blob {
-    async fn read_at<B: StableBufMut>(&self, mut buf: B, offset: u64) -> Result<B, Error> {
+    async fn read_at(
+        &self,
+        buf: impl Into<StableBuf> + Send,
+        offset: u64,
+    ) -> Result<StableBuf, Error> {
+        let mut buf = buf.into();
         let fd = types::Fd(self.file.as_raw_fd());
-        let mut total_read = 0;
-        let len = buf.len();
-        let buf_ref = buf.deref_mut();
-
+        let mut bytes_read = 0;
+        let buf_len = buf.len();
         let mut io_sender = self.io_sender.clone();
-        while total_read < len {
+        while bytes_read < buf_len {
             // Figure out how much is left to read and where to read into
-            let remaining = &mut buf_ref[total_read..];
-            let offset = offset + total_read as u64;
+            let remaining = unsafe {
+                std::slice::from_raw_parts_mut(
+                    buf.as_mut_ptr().add(bytes_read),
+                    buf_len - bytes_read,
+                )
+            };
+            let offset = offset + bytes_read as u64;
 
             // Create an operation to do the read
             let op = opcode::Read::new(fd, remaining.as_mut_ptr(), remaining.len() as _)
@@ -174,38 +181,48 @@ impl crate::Blob for Blob {
             // Submit the operation
             let (sender, receiver) = oneshot::channel();
             io_sender
-                .send((op, sender))
+                .send(iouring::Op {
+                    work: op,
+                    sender,
+                    buffer: Some(buf),
+                })
                 .await
                 .map_err(|_| Error::ReadFailed)?;
 
             // Wait for the result
-            let bytes_read = receiver.await.map_err(|_| Error::ReadFailed)?;
-            if should_retry(bytes_read) {
+            let (result, got_buf) = receiver.await.map_err(|_| Error::ReadFailed)?;
+            buf = got_buf.unwrap();
+            if should_retry(result) {
                 continue;
             }
 
             // A non-positive return value indicates an error.
-            let bytes_read: usize = bytes_read.try_into().map_err(|_| Error::ReadFailed)?;
-            if bytes_read == 0 {
+            let op_bytes_read: usize = result.try_into().map_err(|_| Error::ReadFailed)?;
+            if op_bytes_read == 0 {
                 // A return value of 0 indicates EOF, which shouldn't happen because we
                 // aren't done reading into `buf`. See `man pread`.
                 return Err(Error::BlobInsufficientLength);
             }
-            total_read += bytes_read;
+            bytes_read += op_bytes_read;
         }
         Ok(buf)
     }
 
-    async fn write_at<B: StableBuf>(&self, buf: B, offset: u64) -> Result<(), Error> {
+    async fn write_at(&self, buf: impl Into<StableBuf> + Send, offset: u64) -> Result<(), Error> {
+        let mut buf = buf.into();
         let fd = types::Fd(self.file.as_raw_fd());
-        let mut total_written = 0;
-        let buf_ref = buf.as_ref();
-
+        let mut bytes_written = 0;
+        let buf_len = buf.len();
         let mut io_sender = self.io_sender.clone();
-        while total_written < buf.len() {
+        while bytes_written < buf_len {
             // Figure out how much is left to write and where to write from
-            let remaining = &buf_ref[total_written..];
-            let offset = offset + total_written as u64;
+            let remaining = unsafe {
+                std::slice::from_raw_parts(
+                    buf.as_mut_ptr().add(bytes_written) as *const u8,
+                    buf_len - bytes_written,
+                )
+            };
+            let offset = offset + bytes_written as u64;
 
             // Create an operation to do the write
             let op = opcode::Write::new(fd, remaining.as_ptr(), remaining.len() as _)
@@ -215,20 +232,26 @@ impl crate::Blob for Blob {
             // Submit the operation
             let (sender, receiver) = oneshot::channel();
             io_sender
-                .send((op, sender))
+                .send(iouring::Op {
+                    work: op,
+                    sender,
+                    buffer: Some(buf),
+                })
                 .await
                 .map_err(|_| Error::WriteFailed)?;
 
             // Wait for the result
-            let return_value = receiver.await.map_err(|_| Error::WriteFailed)?;
+            let (return_value, got_buf) = receiver.await.map_err(|_| Error::WriteFailed)?;
+            buf = got_buf.unwrap();
             if should_retry(return_value) {
                 continue;
             }
 
             // A negative return value indicates an error.
-            let bytes_written: usize = return_value.try_into().map_err(|_| Error::WriteFailed)?;
+            let op_bytes_written: usize =
+                return_value.try_into().map_err(|_| Error::WriteFailed)?;
 
-            total_written += bytes_written;
+            bytes_written += op_bytes_written;
         }
         Ok(())
     }
@@ -249,7 +272,11 @@ impl crate::Blob for Blob {
             let (sender, receiver) = oneshot::channel();
             self.io_sender
                 .clone()
-                .send((op, sender))
+                .send(iouring::Op {
+                    work: op,
+                    sender,
+                    buffer: None,
+                })
                 .await
                 .map_err(|_| {
                     Error::BlobSyncFailed(
@@ -260,7 +287,7 @@ impl crate::Blob for Blob {
                 })?;
 
             // Wait for the result
-            let return_value = receiver.await.map_err(|_| {
+            let (return_value, _) = receiver.await.map_err(|_| {
                 Error::BlobSyncFailed(
                     self.partition.clone(),
                     hex(&self.name),

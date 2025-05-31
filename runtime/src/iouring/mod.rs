@@ -1,3 +1,4 @@
+use commonware_utils::StableBuf;
 use futures::{
     channel::{mpsc, oneshot},
     StreamExt as _,
@@ -121,9 +122,30 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
     builder.build(cfg.size)
 }
 
+/// An operation submitted to the io_uring event loop which will be processed
+/// asynchronously by the event loop in `run`.
+pub struct Op {
+    /// The submission queue entry to be submitted to the ring.
+    /// Its user data field will be overwritten. Users shouldn't rely on it.
+    pub work: SqueueEntry,
+    /// Sends the result of the operation and `buffer`.
+    pub sender: oneshot::Sender<(i32, Option<StableBuf>)>,
+    /// The buffer used for the operation, if any.
+    /// E.g. For read, this is the buffer being read into.
+    /// If None, the operation doesn't use a buffer (e.g. a sync operation).
+    /// We hold the buffer here so it's guaranteed to live until the operation
+    /// completes, preventing write-after-free issues.
+    pub buffer: Option<StableBuf>,
+}
+
 // Returns false iff we received a shutdown timeout
 // and we should stop processing completions.
-fn handle_cqe(waiters: &mut HashMap<u64, oneshot::Sender<i32>>, cqe: CqueueEntry, cfg: &Config) {
+#[allow(clippy::type_complexity)]
+fn handle_cqe(
+    waiters: &mut HashMap<u64, (oneshot::Sender<(i32, Option<StableBuf>)>, Option<StableBuf>)>,
+    cqe: CqueueEntry,
+    cfg: &Config,
+) {
     let work_id = cqe.user_data();
     match work_id {
         TIMEOUT_WORK_ID => {
@@ -150,30 +172,25 @@ fn handle_cqe(waiters: &mut HashMap<u64, oneshot::Sender<i32>>, cqe: CqueueEntry
                 result
             };
 
-            let result_sender = waiters.remove(&work_id).expect("missing sender");
-            let _ = result_sender.send(result);
+            let (result_sender, buffer) = waiters.remove(&work_id).expect("missing sender");
+            let _ = result_sender.send((result, buffer));
         }
     }
 }
 
 /// Creates a new io_uring instance that listens for incoming work on `receiver`.
-///
-/// Each incoming work is `(work, sender)`, where:
-/// * `work` is the submission queue entry to be submitted to the ring.
-///   Its user data field will be overwritten. Users shouldn't rely on it.
-/// * `sender` is where we send the return value of the work.
-///
 /// This function will block until `receiver` is closed or an error occurs.
 /// It should be run in a separate task.
-pub(crate) async fn run(
-    cfg: Config,
-    metrics: Arc<Metrics>,
-    mut receiver: mpsc::Receiver<(SqueueEntry, oneshot::Sender<i32>)>,
-) {
+pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::Receiver<Op>) {
     let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
     let mut next_work_id: u64 = 0;
-    // Maps a work ID to the sender that we will send the result to.
-    let mut waiters: HashMap<_, oneshot::Sender<i32>> = HashMap::with_capacity(cfg.size as usize);
+    // Maps a work ID to the sender that we will send the result to
+    // and the buffer used for the operation.
+    #[allow(clippy::type_complexity)]
+    let mut waiters: std::collections::HashMap<
+        _,
+        (oneshot::Sender<(i32, Option<StableBuf>)>, Option<StableBuf>),
+    > = std::collections::HashMap::with_capacity(cfg.size as usize);
 
     loop {
         // Try to get a completion
@@ -185,7 +202,7 @@ pub(crate) async fn run(
         // Stop if we are at the max number of processing work.
         while waiters.len() < cfg.size as usize {
             // Wait for more work
-            let (mut work, sender) = if waiters.is_empty() {
+            let op = if waiters.is_empty() {
                 // Block until there is something to do
                 match receiver.next().await {
                     // Got work
@@ -210,6 +227,11 @@ pub(crate) async fn run(
                     Err(_) => break,
                 }
             };
+            let Op {
+                mut work,
+                sender,
+                buffer,
+            } = op;
 
             // Assign a unique id
             let work_id = next_work_id;
@@ -221,7 +243,7 @@ pub(crate) async fn run(
             work = work.user_data(work_id);
 
             // We'll send the result of this operation to `sender`.
-            waiters.insert(work_id, sender);
+            waiters.insert(work_id, (sender, buffer));
 
             // Submit the operation to the ring, with timeout if configured
             if let Some(timeout) = &cfg.op_timeout {
@@ -277,7 +299,12 @@ pub(crate) async fn run(
 
 /// Process `ring` completions until all pending operations are complete or
 /// until `timeout` fires. If `timeout` is None, wait indefinitely.
-async fn drain(ring: &mut IoUring, waiters: &mut HashMap<u64, oneshot::Sender<i32>>, cfg: &Config) {
+#[allow(clippy::type_complexity)]
+async fn drain(
+    ring: &mut IoUring,
+    waiters: &mut HashMap<u64, (oneshot::Sender<(i32, Option<StableBuf>)>, Option<StableBuf>)>,
+    cfg: &Config,
+) {
     if let Some(timeout) = cfg.shutdown_timeout {
         // Create a timeout that will fire if we can't clear all the inflight operations.
         let timeout = Timespec::new()
@@ -318,7 +345,7 @@ pub fn should_retry(return_value: i32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::iouring::Config;
+    use crate::iouring::{Config, Op};
     use futures::{
         channel::{
             mpsc::channel,
@@ -346,13 +373,17 @@ mod tests {
         let (left_pipe, right_pipe) = UnixStream::pair().unwrap();
 
         // Submit a read
-        let msg = b"hello";
+        let msg = b"hello".to_vec();
         let mut buf = vec![0; msg.len()];
         let recv =
             opcode::Recv::new(Fd(left_pipe.as_raw_fd()), buf.as_mut_ptr(), buf.len() as _).build();
         let (recv_tx, recv_rx) = oneshot::channel();
         submitter
-            .send((recv, recv_tx))
+            .send(crate::iouring::Op {
+                work: recv,
+                sender: recv_tx,
+                buffer: Some(buf.into()),
+            })
             .await
             .expect("failed to send work");
 
@@ -366,15 +397,19 @@ mod tests {
             opcode::Write::new(Fd(right_pipe.as_raw_fd()), msg.as_ptr(), msg.len() as _).build();
         let (write_tx, write_rx) = oneshot::channel();
         submitter
-            .send((write, write_tx))
+            .send(crate::iouring::Op {
+                work: write,
+                sender: write_tx,
+                buffer: Some(msg.into()),
+            })
             .await
             .expect("failed to send work");
 
         // Wait for the read and write operations to complete.
         if should_succeed {
-            let result = recv_rx.await.expect("failed to receive result");
+            let (result, _) = recv_rx.await.expect("failed to receive result");
             assert!(result > 0, "recv failed: {}", result);
-            let result = write_rx.await.expect("failed to receive result");
+            let (result, _) = write_rx.await.expect("failed to receive result");
             assert!(result > 0, "write failed: {}", result);
         } else {
             let _ = recv_rx.await;
@@ -432,11 +467,15 @@ mod tests {
             opcode::Recv::new(Fd(pipe_left.as_raw_fd()), buf.as_mut_ptr(), buf.len() as _).build();
         let (tx, rx) = oneshot::channel();
         submitter
-            .send((work, tx))
+            .send(crate::iouring::Op {
+                work,
+                sender: tx,
+                buffer: Some(buf.into()),
+            })
             .await
             .expect("failed to send work");
         // Wait for the timeout
-        let result = rx.await.expect("failed to receive result");
+        let (result, _) = rx.await.expect("failed to receive result");
         assert_eq!(result, -libc::ETIMEDOUT);
         drop(submitter);
         handle.await.unwrap();
@@ -457,13 +496,20 @@ mod tests {
         let timeout = Timespec::new().sec(3);
         let timeout = opcode::Timeout::new(&timeout).build();
         let (tx, rx) = oneshot::channel();
-        submitter.send((timeout, tx)).await.unwrap();
+        submitter
+            .send(Op {
+                work: timeout,
+                sender: tx,
+                buffer: None,
+            })
+            .await
+            .unwrap();
 
         // Drop submission channel to trigger io_uring shutdown
         drop(submitter);
 
         // Wait for the operation `timeout` to fire.
-        let result = rx.await.unwrap();
+        let (result, _) = rx.await.unwrap();
         assert_eq!(result, -libc::ETIME);
         handle.await.unwrap();
     }
@@ -483,7 +529,14 @@ mod tests {
         let timeout = Timespec::new().sec(5_000);
         let timeout = opcode::Timeout::new(&timeout).build();
         let (tx, rx) = oneshot::channel();
-        submitter.send((timeout, tx)).await.unwrap();
+        submitter
+            .send(Op {
+                work: timeout,
+                sender: tx,
+                buffer: None,
+            })
+            .await
+            .unwrap();
 
         // Drop submission channel to trigger io_uring shutdown
         drop(submitter);
