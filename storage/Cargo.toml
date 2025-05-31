@@ -24,6 +24,7 @@ prometheus-client = { workspace = true }
 futures-util = { workspace = true }
 tracing = { workspace = true }
 zstd = { workspace = true }
+rayon = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

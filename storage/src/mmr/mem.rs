@@ -374,15 +374,38 @@ impl<H: CHasher> Mmr<H> {
         self.dirty_nodes.clear();
         nodes.sort_by(|a, b| a.1.cmp(&b.1));
 
+        let mut same_height = Vec::new();
+        let mut current_height = 1;
         for (pos, height) in nodes {
+            if height == current_height {
+                same_height.push(pos);
+                continue;
+            }
+            self.update_node_digests(&same_height, hasher, current_height);
+            same_height.clear();
+            current_height += 1;
+            same_height.push(pos);
+        }
+        self.update_node_digests(&same_height, hasher, current_height);
+    }
+
+    /// Update digests of the given set of nodes of equal height in the MMR. Since they are all at
+    /// the same height, this can be done in parallel.
+    fn update_node_digests(
+        &mut self,
+        same_height: &Vec<u64>,
+        hasher: &mut impl Hasher<H>,
+        height: u32,
+    ) {
+        for pos in same_height {
             let left = pos - (1 << height);
             let right = pos - 1;
             let digest = hasher.node_digest(
-                pos,
+                *pos,
                 self.get_node_unchecked(left),
                 self.get_node_unchecked(right),
             );
-            let index = self.pos_to_index(pos);
+            let index = self.pos_to_index(*pos);
             self.nodes[index] = digest;
         }
     }
