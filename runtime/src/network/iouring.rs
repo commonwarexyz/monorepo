@@ -52,8 +52,8 @@ impl Network {
         std::thread::spawn(|| block_on(iouring::run(cfg, metrics, rx)));
 
         Ok(Self {
-            send_submitter: send_submitter.clone(),
-            recv_submitter: recv_submitter.clone(),
+            send_submitter,
+            recv_submitter,
         })
     }
 }
