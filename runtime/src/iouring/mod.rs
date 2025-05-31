@@ -227,11 +227,10 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
                     Err(_) => break,
                 }
             };
-
             let Op {
                 mut work,
                 sender,
-                buffer: buf,
+                buffer,
             } = op;
 
             // Assign a unique id
@@ -244,7 +243,7 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
             work = work.user_data(work_id);
 
             // We'll send the result of this operation to `sender`.
-            waiters.insert(work_id, (sender, buf));
+            waiters.insert(work_id, (sender, buffer));
 
             // Submit the operation to the ring, with timeout if configured
             if let Some(timeout) = &cfg.op_timeout {
