@@ -11,7 +11,7 @@ use commonware_cryptography::{
         poly::{self, PartialSignature},
         variant::Variant,
     },
-    Digest, PrivateKey, PublicKey, Verifier as _,
+    Digest, PrivateKey, PublicKey,
 };
 use commonware_utils::{union, Array};
 use futures::channel::oneshot;
@@ -315,9 +315,9 @@ impl<V: Variant, D: Digest> EncodeSize for Parent<V, D> {
 /// Nodes form a linked chain from each sequencer, ensuring that new chunks can only be added
 /// after their predecessors have been properly acknowledged by the validator set.
 #[derive(Clone, Debug)]
-pub struct Node<C: PrivateKey, V: Variant, D: Digest> {
+pub struct Node<C: PublicKey, V: Variant, D: Digest> {
     /// Chunk of the node.
-    pub chunk: Chunk<C::PublicKey, D>,
+    pub chunk: Chunk<C, D>,
 
     /// Signature of the sequencer over the chunk.
     pub signature: C::Signature,
@@ -332,16 +332,12 @@ pub struct Node<C: PrivateKey, V: Variant, D: Digest> {
     pub parent: Option<Parent<V, D>>,
 }
 
-impl<C: PrivateKey, V: Variant, D: Digest> Node<C, V, D> {
+impl<C: PublicKey, V: Variant, D: Digest> Node<C, V, D> {
     /// Create a new node with the given chunk, signature, and parent.
     ///
     /// For genesis nodes (height = 0), parent should be None.
     /// For all other nodes, parent must be provided.
-    pub fn new(
-        chunk: Chunk<C::PublicKey, D>,
-        signature: C::Signature,
-        parent: Option<Parent<V, D>>,
-    ) -> Self {
+    pub fn new(chunk: Chunk<C, D>, signature: C::Signature, parent: Option<Parent<V, D>>) -> Self {
         Self {
             chunk,
             signature,
@@ -364,7 +360,7 @@ impl<C: PrivateKey, V: Variant, D: Digest> Node<C, V, D> {
         &self,
         namespace: &[u8],
         public: &V::Public,
-    ) -> Result<Option<Chunk<C::PublicKey, D>>, Error> {
+    ) -> Result<Option<Chunk<C, D>>, Error> {
         // Verify chunk
         let chunk_namespace = chunk_namespace(namespace);
         let message = self.chunk.encode();
@@ -409,21 +405,22 @@ impl<C: PrivateKey, V: Variant, D: Digest> Node<C, V, D> {
     ///
     /// This is used by sequencers to create and sign new nodes for broadcast.
     /// For non-genesis nodes (height > 0), a parent with threshold signature must be provided.
-    pub fn sign(
+    pub fn sign<T: PrivateKey<PublicKey = C, Signature = C::Signature>>(
         namespace: &[u8],
-        scheme: &mut C,
+        scheme: &mut T,
         height: u64,
         payload: D,
         parent: Option<Parent<V, D>>,
     ) -> Self {
         let chunk_namespace = chunk_namespace(namespace);
-        let chunk = Chunk::new(scheme.public_key(), height, payload);
+        let pub_key = scheme.public_key();
+        let chunk = Chunk::new(pub_key, height, payload);
         let signature = scheme.sign(Some(chunk_namespace.as_ref()), &chunk.encode());
         Self::new(chunk, signature, parent)
     }
 }
 
-impl<C: PrivateKey, V: Variant, D: Digest> Write for Node<C, V, D> {
+impl<C: PublicKey, V: Variant, D: Digest> Write for Node<C, V, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.chunk.write(writer);
         self.signature.write(writer);
@@ -431,7 +428,7 @@ impl<C: PrivateKey, V: Variant, D: Digest> Write for Node<C, V, D> {
     }
 }
 
-impl<C: PrivateKey, V: Variant, D: Digest> Read for Node<C, V, D> {
+impl<C: PublicKey, V: Variant, D: Digest> Read for Node<C, V, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -457,13 +454,13 @@ impl<C: PrivateKey, V: Variant, D: Digest> Read for Node<C, V, D> {
     }
 }
 
-impl<C: PrivateKey, V: Variant, D: Digest> EncodeSize for Node<C, V, D> {
+impl<C: PublicKey, V: Variant, D: Digest> EncodeSize for Node<C, V, D> {
     fn encode_size(&self) -> usize {
         self.chunk.encode_size() + self.signature.encode_size() + self.parent.encode_size()
     }
 }
 
-impl<C: PrivateKey, V: Variant, D: Digest> Hash for Node<C, V, D> {
+impl<C: PublicKey, V: Variant, D: Digest> Hash for Node<C, V, D> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.chunk.hash(state);
         self.signature.hash(state);
@@ -471,7 +468,7 @@ impl<C: PrivateKey, V: Variant, D: Digest> Hash for Node<C, V, D> {
     }
 }
 
-impl<C: PrivateKey, V: Variant, D: Digest> PartialEq for Node<C, V, D> {
+impl<C: PublicKey, V: Variant, D: Digest> PartialEq for Node<C, V, D> {
     fn eq(&self, other: &Self) -> bool {
         self.chunk == other.chunk
             && self.signature == other.signature
@@ -479,7 +476,7 @@ impl<C: PrivateKey, V: Variant, D: Digest> PartialEq for Node<C, V, D> {
     }
 }
 
-impl<C: PrivateKey, V: Variant, D: Digest> Eq for Node<C, V, D> {}
+impl<C: PublicKey, V: Variant, D: Digest> Eq for Node<C, V, D> {}
 
 /// Ack is a message sent by a validator to acknowledge the receipt of a Chunk.
 ///
@@ -825,7 +822,7 @@ mod tests {
         },
         ed25519::{self, PublicKey},
         sha256::Digest as Sha256Digest,
-        PrivateKeyGen as _, Signer as _,
+        PrivateKeyGen as _, Signer,
     };
     use commonware_utils::quorum;
     use rand::{rngs::StdRng, SeedableRng};
@@ -911,10 +908,9 @@ mod tests {
         let chunk = Chunk::new(public_key.clone(), 0, sample_digest(1));
         let message = chunk.encode();
         let signature = scheme.sign(Some(chunk_namespace.as_ref()), &message);
-        let node =
-            Node::<ed25519::PrivateKey, V, Sha256Digest>::new(chunk, signature.clone(), None);
+        let node = Node::<ed25519::PublicKey, V, Sha256Digest>::new(chunk, signature.clone(), None);
         let encoded = node.encode();
-        let decoded = Node::<ed25519::PrivateKey, V, Sha256Digest>::decode(encoded).unwrap();
+        let decoded = Node::<ed25519::PublicKey, V, Sha256Digest>::decode(encoded).unwrap();
         assert_eq!(decoded.chunk, node.chunk);
         assert_eq!(decoded.signature, node.signature);
         assert_eq!(decoded.parent, node.parent);
@@ -951,11 +947,11 @@ mod tests {
         let chunk2 = Chunk::new(public_key.clone(), 1, sample_digest(2));
         let message2 = chunk2.encode();
         let signature2 = scheme.sign(Some(chunk_namespace.as_ref()), &message2);
-        let node2 = Node::<ed25519::PrivateKey, V, Sha256Digest>::new(chunk2, signature2, parent);
+        let node2 = Node::<ed25519::PublicKey, V, Sha256Digest>::new(chunk2, signature2, parent);
 
         // Test encode/decode
         let encoded2 = node2.encode();
-        let decoded2 = Node::<ed25519::PrivateKey, V, Sha256Digest>::decode(encoded2).unwrap();
+        let decoded2 = Node::<ed25519::PublicKey, V, Sha256Digest>::decode(encoded2).unwrap();
         assert_eq!(decoded2.chunk, node2.chunk);
         assert_eq!(decoded2.signature, node2.signature);
         assert_eq!(decoded2.parent, node2.parent);
@@ -1141,7 +1137,7 @@ mod tests {
         let identity = public::<V>(&polynomial);
 
         // Test genesis node (no parent)
-        let node = Node::<ed25519::PrivateKey, V, Sha256Digest>::sign(
+        let node = Node::<ed25519::PublicKey, V, Sha256Digest>::sign(
             NAMESPACE,
             &mut scheme,
             0,
@@ -1170,7 +1166,7 @@ mod tests {
             parent_epoch,
             parent_threshold,
         ));
-        let node = Node::<ed25519::PrivateKey, V, Sha256Digest>::sign(
+        let node = Node::<ed25519::PublicKey, V, Sha256Digest>::sign(
             NAMESPACE,
             &mut scheme,
             1,
@@ -1332,9 +1328,9 @@ mod tests {
         let parent = Parent::new(sample_digest(0), parent_epoch, parent_signature);
 
         let encoded =
-            Node::<ed25519::PrivateKey, MinSig, Sha256Digest>::new(chunk, signature, Some(parent))
+            Node::<ed25519::PublicKey, MinSig, Sha256Digest>::new(chunk, signature, Some(parent))
                 .encode();
-        Node::<ed25519::PrivateKey, MinSig, Sha256Digest>::decode(encoded).unwrap();
+        Node::<ed25519::PublicKey, MinSig, Sha256Digest>::decode(encoded).unwrap();
     }
 
     #[test]
@@ -1348,8 +1344,8 @@ mod tests {
         let signature = sample_scheme(0).sign(Some(chunk_namespace.as_ref()), &message);
 
         let encoded =
-            Node::<ed25519::PrivateKey, MinSig, Sha256Digest>::new(chunk, signature, None).encode();
-        Node::<ed25519::PrivateKey, MinSig, Sha256Digest>::decode(encoded).unwrap();
+            Node::<ed25519::PublicKey, MinSig, Sha256Digest>::new(chunk, signature, None).encode();
+        Node::<ed25519::PublicKey, MinSig, Sha256Digest>::decode(encoded).unwrap();
     }
 
     fn node_verify_invalid_signature<V: Variant>() {
@@ -1369,8 +1365,7 @@ mod tests {
         let signature = scheme.sign(Some(chunk_namespace.as_ref()), &message);
 
         // Create a node with valid signature
-        let node =
-            Node::<ed25519::PrivateKey, V, Sha256Digest>::new(chunk.clone(), signature, None);
+        let node = Node::<ed25519::PublicKey, V, Sha256Digest>::new(chunk.clone(), signature, None);
 
         // Verification should succeed
         assert!(node.verify(NAMESPACE, identity).is_ok());
@@ -1378,7 +1373,7 @@ mod tests {
         // Now create a node with invalid signature
         let tampered_signature = scheme.sign(Some(chunk_namespace.as_ref()), &node.encode());
         let invalid_node =
-            Node::<ed25519::PrivateKey, V, Sha256Digest>::new(chunk, tampered_signature, None);
+            Node::<ed25519::PublicKey, V, Sha256Digest>::new(chunk, tampered_signature, None);
 
         // Verification should fail
         assert!(matches!(
@@ -1424,7 +1419,7 @@ mod tests {
         let chunk_namespace = chunk_namespace(NAMESPACE);
         let message = child_chunk.encode();
         let node_signature = scheme.sign(Some(chunk_namespace.as_ref()), &message);
-        let node = Node::<ed25519::PrivateKey, V, Sha256Digest>::new(
+        let node = Node::<ed25519::PublicKey, V, Sha256Digest>::new(
             child_chunk.clone(),
             node_signature.clone(),
             Some(parent),
@@ -1452,7 +1447,7 @@ mod tests {
         let wrong_parent = Parent::new(parent_chunk.payload, epoch, wrong_signature);
 
         // Create child node with wrong parent
-        let node = Node::<ed25519::PrivateKey, V, Sha256Digest>::new(
+        let node = Node::<ed25519::PublicKey, V, Sha256Digest>::new(
             child_chunk,
             node_signature,
             Some(wrong_parent),
@@ -1647,11 +1642,11 @@ mod tests {
 
         // Create the genesis node with a parent - should fail to decode
         let encoded =
-            Node::<ed25519::PrivateKey, V, Sha256Digest>::new(chunk, signature, Some(parent))
+            Node::<ed25519::PublicKey, V, Sha256Digest>::new(chunk, signature, Some(parent))
                 .encode();
 
         // This should error because genesis nodes can't have parents
-        let result = Node::<ed25519::PrivateKey, V, Sha256Digest>::decode(encoded);
+        let result = Node::<ed25519::PublicKey, V, Sha256Digest>::decode(encoded);
         assert!(result.is_err());
     }
 
@@ -1671,10 +1666,10 @@ mod tests {
 
         // Create the node without a parent - should fail to decode
         let encoded =
-            Node::<ed25519::PrivateKey, V, Sha256Digest>::new(chunk, signature, None).encode();
+            Node::<ed25519::PublicKey, V, Sha256Digest>::new(chunk, signature, None).encode();
 
         // This should error because non-genesis nodes must have parents
-        let result = Node::<ed25519::PrivateKey, V, Sha256Digest>::decode(encoded);
+        let result = Node::<ed25519::PublicKey, V, Sha256Digest>::decode(encoded);
         assert!(result.is_err());
     }
 

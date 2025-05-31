@@ -26,11 +26,9 @@ pub trait Signer {
 /// A private key, able to derive its public key and sign messages.
 pub trait PrivateKey: Signer + Sized + ReadExt + Encode + PartialEq + Array {
     /// The corresponding public key type.
-    type PublicKey: PublicKey<Private = Self, Signature = Self::Signature>;
+    type PublicKey: PublicKey<Signature = Self::Signature>;
 
-    fn public_key(&self) -> Self::PublicKey {
-        Self::PublicKey::from(self.clone())
-    }
+    fn public_key(&self) -> Self::PublicKey;
 }
 
 pub trait PrivateKeyGen: PrivateKey {
@@ -51,12 +49,7 @@ pub trait Verifier {
 }
 
 /// A public key, able to verify signatures.
-pub trait PublicKey:
-    Verifier + Sized + From<Self::Private> + ReadExt + Encode + PartialEq + Array
-{
-    /// The private key it came from.
-    type Private: PrivateKey<PublicKey = Self>;
-}
+pub trait PublicKey: Verifier + Sized + ReadExt + Encode + PartialEq + Array {}
 
 /// A signature over a message by some private key.
 pub trait Signature: Sized + Clone + ReadExt + Encode + PartialEq + Array {}
@@ -187,11 +180,6 @@ mod tests {
         assert!(C::PublicKey::decode(public_key.as_ref()).is_ok());
     }
 
-    fn test_from_valid_private_key<C: PrivateKeyGen>() {
-        let private_key = C::from_rng(&mut OsRng);
-        assert_eq!(private_key.public_key(), C::PublicKey::from(private_key));
-    }
-
     fn test_validate_invalid_public_key<C: PrivateKeyGen>() {
         let result = C::PublicKey::decode(vec![0; 1024].as_ref());
         assert!(result.is_err());
@@ -268,11 +256,6 @@ mod tests {
     }
 
     #[test]
-    fn test_ed25519_from_valid_private_key() {
-        test_from_valid_private_key::<ed25519::PrivateKey>();
-    }
-
-    #[test]
     fn test_ed25519_sign_and_verify() {
         test_sign_and_verify::<ed25519::PrivateKey>();
     }
@@ -319,11 +302,6 @@ mod tests {
     }
 
     #[test]
-    fn test_bls12381_from_valid_private_key() {
-        test_from_valid_private_key::<bls12381::PrivateKey>();
-    }
-
-    #[test]
     fn test_bls12381_sign_and_verify() {
         test_sign_and_verify::<bls12381::PrivateKey>();
     }
@@ -367,11 +345,6 @@ mod tests {
     #[test]
     fn test_secp256r1_validate_invalid_public_key() {
         test_validate_invalid_public_key::<secp256r1::PrivateKey>();
-    }
-
-    #[test]
-    fn test_secp256r1_from_valid_private_key() {
-        test_from_valid_private_key::<secp256r1::PrivateKey>();
     }
 
     #[test]

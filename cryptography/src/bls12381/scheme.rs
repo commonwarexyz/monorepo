@@ -29,7 +29,7 @@ use super::primitives::{
     ops,
     variant::{MinPk, Variant},
 };
-use crate::{Array, PrivateKeyGen};
+use crate::{Array, PrivateKey as _, PrivateKeyGen};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     DecodeExt, EncodeFixed, Error as CodecError, FixedSize, Read, ReadExt, Write,
@@ -128,6 +128,10 @@ impl Display for PrivateKey {
 
 impl crate::PrivateKey for PrivateKey {
     type PublicKey = PublicKey;
+
+    fn public_key(&self) -> Self::PublicKey {
+        PublicKey::from(ops::compute_public::<MinPk>(&self.key))
+    }
 }
 
 impl crate::Signer for PrivateKey {
@@ -147,9 +151,7 @@ impl PrivateKeyGen for PrivateKey {
     }
 }
 
-impl crate::PublicKey for PublicKey {
-    type Private = PrivateKey;
-}
+impl crate::PublicKey for PublicKey {}
 
 impl crate::Verifier for PublicKey {
     type Signature = Signature;
@@ -168,7 +170,7 @@ pub struct PublicKey {
 
 impl From<PrivateKey> for PublicKey {
     fn from(private_key: PrivateKey) -> Self {
-        PublicKey::from(ops::compute_public::<MinPk>(&private_key.key))
+        private_key.public_key()
     }
 }
 

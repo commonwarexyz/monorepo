@@ -24,6 +24,14 @@ pub struct PrivateKey {
 
 impl crate::PrivateKey for PrivateKey {
     type PublicKey = PublicKey;
+
+    fn public_key(&self) -> Self::PublicKey {
+        let raw = self.key.verification_key().to_bytes();
+        Self::PublicKey {
+            raw,
+            key: self.key.verification_key().to_owned(),
+        }
+    }
 }
 
 impl crate::Signer for PrivateKey {
@@ -143,9 +151,7 @@ impl From<PrivateKey> for PublicKey {
     }
 }
 
-impl crate::PublicKey for PublicKey {
-    type Private = PrivateKey;
-}
+impl crate::PublicKey for PublicKey {}
 
 impl crate::Verifier for PublicKey {
     type Signature = Signature;
