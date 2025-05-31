@@ -8,7 +8,7 @@ use futures::{
     executor::block_on,
     SinkExt as _,
 };
-use io_uring::{opcode, squeue::Entry as SqueueEntry, types};
+use io_uring::{opcode, types};
 use prometheus_client::registry::Registry;
 use std::fs::{self, File};
 use std::io::Error as IoError;
@@ -33,7 +33,7 @@ pub struct Storage {
 
 impl Storage {
     /// Returns a new `Storage` instance.
-    pub fn start(cfg: Config) -> Self {
+    pub fn start(cfg: Config, registry: &mut Registry) -> Self {
         let (io_sender, receiver) = mpsc::channel::<iouring::Op>(cfg.ring_config.size as usize);
 
         let storage = Storage {
