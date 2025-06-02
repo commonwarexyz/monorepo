@@ -164,7 +164,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                 invalid_len = len,
                 "last blob len is not a multiple of item size, truncating"
             );
-            len = len - len % Self::CHUNK_SIZE_U64;
+            len -= len % Self::CHUNK_SIZE_U64;
             newest_blob.truncate(len).await?;
             newest_blob.sync().await?;
         }
