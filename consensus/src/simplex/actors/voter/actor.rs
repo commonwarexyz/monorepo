@@ -11,7 +11,7 @@ use crate::{
     },
     Automaton, Relay, Reporter, Supervisor, LATENCY,
 };
-use commonware_cryptography::{Digest, PrivateKey};
+use commonware_cryptography::{Digest, PrivateKey, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
@@ -52,17 +52,17 @@ type Finalizable<'a, V, D> = Option<(
 const GENESIS_VIEW: View = 0;
 
 struct Round<
-    C: PrivateKey,
+    C: PublicKey,
     D: Digest,
     R: Reporter<Activity = Activity<C::Signature, D>>,
-    S: Supervisor<Index = View, PublicKey = C::PublicKey>,
+    S: Supervisor<Index = View, PublicKey = C>,
 > {
     start: SystemTime,
     supervisor: S,
     reporter: R,
 
     view: View,
-    leader: C::PublicKey,
+    leader: C,
     leader_deadline: Option<SystemTime>,
     advance_deadline: Option<SystemTime>,
     nullify_retry: Option<SystemTime>,
@@ -91,10 +91,10 @@ struct Round<
 }
 
 impl<
-        C: PrivateKey,
+        C: PublicKey,
         D: Digest,
         R: Reporter<Activity = Activity<C::Signature, D>>,
-        S: Supervisor<Index = View, PublicKey = C::PublicKey>,
+        S: Supervisor<Index = View, PublicKey = C>,
     > Round<C, D, R, S>
 {
     pub fn new(current: SystemTime, reporter: R, supervisor: S, view: View) -> Self {
@@ -346,7 +346,7 @@ pub struct Actor<
 
     last_finalized: View,
     view: View,
-    views: BTreeMap<View, Round<C, D, F, S>>,
+    views: BTreeMap<View, Round<C::PublicKey, D, F, S>>,
 
     current_view: Gauge,
     tracked_views: Gauge,
