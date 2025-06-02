@@ -162,6 +162,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
 
         // Truncate the last blob if it's not the expected length, which might happen from unclean
         // shutdown.
+        let mut truncated = false;
         let newest_blob_index = *blobs.keys().last().unwrap();
         let newest_blob = blobs.get_mut(&newest_blob_index).unwrap();
         let mut size = newest_blob.size().await;
@@ -173,12 +174,11 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             );
             size -= size % Self::CHUNK_SIZE_U64;
             newest_blob.truncate(size).await?;
-            newest_blob.sync().await?;
+            truncated = true;
         }
 
         // Truncate any records with failing checksums. This can happen if the file system allocated
         // extra space for a blob but there was a crash before any data was written to that space.
-        let mut truncated = false;
         while size > 0 {
             let offset = size - Self::CHUNK_SIZE_U64;
             let read = newest_blob
