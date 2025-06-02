@@ -624,7 +624,14 @@ impl<
         // If retry, broadcast notarization that led us to enter this view
         let past_view = self.view - 1;
         if retry && past_view > 0 {
-            if let Some(notarization) = self.construct_notarization(past_view, true) {
+            if let Some(finalization) = self.construct_finalization(past_view, true) {
+                let msg = Voter::Finalization(finalization);
+                sender.send(Recipients::All, msg, true).await.unwrap();
+                self.broadcast_messages
+                    .get_or_create(&metrics::FINALIZATION)
+                    .inc();
+                debug!(view = past_view, "rebroadcast entry finalization");
+            } else if let Some(notarization) = self.construct_notarization(past_view, true) {
                 let msg = Voter::Notarization(notarization);
                 sender.send(Recipients::All, msg, true).await.unwrap();
                 self.broadcast_messages
@@ -641,7 +648,7 @@ impl<
             } else {
                 warn!(
                     view = past_view,
-                    "unable to rebroadcast entry notarization/nullification"
+                    "unable to rebroadcast entry notarization/nullification/finalization"
                 );
             }
         }
