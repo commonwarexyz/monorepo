@@ -11,7 +11,9 @@ use crate::{
     },
     Reporter, ThresholdSupervisor,
 };
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PrivateKey};
+use commonware_cryptography::{
+    bls12381::primitives::variant::Variant, Digest, PrivateKey, PublicKey,
+};
 use commonware_macros::select;
 use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver};
 use commonware_runtime::{
@@ -25,15 +27,15 @@ use std::{collections::BTreeMap, marker::PhantomData, sync::Arc};
 use tracing::{trace, warn};
 
 struct Round<
-    C: PrivateKey,
-    B: Blocker<PublicKey = C::PublicKey>,
+    C: PublicKey,
+    B: Blocker<PublicKey = C>,
     V: Variant,
     D: Digest,
     R: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<
         Index = View,
         Polynomial = Vec<V::Public>,
-        PublicKey = C::PublicKey,
+        PublicKey = C,
         Identity = V::Public,
     >,
 > {
@@ -53,15 +55,15 @@ struct Round<
 }
 
 impl<
-        C: PrivateKey,
-        B: Blocker<PublicKey = C::PublicKey>,
+        C: PublicKey,
+        B: Blocker<PublicKey = C>,
         V: Variant,
         D: Digest,
         R: Reporter<Activity = Activity<V, D>>,
         S: ThresholdSupervisor<
             Index = View,
             Polynomial = Vec<V::Public>,
-            PublicKey = C::PublicKey,
+            PublicKey = C,
             Identity = V::Public,
         >,
     > Round<C, B, V, D, R, S>
@@ -101,7 +103,7 @@ impl<
         }
     }
 
-    async fn add(&mut self, sender: C::PublicKey, message: Voter<V, D>) -> bool {
+    async fn add(&mut self, sender: C, message: Voter<V, D>) -> bool {
         // Check if sender is a participant
         let Some(index) = self.supervisor.is_participant(self.view, &sender) else {
             warn!(?sender, "blocking peer");
@@ -306,7 +308,7 @@ impl<
         self.verifier.verify_finalizes(namespace, polynomial)
     }
 
-    fn is_active(&self, leader: &C::PublicKey) -> Option<bool> {
+    fn is_active(&self, leader: &C) -> Option<bool> {
         let leader_index = self.supervisor.is_participant(self.view, leader)?;
         Some(
             self.notarizes[leader_index as usize].is_some()
@@ -436,7 +438,8 @@ impl<
         // Initialize view data structures
         let mut current: View = 0;
         let mut finalized: View = 0;
-        let mut work: BTreeMap<u64, Round<C, B, V, D, R, S>> = BTreeMap::new();
+        #[allow(clippy::type_complexity)]
+        let mut work: BTreeMap<u64, Round<C::PublicKey, B, V, D, R, S>> = BTreeMap::new();
         let mut initialized = false;
 
         loop {
