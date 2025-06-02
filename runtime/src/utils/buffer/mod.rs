@@ -407,7 +407,7 @@ mod tests {
             assert_eq!(size, 0);
 
             let writer = Write::new(blob.clone(), size, 8);
-            writer.write_at("hello".as_bytes(), 0).await.unwrap();
+            writer.write_at(b"hello".to_vec(), 0).await.unwrap();
             assert_eq!(writer.size().await, 5);
             writer.sync().await.unwrap();
             assert_eq!(writer.size().await, 5);
@@ -431,9 +431,9 @@ mod tests {
             assert_eq!(size, 0);
 
             let writer = Write::new(blob.clone(), size, 4);
-            writer.write_at("abc".as_bytes(), 0).await.unwrap();
+            writer.write_at(b"abc".to_vec(), 0).await.unwrap();
             assert_eq!(writer.size().await, 3);
-            writer.write_at("defg".as_bytes(), 3).await.unwrap();
+            writer.write_at(b"defg".to_vec(), 3).await.unwrap();
             assert_eq!(writer.size().await, 7);
             writer.sync().await.unwrap();
 
@@ -456,7 +456,7 @@ mod tests {
             assert_eq!(size, 0);
 
             let writer = Write::new(blob.clone(), size, 4);
-            writer.write_at("abc".as_bytes(), 0).await.unwrap();
+            writer.write_at(b"abc".to_vec(), 0).await.unwrap();
             assert_eq!(writer.size().await, 3);
             writer
                 .write_at(b"defghijklmnopqrstuvwxyz".to_vec(), 3)
@@ -497,11 +497,11 @@ mod tests {
             let writer = Write::new(blob.clone(), size, 10);
 
             // Write data that fits in buffer
-            writer.write_at("hello".as_bytes(), 0).await.unwrap();
+            writer.write_at(b"hello".to_vec(), 0).await.unwrap();
             assert_eq!(writer.size().await, 5);
 
             // Append data that causes buffer flush
-            writer.write_at(" world".as_bytes(), 5).await.unwrap();
+            writer.write_at(b" world".to_vec(), 5).await.unwrap();
             writer.sync().await.unwrap();
             assert_eq!(writer.size().await, 11);
 
@@ -524,11 +524,11 @@ mod tests {
             let writer = Write::new(blob.clone(), size, 20);
 
             // Initial write
-            writer.write_at("abcdefghij".as_bytes(), 0).await.unwrap();
+            writer.write_at(b"abcdefghij".to_vec(), 0).await.unwrap();
             assert_eq!(writer.size().await, 10);
 
             // Overwrite middle section
-            writer.write_at("01234".as_bytes(), 2).await.unwrap();
+            writer.write_at(b"01234".to_vec(), 2).await.unwrap();
             assert_eq!(writer.size().await, 10);
             writer.sync().await.unwrap();
 
@@ -541,9 +541,9 @@ mod tests {
             assert_eq!(&buf, b"ab01234hij");
 
             // Extend buffer and do partial overwrite
-            writer.write_at("klmnopqrst".as_bytes(), 10).await.unwrap();
+            writer.write_at(b"klmnopqrst".to_vec(), 10).await.unwrap();
             assert_eq!(writer.size().await, 20);
-            writer.write_at("wxyz".as_bytes(), 9).await.unwrap();
+            writer.write_at(b"wxyz".to_vec(), 9).await.unwrap();
             assert_eq!(writer.size().await, 20);
             writer.sync().await.unwrap();
 
@@ -566,11 +566,11 @@ mod tests {
             let writer = Write::new(blob.clone(), size, 10);
 
             // Write data at a later offset first
-            writer.write_at("0123456789".as_bytes(), 10).await.unwrap();
+            writer.write_at(b"0123456789".to_vec(), 10).await.unwrap();
             assert_eq!(writer.size().await, 20);
 
             // Write at an earlier offset (should flush buffer first)
-            writer.write_at("abcde".as_bytes(), 0).await.unwrap();
+            writer.write_at(b"abcde".to_vec(), 0).await.unwrap();
             assert_eq!(writer.size().await, 20);
             writer.sync().await.unwrap();
 
@@ -586,7 +586,7 @@ mod tests {
             assert_eq!(buf, expected);
 
             // Fill the gap between existing data
-            writer.write_at("fghij".as_bytes(), 5).await.unwrap();
+            writer.write_at(b"fghij".to_vec(), 5).await.unwrap();
             assert_eq!(writer.size().await, 20);
             writer.sync().await.unwrap();
             assert_eq!(writer.size().await, 20);
@@ -611,7 +611,7 @@ mod tests {
             let writer = Write::new(blob, size, 10);
 
             // Write initial data
-            writer.write_at("hello world".as_bytes(), 0).await.unwrap();
+            writer.write_at(b"hello world".to_vec(), 0).await.unwrap();
             assert_eq!(writer.size().await, 11);
             writer.sync().await.unwrap();
             assert_eq!(writer.size().await, 11);
@@ -635,7 +635,7 @@ mod tests {
             assert_eq!(&buf, b"hello");
 
             // Write to truncated blob
-            writer.write_at("X".as_bytes(), 0).await.unwrap();
+            writer.write_at(b"X".to_vec(), 0).await.unwrap();
             assert_eq!(writer.size().await, 5);
             writer.sync().await.unwrap();
 
@@ -677,11 +677,11 @@ mod tests {
             let writer = Write::new(blob.clone(), size, 10);
 
             // Write data that stays in buffer
-            writer.write_at("buffered".as_bytes(), 0).await.unwrap();
+            writer.write_at(b"buffered".to_vec(), 0).await.unwrap();
             assert_eq!(writer.size().await, 8);
 
             // Read from buffer via writer
-            let mut read_buf_vec = vec![0u8; 4];
+            let mut read_buf_vec = vec![0u8; 4].into();
             read_buf_vec = writer.read_at(read_buf_vec, 0).await.unwrap();
             assert_eq!(read_buf_vec.as_ref(), b"buff");
 
@@ -693,31 +693,31 @@ mod tests {
             assert!(writer.read_at(small_buf_vec, 8).await.is_err());
 
             // Write large data that flushes buffer
-            writer.write_at(" and flushed".as_bytes(), 8).await.unwrap();
+            writer.write_at(b" and flushed".to_vec(), 8).await.unwrap();
             assert_eq!(writer.size().await, 20);
             writer.sync().await.unwrap();
             assert_eq!(writer.size().await, 20);
 
             // Read from underlying blob through writer
-            let mut read_buf_vec_2 = vec![0u8; 4];
+            let mut read_buf_vec_2 = vec![0u8; 4].into();
             read_buf_vec_2 = writer.read_at(read_buf_vec_2, 0).await.unwrap();
             assert_eq!(read_buf_vec_2.as_ref(), b"buff");
 
-            let mut read_buf_7_vec = vec![0u8; 7];
+            let mut read_buf_7_vec = vec![0u8; 7].into();
             read_buf_7_vec = writer.read_at(read_buf_7_vec, 13).await.unwrap();
             assert_eq!(read_buf_7_vec.as_ref(), b"flushed");
 
             // Buffer new data at the end
-            writer.write_at(" more data".as_bytes(), 20).await.unwrap();
+            writer.write_at(b" more data".to_vec(), 20).await.unwrap();
             assert_eq!(writer.size().await, 30);
 
             // Read newly buffered data
-            let mut read_buf_vec_3 = vec![0u8; 5];
+            let mut read_buf_vec_3 = vec![0u8; 5].into();
             read_buf_vec_3 = writer.read_at(read_buf_vec_3, 20).await.unwrap();
             assert_eq!(read_buf_vec_3.as_ref(), b" more");
 
             // Read spanning both blob and buffer
-            let mut combo_read_buf_vec = vec![0u8; 12];
+            let mut combo_read_buf_vec = vec![0u8; 12].into();
             combo_read_buf_vec = writer.read_at(combo_read_buf_vec, 16).await.unwrap();
             assert_eq!(combo_read_buf_vec.as_ref(), b"shed more da");
 
@@ -746,11 +746,11 @@ mod tests {
             let writer = Write::new(blob.clone(), size, 10);
 
             // Fill buffer completely
-            writer.write_at("0123456789".as_bytes(), 0).await.unwrap();
+            writer.write_at(b"0123456789".to_vec(), 0).await.unwrap();
             assert_eq!(writer.size().await, 10);
 
             // Write at non-contiguous offset (should flush then write directly)
-            writer.write_at("abc".as_bytes(), 15).await.unwrap();
+            writer.write_at(b"abc".to_vec(), 15).await.unwrap();
             assert_eq!(writer.size().await, 18);
             writer.sync().await.unwrap();
             assert_eq!(writer.size().await, 18);
@@ -771,14 +771,11 @@ mod tests {
             // Test write that exceeds buffer capacity
             let (blob2, size) = context.open("partition", b"write_straddle2").await.unwrap();
             let writer2 = Write::new(blob2.clone(), size, 10);
-            writer2.write_at("0123456789".as_bytes(), 0).await.unwrap();
+            writer2.write_at(b"0123456789".to_vec(), 0).await.unwrap();
             assert_eq!(writer2.size().await, 10);
 
             // Write large data that exceeds capacity
-            writer2
-                .write_at("ABCDEFGHIJKL".as_bytes(), 5)
-                .await
-                .unwrap();
+            writer2.write_at(b"ABCDEFGHIJKL".to_vec(), 5).await.unwrap();
             assert_eq!(writer2.size().await, 17);
             writer2.sync().await.unwrap();
             assert_eq!(writer2.size().await, 17);
@@ -801,7 +798,7 @@ mod tests {
             // Test that closing writer flushes and persists buffered data
             let (blob_orig, size) = context.open("partition", b"write_close").await.unwrap();
             let writer = Write::new(blob_orig.clone(), size, 8);
-            writer.write_at("pending".as_bytes(), 0).await.unwrap();
+            writer.write_at(b"pending".to_vec(), 0).await.unwrap();
             assert_eq!(writer.size().await, 7);
 
             // Close should flush and sync data
@@ -830,7 +827,7 @@ mod tests {
 
             // Write data larger than buffer capacity (should write directly)
             let data_large = b"0123456789";
-            writer.write_at(data_large.as_slice(), 0).await.unwrap();
+            writer.write_at(data_large.to_vec(), 0).await.unwrap();
             assert_eq!(writer.size().await, 10);
 
             // Sync to ensure data is persisted
@@ -848,11 +845,11 @@ mod tests {
             assert_eq!(&buf, data_large.as_slice());
 
             // Now write small data that should be buffered
-            writer.write_at(b"abc".as_slice(), 10).await.unwrap();
+            writer.write_at(b"abc".to_vec(), 10).await.unwrap();
             assert_eq!(writer.size().await, 13);
 
             // Verify it's in buffer by reading through writer
-            let mut read_small_buf_vec = vec![0u8; 3];
+            let mut read_small_buf_vec = vec![0u8; 3].into();
             read_small_buf_vec = writer.read_at(read_small_buf_vec, 10).await.unwrap();
             assert_eq!(read_small_buf_vec.as_ref(), b"abc");
 
@@ -883,15 +880,15 @@ mod tests {
             let writer = Write::new(blob.clone(), size, 15);
 
             // Write initial data
-            writer.write_at("0123456789".as_bytes(), 0).await.unwrap();
+            writer.write_at(b"0123456789".to_vec(), 0).await.unwrap();
             assert_eq!(writer.size().await, 10);
 
             // Overwrite and extend within buffer capacity
-            writer.write_at("ABCDEFGHIJ".as_bytes(), 5).await.unwrap();
+            writer.write_at(b"ABCDEFGHIJ".to_vec(), 5).await.unwrap();
             assert_eq!(writer.size().await, 15);
 
             // Verify buffer content through writer
-            let mut read_buf_vec = vec![0u8; 15];
+            let mut read_buf_vec = vec![0u8; 15].into();
             read_buf_vec = writer.read_at(read_buf_vec, 0).await.unwrap();
             assert_eq!(read_buf_vec.as_ref(), b"01234ABCDEFGHIJ");
 
@@ -919,13 +916,13 @@ mod tests {
             let writer = Write::new(blob.clone(), size, 20);
 
             // Write initial data
-            writer.write_at("0123456789".as_bytes(), 0).await.unwrap();
+            writer.write_at(b"0123456789".to_vec(), 0).await.unwrap();
             assert_eq!(writer.size().await, 10);
             writer.sync().await.unwrap();
 
             // Append at the current size (logical end)
             writer
-                .write_at("abc".as_bytes(), writer.size().await)
+                .write_at(b"abc".to_vec(), writer.size().await)
                 .await
                 .unwrap();
             assert_eq!(writer.size().await, 13);
