@@ -285,7 +285,7 @@ impl crate::Runner for Runner {
                     IoUringNetwork::start(IoUringNetworkConfig {
                         tcp_nodelay: self.cfg.network_cfg.tcp_nodelay,
                         iouring_config: iouring::Config {
-                                                    op_timeout: Some(self.cfg.network_cfg.read_write_timeout),
+                        op_timeout: Some(self.cfg.network_cfg.read_write_timeout),
                         force_poll: IOURING_NETWORK_FORCE_POLL,
                         shutdown_timeout: Some(self.cfg.network_cfg.read_write_timeout),
                         ..Default::default()
