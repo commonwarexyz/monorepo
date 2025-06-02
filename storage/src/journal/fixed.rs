@@ -1140,6 +1140,7 @@ mod tests {
         });
     }
 
+    /// Protect against accidental changes to the journal disk format.
     #[test_traced]
     fn test_journal_conformance() {
         // Initialize the deterministic context
