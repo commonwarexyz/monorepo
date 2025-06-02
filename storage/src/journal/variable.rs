@@ -1755,6 +1755,7 @@ mod tests {
                 .open(&cfg.partition, &1u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
+            assert!(size > 0);
             let buf = blob
                 .read_at(vec![0u8; size as usize], 0)
                 .await
