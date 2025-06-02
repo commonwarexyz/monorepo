@@ -67,7 +67,7 @@ impl<B: Blob> Inner<B> {
         let len = buf.len() as u64;
         self.blob.write_at(buf, self.position).await?;
 
-        // Advance position and reset buffer at the new tip
+        // Advance position to the new tip and reset buffer
         self.position += len;
         self.buffer = Vec::with_capacity(self.capacity);
         Ok(())
@@ -134,7 +134,9 @@ pub struct Write<B: Blob> {
 }
 
 impl<B: Blob> Write<B> {
-    /// Creates a new `Write` that buffers writes to the end of a [Blob] with the specified buffer capacity.
+    /// Creates a new `Write` that buffers writes to a [Blob] with the specified buffer capacity.
+    ///
+    /// For correct behavior, `size` must be the size of the underlying [Blob].
     ///
     /// # Panics
     ///
@@ -231,7 +233,10 @@ impl<B: Blob> Blob for Write<B> {
             return inner.write(buf).await;
         }
 
-        // Case 2: Write can be merged into existing buffer
+        // Case 2: Write can be merged into existing buffer.
+        //
+        // This handles overwrites and extensions within the buffer's current capacity,
+        // including writes that create gaps (filled with zeros) in the buffer.
         let can_merge_into_buffer = offset >= buffer_start
             && (offset - buffer_start) + data_len as u64 <= inner.capacity as u64;
         if can_merge_into_buffer {
@@ -248,15 +253,17 @@ impl<B: Blob> Blob for Write<B> {
             return Ok(());
         }
 
-        // Case 3: All other cases - flush buffer and write directly
-        // This includes: writes before buffer, writes that would exceed capacity,
-        // or non-contiguous writes that can't be merged
+        // Case 3: Write cannot be merged - flush buffer and write directly.
+        //
+        // This includes: writes before the buffer, writes that would exceed capacity,
+        // or non-contiguous writes that can't be merged.
         if !inner.buffer.is_empty() {
             inner.flush().await?;
         }
         inner.blob.write_at(buf, offset).await?;
 
-        // Update position to maintain "buffer at tip" invariant
+        // Update position to maintain "buffer at tip" invariant.
+        //
         // Position should advance to the end of this write if it extends the logical blob
         let write_end = offset + data_len as u64;
         if write_end > inner.position {
@@ -270,27 +277,28 @@ impl<B: Blob> Blob for Write<B> {
         // Acquire a write lock on the inner state
         let mut inner = self.inner.write().await;
 
-        // Prepare the buffer boundaries
+        // Determine the current buffer boundaries
         let buffer_start = inner.position;
         let buffer_end = buffer_start + inner.buffer.len() as u64;
 
-        // Adjust buffer content based on `len`
+        // Adjust buffer content based on truncation point
         if len <= buffer_start {
-            // Truncation point is before or exactly at the start of the buffer.
+            // Truncation point is before or at the start of the buffer.
             //
-            // All buffered data is now invalid/beyond the new length.
+            // All buffered data is now beyond the new length and should be discarded.
             inner.buffer.clear();
             inner.blob.truncate(len).await?;
             inner.position = len;
         } else if len < buffer_end {
             // Truncation point is within the buffer.
             //
-            // `len` is > `buffer_start_blob_offset` here.
-            // New length of data *within the buffer* is `len - buffer_start_blob_offset`.
-            let new_buffer_actual_len = (len - buffer_start) as usize;
-            inner.buffer.truncate(new_buffer_actual_len);
+            // Keep only the portion of the buffer up to the truncation point.
+            let new_buffer_len = (len - buffer_start) as usize;
+            inner.buffer.truncate(new_buffer_len);
         } else {
-            // Truncation point is at or after the end of the buffer, so no changes are needed
+            // Truncation point is at or after the end of the buffer.
+            //
+            // No changes needed to the buffer content.
         }
         Ok(())
     }
