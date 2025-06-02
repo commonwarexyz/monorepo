@@ -171,6 +171,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
 
         // Truncate any records with failing checksums. This can happen if the file system allocated
         // extra space for a blob but there was a crash before any data was written to that space.
+        let mut truncated = false;
         while len > 0 {
             let offset = len - Self::CHUNK_SIZE_U64;
             let read = newest_blob
@@ -185,11 +186,18 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                     );
                     len -= Self::CHUNK_SIZE_U64;
                     newest_blob.truncate(len).await?;
+                    truncated = true;
                 }
                 Err(err) => return Err(err),
             }
         }
 
+        // If we truncated the blob, make sure to sync it.
+        if truncated {
+            newest_blob.sync().await?;
+        }
+
+        // If the blob is now full, create a new one.
         if len == cfg.items_per_blob * Self::CHUNK_SIZE_U64 {
             warn!(
                 blob = newest_blob_index,
