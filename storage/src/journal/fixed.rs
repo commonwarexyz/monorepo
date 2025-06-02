@@ -153,7 +153,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         context.register("pruned", "Number of blobs pruned", pruned.clone());
         tracked.set(blobs.len() as i64);
 
-        // truncate the last blob if it's not the expected length, which might happen from unclean
+        // Truncate the last blob if it's not the expected length, which might happen from unclean
         // shutdown.
         let newest_blob_index = *blobs.keys().last().unwrap();
         let (newest_blob, len) = blobs.get_mut(&newest_blob_index).unwrap();
@@ -166,6 +166,27 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             *len -= *len % Self::CHUNK_SIZE_U64;
             newest_blob.truncate(*len).await?;
             newest_blob.sync().await?;
+        }
+
+        // Truncate any records with failing checksums. This can happen if the file system allocated
+        // extra space for a blob but there was a crash before any data was written to that space.
+        while *len > 0 {
+            let offset = *len - Self::CHUNK_SIZE_U64;
+            let read = newest_blob
+                .read_at(vec![0u8; Self::CHUNK_SIZE], offset)
+                .await?;
+            match Self::verify_integrity(&read) {
+                Ok(_) => break, // Valid item found, we can stop truncating.
+                Err(Error::ChecksumMismatch(_, _)) => {
+                    warn!(
+                        blob = newest_blob_index,
+                        offset, "checksum mismatch, truncating blob",
+                    );
+                    *len -= Self::CHUNK_SIZE_U64;
+                    newest_blob.truncate(*len).await?;
+                }
+                Err(err) => return Err(err),
+            }
         }
 
         if *len == cfg.items_per_blob * Self::CHUNK_SIZE_U64 {
@@ -980,6 +1001,56 @@ mod tests {
                 .await
                 .expect("failed to append data");
             assert_eq!(journal.size().await.unwrap(), 1);
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_recover_from_unwritten_data() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Initialize the journal, allowing a max of 10 items per blob.
+            let cfg = Config {
+                partition: "test_partition".into(),
+                items_per_blob: 10,
+                write_buffer: 1024,
+            };
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+            // Add only a single item
+            journal
+                .append(test_digest(0))
+                .await
+                .expect("failed to append data");
+            assert_eq!(journal.size().await.unwrap(), 1);
+            journal.close().await.expect("Failed to close journal");
+
+            // Manually extend the blob by an amount at least some multiple of the chunk size to
+            // simulate a failure where the file was extended, but no bytes were written due to
+            // failure.
+            let (blob, len) = context
+                .open(&cfg.partition, &0u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            blob.write_at(vec![0u8; Digest::SIZE * 3 - 1], len)
+                .await
+                .expect("Failed to extend blob");
+            blob.close().await.expect("Failed to close blob");
+
+            // Re-initialize the journal to simulate a restart
+            let mut journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to re-initialize journal");
+
+            // Ensure we've recovered to the state of a single item.
+            assert_eq!(journal.size().await.unwrap(), 1);
+            assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(0));
+            // Make sure journal still works for appending.
+            journal
+                .append(test_digest(0))
+                .await
+                .expect("failed to append data");
+            assert_eq!(journal.size().await.unwrap(), 2);
         });
     }
 
