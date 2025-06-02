@@ -197,7 +197,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             newest_blob.sync().await?;
         }
 
-        // If the blob is now full, create a new one.
+        // If the blob is full, create a new one.
         if size == cfg.items_per_blob * Self::CHUNK_SIZE_U64 {
             warn!(
                 blob = newest_blob_index,
