@@ -136,9 +136,7 @@ pub struct Write<B: Blob> {
 }
 
 impl<B: Blob> Write<B> {
-    /// Creates a new `Write` that buffers writes to a [Blob] with the specified buffer capacity.
-    ///
-    /// For correct behavior, `size` must be the size of the underlying [Blob].
+    /// Creates a new `Write` that buffers writes to a [Blob] with the provided size and buffer capacity.
     ///
     /// # Panics
     ///
