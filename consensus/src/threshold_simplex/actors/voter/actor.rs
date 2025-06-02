@@ -804,7 +804,7 @@ impl<
                 debug!(view = past_view, "rebroadcast entry nullification");
             } else {
                 warn!(
-                    view = past_view,
+                    current = self.view,
                     "unable to rebroadcast entry notarization/nullification/finalization"
                 );
             }
