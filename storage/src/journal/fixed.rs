@@ -829,6 +829,15 @@ mod tests {
                     items.len(),
                     ITEMS_PER_BLOB as usize * 100 + ITEMS_PER_BLOB as usize / 2 - 4
                 );
+
+                // Delete a blob and make sure the gap is detected
+                context
+                    .remove(&cfg.partition, Some(&40u64.to_be_bytes()))
+                    .await
+                    .expect("Failed to remove blob");
+                // Re-initialize the journal to simulate a restart
+                let result = Journal::<_, Digest>::init(context.clone(), cfg.clone()).await;
+                assert!(matches!(result.err().unwrap(), Error::MissingBlob(n) if n == 40));
             }
         });
     }
