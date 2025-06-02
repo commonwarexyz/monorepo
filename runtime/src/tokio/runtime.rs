@@ -2,7 +2,7 @@
 use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage};
 
 #[cfg(feature = "iouring-network")]
-use crate::network::iouring::Network as IoUringNetwork;
+use crate::{iouring, network::iouring::Network as IoUringNetwork};
 
 #[cfg(not(feature = "iouring-network"))]
 use crate::network::tokio::{Config as TokioNetworkConfig, Network as TokioNetwork};
@@ -32,6 +32,9 @@ use std::{
 };
 use tokio::runtime::{Builder, Runtime};
 
+#[cfg(feature = "iouring-network")]
+const IOURING_NETWORK_FORCE_POLL: Option<Duration> = Some(Duration::from_millis(100));
+
 #[derive(Debug)]
 struct Metrics {
     tasks_spawned: Family<Label, Counter>,
@@ -55,6 +58,26 @@ impl Metrics {
             metrics.tasks_running.clone(),
         );
         metrics
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct NetworkConfig {
+    /// Whether or not to enable TCP_NODELAY.
+    ///
+    /// If `None`, the default value is used.
+    tcp_nodelay: Option<bool>,
+
+    /// Read/write timeout for network operations.
+    read_write_timeout: Duration,
+}
+
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self {
+            tcp_nodelay: None,
+            read_write_timeout: Duration::from_secs(60),
+        }
     }
 }
 
@@ -88,11 +111,8 @@ pub struct Config {
     /// Tokio sets the default value to 2MB.
     maximum_buffer_size: usize,
 
-    #[cfg(feature = "iouring-network")]
-    network_cfg: crate::iouring::Config,
-
-    #[cfg(not(feature = "iouring-network"))]
-    network_cfg: TokioNetworkConfig,
+    /// Network configuration.
+    network_cfg: NetworkConfig,
 }
 
 impl Config {
@@ -106,10 +126,7 @@ impl Config {
             catch_panics: true,
             storage_directory,
             maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
-            #[cfg(feature = "iouring-network")]
-            network_cfg: crate::iouring::Config::default(),
-            #[cfg(not(feature = "iouring-network"))]
-            network_cfg: TokioNetworkConfig::default(),
+            network_cfg: NetworkConfig::default(),
         }
     }
 
@@ -130,6 +147,16 @@ impl Config {
         self
     }
     /// See [Config]
+    pub fn with_read_write_timeout(mut self, d: Duration) -> Self {
+        self.network_cfg.read_write_timeout = d;
+        self
+    }
+    /// See [Config]
+    pub fn with_tcp_nodelay(mut self, n: Option<bool>) -> Self {
+        self.network_cfg.tcp_nodelay = n;
+        self
+    }
+    /// See [Config]
     pub fn with_storage_directory(mut self, p: impl Into<PathBuf>) -> Self {
         self.storage_directory = p.into();
         self
@@ -138,21 +165,6 @@ impl Config {
     pub fn with_maximum_buffer_size(mut self, n: usize) -> Self {
         self.maximum_buffer_size = n;
         self
-    }
-    cfg_if::cfg_if! {
-            if #[cfg(not(feature = "iouring-network"))] {
-                /// See [Config]
-                pub fn with_network_config(mut self, cfg: TokioNetworkConfig) -> Self {
-                    self.network_cfg = cfg;
-                    self
-                }
-            } else {
-                /// See [Config]
-                pub fn with_network_config(mut self, cfg: crate::iouring::Config) -> Self {
-                    self.network_cfg = cfg;
-                    self
-                }
-        }
     }
 
     // Getters
@@ -169,25 +181,20 @@ impl Config {
         self.catch_panics
     }
     /// See [Config]
+    pub fn read_write_timeout(&self) -> Duration {
+        self.network_cfg.read_write_timeout
+    }
+    /// See [Config]
+    pub fn tcp_nodelay(&self) -> Option<bool> {
+        self.network_cfg.tcp_nodelay
+    }
+    /// See [Config]
     pub fn storage_directory(&self) -> &PathBuf {
         &self.storage_directory
     }
     /// See [Config]
     pub fn maximum_buffer_size(&self) -> usize {
         self.maximum_buffer_size
-    }
-    cfg_if::cfg_if! {
-        if #[cfg(feature = "iouring-network")] {
-            /// See [Config]
-            pub fn network_config(&self) -> &crate::iouring::Config {
-                &self.network_cfg
-            }
-        } else {
-            /// See [Config]
-            pub fn network_config(&self) -> &TokioNetworkConfig {
-                &self.network_cfg
-            }
-        }
     }
 }
 
@@ -272,12 +279,20 @@ impl crate::Runner for Runner {
             if #[cfg(feature = "iouring-network")] {
                 let iouring_registry = runtime_registry.sub_registry_with_prefix("iouring_network");
                 let network = MeteredNetwork::new(
-                    IoUringNetwork::start(self.cfg.network_cfg.clone(),iouring_registry).unwrap(),
+                    IoUringNetwork::start(iouring::Config{
+                        op_timeout: Some(self.cfg.network_cfg.read_write_timeout),
+                        force_poll: IOURING_NETWORK_FORCE_POLL,
+                        shutdown_timeout: Some(self.cfg.network_cfg.read_write_timeout),
+                        ..Default::default()
+                    },iouring_registry).unwrap(),
                     runtime_registry,
                 );
             } else {
+                let config = TokioNetworkConfig::default().with_read_timeout(self.cfg.network_cfg.read_write_timeout)
+                .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
+                .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay);
                 let network = MeteredNetwork::new(
-                    TokioNetwork::from(self.cfg.network_cfg.clone()),
+                    TokioNetwork::from(config),
                     runtime_registry,
                 );
             }
