@@ -5,7 +5,7 @@ use crate::authenticated::{
     metrics, types,
 };
 use commonware_codec::{Decode, Encode};
-use commonware_cryptography::PrivateKey;
+use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
 use commonware_stream::{
@@ -19,7 +19,7 @@ use rand::{CryptoRng, Rng};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::{debug, info};
 
-pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PrivateKey> {
+pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey> {
     context: E,
 
     gossip_bit_vec_frequency: Duration,
@@ -38,17 +38,13 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PrivateKe
     rate_limited: Family<metrics::Message, Counter>,
 
     // When reservation goes out-of-scope, the tracker will be notified.
-    reservation: Reservation<E, C::PublicKey>,
+    reservation: Reservation<E, C>,
 }
 
-impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: PrivateKey>
+impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: PublicKey>
     Actor<E, C>
 {
-    pub fn new(
-        context: E,
-        cfg: Config,
-        reservation: Reservation<E, C::PublicKey>,
-    ) -> (Self, Relay) {
+    pub fn new(context: E, cfg: Config, reservation: Reservation<E, C>) -> (Self, Relay) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
@@ -106,10 +102,10 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pri
 
     pub async fn run<Si: Sink, St: Stream>(
         mut self,
-        peer: C::PublicKey,
+        peer: C,
         connection: Connection<Si, St>,
         mut tracker: tracker::Mailbox<E, C>,
-        channels: Channels<C::PublicKey>,
+        channels: Channels<C>,
     ) -> Error {
         // Instantiate rate limiters for each message type
         let mut rate_limits = HashMap::new();

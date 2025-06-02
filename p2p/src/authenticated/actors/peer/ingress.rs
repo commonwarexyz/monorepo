@@ -1,12 +1,12 @@
 use super::Error;
 use crate::{authenticated::types, Channel};
 use bytes::Bytes;
-use commonware_cryptography::PrivateKey;
+use commonware_cryptography::PublicKey;
 use futures::{channel::mpsc, SinkExt};
 
 /// Messages that can be sent to the peer [`Actor`](`super::Actor`).
 #[derive(Clone, Debug)]
-pub enum Message<C: PrivateKey> {
+pub enum Message<C: PublicKey> {
     /// Send a bit vector to the peer.
     BitVec(types::BitVec),
 
@@ -18,11 +18,11 @@ pub enum Message<C: PrivateKey> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<C: PrivateKey> {
+pub struct Mailbox<C: PublicKey> {
     sender: mpsc::Sender<Message<C>>,
 }
 
-impl<C: PrivateKey> Mailbox<C> {
+impl<C: PublicKey> Mailbox<C> {
     pub(super) fn new(sender: mpsc::Sender<Message<C>>) -> Self {
         Self { sender }
     }

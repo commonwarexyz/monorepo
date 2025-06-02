@@ -42,7 +42,7 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PrivateK
 
     // ---------- Message-Passing ----------
     /// The mailbox for the actor.
-    receiver: mpsc::Receiver<Message<E, C>>,
+    receiver: mpsc::Receiver<Message<E, C::PublicKey>>,
 
     // ---------- State ----------
     /// Tracks peer sets and peer connectivity information.
@@ -51,12 +51,16 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PrivateK
 
 impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PrivateKey> Actor<E, C> {
     /// Create a new tracker [`Actor`] from the given `context` and `cfg`.
-    pub fn new(context: E, mut cfg: Config<C>) -> (Self, Mailbox<E, C>, Oracle<E, C>) {
+    #[allow(clippy::type_complexity)]
+    pub fn new(
+        context: E,
+        cfg: Config<C>,
+    ) -> (Self, Mailbox<E, C::PublicKey>, Oracle<E, C::PublicKey>) {
         // Sign my own information
         let socket = cfg.address;
         let timestamp = context.current().epoch_millis();
         let ip_namespace = union(&cfg.namespace, NAMESPACE_SUFFIX_IP);
-        let myself = types::PeerInfo::sign(&mut cfg.crypto, &ip_namespace, socket, timestamp);
+        let myself = types::PeerInfo::sign(&cfg.crypto, &ip_namespace, socket, timestamp);
 
         // General initialization
         let directory_cfg = directory::Config {
@@ -88,7 +92,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PrivateKey> Actor<E,
     /// Handle an incoming list of peer information.
     ///
     /// Returns an error if the list itself or any entries can be considered malformed.
-    fn validate(&mut self, infos: &Vec<types::PeerInfo<C>>) -> Result<(), Error> {
+    fn validate(&mut self, infos: &Vec<types::PeerInfo<C::PublicKey>>) -> Result<(), Error> {
         // Ensure there aren't too many peers sent
         if infos.len() > self.peer_gossip_max_count {
             return Err(Error::TooManyPeers(infos.len()));
@@ -298,7 +302,7 @@ mod tests {
         timestamp: u64,
         target_pk_override: Option<PublicKey>,
         make_sig_invalid: bool,
-    ) -> PeerInfo<ed25519::PrivateKey> {
+    ) -> PeerInfo<ed25519::PublicKey> {
         let peer_info_pk = target_pk_override.unwrap_or_else(|| signer.public_key());
         let mut signature = signer.sign(Some(ip_namespace), &(socket, timestamp).encode());
 
@@ -319,10 +323,10 @@ mod tests {
     // Mock a connection to a peer by reserving it as if it had dialed us and the `peer` actor had
     // sent an initialization.
     async fn connect_to_peer(
-        mailbox: &mut tracker::Mailbox<Context, ed25519::PrivateKey>,
+        mailbox: &mut tracker::Mailbox<Context, ed25519::PublicKey>,
         peer: &PublicKey,
-        peer_mailbox: &peer::Mailbox<ed25519::PrivateKey>,
-        peer_receiver: &mut mpsc::Receiver<peer::Message<ed25519::PrivateKey>>,
+        peer_mailbox: &peer::Mailbox<ed25519::PublicKey>,
+        peer_receiver: &mut mpsc::Receiver<peer::Message<ed25519::PublicKey>>,
     ) -> tracker::Reservation<Context, PublicKey> {
         let res = mailbox
             .listen(peer.clone())
@@ -344,8 +348,8 @@ mod tests {
     struct TestHarness {
         #[allow(dead_code)]
         actor_handle: Handle<()>,
-        mailbox: Mailbox<deterministic::Context, ed25519::PrivateKey>,
-        oracle: Oracle<deterministic::Context, ed25519::PrivateKey>,
+        mailbox: Mailbox<deterministic::Context, ed25519::PublicKey>,
+        oracle: Oracle<deterministic::Context, ed25519::PublicKey>,
         ip_namespace: Vec<u8>,
         tracker_pk: PublicKey,
         tracker_signer: ed25519::PrivateKey,

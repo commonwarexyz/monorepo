@@ -138,7 +138,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Priva
     /// Start the dialer actor.
     pub fn start(
         self,
-        tracker: tracker::Mailbox<E, C>,
+        tracker: tracker::Mailbox<E, C::PublicKey>,
         supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
     ) -> Handle<()> {
         self.context
@@ -148,7 +148,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Priva
 
     async fn run(
         mut self,
-        mut tracker: tracker::Mailbox<E, C>,
+        mut tracker: tracker::Mailbox<E, C::PublicKey>,
         mut supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
     ) {
         let mut dial_deadline = self.context.current();
