@@ -253,7 +253,7 @@ mod tests {
     use super::*;
     use bytes::BytesMut;
     use commonware_codec::{Decode, DecodeRangeExt};
-    use commonware_cryptography::{secp256r1, PrivateKeyGen as _};
+    use commonware_cryptography::{secp256r1, PrivateKeyGen as _, Signer as _};
 
     fn signed_peer_info() -> PeerInfo<secp256r1::PublicKey> {
         let mut rng = rand::thread_rng();

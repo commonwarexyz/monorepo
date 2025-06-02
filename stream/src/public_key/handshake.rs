@@ -4,7 +4,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
-use commonware_cryptography::{PrivateKey, PublicKey, Verifier as _};
+use commonware_cryptography::{PrivateKey, PublicKey};
 use commonware_runtime::Clock;
 use commonware_utils::SystemTimeExt;
 use std::time::Duration;
@@ -74,19 +74,23 @@ impl<K: PublicKey> EncodeSize for Info<K> {
 // dialer to sign some random bytes provided by the server but this would
 // require the server to send a message to a peer before authorizing that
 // it should connect to them.
-pub struct Signed<C: PrivateKey> {
+pub struct Signed<C: PublicKey> {
     // The handshake info that was signed over
-    info: Info<C::PublicKey>,
+    info: Info<C>,
 
     // The public key of the sender
-    signer: C::PublicKey,
+    signer: C,
 
     // The signature of the sender
     signature: C::Signature,
 }
 
-impl<C: PrivateKey> Signed<C> {
-    pub fn sign(crypto: &mut C, namespace: &[u8], info: Info<C::PublicKey>) -> Self {
+impl<C: PublicKey> Signed<C> {
+    pub fn sign(
+        crypto: &mut impl PrivateKey<PublicKey = C, Signature = C::Signature>,
+        namespace: &[u8],
+        info: Info<C>,
+    ) -> Self {
         let signature = crypto.sign(Some(namespace), &info.encode());
         Self {
             info,
@@ -95,7 +99,7 @@ impl<C: PrivateKey> Signed<C> {
         }
     }
 
-    pub fn signer(&self) -> C::PublicKey {
+    pub fn signer(&self) -> C {
         self.signer.clone()
     }
 
@@ -116,7 +120,7 @@ impl<C: PrivateKey> Signed<C> {
         // If we didn't verify this, it would be trivial for any peer to impersonate another peer (even though
         // they would not be able to decrypt any messages from the shared secret). This would prevent us
         // from making a legitimate connection to the intended peer.
-        if crypto.public_key() != self.info.recipient {
+        if *crypto != self.info.recipient {
             return Err(Error::HandshakeNotForUs);
         }
 
@@ -147,7 +151,7 @@ impl<C: PrivateKey> Signed<C> {
     }
 }
 
-impl<C: PrivateKey> Write for Signed<C> {
+impl<C: PublicKey> Write for Signed<C> {
     fn write(&self, buf: &mut impl BufMut) {
         self.info.write(buf);
         self.signer.write(buf);
@@ -155,12 +159,12 @@ impl<C: PrivateKey> Write for Signed<C> {
     }
 }
 
-impl<C: PrivateKey> Read for Signed<C> {
+impl<C: PublicKey> Read for Signed<C> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let info = Info::<C::PublicKey>::read(buf)?;
-        let signer = C::PublicKey::read(buf)?;
+        let info = Info::read(buf)?;
+        let signer = C::read(buf)?;
         let signature = C::Signature::read(buf)?;
         Ok(Self {
             info,
@@ -170,7 +174,7 @@ impl<C: PrivateKey> Read for Signed<C> {
     }
 }
 
-impl<C: PrivateKey> EncodeSize for Signed<C> {
+impl<C: PublicKey> EncodeSize for Signed<C> {
     fn encode_size(&self) -> usize {
         self.info.encode_size() + self.signer.encode_size() + self.signature.encode_size()
     }
@@ -198,7 +202,7 @@ mod tests {
         executor.start(|context| async move {
             // Create participants
             let mut sender = ed25519::PrivateKey::from_seed(0);
-            let recipient = ed25519::PrivateKey::from_seed(1);
+            let recipient = ed25519::PrivateKey::from_seed(1).public_key();
             let ephemeral_public_key = PublicKey::from_bytes([3u8; 32]);
 
             // Create handshake message
@@ -208,13 +212,13 @@ mod tests {
                 TEST_NAMESPACE,
                 Info {
                     timestamp,
-                    recipient: recipient.public_key(),
+                    recipient: recipient.clone(),
                     ephemeral_public_key,
                 },
             );
 
             // Decode the handshake message
-            let handshake = Signed::<ed25519::PrivateKey>::decode(handshake.encode())
+            let handshake = Signed::<ed25519::PublicKey>::decode(handshake.encode())
                 .expect("failed to decode handshake");
 
             // Verify the timestamp
@@ -226,7 +230,7 @@ mod tests {
             assert!(handshake_timestamp + max_handshake_age >= current_timestamp);
 
             // Verify the signature
-            assert_eq!(handshake.info.recipient, recipient.public_key());
+            assert_eq!(handshake.info.recipient, recipient);
             assert_eq!(handshake.info.ephemeral_public_key, ephemeral_public_key,);
 
             // Verify signature
@@ -424,14 +428,14 @@ mod tests {
             );
 
             // Tamper with the handshake to make the signature invalid
-            let mut handshake =
-                Signed::decode(handshake.encode()).expect("failed to decode handshake");
+            let mut handshake = Signed::<ed25519::PublicKey>::decode(handshake.encode())
+                .expect("failed to decode handshake");
             handshake.info.timestamp += 1;
 
             // Verify the handshake
             let result = handshake.verify(
                 &context,
-                &crypto,
+                &crypto.public_key(),
                 TEST_NAMESPACE,
                 Duration::from_secs(5),
                 Duration::from_secs(5),
@@ -444,8 +448,8 @@ mod tests {
     fn test_handshake_verify_invalid_timestamp_old() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut crypto = ed25519::PrivateKey::from_seed(0);
-            let recipient = crypto.public_key();
+            let mut signer = ed25519::PrivateKey::from_seed(0);
+            let recipient = signer.public_key();
             let ephemeral_public_key = x25519::PublicKey::from_bytes([0u8; 32]);
 
             let timeout_duration = Duration::from_secs(5);
@@ -453,11 +457,11 @@ mod tests {
 
             // Create a handshake, setting the timestamp to 0.
             let handshake = Signed::sign(
-                &mut crypto,
+                &mut signer,
                 TEST_NAMESPACE,
                 Info {
                     timestamp: 0,
-                    recipient,
+                    recipient: recipient.clone(),
                     ephemeral_public_key,
                 },
             );
@@ -470,7 +474,7 @@ mod tests {
             handshake
                 .verify(
                     &context,
-                    &crypto,
+                    &recipient,
                     TEST_NAMESPACE,
                     synchrony_bound,
                     timeout_duration,
@@ -483,7 +487,7 @@ mod tests {
             // Verify that a timeout error is returned.
             let result = handshake.verify(
                 &context,
-                &crypto,
+                &recipient,
                 TEST_NAMESPACE,
                 synchrony_bound,
                 timeout_duration,
@@ -496,8 +500,8 @@ mod tests {
     fn test_handshake_verify_invalid_timestamp_future() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut crypto = ed25519::PrivateKey::from_seed(0);
-            let recipient = crypto.public_key();
+            let mut signer = ed25519::PrivateKey::from_seed(0);
+            let recipient = signer.public_key();
             let ephemeral_public_key = x25519::PublicKey::from_bytes([0u8; 32]);
 
             let timeout_duration = Duration::from_secs(0);
@@ -506,7 +510,7 @@ mod tests {
 
             // Create a handshake at the synchrony bound.
             let handshake_ok = Signed::sign(
-                &mut crypto,
+                &mut signer,
                 TEST_NAMESPACE,
                 Info{
                     timestamp: SYNCHRONY_BOUND_MILLIS,
@@ -517,11 +521,11 @@ mod tests {
 
             // Create a handshake 1ms too far into the future.
             let handshake_late = Signed::sign(
-                &mut crypto,
+                &mut signer,
                 TEST_NAMESPACE,
                 Info{
                     timestamp:SYNCHRONY_BOUND_MILLIS + 1,
-                    recipient,
+                    recipient: recipient.clone(),
                     ephemeral_public_key,
                 },
             );
@@ -529,7 +533,7 @@ mod tests {
             // Verify the okay handshake.
             handshake_ok.verify(
                 &context,
-                &crypto,
+                &recipient,
                 TEST_NAMESPACE,
                 synchrony_bound,
                 timeout_duration,
@@ -538,7 +542,7 @@ mod tests {
             // Handshake too far into the future fails.
             let result = handshake_late.verify(
                 &context,
-                &crypto,
+                &recipient,
                 TEST_NAMESPACE,
                 synchrony_bound,
                 timeout_duration,
