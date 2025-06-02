@@ -26,7 +26,7 @@ pub struct Engine<
 
     voter: voter::Actor<E, C, D, A, R, F, S>,
     voter_mailbox: voter::Mailbox<C::Signature, D>,
-    resolver: resolver::Actor<E, C, D, S>,
+    resolver: resolver::Actor<E, C::PublicKey, D, S>,
     resolver_mailbox: resolver::Mailbox<C::Signature, D>,
 }
 
@@ -74,7 +74,7 @@ impl<
         let (resolver, resolver_mailbox) = resolver::Actor::new(
             context.with_label("resolver"),
             resolver::Config {
-                crypto: cfg.crypto,
+                crypto: cfg.crypto.public_key(),
                 supervisor: cfg.supervisor,
                 mailbox_size: cfg.mailbox_size,
                 namespace: cfg.namespace,

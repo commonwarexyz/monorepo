@@ -3,14 +3,14 @@ mod ingress;
 
 use crate::Supervisor;
 pub use actor::Actor;
-use commonware_cryptography::PrivateKey;
+use commonware_cryptography::PublicKey;
 use governor::Quota;
 pub use ingress::Mailbox;
 #[cfg(test)]
 pub use ingress::Message;
 use std::time::Duration;
 
-pub struct Config<C: PrivateKey, S: Supervisor<PublicKey = C::PublicKey>> {
+pub struct Config<C: PublicKey, S: Supervisor<PublicKey = C>> {
     pub crypto: C,
     pub supervisor: S,
 
