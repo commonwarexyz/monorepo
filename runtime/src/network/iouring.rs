@@ -13,12 +13,14 @@ use std::{
     sync::Arc,
 };
 use tokio::net::{TcpListener, TcpStream};
+use tracing::warn;
 
 #[derive(Clone, Debug, Default)]
 pub struct Config {
     /// If Some, explicitly sets TCP_NODELAY on the socket.
     /// Otherwise uses system default.
     pub tcp_nodelay: Option<bool>,
+    /// Configuration for the iouring instance.
     pub iouring_config: iouring::Config,
 }
 
@@ -92,10 +94,11 @@ impl crate::Network for Network {
             .into_std()
             .map_err(|_| crate::Error::ConnectionFailed)?;
 
+        // Set TCP_NODELAY if configured
         if let Some(tcp_nodelay) = self.tcp_nodelay {
-            stream
-                .set_nodelay(tcp_nodelay)
-                .map_err(|_| crate::Error::ConnectionFailed)?;
+            if let Err(err) = stream.set_nodelay(tcp_nodelay) {
+                warn!(?err, "failed to set TCP_NODELAY");
+            }
         }
 
         // Explicitly set non-blocking mode to true
@@ -144,10 +147,11 @@ impl crate::Listener for Listener {
             .into_std()
             .map_err(|_| crate::Error::ConnectionFailed)?;
 
+        // Set TCP_NODELAY if configured
         if let Some(tcp_nodelay) = self.tcp_nodelay {
-            stream
-                .set_nodelay(tcp_nodelay)
-                .map_err(|_| crate::Error::ConnectionFailed)?;
+            if let Err(err) = stream.set_nodelay(tcp_nodelay) {
+                warn!(?err, "failed to set TCP_NODELAY");
+            }
         }
 
         // Explicitly set non-blocking mode to true
