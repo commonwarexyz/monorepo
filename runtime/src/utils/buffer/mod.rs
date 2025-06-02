@@ -525,9 +525,9 @@ mod tests {
             assert_eq!(writer.size().await, 10);
             // Write "01234" into the middle (offset 2, 5 bytes) -> "ab01234hij"
             writer.write_at("01234".as_bytes(), 2).await.unwrap();
-            assert_eq!(writer.size().await, 15);
+            assert_eq!(writer.size().await, 10);
             writer.sync().await.unwrap();
-            assert_eq!(writer.size().await, 15);
+            assert_eq!(writer.size().await, 10);
 
             let (blob, size) = context.open("partition", b"middle_buf").await.unwrap();
             assert_eq!(size, 10); // Original length, as it's an overwrite
@@ -564,15 +564,15 @@ mod tests {
 
             // Buffer some data at offset 10: "0123456789"
             writer.write_at("0123456789".as_bytes(), 10).await.unwrap();
-            assert_eq!(writer.size().await, 10);
+            assert_eq!(writer.size().await, 20);
 
             // Write "abcde" at offset 0. This is before the current buffer.
             // Current buffer should be flushed. "abcde" written directly.
             // New buffer position will be 5.
             writer.write_at("abcde".as_bytes(), 0).await.unwrap();
-            assert_eq!(writer.size().await, 15);
+            assert_eq!(writer.size().await, 20);
             writer.sync().await.unwrap();
-            assert_eq!(writer.size().await, 15);
+            assert_eq!(writer.size().await, 20);
 
             let (blob, size) = context.open("partition", b"before_buf").await.unwrap();
             // Expected: "abcde" at 0 (5 bytes) + "0123456789" at 10 (10 bytes) = 20 total size.
@@ -685,9 +685,9 @@ mod tests {
                 .write_at("some data".as_bytes(), 0)
                 .await
                 .unwrap();
-            assert_eq!(writer_zero.size().await, 10);
+            assert_eq!(writer_zero.size().await, 9);
             writer_zero.sync().await.unwrap();
-            assert_eq!(writer_zero.size().await, 10);
+            assert_eq!(writer_zero.size().await, 9);
             writer_zero.truncate(0).await.unwrap();
             assert_eq!(writer_zero.size().await, 0);
             writer_zero.sync().await.unwrap();
@@ -750,9 +750,9 @@ mod tests {
 
             // 3. Buffer new data without flushing previous
             // Writer inner.position = 20. Buffer is empty.
-            // Write " more data" (9 bytes) at offset 20. This fits in buffer.
+            // Write " more data" (10 bytes) at offset 20. This fits in buffer.
             writer.write_at(" more data".as_bytes(), 20).await.unwrap();
-            assert_eq!(writer.size().await, 29);
+            assert_eq!(writer.size().await, 30);
 
             // Read the newly buffered data: "more"
             let mut read_buf_vec_3 = vec![0u8; 5];

@@ -231,7 +231,12 @@ impl<B: Blob> Blob for Write<B> {
             inner.flush().await?;
         }
         inner.blob.write_at(buf, offset).await?;
-        inner.position = offset + data_len as u64;
+
+        // Update the position (if larger than the current position)
+        let pending = offset + data_len as u64;
+        if pending > inner.position {
+            inner.position = pending;
+        }
         Ok(())
     }
 
