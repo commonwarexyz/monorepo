@@ -21,6 +21,11 @@ struct Inner<B: Blob> {
 }
 
 impl<B: Blob> Inner<B> {
+    /// Returns the current logical size of the blob including any buffered data.
+    fn size(&self) -> u64 {
+        self.position + self.buffer.len() as u64
+    }
+
     /// Appends bytes to the internal buffer, maintaining the "buffer at tip" invariant.
     ///
     /// If the buffer capacity would be exceeded, it is flushed first. If the data
@@ -143,6 +148,7 @@ impl<B: Blob> Write<B> {
     /// Panics if `capacity` is zero.
     pub fn new(blob: B, size: u64, capacity: usize) -> Self {
         assert!(capacity > 0, "buffer capacity must be greater than zero");
+
         Self {
             inner: Arc::new(RwLock::new(Inner {
                 blob,
@@ -159,7 +165,8 @@ impl<B: Blob> Write<B> {
     #[allow(clippy::len_without_is_empty)]
     pub async fn size(&self) -> u64 {
         let inner = self.inner.read().await;
-        inner.position + inner.buffer.len() as u64
+
+        inner.size()
     }
 }
 
