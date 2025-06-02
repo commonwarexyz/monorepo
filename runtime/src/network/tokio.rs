@@ -112,7 +112,7 @@ pub struct Config {
     write_timeout: Duration,
 }
 
-#[allow(dead_code)]
+#[cfg_attr(feature = "iouring-network", allow(dead_code))]
 impl Config {
     // Setters
     /// See [Config]
