@@ -241,7 +241,6 @@ impl<B: Blob> Blob for Write<B> {
     }
 
     async fn truncate(&self, len: u64) -> Result<(), Error> {
-        // Acquire a write lock on the inner state
         let mut inner = self.inner.write().await;
 
         // Prepare the buffer boundaries
