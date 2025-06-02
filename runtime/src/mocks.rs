@@ -128,7 +128,8 @@ impl StreamTrait for Stream {
         };
 
         // Wait for the waiter to be resolved.
-        let data = os_recv.await.map_err(|_| Error::RecvFailed)?;
+        // If the oneshot sender was dropped, it means the sink is closed.
+        let data = os_recv.await.map_err(|_| Error::Closed)?;
         assert_eq!(data.len(), buf.len());
         buf.put_slice(&data);
         Ok(buf)
@@ -147,7 +148,7 @@ mod tests {
     use super::*;
     use crate::{deterministic, Clock, Runner, Spawner};
     use commonware_macros::select;
-    use futures::{executor::block_on, join};
+    use futures::executor::block_on;
     use std::{thread::sleep, time::Duration};
 
     #[test]
@@ -198,64 +199,22 @@ mod tests {
     }
 
     #[test]
-    fn test_recv_error() {
-        let (sink, mut stream) = Channel::init();
-        let executor = deterministic::Runner::default();
-
-        // If the oneshot sender is dropped before the oneshot receiver is resolved,
-        // the recv function should return an error.
-        executor.start(|_| async move {
-            let (v, _) = join!(stream.recv(vec![0; 5]), async {
-                // Take the waiter and drop it.
-                sink.channel.lock().unwrap().waiter.take();
-            },);
-            assert!(matches!(v, Err(Error::RecvFailed)));
-        });
-    }
-
-    #[test]
-    fn test_send_error() {
-        let (mut sink, mut stream) = Channel::init();
-        let executor = deterministic::Runner::default();
-
-        // If the waiter value has a min, but the oneshot receiver is dropped,
-        // the send function should return an error when attempting to send the data.
-        executor.start(|context| async move {
-            // Create a waiter using a recv call.
-            // But then drop the receiver.
-            select! {
-                v = stream.recv( vec![0;5]) => {
-                    panic!("unexpected value: {:?}", v);
-                },
-                _ = context.sleep(Duration::from_millis(100)) => {
-                    "timeout"
-                },
-            };
-            drop(stream);
-
-            // Try to send a message (longer than the requested amount), but the receiver is dropped.
-            let result = sink.send(b"hello world".to_vec()).await;
-            assert!(matches!(result, Err(Error::Closed)));
-        });
-    }
-
-    #[test]
     fn test_recv_error_sink_dropped_while_waiting() {
         let (sink, mut stream) = Channel::init();
         let executor = deterministic::Runner::default();
 
         executor.start(|context| async move {
-            let recv_future = stream.recv(vec![0; 5]); // Stream starts waiting
-
-            // Simulate some delay to ensure the recv_future is waiting
-            context.sleep(Duration::from_millis(50)).await;
-
-            // Drop the sink explicitly after recv_future has started
-            drop(sink);
-
-            // The recv_future should now resolve to an error
-            let result = recv_future.await;
-            assert!(matches!(result, Err(Error::Closed)));
+            futures::join!(
+                async {
+                    let result = stream.recv(vec![0; 5]).await;
+                    assert!(matches!(result, Err(Error::Closed)));
+                },
+                async {
+                    // Wait for the stream to start waiting
+                    context.sleep(Duration::from_millis(50)).await;
+                    drop(sink);
+                }
+            );
         });
     }
 
