@@ -126,26 +126,26 @@ pub struct Write<B: Blob> {
 }
 
 impl<B: Blob> Write<B> {
-    /// Creates a new `Write` that writes to the given blob starting at `position` with the specified buffer capacity.
+    /// Creates a new `Write` that buffers writes to the end of a [Blob] with the specified buffer capacity.
     ///
     /// # Panics
     ///
     /// Panics if `capacity` is zero.
-    pub fn new(blob: B, position: u64, capacity: usize) -> Self {
+    pub fn new(blob: B, size: u64, capacity: usize) -> Self {
         assert!(capacity > 0, "buffer capacity must be greater than zero");
         Self {
             inner: Arc::new(RwLock::new(Inner {
                 blob,
                 buffer: Vec::with_capacity(capacity),
-                position,
+                position: size,
                 capacity,
             })),
         }
     }
 
-    /// Returns the current length of the underlying [Blob] (including all pending bytes in the buffer).
+    /// Returns the current size of the underlying [Blob] (including all pending bytes in the buffer).
     #[allow(clippy::len_without_is_empty)]
-    pub async fn len(&self) -> u64 {
+    pub async fn size(&self) -> u64 {
         let inner = self.inner.read().await;
         inner.position + inner.buffer.len() as u64
     }
