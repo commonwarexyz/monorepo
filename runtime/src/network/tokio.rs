@@ -94,7 +94,7 @@ impl crate::Listener for Listener {
 
 /// Configuration for the tokio [Network] implementation of the [crate::Network] trait.
 #[derive(Clone, Debug)]
-pub(crate) struct Config {
+pub struct Config {
     /// Whether or not to disable Nagle's algorithm.
     ///
     /// The algorithm combines a series of small network packets into a single packet
@@ -112,6 +112,7 @@ pub(crate) struct Config {
     write_timeout: Duration,
 }
 
+#[allow(dead_code)]
 impl Config {
     // Setters
     /// See [Config]

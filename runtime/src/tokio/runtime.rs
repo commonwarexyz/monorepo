@@ -5,13 +5,12 @@ use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage
 use crate::network::iouring::Network as IoUringNetwork;
 
 #[cfg(not(feature = "iouring-network"))]
-use crate::network::tokio::Network as TokioNetwork;
+use crate::network::tokio::{Config as TokioNetworkConfig, Network as TokioNetwork};
 
 #[cfg(not(feature = "iouring-storage"))]
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 
 use crate::network::metered::Network as MeteredNetwork;
-use crate::network::tokio::Config as TokioNetworkConfig;
 use crate::storage::metered::Storage as MeteredStorage;
 use crate::telemetry::metrics::task::Label;
 use crate::{utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
@@ -89,6 +88,10 @@ pub struct Config {
     /// Tokio sets the default value to 2MB.
     maximum_buffer_size: usize,
 
+    #[cfg(feature = "iouring-network")]
+    network_cfg: crate::iouring::Config,
+
+    #[cfg(not(feature = "iouring-network"))]
     network_cfg: TokioNetworkConfig,
 }
 
@@ -97,12 +100,16 @@ impl Config {
     pub fn new() -> Self {
         let rng = OsRng.next_u64();
         let storage_directory = env::temp_dir().join(format!("commonware_tokio_runtime_{}", rng));
+
         Self {
             worker_threads: 2,
             max_blocking_threads: 512,
             catch_panics: true,
             storage_directory,
             maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
+            #[cfg(feature = "iouring-network")]
+            network_cfg: crate::iouring::Config::default(),
+            #[cfg(not(feature = "iouring-network"))]
             network_cfg: TokioNetworkConfig::default(),
         }
     }
@@ -124,21 +131,6 @@ impl Config {
         self
     }
     /// See [Config]
-    pub fn with_read_timeout(mut self, d: Duration) -> Self {
-        self.network_cfg = self.network_cfg.with_read_timeout(d);
-        self
-    }
-    /// See [Config]
-    pub fn with_write_timeout(mut self, d: Duration) -> Self {
-        self.network_cfg = self.network_cfg.with_write_timeout(d);
-        self
-    }
-    /// See [Config]
-    pub fn with_tcp_nodelay(mut self, n: Option<bool>) -> Self {
-        self.network_cfg = self.network_cfg.with_tcp_nodelay(n);
-        self
-    }
-    /// See [Config]
     pub fn with_storage_directory(mut self, p: impl Into<PathBuf>) -> Self {
         self.storage_directory = p.into();
         self
@@ -147,6 +139,21 @@ impl Config {
     pub fn with_maximum_buffer_size(mut self, n: usize) -> Self {
         self.maximum_buffer_size = n;
         self
+    }
+    cfg_if::cfg_if! {
+            if #[cfg(not(feature = "iouring-network"))] {
+                /// See [Config]
+                pub fn with_network_config(mut self, cfg: TokioNetworkConfig) -> Self {
+                    self.network_cfg = cfg;
+                    self
+                }
+            } else {
+                /// See [Config]
+                pub fn with_network_config(mut self, cfg: crate::iouring::Config) -> Self {
+                    self.network_cfg = cfg;
+                    self
+                }
+        }
     }
 
     // Getters
@@ -163,24 +170,25 @@ impl Config {
         self.catch_panics
     }
     /// See [Config]
-    pub fn read_timeout(&self) -> Duration {
-        self.network_cfg.read_timeout()
-    }
-    /// See [Config]
-    pub fn write_timeout(&self) -> Duration {
-        self.network_cfg.write_timeout()
-    }
-    /// See [Config]
-    pub fn tcp_nodelay(&self) -> Option<bool> {
-        self.network_cfg.tcp_nodelay()
-    }
-    /// See [Config]
     pub fn storage_directory(&self) -> &PathBuf {
         &self.storage_directory
     }
     /// See [Config]
     pub fn maximum_buffer_size(&self) -> usize {
         self.maximum_buffer_size
+    }
+    cfg_if::cfg_if! {
+        if #[cfg(feature = "iouring-network")] {
+            /// See [Config]
+            pub fn network_config(&self) -> &crate::iouring::Config {
+                &self.network_cfg
+            }
+        } else {
+            /// See [Config]
+            pub fn network_config(&self) -> &TokioNetworkConfig {
+                &self.network_cfg
+            }
+        }
     }
 }
 
