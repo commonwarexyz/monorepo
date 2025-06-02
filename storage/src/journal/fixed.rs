@@ -1139,4 +1139,66 @@ mod tests {
             assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
         });
     }
+
+    #[test_traced]
+    fn test_journal_conformance() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+
+        // Start the test within the executor
+        executor.start(|context| async move {
+            // Create a journal configuration
+            let cfg = Config {
+                partition: "test_partition".into(),
+                items_per_blob: 60,
+                write_buffer: 1024,
+            };
+
+            // Initialize the journal
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+
+            // Append 100 items to the journal
+            for i in 0..100 {
+                journal
+                    .append(test_digest(i))
+                    .await
+                    .expect("Failed to append data");
+            }
+
+            // Close the journal
+            journal.close().await.expect("Failed to close journal");
+
+            // Hash blob contents
+            let (blob, size) = context
+                .open(&cfg.partition, &0u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            let buf = blob
+                .read_at(vec![0u8; size as usize], 0)
+                .await
+                .expect("Failed to read blob");
+            let digest = hash(buf.as_ref());
+            assert_eq!(
+                hex(&digest),
+                "ed2ea67208cde2ee8c16cca5aa4f369f55b1402258c6b7760e5baf134e38944a",
+            );
+            blob.close().await.expect("Failed to close blob");
+            let (blob, size) = context
+                .open(&cfg.partition, &1u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            let buf = blob
+                .read_at(vec![0u8; size as usize], 0)
+                .await
+                .expect("Failed to read blob");
+            let digest = hash(buf.as_ref());
+            assert_eq!(
+                hex(&digest),
+                "cc7efd4fc999aff36b9fd4213ba8da5810dc1849f92ae2ddf7c6dc40545f9aff",
+            );
+            blob.close().await.expect("Failed to close blob");
+        });
+    }
 }

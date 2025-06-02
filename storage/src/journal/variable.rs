@@ -692,6 +692,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 mod tests {
     use super::*;
     use bytes::BufMut;
+    use commonware_cryptography::hash;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Error as RError, Runner, Storage};
     use commonware_utils::StableBuf;
@@ -1717,6 +1718,52 @@ mod tests {
             let data = 1;
             let result = journal.append(1, data).await;
             assert!(matches!(result, Err(Error::OffsetOverflow)));
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_conformance() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+
+        // Start the test within the executor
+        executor.start(|context| async move {
+            // Create a journal configuration
+            let cfg = Config {
+                partition: "test_partition".into(),
+                compression: None,
+                codec_config: (),
+                write_buffer: 1024,
+            };
+
+            // Initialize the journal
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize journal");
+
+            // Append 100 items to the journal
+            for i in 0..100 {
+                journal.append(1, i).await.expect("Failed to append data");
+            }
+            journal.sync(1).await.expect("Failed to sync blob");
+
+            // Close the journal
+            journal.close().await.expect("Failed to close journal");
+
+            // Hash blob contents
+            let (blob, size) = context
+                .open(&cfg.partition, &1u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            let buf = blob
+                .read_at(vec![0u8; size as usize], 0)
+                .await
+                .expect("Failed to read blob");
+            let digest = hash(buf.as_ref());
+            assert_eq!(
+                hex(&digest),
+                "ca3845fa7fabd4d2855ab72ed21226d1d6eb30cb895ea9ec5e5a14201f3f25d8",
+            );
         });
     }
 }
