@@ -201,4 +201,25 @@ mod tests {
             assert!(matches!(&result, Err(Error::StreamClosed)));
         });
     }
+
+    #[test]
+    fn test_recv_frame_short_length_prefix() {
+        let (mut sink, mut stream) = mocks::Channel::init();
+
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            // Manually insert a frame with a short length prefix
+            let mut buf = BytesMut::with_capacity(3);
+            buf.put_u8(0x00);
+            buf.put_u8(0x00);
+            buf.put_u8(0x00);
+
+            sink.send(buf).await.unwrap();
+            drop(sink); // Close the sink to simulate a closed stream
+
+            // Expect an error rather than a panic
+            let result = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await;
+            assert!(matches!(&result, Err(Error::RecvFailed(_))));
+        });
+    }
 }

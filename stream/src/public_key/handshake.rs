@@ -402,8 +402,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Setup a mock sink and stream
-            let (sink, _) = mocks::Channel::init();
-            let (_, stream) = mocks::Channel::init();
+            let (sink, _stream) = mocks::Channel::init();
+            let (_sink, stream) = mocks::Channel::init();
 
             // Call the verify function for one peer, but never send the handshake from the other
             let config = Config {
