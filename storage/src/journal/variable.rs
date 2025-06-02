@@ -59,13 +59,6 @@
 //! some in-memory state. `Journal` is heavily optimized for this pattern and provides a `replay`
 //! method that iterates over multiple `sections` concurrently in a single stream.
 //!
-//! ## Recovery
-//!
-//! Like [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
-//! and [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
-//! any invalid data discovered will be considered the new end of the journal (and the underlying [Blob] will be truncated to the last
-//! valid item).
-//!
 //! # Exact Reads
 //!
 //! To allow for items to be fetched in a single disk operation, `Journal` allows callers to specify
@@ -390,11 +383,10 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     ///
     /// # Repair
     ///
-    /// If any corrupted data is found, the stream will return an error.
-    ///
-    /// If any trailing data is found (i.e. misaligned entries), the journal will be truncated
-    /// to the last valid item. For this reason, it is recommended to call `replay` before
-    /// calling `append` (as data added to trailing bytes will fail checksum after restart).
+    /// Like [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
+    /// and [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
+    /// any invalid data discovered will be considered the new end of the journal (and the underlying [Blob] will be truncated to the last
+    /// valid item).
     ///
     /// # Concurrency
     ///
