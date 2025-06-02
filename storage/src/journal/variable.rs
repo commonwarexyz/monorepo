@@ -410,90 +410,113 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
         // Replay all blobs concurrently and stream items as they are read (to avoid
         // occupying too much memory with buffered data)
-        Ok(stream::iter(blobs)
-            .map(
-                move |(section, blob, aligned_len, len, codec_config, compressed)| async move {
-                    // Created buffered reader
-                    let reader = Read::new(blob, len, buffer);
+        Ok(
+            stream::iter(blobs)
+                .map(
+                    move |(section, blob, aligned_len, len, codec_config, compressed)| async move {
+                        // Created buffered reader
+                        let reader = Read::new(blob, len, buffer);
 
-                    // Read over the blob
-                    stream::unfold(
-                        (section, reader, 0u32, codec_config, compressed),
-                        move |(section, mut reader, offset, codec_config, compressed)| async move {
-                            // Check if we are at the end of the blob
-                            if offset >= aligned_len {
-                                return None;
-                            }
-
-                            // Read an item from the buffer
-                            match Self::read_buffered(
-                                &mut reader,
+                        // Read over the blob
+                        stream::unfold(
+                            (section, reader, 0u32, 0u64, codec_config, compressed),
+                            move |(
+                                section,
+                                mut reader,
                                 offset,
-                                &codec_config,
+                                read_len,
+                                codec_config,
                                 compressed,
-                            )
-                            .await
-                            {
-                                Ok((next_offset, size, item)) => {
-                                    trace!(
-                                        blob = section,
-                                        cursor = offset,
-                                        len = aligned_len,
-                                        "replayed item"
-                                    );
-                                    Some((
-                                        Ok((section, offset, size, item)),
-                                        (section, reader, next_offset, codec_config, compressed),
-                                    ))
+                            )| async move {
+                                // Check if we are at the end of the blob
+                                if offset >= aligned_len {
+                                    return None;
                                 }
-                                Err(Error::ChecksumMismatch(expected, found)) => {
-                                    // If we encounter corruption, we prune to the last valid item. This
-                                    // can happen during an unclean file close (where pending data is not
-                                    // fully synced to disk).
-                                    warn!(
-                                        blob = section,
-                                        cursor = offset,
-                                        expected,
-                                        found,
-                                        "corruption detected: truncating"
-                                    );
-                                    reader.truncate(offset as u64 * ITEM_ALIGNMENT).await.ok()?;
-                                    None
+
+                                // Read an item from the buffer
+                                match Self::read_buffered(
+                                    &mut reader,
+                                    offset,
+                                    &codec_config,
+                                    compressed,
+                                )
+                                .await
+                                {
+                                    Ok((next_offset, size, item)) => {
+                                        trace!(
+                                            blob = section,
+                                            cursor = offset,
+                                            len = aligned_len,
+                                            "replayed item"
+                                        );
+                                        Some((
+                                            Ok((section, offset, size, item)),
+                                            (
+                                                section,
+                                                reader,
+                                                next_offset,
+                                                read_len + size as u64,
+                                                codec_config,
+                                                compressed,
+                                            ),
+                                        ))
+                                    }
+                                    Err(Error::ChecksumMismatch(expected, found)) => {
+                                        // If we encounter corruption, we prune to the last valid item. This
+                                        // can happen during an unclean file close (where pending data is not
+                                        // fully synced to disk).
+                                        warn!(
+                                            blob = section,
+                                            cursor = offset,
+                                            expected,
+                                            found,
+                                            "corruption detected: truncating"
+                                        );
+                                        reader.truncate(read_len).await.ok()?;
+                                        None
+                                    }
+                                    Err(Error::Runtime(RError::BlobInsufficientLength)) => {
+                                        // If we encounter trailing bytes, we prune to the last
+                                        // valid item. This can happen during an unclean file close (where
+                                        // pending data is not fully synced to disk).
+                                        warn!(
+                                            blob = section,
+                                            new_size = offset,
+                                            old_size = aligned_len,
+                                            "trailing bytes detected: truncating"
+                                        );
+                                        reader.truncate(read_len).await.ok()?;
+                                        None
+                                    }
+                                    Err(err) => {
+                                        // If we encounter an unexpected error, return it without attempting
+                                        // to fix anything.
+                                        warn!(
+                                            blob = section,
+                                            cursor = offset,
+                                            ?err,
+                                            "unexpected error"
+                                        );
+                                        Some((
+                                            Err(err),
+                                            (
+                                                section,
+                                                reader,
+                                                aligned_len,
+                                                read_len,
+                                                codec_config,
+                                                compressed,
+                                            ),
+                                        ))
+                                    }
                                 }
-                                Err(Error::Runtime(RError::BlobInsufficientLength)) => {
-                                    // If we encounter trailing bytes, we prune to the last
-                                    // valid item. This can happen during an unclean file close (where
-                                    // pending data is not fully synced to disk).
-                                    warn!(
-                                        blob = section,
-                                        new_size = offset,
-                                        old_size = aligned_len,
-                                        "trailing bytes detected: truncating"
-                                    );
-                                    reader.truncate(offset as u64 * ITEM_ALIGNMENT).await.ok()?;
-                                    None
-                                }
-                                Err(err) => {
-                                    // If we encounter an unexpected error, return it without attempting
-                                    // to fix anything.
-                                    warn!(
-                                        blob = section,
-                                        cursor = offset,
-                                        ?err,
-                                        "unexpected error"
-                                    );
-                                    Some((
-                                        Err(err),
-                                        (section, reader, aligned_len, codec_config, compressed),
-                                    ))
-                                }
-                            }
-                        },
-                    )
-                },
-            )
-            .buffer_unordered(concurrency)
-            .flatten())
+                            },
+                        )
+                    },
+                )
+                .buffer_unordered(concurrency)
+                .flatten(),
+        )
     }
 
     /// Appends an item to `Journal` in a given `section`, returning the offset
