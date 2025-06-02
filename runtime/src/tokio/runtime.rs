@@ -281,16 +281,17 @@ impl crate::Runner for Runner {
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-network")] {
                 let iouring_registry = runtime_registry.sub_registry_with_prefix("iouring_network");
-                let network = MeteredNetwork::new(
-                    IoUringNetwork::start(IoUringNetworkConfig {
-                        tcp_nodelay: self.cfg.network_cfg.tcp_nodelay,
-                        iouring_config: iouring::Config {
+                let config = IoUringNetworkConfig {
+                    tcp_nodelay: self.cfg.network_cfg.tcp_nodelay,
+                    iouring_config: iouring::Config {
                         op_timeout: Some(self.cfg.network_cfg.read_write_timeout),
                         force_poll: IOURING_NETWORK_FORCE_POLL,
                         shutdown_timeout: Some(self.cfg.network_cfg.read_write_timeout),
                         ..Default::default()
                     },
-                }, iouring_registry).unwrap(),
+                };
+                let network = MeteredNetwork::new(
+                    IoUringNetwork::start(config, iouring_registry).unwrap(),
                 runtime_registry,
             );
         } else {
