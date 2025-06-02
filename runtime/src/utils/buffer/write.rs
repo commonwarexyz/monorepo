@@ -143,8 +143,9 @@ impl<B: Blob> Write<B> {
         }
     }
 
-    /// Returns the position of the next byte to be written to the underlying [Blob].
-    pub async fn position(&self) -> u64 {
+    /// Returns the current length of the underlying [Blob] (including all pending bytes in the buffer).
+    /// TODO: fix this
+    pub async fn len(&self) -> u64 {
         let inner = self.inner.read().await;
         inner.position + inner.buffer.len() as u64
     }

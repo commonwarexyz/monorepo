@@ -397,7 +397,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         let compressed = self.cfg.compression.is_some();
         let mut blobs = Vec::with_capacity(self.blobs.len());
         for (section, blob) in self.blobs.iter() {
-            let blob_len = blob.position().await;
+            let blob_len = blob.len().await;
             let max_offset = compute_next_offset(blob_len)?;
             blobs.push((
                 *section,
@@ -442,7 +442,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                             )
                             .await
                             {
-                                Ok((next_offset, next_valid, size, item)) => {
+                                Ok((next_offset, next_valid_len, size, item)) => {
                                     trace!(
                                         blob = section,
                                         cursor = offset,
@@ -455,7 +455,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                             section,
                                             reader,
                                             next_offset,
-                                            next_valid,
+                                            next_valid_len,
                                             codec_config,
                                             compressed,
                                         ),
@@ -571,7 +571,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         assert_eq!(buf.len(), entry_len);
 
         // Append item to blob
-        let cursor = blob.position().await;
+        let cursor = blob.len().await;
         let offset = compute_next_offset(cursor)?;
         let aligned_cursor = offset as u64 * ITEM_ALIGNMENT;
         blob.write_at(buf, aligned_cursor).await?;
@@ -650,7 +650,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
             // Remove and close blob
             let blob = self.blobs.remove(&section).unwrap();
-            let len = blob.position().await;
+            let len = blob.len().await;
             blob.close().await?;
 
             // Remove blob from storage
@@ -670,7 +670,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// Closes all open sections.
     pub async fn close(self) -> Result<(), Error> {
         for (section, blob) in self.blobs.into_iter() {
-            let len = blob.position().await;
+            let len = blob.len().await;
             blob.close().await?;
             debug!(blob = section, len, "closed blob");
         }
@@ -680,7 +680,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// Close and remove any underlying blobs created by the journal.
     pub async fn destroy(self) -> Result<(), Error> {
         for (i, blob) in self.blobs.into_iter() {
-            let len = blob.position().await;
+            let len = blob.len().await;
             blob.close().await?;
             debug!(blob = i, len, "destroyed blob");
             self.context
