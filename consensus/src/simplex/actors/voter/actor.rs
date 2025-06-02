@@ -32,7 +32,7 @@ use rand::Rng;
 use std::{
     cmp::max,
     collections::{btree_map::Entry, BTreeMap, HashMap},
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, SystemTime},
 };
 use std::{collections::BTreeSet, sync::atomic::AtomicI64};
 use tracing::{debug, trace, warn};
@@ -1704,7 +1704,7 @@ impl<
 
         // Rebuild from journal
         let mut observed_view = 1;
-        let start = Instant::now();
+        let start = self.context.current();
         {
             let stream = journal
                 .replay(self.replay_concurrency, self.replay_buffer)
@@ -1772,7 +1772,13 @@ impl<
         self.journal = Some(journal);
 
         // Update current view and immediately move to timeout (very unlikely we restarted and still within timeout)
-        debug!(current_view = observed_view, elapsed = ?start.elapsed(), "consensus initialized");
+        let end = self.context.current();
+        let elapsed = end.duration_since(start).unwrap_or_default();
+        debug!(
+            current_view = observed_view,
+            ?elapsed,
+            "consensus initialized"
+        );
         self.enter_view(observed_view);
         {
             let round = self.views.get_mut(&observed_view).expect("missing round");
