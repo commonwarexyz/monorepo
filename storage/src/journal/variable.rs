@@ -160,7 +160,7 @@ pub struct Journal<E: Storage + Metrics, V: Codec> {
 
     oldest_allowed: Option<u64>,
 
-    blobs: BTreeMap<u64, (Write<E::Blob>, u64)>,
+    blobs: BTreeMap<u64, Write<E::Blob>>,
 
     tracked: Gauge,
     synced: Counter,
@@ -192,7 +192,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             };
             debug!(section, blob = hex_name, len, "loaded section");
             let blob = Write::new(blob, len, cfg.write_buffer);
-            blobs.insert(section, (blob, len));
+            blobs.insert(section, blob);
         }
 
         // Initialize metrics
@@ -402,13 +402,14 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         let codec_config = self.cfg.codec_config.clone();
         let compressed = self.cfg.compression.is_some();
         let mut blobs = Vec::with_capacity(self.blobs.len());
-        for (section, (blob, blob_len)) in self.blobs.iter() {
-            let max_offset = compute_next_offset(*blob_len)?;
+        for (section, blob) in self.blobs.iter() {
+            let blob_len = blob.position().await;
+            let max_offset = compute_next_offset(blob_len)?;
             blobs.push((
                 *section,
                 blob.clone(),
                 max_offset,
-                *blob_len,
+                blob_len,
                 codec_config.clone(),
                 compressed,
             ));
@@ -563,7 +564,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                 let (blob, len) = self.context.open(&self.cfg.partition, &name).await?;
                 let blob = Write::new(blob, len, self.cfg.write_buffer);
                 self.tracked.inc();
-                entry.insert((blob, len))
+                entry.insert(blob)
             }
         };
 
@@ -576,11 +577,10 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         assert_eq!(buf.len(), entry_len);
 
         // Append item to blob
-        let cursor = blob.1;
+        let cursor = blob.position().await;
         let offset = compute_next_offset(cursor)?;
         let aligned_cursor = offset as u64 * ITEM_ALIGNMENT;
-        blob.0.write_at(buf, aligned_cursor).await?;
-        blob.1 = aligned_cursor + entry_len as u64;
+        blob.write_at(buf, aligned_cursor).await?;
         trace!(blob = section, offset, "appended item");
         Ok((offset, item_len))
     }
@@ -588,7 +588,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// Retrieves an item from `Journal` at a given `section` and `offset`.
     pub async fn get(&self, section: u64, offset: u32) -> Result<Option<V>, Error> {
         self.prune_guard(section, false)?;
-        let (blob, _) = match self.blobs.get(&section) {
+        let blob = match self.blobs.get(&section) {
             Some(blob) => blob,
             None => return Ok(None),
         };
@@ -612,7 +612,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         size: u32,
     ) -> Result<Option<V>, Error> {
         self.prune_guard(section, false)?;
-        let (blob, _) = match self.blobs.get(&section) {
+        let blob = match self.blobs.get(&section) {
             Some(blob) => blob,
             None => return Ok(None),
         };
@@ -634,7 +634,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// If the `section` does not exist, no error will be returned.
     pub async fn sync(&self, section: u64) -> Result<(), Error> {
         self.prune_guard(section, false)?;
-        let (blob, _) = match self.blobs.get(&section) {
+        let blob = match self.blobs.get(&section) {
             Some(blob) => blob,
             None => return Ok(()),
         };
@@ -655,7 +655,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             }
 
             // Remove and close blob
-            let (blob, len) = self.blobs.remove(&section).unwrap();
+            let blob = self.blobs.remove(&section).unwrap();
+            let len = blob.position().await;
             blob.close().await?;
 
             // Remove blob from storage
@@ -674,7 +675,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
     /// Closes all open sections.
     pub async fn close(self) -> Result<(), Error> {
-        for (section, (blob, len)) in self.blobs.into_iter() {
+        for (section, blob) in self.blobs.into_iter() {
+            let len = blob.position().await;
             blob.close().await?;
             debug!(blob = section, len, "closed blob");
         }
@@ -683,7 +685,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
     /// Close and remove any underlying blobs created by the journal.
     pub async fn destroy(self) -> Result<(), Error> {
-        for (i, (blob, len)) in self.blobs.into_iter() {
+        for (i, blob) in self.blobs.into_iter() {
+            let len = blob.position().await;
             blob.close().await?;
             debug!(blob = i, len, "destroyed blob");
             self.context
@@ -1349,7 +1352,7 @@ mod tests {
 
             // Get the new item
             let item = journal
-                .get(2, 3)
+                .get(2, 2)
                 .await
                 .expect("Failed to get item")
                 .expect("Failed to get item");
@@ -1363,7 +1366,7 @@ mod tests {
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            assert_eq!(blob_len, 32);
+            assert_eq!(blob_len, 44);
 
             // Re-initialize the journal to simulate a restart
             let journal = Journal::init(context, cfg)
@@ -1391,6 +1394,13 @@ mod tests {
             assert_eq!(items[0].0, 1);
             assert_eq!(items[0].1, 1);
             assert_eq!(items[1].0, data_items[0].0);
+            assert_eq!(items[1].1, data_items[0].1);
+            assert_eq!(items[2].0, data_items[1].0);
+            assert_eq!(items[2].1, data_items[1].1);
+            assert_eq!(items[3].0, 2);
+            assert_eq!(items[3].1, 5);
+
+            // Confirm blob is expected length
         });
     }
 
