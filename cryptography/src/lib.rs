@@ -12,7 +12,7 @@ use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 pub mod bls12381;
 pub mod ed25519;
 pub mod sha256;
-pub use sha256::{hash, Sha256};
+pub use sha256::{hash, CoreSha256, Sha256};
 pub mod secp256r1;
 
 /// Produces signatures over messages.

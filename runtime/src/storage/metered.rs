@@ -1,5 +1,5 @@
 use crate::Error;
-use commonware_utils::{StableBuf, StableBufMut};
+use commonware_utils::StableBuf;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use prometheus_client::registry::Registry;
 use std::sync::Arc;
@@ -101,14 +101,19 @@ pub struct Blob<B> {
 }
 
 impl<B: crate::Blob> crate::Blob for Blob<B> {
-    async fn read_at<S: StableBufMut>(&self, buf: S, offset: u64) -> Result<S, Error> {
+    async fn read_at(
+        &self,
+        buf: impl Into<StableBuf> + Send,
+        offset: u64,
+    ) -> Result<StableBuf, Error> {
         let read = self.inner.read_at(buf, offset).await?;
         self.metrics.storage_reads.inc();
         self.metrics.storage_read_bytes.inc_by(read.len() as u64);
         Ok(read)
     }
 
-    async fn write_at<S: StableBuf>(&self, buf: S, offset: u64) -> Result<(), Error> {
+    async fn write_at(&self, buf: impl Into<StableBuf> + Send, offset: u64) -> Result<(), Error> {
+        let buf = buf.into();
         let buf_len = buf.len();
         self.inner.write_at(buf, offset).await?;
         self.metrics.storage_writes.inc();
@@ -183,7 +188,7 @@ mod tests {
 
         // Read data from the blob
         let read = blob.read_at(vec![0; 11], 0).await.unwrap();
-        assert_eq!(read, b"hello world");
+        assert_eq!(read.as_ref(), b"hello world");
         let reads = storage.metrics.storage_reads.get();
         let read_bytes = storage.metrics.storage_read_bytes.get();
         assert_eq!(

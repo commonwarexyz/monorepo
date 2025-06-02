@@ -1,13 +1,9 @@
 use crate::Error;
 use chacha20poly1305::Nonce;
 
-/// A struct that holds the nonce information.
-///
-/// Holds a counter value that is incremented by 2 each time the nonce is used.
-/// The least-significant bit does not change, allowing for two disjoint nonce spaces (one for each
-/// side of a connection).
-///
-/// Is able to be incremented up-to 96 bits (12 bytes) before overflowing.
+/// A struct that holds the nonce information. Holds a counter value that is incremented each time
+/// the nonce is used. Is able to be incremented up-to 96 bits (12 bytes) before overflowing.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Info {
     counter: u128,
 }
@@ -17,28 +13,13 @@ pub struct Info {
 const OVERFLOW_VALUE: u128 = 1 << 96;
 
 impl Info {
-    /// Creates a new `Info` struct.
-    ///
-    /// The `dialer` parameter indicates whether the sender is the dialer or not.
-    /// For example, if the client was the dialer, this is set to true for your own nonces, but
-    /// false for the peer's nonces.
-    pub fn new(dialer: bool) -> Self {
-        Self {
-            counter: if dialer { 1 } else { 0 },
-        }
-    }
-
-    /// Increments the nonce.
-    ///
-    /// The counter is incremented by 2, which prevents nonce reuse while also maintaining the value
-    /// of the least-significant bit. This ensures that the nonce space is disjoint for two nonces
-    /// initialized with different boolean values.
+    /// Increments the nonce by 1.
     ///
     /// An error is returned if-and-only-if the nonce overflows 96 bits.
     pub fn inc(&mut self) -> Result<(), Error> {
-        // This line does not need to check for overflow as the counter should not be initialized
-        // to a value greater than 2^96.
-        let new_counter = self.counter + 2;
+        // This line does not need to check for u128 overflow as the counter should be initialized
+        // to 0.
+        let new_counter = self.counter + 1;
 
         // Check for overflow over 96 bits (12 bytes)
         if new_counter >= OVERFLOW_VALUE {
@@ -71,15 +52,15 @@ mod tests {
     fn test_encode() {
         let mut expected = [0u8; 12];
 
-        // Even
-        let even = Info::new(false);
-        assert_eq!(even.encode()[..], expected[..]);
+        // 0
+        let nonce = Info::default();
+        assert_eq!(nonce.encode()[..], expected[..]);
 
-        // Odd
-        let odd = Info::new(true);
+        // 1
+        let nonce = Info { counter: 1 };
         expected = [0u8; 12];
         expected[11] = 1;
-        assert_eq!(odd.encode()[..], expected[..]);
+        assert_eq!(nonce.encode()[..], expected[..]);
 
         // Two bytes are set
         let two_byte = Info { counter: 0x0102 };
@@ -100,44 +81,32 @@ mod tests {
     }
 
     #[test]
-    fn test_even() {
-        let mut even = Info::new(false);
-        assert_eq!(even.counter, 0);
+    fn test_inc() {
+        let mut nonce = Info::default();
 
-        even.inc().unwrap();
-        assert_eq!(even.counter, 2);
+        // Incrementing should succeed
+        assert!(nonce.inc().is_ok());
+        assert_eq!(nonce.counter, 1);
 
-        even.inc().unwrap();
-        assert_eq!(even.counter, 4);
+        // Incrementing again should succeed
+        assert!(nonce.inc().is_ok());
+        assert_eq!(nonce.counter, 2);
     }
 
     #[test]
-    fn test_odd() {
-        let mut odd = Info::new(true);
-        assert_eq!(odd.counter, 1);
-
-        odd.inc().unwrap();
-        assert_eq!(odd.counter, 3);
-
-        odd.inc().unwrap();
-        assert_eq!(odd.counter, 5);
-    }
-
-    #[test]
-    fn test_inc_overflow_even() {
-        let initial = (1 << 96) - 2;
+    fn test_inc_overflow() {
+        let initial = OVERFLOW_VALUE - 2;
         let mut nonce = Info { counter: initial };
 
-        assert!(matches!(nonce.inc(), Err(Error::NonceOverflow)));
-        assert_eq!(nonce.counter, initial);
-    }
+        // Incrementing should succeed
+        assert!(nonce.inc().is_ok());
 
-    #[test]
-    fn test_inc_overflow_odd() {
-        let initial = (1 << 96) - 1;
-        let mut nonce = Info { counter: initial };
-
+        // Incrementing again should overflow
         assert!(matches!(nonce.inc(), Err(Error::NonceOverflow)));
-        assert_eq!(nonce.counter, initial);
+        assert_eq!(nonce.counter, initial + 1);
+
+        // Incrementing again should not change the counter
+        assert!(matches!(nonce.inc(), Err(Error::NonceOverflow)));
+        assert_eq!(nonce.counter, initial + 1);
     }
 }

@@ -1,5 +1,5 @@
 use crate::{SinkOf, StreamOf};
-use commonware_utils::{StableBuf, StableBufMut};
+use commonware_utils::StableBuf;
 use prometheus_client::{metrics::counter::Counter, registry::Registry};
 use std::{net::SocketAddr, sync::Arc};
 
@@ -55,7 +55,8 @@ pub struct Sink<S: crate::Sink> {
 }
 
 impl<S: crate::Sink> crate::Sink for Sink<S> {
-    async fn send<B: StableBuf>(&mut self, data: B) -> Result<(), crate::Error> {
+    async fn send(&mut self, data: impl Into<StableBuf> + Send) -> Result<(), crate::Error> {
+        let data = data.into();
         let len = data.len();
         self.inner.send(data).await?;
         self.metrics.outbound_bandwidth.inc_by(len as u64);
@@ -70,7 +71,7 @@ pub struct Stream<S: crate::Stream> {
 }
 
 impl<S: crate::Stream> crate::Stream for Stream<S> {
-    async fn recv<B: StableBufMut>(&mut self, buf: B) -> Result<B, crate::Error> {
+    async fn recv(&mut self, buf: impl Into<StableBuf> + Send) -> Result<StableBuf, crate::Error> {
         let buf = self.inner.recv(buf).await?;
         self.metrics.inbound_bandwidth.inc_by(buf.len() as u64);
         Ok(buf)
@@ -184,6 +185,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
+    async fn stress_test_trait() {
+        tests::stress_test_network_trait(|| {
+            MeteredNetwork::new(
+                DeterministicNetwork::default(),
+                &mut prometheus_client::registry::Registry::default(),
+            )
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn test_metrics() {
         const MSG_SIZE: u64 = 100;
 
@@ -216,7 +229,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.len(), MSG_SIZE as usize);
-        assert_eq!(response, msg);
+        assert_eq!(response.as_ref(), msg);
 
         // Wait for server to complete
         server.await.unwrap();

@@ -1,4 +1,4 @@
-use commonware_utils::{hex, StableBuf, StableBufMut};
+use commonware_utils::{hex, StableBuf};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -94,7 +94,12 @@ impl Blob {
 }
 
 impl crate::Blob for Blob {
-    async fn read_at<B: StableBufMut>(&self, mut buf: B, offset: u64) -> Result<B, crate::Error> {
+    async fn read_at(
+        &self,
+        buf: impl Into<StableBuf> + Send,
+        offset: u64,
+    ) -> Result<StableBuf, crate::Error> {
+        let mut buf = buf.into();
         let offset = offset
             .try_into()
             .map_err(|_| crate::Error::OffsetOverflow)?;
@@ -107,7 +112,12 @@ impl crate::Blob for Blob {
         Ok(buf)
     }
 
-    async fn write_at<B: StableBuf>(&self, buf: B, offset: u64) -> Result<(), crate::Error> {
+    async fn write_at(
+        &self,
+        buf: impl Into<StableBuf> + Send,
+        offset: u64,
+    ) -> Result<(), crate::Error> {
+        let buf = buf.into();
         let offset = offset
             .try_into()
             .map_err(|_| crate::Error::OffsetOverflow)?;
