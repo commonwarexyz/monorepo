@@ -1,7 +1,7 @@
 use crate::mmr::{
     hasher::{Hasher, Standard},
     journaled::Mmr as JournaledMmr,
-    mem::Mmr as MemMmr,
+    mem::{HashWorkers, Mmr as MemMmr},
     Builder,
 };
 use commonware_cryptography::{Hasher as CHasher, Sha256};
@@ -37,21 +37,48 @@ pub async fn build_test_mmr<H: CHasher>(hasher: &mut impl Hasher<H>, mmr: &mut i
     }
 }
 
-pub async fn build_batched_and_check_test_roots<H: CHasher>(
-    hasher: &mut impl Hasher<H>,
-    mem_mmr: &mut MemMmr<H>,
-) {
+pub async fn build_batched_and_check_test_roots(mem_mmr: &mut MemMmr<Sha256>) {
+    let mut hasher = Sha256::new();
+    let mut hasher = Standard::new(&mut hasher);
     for i in 0u64..199 {
         hasher.inner().update(&i.to_be_bytes());
         let element = hasher.inner().finalize();
-        mem_mmr.add_batched(hasher, &element).await.unwrap();
+        mem_mmr.add_batched(&mut hasher, &element).await.unwrap();
     }
-    mem_mmr.sync(hasher);
+    mem_mmr.sync(&mut hasher);
     assert_eq!(
-        hex(&mem_mmr.root(hasher)),
+        hex(&mem_mmr.root(&mut hasher)),
         ROOTS[199],
         "Root after 200 elements"
     );
+}
+
+pub async fn build_parallel_and_check_test_roots(
+    context: commonware_runtime::deterministic::Context,
+    mem_mmr: &mut MemMmr<Sha256>,
+) {
+    let mut hasher = Sha256::new();
+    let mut hasher = Standard::new(&mut hasher);
+    const TASKS: usize = 10;
+    let mut crypto_hashers = Vec::with_capacity(TASKS);
+    for i_ in 0..TASKS {
+        crypto_hashers.push(Sha256::new());
+    }
+    {
+        let mut hashers = mem_mmr.start(context, crypto_hashers);
+        for i in 0u64..199 {
+            hasher.inner().update(&i.to_be_bytes());
+            let element = hasher.inner().finalize();
+            mem_mmr.add_batched(&mut hasher, &element).await.unwrap();
+        }
+        mem_mmr.sync_parallel(&mut hashers, 20);
+
+        assert_eq!(
+            hex(&mem_mmr.root(&mut hasher)),
+            ROOTS[199],
+            "Root after 200 elements"
+        );
+    }
 }
 
 pub async fn build_batched_and_check_test_roots_journaled<

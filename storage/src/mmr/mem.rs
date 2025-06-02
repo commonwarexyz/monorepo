@@ -9,6 +9,7 @@
 //! position, but whose digests remain required for proof generation. The digests for pinned nodes
 //! are stored in an auxiliary map, and are at most O(log2(n)) in number.
 use crate::mmr::{
+    hasher::Standard,
     iterator::{nodes_needing_parents, PathIterator, PeakIterator},
     verification::Proof,
     Builder,
@@ -16,7 +17,56 @@ use crate::mmr::{
     Hasher,
 };
 use commonware_cryptography::Hasher as CHasher;
-use std::collections::{HashMap, HashSet, VecDeque};
+use commonware_runtime::Spawner;
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    sync::{mpsc, Arc, Mutex},
+};
+
+/// Data required by each hash worker thread.
+pub struct HashWorkerData<H: CHasher> {
+    pub hasher: H,
+}
+
+impl<H: CHasher> HashWorkerData<H> {
+    /// Create a new `HashWorkerData` instance.
+    pub fn new(hasher: H) -> Self {
+        Self { hasher }
+    }
+
+    pub fn hash(&mut self, node_pos: u64, left: &H::Digest, right: &H::Digest) -> H::Digest {
+        // TODO: What if we want an non-standard hasher?
+        let mut hasher = Standard::<H>::new(&mut self.hasher);
+        hasher.node_digest(node_pos, left, right)
+    }
+}
+
+pub struct HashWorkers<H: CHasher> {
+    pub task_sender: mpsc::Sender<(u64, H::Digest, H::Digest)>,
+    pub shared_receiver: Arc<Mutex<mpsc::Receiver<(u64, H::Digest, H::Digest)>>>,
+    pub result_sender: mpsc::Sender<(u64, H::Digest)>,
+    pub result_receiver: mpsc::Receiver<(u64, H::Digest)>,
+    pub handles: Vec<commonware_runtime::Handle<()>>,
+
+    /// Have one spare hash_worker to use in the current thread when parallelization isn't worth it.
+    pub hash_worker: HashWorkerData<H>,
+}
+
+impl<H: CHasher> HashWorkers<H> {
+    pub fn new() -> Self {
+        let (task_sender, task_receiver) = mpsc::channel();
+        let (result_sender, result_receiver) = mpsc::channel();
+
+        Self {
+            task_sender,
+            shared_receiver: Arc::new(Mutex::new(task_receiver)),
+            result_receiver,
+            result_sender,
+            handles: Vec::new(),
+            hash_worker: HashWorkerData::new(H::new()),
+        }
+    }
+}
 
 /// Implementation of `Mmr`.
 ///
@@ -72,6 +122,33 @@ impl<H: CHasher> Mmr<H> {
             dirty_nodes: HashSet::new(),
             dirty_digest: Self::dirty_digest(),
         }
+    }
+
+    pub fn start<E: Spawner>(&mut self, context: E, hashers: Vec<H>) -> HashWorkers<H> {
+        let mut s = HashWorkers::<H>::new();
+        for hasher in hashers.into_iter() {
+            let receiver_clone = s.shared_receiver.clone();
+            let result_sender_clone = s.result_sender.clone();
+            let handle = context.clone().spawn_blocking(true, move |_| {
+                let mut worker_data = HashWorkerData::new(hasher);
+                loop {
+                    let task = {
+                        let receiver_guard = receiver_clone.lock().unwrap();
+                        match receiver_guard.recv() {
+                            Ok(task) => task,
+                            Err(_) => break, // Exit if the channel is closed.
+                        }
+                    };
+                    let (node_pos, left_digest, right_digest) = task;
+
+                    let digest = worker_data.hash(node_pos, &left_digest, &right_digest);
+                    result_sender_clone.send((node_pos, digest)).unwrap();
+                }
+            });
+            s.handles.push(handle);
+        }
+
+        s
     }
 
     // Computes the digest to use as the `self.dirty_digest` placeholder. The specific value is
@@ -387,6 +464,68 @@ impl<H: CHasher> Mmr<H> {
         }
     }
 
+    /// Process any pending batched updates using the concurrently executing hasher tasks.
+    pub fn sync_parallel(
+        &mut self,
+        hashers: &mut HashWorkers<H>,
+        min_hashes_to_parallelize: usize,
+    ) {
+        if self.dirty_nodes.is_empty() {
+            return;
+        }
+        if self.dirty_nodes.len() < min_hashes_to_parallelize {
+            // TODO: non-standard hasher support
+            let mut hasher = Standard::new(&mut hashers.hash_worker.hasher);
+            self.sync(&mut hasher);
+            return;
+        }
+        let mut nodes: Vec<(u64, u32)> = self.dirty_nodes.iter().copied().collect();
+        self.dirty_nodes.clear();
+        nodes.sort_by(|a, b| a.1.cmp(&b.1));
+
+        let mut same_height = Vec::new();
+        let mut current_height = 1;
+        for (i, (pos, height)) in nodes.iter().enumerate() {
+            if *height == current_height {
+                same_height.push(*pos);
+                continue;
+            }
+            if same_height.len() < min_hashes_to_parallelize {
+                self.dirty_nodes = nodes[i - same_height.len()..].iter().copied().collect();
+                let mut hasher = Standard::new(&mut hashers.hash_worker.hasher);
+                self.sync(&mut hasher);
+                return;
+            }
+            self.update_node_digests(hashers, &same_height, current_height);
+            same_height.clear();
+            current_height += 1;
+            same_height.push(*pos);
+        }
+        self.update_node_digests(hashers, &same_height, current_height);
+    }
+
+    fn update_node_digests(
+        &mut self,
+        hashers: &mut HashWorkers<H>,
+        same_height: &Vec<u64>,
+        height: u32,
+    ) {
+        let two_h = 1 << height;
+        for pos in same_height {
+            let left = self.get_node_unchecked(pos - two_h);
+            let right = self.get_node_unchecked(pos - 1);
+            hashers.task_sender.send((*pos, *left, *right)).unwrap();
+        }
+
+        println!("Hi!2");
+        for _ in 0..same_height.len() {
+            let (pos, digest) = hashers.result_receiver.recv().unwrap();
+            let index = self.pos_to_index(pos);
+            self.nodes[index] = digest;
+        }
+        println!("Hi!3");
+    }
+
     /// Computes the root of the MMR.
     ///
     /// # Warning
@@ -520,10 +659,14 @@ mod tests {
     use crate::mmr::{
         hasher::Standard,
         iterator::leaf_num_to_pos,
-        tests::{build_and_check_test_roots_mmr, build_batched_and_check_test_roots, ROOTS},
+        tests::{
+            build_and_check_test_roots_mmr, build_batched_and_check_test_roots,
+            build_parallel_and_check_test_roots, ROOTS,
+        },
     };
 
     use commonware_cryptography::Sha256;
+    use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
     use commonware_utils::hex;
 
@@ -731,16 +874,16 @@ mod tests {
 
     /// Test that the MMR root computation remains stable by comparing against previously computed
     /// roots.
-    #[test]
+    #[test_traced("TRACE")]
     fn test_mem_mmr_root_stability() {
         let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
+        executor.start(|ctx| async move {
             let mut mmr = Mmr::new();
             build_and_check_test_roots_mmr(&mut mmr).await;
             let mut mmr = Mmr::new();
-            let mut hasher = Sha256::default();
-            let mut hasher = Standard::new(&mut hasher);
-            build_batched_and_check_test_roots(&mut hasher, &mut mmr).await;
+            build_batched_and_check_test_roots(&mut mmr).await;
+            let mut mmr = Mmr::new();
+            build_parallel_and_check_test_roots(ctx, &mut mmr).await;
         });
     }
 

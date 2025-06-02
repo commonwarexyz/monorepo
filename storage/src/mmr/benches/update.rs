@@ -1,5 +1,8 @@
 use commonware_cryptography::{sha256, Digest as _, Hasher, Sha256};
-use commonware_runtime::{benchmarks::tokio, tokio::Config};
+use commonware_runtime::{
+    benchmarks::{context, tokio},
+    tokio::Config,
+};
 use commonware_storage::mmr::{hasher::Standard, mem::Mmr};
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -22,6 +25,7 @@ fn bench_update(c: &mut Criterion) {
                     ),
                     |b| {
                         b.to_async(&runner).iter_custom(|_iters| async move {
+                            let ctx = context::get::<commonware_runtime::tokio::Context>();
                             let mut mmr = Mmr::<Sha256>::new();
                             let mut elements = Vec::with_capacity(leaves as usize);
                             let mut sampler = StdRng::seed_from_u64(0);
@@ -37,6 +41,12 @@ fn bench_update(c: &mut Criterion) {
                                 leaf_positions.push(pos);
                             }
 
+                            const TASKS: usize = 10;
+                            let mut crypto_hashers = Vec::with_capacity(TASKS);
+                            for _i_ in 0..TASKS {
+                                crypto_hashers.push(Sha256::new());
+                            }
+                            let mut hashers = mmr.start(ctx, crypto_hashers);
                             // Randomly update leaves -- this is what we are benchmarking.
                             let start = Instant::now();
                             for _ in 0..updates {
@@ -54,7 +64,7 @@ fn bench_update(c: &mut Criterion) {
                                         .unwrap();
                                 }
                             }
-                            mmr.sync(&mut h);
+                            mmr.sync_parallel(&mut hashers, 1000);
                             start.elapsed()
                         });
                     },
