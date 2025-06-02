@@ -97,7 +97,7 @@ mod tests {
             // Initialize voter actor
             let scheme = schemes[0].clone();
             let validator = scheme.public_key();
-            let supervisor_config: mocks::supervisor::Config<ed25519::PrivateKey> =
+            let supervisor_config: mocks::supervisor::Config<ed25519::PublicKey> =
                 mocks::supervisor::Config {
                     namespace: namespace.clone(),
                     participants: view_validators.clone(),
@@ -294,7 +294,7 @@ mod tests {
             // Initialize voter actor
             let private_key = private_keys[0].clone();
             let validator = private_key.public_key();
-            let supervisor_config: mocks::supervisor::Config<ed25519::PrivateKey> =
+            let supervisor_config: mocks::supervisor::Config<ed25519::PublicKey> =
                 mocks::supervisor::Config {
                     namespace: namespace.clone(),
                     participants: view_validators.clone(),

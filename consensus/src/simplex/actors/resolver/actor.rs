@@ -539,7 +539,7 @@ impl<
                                     debug!(view, sender = ?s, "unknown view");
                                     continue;
                                 };
-                                if !nullification.verify::<C>(&self.namespace, participants) {
+                                if !nullification.verify::<C::PublicKey>(&self.namespace, participants) {
                                     warn!(view, sender = ?s, "invalid nullification");
                                     self.requester.block(s.clone());
                                     continue;

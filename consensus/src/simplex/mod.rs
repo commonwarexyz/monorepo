@@ -289,7 +289,7 @@ mod tests {
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::supervisor::Supervisor::<ed25519::PrivateKey, Sha256Digest>::new(
+                    mocks::supervisor::Supervisor::<ed25519::PublicKey, Sha256Digest>::new(
                         supervisor_config,
                     );
                 supervisors.push(supervisor.clone());
@@ -535,7 +535,7 @@ mod tests {
                         participants: view_validators.clone(),
                     };
                     let supervisor = mocks::supervisor::Supervisor::<
-                        ed25519::PrivateKey,
+                        ed25519::PublicKey,
                         Sha256Digest,
                     >::new(supervisor_config);
                     supervisors.insert(validator.clone(), supervisor.clone());
@@ -706,7 +706,7 @@ mod tests {
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::supervisor::Supervisor::<ed25519::PrivateKey, Sha256Digest>::new(
+                    mocks::supervisor::Supervisor::<ed25519::PublicKey, Sha256Digest>::new(
                         supervisor_config,
                     );
                 supervisors.push(supervisor.clone());
@@ -827,7 +827,7 @@ mod tests {
                 participants: view_validators.clone(),
             };
             let mut supervisor =
-                mocks::supervisor::Supervisor::<ed25519::PrivateKey, Sha256Digest>::new(
+                mocks::supervisor::Supervisor::<ed25519::PublicKey, Sha256Digest>::new(
                     supervisor_config,
                 );
             supervisors.push(supervisor.clone());
@@ -951,7 +951,7 @@ mod tests {
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::supervisor::Supervisor::<ed25519::PrivateKey, Sha256Digest>::new(
+                    mocks::supervisor::Supervisor::<ed25519::PublicKey, Sha256Digest>::new(
                         supervisor_config,
                     );
                 supervisors.push(supervisor.clone());
@@ -1169,7 +1169,7 @@ mod tests {
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::supervisor::Supervisor::<ed25519::PrivateKey, Sha256Digest>::new(
+                    mocks::supervisor::Supervisor::<ed25519::PublicKey, Sha256Digest>::new(
                         supervisor_config,
                     );
                 supervisors.push(supervisor.clone());
@@ -1339,7 +1339,7 @@ mod tests {
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::supervisor::Supervisor::<ed25519::PrivateKey, Sha256Digest>::new(
+                    mocks::supervisor::Supervisor::<ed25519::PublicKey, Sha256Digest>::new(
                         supervisor_config,
                     );
                 supervisors.push(supervisor.clone());
@@ -1524,7 +1524,7 @@ mod tests {
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::supervisor::Supervisor::<ed25519::PrivateKey, Sha256Digest>::new(
+                    mocks::supervisor::Supervisor::<ed25519::PublicKey, Sha256Digest>::new(
                         supervisor_config,
                     );
                 supervisors.push(supervisor.clone());
@@ -1705,7 +1705,7 @@ mod tests {
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::supervisor::Supervisor::<ed25519::PrivateKey, Sha256Digest>::new(
+                    mocks::supervisor::Supervisor::<ed25519::PublicKey, Sha256Digest>::new(
                         supervisor_config,
                     );
                 supervisors.push(supervisor.clone());
@@ -1858,7 +1858,7 @@ mod tests {
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::supervisor::Supervisor::<ed25519::PrivateKey, Sha256Digest>::new(
+                    mocks::supervisor::Supervisor::<ed25519::PublicKey, Sha256Digest>::new(
                         supervisor_config,
                     );
                 if idx_scheme == 0 {
@@ -2031,7 +2031,7 @@ mod tests {
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::supervisor::Supervisor::<ed25519::PrivateKey, Sha256Digest>::new(
+                    mocks::supervisor::Supervisor::<ed25519::PublicKey, Sha256Digest>::new(
                         supervisor_config,
                     );
                 if idx_scheme == 0 {
@@ -2196,7 +2196,7 @@ mod tests {
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::supervisor::Supervisor::<ed25519::PrivateKey, Sha256Digest>::new(
+                    mocks::supervisor::Supervisor::<ed25519::PublicKey, Sha256Digest>::new(
                         supervisor_config,
                     );
                 if idx_scheme == 0 {
@@ -2348,7 +2348,7 @@ mod tests {
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::supervisor::Supervisor::<ed25519::PrivateKey, Sha256Digest>::new(
+                    mocks::supervisor::Supervisor::<ed25519::PublicKey, Sha256Digest>::new(
                         supervisor_config,
                     );
                 supervisors.push(supervisor.clone());
