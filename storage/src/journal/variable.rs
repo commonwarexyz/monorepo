@@ -147,12 +147,6 @@ fn compute_next_offset(mut offset: u64) -> Result<u32, Error> {
     Ok(aligned_offset)
 }
 
-/// Computes the valid length of a [Blob] given an offset and size.
-#[inline]
-fn compute_valid_len(offset: u32, size: u32) -> u64 {
-    (offset as u64 * ITEM_ALIGNMENT) + 4 + size as u64 + 4
-}
-
 /// Implementation of `Journal` storage.
 pub struct Journal<E: Storage + Metrics, V: Codec> {
     context: E,
@@ -282,7 +276,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         offset: u32,
         cfg: &V::Cfg,
         compressed: bool,
-    ) -> Result<(u32, u32, V), Error> {
+    ) -> Result<(u32, u64, u32, V), Error> {
         // Calculate absolute file offset from the item offset
         let file_offset = offset as u64 * ITEM_ALIGNMENT;
 
@@ -334,7 +328,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         // Calculate next offset
         let current_pos = reader.position();
         let aligned_offset = compute_next_offset(current_pos)?;
-        Ok((aligned_offset, size, item))
+        Ok((aligned_offset, current_pos, size, item))
     }
 
     /// Reads an item from the blob at the given offset and of a given size.
@@ -448,7 +442,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                             )
                             .await
                             {
-                                Ok((next_offset, size, item)) => {
+                                Ok((next_offset, next_valid, size, item)) => {
                                     trace!(
                                         blob = section,
                                         cursor = offset,
@@ -461,7 +455,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                             section,
                                             reader,
                                             next_offset,
-                                            compute_valid_len(offset, size),
+                                            next_valid,
                                             codec_config,
                                             compressed,
                                         ),

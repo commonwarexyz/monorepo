@@ -143,10 +143,10 @@ impl<B: Blob> Write<B> {
         }
     }
 
-    /// Returns the current position of the buffer in the underlying [Blob].
+    /// Returns the position of the next byte to be written to the underlying [Blob].
     pub async fn position(&self) -> u64 {
         let inner = self.inner.read().await;
-        inner.position
+        inner.position + inner.buffer.len() as u64
     }
 }
 
