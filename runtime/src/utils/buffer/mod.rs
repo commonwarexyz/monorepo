@@ -996,4 +996,33 @@ mod tests {
             assert_eq!(&final_buf, b"01234ABCDEFGHIJ".as_slice());
         });
     }
+
+    #[test_traced]
+    fn test_write_at_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (blob, size) = context.open("partition", b"write_end").await.unwrap();
+            let writer = Write::new(blob.clone(), size, 20);
+
+            writer.write_at("0123456789".as_bytes(), 0).await.unwrap();
+            assert_eq!(writer.size().await, 10);
+            writer.sync().await.unwrap();
+            assert_eq!(writer.size().await, 10);
+
+            writer
+                .write_at("abc".as_bytes(), writer.size().await)
+                .await
+                .unwrap();
+            assert_eq!(writer.size().await, 13);
+            writer.sync().await.unwrap();
+            assert_eq!(writer.size().await, 13);
+
+            let (blob_check, size_check) = context.open("partition", b"write_end").await.unwrap();
+            assert_eq!(size_check, 13);
+            let mut reader = Read::new(blob_check, size_check, 13);
+            let mut buf = vec![0u8; 13];
+            reader.read_exact(&mut buf, 13).await.unwrap();
+            assert_eq!(&buf, b"0123456789abc");
+        });
+    }
 }
