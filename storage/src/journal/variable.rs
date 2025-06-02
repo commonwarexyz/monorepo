@@ -449,13 +449,15 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                             len = aligned_len,
                                             "replayed item"
                                         );
+                                        let valid_len =
+                                            (offset as u64 * ITEM_ALIGNMENT) + 4 + size as u64 + 4;
                                         Some((
                                             Ok((section, offset, size, item)),
                                             (
                                                 section,
                                                 reader,
                                                 next_offset,
-                                                read_len + size as u64,
+                                                valid_len,
                                                 codec_config,
                                                 compressed,
                                             ),
@@ -467,7 +469,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                         // fully synced to disk).
                                         warn!(
                                             blob = section,
-                                            cursor = offset,
+                                            new_offset = offset,
+                                            new_size = read_len,
                                             expected,
                                             found,
                                             "corruption detected: truncating"
@@ -481,8 +484,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                         // pending data is not fully synced to disk).
                                         warn!(
                                             blob = section,
-                                            new_size = offset,
-                                            old_size = aligned_len,
+                                            new_offset = offset,
+                                            new_size = read_len,
                                             "trailing bytes detected: truncating"
                                         );
                                         reader.truncate(read_len).await.ok()?;
@@ -1193,30 +1196,34 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Initialize the journal
-            let journal = Journal::init(context, cfg)
+            let journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
             // Attempt to replay the journal
-            let stream = journal
-                .replay(1, 1024)
-                .await
-                .expect("unable to setup replay");
-            pin_mut!(stream);
-            let mut items = Vec::<(u64, u64)>::new();
-            let mut got_checksum_error = false;
-            while let Some(result) = stream.next().await {
-                match result {
-                    Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
-                    Err(err) => {
-                        assert!(matches!(err, Error::ChecksumMismatch(_, _)));
-                        got_checksum_error = true;
-                        // We explicitly don't return or break here to test that we won't end up in
-                        // an infinite loop if the replay caller doesn't abort on error.
+            {
+                let stream = journal
+                    .replay(1, 1024)
+                    .await
+                    .expect("unable to setup replay");
+                pin_mut!(stream);
+                let mut items = Vec::<(u64, u64)>::new();
+                while let Some(result) = stream.next().await {
+                    match result {
+                        Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
+                        Err(err) => panic!("Failed to read item: {}", err),
                     }
                 }
+                assert!(items.is_empty());
             }
-            assert!(got_checksum_error, "expected checksum mismatch error");
+            journal.close().await.expect("Failed to close journal");
+
+            // Confirm blob is expected length
+            let (_, blob_len) = context
+                .open(&cfg.partition, &section.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            assert_eq!(blob_len, 0);
         });
     }
 
