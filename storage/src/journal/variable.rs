@@ -178,14 +178,14 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             Err(err) => return Err(Error::Runtime(err)),
         };
         for name in stored_blobs {
-            let (blob, len) = context.open(&cfg.partition, &name).await?;
+            let (blob, size) = context.open(&cfg.partition, &name).await?;
             let hex_name = hex(&name);
             let section = match name.try_into() {
                 Ok(section) => u64::from_be_bytes(section),
                 Err(_) => return Err(Error::InvalidBlobName(hex_name)),
             };
-            debug!(section, blob = hex_name, len, "loaded section");
-            let blob = Write::new(blob, len, cfg.write_buffer);
+            debug!(section, blob = hex_name, size, "loaded section");
+            let blob = Write::new(blob, size, cfg.write_buffer);
             blobs.insert(section, blob);
         }
 
@@ -399,13 +399,13 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         let compressed = self.cfg.compression.is_some();
         let mut blobs = Vec::with_capacity(self.blobs.len());
         for (section, blob) in self.blobs.iter() {
-            let blob_len = blob.size().await;
-            let max_offset = compute_next_offset(blob_len)?;
+            let blob_size = blob.size().await;
+            let max_offset = compute_next_offset(blob_size)?;
             blobs.push((
                 *section,
                 blob.clone(),
                 max_offset,
-                blob_len,
+                blob_size,
                 codec_config.clone(),
                 compressed,
             ));
@@ -415,9 +415,9 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         // occupying too much memory with buffered data)
         Ok(stream::iter(blobs)
             .map(
-                move |(section, blob, max_offset, blob_len, codec_config, compressed)| async move {
+                move |(section, blob, max_offset, blob_size, codec_config, compressed)| async move {
                     // Created buffered reader
-                    let reader = Read::new(blob, blob_len, buffer);
+                    let reader = Read::new(blob, blob_size, buffer);
 
                     // Read over the blob
                     stream::unfold(
@@ -426,7 +426,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                             section,
                             mut reader,
                             offset,
-                            valid_len,
+                            valid_size,
                             codec_config,
                             compressed,
                         )| async move {
@@ -444,20 +444,15 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                             )
                             .await
                             {
-                                Ok((next_offset, next_valid_len, size, item)) => {
-                                    trace!(
-                                        blob = section,
-                                        cursor = offset,
-                                        len = max_offset,
-                                        "replayed item"
-                                    );
+                                Ok((next_offset, next_valid_size, size, item)) => {
+                                    trace!(blob = section, cursor = offset, "replayed item");
                                     Some((
                                         Ok((section, offset, size, item)),
                                         (
                                             section,
                                             reader,
                                             next_offset,
-                                            next_valid_len,
+                                            next_valid_size,
                                             codec_config,
                                             compressed,
                                         ),
@@ -470,12 +465,12 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                     warn!(
                                         blob = section,
                                         new_offset = offset,
-                                        new_size = valid_len,
+                                        new_size = valid_size,
                                         expected,
                                         found,
                                         "corruption detected: truncating"
                                     );
-                                    reader.truncate(valid_len).await.ok()?;
+                                    reader.truncate(valid_size).await.ok()?;
                                     None
                                 }
                                 Err(Error::Runtime(RError::BlobInsufficientLength)) => {
@@ -485,10 +480,10 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                     warn!(
                                         blob = section,
                                         new_offset = offset,
-                                        new_size = valid_len,
+                                        new_size = valid_size,
                                         "trailing bytes detected: truncating"
                                     );
-                                    reader.truncate(valid_len).await.ok()?;
+                                    reader.truncate(valid_size).await.ok()?;
                                     None
                                 }
                                 Err(err) => {
@@ -506,7 +501,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                             section,
                                             reader,
                                             offset,
-                                            valid_len,
+                                            valid_size,
                                             codec_config,
                                             compressed,
                                         ),
@@ -557,8 +552,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
                 let name = section.to_be_bytes();
-                let (blob, len) = self.context.open(&self.cfg.partition, &name).await?;
-                let blob = Write::new(blob, len, self.cfg.write_buffer);
+                let (blob, size) = self.context.open(&self.cfg.partition, &name).await?;
+                let blob = Write::new(blob, size, self.cfg.write_buffer);
                 self.tracked.inc();
                 entry.insert(blob)
             }
@@ -652,14 +647,14 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
             // Remove and close blob
             let blob = self.blobs.remove(&section).unwrap();
-            let len = blob.size().await;
+            let size = blob.size().await;
             blob.close().await?;
 
             // Remove blob from storage
             self.context
                 .remove(&self.cfg.partition, Some(&section.to_be_bytes()))
                 .await?;
-            debug!(blob = section, len, "pruned blob");
+            debug!(blob = section, size, "pruned blob");
             self.tracked.dec();
             self.pruned.inc();
         }
@@ -672,9 +667,9 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// Closes all open sections.
     pub async fn close(self) -> Result<(), Error> {
         for (section, blob) in self.blobs.into_iter() {
-            let len = blob.size().await;
+            let size = blob.size().await;
             blob.close().await?;
-            debug!(blob = section, len, "closed blob");
+            debug!(blob = section, size, "closed blob");
         }
         Ok(())
     }
@@ -682,9 +677,9 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// Close and remove any underlying blobs created by the journal.
     pub async fn destroy(self) -> Result<(), Error> {
         for (i, blob) in self.blobs.into_iter() {
-            let len = blob.size().await;
+            let size = blob.size().await;
             blob.close().await?;
-            debug!(blob = i, len, "destroyed blob");
+            debug!(blob = i, size, "destroyed blob");
             self.context
                 .remove(&self.cfg.partition, Some(&i.to_be_bytes()))
                 .await?;
@@ -1220,11 +1215,11 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Confirm blob is expected length
-            let (_, blob_len) = context
+            let (_, blob_size) = context
                 .open(&cfg.partition, &section.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            assert_eq!(blob_len, 0);
+            assert_eq!(blob_size, 0);
         });
     }
 
@@ -1265,11 +1260,11 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Manually corrupt the end of the second blob
-            let (blob, blob_len) = context
+            let (blob, blob_size) = context
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            blob.truncate(blob_len - 4)
+            blob.truncate(blob_size - 4)
                 .await
                 .expect("Failed to corrupt blob");
             blob.close().await.expect("Failed to close blob");
@@ -1306,11 +1301,11 @@ mod tests {
             assert_eq!(items[2].1, data_items[1].1);
 
             // Confirm blob is expected length
-            let (_, blob_len) = context
+            let (_, blob_size) = context
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            assert_eq!(blob_len, 28);
+            assert_eq!(blob_size, 28);
 
             // Attempt to replay journal after truncation
             let mut journal = Journal::init(context.clone(), cfg.clone())
@@ -1358,11 +1353,11 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Confirm blob is expected length
-            let (_, blob_len) = context
+            let (_, blob_size) = context
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            assert_eq!(blob_len, 44);
+            assert_eq!(blob_size, 44);
 
             // Re-initialize the journal to simulate a restart
             let journal = Journal::init(context.clone(), cfg.clone())
@@ -1435,11 +1430,11 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Manually corrupt the end of the second blob
-            let (blob, blob_len) = context
+            let (blob, blob_size) = context
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            blob.truncate(blob_len - 4)
+            blob.truncate(blob_size - 4)
                 .await
                 .expect("Failed to corrupt blob");
             blob.close().await.expect("Failed to close blob");
@@ -1490,11 +1485,11 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Confirm blob is expected length
-            let (_, blob_len) = context
+            let (_, blob_size) = context
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            assert_eq!(blob_len, 48);
+            assert_eq!(blob_size, 48);
 
             // Attempt to replay journal after truncation
             let journal = Journal::init(context, cfg)
@@ -1568,11 +1563,11 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Manually add extra data to the end of the second blob
-            let (blob, blob_len) = context
+            let (blob, blob_size) = context
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            blob.write_at(vec![0u8; 16], blob_len)
+            blob.write_at(vec![0u8; 16], blob_size)
                 .await
                 .expect("Failed to add extra data");
             blob.close().await.expect("Failed to close blob");
