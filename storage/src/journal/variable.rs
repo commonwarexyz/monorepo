@@ -381,7 +381,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     ///
     /// Like [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
     /// and [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
-    /// any invalid data discovered will be considered the new end of the journal (and the underlying [Blob] will be truncated to the last
+    /// the first invalid data read will be considered the new end of the journal (and the underlying [Blob] will be truncated to the last
     /// valid item).
     ///
     /// # Concurrency
