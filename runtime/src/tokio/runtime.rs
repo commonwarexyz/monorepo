@@ -2,7 +2,10 @@
 use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage};
 
 #[cfg(feature = "iouring-network")]
-use crate::{iouring, network::iouring::Network as IoUringNetwork};
+use crate::{
+    iouring,
+    network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork},
+};
 
 #[cfg(not(feature = "iouring-network"))]
 use crate::network::tokio::{Config as TokioNetworkConfig, Network as TokioNetwork};
@@ -279,16 +282,19 @@ impl crate::Runner for Runner {
             if #[cfg(feature = "iouring-network")] {
                 let iouring_registry = runtime_registry.sub_registry_with_prefix("iouring_network");
                 let network = MeteredNetwork::new(
-                    IoUringNetwork::start(iouring::Config{
-                        op_timeout: Some(self.cfg.network_cfg.read_write_timeout),
+                    IoUringNetwork::start(IoUringNetworkConfig {
+                        tcp_nodelay: self.cfg.network_cfg.tcp_nodelay,
+                        iouring_config: iouring::Config {
+                                                    op_timeout: Some(self.cfg.network_cfg.read_write_timeout),
                         force_poll: IOURING_NETWORK_FORCE_POLL,
                         shutdown_timeout: Some(self.cfg.network_cfg.read_write_timeout),
                         ..Default::default()
-                    },iouring_registry).unwrap(),
-                    runtime_registry,
-                );
-            } else {
-                let config = TokioNetworkConfig::default().with_read_timeout(self.cfg.network_cfg.read_write_timeout)
+                    },
+                }, iouring_registry).unwrap(),
+                runtime_registry,
+            );
+        } else {
+            let config = TokioNetworkConfig::default().with_read_timeout(self.cfg.network_cfg.read_write_timeout)
                 .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
                 .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay);
                 let network = MeteredNetwork::new(
