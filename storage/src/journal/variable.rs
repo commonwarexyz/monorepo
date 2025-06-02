@@ -447,7 +447,9 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                     ))
                                 }
                                 Err(Error::ChecksumMismatch(expected, found)) => {
-                                    // If we encounter corruption, we don't try to fix it.
+                                    // If we encounter corruption, we prune to the last valid item. This
+                                    // can happen during an unclean file close (where pending data is not
+                                    // fully synced to disk).
                                     warn!(
                                         blob = section,
                                         cursor = offset,
@@ -455,10 +457,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                         found,
                                         "corruption detected"
                                     );
-                                    Some((
-                                        Err(Error::ChecksumMismatch(expected, found)),
-                                        (section, reader, aligned_len, codec_config, compressed),
-                                    ))
+                                    reader.truncate(offset as u64 * ITEM_ALIGNMENT).await.ok()?;
+                                    None
                                 }
                                 Err(Error::Runtime(RError::BlobInsufficientLength)) => {
                                     // If we encounter trailing bytes, we prune to the last
