@@ -9,6 +9,7 @@
 //! position, but whose digests remain required for proof generation. The digests for pinned nodes
 //! are stored in an auxiliary map, and are at most O(log2(n)) in number.
 use crate::mmr::{
+    hasher::Standard,
     iterator::{nodes_needing_parents, PathIterator, PeakIterator},
     verification::Proof,
     Builder,
@@ -16,6 +17,10 @@ use crate::mmr::{
     Hasher,
 };
 use commonware_cryptography::Hasher as CHasher;
+use rayon::{
+    iter::{IntoParallelRefIterator, ParallelIterator},
+    ThreadPool,
+};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Implementation of `Mmr`.
@@ -374,40 +379,138 @@ impl<H: CHasher> Mmr<H> {
         self.dirty_nodes.clear();
         nodes.sort_by(|a, b| a.1.cmp(&b.1));
 
+        for (pos, height) in nodes {
+            let left = pos - (1 << height);
+            let right = pos - 1;
+            let digest = hasher.node_digest(
+                pos,
+                self.get_node_unchecked(left),
+                self.get_node_unchecked(right),
+            );
+            let index = self.pos_to_index(pos);
+            self.nodes[index] = digest;
+        }
+    }
+
+    /// Process any pending batched updates, using parallel hash workers as long as the number of
+    /// computations that can be parallelized exceeds the given threshold.
+    pub fn sync_parallel_by_level(
+        &mut self,
+        hasher: &mut impl Hasher<H>,
+        pool: &mut ThreadPool,
+        min_nodes_to_parallelize: usize,
+    ) {
+        if self.dirty_nodes.len() < min_nodes_to_parallelize {
+            self.sync(hasher);
+            return;
+        }
+        let mut nodes: Vec<(u64, u32)> = self.dirty_nodes.iter().copied().collect();
+        self.dirty_nodes.clear();
+        nodes.sort_by(|a, b| a.1.cmp(&b.1));
+
         let mut same_height = Vec::new();
         let mut current_height = 1;
-        for (pos, height) in nodes {
-            if height == current_height {
-                same_height.push(pos);
+        for (i, (pos, height)) in nodes.iter().enumerate() {
+            if *height == current_height {
+                same_height.push(*pos);
                 continue;
             }
-            self.update_node_digests(&same_height, hasher, current_height);
+            if same_height.len() < min_nodes_to_parallelize {
+                self.dirty_nodes = nodes[i - same_height.len()..].iter().copied().collect();
+                self.sync(hasher);
+                return;
+            }
+            self.update_node_digests(pool, &same_height, current_height);
             same_height.clear();
             current_height += 1;
-            same_height.push(pos);
+            same_height.push(*pos);
         }
-        self.update_node_digests(&same_height, hasher, current_height);
+        if same_height.len() < min_nodes_to_parallelize {
+            self.dirty_nodes = nodes[nodes.len() - same_height.len()..]
+                .iter()
+                .copied()
+                .collect();
+            self.sync(hasher);
+            return;
+        }
+        self.update_node_digests(pool, &same_height, current_height);
     }
 
     /// Update digests of the given set of nodes of equal height in the MMR. Since they are all at
     /// the same height, this can be done in parallel.
-    fn update_node_digests(
+    fn update_node_digests(&mut self, pool: &mut ThreadPool, same_height: &Vec<u64>, height: u32) {
+        let two_h = 1 << height;
+        pool.install(|| {
+            let computed_digests: Vec<(usize, H::Digest)> = same_height
+                .par_iter()
+                .map_init(
+                    || H::new(),
+                    |hasher, &pos| {
+                        // TODO: allow for non-Standard hashing.
+                        let mut hasher = Standard::new(hasher);
+
+                        let left = pos - two_h;
+                        let right = pos - 1;
+                        let digest = hasher.node_digest(
+                            pos,
+                            self.get_node_unchecked(left),
+                            self.get_node_unchecked(right),
+                        );
+                        let index = self.pos_to_index(pos);
+                        (index, digest)
+                    },
+                )
+                .collect();
+
+            for (index, digest) in computed_digests {
+                self.nodes[index] = digest;
+            }
+        });
+    }
+
+    /// Process any pending batched updates, using parallel hash workers that work on independent
+    /// subtrees as long as the number of computations that can be parallelized exceeds the given
+    /// threshold.
+    pub fn sync_parallel_by_subtree(
         &mut self,
-        same_height: &Vec<u64>,
         hasher: &mut impl Hasher<H>,
-        height: u32,
+        pool: &mut ThreadPool,
+        min_nodes_to_parallelize: usize,
     ) {
-        for pos in same_height {
-            let left = pos - (1 << height);
-            let right = pos - 1;
-            let digest = hasher.node_digest(
-                *pos,
-                self.get_node_unchecked(left),
-                self.get_node_unchecked(right),
-            );
-            let index = self.pos_to_index(*pos);
-            self.nodes[index] = digest;
+        if self.dirty_nodes.len() < min_nodes_to_parallelize {
+            self.sync(hasher);
+            return;
         }
+        let mut nodes: Vec<(u64, u32)> = self.dirty_nodes.iter().copied().collect();
+        self.dirty_nodes.clear();
+        nodes.sort_by(|a, b| a.1.cmp(&b.1));
+
+        let mut same_height = Vec::new();
+        let mut current_height = 1;
+        for (i, (pos, height)) in nodes.iter().enumerate() {
+            if *height == current_height {
+                same_height.push(*pos);
+                continue;
+            }
+            if same_height.len() < min_nodes_to_parallelize {
+                self.dirty_nodes = nodes[i - same_height.len()..].iter().copied().collect();
+                self.sync(hasher);
+                return;
+            }
+            self.update_node_digests(pool, &same_height, current_height);
+            same_height.clear();
+            current_height += 1;
+            same_height.push(*pos);
+        }
+        if same_height.len() < min_nodes_to_parallelize {
+            self.dirty_nodes = nodes[nodes.len() - same_height.len()..]
+                .iter()
+                .copied()
+                .collect();
+            self.sync(hasher);
+            return;
+        }
+        self.update_node_digests(pool, &same_height, current_height);
     }
 
     /// Computes the root of the MMR.
@@ -543,12 +646,16 @@ mod tests {
     use crate::mmr::{
         hasher::Standard,
         iterator::leaf_num_to_pos,
-        tests::{build_and_check_test_roots_mmr, build_batched_and_check_test_roots, ROOTS},
+        tests::{
+            build_and_check_test_roots_mmr, build_batched_and_check_test_roots,
+            build_parallel_and_check_test_roots, ROOTS,
+        },
     };
 
     use commonware_cryptography::Sha256;
     use commonware_runtime::{deterministic, Runner};
     use commonware_utils::hex;
+    use rayon::ThreadPoolBuilder;
 
     /// Test empty MMR behavior.
     #[test]
@@ -758,17 +865,28 @@ mod tests {
     fn test_mem_mmr_root_stability() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
+            // Test root stability under different MMR building methods.
             let mut mmr = Mmr::new();
             build_and_check_test_roots_mmr(&mut mmr).await;
+
             let mut mmr = Mmr::new();
             build_batched_and_check_test_roots(&mut mmr).await;
+
+            let mut mmr = Mmr::new();
+            // TODO: This pool obtained from the deterministic runtime will cause the test to hang
+            // since the main thread does not yield, and the deterministic runtime is single
+            // threaded:
+            //
+            // let mut pool = commonware_runtime::create_pool(context, 4).unwrap();
+            let mut pool = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+            build_parallel_and_check_test_roots(&mut pool, &mut mmr).await;
         });
     }
 
     /// Build the MMR corresponding to the stability test while pruning after each add, and confirm
     /// the static roots match that from the root computation.
     #[test]
-    fn test_mem_mmr_test_root_stability_while_pruning() {
+    fn test_mem_mmr_root_stability_while_pruning() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = Sha256::default();

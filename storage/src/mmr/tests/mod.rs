@@ -7,6 +7,7 @@ use crate::mmr::{
 use commonware_cryptography::{Hasher as CHasher, Sha256};
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::hex;
+use rayon::ThreadPool;
 
 /// Build the MMR corresponding to the stability test `ROOTS` and confirm the
 /// roots match that from the builder's root computation
@@ -46,6 +47,26 @@ pub async fn build_batched_and_check_test_roots(mem_mmr: &mut MemMmr<Sha256>) {
         mem_mmr.add_batched(&mut hasher, &element).await.unwrap();
     }
     mem_mmr.sync(&mut hasher);
+    assert_eq!(
+        hex(&mem_mmr.root(&mut hasher)),
+        ROOTS[199],
+        "Root after 200 elements"
+    );
+}
+
+pub async fn build_parallel_and_check_test_roots(
+    pool: &mut ThreadPool,
+    mem_mmr: &mut MemMmr<Sha256>,
+) {
+    let mut hasher = Sha256::new();
+    let mut hasher = Standard::new(&mut hasher);
+    for i in 0u64..199 {
+        hasher.inner().update(&i.to_be_bytes());
+        let element = hasher.inner().finalize();
+        mem_mmr.add_batched(&mut hasher, &element).await.unwrap();
+    }
+    mem_mmr.sync_parallel_by_level(&mut hasher, pool, 20);
+
     assert_eq!(
         hex(&mem_mmr.root(&mut hasher)),
         ROOTS[199],
