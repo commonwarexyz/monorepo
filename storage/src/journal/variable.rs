@@ -1449,7 +1449,7 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Re-initialize the journal to simulate a restart
-            let journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -1468,7 +1468,6 @@ mod tests {
                     }
                 }
             }
-            journal.close().await.expect("Failed to close journal");
 
             // Verify that only non-corrupted items were replayed
             assert_eq!(items.len(), 3);
@@ -1479,12 +1478,27 @@ mod tests {
             assert_eq!(items[2].0, data_items[1].0);
             assert_eq!(items[2].1, data_items[1].1);
 
+            // Append a new item to the truncated partition
+            journal.append(2, 5).await.expect("Failed to append data");
+            journal.sync(2).await.expect("Failed to sync blob");
+
+            // Get the new item
+            let item = journal
+                .get(2, 2)
+                .await
+                .expect("Failed to get item")
+                .expect("Failed to get item");
+            assert_eq!(item, 5);
+
+            // Close the journal
+            journal.close().await.expect("Failed to close journal");
+
             // Confirm blob is expected length
             let (_, blob_len) = context
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            assert_eq!(blob_len, 32);
+            assert_eq!(blob_len, 48);
 
             // Attempt to replay journal after truncation
             let journal = Journal::init(context, cfg)
@@ -1509,13 +1523,15 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Verify that only non-corrupted items were replayed
-            assert_eq!(items.len(), 3);
+            assert_eq!(items.len(), 4);
             assert_eq!(items[0].0, 1);
             assert_eq!(items[0].1, 1);
             assert_eq!(items[1].0, data_items[0].0);
             assert_eq!(items[1].1, data_items[0].1);
             assert_eq!(items[2].0, data_items[1].0);
             assert_eq!(items[2].1, data_items[1].1);
+            assert_eq!(items[3].0, 2);
+            assert_eq!(items[3].1, 5);
         });
     }
 
