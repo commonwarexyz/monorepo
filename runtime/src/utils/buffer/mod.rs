@@ -406,9 +406,11 @@ mod tests {
             let (blob, size) = context.open("partition", b"write_basic").await.unwrap();
             assert_eq!(size, 0);
 
-            let writer = Write::new(blob.clone(), 0, 8);
+            let writer = Write::new(blob.clone(), size, 8);
             writer.write_at("hello".as_bytes(), 0).await.unwrap();
+            assert_eq!(writer.size().await, 5);
             writer.sync().await.unwrap();
+            assert_eq!(writer.size().await, 5);
 
             let (blob, size) = context.open("partition", b"write_basic").await.unwrap();
             assert_eq!(size, 5);
@@ -427,10 +429,13 @@ mod tests {
             let (blob, size) = context.open("partition", b"write_multi").await.unwrap();
             assert_eq!(size, 0);
 
-            let writer = Write::new(blob.clone(), 0, 4);
+            let writer = Write::new(blob.clone(), size, 4);
             writer.write_at("abc".as_bytes(), 0).await.unwrap();
+            assert_eq!(writer.size().await, 3);
             writer.write_at("defg".as_bytes(), 3).await.unwrap();
+            assert_eq!(writer.size().await, 7);
             writer.sync().await.unwrap();
+            assert_eq!(writer.size().await, 7);
 
             let (blob, size) = context.open("partition", b"write_multi").await.unwrap();
             assert_eq!(size, 7);
@@ -449,13 +454,16 @@ mod tests {
             let (blob, size) = context.open("partition", b"write_multi").await.unwrap();
             assert_eq!(size, 0);
 
-            let writer = Write::new(blob.clone(), 0, 4);
+            let writer = Write::new(blob.clone(), size, 4);
             writer.write_at("abc".as_bytes(), 0).await.unwrap();
+            assert_eq!(writer.size().await, 3);
             writer
                 .write_at("defghijklmnopqrstuvwxyz".as_bytes(), 3)
                 .await
                 .unwrap();
+            assert_eq!(writer.size().await, 26);
             writer.sync().await.unwrap();
+            assert_eq!(writer.size().await, 26);
 
             let (blob, size) = context.open("partition", b"write_multi").await.unwrap();
             assert_eq!(size, 26);
@@ -474,7 +482,7 @@ mod tests {
             // Test creating a writer with zero buffer capacity.
             let (blob, size) = context.open("partition", b"write_empty").await.unwrap();
             assert_eq!(size, 0);
-            Write::new(blob, 0, 0);
+            Write::new(blob, size, 0);
         });
     }
 
@@ -483,15 +491,17 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Test appending data that partially fits and then exceeds buffer capacity, causing a flush.
-            let (blob, _) = context.open("partition", b"append_buf").await.unwrap();
-            let writer = Write::new(blob.clone(), 0, 10);
+            let (blob, size) = context.open("partition", b"append_buf").await.unwrap();
+            let writer = Write::new(blob.clone(), size, 10);
 
             // Write "hello" (5 bytes) - fits in buffer
             writer.write_at("hello".as_bytes(), 0).await.unwrap();
+            assert_eq!(writer.size().await, 5);
             // Append " world" (6 bytes) - "hello world" is 11 bytes, exceeds buffer
             // "hello" is flushed, " world" is buffered
             writer.write_at(" world".as_bytes(), 5).await.unwrap();
             writer.sync().await.unwrap();
+            assert_eq!(writer.size().await, 11);
 
             let (blob, size) = context.open("partition", b"append_buf").await.unwrap();
             assert_eq!(size, 11);
@@ -507,14 +517,17 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Test writing data into the middle of an existing, partially filled buffer.
-            let (blob, _) = context.open("partition", b"middle_buf").await.unwrap();
-            let writer = Write::new(blob.clone(), 0, 20);
+            let (blob, size) = context.open("partition", b"middle_buf").await.unwrap();
+            let writer = Write::new(blob.clone(), size, 20);
 
             // Write "abcdefghij" (10 bytes)
             writer.write_at("abcdefghij".as_bytes(), 0).await.unwrap();
+            assert_eq!(writer.size().await, 10);
             // Write "01234" into the middle (offset 2, 5 bytes) -> "ab01234hij"
             writer.write_at("01234".as_bytes(), 2).await.unwrap();
+            assert_eq!(writer.size().await, 15);
             writer.sync().await.unwrap();
+            assert_eq!(writer.size().await, 15);
 
             let (blob, size) = context.open("partition", b"middle_buf").await.unwrap();
             assert_eq!(size, 10); // Original length, as it's an overwrite
@@ -525,9 +538,12 @@ mod tests {
 
             // Write "klmnopqrst" (10 bytes) - buffer becomes "ab01234hijklmnopqrst" (20 bytes)
             writer.write_at("klmnopqrst".as_bytes(), 10).await.unwrap();
+            assert_eq!(writer.size().await, 20);
             // Overwrite "jklm" with "wxyz" -> buffer becomes "ab01234hiwxyzopqrst"
             writer.write_at("wxyz".as_bytes(), 9).await.unwrap();
+            assert_eq!(writer.size().await, 20);
             writer.sync().await.unwrap();
+            assert_eq!(writer.size().await, 20);
 
             let (blob, size) = context.open("partition", b"middle_buf").await.unwrap();
             assert_eq!(size, 20);
@@ -543,17 +559,20 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Test writing data at an offset that precedes the current buffered data range.
-            let (blob, _) = context.open("partition", b"before_buf").await.unwrap();
-            let writer = Write::new(blob.clone(), 10, 10); // Buffer starts at blob offset 10
+            let (blob, size) = context.open("partition", b"before_buf").await.unwrap();
+            let writer = Write::new(blob.clone(), size, 10);
 
             // Buffer some data at offset 10: "0123456789"
             writer.write_at("0123456789".as_bytes(), 10).await.unwrap();
+            assert_eq!(writer.size().await, 10);
 
             // Write "abcde" at offset 0. This is before the current buffer.
             // Current buffer should be flushed. "abcde" written directly.
             // New buffer position will be 5.
             writer.write_at("abcde".as_bytes(), 0).await.unwrap();
+            assert_eq!(writer.size().await, 15);
             writer.sync().await.unwrap();
+            assert_eq!(writer.size().await, 15);
 
             let (blob, size) = context.open("partition", b"before_buf").await.unwrap();
             // Expected: "abcde" at 0 (5 bytes) + "0123456789" at 10 (10 bytes) = 20 total size.
@@ -574,7 +593,9 @@ mod tests {
             // The buffer for writer is now at position 5 with capacity 10.
             // This write will be buffered.
             writer.write_at("fghij".as_bytes(), 5).await.unwrap();
+            assert_eq!(writer.size().await, 20);
             writer.sync().await.unwrap();
+            assert_eq!(writer.size().await, 20);
 
             let (blob, size) = context.open("partition", b"before_buf").await.unwrap();
             assert_eq!(size, 20); // Size remains 20 as "fghij" overwrites part of the gap + start of old data.
@@ -593,11 +614,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Test truncating the blob via the writer and subsequent write behaviors.
-            let (blob, _) = context.open("partition", b"truncate_write").await.unwrap();
-            let writer = Write::new(blob, 0, 10);
+            let (blob, size) = context.open("partition", b"truncate_write").await.unwrap();
+            let writer = Write::new(blob, size, 10);
 
             writer.write_at("hello world".as_bytes(), 0).await.unwrap(); // 11 bytes
+            assert_eq!(writer.size().await, 11);
             writer.sync().await.unwrap();
+            assert_eq!(writer.size().await, 11);
 
             let (blob_check, size_check) =
                 context.open("partition", b"truncate_write").await.unwrap();
@@ -606,7 +629,9 @@ mod tests {
 
             // Truncate to 5 bytes ("hello")
             writer.truncate(5).await.unwrap();
+            assert_eq!(writer.size().await, 5);
             writer.sync().await.unwrap();
+            assert_eq!(writer.size().await, 5);
 
             let (blob, size) = context.open("partition", b"truncate_write").await.unwrap();
             assert_eq!(size, 5);
@@ -642,7 +667,9 @@ mod tests {
             // Not scenario 2 (0 < 11).
             // Scenario 3: flush (empty). blob.write_at("X", 0). inner.position = 0 + 1 = 1.
             writer.write_at("X".as_bytes(), 0).await.unwrap();
+            assert_eq!(writer.size().await, 5);
             writer.sync().await.unwrap();
+            assert_eq!(writer.size().await, 5);
 
             let (blob, size) = context.open("partition", b"truncate_write").await.unwrap();
             assert_eq!(size, 5); // Blob was "hello", truncated to 5, now overwritten at 0 with "X", size remains 5.
@@ -652,15 +679,19 @@ mod tests {
             assert_eq!(&buf, b"Xello");
 
             // Test truncate to 0
-            let (blob_zero, _) = context.open("partition", b"truncate_zero").await.unwrap();
-            let writer_zero = Write::new(blob_zero.clone(), 0, 10);
+            let (blob_zero, size) = context.open("partition", b"truncate_zero").await.unwrap();
+            let writer_zero = Write::new(blob_zero.clone(), size, 10);
             writer_zero
                 .write_at("some data".as_bytes(), 0)
                 .await
                 .unwrap();
+            assert_eq!(writer_zero.size().await, 10);
             writer_zero.sync().await.unwrap();
+            assert_eq!(writer_zero.size().await, 10);
             writer_zero.truncate(0).await.unwrap();
+            assert_eq!(writer_zero.size().await, 0);
             writer_zero.sync().await.unwrap();
+            assert_eq!(writer_zero.size().await, 0);
 
             let (_, size_z) = context.open("partition", b"truncate_zero").await.unwrap();
             assert_eq!(size_z, 0);
@@ -672,11 +703,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Test reading data through the writer's read_at method, covering buffer and blob reads.
-            let (blob, _) = context.open("partition", b"read_at_writer").await.unwrap();
-            let writer = Write::new(blob.clone(), 0, 10); // Buffer capacity 10, starts at blob offset 0
+            let (blob, size) = context.open("partition", b"read_at_writer").await.unwrap();
+            let writer = Write::new(blob.clone(), size, 10); // Buffer capacity 10, starts at blob offset 0
 
             // 1. Write "buffered" (8 bytes) - stays in buffer
             writer.write_at("buffered".as_bytes(), 0).await.unwrap();
+            assert_eq!(writer.size().await, 8);
 
             // Read from buffer: "buff" at offset 0
             let mut read_buf_vec = vec![0u8; 4];
@@ -699,7 +731,9 @@ mod tests {
             // Then " and flushed" (12 bytes) is written. Since 12 > 10 (capacity), it's a direct write.
             // blob.write_at(" and flushed", 8). inner.position = 8 + 12 = 20.
             writer.write_at(" and flushed".as_bytes(), 8).await.unwrap();
+            assert_eq!(writer.size().await, 20);
             writer.sync().await.unwrap(); // Syncs any remaining (should be none from this op)
+            assert_eq!(writer.size().await, 20);
 
             // Blob now contains "buffered and flushed" (8 + 12 = 20 bytes)
             // Writer's inner.position = 20. Buffer is empty.
@@ -718,6 +752,7 @@ mod tests {
             // Writer inner.position = 20. Buffer is empty.
             // Write " more data" (9 bytes) at offset 20. This fits in buffer.
             writer.write_at(" more data".as_bytes(), 20).await.unwrap();
+            assert_eq!(writer.size().await, 29);
 
             // Read the newly buffered data: "more"
             let mut read_buf_vec_3 = vec![0u8; 5];
@@ -747,6 +782,7 @@ mod tests {
 
             // Verify full content by reopening and reading
             writer.sync().await.unwrap(); // Flush "more data"
+            assert_eq!(writer.size().await, 30);
             let (final_blob, final_size) =
                 context.open("partition", b"read_at_writer").await.unwrap();
             assert_eq!(final_size, 30); // "buffered and flushed more data"
@@ -765,11 +801,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Test write operations that are non-contiguous with the current buffer, forcing flushes.
-            let (blob, _) = context.open("partition", b"write_straddle").await.unwrap();
-            let writer = Write::new(blob.clone(), 0, 10); // buffer capacity 10
+            let (blob, size) = context.open("partition", b"write_straddle").await.unwrap();
+            let writer = Write::new(blob.clone(), size, 10); // buffer capacity 10
 
             // Buffer "0123456789" (10 bytes)
             writer.write_at("0123456789".as_bytes(), 0).await.unwrap();
+            assert_eq!(writer.size().await, 10);
             // At this point, inner.buffer = "0123456789", inner.position = 0
 
             // Write "abc" at offset 15.
@@ -777,7 +814,9 @@ mod tests {
             // Current buffer "0123456789" is flushed. blob gets "0123456789". inner.position becomes 10.
             // Then "abc" is written directly to blob at offset 15. inner.position becomes 15 + 3 = 18.
             writer.write_at("abc".as_bytes(), 15).await.unwrap();
+            assert_eq!(writer.size().await, 18);
             writer.sync().await.unwrap(); // syncs blob state
+            assert_eq!(writer.size().await, 18);
 
             let (blob_check, size_check) =
                 context.open("partition", b"write_straddle").await.unwrap();
@@ -796,9 +835,10 @@ mod tests {
             assert_eq!(buf, expected);
 
             // Reset for a new scenario: Write that overwrites end of buffer and extends
-            let (blob2, _) = context.open("partition", b"write_straddle2").await.unwrap();
-            let writer2 = Write::new(blob2.clone(), 0, 10);
+            let (blob2, size) = context.open("partition", b"write_straddle2").await.unwrap();
+            let writer2 = Write::new(blob2.clone(), size, 10);
             writer2.write_at("0123456789".as_bytes(), 0).await.unwrap(); // Buffer full: "0123456789", position 0
+            assert_eq!(writer2.size().await, 10);
 
             // Write "ABCDEFGHIJKL" (12 bytes) at offset 5.
             // write_start = 5. data_len = 12.
@@ -816,7 +856,9 @@ mod tests {
                 .write_at("ABCDEFGHIJKL".as_bytes(), 5)
                 .await
                 .unwrap();
+            assert_eq!(writer2.size().await, 17);
             writer2.sync().await.unwrap();
+            assert_eq!(writer2.size().await, 17);
 
             let (blob_check2, size_check2) =
                 context.open("partition", b"write_straddle2").await.unwrap();
@@ -833,10 +875,11 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Test that closing the writer flushes any pending data in the buffer.
-            let (blob_orig, _) = context.open("partition", b"write_close").await.unwrap();
-            let writer = Write::new(blob_orig.clone(), 0, 8);
+            let (blob_orig, size) = context.open("partition", b"write_close").await.unwrap();
+            let writer = Write::new(blob_orig.clone(), size, 8);
             writer.write_at("pending".as_bytes(), 0).await.unwrap(); // 7 bytes, buffered
                                                                      // Data "pending" is in the writer's buffer, not yet on disk.
+            assert_eq!(writer.size().await, 7);
 
             // Closing the writer should flush and sync the data.
             writer.close().await.unwrap();
@@ -855,21 +898,23 @@ mod tests {
     fn test_write_direct_due_to_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (blob, _) = context
+            let (blob, size) = context
                 .open("partition", b"write_direct_size")
                 .await
                 .unwrap();
             // Buffer capacity 5, initial position 0
-            let writer = Write::new(blob.clone(), 0, 5);
+            let writer = Write::new(blob.clone(), size, 5);
 
             // Write 10 bytes, which is > capacity. Should be a direct write.
             let data_large = b"0123456789";
             writer.write_at(data_large.as_slice(), 0).await.unwrap();
+            assert_eq!(writer.size().await, 10);
             // Inner state: buffer should be empty, position should be 10.
             // We can't directly check inner state here, so we rely on observable behavior.
 
             // Sync to ensure data is on disk
             writer.sync().await.unwrap();
+            assert_eq!(writer.size().await, 10);
 
             let (blob_check, size_check) = context
                 .open("partition", b"write_direct_size")
@@ -884,11 +929,13 @@ mod tests {
             // Now, buffer something small
             writer.write_at(b"abc".as_slice(), 10).await.unwrap(); // This should be buffered
                                                                    // Attempt to read it back using writer.read_at to see if it's in buffer
+            assert_eq!(writer.size().await, 13);
             let mut read_small_buf_vec = vec![0u8; 3];
             read_small_buf_vec = writer.read_at(read_small_buf_vec, 10).await.unwrap();
             assert_eq!(&read_small_buf_vec, b"abc".as_slice());
 
             writer.sync().await.unwrap();
+            assert_eq!(writer.size().await, 13);
             let (blob_check2, size_check2) = context
                 .open("partition", b"write_direct_size")
                 .await
@@ -905,14 +952,15 @@ mod tests {
     fn test_write_overwrite_and_extend_in_buffer() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (blob, _) = context
+            let (blob, size) = context
                 .open("partition", b"overwrite_extend_buf")
                 .await
                 .unwrap();
-            let writer = Write::new(blob.clone(), 0, 15); // buffer capacity 15
+            let writer = Write::new(blob.clone(), size, 15); // buffer capacity 15
 
             // 1. Buffer initial data: "0123456789" (10 bytes) at offset 0
             writer.write_at("0123456789".as_bytes(), 0).await.unwrap();
+            assert_eq!(writer.size().await, 10);
             // Inner buffer: "0123456789", position 0
 
             // 2. Overwrite and extend: write "ABCDEFGHIJ" (10 bytes) at offset 5
@@ -927,6 +975,7 @@ mod tests {
             // Current buffer len is 10. Resize to 15.
             // buffer[5..15] gets "ABCDEFGHIJ"
             writer.write_at("ABCDEFGHIJ".as_bytes(), 5).await.unwrap();
+            assert_eq!(writer.size().await, 15);
 
             // Check buffer content via read_at on writer
             let mut read_buf_vec = vec![0u8; 15];
@@ -934,6 +983,7 @@ mod tests {
             assert_eq!(&read_buf_vec, b"01234ABCDEFGHIJ".as_slice());
 
             writer.sync().await.unwrap();
+            assert_eq!(writer.size().await, 15);
 
             let (blob_check, size_check) = context
                 .open("partition", b"overwrite_extend_buf")
