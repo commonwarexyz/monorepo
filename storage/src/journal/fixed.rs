@@ -181,7 +181,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                 Err(Error::ChecksumMismatch(_, _)) => {
                     warn!(
                         blob = newest_blob_index,
-                        offset, "checksum mismatch, truncating blob",
+                        offset, "checksum mismatch: truncating",
                     );
                     len -= Self::CHUNK_SIZE_U64;
                     newest_blob.truncate(len).await?;
@@ -245,7 +245,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             .expect("no blobs found");
 
         // There should always be room to append an item in the newest blob
-        let len = newest_blob.size().await;
+        let mut len = newest_blob.size().await;
         assert!(len < self.cfg.items_per_blob * Self::CHUNK_SIZE_U64);
         assert_eq!(len % Self::CHUNK_SIZE_U64, 0);
         let mut buf: Vec<u8> = Vec::with_capacity(Self::CHUNK_SIZE);
@@ -254,11 +254,14 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         buf.extend_from_slice(&item);
         buf.put_u32(checksum);
 
+        // Write the item to the blob
         let item_pos = (len / Self::CHUNK_SIZE_U64) + self.cfg.items_per_blob * newest_blob_index;
         newest_blob.write_at(buf, len).await?;
         trace!(blob = newest_blob_index, pos = item_pos, "appended item");
+        len += Self::CHUNK_SIZE_U64;
 
-        if len + Self::CHUNK_SIZE_U64 == self.cfg.items_per_blob * Self::CHUNK_SIZE_U64 {
+        // If the blob is now full, create a new one
+        if len == self.cfg.items_per_blob * Self::CHUNK_SIZE_U64 {
             // Newest blob is now full so we need to create a new empty one to fulfill the invariant
             // that the newest blob always has room for a new element.
             let next_blob_index = newest_blob_index + 1;
@@ -456,8 +459,8 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         new_oldest_blob = std::cmp::min(new_oldest_blob, *newest_blob_index);
 
         for index in *oldest_blob_index..new_oldest_blob {
-            let blob = self.blobs.remove(&index).unwrap();
             // Close the blob and remove it from storage
+            let blob = self.blobs.remove(&index).unwrap();
             blob.close().await?;
             self.context
                 .remove(&self.cfg.partition, Some(&index.to_be_bytes()))
