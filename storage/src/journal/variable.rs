@@ -455,7 +455,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                         cursor = offset,
                                         expected,
                                         found,
-                                        "corruption detected"
+                                        "corruption detected: truncating"
                                     );
                                     reader.truncate(offset as u64 * ITEM_ALIGNMENT).await.ok()?;
                                     None
@@ -473,10 +473,20 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                     reader.truncate(offset as u64 * ITEM_ALIGNMENT).await.ok()?;
                                     None
                                 }
-                                Err(err) => Some((
-                                    Err(err),
-                                    (section, reader, aligned_len, codec_config, compressed),
-                                )),
+                                Err(err) => {
+                                    // If we encounter an unexpected error, return it without attempting
+                                    // to fix anything.
+                                    warn!(
+                                        blob = section,
+                                        cursor = offset,
+                                        ?err,
+                                        "unexpected error"
+                                    );
+                                    Some((
+                                        Err(err),
+                                        (section, reader, aligned_len, codec_config, compressed),
+                                    ))
+                                }
                             }
                         },
                     )
