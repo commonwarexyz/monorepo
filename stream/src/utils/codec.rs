@@ -203,20 +203,23 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn test_recv_frame_short_length_prefix_panics() {
-        use bytes::{BufMut, BytesMut};
+    fn test_recv_frame_short_length_prefix() {
         let (mut sink, mut stream) = mocks::Channel::init();
 
-        deterministic::Runner::default().start(|_| async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            // Manually insert a frame with a short length prefix
             let mut buf = BytesMut::with_capacity(3);
             buf.put_u8(0x00);
             buf.put_u8(0x00);
             buf.put_u8(0x00);
 
             sink.send(buf).await.unwrap();
+            drop(sink); // Close the sink to simulate a closed stream
 
-            let _ = super::recv_frame(&mut stream, 100).await;
+            // Expect an error rather than a panic
+            let result = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await;
+            assert!(matches!(&result, Err(Error::RecvFailed(_))));
         });
     }
 }

@@ -18,6 +18,12 @@ pub struct Channel {
     /// bytes that the stream is waiting for, as well as the oneshot sender that
     /// the sink uses to send the bytes to the stream directly.
     waiter: Option<(usize, oneshot::Sender<Bytes>)>,
+
+    /// Tracks whether the sink is still alive and able to send messages.
+    sink_alive: bool,
+
+    /// Tracks whether the stream is still alive and able to receive messages.
+    stream_alive: bool,
 }
 
 impl Channel {
@@ -26,6 +32,8 @@ impl Channel {
         let channel = Arc::new(Mutex::new(Channel {
             buffer: VecDeque::new(),
             waiter: None,
+            sink_alive: true,
+            stream_alive: true,
         }));
         (
             Sink {
@@ -46,6 +54,13 @@ impl SinkTrait for Sink {
         let msg = msg.into();
         let (os_send, data) = {
             let mut channel = self.channel.lock().unwrap();
+
+            // If the receiver is dead, we cannot send any more messages.
+            if !channel.stream_alive {
+                return Err(Error::Closed);
+            }
+
+            // Add the data to the buffer.
             channel.buffer.extend(msg.as_ref());
 
             // If there is a waiter and the buffer is large enough,
@@ -70,6 +85,16 @@ impl SinkTrait for Sink {
     }
 }
 
+impl Drop for Sink {
+    fn drop(&mut self) {
+        let mut channel = self.channel.lock().unwrap();
+        channel.sink_alive = false;
+
+        // If there is a waiter, resolve it by dropping the oneshot sender.
+        channel.waiter.take();
+    }
+}
+
 /// A mock stream that implements the Stream trait.
 pub struct Stream {
     channel: Arc<Mutex<Channel>>,
@@ -89,6 +114,12 @@ impl StreamTrait for Stream {
                 return Ok(buf);
             }
 
+            // At this point, there is not enough data in the buffer.
+            // If the stream is dead, we cannot receive any more messages.
+            if !channel.sink_alive {
+                return Err(Error::Closed);
+            }
+
             // Otherwise, populate the waiter.
             assert!(channel.waiter.is_none());
             let (os_send, os_recv) = oneshot::channel();
@@ -104,10 +135,17 @@ impl StreamTrait for Stream {
     }
 }
 
+impl Drop for Stream {
+    fn drop(&mut self) {
+        let mut channel = self.channel.lock().unwrap();
+        channel.stream_alive = false;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, Clock, Runner};
+    use crate::{deterministic, Clock, Runner, Spawner};
     use commonware_macros::select;
     use futures::{executor::block_on, join};
     use std::{thread::sleep, time::Duration};
@@ -197,7 +235,79 @@ mod tests {
 
             // Try to send a message (longer than the requested amount), but the receiver is dropped.
             let result = sink.send(b"hello world".to_vec()).await;
-            assert!(matches!(result, Err(Error::SendFailed)));
+            assert!(matches!(result, Err(Error::Closed)));
+        });
+    }
+
+    #[test]
+    fn test_recv_error_sink_dropped_while_waiting() {
+        let (sink, mut stream) = Channel::init();
+        let executor = deterministic::Runner::default();
+
+        executor.start(|context| async move {
+            let recv_future = stream.recv(vec![0; 5]); // Stream starts waiting
+
+            // Simulate some delay to ensure the recv_future is waiting
+            context.sleep(Duration::from_millis(50)).await;
+
+            // Drop the sink explicitly after recv_future has started
+            drop(sink);
+
+            // The recv_future should now resolve to an error
+            let result = recv_future.await;
+            assert!(matches!(result, Err(Error::Closed)));
+        });
+    }
+
+    #[test]
+    fn test_recv_error_sink_dropped_before_recv() {
+        let (sink, mut stream) = Channel::init();
+        drop(sink); // Drop sink immediately
+
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let result = stream.recv(vec![0; 5]).await;
+            assert!(matches!(result, Err(Error::Closed)));
+        });
+    }
+
+    #[test]
+    fn test_send_error_stream_dropped() {
+        let (mut sink, mut stream) = Channel::init();
+        let executor = deterministic::Runner::default();
+
+        executor.start(|context| async move {
+            // Send some bytes
+            assert!(sink.send(b"7 bytes".to_vec()).await.is_ok());
+
+            // Spawn a task to initiate recv's where the first one will succeed and then will drop.
+            let handle = context.clone().spawn(|_| async move {
+                let _ = stream.recv(vec![0; 5]).await;
+                let _ = stream.recv(vec![0; 5]).await;
+            });
+
+            // Give the async task a moment to start
+            context.sleep(Duration::from_millis(50)).await;
+
+            // Drop the stream by aborting the handle
+            handle.abort();
+            assert!(matches!(handle.await, Err(Error::Closed)));
+
+            // Try to send a message. The stream is dropped, so this should fail.
+            let result = sink.send(b"hello world".to_vec()).await;
+            assert!(matches!(result, Err(Error::Closed)));
+        });
+    }
+
+    #[test]
+    fn test_send_error_stream_dropped_before_send() {
+        let (mut sink, stream) = Channel::init();
+        drop(stream); // Drop stream immediately
+
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let result = sink.send(b"hello world".to_vec()).await;
+            assert!(matches!(result, Err(Error::Closed)));
         });
     }
 
