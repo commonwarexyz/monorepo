@@ -148,7 +148,6 @@ mod tests {
     use super::*;
     use crate::{deterministic, Clock, Runner, Spawner};
     use commonware_macros::select;
-    use futures::executor::block_on;
     use std::{thread::sleep, time::Duration};
 
     #[test]
@@ -156,7 +155,8 @@ mod tests {
         let (mut sink, mut stream) = Channel::init();
         let data = b"hello world".to_vec();
 
-        block_on(async {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
             sink.send(data.clone()).await.unwrap();
             let buf = stream.recv(vec![0; data.len()]).await.unwrap();
             assert_eq!(buf.as_ref(), data);
@@ -169,7 +169,8 @@ mod tests {
         let data = b"hello".to_vec();
         let data2 = b" world".to_vec();
 
-        block_on(async {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
             sink.send(data).await.unwrap();
             sink.send(data2).await.unwrap();
             let buf = stream.recv(vec![0; 5]).await.unwrap();
@@ -184,25 +185,24 @@ mod tests {
     #[test]
     fn test_send_recv_async() {
         let (mut sink, mut stream) = Channel::init();
-
         let data = b"hello world";
-        let buf = block_on(async {
-            futures::try_join!(stream.recv(vec![0; data.len()]), async {
-                sleep(Duration::from_millis(10_000));
-                sink.send(data.to_vec()).await
-            },)
-            .unwrap()
-            .0
-        });
 
-        assert_eq!(buf.as_ref(), data);
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let (buf, _) = futures::try_join!(stream.recv(vec![0; data.len()]), async {
+                sleep(Duration::from_millis(50));
+                sink.send(data.to_vec()).await
+            })
+            .unwrap();
+            assert_eq!(buf.as_ref(), data);
+        });
     }
 
     #[test]
     fn test_recv_error_sink_dropped_while_waiting() {
         let (sink, mut stream) = Channel::init();
-        let executor = deterministic::Runner::default();
 
+        let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             futures::join!(
                 async {
@@ -233,8 +233,8 @@ mod tests {
     #[test]
     fn test_send_error_stream_dropped() {
         let (mut sink, mut stream) = Channel::init();
-        let executor = deterministic::Runner::default();
 
+        let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Send some bytes
             assert!(sink.send(b"7 bytes".to_vec()).await.is_ok());
@@ -273,9 +273,10 @@ mod tests {
     #[test]
     fn test_recv_timeout() {
         let (_sink, mut stream) = Channel::init();
-        let executor = deterministic::Runner::default();
 
-        // If there is no data to read, test that the recv function just blocks. A timeout should return first.
+        // If there is no data to read, test that the recv function just blocks.
+        // The timeout should return first.
+        let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             select! {
                 v = stream.recv(vec![0;5]) => {
