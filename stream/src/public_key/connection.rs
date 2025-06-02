@@ -125,6 +125,11 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         mut stream: St,
         peer: C::PublicKey,
     ) -> Result<Self, Error> {
+        // Ensure we are not trying to connect to ourselves
+        if peer == config.crypto.public_key() {
+            return Err(Error::DialSelf);
+        }
+
         // Set handshake deadline
         let deadline = context.current() + config.handshake_timeout;
 
@@ -638,8 +643,8 @@ mod tests {
         executor.start(|context| async move {
             // Create cryptographic identities
             let dialer_crypto = Ed25519::from_seed(0);
-            let mut peer_crypto = Ed25519::from_seed(1);
-            let peer_public_key = peer_crypto.public_key();
+            let mut listener_crypto = Ed25519::from_seed(1);
+            let listener_public_key = listener_crypto.public_key();
 
             // Set up mock channels
             let (dialer_sink, mut peer_stream) = mocks::Channel::init();
@@ -673,7 +678,7 @@ mod tests {
 
                     // Create the signed handshake
                     let signed_handshake =
-                        handshake::Signed::sign(&mut peer_crypto, &namespace, info);
+                        handshake::Signed::sign(&mut listener_crypto, &namespace, info);
 
                     // Send the signed handshake
                     send_frame(&mut peer_sink, &signed_handshake.encode(), 1024)
@@ -688,7 +693,7 @@ mod tests {
                 dialer_config,
                 dialer_sink,
                 dialer_stream,
-                peer_public_key,
+                listener_public_key,
             )
             .await;
 
@@ -702,8 +707,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create cryptographic identities
-            let listener_crypto = Ed25519::from_seed(0);
-            let mut dialer_crypto = Ed25519::from_seed(1);
+            let mut dialer_crypto = Ed25519::from_seed(0);
+            let listener_crypto = Ed25519::from_seed(1);
 
             // Set up mock channels
             let (mut dialer_sink, listener_stream) = mocks::Channel::init();
@@ -750,6 +755,117 @@ mod tests {
 
             // Verify the error
             assert!(matches!(result, Err(Error::SharedSecretNotContributory)));
+        });
+    }
+
+    #[test]
+    fn test_listener_rejects_handshake_signed_with_own_key() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let self_crypto = Ed25519::from_seed(0);
+            let self_public_key = self_crypto.public_key();
+
+            let config = Config {
+                crypto: self_crypto.clone(),
+                namespace: b"test_self_connect_namespace".to_vec(),
+                max_message_size: 1024,
+                synchrony_bound: Duration::from_secs(5),
+                max_handshake_age: Duration::from_secs(5),
+                handshake_timeout: Duration::from_secs(1),
+            };
+
+            // Initial handshake travels: dialer_sink -> listener_stream
+            let (mut dialer_sink, listener_stream) = mocks::Channel::init();
+            // Reply handshake would travel: listener_reply_sink -> dialer_stream
+            let (listener_reply_sink, _dialer_stream) = mocks::Channel::init();
+
+            let listener_config = config.clone();
+            let listener_handle =
+                context
+                    .with_label("self_listener")
+                    .spawn(move |task_ctx| async move {
+                        IncomingConnection::verify(
+                            &task_ctx,
+                            listener_config,
+                            listener_reply_sink,
+                            listener_stream,
+                        )
+                        .await
+                    });
+
+            let max_msg_size = config.max_message_size;
+            let namespace = config.namespace.clone();
+            let handshake_sender_handle =
+                context
+                    .with_label("handshake_sender")
+                    .spawn(move |task_ctx| {
+                        let mut crypto_for_signing = self_crypto.clone();
+                        let recipient_pk = self_public_key.clone();
+                        let ephemeral_pk = super::x25519::PublicKey::from_bytes([0xCDu8; 32]);
+
+                        async move {
+                            let timestamp = task_ctx.current().epoch_millis();
+                            let info = super::handshake::Info::<Ed25519>::new(
+                                recipient_pk,
+                                ephemeral_pk,
+                                timestamp,
+                            );
+                            let signed_handshake = super::handshake::Signed::sign(
+                                &mut crypto_for_signing,
+                                &namespace,
+                                info,
+                            );
+                            crate::utils::codec::send_frame(
+                                &mut dialer_sink,
+                                &signed_handshake.encode(),
+                                max_msg_size,
+                            )
+                            .await
+                        }
+                    });
+
+            // Ensure handshake is sent
+            handshake_sender_handle.await.unwrap().unwrap();
+
+            let listener_result = listener_handle.await.unwrap();
+            assert!(matches!(listener_result, Err(Error::HandshakeUsesOurKey)));
+        });
+    }
+
+    #[test]
+    fn test_upgrade_dialer_rejects_connecting_to_self() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create cryptographic identity.
+            let self_crypto = Ed25519::from_seed(0);
+            let self_public_key = self_crypto.public_key();
+
+            // Configure dialer parameters.
+            let dialer_config = Config {
+                crypto: self_crypto.clone(),
+                namespace: b"test_dial_self_direct".to_vec(),
+                max_message_size: 1024,
+                synchrony_bound: Duration::from_secs(5),
+                max_handshake_age: Duration::from_secs(5),
+                handshake_timeout: Duration::from_secs(1),
+            };
+
+            // Set up mock channels (not fully utilized due to early error).
+            let (dialer_sink, _unused_stream) = mocks::Channel::init();
+            let (_unused_sink, dialer_stream) = mocks::Channel::init();
+
+            // Attempt to upgrade dialer connection, targeting self.
+            let result = Connection::upgrade_dialer(
+                context.clone(),
+                dialer_config,
+                dialer_sink,
+                dialer_stream,
+                self_public_key.clone(),
+            )
+            .await;
+
+            // Verify dialer rejects self-connection attempt.
+            assert!(matches!(result, Err(Error::DialSelf)));
         });
     }
 }
