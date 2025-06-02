@@ -42,7 +42,7 @@ pub struct Engine<
     batcher: batcher::Actor<E, C, B, V, D, F, S>,
     batcher_mailbox: batcher::Mailbox<C::PublicKey, V, D>,
 
-    resolver: resolver::Actor<E, C, B, V, D, S>,
+    resolver: resolver::Actor<E, C::PublicKey, B, V, D, S>,
     resolver_mailbox: resolver::Mailbox<V, D>,
 }
 
@@ -113,7 +113,7 @@ impl<
             context.with_label("resolver"),
             resolver::Config {
                 blocker: cfg.blocker,
-                crypto: cfg.crypto,
+                crypto: cfg.crypto.public_key(),
                 supervisor: cfg.supervisor,
                 mailbox_size: cfg.mailbox_size,
                 namespace: cfg.namespace,

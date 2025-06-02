@@ -11,7 +11,7 @@ use crate::{
     },
     ThresholdSupervisor,
 };
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PrivateKey};
+use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{
     utils::{
@@ -101,13 +101,13 @@ impl Inflight {
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
     E: Clock + GClock + Rng + Metrics + Spawner,
-    C: PrivateKey,
-    B: Blocker<PublicKey = C::PublicKey>,
+    C: PublicKey,
+    B: Blocker<PublicKey = C>,
     V: Variant,
     D: Digest,
     S: ThresholdSupervisor<
         Index = View,
-        PublicKey = C::PublicKey,
+        PublicKey = C,
         Identity = V::Public,
         Polynomial = Vec<V::Public>,
     >,
@@ -131,7 +131,7 @@ pub struct Actor<
     fetch_timeout: Duration,
     max_fetch_count: usize,
     fetch_concurrent: usize,
-    requester: requester::Requester<E, C::PublicKey>,
+    requester: requester::Requester<E, C>,
 
     unfulfilled: Gauge,
     outstanding: Gauge,
@@ -140,13 +140,13 @@ pub struct Actor<
 
 impl<
         E: Clock + GClock + Rng + Metrics + Spawner,
-        C: PrivateKey,
-        B: Blocker<PublicKey = C::PublicKey>,
+        C: PublicKey,
+        B: Blocker<PublicKey = C>,
         V: Variant,
         D: Digest,
         S: ThresholdSupervisor<
             Index = View,
-            PublicKey = C::PublicKey,
+            PublicKey = C,
             Identity = V::Public,
             Polynomial = Vec<V::Public>,
         >,
@@ -155,7 +155,7 @@ impl<
     pub fn new(context: E, cfg: Config<C, B, S>) -> (Self, Mailbox<V, D>) {
         // Initialize requester
         let config = requester::Config {
-            public_key: cfg.crypto.public_key(),
+            public_key: cfg.crypto,
             rate_limit: cfg.fetch_rate_per_peer,
             initial: cfg.fetch_timeout / 2,
             timeout: cfg.fetch_timeout,
@@ -212,7 +212,7 @@ impl<
     }
 
     /// Concurrent indicates whether we should send a new request (only if we see a request for the first time)
-    async fn send<Sr: Sender<PublicKey = C::PublicKey>>(
+    async fn send<Sr: Sender<PublicKey = C>>(
         &mut self,
         shuffle: bool,
         sender: &mut WrappedSender<Sr, Backfiller<V, D>>,
@@ -312,8 +312,8 @@ impl<
     pub fn start(
         mut self,
         voter: voter::Mailbox<V, D>,
-        sender: impl Sender<PublicKey = C::PublicKey>,
-        receiver: impl Receiver<PublicKey = C::PublicKey>,
+        sender: impl Sender<PublicKey = C>,
+        receiver: impl Receiver<PublicKey = C>,
     ) -> Handle<()> {
         self.context.spawn_ref()(self.run(voter, sender, receiver))
     }
@@ -321,8 +321,8 @@ impl<
     async fn run(
         mut self,
         mut voter: voter::Mailbox<V, D>,
-        sender: impl Sender<PublicKey = C::PublicKey>,
-        receiver: impl Receiver<PublicKey = C::PublicKey>,
+        sender: impl Sender<PublicKey = C>,
+        receiver: impl Receiver<PublicKey = C>,
     ) {
         // Wrap channel
         let (mut sender, mut receiver) = wrap(self.max_fetch_count, sender, receiver);
