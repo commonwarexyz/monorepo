@@ -631,32 +631,7 @@ mod tests {
             reader.read_exact(&mut buf, 5).await.unwrap();
             assert_eq!(&buf, b"hello");
 
-            // Write more data, buffer position should be reset by truncate implicitly
-            // or write_at should handle it.
-            // After truncate, the writer's internal state (position, buffer) needs to be consistent.
-            // Let's assume truncate implies a flush and reset of position to 0 for the writer if not specified.
-            // The `Blob::truncate` itself doesn't dictate writer state.
-            // The current `Write::truncate` flushes then truncates. The writer's `position` is not reset.
-            // This means subsequent writes might be to unexpected locations if not careful.
-            // Let's test current behavior:
-            // inner.position was 11 after "hello world". Flush happens. Blob truncated to 5.
-            // writer.inner.position is still 11.
-            // This is a bit tricky. For `Write::new(blob, position, capacity)`, `position` is the *start* of the buffer.
-            // After flush, `inner.position` becomes `inner.position + len_flushed`.
-            // So after writing "hello world" (11 bytes) with buffer 10:
-            // 1. "hello worl" (10 bytes) written to buffer. inner.buffer.len() = 10, inner.position = 0.
-            // 2. "d" (1 byte) written. Buffer has "hello worl". write("d") called.
-            //    buffer.len (10) + "d".len (1) > capacity (10). So flush.
-            //    blob.write_at("hello worl", 0). inner.position becomes 10. inner.buffer is empty.
-            //    Then "d" is buffered. inner.buffer = "d".
-            // 3. sync() called. Flushes "d". blob.write_at("d", 10). inner.position becomes 11. inner.buffer empty.
-            // 4. truncate(5). Flushes (empty buffer). inner.blob.truncate(5). inner.position is still 11.
-
-            // If we now write "X" at offset 0:
-            // write_start = 0. buffer_start = 11. buffer_end = 11.
-            // Not scenario 1 (0 != 11).
-            // Not scenario 2 (0 < 11).
-            // Scenario 3: flush (empty). blob.write_at("X", 0). inner.position = 0 + 1 = 1.
+            // Write data before the buffer
             writer.write_at("X".as_bytes(), 0).await.unwrap();
             assert_eq!(writer.size().await, 5);
             writer.sync().await.unwrap();
