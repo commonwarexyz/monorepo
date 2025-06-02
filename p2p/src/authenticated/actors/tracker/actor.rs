@@ -46,7 +46,7 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PrivateK
 
     // ---------- State ----------
     /// Tracks peer sets and peer connectivity information.
-    directory: Directory<E, C>,
+    directory: Directory<E, C::PublicKey>,
 }
 
 impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PrivateKey> Actor<E, C> {

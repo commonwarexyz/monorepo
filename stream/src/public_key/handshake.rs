@@ -188,7 +188,7 @@ mod tests {
         utils::codec::send_frame,
     };
     use commonware_codec::DecodeExt;
-    use commonware_cryptography::{ed25519, PrivateKeyGen as _};
+    use commonware_cryptography::{ed25519, PrivateKeyGen as _, Verifier as _};
     use commonware_runtime::{deterministic, mocks, Metrics, Runner, Spawner};
     use x25519::PublicKey;
 
