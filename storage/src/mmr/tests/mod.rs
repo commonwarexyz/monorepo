@@ -37,38 +37,38 @@ pub async fn build_test_mmr<H: CHasher>(hasher: &mut impl Hasher<H>, mmr: &mut i
     }
 }
 
-pub async fn build_batched_and_check_test_roots<H: CHasher>(
-    hasher: &mut impl Hasher<H>,
-    mem_mmr: &mut MemMmr<H>,
-) {
+pub async fn build_batched_and_check_test_roots(mem_mmr: &mut MemMmr<Sha256>) {
+    let mut hasher = Sha256::new();
+    let mut hasher = Standard::new(&mut hasher);
     for i in 0u64..199 {
         hasher.inner().update(&i.to_be_bytes());
         let element = hasher.inner().finalize();
-        mem_mmr.add_batched(hasher, &element).await.unwrap();
+        mem_mmr.add_batched(&mut hasher, &element).await.unwrap();
     }
-    mem_mmr.sync(hasher);
+    mem_mmr.sync(&mut hasher);
     assert_eq!(
-        hex(&mem_mmr.root(hasher)),
+        hex(&mem_mmr.root(&mut hasher)),
         ROOTS[199],
         "Root after 200 elements"
     );
 }
 
-pub async fn build_batched_and_check_test_roots_journaled<
-    H: CHasher,
-    E: RStorage + Clock + Metrics,
->(
-    hasher: &mut impl Hasher<H>,
-    journaled_mmr: &mut JournaledMmr<E, H>,
+pub async fn build_batched_and_check_test_roots_journaled<E: RStorage + Clock + Metrics>(
+    journaled_mmr: &mut JournaledMmr<E, Sha256>,
 ) {
+    let mut hasher = Sha256::new();
+    let mut hasher = Standard::new(&mut hasher);
     for i in 0u64..199 {
         hasher.inner().update(&i.to_be_bytes());
         let element = hasher.inner().finalize();
-        journaled_mmr.add_batched(hasher, &element).await.unwrap();
+        journaled_mmr
+            .add_batched(&mut hasher, &element)
+            .await
+            .unwrap();
     }
-    journaled_mmr.sync(hasher).await.unwrap();
+    journaled_mmr.sync(&mut hasher).await.unwrap();
     assert_eq!(
-        hex(&journaled_mmr.root(hasher)),
+        hex(&journaled_mmr.root(&mut hasher)),
         ROOTS[199],
         "Root after 200 elements"
     );
