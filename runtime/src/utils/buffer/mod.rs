@@ -937,4 +937,153 @@ mod tests {
             assert_eq!(&buf, b"0123456789abc");
         });
     }
+
+    #[test_traced]
+    fn test_write_at_size_multiple_appends() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Test multiple appends using writer.size()
+            let (blob, size) = context
+                .open("partition", b"write_multiple_appends_at_size")
+                .await
+                .unwrap();
+            let writer = Write::new(blob.clone(), size, 5); // Small buffer
+
+            // First write
+            writer.write_at(b"AAA".to_vec(), 0).await.unwrap();
+            assert_eq!(writer.size().await, 3);
+            writer.sync().await.unwrap();
+            assert_eq!(writer.size().await, 3);
+
+            // Append using size()
+            writer
+                .write_at(b"BBB".to_vec(), writer.size().await)
+                .await
+                .unwrap();
+            assert_eq!(writer.size().await, 6); // 3 (AAA) + 3 (BBB)
+            writer.sync().await.unwrap();
+            assert_eq!(writer.size().await, 6);
+
+            // Append again using size()
+            writer
+                .write_at(b"CCC".to_vec(), writer.size().await)
+                .await
+                .unwrap();
+            assert_eq!(writer.size().await, 9); // 6 + 3 (CCC)
+            writer.sync().await.unwrap();
+            assert_eq!(writer.size().await, 9);
+
+            // Verify final content
+            let (blob_check, size_check) = context
+                .open("partition", b"write_multiple_appends_at_size")
+                .await
+                .unwrap();
+            assert_eq!(size_check, 9);
+            let mut reader = Read::new(blob_check, size_check, 9);
+            let mut buf = vec![0u8; 9];
+            reader.read_exact(&mut buf, 9).await.unwrap();
+            assert_eq!(&buf, b"AAABBBCCC");
+        });
+    }
+
+    #[test_traced]
+    fn test_write_non_contiguous_then_append_at_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Test writing non-contiguously, then appending at the new size
+            let (blob, size) = context
+                .open("partition", b"write_non_contiguous_then_append")
+                .await
+                .unwrap();
+            let writer = Write::new(blob.clone(), size, 10);
+
+            // Initial buffered write
+            writer.write_at(b"INITIAL".to_vec(), 0).await.unwrap(); // 7 bytes
+            assert_eq!(writer.size().await, 7);
+            // Buffer contains "INITIAL", inner.position = 0
+
+            // Non-contiguous write, forces flush of "INITIAL" and direct write of "NONCONTIG"
+            writer.write_at(b"NONCONTIG".to_vec(), 20).await.unwrap();
+            assert_eq!(writer.size().await, 29);
+            writer.sync().await.unwrap();
+            assert_eq!(writer.size().await, 29);
+
+            // Append at the new size
+            writer
+                .write_at(b"APPEND".to_vec(), writer.size().await)
+                .await
+                .unwrap();
+            assert_eq!(writer.size().await, 35); // 29 + 6
+            writer.sync().await.unwrap();
+            assert_eq!(writer.size().await, 35);
+
+            // Verify final content
+            let (blob_check, size_check) = context
+                .open("partition", b"write_non_contiguous_then_append")
+                .await
+                .unwrap();
+            assert_eq!(size_check, 35);
+            let mut reader = Read::new(blob_check, size_check, 35);
+            let mut buf = vec![0u8; 35];
+            reader.read_exact(&mut buf, 35).await.unwrap();
+
+            let mut expected = vec![0u8; 35];
+            expected[0..7].copy_from_slice(b"INITIAL");
+            expected[20..29].copy_from_slice(b"NONCONTIG");
+            expected[29..35].copy_from_slice(b"APPEND");
+            assert_eq!(buf, expected);
+        });
+    }
+
+    #[test_traced]
+    fn test_truncate_then_append_at_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Test truncating, then appending at the new size
+            let (blob, size) = context
+                .open("partition", b"truncate_then_append_at_size")
+                .await
+                .unwrap();
+            let writer = Write::new(blob.clone(), size, 10);
+
+            // Write initial data and sync
+            writer
+                .write_at(b"0123456789ABCDEF".to_vec(), 0)
+                .await
+                .unwrap(); // 16 bytes
+            assert_eq!(writer.size().await, 16);
+            writer.sync().await.unwrap(); // inner.position = 16, buffer empty
+            assert_eq!(writer.size().await, 16);
+
+            // Truncate
+            let truncate_to = 5;
+            writer.truncate(truncate_to).await.unwrap();
+            // after truncate, inner.position should be `truncate_to` (5)
+            // buffer should be empty
+            assert_eq!(writer.size().await, truncate_to);
+            writer.sync().await.unwrap(); // Ensure truncation is persisted for verify step
+            assert_eq!(writer.size().await, truncate_to);
+
+            // Append at the new (truncated) size
+            writer
+                .write_at(b"XXXXX".to_vec(), writer.size().await)
+                .await
+                .unwrap(); // 5 bytes
+                           // inner.buffer = "XXXXX", inner.position = 5
+            assert_eq!(writer.size().await, 10); // 5 (truncated) + 5 (XXXXX)
+            writer.sync().await.unwrap();
+            assert_eq!(writer.size().await, 10);
+
+            // Verify final content
+            let (blob_check, size_check) = context
+                .open("partition", b"truncate_then_append_at_size")
+                .await
+                .unwrap();
+            assert_eq!(size_check, 10);
+            let mut reader = Read::new(blob_check, size_check, 10);
+            let mut buf = vec![0u8; 10];
+            reader.read_exact(&mut buf, 10).await.unwrap();
+            assert_eq!(&buf, b"01234XXXXX");
+        });
+    }
 }
