@@ -423,7 +423,7 @@ mod tests {
             blob.close().await.unwrap();
 
             // Initialize the archive again
-            let archive= Archive::<_, _, FixedBytes<64>, i32>::init(
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(
                 context,
                 Config {
                     partition: "test_partition".into(),
