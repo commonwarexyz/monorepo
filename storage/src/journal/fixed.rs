@@ -968,6 +968,7 @@ mod tests {
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
+
             // Add only a single item
             journal
                 .append(test_digest(0))
@@ -996,12 +997,21 @@ mod tests {
             // Ensure we've recovered to the state of a single item.
             assert_eq!(journal.size().await.unwrap(), 1);
             assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(0));
+
             // Make sure journal still works for appending.
             journal
-                .append(test_digest(0))
+                .append(test_digest(1))
                 .await
                 .expect("failed to append data");
             assert_eq!(journal.size().await.unwrap(), 2);
+
+            // Get the value of the first item
+            let item = journal.read(0).await.unwrap();
+            assert_eq!(item, test_digest(0));
+
+            // Get the value of new item
+            let item = journal.read(1).await.unwrap();
+            assert_eq!(item, test_digest(1));
         });
     }
 
