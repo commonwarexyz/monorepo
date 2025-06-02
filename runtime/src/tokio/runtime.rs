@@ -66,9 +66,8 @@ impl Metrics {
 
 #[derive(Clone, Debug)]
 pub struct NetworkConfig {
-    /// Whether or not to enable TCP_NODELAY.
-    ///
-    /// If `None`, the default value is used.
+    /// If Some, explicitly sets TCP_NODELAY on the socket.
+    /// Otherwise uses system default.
     tcp_nodelay: Option<bool>,
 
     /// Read/write timeout for network operations.
