@@ -1369,7 +1369,7 @@ mod tests {
             assert_eq!(blob_len, 44);
 
             // Re-initialize the journal to simulate a restart
-            let journal = Journal::init(context, cfg)
+            let journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -1399,8 +1399,6 @@ mod tests {
             assert_eq!(items[2].1, data_items[1].1);
             assert_eq!(items[3].0, 2);
             assert_eq!(items[3].1, 5);
-
-            // Confirm blob is expected length
         });
     }
 
