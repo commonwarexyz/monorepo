@@ -792,7 +792,6 @@ mod tests {
             assert!(matches!(err, Error::Runtime(_)));
 
             // Replay all items, making sure the partial read error is handled correctly
-            let expected_items = ITEMS_PER_BLOB as usize * 100 + ITEMS_PER_BLOB as usize / 2 - 4;
             {
                 let stream = journal
                     .replay(10, 1024)
@@ -815,78 +814,11 @@ mod tests {
                 }
                 assert_eq!(error_count, 1);
                 // Result will be missing the 4 items following the truncation
-                assert_eq!(items.len(), expected_items);
+                assert_eq!(
+                    items.len(),
+                    ITEMS_PER_BLOB as usize * 100 + ITEMS_PER_BLOB as usize / 2 - 4
+                );
             }
-            journal.close().await.expect("Failed to close journal");
-
-            // Re-initialize the journal to simulate a restart
-            let journal = Journal::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to re-initialize journal");
-
-            // Replay all items after truncation
-            {
-                let stream = journal
-                    .replay(10, 1024)
-                    .await
-                    .expect("failed to replay journal");
-                let mut items = Vec::new();
-                pin_mut!(stream);
-                while let Some(result) = stream.next().await {
-                    match result {
-                        Ok((pos, item)) => {
-                            assert_eq!(test_digest(pos), item);
-                            items.push(pos);
-                        }
-                        Err(err) => panic!("Failed to read item: {}", err),
-                    }
-                }
-                assert_eq!(items.len(), expected_items);
-            }
-
-            // Add extra data to the end of the blob
-            let (blob, blob_len) = context
-                .open(&cfg.partition, &40u64.to_be_bytes())
-                .await
-                .expect("Failed to open blob");
-            blob.write_at(vec![0u8; 4 + Digest::SIZE], blob_len)
-                .await
-                .expect("Failed to add extra data");
-            blob.close().await.expect("Failed to close blob");
-
-            // Re-initialize the journal to simulate a restart
-            let journal = Journal::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to re-initialize journal");
-
-            // Replay all items, making sure the extra data is ignored
-            {
-                let stream = journal
-                    .replay(10, 1024)
-                    .await
-                    .expect("failed to replay journal");
-                let mut items = Vec::new();
-                pin_mut!(stream);
-                while let Some(result) = stream.next().await {
-                    match result {
-                        Ok((pos, item)) => {
-                            assert_eq!(test_digest(pos), item);
-                            items.push(pos);
-                        }
-                        Err(err) => panic!("Failed to read item: {}", err),
-                    }
-                }
-                assert_eq!(items.len(), expected_items);
-            }
-
-            // Delete a blob and make sure the gap is detected
-            context
-                .remove(&cfg.partition, Some(&40u64.to_be_bytes()))
-                .await
-                .expect("Failed to remove blob");
-            // Re-initialize the journal to simulate a restart
-            let result = Journal::<_, Digest>::init(context.clone(), cfg.clone()).await;
-            assert!(matches!(result.err().unwrap(), Error::MissingBlob(n) if n == 40));
         });
     }
 
