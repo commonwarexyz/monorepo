@@ -693,7 +693,7 @@ impl<
         };
 
         // Verify the signature
-        if !nullify.verify::<C::PublicKey>(&self.namespace, public_key) {
+        if !nullify.verify(&self.namespace, public_key) {
             return false;
         }
 
@@ -1012,7 +1012,7 @@ impl<
         };
 
         // Verify the signature
-        if !notarize.verify::<C::PublicKey>(&self.namespace, public_key) {
+        if !notarize.verify(&self.namespace, public_key) {
             return false;
         }
 
@@ -1064,7 +1064,7 @@ impl<
         let Some(participants) = self.supervisor.participants(view) else {
             return false;
         };
-        if !notarization.verify::<C::PublicKey>(&self.namespace, participants) {
+        if !notarization.verify(&self.namespace, participants) {
             return false;
         }
 
@@ -1133,7 +1133,7 @@ impl<
         let Some(participants) = self.supervisor.participants(nullification.view) else {
             return false;
         };
-        if !nullification.verify::<C::PublicKey>(&self.namespace, participants) {
+        if !nullification.verify(&self.namespace, participants) {
             return false;
         }
 
@@ -1190,7 +1190,7 @@ impl<
         };
 
         // Verify the signature
-        if !finalize.verify::<C::PublicKey>(&self.namespace, public_key) {
+        if !finalize.verify(&self.namespace, public_key) {
             return false;
         }
 
@@ -1242,7 +1242,7 @@ impl<
         let Some(participants) = self.supervisor.participants(view) else {
             return false;
         };
-        if !finalization.verify::<C::PublicKey>(&self.namespace, participants) {
+        if !finalization.verify(&self.namespace, participants) {
             return false;
         }
 

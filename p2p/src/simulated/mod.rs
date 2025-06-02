@@ -13,7 +13,7 @@
 //!
 //! ```rust
 //! use commonware_p2p::simulated::{Config, Link, Network};
-//! use commonware_cryptography::{ed25519, PrivateKey as _, PublicKey as _};
+//! use commonware_cryptography::{ed25519, PrivateKey as _, PublicKey as _, PrivateKeyGen as _};
 //! use commonware_runtime::{deterministic, Spawner, Runner, Metrics};
 //!
 //! // Generate peers
