@@ -1,4 +1,5 @@
 use crate::{Blob, Error};
+use commonware_utils::StableBuf;
 
 /// A reader that buffers content from a [Blob] to optimize the performance
 /// of a full scan of contents.
@@ -33,7 +34,7 @@ pub struct Read<B: Blob> {
     /// The underlying blob to read from.
     blob: B,
     /// The buffer storing the data read from the blob.
-    buffer: Vec<u8>,
+    buffer: StableBuf,
     /// The current position in the blob from where the buffer was filled.
     blob_position: u64,
     /// The size of the blob.
@@ -56,7 +57,7 @@ impl<B: Blob> Read<B> {
         assert!(buffer_size > 0, "buffer size must be greater than zero");
         Self {
             blob,
-            buffer: vec![0; buffer_size],
+            buffer: vec![0; buffer_size].into(),
             blob_position: 0,
             blob_size,
             buffer_position: 0,
@@ -127,7 +128,7 @@ impl<B: Blob> Read<B> {
 
             // Copy bytes from buffer to output
             buf[bytes_read..(bytes_read + bytes_to_copy)].copy_from_slice(
-                &self.buffer[self.buffer_position..(self.buffer_position + bytes_to_copy)],
+                &self.buffer.as_ref()[self.buffer_position..(self.buffer_position + bytes_to_copy)],
             );
 
             self.buffer_position += bytes_to_copy;

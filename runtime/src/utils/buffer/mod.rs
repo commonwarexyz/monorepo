@@ -459,7 +459,7 @@ mod tests {
             writer.write_at("abc".as_bytes(), 0).await.unwrap();
             assert_eq!(writer.size().await, 3);
             writer
-                .write_at("defghijklmnopqrstuvwxyz".as_bytes(), 3)
+                .write_at(b"defghijklmnopqrstuvwxyz".to_vec(), 3)
                 .await
                 .unwrap();
             assert_eq!(writer.size().await, 26);
@@ -651,7 +651,7 @@ mod tests {
             let (blob_zero, size) = context.open("partition", b"truncate_zero").await.unwrap();
             let writer_zero = Write::new(blob_zero.clone(), size, 10);
             writer_zero
-                .write_at("some data".as_bytes(), 0)
+                .write_at(b"some data".to_vec(), 0)
                 .await
                 .unwrap();
             assert_eq!(writer_zero.size().await, 9);
@@ -683,10 +683,10 @@ mod tests {
             // Read from buffer via writer
             let mut read_buf_vec = vec![0u8; 4];
             read_buf_vec = writer.read_at(read_buf_vec, 0).await.unwrap();
-            assert_eq!(&read_buf_vec, b"buff");
+            assert_eq!(read_buf_vec.as_ref(), b"buff");
 
             read_buf_vec = writer.read_at(read_buf_vec, 4).await.unwrap();
-            assert_eq!(&read_buf_vec, b"ered");
+            assert_eq!(read_buf_vec.as_ref(), b"ered");
 
             // Reading past buffer end should fail
             let small_buf_vec = vec![0u8; 1];
@@ -701,11 +701,11 @@ mod tests {
             // Read from underlying blob through writer
             let mut read_buf_vec_2 = vec![0u8; 4];
             read_buf_vec_2 = writer.read_at(read_buf_vec_2, 0).await.unwrap();
-            assert_eq!(&read_buf_vec_2, b"buff");
+            assert_eq!(read_buf_vec_2.as_ref(), b"buff");
 
             let mut read_buf_7_vec = vec![0u8; 7];
             read_buf_7_vec = writer.read_at(read_buf_7_vec, 13).await.unwrap();
-            assert_eq!(&read_buf_7_vec, b"flushed");
+            assert_eq!(read_buf_7_vec.as_ref(), b"flushed");
 
             // Buffer new data at the end
             writer.write_at(" more data".as_bytes(), 20).await.unwrap();
@@ -714,12 +714,12 @@ mod tests {
             // Read newly buffered data
             let mut read_buf_vec_3 = vec![0u8; 5];
             read_buf_vec_3 = writer.read_at(read_buf_vec_3, 20).await.unwrap();
-            assert_eq!(&read_buf_vec_3, b" more");
+            assert_eq!(read_buf_vec_3.as_ref(), b" more");
 
             // Read spanning both blob and buffer
             let mut combo_read_buf_vec = vec![0u8; 12];
             combo_read_buf_vec = writer.read_at(combo_read_buf_vec, 16).await.unwrap();
-            assert_eq!(&combo_read_buf_vec, b"shed more da");
+            assert_eq!(combo_read_buf_vec.as_ref(), b"shed more da");
 
             // Verify complete content by reopening
             writer.sync().await.unwrap();
@@ -854,7 +854,7 @@ mod tests {
             // Verify it's in buffer by reading through writer
             let mut read_small_buf_vec = vec![0u8; 3];
             read_small_buf_vec = writer.read_at(read_small_buf_vec, 10).await.unwrap();
-            assert_eq!(&read_small_buf_vec, b"abc".as_slice());
+            assert_eq!(read_small_buf_vec.as_ref(), b"abc");
 
             writer.sync().await.unwrap();
 
@@ -893,7 +893,7 @@ mod tests {
             // Verify buffer content through writer
             let mut read_buf_vec = vec![0u8; 15];
             read_buf_vec = writer.read_at(read_buf_vec, 0).await.unwrap();
-            assert_eq!(&read_buf_vec, b"01234ABCDEFGHIJ".as_slice());
+            assert_eq!(read_buf_vec.as_ref(), b"01234ABCDEFGHIJ");
 
             writer.sync().await.unwrap();
 

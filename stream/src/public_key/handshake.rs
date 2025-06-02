@@ -124,6 +124,15 @@ impl<C: Scheme> Signed<C> {
             return Err(Error::HandshakeNotForUs);
         }
 
+        // Verify that the handshake is not signed by us
+        //
+        // This could indicate a self-connection attempt, which is not allowed.
+        // It could also indicate a replay attack or a malformed message.
+        // Either way, fail early to avoid any potential issues.
+        if crypto.public_key() == self.signer {
+            return Err(Error::HandshakeUsesOurKey);
+        }
+
         // Verify that the timestamp in the handshake is recent
         //
         // This prevents an adversary from reopening an encrypted connection
@@ -416,16 +425,17 @@ mod tests {
     fn test_handshake_verify_invalid_signature() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut crypto = Ed25519::from_seed(0);
-            let recipient = crypto.public_key();
+            let mut sender = Ed25519::from_seed(0);
+            let recipient = Ed25519::from_seed(1);
             let ephemeral_public_key = x25519::PublicKey::from_bytes([0u8; 32]);
 
+            // The peer creates a valid handshake intended for us
             let handshake = Signed::sign(
-                &mut crypto,
+                &mut sender,
                 TEST_NAMESPACE,
                 Info {
                     timestamp: 0,
-                    recipient,
+                    recipient: recipient.public_key(),
                     ephemeral_public_key,
                 },
             );
@@ -438,7 +448,7 @@ mod tests {
             // Verify the handshake
             let result = handshake.verify(
                 &context,
-                &crypto,
+                &recipient,
                 TEST_NAMESPACE,
                 Duration::from_secs(5),
                 Duration::from_secs(5),
@@ -451,20 +461,20 @@ mod tests {
     fn test_handshake_verify_invalid_timestamp_old() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut crypto = Ed25519::from_seed(0);
-            let recipient = crypto.public_key();
+            let mut sender = Ed25519::from_seed(0);
+            let recipient = Ed25519::from_seed(1);
             let ephemeral_public_key = x25519::PublicKey::from_bytes([0u8; 32]);
 
             let timeout_duration = Duration::from_secs(5);
             let synchrony_bound = Duration::from_secs(0);
 
-            // Create a handshake, setting the timestamp to 0.
+            // The peer creates a handshake, setting the timestamp to 0.
             let handshake = Signed::sign(
-                &mut crypto,
+                &mut sender,
                 TEST_NAMESPACE,
                 Info {
                     timestamp: 0,
-                    recipient,
+                    recipient: recipient.public_key(),
                     ephemeral_public_key,
                 },
             );
@@ -477,7 +487,7 @@ mod tests {
             handshake
                 .verify(
                     &context,
-                    &crypto,
+                    &recipient,
                     TEST_NAMESPACE,
                     synchrony_bound,
                     timeout_duration,
@@ -490,7 +500,7 @@ mod tests {
             // Verify that a timeout error is returned.
             let result = handshake.verify(
                 &context,
-                &crypto,
+                &recipient,
                 TEST_NAMESPACE,
                 synchrony_bound,
                 timeout_duration,
@@ -503,32 +513,32 @@ mod tests {
     fn test_handshake_verify_invalid_timestamp_future() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut crypto = Ed25519::from_seed(0);
-            let recipient = crypto.public_key();
+            let mut sender = Ed25519::from_seed(0);
+            let recipient = Ed25519::from_seed(1);
             let ephemeral_public_key = x25519::PublicKey::from_bytes([0u8; 32]);
 
             let timeout_duration = Duration::from_secs(0);
             const SYNCHRONY_BOUND_MILLIS: u64 = 5_000;
             let synchrony_bound = Duration::from_millis(SYNCHRONY_BOUND_MILLIS);
 
-            // Create a handshake at the synchrony bound.
+            // The peer creates a handshake at the synchrony bound.
             let handshake_ok = Signed::sign(
-                &mut crypto,
+                &mut sender,
                 TEST_NAMESPACE,
                 Info{
                     timestamp: SYNCHRONY_BOUND_MILLIS,
-                    recipient: recipient.clone(),
+                    recipient: recipient.public_key(),
                     ephemeral_public_key,
                 },
             );
 
             // Create a handshake 1ms too far into the future.
             let handshake_late = Signed::sign(
-                &mut crypto,
+                &mut sender,
                 TEST_NAMESPACE,
                 Info{
                     timestamp:SYNCHRONY_BOUND_MILLIS + 1,
-                    recipient,
+                    recipient: recipient.public_key(),
                     ephemeral_public_key,
                 },
             );
@@ -536,7 +546,7 @@ mod tests {
             // Verify the okay handshake.
             handshake_ok.verify(
                 &context,
-                &crypto,
+                &recipient,
                 TEST_NAMESPACE,
                 synchrony_bound,
                 timeout_duration,
@@ -545,7 +555,7 @@ mod tests {
             // Handshake too far into the future fails.
             let result = handshake_late.verify(
                 &context,
-                &crypto,
+                &recipient,
                 TEST_NAMESPACE,
                 synchrony_bound,
                 timeout_duration,

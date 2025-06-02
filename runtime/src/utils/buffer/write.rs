@@ -1,5 +1,5 @@
 use crate::{Blob, Error, RwLock};
-use commonware_utils::{StableBuf, StableBufMut};
+use commonware_utils::StableBuf;
 use std::sync::Arc;
 
 /// The internal state of a [Write] buffer.
@@ -26,9 +26,11 @@ impl<B: Blob> Inner<B> {
     /// If the buffer capacity would be exceeded, it is flushed first. If the data
     /// is larger than the buffer capacity, it is written directly to the blob.
     ///
-    /// # Returns
-    /// An error if the write to the underlying [Blob] fails.
-    async fn write<Buf: StableBuf>(&mut self, buf: Buf) -> Result<(), Error> {
+    /// Returns an error if the write to the underlying [Blob] fails (may be due to a `flush` of data not
+    /// related to the data being written).
+    async fn write<S: Into<StableBuf>>(&mut self, buf: S) -> Result<(), Error> {
+        // If the buffer capacity will be exceeded, flush the buffer first
+        let buf = buf.into();
         let buf_len = buf.len();
 
         // Flush buffer if adding this data would exceed capacity
@@ -111,14 +113,14 @@ impl<B: Blob> Inner<B> {
 ///     assert_eq!(size, 0);
 ///
 ///     // Create a buffered writer with 16-byte buffer
-///     let writer = Write::new(blob, 0, 16);
-///     writer.write_at("hello".as_bytes(), 0).await.expect("write failed");
-///     writer.sync().await.expect("sync failed");
+///     let mut blob = Write::new(blob, 0, 16);
+///     blob.write_at(b"hello".to_vec(), 0).await.expect("write failed");
+///     blob.sync().await.expect("sync failed");
 ///
-///     // Write more data
-///     writer.write_at(" world".as_bytes(), 5).await.expect("write failed");
-///     writer.write_at("!".as_bytes(), 11).await.expect("write failed");
-///     writer.sync().await.expect("sync failed");
+///     // Write more data in multiple flushes
+///     blob.write_at(b" world".to_vec(), 5).await.expect("write failed");
+///     blob.write_at(b"!".to_vec(), 11).await.expect("write failed");
+///     blob.sync().await.expect("sync failed");
 ///
 ///     // Read back the data to verify
 ///     let (blob, size) = context.open("my_partition", b"my_data").await.expect("unable to reopen blob");
@@ -164,11 +166,16 @@ impl<B: Blob> Write<B> {
 }
 
 impl<B: Blob> Blob for Write<B> {
-    async fn read_at<T: StableBufMut>(&self, mut buf: T, offset: u64) -> Result<T, Error> {
+    async fn read_at(
+        &self,
+        buf: impl Into<StableBuf> + Send,
+        offset: u64,
+    ) -> Result<StableBuf, Error> {
         // Acquire a read lock on the inner state
         let inner = self.inner.read().await;
 
         // Ensure offset read doesn't overflow
+        let mut buf = buf.into();
         let data_len = buf.len();
         let data_end = offset
             .checked_add(data_len as u64)
@@ -210,17 +217,18 @@ impl<B: Blob> Blob for Write<B> {
         let blob_part = inner.blob.read_at(blob_part, offset).await?;
 
         // Copy blob data and buffer data to result
-        buf.deref_mut()[..blob_bytes].copy_from_slice(&blob_part);
-        buf.deref_mut()[blob_bytes..].copy_from_slice(&inner.buffer[..buffer_bytes]);
+        buf.as_mut()[..blob_bytes].copy_from_slice(blob_part.as_ref());
+        buf.as_mut()[blob_bytes..].copy_from_slice(&inner.buffer[..buffer_bytes]);
 
         Ok(buf)
     }
 
-    async fn write_at<T: StableBuf>(&self, buf: T, offset: u64) -> Result<(), Error> {
+    async fn write_at(&self, buf: impl Into<StableBuf> + Send, offset: u64) -> Result<(), Error> {
         // Acquire a write lock on the inner state
         let mut inner = self.inner.write().await;
 
         // Prepare the buf to be written
+        let buf = buf.into();
         let data = buf.as_ref();
         let data_len = data.len();
 

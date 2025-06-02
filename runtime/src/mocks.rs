@@ -2,7 +2,7 @@
 
 use crate::{Error, Sink as SinkTrait, Stream as StreamTrait};
 use bytes::Bytes;
-use commonware_utils::{StableBuf, StableBufMut};
+use commonware_utils::StableBuf;
 use futures::channel::oneshot;
 use std::{
     collections::VecDeque,
@@ -42,7 +42,8 @@ pub struct Sink {
 }
 
 impl SinkTrait for Sink {
-    async fn send<B: StableBuf>(&mut self, msg: B) -> Result<(), Error> {
+    async fn send(&mut self, msg: impl Into<StableBuf> + Send) -> Result<(), Error> {
+        let msg = msg.into();
         let (os_send, data) = {
             let mut channel = self.channel.lock().unwrap();
             channel.buffer.extend(msg.as_ref());
@@ -75,7 +76,8 @@ pub struct Stream {
 }
 
 impl StreamTrait for Stream {
-    async fn recv<B: StableBufMut>(&mut self, mut buf: B) -> Result<B, Error> {
+    async fn recv(&mut self, buf: impl Into<StableBuf> + Send) -> Result<StableBuf, Error> {
+        let mut buf = buf.into();
         let os_recv = {
             let mut channel = self.channel.lock().unwrap();
 
@@ -118,7 +120,7 @@ mod tests {
         block_on(async {
             sink.send(data.clone()).await.unwrap();
             let buf = stream.recv(vec![0; data.len()]).await.unwrap();
-            assert_eq!(buf, data);
+            assert_eq!(buf.as_ref(), data);
         });
     }
 
@@ -132,11 +134,11 @@ mod tests {
             sink.send(data).await.unwrap();
             sink.send(data2).await.unwrap();
             let buf = stream.recv(vec![0; 5]).await.unwrap();
-            assert_eq!(buf, b"hello");
+            assert_eq!(buf.as_ref(), b"hello");
             let buf = stream.recv(buf).await.unwrap();
-            assert_eq!(buf, b" worl");
+            assert_eq!(buf.as_ref(), b" worl");
             let buf = stream.recv(vec![0; 1]).await.unwrap();
-            assert_eq!(buf, b"d");
+            assert_eq!(buf.as_ref(), b"d");
         });
     }
 
@@ -154,7 +156,7 @@ mod tests {
             .0
         });
 
-        assert_eq!(buf, data);
+        assert_eq!(buf.as_ref(), data);
     }
 
     #[test]

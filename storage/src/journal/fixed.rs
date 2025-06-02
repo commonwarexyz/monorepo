@@ -332,7 +332,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         let item_index = item_pos % self.cfg.items_per_blob;
         let offset = item_index * Self::CHUNK_SIZE_U64;
         let read = blob.read_at(vec![0u8; Self::CHUNK_SIZE], offset).await?;
-        Self::verify_integrity(&read)
+        Self::verify_integrity(read.as_ref())
     }
 
     /// Verify the integrity of the Array + checksum in `buf`, returning the array if it is valid.

@@ -45,26 +45,27 @@
 //! ## Encryption
 //!
 //! During the handshake (described above), a shared x25519 secret is established using a
-//! Diffie-Hellman Key Exchange. This x25519 secret is then used to create a ChaCha20-Poly1305
-//! cipher for encrypting all messages exchanged with the peer.
+//! Diffie-Hellman Key Exchange. This x25519 secret is then used in-conjunction with the handshake
+//! data in a key-derivation-function to create a pair of ChaCha20-Poly1305 ciphers. One cipher per
+//! direction allows for encryption of all messages.
 //!
-//! Each peer maintains a pair of ChaCha20-Poly1305 nonces (12 bytes), one for itself and one for
-//! the other. Each nonce is constructed using a counter that starts at either 1 for the dialer, or
-//! 0 for the listener. For each message sent, the relevant counter is incremented by 2, ensuring that
-//! the two counters have disjoint nonce spaces.
+//! Each direction of communication also uses a 12-byte nonce derived from a counter that is
+//! incremented for each message sent. This provides for a maximum of 2^96 messages per sender,
+//! which would be sufficient for over 2.5 trillion years of continuous communication at a rate of
+//! 1 billion messages per second. In other words, sufficient for all practical use cases. This
+//! approach ensures well-behaving peers, as long as they both stay online, remain connected
+//! indefinitely (maximizing the stability of any p2p construction). In an unlikely case of
+//! overflow, a new connection should be established.
 //!
-//! The nonce is the least-significant 12 bytes of the counter, encoded big-endian. This provides 2^95 unique nonces
-//! per sender, sufficient for over 1 trillion years at 1 billion messages/second—far exceeding practical limits. This approach
-//! ensures well-behaving peers, as long as they both stay online, remain connected indefinitely (maximizing the stability
-//! of any p2p construction). In an unlikely case of overflow, the connection would terminate, and a new handshake would be required.
-//!
-//! This simple coordination prevents nonce reuse (which would allow for messages to be decrypted) and saves a small amount of
-//! bandwidth (no need to send the nonce alongside the encrypted message). This "pedantic" construction of the nonce
-//! also avoids accidental reuse of a nonce over long-lived connections (when setting it to be a small hash as in XChaCha20-Poly1305).
+//! This simple coordination prevents nonce reuse (which would allow for messages to be decrypted)
+//! and saves a small amount of bandwidth (no need to send the nonce alongside the encrypted
+//! message). This also avoids accidental reuse of a nonce over long-lived connections (for example
+//! when setting it to be a small hash as in XChaCha20-Poly1305).
 
 use commonware_cryptography::Scheme;
 use std::time::Duration;
 
+mod cipher;
 mod connection;
 pub use connection::{Connection, IncomingConnection, Receiver, Sender};
 mod handshake;

@@ -12,10 +12,16 @@ fn benchmark_sender_send(c: &mut Criterion) {
         c.bench_function(&format!("{}/len={}", module_path!(), message_size), |b| {
             b.iter_batched(
                 || {
-                    let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
+                    let cipher1 = ChaCha20Poly1305::new(&[1u8; 32].into());
+                    let cipher2 = ChaCha20Poly1305::new(&[2u8; 32].into());
                     let (sink, stream) = mocks::Channel::init();
-                    let connection =
-                        Connection::from_preestablished(true, sink, stream, cipher, message_size);
+                    let connection = Connection::from_preestablished(
+                        sink,
+                        stream,
+                        message_size,
+                        cipher1,
+                        cipher2,
+                    );
                     let (sender, _receiver) = connection.split();
                     let msg = msg.clone();
                     (sender, msg)
