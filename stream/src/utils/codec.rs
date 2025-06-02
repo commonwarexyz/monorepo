@@ -201,4 +201,22 @@ mod tests {
             assert!(matches!(&result, Err(Error::StreamClosed)));
         });
     }
+
+    #[test]
+    #[should_panic]
+    fn test_recv_frame_short_length_prefix_panics() {
+        use bytes::{BufMut, BytesMut};
+        let (mut sink, mut stream) = mocks::Channel::init();
+
+        deterministic::Runner::default().start(|_| async move {
+            let mut buf = BytesMut::with_capacity(3);
+            buf.put_u8(0x00);
+            buf.put_u8(0x00);
+            buf.put_u8(0x00);
+
+            sink.send(buf).await.unwrap();
+
+            let _ = super::recv_frame(&mut stream, 100).await;
+        });
+    }
 }
