@@ -114,7 +114,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             Err(err) => return Err(Error::Runtime(err)),
         };
         for name in stored_blobs {
-            let (blob, len) = context
+            let (blob, size) = context
                 .open(&cfg.partition, &name)
                 .await
                 .map_err(Error::Runtime)?;
@@ -122,8 +122,8 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                 Ok(index) => u64::from_be_bytes(index),
                 Err(nm) => return Err(Error::InvalidBlobName(hex(&nm))),
             };
-            debug!(blob = index, "loaded blob");
-            let blob = Write::new(blob, len, cfg.write_buffer);
+            debug!(blob = index, size, "loaded blob");
+            let blob = Write::new(blob, size, cfg.write_buffer);
             blobs.insert(index, blob);
         }
         if !blobs.is_empty() {
@@ -138,9 +138,9 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             }
         } else {
             debug!("no blobs found");
-            let (blob, len) = context.open(&cfg.partition, &0u64.to_be_bytes()).await?;
-            assert_eq!(len, 0);
-            let blob = Write::new(blob, len, cfg.write_buffer);
+            let (blob, size) = context.open(&cfg.partition, &0u64.to_be_bytes()).await?;
+            assert_eq!(size, 0);
+            let blob = Write::new(blob, size, cfg.write_buffer);
             blobs.insert(0, blob);
         }
 
@@ -157,23 +157,23 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         // shutdown.
         let newest_blob_index = *blobs.keys().last().unwrap();
         let newest_blob = blobs.get_mut(&newest_blob_index).unwrap();
-        let mut len = newest_blob.size().await;
-        if len % Self::CHUNK_SIZE_U64 != 0 {
+        let mut size = newest_blob.size().await;
+        if size % Self::CHUNK_SIZE_U64 != 0 {
             warn!(
                 blob = newest_blob_index,
-                invalid_len = len,
-                "last blob len is not a multiple of item size, truncating"
+                invalid_size = size,
+                "last blob size is not a multiple of item size, truncating"
             );
-            len -= len % Self::CHUNK_SIZE_U64;
-            newest_blob.truncate(len).await?;
+            size -= size % Self::CHUNK_SIZE_U64;
+            newest_blob.truncate(size).await?;
             newest_blob.sync().await?;
         }
 
         // Truncate any records with failing checksums. This can happen if the file system allocated
         // extra space for a blob but there was a crash before any data was written to that space.
         let mut truncated = false;
-        while len > 0 {
-            let offset = len - Self::CHUNK_SIZE_U64;
+        while size > 0 {
+            let offset = size - Self::CHUNK_SIZE_U64;
             let read = newest_blob
                 .read_at(vec![0u8; Self::CHUNK_SIZE], offset)
                 .await?;
@@ -184,8 +184,8 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                         blob = newest_blob_index,
                         offset, "checksum mismatch: truncating",
                     );
-                    len -= Self::CHUNK_SIZE_U64;
-                    newest_blob.truncate(len).await?;
+                    size -= Self::CHUNK_SIZE_U64;
+                    newest_blob.truncate(size).await?;
                     truncated = true;
                 }
                 Err(err) => return Err(err),
@@ -198,16 +198,16 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         }
 
         // If the blob is now full, create a new one.
-        if len == cfg.items_per_blob * Self::CHUNK_SIZE_U64 {
+        if size == cfg.items_per_blob * Self::CHUNK_SIZE_U64 {
             warn!(
                 blob = newest_blob_index,
                 "blob is full, creating a new empty one"
             );
             let next_blob_index = newest_blob_index + 1;
-            let (next_blob, len) = context
+            let (next_blob, size) = context
                 .open(&cfg.partition, &next_blob_index.to_be_bytes())
                 .await?;
-            let next_blob = Write::new(next_blob, len, cfg.write_buffer);
+            let next_blob = Write::new(next_blob, size, cfg.write_buffer);
             blobs.insert(next_blob_index, next_blob);
             tracked.inc();
         }
@@ -236,9 +236,9 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
     /// appended to the journal will be at this position.
     pub async fn size(&self) -> Result<u64, Error> {
         let (newest_blob_index, blob) = self.newest_blob();
-        let len = blob.size().await;
-        assert_eq!(len % Self::CHUNK_SIZE_U64, 0);
-        let items_in_blob = len / Self::CHUNK_SIZE_U64;
+        let size = blob.size().await;
+        assert_eq!(size % Self::CHUNK_SIZE_U64, 0);
+        let items_in_blob = size / Self::CHUNK_SIZE_U64;
         Ok(items_in_blob + self.cfg.items_per_blob * newest_blob_index)
     }
 
@@ -253,9 +253,9 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             .expect("no blobs found");
 
         // There should always be room to append an item in the newest blob
-        let mut len = newest_blob.size().await;
-        assert!(len < self.cfg.items_per_blob * Self::CHUNK_SIZE_U64);
-        assert_eq!(len % Self::CHUNK_SIZE_U64, 0);
+        let mut size = newest_blob.size().await;
+        assert!(size < self.cfg.items_per_blob * Self::CHUNK_SIZE_U64);
+        assert_eq!(size % Self::CHUNK_SIZE_U64, 0);
         let mut buf: Vec<u8> = Vec::with_capacity(Self::CHUNK_SIZE);
         let item = item.encode();
         let checksum = crc32fast::hash(&item);
@@ -263,24 +263,24 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         buf.put_u32(checksum);
 
         // Write the item to the blob
-        let item_pos = (len / Self::CHUNK_SIZE_U64) + self.cfg.items_per_blob * newest_blob_index;
-        newest_blob.write_at(buf, len).await?;
+        let item_pos = (size / Self::CHUNK_SIZE_U64) + self.cfg.items_per_blob * newest_blob_index;
+        newest_blob.write_at(buf, size).await?;
         trace!(blob = newest_blob_index, pos = item_pos, "appended item");
-        len += Self::CHUNK_SIZE_U64;
+        size += Self::CHUNK_SIZE_U64;
 
         // If the blob is now full, create a new one
-        if len == self.cfg.items_per_blob * Self::CHUNK_SIZE_U64 {
+        if size == self.cfg.items_per_blob * Self::CHUNK_SIZE_U64 {
             // Newest blob is now full so we need to create a new empty one to fulfill the invariant
             // that the newest blob always has room for a new element.
             let next_blob_index = newest_blob_index + 1;
             // Always sync the previous blob before creating a new one
             newest_blob.sync().await?;
             debug!(blob = next_blob_index, "creating next blob");
-            let (next_blob, len) = self
+            let (next_blob, size) = self
                 .context
                 .open(&self.cfg.partition, &next_blob_index.to_be_bytes())
                 .await?;
-            let next_blob = Write::new(next_blob, len, self.cfg.write_buffer);
+            let next_blob = Write::new(next_blob, size, self.cfg.write_buffer);
             assert!(self.blobs.insert(next_blob_index, next_blob).is_none());
             self.tracked.inc();
         }
@@ -861,12 +861,12 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Manually truncate most recent blob to simulate a partial write.
-            let (blob, len) = context
+            let (blob, size) = context
                 .open(&cfg.partition, &1u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
             // truncate the most recent blob by 1 byte which corrupts the most recent item
-            blob.truncate(len - 1)
+            blob.truncate(size - 1)
                 .await
                 .expect("Failed to corrupt blob");
             blob.close().await.expect("Failed to close blob");
@@ -918,12 +918,12 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Manually truncate most recent blob to simulate a partial write.
-            let (blob, len) = context
+            let (blob, size) = context
                 .open(&cfg.partition, &0u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            // truncate the most recent blob by 1 byte which corrupts the one appended item
-            blob.truncate(len - 1)
+            // Truncate the most recent blob by 1 byte which corrupts the one appended item
+            blob.truncate(size - 1)
                 .await
                 .expect("Failed to corrupt blob");
             blob.close().await.expect("Failed to close blob");
@@ -970,11 +970,11 @@ mod tests {
             // Manually extend the blob by an amount at least some multiple of the chunk size to
             // simulate a failure where the file was extended, but no bytes were written due to
             // failure.
-            let (blob, len) = context
+            let (blob, size) = context
                 .open(&cfg.partition, &0u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            blob.write_at(vec![0u8; Digest::SIZE * 3 - 1], len)
+            blob.write_at(vec![0u8; Digest::SIZE * 3 - 1], size)
                 .await
                 .expect("Failed to extend blob");
             blob.close().await.expect("Failed to close blob");
