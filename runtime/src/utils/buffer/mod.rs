@@ -562,49 +562,40 @@ mod tests {
             let (blob, size) = context.open("partition", b"before_buf").await.unwrap();
             let writer = Write::new(blob.clone(), size, 10);
 
-            // Buffer some data at offset 10: "0123456789"
+            // Buffer data at offset 10
             writer.write_at("0123456789".as_bytes(), 10).await.unwrap();
             assert_eq!(writer.size().await, 20);
 
-            // Write "abcde" at offset 0. This is before the current buffer.
-            // Current buffer should be flushed. "abcde" written directly.
-            // New buffer position will be 5.
+            // Write before the buffer - should flush buffer then write directly
             writer.write_at("abcde".as_bytes(), 0).await.unwrap();
             assert_eq!(writer.size().await, 20);
             writer.sync().await.unwrap();
             assert_eq!(writer.size().await, 20);
 
+            // Reopen the blob and read the data
             let (blob, size) = context.open("partition", b"before_buf").await.unwrap();
-            // Expected: "abcde" at 0 (5 bytes) + "0123456789" at 10 (10 bytes) = 20 total size.
-            // The underlying blob previously had "0123456789" written starting at 10.
-            // Then "abcde" was written starting at 0.
-            // The blob size should be 20 if the original data at 10 was preserved.
             assert_eq!(size, 20);
             let mut reader = Read::new(blob, size, 20);
             let mut buf = vec![0u8; 20];
             reader.read_exact(&mut buf, 20).await.unwrap();
-
             let mut expected = vec![0u8; 20];
             expected[0..5].copy_from_slice("abcde".as_bytes());
             expected[10..20].copy_from_slice("0123456789".as_bytes());
             assert_eq!(buf, expected);
 
-            // Write "fghij" at offset 5. This will append to the "abcde"
-            // The buffer for writer is now at position 5 with capacity 10.
-            // This write will be buffered.
+            // Write to fill the gap between existing data
             writer.write_at("fghij".as_bytes(), 5).await.unwrap();
             assert_eq!(writer.size().await, 20);
             writer.sync().await.unwrap();
             assert_eq!(writer.size().await, 20);
 
+            // Reopen the blob and read the data
             let (blob, size) = context.open("partition", b"before_buf").await.unwrap();
-            assert_eq!(size, 20); // Size remains 20 as "fghij" overwrites part of the gap + start of old data.
+            assert_eq!(size, 20);
             let mut reader = Read::new(blob, size, 20);
             let mut buf = vec![0u8; 20];
             reader.read_exact(&mut buf, 20).await.unwrap();
-
             expected[0..10].copy_from_slice("abcdefghij".as_bytes());
-            // The "0123456789" part originally at 10-19 is still there.
             assert_eq!(buf, expected);
         });
     }
@@ -704,88 +695,59 @@ mod tests {
         executor.start(|context| async move {
             // Test reading data through the writer's read_at method, covering buffer and blob reads.
             let (blob, size) = context.open("partition", b"read_at_writer").await.unwrap();
-            let writer = Write::new(blob.clone(), size, 10); // Buffer capacity 10, starts at blob offset 0
+            let writer = Write::new(blob.clone(), size, 10); // Buffer capacity 10
 
-            // 1. Write "buffered" (8 bytes) - stays in buffer
+            // Write "buffered" (8 bytes) - stays in buffer
             writer.write_at("buffered".as_bytes(), 0).await.unwrap();
             assert_eq!(writer.size().await, 8);
 
-            // Read from buffer: "buff" at offset 0
+            // Read from buffer
             let mut read_buf_vec = vec![0u8; 4];
             read_buf_vec = writer.read_at(read_buf_vec, 0).await.unwrap();
             assert_eq!(&read_buf_vec, b"buff");
 
-            // Read from buffer: "ered" at offset 4
             read_buf_vec = writer.read_at(read_buf_vec, 4).await.unwrap();
             assert_eq!(&read_buf_vec, b"ered");
 
-            // Read past buffer end (buffered data is "buffered" at 0-7)
+            // Read past buffer end should fail
             let small_buf_vec = vec![0u8; 1];
             assert!(writer.read_at(small_buf_vec, 8).await.is_err());
 
-            // 2. Write " and flushed" (12 bytes) at offset 8.
-            // "buffered" (8 bytes) is at 0-7. New write starts at 8.
-            // This is an append to buffer. writer.write_at(" and flushed", 8)
-            // inner.write will be called. buffer.len (8) + " and flushed".len (12) = 20 > capacity (10)
-            // So, "buffered" is flushed. blob.write_at("buffered", 0). inner.position = 8.
-            // Then " and flushed" (12 bytes) is written. Since 12 > 10 (capacity), it's a direct write.
-            // blob.write_at(" and flushed", 8). inner.position = 8 + 12 = 20.
+            // Write " and flushed" (12 bytes) at offset 8 - this will flush buffer then write directly
             writer.write_at(" and flushed".as_bytes(), 8).await.unwrap();
             assert_eq!(writer.size().await, 20);
-            writer.sync().await.unwrap(); // Syncs any remaining (should be none from this op)
+            writer.sync().await.unwrap();
             assert_eq!(writer.size().await, 20);
 
-            // Blob now contains "buffered and flushed" (8 + 12 = 20 bytes)
-            // Writer's inner.position = 20. Buffer is empty.
-
-            // Read from underlying blob through writer: "buff" at offset 0
+            // Read from underlying blob through writer
             let mut read_buf_vec_2 = vec![0u8; 4];
             read_buf_vec_2 = writer.read_at(read_buf_vec_2, 0).await.unwrap();
             assert_eq!(&read_buf_vec_2, b"buff");
 
-            // Read from underlying blob: "flushed" at offset 13
             let mut read_buf_7_vec = vec![0u8; 7];
             read_buf_7_vec = writer.read_at(read_buf_7_vec, 13).await.unwrap();
             assert_eq!(&read_buf_7_vec, b"flushed");
 
-            // 3. Buffer new data without flushing previous
-            // Writer inner.position = 20. Buffer is empty.
-            // Write " more data" (10 bytes) at offset 20. This fits in buffer.
+            // Buffer new data at the tip
             writer.write_at(" more data".as_bytes(), 20).await.unwrap();
             assert_eq!(writer.size().await, 30);
 
-            // Read the newly buffered data: "more"
+            // Read the newly buffered data
             let mut read_buf_vec_3 = vec![0u8; 5];
             read_buf_vec_3 = writer.read_at(read_buf_vec_3, 20).await.unwrap();
             assert_eq!(&read_buf_vec_3, b" more");
 
-            // Read part from blob, part from buffer (not directly supported by current read_at logic, it seems)
-            // `read_at` logic:
-            // If data_end <= buffer_start: read from blob. (buffer_start is inner.position where buffer *would* start if written)
-            // If offset >= buffer_start: read from buffer (if it contains the data)
-            // Combination case: read blob part, then buffer part.
-
-            // Current state:
-            // Blob: "buffered and flushed" (0-19)
-            // Buffer: " more data" (starts at blob offset 20, covers 20-29)
-            // writer.inner.position = 20 (start of buffered data " more data")
-            // writer.inner.buffer = " more data"
-
-            // Try to read "flushed more " (12 bytes: ("shed " - 5) from blob, ("more da" - 7) from buffer) starting at offset 16
-            // offset = 16, data_len = 12. data_end = 28.
-            // buffer_start (inner.position) = 20. buffer_end = 20 + 9 = 29.
-            // data_end (28) > buffer_start (20) is true.
-            // offset (16) < buffer_start (20) is true. -> This is the combined case.
+            // Read spanning blob and buffer
             let mut combo_read_buf_vec = vec![0u8; 12];
             combo_read_buf_vec = writer.read_at(combo_read_buf_vec, 16).await.unwrap();
             assert_eq!(&combo_read_buf_vec, b"shed more da");
 
             // Verify full content by reopening and reading
-            writer.sync().await.unwrap(); // Flush "more data"
+            writer.sync().await.unwrap();
             assert_eq!(writer.size().await, 30);
             let (final_blob, final_size) =
                 context.open("partition", b"read_at_writer").await.unwrap();
-            assert_eq!(final_size, 30); // "buffered and flushed more data"
+            assert_eq!(final_size, 30);
             let mut final_reader = Read::new(final_blob, final_size, 30);
             let mut full_content = vec![0u8; 30];
             final_reader
@@ -802,27 +764,20 @@ mod tests {
         executor.start(|context| async move {
             // Test write operations that are non-contiguous with the current buffer, forcing flushes.
             let (blob, size) = context.open("partition", b"write_straddle").await.unwrap();
-            let writer = Write::new(blob.clone(), size, 10); // buffer capacity 10
+            let writer = Write::new(blob.clone(), size, 10);
 
-            // Buffer "0123456789" (10 bytes)
+            // Fill buffer with "0123456789"
             writer.write_at("0123456789".as_bytes(), 0).await.unwrap();
             assert_eq!(writer.size().await, 10);
-            // At this point, inner.buffer = "0123456789", inner.position = 0
 
-            // Write "abc" at offset 15.
-            // This is scenario 3: write is after buffer, non-contiguous.
-            // Current buffer "0123456789" is flushed. blob gets "0123456789". inner.position becomes 10.
-            // Then "abc" is written directly to blob at offset 15. inner.position becomes 15 + 3 = 18.
+            // Write at non-contiguous offset 15 - should flush buffer then write directly
             writer.write_at("abc".as_bytes(), 15).await.unwrap();
             assert_eq!(writer.size().await, 18);
-            writer.sync().await.unwrap(); // syncs blob state
+            writer.sync().await.unwrap();
             assert_eq!(writer.size().await, 18);
 
             let (blob_check, size_check) =
                 context.open("partition", b"write_straddle").await.unwrap();
-            // Expected: "0123456789" at 0-9, then "abc" at 15-17. Size should be 18.
-            // The space between 9 and 15 will be undefined or zeros depending on blob impl.
-            // For memory blob, it extends and fills with zeros.
             assert_eq!(size_check, 18);
             let mut reader = Read::new(blob_check, size_check, 20);
             let mut buf = vec![0u8; 18];
@@ -830,28 +785,17 @@ mod tests {
 
             let mut expected = vec![0u8; 18];
             expected[0..10].copy_from_slice(b"0123456789");
-            // Bytes 10-14 are zeros for memory blob
+            // Bytes 10-14 are zeros (gap in memory blob)
             expected[15..18].copy_from_slice(b"abc");
             assert_eq!(buf, expected);
 
-            // Reset for a new scenario: Write that overwrites end of buffer and extends
+            // Test write that overwrites part of buffer but exceeds capacity
             let (blob2, size) = context.open("partition", b"write_straddle2").await.unwrap();
             let writer2 = Write::new(blob2.clone(), size, 10);
-            writer2.write_at("0123456789".as_bytes(), 0).await.unwrap(); // Buffer full: "0123456789", position 0
+            writer2.write_at("0123456789".as_bytes(), 0).await.unwrap();
             assert_eq!(writer2.size().await, 10);
 
-            // Write "ABCDEFGHIJKL" (12 bytes) at offset 5.
-            // write_start = 5. data_len = 12.
-            // buffer_start = 0. buffer_end = 10.
-            // Scenario 1: no (5 != 10)
-            // Scenario 2: can_write_into_buffer?
-            //   write_start (5) >= buffer_start (0) -> true
-            //   (write_start - buffer_start) (5) + data_len (12) = 17 <= capacity (10) -> false
-            // So, Scenario 3.
-            // Flush "0123456789". blob gets it. writer2.inner.position becomes 10.
-            // blob.write_at("ABCDEFGHIJKL", 5).
-            // Underlying blob becomes "01234ABCDEFGHIJKL" (len 17).
-            // writer2.inner.position becomes 5 + 12 = 17.
+            // Write 12 bytes starting at offset 5 - exceeds capacity so flushes then writes directly
             writer2
                 .write_at("ABCDEFGHIJKL".as_bytes(), 5)
                 .await
@@ -877,14 +821,13 @@ mod tests {
             // Test that closing the writer flushes any pending data in the buffer.
             let (blob_orig, size) = context.open("partition", b"write_close").await.unwrap();
             let writer = Write::new(blob_orig.clone(), size, 8);
-            writer.write_at("pending".as_bytes(), 0).await.unwrap(); // 7 bytes, buffered
-                                                                     // Data "pending" is in the writer's buffer, not yet on disk.
+            writer.write_at("pending".as_bytes(), 0).await.unwrap();
             assert_eq!(writer.size().await, 7);
 
-            // Closing the writer should flush and sync the data.
+            // Closing should flush and sync the data
             writer.close().await.unwrap();
 
-            // Reopen and verify
+            // Verify data was persisted
             let (blob_check, size_check) = context.open("partition", b"write_close").await.unwrap();
             assert_eq!(size_check, 7);
             let mut reader = Read::new(blob_check, size_check, 8);
