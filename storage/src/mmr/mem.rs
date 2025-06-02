@@ -738,9 +738,7 @@ mod tests {
             let mut mmr = Mmr::new();
             build_and_check_test_roots_mmr(&mut mmr).await;
             let mut mmr = Mmr::new();
-            let mut hasher = Sha256::default();
-            let mut hasher = Standard::new(&mut hasher);
-            build_batched_and_check_test_roots(&mut hasher, &mut mmr).await;
+            build_batched_and_check_test_roots(&mut mmr).await;
         });
     }
 

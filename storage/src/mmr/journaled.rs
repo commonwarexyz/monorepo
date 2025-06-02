@@ -574,7 +574,7 @@ mod tests {
             let mut mmr = Mmr::init(context.clone(), &mut std_hasher, cfg.clone())
                 .await
                 .unwrap();
-            build_batched_and_check_test_roots_journaled(&mut std_hasher, &mut mmr).await;
+            build_batched_and_check_test_roots_journaled(&mut mmr).await;
         });
     }
 
