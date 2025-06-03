@@ -293,7 +293,7 @@ fn main() {
                 DEFAULT_MESSAGE_BACKLOG,
                 COMPRESSION_LEVEL,
             );
-            let arbiter: handlers::Arbiter<_, ed25519::PrivateKey> = handlers::Arbiter::new(
+            let arbiter: handlers::Arbiter<_, ed25519::PublicKey> = handlers::Arbiter::new(
                 context.with_label("arbiter"),
                 DKG_FREQUENCY,
                 DKG_PHASE_TIMEOUT,
