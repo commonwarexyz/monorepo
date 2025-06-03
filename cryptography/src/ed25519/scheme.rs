@@ -1,4 +1,4 @@
-use crate::{Array, BatchScheme, PrivateKeyExt};
+use crate::{Array, BatchVerifier, PrivateKeyExt};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_utils::{hex, union_unique};
@@ -311,7 +311,7 @@ pub struct Batch {
     verifier: ed25519_consensus::batch::Verifier,
 }
 
-impl BatchScheme<PrivateKey> for Batch {
+impl BatchVerifier<PublicKey> for Batch {
     fn new() -> Self {
         Batch {
             verifier: ed25519_consensus::batch::Verifier::new(),

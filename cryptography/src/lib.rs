@@ -62,8 +62,8 @@ pub trait Signature: Sized + Clone + ReadExt + Encode + PartialEq + Array {}
 
 // /// Implementation that can indicate whether all `Signatures` are correct or that some `Signature`
 // /// is incorrect.
-pub trait BatchScheme<K: PrivateKey> {
-    /// Create a new batch scheme.
+pub trait BatchVerifier<K: PublicKey> {
+    /// Create a new batch verifier.
     fn new() -> Self;
 
     /// Append item to the batch.
@@ -79,7 +79,7 @@ pub trait BatchScheme<K: PrivateKey> {
         &mut self,
         namespace: Option<&[u8]>,
         message: &[u8],
-        public_key: &K::PublicKey,
+        public_key: &K,
         signature: &K::Signature,
     ) -> bool;
 

@@ -29,7 +29,7 @@ use super::primitives::{
     ops,
     variant::{MinPk, Variant},
 };
-use crate::{Array, BatchScheme, PrivateKey as _, PrivateKeyExt};
+use crate::{Array, BatchVerifier, PrivateKey as _, PrivateKeyExt};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     DecodeExt, EncodeFixed, Error as CodecError, FixedSize, Read, ReadExt, Write,
@@ -348,7 +348,7 @@ pub struct Batch {
     signatures: Vec<<MinPk as Variant>::Signature>,
 }
 
-impl BatchScheme<PrivateKey> for Batch {
+impl BatchVerifier<PublicKey> for Batch {
     fn new() -> Self {
         Self {
             publics: Vec::new(),
@@ -383,7 +383,7 @@ impl BatchScheme<PrivateKey> for Batch {
 /// Test vectors sourced from https://github.com/ethereum/bls12-381-tests/releases/tag/v0.1.2.
 #[cfg(test)]
 mod tests {
-    use crate::{bls12381, BatchScheme as _, Signer as _, Verifier as _};
+    use crate::{bls12381, BatchVerifier as _, Signer as _, Verifier as _};
 
     use super::*;
     use commonware_codec::{DecodeExt, Encode};
