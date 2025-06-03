@@ -322,13 +322,13 @@ impl<S: SigTrait, D: Digest> Notarize<S, D> {
     /// Creates a new signed notarize using the provided cryptographic scheme.
     pub fn sign<C: Signer<Signature = S>>(
         namespace: &[u8],
-        scheme: &mut C,
+        signer: &mut C,
         public_key_index: u32,
         proposal: Proposal<D>,
     ) -> Self {
         let notarize_namespace = notarize_namespace(namespace);
         let message = proposal.encode();
-        let signature = scheme.sign(Some(notarize_namespace.as_ref()), &message);
+        let signature = signer.sign(Some(notarize_namespace.as_ref()), &message);
         Self {
             proposal,
             signature: Signature::new(public_key_index, signature),
@@ -509,13 +509,13 @@ impl<S: SigTrait> Nullify<S> {
     /// Creates a new signed nullify using the provided cryptographic scheme.
     pub fn sign<C: Signer<Signature = S>>(
         namespace: &[u8],
-        scheme: &mut C,
+        signer: &mut C,
         public_key_index: u32,
         view: View,
     ) -> Self {
         let nullify_namespace = nullify_namespace(namespace);
         let message = view_message(view);
-        let signature = scheme.sign(Some(nullify_namespace.as_ref()), &message);
+        let signature = signer.sign(Some(nullify_namespace.as_ref()), &message);
         Self {
             view,
             signature: Signature::new(public_key_index, signature),
@@ -686,13 +686,13 @@ impl<S: SigTrait, D: Digest> Finalize<S, D> {
     /// Creates a new signed finalize using the provided cryptographic scheme.
     pub fn sign<C: Signer<Signature = S>>(
         namespace: &[u8],
-        scheme: &mut C,
+        signer: &mut C,
         public_key_index: u32,
         proposal: Proposal<D>,
     ) -> Self {
         let finalize_namespace = finalize_namespace(namespace);
         let message = proposal.encode();
-        let signature = scheme.sign(Some(finalize_namespace.as_ref()), &message);
+        let signature = signer.sign(Some(finalize_namespace.as_ref()), &message);
         Self {
             proposal,
             signature: Signature::new(public_key_index, signature),
