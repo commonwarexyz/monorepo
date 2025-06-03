@@ -100,6 +100,10 @@ pub enum Message<E: Spawner + Metrics, C: Verifier> {
         /// The public key of the peer to reserve.
         public_key: C::PublicKey,
 
+        /// The timestamp of the dialer's handshake. Used to avoid re-use of the same handshake
+        /// message, for example replay attacks.
+        handshake_timestamp: u64,
+
         /// The sender to respond with the reservation.
         reservation: oneshot::Sender<Option<Reservation<E, C::PublicKey>>>,
     },
@@ -185,11 +189,13 @@ impl<E: Spawner + Metrics, C: Verifier> Mailbox<E, C> {
     pub async fn listen(
         &mut self,
         public_key: C::PublicKey,
+        handshake_timestamp: u64,
     ) -> Option<Reservation<E, C::PublicKey>> {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(Message::Listen {
                 public_key,
+                handshake_timestamp,
                 reservation: tx,
             })
             .await

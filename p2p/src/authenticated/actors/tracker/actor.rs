@@ -214,8 +214,10 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Scheme> Actor<E, C> 
                 Message::Listen {
                     public_key,
                     reservation,
+                    handshake_timestamp,
                 } => {
-                    let _ = reservation.send(self.directory.listen(&public_key));
+                    let _ =
+                        reservation.send(self.directory.listen(&public_key, handshake_timestamp));
                 }
                 Message::Block { public_key } => {
                     // Block the peer
@@ -325,7 +327,7 @@ mod tests {
         peer_receiver: &mut mpsc::Receiver<peer::Message<Ed25519>>,
     ) -> tracker::Reservation<Context, PublicKey> {
         let res = mailbox
-            .listen(peer.clone())
+            .listen(peer.clone(), 1)
             .await
             .expect("reservation failed");
         let dialer = false;
@@ -448,7 +450,7 @@ mod tests {
 
             let (peer_mailbox, mut peer_receiver) = peer::Mailbox::test();
 
-            let _res = mailbox.listen(auth_pk.clone()).await.unwrap();
+            let _res = mailbox.listen(auth_pk.clone(), 1).await.unwrap();
             mailbox
                 .connect(auth_pk.clone(), false, peer_mailbox.clone())
                 .await;
@@ -844,22 +846,22 @@ mod tests {
 
             let (_peer_signer, peer_pk) = new_signer_and_pk(1);
 
-            let reservation = mailbox.listen(peer_pk.clone()).await;
+            let reservation = mailbox.listen(peer_pk.clone(), 1).await;
             assert!(reservation.is_none());
 
             oracle.register(0, vec![peer_pk.clone()]).await;
             context.sleep(Duration::from_millis(10)).await; // Allow register to process
 
-            let reservation = mailbox.listen(peer_pk.clone()).await;
+            let reservation = mailbox.listen(peer_pk.clone(), 2).await;
             assert!(reservation.is_some());
 
-            let failed_reservation = mailbox.listen(peer_pk.clone()).await;
+            let failed_reservation = mailbox.listen(peer_pk.clone(), 3).await;
             assert!(failed_reservation.is_none());
 
             drop(reservation.unwrap());
             context.sleep(Duration::from_millis(1_010)).await; // Allow release and rate limit to pass
 
-            let reservation_after_release = mailbox.listen(peer_pk.clone()).await;
+            let reservation_after_release = mailbox.listen(peer_pk.clone(), 4).await;
             assert!(reservation_after_release.is_some());
         });
     }

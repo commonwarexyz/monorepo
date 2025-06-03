@@ -249,8 +249,12 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Directory<
     /// Attempt to reserve a peer for the listener.
     ///
     /// Returns `Some` on success, `None` otherwise.
-    pub fn listen(&mut self, peer: &C::PublicKey) -> Option<Reservation<E, C::PublicKey>> {
-        self.reserve(Metadata::Listener(peer.clone()))
+    pub fn listen(
+        &mut self,
+        peer: &C::PublicKey,
+        handshake_timestamp: u64,
+    ) -> Option<Reservation<E, C::PublicKey>> {
+        self.reserve(Metadata::Listener(peer.clone(), handshake_timestamp))
     }
 
     /// Returns a [`types::BitVec`] for a random peer set.
@@ -343,6 +347,13 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Directory<
             return None;
         }
 
+        // Timestamp too old
+        if let Metadata::Listener(_, timestamp) = &metadata {
+            if *timestamp <= record.timestamp() {
+                return None;
+            }
+        }
+
         // Rate limit
         if self.rate_limiter.check_key(peer).is_err() {
             self.metrics
@@ -352,16 +363,21 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Directory<
             return None;
         }
 
-        // Reserve
-        if record.reserve() {
-            self.metrics.reserved.inc();
-            return Some(Reservation::new(
-                self.context.clone(),
-                metadata,
-                self.sender.clone(),
-            ));
+        // Attempt to reserve the record
+        if !record.reserve() {
+            return None;
         }
-        None
+
+        // Success
+        self.metrics.reserved.inc();
+        if let Metadata::Listener(_, timestamp) = &metadata {
+            record.set_timestamp(*timestamp);
+        }
+        Some(Reservation::new(
+            self.context.clone(),
+            metadata,
+            self.sender.clone(),
+        ))
     }
 
     /// Attempt to delete a record.

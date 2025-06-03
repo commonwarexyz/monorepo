@@ -97,7 +97,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         // Reserve also checks if the peer is authorized.
         let peer = incoming.peer();
         let Some(reservation) = tracker
-            .listen(peer.clone())
+            .listen(peer.clone(), incoming.timestamp())
             .instrument(debug_span!("reserve"))
             .await
         else {

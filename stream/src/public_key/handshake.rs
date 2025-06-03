@@ -107,6 +107,10 @@ impl<C: Scheme> Signed<C> {
         self.info.ephemeral_public_key
     }
 
+    pub fn timestamp(&self) -> u64 {
+        self.info.timestamp
+    }
+
     pub fn verify<E: Clock>(
         &self,
         context: &E,

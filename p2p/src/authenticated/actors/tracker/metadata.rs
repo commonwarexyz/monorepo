@@ -15,7 +15,8 @@ pub enum Metadata<P: Array> {
     ///
     /// Contains:
     /// - The public key of the peer.
-    Listener(P),
+    /// - The timestamp of the handshake of the peer.
+    Listener(P, u64),
 }
 
 impl<P: Array> Metadata<P> {
@@ -23,7 +24,7 @@ impl<P: Array> Metadata<P> {
     pub fn public_key(&self) -> &P {
         match self {
             Metadata::Dialer(public_key, _) => public_key,
-            Metadata::Listener(public_key) => public_key,
+            Metadata::Listener(public_key, _) => public_key,
         }
     }
 }

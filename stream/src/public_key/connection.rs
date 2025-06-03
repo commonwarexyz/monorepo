@@ -25,6 +25,7 @@ pub struct IncomingConnection<C: Scheme, Si: Sink, St: Stream> {
     deadline: SystemTime,
     ephemeral_public_key: x25519::PublicKey,
     peer_public_key: C::PublicKey,
+    handshake_timestamp: u64,
 
     /// Stores the raw bytes of the dialer handshake message.
     /// Necessary for the cipher derivation.
@@ -64,6 +65,7 @@ impl<C: Scheme, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
             deadline,
             ephemeral_public_key: signed_handshake.ephemeral(),
             peer_public_key: signed_handshake.signer(),
+            handshake_timestamp: signed_handshake.timestamp(),
             dialer_handshake_bytes: msg,
         })
     }
@@ -76,6 +78,11 @@ impl<C: Scheme, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
     /// The ephemeral public key of the peer attempting to connect.
     pub fn ephemeral(&self) -> x25519::PublicKey {
         self.ephemeral_public_key
+    }
+
+    /// The timestamp of the dialer's handshake message.
+    pub fn timestamp(&self) -> u64 {
+        self.handshake_timestamp
     }
 }
 
