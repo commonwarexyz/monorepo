@@ -39,7 +39,7 @@ pub struct Engine<
     voter: voter::Actor<E, C, B, V, D, A, R, F, S>,
     voter_mailbox: voter::Mailbox<V, D>,
 
-    batcher: batcher::Actor<E, C, B, V, D, F, S>,
+    batcher: batcher::Actor<E, C::PublicKey, B, V, D, F, S>,
     batcher_mailbox: batcher::Mailbox<C::PublicKey, V, D>,
 
     resolver: resolver::Actor<E, C::PublicKey, B, V, D, S>,

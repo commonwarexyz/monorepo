@@ -11,9 +11,7 @@ use crate::{
     },
     Reporter, ThresholdSupervisor,
 };
-use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, Digest, PrivateKey, PublicKey,
-};
+use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver};
 use commonware_runtime::{
@@ -319,14 +317,14 @@ impl<
 
 pub struct Actor<
     E: Spawner + Metrics + Clock,
-    C: PrivateKey,
-    B: Blocker<PublicKey = C::PublicKey>,
+    C: PublicKey,
+    B: Blocker<PublicKey = C>,
     V: Variant,
     D: Digest,
     R: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<
         Index = View,
-        PublicKey = C::PublicKey,
+        PublicKey = C,
         Identity = V::Public,
         Polynomial = Vec<V::Public>,
     >,
@@ -340,7 +338,7 @@ pub struct Actor<
     skip_timeout: View,
     namespace: Vec<u8>,
 
-    mailbox_receiver: mpsc::Receiver<Message<C::PublicKey, V, D>>,
+    mailbox_receiver: mpsc::Receiver<Message<C, V, D>>,
 
     added: Counter,
     verified: Counter,
@@ -353,20 +351,20 @@ pub struct Actor<
 
 impl<
         E: Spawner + Metrics + Clock,
-        C: PrivateKey,
-        B: Blocker<PublicKey = C::PublicKey>,
+        C: PublicKey,
+        B: Blocker<PublicKey = C>,
         V: Variant,
         D: Digest,
         R: Reporter<Activity = Activity<V, D>>,
         S: ThresholdSupervisor<
             Index = View,
-            PublicKey = C::PublicKey,
+            PublicKey = C,
             Identity = V::Public,
             Polynomial = Vec<V::Public>,
         >,
     > Actor<E, C, B, V, D, R, S>
 {
-    pub fn new(context: E, cfg: Config<B, R, S>) -> (Self, Mailbox<C::PublicKey, V, D>) {
+    pub fn new(context: E, cfg: Config<B, R, S>) -> (Self, Mailbox<C, V, D>) {
         let added = Counter::default();
         let verified = Counter::default();
         let inbound_messages = Family::<Inbound, Counter>::default();
@@ -422,7 +420,7 @@ impl<
     pub fn start(
         mut self,
         consensus: voter::Mailbox<V, D>,
-        receiver: impl Receiver<PublicKey = C::PublicKey>,
+        receiver: impl Receiver<PublicKey = C>,
     ) -> Handle<()> {
         self.context.spawn_ref()(self.run(consensus, receiver))
     }
@@ -430,7 +428,7 @@ impl<
     pub async fn run(
         mut self,
         mut consensus: voter::Mailbox<V, D>,
-        receiver: impl Receiver<PublicKey = C::PublicKey>,
+        receiver: impl Receiver<PublicKey = C>,
     ) {
         // Wrap channel
         let mut receiver: WrappedReceiver<_, Voter<V, D>> = WrappedReceiver::new((), receiver);
@@ -439,7 +437,7 @@ impl<
         let mut current: View = 0;
         let mut finalized: View = 0;
         #[allow(clippy::type_complexity)]
-        let mut work: BTreeMap<u64, Round<C::PublicKey, B, V, D, R, S>> = BTreeMap::new();
+        let mut work: BTreeMap<u64, Round<C, B, V, D, R, S>> = BTreeMap::new();
         let mut initialized = false;
 
         loop {
