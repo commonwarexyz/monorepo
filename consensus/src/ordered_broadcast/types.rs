@@ -11,7 +11,7 @@ use commonware_cryptography::{
         poly::{self, PartialSignature},
         variant::Variant,
     },
-    Digest, PublicKey,
+    Digest, PublicKey, Signer,
 };
 use commonware_utils::{union, Array};
 use futures::channel::oneshot;
@@ -405,17 +405,17 @@ impl<C: PublicKey, V: Variant, D: Digest> Node<C, V, D> {
     ///
     /// This is used by sequencers to create and sign new nodes for broadcast.
     /// For non-genesis nodes (height > 0), a parent with threshold signature must be provided.
-    pub fn sign<T: commonware_cryptography::Signer<PublicKey = C, Signature = C::Signature>>(
+    pub fn sign<S: Signer<PublicKey = C, Signature = C::Signature>>(
         namespace: &[u8],
-        scheme: &mut T,
+        signer: &mut S,
         height: u64,
         payload: D,
         parent: Option<Parent<V, D>>,
     ) -> Self {
         let chunk_namespace = chunk_namespace(namespace);
-        let pub_key = scheme.public_key();
+        let pub_key = signer.public_key();
         let chunk = Chunk::new(pub_key, height, payload);
-        let signature = scheme.sign(Some(chunk_namespace.as_ref()), &chunk.encode());
+        let signature = signer.sign(Some(chunk_namespace.as_ref()), &chunk.encode());
         Self::new(chunk, signature, parent)
     }
 }
@@ -822,7 +822,7 @@ mod tests {
         },
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
-        PrivateKeyExt as _, Signer as _,
+        PrivateKeyExt as _, Signer,
     };
     use commonware_utils::quorum;
     use rand::{rngs::StdRng, SeedableRng};

@@ -83,7 +83,7 @@ mod tests {
     use bytes::Bytes;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
-        PrivateKeyExt as _, Signer as _,
+        PrivateKeyExt as _, Signer,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
@@ -160,20 +160,21 @@ mod tests {
     async fn setup_and_spawn_actor(
         context: &deterministic::Context,
         coordinator: &Coordinator<PublicKey>,
-        scheme: PrivateKey,
+        signer: impl Signer<PublicKey = PublicKey>,
         connection: (Sender<PublicKey>, Receiver<PublicKey>),
         consumer: Consumer<Key, Bytes>,
         producer: Producer<Key, Bytes>,
     ) -> Mailbox<Key> {
+        let public_key = signer.public_key();
         let (engine, mailbox) = Engine::new(
-            context.with_label(&format!("actor_{}", scheme.public_key())),
+            context.with_label(&format!("actor_{}", public_key)),
             Config {
                 coordinator: coordinator.clone(),
                 consumer,
                 producer,
                 mailbox_size: MAILBOX_SIZE,
                 requester_config: commonware_p2p::utils::requester::Config {
-                    public_key: scheme.public_key(),
+                    public_key,
                     rate_limit: governor::Quota::per_second(NZU32!(RATE_LIMIT)),
                     initial: INITIAL_DURATION,
                     timeout: TIMEOUT,
