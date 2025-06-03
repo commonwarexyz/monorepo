@@ -1,24 +1,13 @@
 use crate::{Blob, Error};
+use commonware_utils::StableBuf;
 
 /// A reader that buffers content from a [Blob] to optimize the performance
 /// of a full scan of contents.
 ///
-/// # Performance Considerations
-///
-/// - Choose an appropriate buffer size based on your access patterns:
-///   - Larger buffers (e.g., 1 MB) for sequential scanning of large files
-///   - Medium buffers (e.g., 64 KB) for general purpose usage
-///   - Smaller buffers (e.g., 4 KB) for random access patterns or memory-constrained environments
-///
-/// - For sequential reading, let the buffer's automatic refilling handle data loading
-/// - For random access patterns, use `seek_to` followed by `refill` for best performance
-/// - Use `peek` when you need to examine data without committing to consuming it
-/// - Check `blob_remaining()` to avoid attempting to read past the end of the blob
-///
 /// # Example
 ///
 /// ```
-/// use commonware_runtime::{Runner, Buffer, Blob, Error, Storage, deterministic};
+/// use commonware_runtime::{Runner, buffer::Read, Blob, Error, Storage, deterministic};
 ///
 /// let executor = deterministic::Runner::default();
 /// executor.start(|context| async move {
@@ -30,7 +19,7 @@ use crate::{Blob, Error};
 ///
 ///     // Create a buffer
 ///     let buffer = 64 * 1024;
-///     let mut reader = Buffer::new(blob, size, buffer);
+///     let mut reader = Read::new(blob, size, buffer);
 ///
 ///     // Read data sequentially
 ///     let mut header = [0u8; 16];
@@ -41,11 +30,11 @@ use crate::{Blob, Error};
 ///     assert_eq!(reader.position(), 16);
 /// });
 /// ```
-pub struct Buffer<B: Blob> {
+pub struct Read<B: Blob> {
     /// The underlying blob to read from.
     blob: B,
     /// The buffer storing the data read from the blob.
-    buffer: Vec<u8>,
+    buffer: StableBuf,
     /// The current position in the blob from where the buffer was filled.
     blob_position: u64,
     /// The size of the blob.
@@ -58,17 +47,17 @@ pub struct Buffer<B: Blob> {
     buffer_size: usize,
 }
 
-impl<B: Blob> Buffer<B> {
-    /// Creates a new `Buffer` that reads from the given blob with the specified buffer size.
+impl<B: Blob> Read<B> {
+    /// Creates a new `Read` that reads from the given blob with the specified buffer size.
     ///
     /// # Panics
     ///
     /// Panics if `buffer_size` is zero.
     pub fn new(blob: B, blob_size: u64, buffer_size: usize) -> Self {
-        assert!(buffer_size > 0, "Buffer size must be greater than zero");
+        assert!(buffer_size > 0, "buffer size must be greater than zero");
         Self {
             blob,
-            buffer: vec![0; buffer_size],
+            buffer: vec![0; buffer_size].into(),
             blob_position: 0,
             blob_size,
             buffer_position: 0,
@@ -90,7 +79,7 @@ impl<B: Blob> Buffer<B> {
 
     /// Refills the buffer from the blob starting at the current blob position.
     /// Returns the number of bytes read or an error if the read failed.
-    pub async fn refill(&mut self) -> Result<usize, Error> {
+    async fn refill(&mut self) -> Result<usize, Error> {
         // Update blob position to account for consumed bytes
         self.blob_position += self.buffer_position as u64;
         self.buffer_position = 0;
@@ -139,7 +128,7 @@ impl<B: Blob> Buffer<B> {
 
             // Copy bytes from buffer to output
             buf[bytes_read..(bytes_read + bytes_to_copy)].copy_from_slice(
-                &self.buffer[self.buffer_position..(self.buffer_position + bytes_to_copy)],
+                &self.buffer.as_ref()[self.buffer_position..(self.buffer_position + bytes_to_copy)],
             );
 
             self.buffer_position += bytes_to_copy;
@@ -161,19 +150,28 @@ impl<B: Blob> Buffer<B> {
             return Err(Error::BlobInsufficientLength);
         }
 
-        // Reset buffer state
-        self.blob_position = position;
-        self.buffer_position = 0;
-        self.buffer_valid_len = 0;
+        // Check if the position is within the current buffer
+        let buffer_start = self.blob_position;
+        let buffer_end = self.blob_position + self.buffer_valid_len as u64;
+
+        if position >= buffer_start && position < buffer_end {
+            // Position is within the current buffer, adjust buffer_position
+            self.buffer_position = (position - self.blob_position) as usize;
+        } else {
+            // Position is outside the current buffer, reset buffer state
+            self.blob_position = position;
+            self.buffer_position = 0;
+            self.buffer_valid_len = 0;
+        }
 
         Ok(())
     }
 
-    /// Truncates the blob to the specified size.
+    /// Truncates the blob to the specified len and syncs the blob.
     ///
     /// This may be useful if reading some blob after unclean shutdown.
-    pub async fn truncate(self, size: u64) -> Result<(), Error> {
-        self.blob.truncate(size).await?;
+    pub async fn truncate(self, len: u64) -> Result<(), Error> {
+        self.blob.truncate(len).await?;
         self.blob.sync().await
     }
 }

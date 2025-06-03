@@ -1,13 +1,19 @@
-#[cfg(feature = "iouring")]
+#[cfg(feature = "iouring-storage")]
 use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage};
 
-#[cfg(not(feature = "iouring"))]
+#[cfg(feature = "iouring-network")]
+use crate::{
+    iouring,
+    network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork},
+};
+
+#[cfg(not(feature = "iouring-network"))]
+use crate::network::tokio::{Config as TokioNetworkConfig, Network as TokioNetwork};
+
+#[cfg(not(feature = "iouring-storage"))]
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 
-use crate::network::metered::{Listener as MeteredListener, Network as MeteredNetwork};
-use crate::network::tokio::{
-    Config as TokioNetworkConfig, Listener as TokioListener, Network as TokioNetwork,
-};
+use crate::network::metered::Network as MeteredNetwork;
 use crate::storage::metered::Storage as MeteredStorage;
 use crate::telemetry::metrics::task::Label;
 use crate::{utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
@@ -30,6 +36,9 @@ use std::{
 use tokio::runtime::{Builder, Runtime};
 
 const COMMONWARE_STORAGE_DIRECTORY: &str = "COMMONWARE_STORAGE_DIRECTORY";
+
+#[cfg(feature = "iouring-network")]
+const IOURING_NETWORK_FORCE_POLL: Option<Duration> = Some(Duration::from_millis(100));
 
 #[derive(Debug)]
 struct Metrics {
@@ -54,6 +63,25 @@ impl Metrics {
             metrics.tasks_running.clone(),
         );
         metrics
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct NetworkConfig {
+    /// If Some, explicitly sets TCP_NODELAY on the socket.
+    /// Otherwise uses system default.
+    tcp_nodelay: Option<bool>,
+
+    /// Read/write timeout for network operations.
+    read_write_timeout: Duration,
+}
+
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self {
+            tcp_nodelay: None,
+            read_write_timeout: Duration::from_secs(60),
+        }
     }
 }
 
@@ -87,7 +115,8 @@ pub struct Config {
     /// Tokio sets the default value to 2MB.
     maximum_buffer_size: usize,
 
-    network_cfg: TokioNetworkConfig,
+    /// Network configuration.
+    network_cfg: NetworkConfig,
 }
 
 impl Config {
@@ -101,7 +130,7 @@ impl Config {
             catch_panics: true,
             storage_directory,
             maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
-            network_cfg: TokioNetworkConfig::default(),
+            network_cfg: NetworkConfig::default(),
         }
     }
 
@@ -122,18 +151,13 @@ impl Config {
         self
     }
     /// See [Config]
-    pub fn with_read_timeout(mut self, d: Duration) -> Self {
-        self.network_cfg = self.network_cfg.with_read_timeout(d);
-        self
-    }
-    /// See [Config]
-    pub fn with_write_timeout(mut self, d: Duration) -> Self {
-        self.network_cfg = self.network_cfg.with_write_timeout(d);
+    pub fn with_read_write_timeout(mut self, d: Duration) -> Self {
+        self.network_cfg.read_write_timeout = d;
         self
     }
     /// See [Config]
     pub fn with_tcp_nodelay(mut self, n: Option<bool>) -> Self {
-        self.network_cfg = self.network_cfg.with_tcp_nodelay(n);
+        self.network_cfg.tcp_nodelay = n;
         self
     }
     /// See [Config]
@@ -180,16 +204,12 @@ impl Config {
         self.catch_panics
     }
     /// See [Config]
-    pub fn read_timeout(&self) -> Duration {
-        self.network_cfg.read_timeout()
-    }
-    /// See [Config]
-    pub fn write_timeout(&self) -> Duration {
-        self.network_cfg.write_timeout()
+    pub fn read_write_timeout(&self) -> Duration {
+        self.network_cfg.read_write_timeout
     }
     /// See [Config]
     pub fn tcp_nodelay(&self) -> Option<bool> {
-        self.network_cfg.tcp_nodelay()
+        self.network_cfg.tcp_nodelay
     }
     /// See [Config]
     pub fn storage_directory(&self) -> &PathBuf {
@@ -257,27 +277,53 @@ impl crate::Runner for Runner {
             .expect("failed to create Tokio runtime");
         let (signaler, signal) = Signaler::new();
 
-        // Initialize storage
-        #[cfg(feature = "iouring")]
-        let storage = MeteredStorage::new(
-            IoUringStorage::start(IoUringConfig {
-                storage_directory: self.cfg.storage_directory.clone(),
-                ring_config: Default::default(),
-            }),
-            runtime_registry,
-        );
-        #[cfg(not(feature = "iouring"))]
-        let storage = MeteredStorage::new(
-            TokioStorage::new(TokioStorageConfig::new(
-                self.cfg.storage_directory.clone(),
-                self.cfg.maximum_buffer_size,
-            )),
-            runtime_registry,
-        );
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "iouring-storage")] {
+                let iouring_registry = runtime_registry.sub_registry_with_prefix("iouring_storage");
+                let storage = MeteredStorage::new(
+                    IoUringStorage::start(IoUringConfig {
+                        storage_directory: self.cfg.storage_directory.clone(),
+                        ring_config: Default::default(),
+                    }, iouring_registry),
+                    runtime_registry,
+                );
+            } else {
+                let storage = MeteredStorage::new(
+                    TokioStorage::new(TokioStorageConfig::new(
+                        self.cfg.storage_directory.clone(),
+                        self.cfg.maximum_buffer_size,
+                    )),
+                    runtime_registry,
+                );
+            }
+        }
 
-        // Initialize network
-        let network = TokioNetwork::from(self.cfg.network_cfg.clone());
-        let network = MeteredNetwork::new(network, runtime_registry);
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "iouring-network")] {
+                let iouring_registry = runtime_registry.sub_registry_with_prefix("iouring_network");
+                let config = IoUringNetworkConfig {
+                    tcp_nodelay: self.cfg.network_cfg.tcp_nodelay,
+                    iouring_config: iouring::Config {
+                        op_timeout: Some(self.cfg.network_cfg.read_write_timeout),
+                        force_poll: IOURING_NETWORK_FORCE_POLL,
+                        shutdown_timeout: Some(self.cfg.network_cfg.read_write_timeout),
+                        ..Default::default()
+                    },
+                };
+                let network = MeteredNetwork::new(
+                    IoUringNetwork::start(config, iouring_registry).unwrap(),
+                runtime_registry,
+            );
+        } else {
+            let config = TokioNetworkConfig::default().with_read_timeout(self.cfg.network_cfg.read_write_timeout)
+                .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
+                .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay);
+                let network = MeteredNetwork::new(
+                    TokioNetwork::from(config),
+                    runtime_registry,
+                );
+            }
+        }
 
         // Initialize executor
         let executor = Arc::new(Executor {
@@ -309,11 +355,21 @@ impl crate::Runner for Runner {
     }
 }
 
-#[cfg(feature = "iouring")]
-type Storage = MeteredStorage<IoUringStorage>;
+cfg_if::cfg_if! {
+    if #[cfg(feature = "iouring-storage")] {
+        type Storage = MeteredStorage<IoUringStorage>;
+    } else {
+        type Storage = MeteredStorage<TokioStorage>;
+    }
+}
 
-#[cfg(not(feature = "iouring"))]
-type Storage = MeteredStorage<TokioStorage>;
+cfg_if::cfg_if! {
+    if #[cfg(feature = "iouring-network")] {
+        type Network = MeteredNetwork<IoUringNetwork>;
+    } else {
+        type Network = MeteredNetwork<TokioNetwork>;
+    }
+}
 
 /// Implementation of [crate::Spawner], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `tokio`
@@ -323,7 +379,7 @@ pub struct Context {
     spawned: bool,
     executor: Arc<Executor>,
     storage: Storage,
-    network: MeteredNetwork<TokioNetwork>,
+    network: Network,
 }
 
 impl Clone for Context {
@@ -349,18 +405,7 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
-        let label = Label::future(self.name.clone());
-        self.executor
-            .metrics
-            .tasks_spawned
-            .get_or_create(&label)
-            .inc();
-        let gauge = self
-            .executor
-            .metrics
-            .tasks_running
-            .get_or_create(&label)
-            .clone();
+        let (_, gauge) = spawn_metrics!(self, future);
 
         // Set up the task
         let catch_panics = self.executor.cfg.catch_panics;
@@ -383,18 +428,7 @@ impl crate::Spawner for Context {
         self.spawned = true;
 
         // Get metrics
-        let label = Label::future(self.name.clone());
-        self.executor
-            .metrics
-            .tasks_spawned
-            .get_or_create(&label)
-            .inc();
-        let gauge = self
-            .executor
-            .metrics
-            .tasks_running
-            .get_or_create(&label)
-            .clone();
+        let (_, gauge) = spawn_metrics!(self, future);
 
         // Set up the task
         let executor = self.executor.clone();
@@ -416,24 +450,9 @@ impl crate::Spawner for Context {
         assert!(!self.spawned, "already spawned");
 
         // Get metrics
-        let label = if dedicated {
-            Label::blocking_dedicated(self.name.clone())
-        } else {
-            Label::blocking_shared(self.name.clone())
-        };
-        self.executor
-            .metrics
-            .tasks_spawned
-            .get_or_create(&label)
-            .inc();
-        let gauge = self
-            .executor
-            .metrics
-            .tasks_running
-            .get_or_create(&label)
-            .clone();
+        let (_, gauge) = spawn_metrics!(self, blocking, dedicated);
 
-        // Initialize the blocking task using the new function
+        // Set up the task
         let executor = self.executor.clone();
         let (f, handle) = Handle::init_blocking(|| f(self), gauge, executor.cfg.catch_panics);
 
@@ -444,6 +463,33 @@ impl crate::Spawner for Context {
             executor.runtime.spawn_blocking(f);
         }
         handle
+    }
+
+    fn spawn_blocking_ref<F, T>(&mut self, dedicated: bool) -> impl FnOnce(F) -> Handle<T> + 'static
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        // Ensure a context only spawns one task
+        assert!(!self.spawned, "already spawned");
+        self.spawned = true;
+
+        // Get metrics
+        let (_, gauge) = spawn_metrics!(self, blocking, dedicated);
+
+        // Set up the task
+        let executor = self.executor.clone();
+        move |f: F| {
+            let (f, handle) = Handle::init_blocking(f, gauge, executor.cfg.catch_panics);
+
+            // Spawn the blocking task
+            if dedicated {
+                std::thread::spawn(f);
+            } else {
+                executor.runtime.spawn_blocking(f);
+            }
+            handle
+        }
     }
 
     fn stop(&self, value: i32) {
@@ -537,7 +583,7 @@ impl GClock for Context {
 impl ReasonablyRealtime for Context {}
 
 impl crate::Network for Context {
-    type Listener = MeteredListener<TokioListener>;
+    type Listener = <Network as crate::Network>::Listener;
 
     async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, Error> {
         self.network.bind(socket).await

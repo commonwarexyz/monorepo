@@ -1,15 +1,15 @@
 use super::{
-    actors::{resolver, voter},
+    actors::{batcher, resolver, voter},
     config::Config,
     types::{Activity, Context, View},
 };
 use crate::{Automaton, Relay, Reporter, ThresholdSupervisor};
 use commonware_cryptography::{
-    bls12381::primitives::{group, poly, variant::Variant},
+    bls12381::primitives::{group, variant::Variant},
     Digest, Scheme,
 };
 use commonware_macros::select;
-use commonware_p2p::{Receiver, Sender};
+use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
@@ -19,30 +19,37 @@ use tracing::debug;
 pub struct Engine<
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
     C: Scheme,
+    B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     D: Digest,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<
-        Seed = V::Signature,
         Index = View,
-        Share = group::Share,
-        Identity = poly::Public<V>,
         PublicKey = C::PublicKey,
+        Identity = V::Public,
+        Seed = V::Signature,
+        Polynomial = Vec<V::Public>,
+        Share = group::Share,
     >,
 > {
     context: E,
 
-    voter: voter::Actor<E, C, V, D, A, R, F, S>,
+    voter: voter::Actor<E, C, B, V, D, A, R, F, S>,
     voter_mailbox: voter::Mailbox<V, D>,
-    resolver: resolver::Actor<E, C, V, D, S>,
+
+    batcher: batcher::Actor<E, C, B, V, D, F, S>,
+    batcher_mailbox: batcher::Mailbox<C::PublicKey, V, D>,
+
+    resolver: resolver::Actor<E, C, B, V, D, S>,
     resolver_mailbox: resolver::Mailbox<V, D>,
 }
 
 impl<
         E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
         C: Scheme,
+        B: Blocker<PublicKey = C::PublicKey>,
         V: Variant,
         D: Digest,
         A: Automaton<Context = Context<D>, Digest = D>,
@@ -52,21 +59,37 @@ impl<
             Seed = V::Signature,
             Index = View,
             Share = group::Share,
-            Identity = poly::Public<V>,
+            Polynomial = Vec<V::Public>,
+            Identity = V::Public,
             PublicKey = C::PublicKey,
         >,
-    > Engine<E, C, V, D, A, R, F, S>
+    > Engine<E, C, B, V, D, A, R, F, S>
 {
     /// Create a new `threshold-simplex` consensus engine.
-    pub fn new(context: E, cfg: Config<C, V, D, A, R, F, S>) -> Self {
+    pub fn new(context: E, cfg: Config<C, B, V, D, A, R, F, S>) -> Self {
         // Ensure configuration is valid
         cfg.assert();
 
+        // Create batcher
+        let (batcher, batcher_mailbox) = batcher::Actor::new(
+            context.with_label("batcher"),
+            batcher::Config {
+                blocker: cfg.blocker.clone(),
+                reporter: cfg.reporter.clone(),
+                supervisor: cfg.supervisor.clone(),
+                namespace: cfg.namespace.clone(),
+                mailbox_size: cfg.mailbox_size,
+                activity_timeout: cfg.activity_timeout,
+                skip_timeout: cfg.skip_timeout,
+            },
+        );
+
         // Create voter
         let (voter, voter_mailbox) = voter::Actor::new(
-            context.clone(),
+            context.with_label("voter"),
             voter::Config {
                 crypto: cfg.crypto.clone(),
+                blocker: cfg.blocker.clone(),
                 automaton: cfg.automaton,
                 relay: cfg.relay,
                 reporter: cfg.reporter,
@@ -79,16 +102,17 @@ impl<
                 notarization_timeout: cfg.notarization_timeout,
                 nullify_retry: cfg.nullify_retry,
                 activity_timeout: cfg.activity_timeout,
-                skip_timeout: cfg.skip_timeout,
                 replay_concurrency: cfg.replay_concurrency,
                 replay_buffer: cfg.replay_buffer,
+                write_buffer: cfg.write_buffer,
             },
         );
 
         // Create resolver
         let (resolver, resolver_mailbox) = resolver::Actor::new(
-            context.clone(),
+            context.with_label("resolver"),
             resolver::Config {
+                blocker: cfg.blocker,
                 crypto: cfg.crypto,
                 supervisor: cfg.supervisor,
                 mailbox_size: cfg.mailbox_size,
@@ -107,6 +131,10 @@ impl<
 
             voter,
             voter_mailbox,
+
+            batcher,
+            batcher_mailbox,
+
             resolver,
             resolver_mailbox,
         }
@@ -117,7 +145,11 @@ impl<
     /// This will also rebuild the state of the engine from provided `Journal`.
     pub fn start(
         self,
-        voter_network: (
+        pending_network: (
+            impl Sender<PublicKey = C::PublicKey>,
+            impl Receiver<PublicKey = C::PublicKey>,
+        ),
+        recovered_network: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
@@ -128,12 +160,16 @@ impl<
     ) -> Handle<()> {
         self.context
             .clone()
-            .spawn(|_| self.run(voter_network, resolver_network))
+            .spawn(|_| self.run(pending_network, recovered_network, resolver_network))
     }
 
     async fn run(
         self,
-        voter_network: (
+        pending_network: (
+            impl Sender<PublicKey = C::PublicKey>,
+            impl Receiver<PublicKey = C::PublicKey>,
+        ),
+        recovered_network: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
@@ -142,11 +178,11 @@ impl<
             impl Receiver<PublicKey = C::PublicKey>,
         ),
     ) {
-        // Start the voter
-        let (voter_sender, voter_receiver) = voter_network;
-        let mut voter_task = self
-            .voter
-            .start(self.resolver_mailbox, voter_sender, voter_receiver);
+        // Start the batcher
+        let (pending_sender, pending_receiver) = pending_network;
+        let mut batcher_task = self
+            .batcher
+            .start(self.voter_mailbox.clone(), pending_receiver);
 
         // Start the resolver
         let (resolver_sender, resolver_receiver) = resolver_network;
@@ -154,15 +190,32 @@ impl<
             self.resolver
                 .start(self.voter_mailbox, resolver_sender, resolver_receiver);
 
+        // Start the voter
+        let (recovered_sender, recovered_receiver) = recovered_network;
+        let mut voter_task = self.voter.start(
+            self.batcher_mailbox,
+            self.resolver_mailbox,
+            pending_sender,
+            recovered_sender,
+            recovered_receiver,
+        );
+
         // Wait for the resolver or voter to finish
         select! {
             _ = &mut voter_task => {
                 debug!("voter finished");
                 resolver_task.abort();
+                batcher_task.abort();
+            },
+            _ = &mut batcher_task => {
+                debug!("batcher finished");
+                voter_task.abort();
+                resolver_task.abort();
             },
             _ = &mut resolver_task => {
                 debug!("resolver finished");
                 voter_task.abort();
+                batcher_task.abort();
             },
         }
     }

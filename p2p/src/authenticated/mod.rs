@@ -298,20 +298,17 @@ mod tests {
                 let addresses = addresses.clone();
                 move |context| async move {
                     // Wait for all peers to send their identity
-                    let acker = context
-                        .clone()
-                        .with_label("receiver")
-                        .spawn(move |_| async move {
-                            let mut received = HashSet::new();
-                            while received.len() < n - 1 {
-                                // Ensure message equals sender identity
-                                let (sender, message) = receiver.recv().await.unwrap();
-                                assert_eq!(sender.as_ref(), message.as_ref());
+                    let acker = context.with_label("receiver").spawn(move |_| async move {
+                        let mut received = HashSet::new();
+                        while received.len() < n - 1 {
+                            // Ensure message equals sender identity
+                            let (sender, message) = receiver.recv().await.unwrap();
+                            assert_eq!(sender.as_ref(), message.as_ref());
 
-                                // Add to received set
-                                received.insert(sender);
-                            }
-                        });
+                            // Add to received set
+                            received.insert(sender);
+                        }
+                    });
 
                     // Send identity to all peers
                     let msg = signer.public_key();

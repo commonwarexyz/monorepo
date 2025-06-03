@@ -1,10 +1,10 @@
 //! Implementations of the `Storage` trait that can be used by the runtime.
 pub mod audited;
-#[cfg(feature = "iouring")]
+#[cfg(feature = "iouring-storage")]
 pub mod iouring;
 pub mod memory;
 pub mod metered;
-#[cfg(all(not(target_arch = "wasm32"), not(feature = "iouring")))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "iouring-storage")))]
 pub mod tokio;
 
 #[cfg(test)]
@@ -46,7 +46,8 @@ pub(crate) mod tests {
         let read = blob.read_at(vec![0; 11], 0).await.unwrap();
 
         assert_eq!(
-            read, b"hello world",
+            read.as_ref(),
+            b"hello world",
             "Blob content does not match expected value"
         );
     }
@@ -123,7 +124,11 @@ pub(crate) mod tests {
         write_task.await.unwrap();
         let buffer = read_task.await.unwrap();
 
-        assert_eq!(buffer, b"concurrent write", "Concurrent access failed");
+        assert_eq!(
+            buffer.as_ref(),
+            b"concurrent write",
+            "Concurrent access failed"
+        );
     }
 
     /// Test handling of large data sizes.
@@ -139,7 +144,7 @@ pub(crate) mod tests {
 
         let read = blob.read_at(vec![0; 10 * 1024 * 1024], 0).await.unwrap();
 
-        assert_eq!(read, large_data, "Large data read/write failed");
+        assert_eq!(read.as_ref(), large_data, "Large data read/write failed");
     }
 
     /// Test overwriting data in a blob.
@@ -163,7 +168,8 @@ pub(crate) mod tests {
         let read = blob.read_at(vec![0; 17], 0).await.unwrap();
 
         assert_eq!(
-            read, b"initial overwrite",
+            read.as_ref(),
+            b"initial overwrite",
             "Data was not overwritten correctly"
         );
     }
@@ -209,7 +215,11 @@ pub(crate) mod tests {
 
         // Read back the data
         let read = blob.read_at(vec![0; 11], 10_000).await.unwrap();
-        assert_eq!(read, b"offset data", "Data at large offset is incorrect");
+        assert_eq!(
+            read.as_ref(),
+            b"offset data",
+            "Data at large offset is incorrect"
+        );
     }
 
     /// Test appending data to a blob.
@@ -231,7 +241,7 @@ pub(crate) mod tests {
 
         // Read back the data
         let read = blob.read_at(vec![0; 11], 0).await.unwrap();
-        assert_eq!(read, b"firstsecond", "Appended data is incorrect");
+        assert_eq!(read.as_ref(), b"firstsecond", "Appended data is incorrect");
     }
 
     /// Test reading and writing with interleaved offsets.
@@ -248,10 +258,10 @@ pub(crate) mod tests {
 
         // Read back the data
         let read = blob.read_at(vec![0; 5], 0).await.unwrap();
-        assert_eq!(read, b"first", "Data at offset 0 is incorrect");
+        assert_eq!(read.as_ref(), b"first", "Data at offset 0 is incorrect");
 
         let read = blob.read_at(vec![0; 6], 10).await.unwrap();
-        assert_eq!(read, b"second", "Data at offset 10 is incorrect");
+        assert_eq!(read.as_ref(), b"second", "Data at offset 10 is incorrect");
     }
 
     /// Test writing and reading large data in chunks.
@@ -277,10 +287,10 @@ pub(crate) mod tests {
         }
 
         // Read back the data in chunks
-        let mut read = vec![0u8; chunk_size];
+        let mut read = vec![0u8; chunk_size].into();
         for i in 0..num_chunks {
             read = blob.read_at(read, (i * chunk_size) as u64).await.unwrap();
-            assert_eq!(read, data, "Chunk {} is incorrect", i);
+            assert_eq!(read.as_ref(), data, "Chunk {} is incorrect", i);
         }
     }
 
@@ -319,7 +329,11 @@ pub(crate) mod tests {
 
         // Read back the data
         let read = blob.read_at(vec![0; 7], 0).await.unwrap();
-        assert_eq!(read, b"overmap", "Overlapping writes are incorrect");
+        assert_eq!(
+            read.as_ref(),
+            b"overmap",
+            "Overlapping writes are incorrect"
+        );
     }
 
     async fn test_truncate_then_open<S>(storage: &S)
@@ -351,6 +365,6 @@ pub(crate) mod tests {
 
         // Read back the data
         let read = blob.read_at(vec![0; 5], 0).await.unwrap();
-        assert_eq!(read, b"hello", "Truncated data is incorrect");
+        assert_eq!(read.as_ref(), b"hello", "Truncated data is incorrect");
     }
 }

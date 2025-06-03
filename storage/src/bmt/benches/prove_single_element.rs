@@ -1,4 +1,4 @@
-use commonware_cryptography::{Hasher, Sha256};
+use commonware_cryptography::{sha256, Digest as _, Hasher, Sha256};
 use commonware_storage::bmt::Builder;
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
@@ -12,7 +12,7 @@ fn bench_prove_single_element(c: &mut Criterion) {
         let mut queries = Vec::with_capacity(n);
         let mut sampler = StdRng::seed_from_u64(0);
         for pos in 0..n {
-            let element = Sha256::random(&mut sampler);
+            let element = sha256::Digest::random(&mut sampler);
             builder.add(&element);
             queries.push((pos as u32, element));
         }

@@ -9,6 +9,8 @@ mod fixed_read_random;
 mod fixed_read_sequential;
 mod fixed_replay;
 
+const WRITE_BUFFER: usize = 1_024 * 1024; // 1MB
+
 criterion_main!(
     fixed_append::benches,
     fixed_read_random::benches,
@@ -26,6 +28,7 @@ async fn get_journal<const ITEM_SIZE: usize>(
     let journal_config = JConfig {
         partition: partition_name.to_string(),
         items_per_blob,
+        write_buffer: WRITE_BUFFER,
     };
     Journal::init(context, journal_config).await.unwrap()
 }

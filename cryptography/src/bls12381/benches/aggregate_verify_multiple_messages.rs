@@ -4,7 +4,7 @@ use rand::{thread_rng, Rng};
 
 fn benchmark_aggregate_verify_multiple_messages(c: &mut Criterion) {
     let namespace = b"namespace";
-    for n in [2, 10, 100, 1000, 10000, 50000].into_iter() {
+    for n in [2, 10, 100, 1000, 10000].into_iter() {
         let mut msgs = Vec::with_capacity(n);
         for _ in 0..n {
             let mut msg = [0u8; 32];
@@ -15,7 +15,7 @@ fn benchmark_aggregate_verify_multiple_messages(c: &mut Criterion) {
             .iter()
             .map(|msg| (Some(&namespace[..]), msg.as_ref()))
             .collect::<Vec<_>>();
-        for concurrency in [1, 2, 4, 8].into_iter() {
+        for concurrency in [1, 8].into_iter() {
             c.bench_function(
                 &format!("{}/conc={} msgs={}", module_path!(), concurrency, n,),
                 |b| {

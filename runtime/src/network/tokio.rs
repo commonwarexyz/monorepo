@@ -1,5 +1,5 @@
 use crate::Error;
-use commonware_utils::{StableBuf, StableBufMut};
+use commonware_utils::StableBuf;
 use std::{net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
@@ -18,9 +18,9 @@ pub struct Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send<B: StableBuf>(&mut self, msg: B) -> Result<(), Error> {
+    async fn send(&mut self, msg: impl Into<StableBuf> + Send) -> Result<(), Error> {
         // Time out if we take too long to write
-        timeout(self.write_timeout, self.sink.write_all(msg.as_ref()))
+        timeout(self.write_timeout, self.sink.write_all(msg.into().as_ref()))
             .await
             .map_err(|_| Error::Timeout)?
             .map_err(|_| Error::SendFailed)?;
@@ -35,13 +35,14 @@ pub struct Stream {
 }
 
 impl crate::Stream for Stream {
-    async fn recv<B: StableBufMut>(&mut self, mut buf: B) -> Result<B, Error> {
-        if buf.len() == 0 {
+    async fn recv(&mut self, buf: impl Into<StableBuf> + Send) -> Result<StableBuf, Error> {
+        let mut buf = buf.into();
+        if buf.is_empty() {
             return Ok(buf);
         }
 
         // Time out if we take too long to read
-        timeout(self.read_timeout, self.stream.read_exact(buf.deref_mut()))
+        timeout(self.read_timeout, self.stream.read_exact(buf.as_mut()))
             .await
             .map_err(|_| Error::Timeout)?
             .map_err(|_| Error::RecvFailed)?;
@@ -93,7 +94,7 @@ impl crate::Listener for Listener {
 
 /// Configuration for the tokio [Network] implementation of the [crate::Network] trait.
 #[derive(Clone, Debug)]
-pub(crate) struct Config {
+pub struct Config {
     /// Whether or not to disable Nagle's algorithm.
     ///
     /// The algorithm combines a series of small network packets into a single packet
@@ -111,6 +112,7 @@ pub(crate) struct Config {
     write_timeout: Duration,
 }
 
+#[cfg_attr(feature = "iouring-network", allow(dead_code))]
 impl Config {
     // Setters
     /// See [Config]
@@ -155,7 +157,8 @@ impl Default for Config {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct Network {
+/// [crate::Network] implementation that uses the [tokio] runtime.
+pub struct Network {
     cfg: Config,
 }
 
@@ -224,6 +227,19 @@ mod tests {
     #[tokio::test]
     async fn test_trait() {
         tests::test_network_trait(|| {
+            TokioNetwork::Network::from(
+                TokioNetwork::Config::default()
+                    .with_read_timeout(Duration::from_secs(15))
+                    .with_write_timeout(Duration::from_secs(15)),
+            )
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn stress_test_trait() {
+        tests::stress_test_network_trait(|| {
             TokioNetwork::Network::from(
                 TokioNetwork::Config::default()
                     .with_read_timeout(Duration::from_secs(15))

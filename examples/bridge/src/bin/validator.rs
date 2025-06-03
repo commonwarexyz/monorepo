@@ -187,14 +187,20 @@ fn main() {
         //
         // If you want to maximize the number of views per second, increase the rate limit
         // for this channel.
-        let (voter_sender, voter_receiver) = network.register(
+        let (pending_sender, pending_receiver) = network.register(
             0,
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
             Some(3),
         );
-        let (resolver_sender, resolver_receiver) = network.register(
+        let (recovered_sender, recovered_receiver) = network.register(
             1,
+            Quota::per_second(NZU32!(10)),
+            256, // 256 messages in flight
+            Some(3),
+        );
+        let (resolver_sender, resolver_receiver) = network.register(
+            2,
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
             Some(3),
@@ -221,6 +227,7 @@ fn main() {
             context.with_label("engine"),
             threshold_simplex::Config {
                 crypto: signer.clone(),
+                blocker: oracle,
                 automaton: mailbox.clone(),
                 relay: mailbox.clone(),
                 reporter: mailbox.clone(),
@@ -231,6 +238,7 @@ fn main() {
                 mailbox_size: 1024,
                 replay_concurrency: 1,
                 replay_buffer: 1024 * 1024,
+                write_buffer: 1024 * 1024,
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(10),
@@ -246,7 +254,8 @@ fn main() {
         // Start consensus
         network.start();
         engine.start(
-            (voter_sender, voter_receiver),
+            (pending_sender, pending_receiver),
+            (recovered_sender, recovered_receiver),
             (resolver_sender, resolver_receiver),
         );
 

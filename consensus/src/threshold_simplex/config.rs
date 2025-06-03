@@ -4,21 +4,34 @@ use commonware_cryptography::{
     bls12381::primitives::{group, variant::Variant},
     Digest, Scheme,
 };
+use commonware_p2p::Blocker;
 use governor::Quota;
 use std::time::Duration;
 
 /// Configuration for the consensus engine.
 pub struct Config<
     C: Scheme,
+    B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     D: Digest,
     A: Automaton<Context = Context<D>>,
     R: Relay,
     F: Reporter<Activity = Activity<V, D>>,
-    S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
+    S: ThresholdSupervisor<
+        Index = View,
+        Identity = V::Public,
+        Seed = V::Signature,
+        PublicKey = C::PublicKey,
+        Share = group::Share,
+    >,
 > {
     /// Cryptographic primitives.
     pub crypto: C,
+
+    /// Blocker for the network.
+    ///
+    /// Blocking is handled by [commonware_p2p].
+    pub blocker: B,
 
     /// Automaton for the consensus engine.
     pub automaton: A,
@@ -51,6 +64,9 @@ pub struct Config<
     /// Number of bytes to buffer when replaying during startup.
     pub replay_buffer: usize,
 
+    /// The size of the write buffer to use for each blob in the journal.
+    pub write_buffer: usize,
+
     /// Amount of time to wait for a leader to propose a payload
     /// in a view.
     pub leader_timeout: Duration,
@@ -82,7 +98,7 @@ pub struct Config<
 
     /// Maximum rate of requests to send to a given peer.
     ///
-    /// Inbound rate limiting is handled by `commonware-p2p`.
+    /// Inbound rate limiting is handled by [commonware_p2p].
     pub fetch_rate_per_peer: Quota,
 
     /// Number of concurrent requests to make at once.
@@ -91,13 +107,20 @@ pub struct Config<
 
 impl<
         C: Scheme,
+        B: Blocker<PublicKey = C::PublicKey>,
         V: Variant,
         D: Digest,
         A: Automaton<Context = Context<D>>,
         R: Relay,
         F: Reporter<Activity = Activity<V, D>>,
-        S: ThresholdSupervisor<Seed = V::Signature, Index = View, Share = group::Share>,
-    > Config<C, V, D, A, R, F, S>
+        S: ThresholdSupervisor<
+            Seed = V::Signature,
+            Index = View,
+            Share = group::Share,
+            Identity = V::Public,
+            PublicKey = C::PublicKey,
+        >,
+    > Config<C, B, V, D, A, R, F, S>
 {
     /// Assert enforces that all configuration values are valid.
     pub fn assert(&self) {

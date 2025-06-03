@@ -56,12 +56,6 @@ impl Signer for Ed25519 {
         Self { signer, verifier }
     }
 
-    fn from(private_key: PrivateKey) -> Option<Self> {
-        let signer = private_key.key.clone();
-        let verifier = signer.verification_key();
-        Some(Self { signer, verifier })
-    }
-
     fn private_key(&self) -> PrivateKey {
         PrivateKey::from(self.signer.clone())
     }
@@ -79,6 +73,13 @@ impl Signer for Ed25519 {
     }
 }
 
+impl From<PrivateKey> for Ed25519 {
+    fn from(private_key: PrivateKey) -> Self {
+        let signer = private_key.key.clone();
+        let verifier = signer.verification_key();
+        Self { signer, verifier }
+    }
+}
 /// Ed25519 Batch Verifier.
 pub struct Ed25519Batch {
     verifier: ed25519_consensus::batch::Verifier,
@@ -365,7 +366,7 @@ mod tests {
         message: &[u8],
         signature: Signature,
     ) {
-        let mut signer = <Ed25519 as Signer>::from(private_key).unwrap();
+        let mut signer = Ed25519::from(private_key);
         let computed_signature = signer.sign(None, message);
         assert_eq!(computed_signature, signature);
         assert!(Ed25519::verify(
@@ -726,5 +727,42 @@ mod tests {
             &Signature::decode(bad_signature.as_ref()).unwrap()
         ));
         assert!(!batch.verify(&mut rand::thread_rng()));
+    }
+
+    #[test]
+    fn test_zero_signature_fails() {
+        let (_, public_key, message, _) = vector_1();
+        let zero_sig = Signature::decode(vec![0u8; Signature::SIZE].as_ref()).unwrap();
+        assert!(!Ed25519::verify(None, &message, &public_key, &zero_sig));
+    }
+
+    #[test]
+    fn test_high_s_fails() {
+        let (_, public_key, message, signature) = vector_1();
+        let mut bad_signature = signature.to_vec();
+        bad_signature[63] |= 0x80; // make S non-canonical
+        let bad_signature = Signature::decode(bad_signature.as_ref()).unwrap();
+        assert!(!Ed25519::verify(
+            None,
+            &message,
+            &public_key,
+            &bad_signature
+        ));
+    }
+
+    #[test]
+    fn test_invalid_r_fails() {
+        let (_, public_key, message, signature) = vector_1();
+        let mut bad_signature = signature.to_vec();
+        for b in bad_signature.iter_mut().take(32) {
+            *b = 0xff; // invalid R component
+        }
+        let bad_signature = Signature::decode(bad_signature.as_ref()).unwrap();
+        assert!(!Ed25519::verify(
+            None,
+            &message,
+            &public_key,
+            &bad_signature
+        ));
     }
 }

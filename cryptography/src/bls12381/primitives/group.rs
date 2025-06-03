@@ -572,6 +572,12 @@ impl Display for G1 {
     }
 }
 
+impl AsRef<G1> for G1 {
+    fn as_ref(&self) -> &Self {
+        self
+    }
+}
+
 impl G2 {
     /// Encodes the G2 element into a slice.
     fn as_slice(&self) -> [u8; Self::SIZE] {
@@ -757,6 +763,12 @@ impl Debug for G2 {
 impl Display for G2 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", hex(&self.as_slice()))
+    }
+}
+
+impl AsRef<G2> for G2 {
+    fn as_ref(&self) -> &Self {
+        self
     }
 }
 

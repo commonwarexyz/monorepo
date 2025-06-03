@@ -13,7 +13,7 @@ pub use bls12381::Bls12381;
 pub mod ed25519;
 pub use ed25519::{Ed25519, Ed25519Batch};
 pub mod sha256;
-pub use sha256::{hash, Sha256};
+pub use sha256::{hash, CoreSha256, Sha256};
 pub mod secp256r1;
 pub use secp256r1::Secp256r1;
 
@@ -43,7 +43,7 @@ pub trait Verifier: Specification + Clone + Send + Sync + 'static {
 }
 
 /// Implementation that can sign a message with a `PrivateKey`.
-pub trait Signer: Specification + Clone + Send + Sync + 'static {
+pub trait Signer: From<Self::PrivateKey> + Specification + Clone + Send + Sync + 'static {
     /// Private key used for signing.
     type PrivateKey: Array;
 
@@ -60,9 +60,6 @@ pub trait Signer: Specification + Clone + Send + Sync + 'static {
     /// a message on the network layer can't accidentally spend funds on the execution layer). See
     /// [union_unique](commonware_utils::union_unique) for details.
     fn sign(&mut self, namespace: Option<&[u8]>, message: &[u8]) -> Self::Signature;
-
-    /// Returns a new instance of the scheme from a secret key.
-    fn from(private_key: Self::PrivateKey) -> Option<Self>;
 
     /// Returns a new instance of the scheme from a provided seed.
     ///
@@ -129,19 +126,32 @@ pub trait BatchScheme: Specification {
 
 /// Specializes the [commonware_utils::Array] trait with the Copy trait for cryptographic digests
 /// (which should be cheap to clone).
-pub trait Digest: Array + Copy {}
+pub trait Digest: Array + Copy {
+    /// Generate a random digest.
+    ///
+    /// # Warning
+    ///
+    /// This function is typically used for testing and is not recommended
+    /// for production use.
+    fn random<R: RngCore + CryptoRng>(rng: &mut R) -> Self;
+}
 
 /// An object that can be uniquely represented as a [Digest].
-pub trait Digestible<D: Digest>: Clone + Sized + Send + Sync + 'static {
+pub trait Digestible: Clone + Sized + Send + Sync + 'static {
+    /// The type of digest produced by this object.
+    type Digest: Digest;
     /// Returns a unique representation of the object as a [Digest].
     ///
     /// If many objects with [Digest]s are related (map to some higher-level
     /// group [Digest]), you should also implement [Committable].
-    fn digest(&self) -> D;
+    fn digest(&self) -> Self::Digest;
 }
 
-/// An object that shares a (commitment) [Digest] with other, related values.
-pub trait Committable<D: Digest>: Clone + Sized + Send + Sync + 'static {
+/// An object that can produce a commitment of itself.
+pub trait Committable: Digestible + Clone + Sized + Send + Sync + 'static {
+    /// The type of commitment produced by this object.
+    type Commitment: Digest;
+
     /// Returns the unique commitment of the object as a [Digest].
     ///
     /// For simple objects (like a block), this is often just the digest of the object
@@ -154,7 +164,7 @@ pub trait Committable<D: Digest>: Clone + Sized + Send + Sync + 'static {
     /// to different commitments. Primitives assume there is a one-to-one
     /// relation between digest and commitment and a one-to-many relation
     /// between commitment and digest.
-    fn commitment(&self) -> D;
+    fn commitment(&self) -> Self::Commitment;
 }
 
 /// Interface that commonware crates rely on for hashing.
@@ -187,14 +197,6 @@ pub trait Hasher: Clone + Send + Sync + 'static {
     ///
     /// This function does not need to be called after `finalize`.
     fn reset(&mut self);
-
-    /// Generate a random digest.
-    ///
-    /// # Warning
-    ///
-    /// This function is typically used for testing and is not recommended
-    /// for production use.
-    fn random<R: Rng + CryptoRng>(rng: &mut R) -> Self::Digest;
 }
 
 #[cfg(test)]
@@ -213,7 +215,7 @@ mod tests {
         let signer = C::new(&mut OsRng);
         let private_key = signer.private_key();
         let public_key = signer.public_key();
-        let signer = C::from(private_key).unwrap();
+        let signer = C::from(private_key);
         assert_eq!(public_key, signer.public_key());
     }
 
