@@ -141,7 +141,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let d2l_msg = handshake::Signed::sign(
             &mut config.crypto,
             &config.namespace,
-            handshake::Info::<C::PublicKey>::new(
+            handshake::Info::new(
                 peer.clone(),
                 x25519::PublicKey::from_secret(&secret),
                 timestamp,
@@ -170,8 +170,8 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         };
 
         // Verify handshake message from peer
-        let signed_handshake = handshake::Signed::<C::PublicKey>::decode(l2d_msg.as_ref())
-            .map_err(Error::UnableToDecode)?;
+        let signed_handshake =
+            handshake::Signed::decode(l2d_msg.as_ref()).map_err(Error::UnableToDecode)?;
         signed_handshake.verify(
             &context,
             &config.crypto.public_key(),
@@ -232,7 +232,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let l2d_msg = handshake::Signed::sign(
             &mut crypto,
             &namespace,
-            handshake::Info::<C::PublicKey>::new(
+            handshake::Info::new(
                 incoming.peer_public_key,
                 x25519::PublicKey::from_secret(&secret),
                 timestamp,
@@ -808,11 +808,8 @@ mod tests {
 
                         async move {
                             let timestamp = task_ctx.current().epoch_millis();
-                            let info = super::handshake::Info::<PublicKey>::new(
-                                recipient_pk,
-                                ephemeral_pk,
-                                timestamp,
-                            );
+                            let info =
+                                super::handshake::Info::new(recipient_pk, ephemeral_pk, timestamp);
                             let signed_handshake = super::handshake::Signed::sign(
                                 &mut crypto_for_signing,
                                 &namespace,
