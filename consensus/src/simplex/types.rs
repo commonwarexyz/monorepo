@@ -4,7 +4,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write,
 };
-use commonware_cryptography::{Digest, PrivateKey, Signature as SigTrait, Verifier};
+use commonware_cryptography::{Digest, PrivateKey, Signature as SigTrait, Signer, Verifier};
 use commonware_utils::{quorum, union};
 
 /// View is a monotonically increasing counter that represents the current focus of consensus.
@@ -320,7 +320,7 @@ impl<S: SigTrait, D: Digest> Notarize<S, D> {
     }
 
     /// Creates a new signed notarize using the provided cryptographic scheme.
-    pub fn sign<C: PrivateKey<Signature = S>>(
+    pub fn sign<C: Signer<Signature = S>>(
         namespace: &[u8],
         scheme: &mut C,
         public_key_index: u32,
@@ -507,7 +507,7 @@ impl<S: SigTrait> Nullify<S> {
     }
 
     /// Creates a new signed nullify using the provided cryptographic scheme.
-    pub fn sign<C: PrivateKey<Signature = S>>(
+    pub fn sign<C: Signer<Signature = S>>(
         namespace: &[u8],
         scheme: &mut C,
         public_key_index: u32,
@@ -1477,7 +1477,7 @@ mod tests {
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey, Signature},
         sha256::Digest as Sha256Digest,
-        PrivateKey as _, PrivateKeyGen as _, Signer as _,
+        PrivateKey as _, PrivateKeyGen as _,
     };
 
     const NAMESPACE: &[u8] = b"test";

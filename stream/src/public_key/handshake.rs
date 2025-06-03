@@ -86,8 +86,8 @@ pub struct Signed<C: PublicKey> {
 }
 
 impl<C: PublicKey> Signed<C> {
-    pub fn sign(
-        crypto: &mut impl PrivateKey<PublicKey = C, Signature = C::Signature>,
+    pub fn sign<Sk: PrivateKey<PublicKey = C, Signature = C::Signature>>(
+        crypto: &mut Sk,
         namespace: &[u8],
         info: Info<C>,
     ) -> Self {

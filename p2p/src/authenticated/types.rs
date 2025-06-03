@@ -162,8 +162,8 @@ impl<C: PublicKey> PeerInfo<C> {
         )
     }
 
-    pub fn sign(
-        signer: &impl PrivateKey<PublicKey = C, Signature = C::Signature>,
+    pub fn sign<Sk: PrivateKey<PublicKey = C, Signature = C::Signature>>(
+        signer: &Sk,
         namespace: &[u8],
         socket: SocketAddr,
         timestamp: u64,
