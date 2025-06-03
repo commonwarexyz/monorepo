@@ -1,8 +1,7 @@
-use std::fmt::Write;
-
 use crate::Channel;
 use commonware_utils::Array;
 use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue, LabelValueEncoder};
+use std::fmt::Write;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct Peer {
