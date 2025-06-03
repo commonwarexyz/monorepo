@@ -423,7 +423,7 @@ mod tests {
             blob.close().await.unwrap();
 
             // Initialize the archive again
-            let result = Archive::<_, _, FixedBytes<64>, i32>::init(
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(
                 context,
                 Config {
                     partition: "test_partition".into(),
@@ -437,11 +437,14 @@ mod tests {
                     section_mask: DEFAULT_SECTION_MASK,
                 },
             )
-            .await;
-            assert!(matches!(
-                result,
-                Err(Error::Journal(JournalError::ChecksumMismatch(_, _)))
-            ));
+            .await.expect("Failed to initialize archive");
+
+            // Check that the archive is empty
+            let retrieved: Option<i32> = archive
+                .get(Identifier::Index(index))
+                .await
+                .expect("Failed to get data");
+            assert!(retrieved.is_none());
         });
     }
 

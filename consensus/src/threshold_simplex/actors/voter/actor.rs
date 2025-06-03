@@ -41,13 +41,10 @@ use prometheus_client::metrics::{
     counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
 };
 use rand::Rng;
+use std::sync::{atomic::AtomicI64, Arc};
 use std::{
     collections::BTreeMap,
     time::{Duration, SystemTime},
-};
-use std::{
-    sync::{atomic::AtomicI64, Arc},
-    time::Instant,
 };
 use tracing::{debug, info, trace, warn};
 
@@ -774,7 +771,17 @@ impl<
         // If retry, broadcast notarization that led us to enter this view
         let past_view = self.view - 1;
         if retry && past_view > 0 {
-            if let Some(notarization) = self.construct_notarization(past_view, true).await {
+            if let Some(finalization) = self.construct_finalization(past_view, true).await {
+                self.outbound_messages
+                    .get_or_create(&metrics::FINALIZATION)
+                    .inc();
+                let msg = Voter::Finalization(finalization);
+                recovered_sender
+                    .send(Recipients::All, msg, true)
+                    .await
+                    .unwrap();
+                debug!(view = past_view, "rebroadcast entry finalization");
+            } else if let Some(notarization) = self.construct_notarization(past_view, true).await {
                 self.outbound_messages
                     .get_or_create(&metrics::NOTARIZATION)
                     .inc();
@@ -797,8 +804,8 @@ impl<
                 debug!(view = past_view, "rebroadcast entry nullification");
             } else {
                 warn!(
-                    view = past_view,
-                    "unable to rebroadcast entry notarization/nullification"
+                    current = self.view,
+                    "unable to rebroadcast entry notarization/nullification/finalization"
                 );
             }
         }
@@ -1674,7 +1681,7 @@ impl<
         .expect("unable to open journal");
 
         // Rebuild from journal
-        let start = Instant::now();
+        let start = self.context.current();
         {
             let stream = journal
                 .replay(self.replay_concurrency, self.replay_buffer)
@@ -1764,8 +1771,14 @@ impl<
         self.journal = Some(journal);
 
         // Update current view and immediately move to timeout (very unlikely we restarted and still within timeout)
+        let end = self.context.current();
+        let elapsed = end.duration_since(start).unwrap_or_default();
         let observed_view = self.view;
-        info!(current_view = observed_view, elapsed = ?start.elapsed(), "consensus initialized");
+        info!(
+            current_view = observed_view,
+            ?elapsed,
+            "consensus initialized"
+        );
         {
             let round = self.views.get_mut(&observed_view).expect("missing round");
             round.leader_deadline = Some(self.context.current());
