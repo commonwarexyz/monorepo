@@ -12,7 +12,7 @@ use commonware_cryptography::{
     },
     Ed25519, Sha256, Signer,
 };
-use commonware_p2p::authenticated;
+use commonware_p2p::authenticated::{self, Padding};
 use commonware_runtime::{tokio, Metrics, Network, Runner};
 use commonware_stream::public_key::{self, Connection};
 use commonware_utils::{from_hex, quorum, union, NZU32};
@@ -192,18 +192,21 @@ fn main() {
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
             Some(3),
+            Padding::None,
         );
         let (recovered_sender, recovered_receiver) = network.register(
             1,
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
             Some(3),
+            Padding::None,
         );
         let (resolver_sender, resolver_receiver) = network.register(
             2,
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
             Some(3),
+            Padding::None,
         );
 
         // Initialize application

@@ -57,10 +57,8 @@ mod logger;
 
 use clap::{value_parser, Arg, Command};
 use commonware_cryptography::{Ed25519, Signer};
-use commonware_p2p::authenticated::{self, Network};
-use commonware_runtime::tokio;
-use commonware_runtime::Metrics;
-use commonware_runtime::Runner as _;
+use commonware_p2p::authenticated::{self, Network, Padding};
+use commonware_runtime::{tokio, Metrics, Runner as _};
 use commonware_utils::NZU32;
 use governor::Quota;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -179,6 +177,7 @@ fn main() {
             Quota::per_second(NZU32!(128)),
             MAX_MESSAGE_BACKLOG,
             COMPRESSION_LEVEL,
+            Padding::None,
         );
 
         // Start network

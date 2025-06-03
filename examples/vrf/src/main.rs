@@ -80,7 +80,7 @@ mod handlers;
 
 use clap::{value_parser, Arg, Command};
 use commonware_cryptography::{Ed25519, Signer};
-use commonware_p2p::authenticated::{self, Network};
+use commonware_p2p::authenticated::{self, Network, Padding};
 use commonware_runtime::{tokio, Metrics, Runner};
 use commonware_utils::{quorum, NZU32};
 use governor::Quota;
@@ -257,6 +257,7 @@ fn main() {
                 Quota::per_second(NZU32!(10)),
                 DEFAULT_MESSAGE_BACKLOG,
                 COMPRESSION_LEVEL,
+                Padding::None,
             );
             let arbiter = Ed25519::from_seed(*arbiter).public_key();
             let (contributor, requests) = handlers::Contributor::new(
@@ -277,6 +278,7 @@ fn main() {
                 Quota::per_second(NZU32!(10)),
                 DEFAULT_MESSAGE_BACKLOG,
                 None,
+                Padding::None,
             );
             let signer = handlers::Vrf::new(
                 context.with_label("signer"),
@@ -292,6 +294,7 @@ fn main() {
                 Quota::per_second(NZU32!(10)),
                 DEFAULT_MESSAGE_BACKLOG,
                 COMPRESSION_LEVEL,
+                Padding::None,
             );
             let arbiter: handlers::Arbiter<_, Ed25519> = handlers::Arbiter::new(
                 context.with_label("arbiter"),
