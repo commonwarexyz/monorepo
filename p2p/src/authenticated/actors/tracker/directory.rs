@@ -347,10 +347,14 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Directory<
             return None;
         }
 
-        // Timestamp too old
+        // Check timestamp
         if let Metadata::Listener(_, timestamp) = &metadata {
             if *timestamp <= record.timestamp() {
+                // Reject timestamps that are too old
                 return None;
+            } else {
+                // Record new timestamps even if we ultimately reject the reservation
+                record.set_timestamp(*timestamp);
             }
         }
 
@@ -370,9 +374,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Directory<
 
         // Success
         self.metrics.reserved.inc();
-        if let Metadata::Listener(_, timestamp) = &metadata {
-            record.set_timestamp(*timestamp);
-        }
         Some(Reservation::new(
             self.context.clone(),
             metadata,
