@@ -14,6 +14,13 @@ use std::net::SocketAddr;
 /// - 5: Message length varint (lengths longer than 32 bits are forbidden by the codec)
 pub const MAX_PAYLOAD_DATA_OVERHEAD: usize = 1 + 5 + 5;
 
+/// Prefix byte used to identify a [Payload] with variant BitVec.
+const BIT_VEC_PREFIX: u8 = 0;
+/// Prefix byte used to identify a [Payload] with variant Peers.
+const PEERS_PREFIX: u8 = 1;
+/// Prefix byte used to identify a [Payload] with variant Data.
+const DATA_PREFIX: u8 = 2;
+
 /// Configuration when deserializing messages.
 ///
 /// This is used to limit the size of the messages received from peers.
@@ -55,15 +62,15 @@ impl<C: Verifier> Write for Payload<C> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             Payload::BitVec(bit_vec) => {
-                0u8.write(buf);
+                BIT_VEC_PREFIX.write(buf);
                 bit_vec.write(buf);
             }
             Payload::Peers(peers) => {
-                1u8.write(buf);
+                PEERS_PREFIX.write(buf);
                 peers.write(buf);
             }
             Payload::Data(data) => {
-                2u8.write(buf);
+                DATA_PREFIX.write(buf);
                 data.write(buf);
             }
         }
@@ -76,15 +83,15 @@ impl<C: Verifier> Read for Payload<C> {
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let payload_type = <u8>::read(buf)?;
         match payload_type {
-            0 => {
+            BIT_VEC_PREFIX => {
                 let bit_vec = BitVec::read_cfg(buf, &cfg.max_bit_vec)?;
                 Ok(Payload::BitVec(bit_vec))
             }
-            1 => {
+            PEERS_PREFIX => {
                 let peers = Vec::<PeerInfo<C>>::read_range(buf, ..=cfg.max_peers)?;
                 Ok(Payload::Peers(peers))
             }
-            2 => {
+            DATA_PREFIX => {
                 // Don't limit the size of the data to be read.
                 // The max message size should already be limited by the p2p layer.
                 let data = Data::read_cfg(buf, &(..).into())?;
