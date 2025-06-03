@@ -14,8 +14,11 @@ use std::net::SocketAddr;
 /// - 5: Message length varint (lengths longer than 32 bits are forbidden by the codec)
 pub const MAX_PAYLOAD_DATA_OVERHEAD: usize = 1 + 5 + 5;
 
+/// Prefix byte used to identify a [Payload] with variant BitVec.
 const BIT_VEC_PREFIX: u8 = 0;
+/// Prefix byte used to identify a [Payload] with variant Peers.
 const PEERS_PREFIX: u8 = 1;
+/// Prefix byte used to identify a [Payload] with variant Data.
 const DATA_PREFIX: u8 = 2;
 
 /// Configuration when deserializing messages.
