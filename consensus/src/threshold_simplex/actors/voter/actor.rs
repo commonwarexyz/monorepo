@@ -18,7 +18,7 @@ use commonware_cryptography::{
         ops::{threshold_signature_recover, threshold_signature_recover_pair},
         variant::Variant,
     },
-    Digest, PrivateKey,
+    Digest, PrivateKey, PublicKey,
 };
 use commonware_macros::select;
 use commonware_p2p::{
@@ -71,12 +71,12 @@ enum Action {
 
 struct Round<
     E: Clock,
-    C: PrivateKey,
+    C: PublicKey,
     V: Variant,
     D: Digest,
     S: ThresholdSupervisor<
         Index = View,
-        PublicKey = C::PublicKey,
+        PublicKey = C,
         Identity = V::Public,
         Seed = V::Signature,
         Share = group::Share,
@@ -89,7 +89,7 @@ struct Round<
     quorum: u32,
 
     // Leader is set as soon as we know the seed for the view.
-    leader: Option<(C::PublicKey, u32)>,
+    leader: Option<(C, u32)>,
 
     // We explicitly distinguish between the proposal being verified (we checked it)
     // and the proposal being recovered (network has determined its validity). As a sanity
@@ -132,14 +132,14 @@ struct Round<
 
 impl<
         E: Clock,
-        C: PrivateKey,
+        C: PublicKey,
         V: Variant,
         D: Digest,
         S: ThresholdSupervisor<
             Seed = V::Signature,
             Index = View,
             Share = group::Share,
-            PublicKey = C::PublicKey,
+            PublicKey = C,
             Identity = V::Public,
         >,
     > Round<E, C, V, D, S>
@@ -469,7 +469,7 @@ pub struct Actor<
     mailbox_receiver: mpsc::Receiver<Message<V, D>>,
 
     view: View,
-    views: BTreeMap<View, Round<E, C, V, D, S>>,
+    views: BTreeMap<View, Round<E, C::PublicKey, V, D, S>>,
     last_finalized: View,
 
     current_view: Gauge,
