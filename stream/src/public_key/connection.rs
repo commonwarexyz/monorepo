@@ -6,7 +6,7 @@ use crate::{
 use bytes::Bytes;
 use chacha20poly1305::{aead::Aead, ChaCha20Poly1305};
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::PrivateKey;
+use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
 use commonware_utils::SystemTimeExt as _;
@@ -18,7 +18,7 @@ use std::time::SystemTime;
 const ENCRYPTION_TAG_LENGTH: usize = 16;
 
 /// An incoming connection with a verified peer handshake.
-pub struct IncomingConnection<C: PrivateKey, Si: Sink, St: Stream> {
+pub struct IncomingConnection<C: Signer, Si: Sink, St: Stream> {
     config: Config<C>,
     sink: Si,
     stream: St,
@@ -31,7 +31,7 @@ pub struct IncomingConnection<C: PrivateKey, Si: Sink, St: Stream> {
     dialer_handshake_bytes: Bytes,
 }
 
-impl<C: PrivateKey, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
+impl<C: Signer, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
     pub async fn verify<E: Clock + Spawner>(
         context: &E,
         config: Config<C>,
@@ -118,7 +118,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
     ///
     /// This will send a handshake message to the peer, wait for a response,
     /// and verify the peer's handshake message.
-    pub async fn upgrade_dialer<R: Rng + CryptoRng + Spawner + Clock, C: PrivateKey>(
+    pub async fn upgrade_dialer<R: Rng + CryptoRng + Spawner + Clock, C: Signer>(
         mut context: R,
         mut config: Config<C>,
         mut sink: Si,
@@ -212,7 +212,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
     /// Because we already verified the peer's handshake, this function
     /// only needs to send our handshake message for the connection to be fully
     /// initialized.
-    pub async fn upgrade_listener<R: Rng + CryptoRng + Spawner + Clock, C: PrivateKey>(
+    pub async fn upgrade_listener<R: Rng + CryptoRng + Spawner + Clock, C: Signer>(
         mut context: R,
         incoming: IncomingConnection<C, Si, St>,
     ) -> Result<Self, Error> {
@@ -355,7 +355,7 @@ mod tests {
     use chacha20poly1305::KeyInit;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
-        PrivateKey as _, PrivateKeyExt as _,
+        PrivateKeyExt as _,
     };
     use commonware_runtime::{deterministic, mocks, Metrics, Runner};
     use std::time::Duration;

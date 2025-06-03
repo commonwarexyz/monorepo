@@ -29,7 +29,7 @@ use super::primitives::{
     ops,
     variant::{MinPk, Variant},
 };
-use crate::{Array, BatchVerifier, PrivateKey as _, PrivateKeyExt};
+use crate::{Array, BatchVerifier, PrivateKeyExt, Signer as _};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     DecodeExt, EncodeFixed, Error as CodecError, FixedSize, Read, ReadExt, Write,
@@ -128,14 +128,15 @@ impl Display for PrivateKey {
 
 impl crate::PrivateKey for PrivateKey {
     type PublicKey = PublicKey;
-
-    fn public_key(&self) -> Self::PublicKey {
-        PublicKey::from(ops::compute_public::<MinPk>(&self.key))
-    }
 }
 
 impl crate::Signer for PrivateKey {
     type Signature = Signature;
+    type PublicKey = PublicKey;
+
+    fn public_key(&self) -> Self::PublicKey {
+        PublicKey::from(ops::compute_public::<MinPk>(&self.key))
+    }
 
     fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Self::Signature {
         let signature = ops::sign_message::<MinPk>(&self.key, namespace, msg);

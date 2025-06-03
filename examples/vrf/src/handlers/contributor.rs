@@ -8,7 +8,7 @@ use commonware_cryptography::{
         dkg::{player::Output, Dealer, Player},
         primitives::{group, variant::MinSig},
     },
-    PrivateKey, Verifier as _,
+    Signer, Verifier as _,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -21,7 +21,7 @@ use tracing::{debug, info, warn};
 
 /// A DKG/Resharing contributor that can be configured to behave honestly
 /// or deviate as a rogue, lazy, or forger.
-pub struct Contributor<E: Clock + Rng + Spawner, C: PrivateKey> {
+pub struct Contributor<E: Clock + Rng + Spawner, C: Signer> {
     context: E,
     crypto: C,
     dkg_phase_timeout: Duration,
@@ -37,7 +37,7 @@ pub struct Contributor<E: Clock + Rng + Spawner, C: PrivateKey> {
     signatures: mpsc::Sender<(u64, Output<MinSig>)>,
 }
 
-impl<E: Clock + Rng + Spawner, C: PrivateKey> Contributor<E, C> {
+impl<E: Clock + Rng + Spawner, C: Signer> Contributor<E, C> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         context: E,

@@ -7,7 +7,7 @@ use super::{
     types,
 };
 use crate::Channel;
-use commonware_cryptography::PrivateKey;
+use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics, Network as RNetwork, Spawner};
 use commonware_stream::public_key;
@@ -25,7 +25,7 @@ const STREAM_SUFFIX: &[u8] = b"_STREAM";
 /// Implementation of an `authenticated` network.
 pub struct Network<
     E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics,
-    C: PrivateKey,
+    C: Signer,
 > {
     context: E,
     cfg: Config<C>,
@@ -37,10 +37,8 @@ pub struct Network<
     router_mailbox: router::Mailbox<C::PublicKey>,
 }
 
-impl<
-        E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics,
-        C: PrivateKey,
-    > Network<E, C>
+impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics, C: Signer>
+    Network<E, C>
 {
     /// Create a new instance of an `authenticated` network.
     ///

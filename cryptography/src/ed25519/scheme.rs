@@ -24,18 +24,11 @@ pub struct PrivateKey {
 
 impl crate::PrivateKey for PrivateKey {
     type PublicKey = PublicKey;
-
-    fn public_key(&self) -> Self::PublicKey {
-        let raw = self.key.verification_key().to_bytes();
-        Self::PublicKey {
-            raw,
-            key: self.key.verification_key().to_owned(),
-        }
-    }
 }
 
 impl crate::Signer for PrivateKey {
     type Signature = Signature;
+    type PublicKey = PublicKey;
 
     fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Self::Signature {
         let sig = match namespace {
@@ -43,6 +36,14 @@ impl crate::Signer for PrivateKey {
             None => self.key.sign(msg),
         };
         Signature::from(sig)
+    }
+
+    fn public_key(&self) -> Self::PublicKey {
+        let raw = self.key.verification_key().to_bytes();
+        Self::PublicKey {
+            raw,
+            key: self.key.verification_key().to_owned(),
+        }
     }
 }
 

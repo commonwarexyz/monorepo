@@ -1,12 +1,12 @@
 use super::types::{Activity, Context, View};
 use crate::{Automaton, Relay, Reporter, Supervisor};
-use commonware_cryptography::{Digest, PrivateKey};
+use commonware_cryptography::{Digest, Signer};
 use governor::Quota;
 use std::time::Duration;
 
 /// Configuration for the consensus engine.
 pub struct Config<
-    C: PrivateKey,
+    C: Signer,
     D: Digest,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
@@ -96,7 +96,7 @@ pub struct Config<
 }
 
 impl<
-        C: PrivateKey,
+        C: Signer,
         D: Digest,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,

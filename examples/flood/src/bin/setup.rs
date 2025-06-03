@@ -1,5 +1,5 @@
 use clap::{value_parser, Arg, Command};
-use commonware_cryptography::{ed25519, PrivateKey as _, PrivateKeyExt as _};
+use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
 use commonware_deployer::ec2;
 use commonware_flood::Config;
 use rand::{rngs::OsRng, seq::IteratorRandom};

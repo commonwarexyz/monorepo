@@ -1,7 +1,7 @@
 //! Tracker
 
 use crate::authenticated::config::Bootstrapper;
-use commonware_cryptography::PrivateKey;
+use commonware_cryptography::Signer;
 use governor::Quota;
 use std::net::IpAddr;
 use std::net::SocketAddr;
@@ -23,7 +23,7 @@ pub use metadata::Metadata;
 pub use reservation::Reservation;
 
 #[derive(Clone, Debug)]
-pub struct Config<C: PrivateKey> {
+pub struct Config<C: Signer> {
     pub crypto: C,
     pub namespace: Vec<u8>,
     pub address: SocketAddr,

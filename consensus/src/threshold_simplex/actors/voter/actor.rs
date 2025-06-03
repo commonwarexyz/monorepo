@@ -18,7 +18,7 @@ use commonware_cryptography::{
         ops::{threshold_signature_recover, threshold_signature_recover_pair},
         variant::Variant,
     },
-    Digest, PrivateKey, PublicKey,
+    Digest, PublicKey, Signer,
 };
 use commonware_macros::select;
 use commonware_p2p::{
@@ -423,7 +423,7 @@ impl<
 
 pub struct Actor<
     E: Clock + Rng + Spawner + Storage + Metrics,
-    C: PrivateKey,
+    C: Signer,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     D: Digest,
@@ -481,7 +481,7 @@ pub struct Actor<
 
 impl<
         E: Clock + Rng + Spawner + Storage + Metrics,
-        C: PrivateKey,
+        C: Signer,
         B: Blocker<PublicKey = C::PublicKey>,
         V: Variant,
         D: Digest,

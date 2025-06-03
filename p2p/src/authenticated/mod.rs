@@ -100,7 +100,7 @@
 //!
 //! ```rust
 //! use commonware_p2p::{authenticated::{self, Network}, Sender, Recipients};
-//! use commonware_cryptography::{ed25519, PrivateKey as _, PublicKey as _, PrivateKeyExt as _};
+//! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, PrivateKeyExt as _};
 //! use commonware_runtime::{tokio, Spawner, Runner, Metrics};
 //! use commonware_utils::NZU32;
 //! use governor::Quota;
@@ -210,7 +210,7 @@ pub use network::Network;
 mod tests {
     use super::*;
     use crate::{Receiver, Recipients, Sender};
-    use commonware_cryptography::{ed25519, PrivateKey as _, PrivateKeyExt as _};
+    use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         deterministic, tokio, Clock, Metrics, Network as RNetwork, Runner, Spawner,

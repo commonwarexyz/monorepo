@@ -4,7 +4,7 @@ use super::{
     Config, Error,
 };
 use crate::authenticated::{ip, types};
-use commonware_cryptography::PrivateKey;
+use commonware_cryptography::Signer;
 use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::{union, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
@@ -17,7 +17,7 @@ use tracing::debug;
 const NAMESPACE_SUFFIX_IP: &[u8] = b"_IP";
 
 /// The tracker actor that manages peer discovery and connection reservations.
-pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PrivateKey> {
+pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> {
     context: E,
 
     // ---------- Configuration ----------
@@ -49,7 +49,7 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PrivateK
     directory: Directory<E, C::PublicKey>,
 }
 
-impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PrivateKey> Actor<E, C> {
+impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> {
     /// Create a new tracker [`Actor`] from the given `context` and `cfg`.
     #[allow(clippy::type_complexity)]
     pub fn new(
@@ -250,7 +250,7 @@ mod tests {
     use commonware_cryptography::PrivateKeyExt as _;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey, Signature},
-        PrivateKey as PrivateKeyTrait, Signer as _,
+        Signer,
     };
     use commonware_runtime::{
         deterministic::{self, Context},
@@ -267,7 +267,7 @@ mod tests {
     use types::PeerInfo;
 
     // Test Configuration Setup
-    fn default_test_config<C: PrivateKeyTrait>(
+    fn default_test_config<C: Signer>(
         crypto: C,
         bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
     ) -> Config<C> {

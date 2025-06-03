@@ -2,7 +2,7 @@ use clap::{Arg, Command};
 use commonware_codec::DecodeExt;
 use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
-    PrivateKey as _,
+    Signer as _,
 };
 use commonware_deployer::ec2::{Hosts, METRICS_PORT};
 use commonware_flood::Config;

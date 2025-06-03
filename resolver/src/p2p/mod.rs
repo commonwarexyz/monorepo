@@ -83,7 +83,7 @@ mod tests {
     use bytes::Bytes;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
-        PrivateKey as _, PrivateKeyExt as _,
+        PrivateKeyExt as _, Signer as _,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};

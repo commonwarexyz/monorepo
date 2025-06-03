@@ -2,7 +2,7 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, ReadRangeExt, Write,
 };
-use commonware_cryptography::{PrivateKey, PublicKey};
+use commonware_cryptography::{PublicKey, Signer};
 use commonware_utils::BitVec as UtilsBitVec;
 use std::net::SocketAddr;
 
@@ -162,7 +162,7 @@ impl<C: PublicKey> PeerInfo<C> {
         )
     }
 
-    pub fn sign<Sk: PrivateKey<PublicKey = C, Signature = C::Signature>>(
+    pub fn sign<Sk: Signer<PublicKey = C, Signature = C::Signature>>(
         signer: &Sk,
         namespace: &[u8],
         socket: SocketAddr,
@@ -253,7 +253,7 @@ mod tests {
     use super::*;
     use bytes::BytesMut;
     use commonware_codec::{Decode, DecodeRangeExt};
-    use commonware_cryptography::{secp256r1, PrivateKeyExt as _, Signer as _};
+    use commonware_cryptography::{secp256r1, PrivateKeyExt as _};
 
     fn signed_peer_info() -> PeerInfo<secp256r1::PublicKey> {
         let mut rng = rand::thread_rng();

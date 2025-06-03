@@ -15,25 +15,27 @@ pub mod sha256;
 pub use sha256::{hash, CoreSha256, Sha256};
 pub mod secp256r1;
 
-/// Produces signatures over messages.
-pub trait Signer {
+/// Produces signatures over messages and has a corresponding public key.
+pub trait Signer: Send + Sync + Clone + 'static {
     /// The type of signature produced by this signer.
     type Signature: Signature;
-
-    /// Sign a message with the given namespace.
-    fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Self::Signature;
-}
-
-/// A private key, able to derive its public key and sign messages.
-pub trait PrivateKey: Signer + Send + Sync + Clone + 'static {
     /// The corresponding public key type.
     type PublicKey: PublicKey<Signature = Self::Signature>;
 
     /// Returns the public key corresponding to this private key.
     fn public_key(&self) -> Self::PublicKey;
+
+    /// Sign a message with the given namespace.
+    fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Self::Signature;
 }
 
-/// A private key that can be generated from a seed or RNG.
+/// A [Signer] that can be serialized/deserialized.
+pub trait PrivateKey: Signer + Sized + ReadExt + Encode + PartialEq + Array {
+    /// The corresponding public key type.
+    type PublicKey: PublicKey<Signature = Self::Signature>;
+}
+
+/// A [PrivateKey] that can be generated from a seed or RNG.
 pub trait PrivateKeyExt: PrivateKey {
     /// Create a private key from a seed.
     fn from_seed(seed: u64) -> Self {
@@ -183,10 +185,10 @@ mod tests {
     fn test_validate<C: PrivateKeyExt>() {
         let private_key = C::from_rng(&mut OsRng);
         let public_key = private_key.public_key();
-        assert!(C::PublicKey::decode(public_key.as_ref()).is_ok());
+        assert!(<C as Signer>::PublicKey::decode(public_key.as_ref()).is_ok());
     }
 
-    fn test_validate_invalid_public_key<C: PrivateKeyExt>() {
+    fn test_validate_invalid_public_key<C: Signer>() {
         let result = C::PublicKey::decode(vec![0; 1024].as_ref());
         assert!(result.is_err());
     }

@@ -81,7 +81,7 @@ mod handlers;
 use clap::{value_parser, Arg, Command};
 use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
-    PrivateKey as _, PrivateKeyExt as _,
+    PrivateKeyExt as _, Signer as _,
 };
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{tokio, Metrics, Runner};

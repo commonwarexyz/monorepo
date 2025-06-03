@@ -66,7 +66,7 @@ use std::time::Duration;
 
 mod cipher;
 mod connection;
-use commonware_cryptography::PrivateKey;
+use commonware_cryptography::Signer;
 pub use connection::{Connection, IncomingConnection, Receiver, Sender};
 mod handshake;
 mod nonce;
@@ -80,7 +80,7 @@ mod x25519;
 /// If this is not synchronized, connections could be unnecessarily dropped,
 /// or messages could be parsed incorrectly.
 #[derive(Clone)]
-pub struct Config<C: PrivateKey> {
+pub struct Config<C: Signer> {
     /// Cryptographic primitives.
     pub crypto: C,
 

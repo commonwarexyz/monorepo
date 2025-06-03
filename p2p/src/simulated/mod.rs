@@ -13,7 +13,7 @@
 //!
 //! ```rust
 //! use commonware_p2p::simulated::{Config, Link, Network};
-//! use commonware_cryptography::{ed25519, PrivateKey as _, PublicKey as _, PrivateKeyExt as _};
+//! use commonware_cryptography::{ed25519, PrivateKey, Signer as _, PublicKey as _, PrivateKeyExt as _};
 //! use commonware_runtime::{deterministic, Spawner, Runner, Metrics};
 //!
 //! // Generate peers
@@ -124,7 +124,7 @@ mod tests {
     use super::*;
     use crate::{Receiver, Recipients, Sender};
     use bytes::Bytes;
-    use commonware_cryptography::{ed25519::PrivateKey, PrivateKey as _, PrivateKeyExt as _};
+    use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt as _, Signer as _};
     use commonware_macros::select;
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
     use futures::{channel::mpsc, SinkExt, StreamExt};

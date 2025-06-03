@@ -7,7 +7,7 @@ use crate::authenticated::{
     },
     metrics,
 };
-use commonware_cryptography::PrivateKey;
+use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{
     telemetry::traces::status, Clock, Handle, Metrics, Network, SinkOf, Spawner, StreamOf,
@@ -22,7 +22,7 @@ use std::time::Duration;
 use tracing::{debug, debug_span, Instrument};
 
 /// Configuration for the dialer actor.
-pub struct Config<C: PrivateKey> {
+pub struct Config<C: Signer> {
     /// Configuration for the stream.
     pub stream_cfg: StreamConfig<C>,
 
@@ -40,7 +40,7 @@ pub struct Config<C: PrivateKey> {
 }
 
 /// Actor responsible for dialing peers and establishing outgoing connections.
-pub struct Actor<E: Spawner + Clock + GClock + Network + Metrics, C: PrivateKey> {
+pub struct Actor<E: Spawner + Clock + GClock + Network + Metrics, C: Signer> {
     context: E,
 
     // ---------- State ----------
@@ -57,7 +57,7 @@ pub struct Actor<E: Spawner + Clock + GClock + Network + Metrics, C: PrivateKey>
     attempts: Family<metrics::Peer, Counter>,
 }
 
-impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: PrivateKey> Actor<E, C> {
+impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>) -> Self {
         let attempts = Family::<metrics::Peer, Counter>::default();
         context.register(

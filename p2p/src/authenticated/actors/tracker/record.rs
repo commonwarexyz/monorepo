@@ -292,7 +292,7 @@ mod tests {
     use super::*;
     use crate::authenticated::types::PeerInfo;
     use commonware_codec::Encode;
-    use commonware_cryptography::{secp256r1, PrivateKeyExt};
+    use commonware_cryptography::{secp256r1, PrivateKeyExt, Signer};
     use std::net::SocketAddr;
 
     // Helper function to create signed peer info for testing
@@ -300,7 +300,7 @@ mod tests {
         signer_seed: u64,
         socket: SocketAddr,
         timestamp: u64,
-    ) -> PeerInfo<S::PublicKey>
+    ) -> PeerInfo<<S as Signer>::PublicKey>
     where
         S: PrivateKeyExt,
     {

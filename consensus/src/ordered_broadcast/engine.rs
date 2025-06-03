@@ -15,7 +15,7 @@ use super::{
 use crate::{Automaton, Monitor, Relay, Reporter, Supervisor, ThresholdSupervisor};
 use commonware_cryptography::{
     bls12381::primitives::{group, poly, variant::Variant},
-    Digest, PrivateKey, PublicKey,
+    Digest, PublicKey, Signer,
 };
 use commonware_macros::select;
 use commonware_p2p::{
@@ -54,7 +54,7 @@ struct Verify<C: PublicKey, D: Digest, E: Clock> {
 /// Instance of the engine.
 pub struct Engine<
     E: Clock + Spawner + Storage + Metrics,
-    C: PrivateKey,
+    C: Signer,
     V: Variant,
     D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
@@ -202,7 +202,7 @@ pub struct Engine<
 
 impl<
         E: Clock + Spawner + Storage + Metrics,
-        C: PrivateKey,
+        C: Signer,
         V: Variant,
         D: Digest,
         A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,

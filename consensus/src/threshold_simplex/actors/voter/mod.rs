@@ -9,12 +9,12 @@ use crate::{
 };
 pub use actor::Actor;
 use commonware_cryptography::{bls12381::primitives::group, Digest};
-use commonware_cryptography::{bls12381::primitives::variant::Variant, PrivateKey};
+use commonware_cryptography::{bls12381::primitives::variant::Variant, Signer};
 use commonware_p2p::Blocker;
 pub use ingress::{Mailbox, Message};
 
 pub struct Config<
-    C: PrivateKey,
+    C: Signer,
     B: Blocker,
     V: Variant,
     D: Digest,

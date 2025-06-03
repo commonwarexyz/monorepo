@@ -3,7 +3,7 @@ use commonware_cryptography::{
         dkg::{Dealer, Player},
         primitives::variant::MinSig,
     },
-    ed25519, PrivateKey as _, PrivateKeyExt as _,
+    ed25519, PrivateKeyExt as _, Signer as _,
 };
 use commonware_utils::quorum;
 use criterion::{criterion_group, BatchSize, Criterion};

@@ -5,14 +5,14 @@ use crate::{
     Supervisor,
 };
 use commonware_codec::{Decode, Encode};
-use commonware_cryptography::{Hasher, PrivateKey};
+use commonware_cryptography::{Hasher, Signer};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
 use rand::{CryptoRng, Rng};
 use std::collections::HashMap;
 use tracing::debug;
 
-pub struct Config<C: PrivateKey, S: Supervisor<Index = View>> {
+pub struct Config<C: Signer, S: Supervisor<Index = View>> {
     pub crypto: C,
     pub supervisor: S,
     pub namespace: Vec<u8>,
@@ -21,7 +21,7 @@ pub struct Config<C: PrivateKey, S: Supervisor<Index = View>> {
 
 pub struct Outdated<
     E: Clock + Rng + CryptoRng + Spawner,
-    C: PrivateKey,
+    C: Signer,
     H: Hasher,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
@@ -37,7 +37,7 @@ pub struct Outdated<
 
 impl<
         E: Clock + Rng + CryptoRng + Spawner,
-        C: PrivateKey,
+        C: Signer,
         H: Hasher,
         S: Supervisor<Index = View, PublicKey = C::PublicKey>,
     > Outdated<E, C, H, S>
