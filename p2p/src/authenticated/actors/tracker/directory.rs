@@ -3,7 +3,7 @@ use crate::authenticated::{
     metrics,
     types::{self, PeerInfo},
 };
-use commonware_cryptography::Verifier;
+use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::SystemTimeExt;
 use futures::channel::mpsc;
@@ -35,7 +35,7 @@ pub struct Config {
 }
 
 /// Represents a collection of records for all peers.
-pub struct Directory<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> {
+pub struct Directory<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
     context: E,
 
     // ---------- Configuration ----------
@@ -48,33 +48,32 @@ pub struct Directory<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Veri
 
     // ---------- State ----------
     /// The records of all peers.
-    peers: HashMap<C::PublicKey, Record<C>>,
+    peers: HashMap<C, Record<C>>,
 
     /// The peer sets
-    sets: BTreeMap<u64, Set<C::PublicKey>>,
+    sets: BTreeMap<u64, Set<C>>,
 
     /// Rate limiter for connection attempts.
     #[allow(clippy::type_complexity)]
-    rate_limiter:
-        RateLimiter<C::PublicKey, HashMapStateStore<C::PublicKey>, E, NoOpMiddleware<E::Instant>>,
+    rate_limiter: RateLimiter<C, HashMapStateStore<C>, E, NoOpMiddleware<E::Instant>>,
 
     // ---------- Released Reservations Queue ----------
     /// Sender for releasing reservations.
-    sender: mpsc::Sender<Metadata<C::PublicKey>>,
+    sender: mpsc::Sender<Metadata<C>>,
 
     /// Receiver for releasing reservations.
-    receiver: mpsc::Receiver<Metadata<C::PublicKey>>,
+    receiver: mpsc::Receiver<Metadata<C>>,
 
     // ---------- Metrics ----------
     /// The metrics for the records.
     metrics: Metrics,
 }
 
-impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Directory<E, C> {
+impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Create a new set of records using the given bootstrappers and local node information.
     pub fn init(
         context: E,
-        bootstrappers: Vec<(C::PublicKey, SocketAddr)>,
+        bootstrappers: Vec<(C, SocketAddr)>,
         myself: PeerInfo<C>,
         cfg: Config,
     ) -> Self {
@@ -138,7 +137,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Directory<
     /// # Panics
     ///
     /// Panics if the peer is not tracked or if the peer is not in the reserved state.
-    pub fn connect(&mut self, peer: &C::PublicKey, dialer: bool) {
+    pub fn connect(&mut self, peer: &C, dialer: bool) {
         // Set the record as connected
         let record = self.peers.get_mut(peer).unwrap();
         if dialer {
@@ -183,7 +182,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Directory<
     }
 
     /// Stores a new peer set.
-    pub fn add_set(&mut self, index: u64, peers: Vec<C::PublicKey>) {
+    pub fn add_set(&mut self, index: u64, peers: Vec<C>) {
         // Check if peer set already exists
         if self.sets.contains_key(&index) {
             debug!(index, "peer set already exists");
@@ -226,7 +225,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Directory<
     }
 
     /// Returns a vector of dialable peers. That is, unconnected peers for which we have a socket.
-    pub fn dialable(&self) -> Vec<C::PublicKey> {
+    pub fn dialable(&self) -> Vec<C> {
         // Collect peers with known addresses
         let mut result: Vec<_> = self
             .peers
@@ -241,7 +240,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Directory<
     /// Attempt to reserve a peer for the dialer.
     ///
     /// Returns `Some` on success, `None` otherwise.
-    pub fn dial(&mut self, peer: &C::PublicKey) -> Option<Reservation<E, C::PublicKey>> {
+    pub fn dial(&mut self, peer: &C) -> Option<Reservation<E, C>> {
         let socket = self.peers.get(peer)?.socket()?;
         self.reserve(Metadata::Dialer(peer.clone(), socket))
     }
@@ -249,7 +248,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Directory<
     /// Attempt to reserve a peer for the listener.
     ///
     /// Returns `Some` on success, `None` otherwise.
-    pub fn listen(&mut self, peer: &C::PublicKey) -> Option<Reservation<E, C::PublicKey>> {
+    pub fn listen(&mut self, peer: &C) -> Option<Reservation<E, C>> {
         self.reserve(Metadata::Listener(peer.clone()))
     }
 
@@ -263,7 +262,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Directory<
     }
 
     /// Attempt to block a peer, updating the metrics accordingly.
-    pub fn block(&mut self, peer: &C::PublicKey) {
+    pub fn block(&mut self, peer: &C) {
         if self.peers.get_mut(peer).is_some_and(|r| r.block()) {
             self.metrics.blocked.inc();
         }
@@ -272,7 +271,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Directory<
     // ---------- Getters ----------
 
     /// Returns the sharable information for a given peer.
-    pub fn info(&self, peer: &C::PublicKey) -> Option<PeerInfo<C>> {
+    pub fn info(&self, peer: &C) -> Option<PeerInfo<C>> {
         self.peers.get(peer).and_then(|r| r.sharable())
     }
 
@@ -317,7 +316,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Directory<
     }
 
     /// Returns true if the peer is able to be connected to.
-    pub fn allowed(&self, peer: &C::PublicKey) -> bool {
+    pub fn allowed(&self, peer: &C) -> bool {
         self.peers.get(peer).is_some_and(|r| r.allowed())
     }
 
@@ -326,10 +325,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Directory<
     /// Attempt to reserve a peer.
     ///
     /// Returns `Some(Reservation)` if the peer was successfully reserved, `None` otherwise.
-    fn reserve(
-        &mut self,
-        metadata: Metadata<C::PublicKey>,
-    ) -> Option<Reservation<E, C::PublicKey>> {
+    fn reserve(&mut self, metadata: Metadata<C>) -> Option<Reservation<E, C>> {
         let peer = metadata.public_key();
 
         // Not reservable
@@ -367,7 +363,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Verifier> Directory<
     /// Attempt to delete a record.
     ///
     /// Returns `true` if the record was deleted, `false` otherwise.
-    fn delete_if_needed(&mut self, peer: &C::PublicKey) -> bool {
+    fn delete_if_needed(&mut self, peer: &C) -> bool {
         let Some(record) = self.peers.get(peer) else {
             return false;
         };

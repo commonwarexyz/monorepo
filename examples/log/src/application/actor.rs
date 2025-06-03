@@ -3,7 +3,7 @@ use super::{
     supervisor::Supervisor,
     Config,
 };
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{Hasher, Signature};
 use commonware_runtime::{Handle, Spawner};
 use commonware_utils::{hex, Array};
 use futures::{channel::mpsc, StreamExt};
@@ -15,7 +15,7 @@ use tracing::info;
 const GENESIS: &[u8] = b"commonware is neat";
 
 /// Application actor.
-pub struct Application<R: Rng + Spawner, P: Array, S: Array, H: Hasher> {
+pub struct Application<R: Rng + Spawner, P: Array, S: Signature, H: Hasher> {
     context: R,
     hasher: H,
     mailbox: mpsc::Receiver<Message<H::Digest>>,
@@ -24,7 +24,7 @@ pub struct Application<R: Rng + Spawner, P: Array, S: Array, H: Hasher> {
     _phantom_s: PhantomData<S>,
 }
 
-impl<R: Rng + Spawner, P: Array, S: Array, H: Hasher> Application<R, P, S, H> {
+impl<R: Rng + Spawner, P: Array, S: Signature, H: Hasher> Application<R, P, S, H> {
     /// Create a new application actor.
     #[allow(clippy::type_complexity)]
     pub fn new(

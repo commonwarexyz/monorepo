@@ -7,7 +7,7 @@ use super::{
     types,
 };
 use crate::Channel;
-use commonware_cryptography::Scheme;
+use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics, Network as RNetwork, Spawner};
 use commonware_stream::public_key;
@@ -25,19 +25,19 @@ const STREAM_SUFFIX: &[u8] = b"_STREAM";
 /// Implementation of an `authenticated` network.
 pub struct Network<
     E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics,
-    C: Scheme,
+    C: Signer,
 > {
     context: E,
     cfg: Config<C>,
 
     channels: Channels<C::PublicKey>,
     tracker: tracker::Actor<E, C>,
-    tracker_mailbox: tracker::Mailbox<E, C>,
+    tracker_mailbox: tracker::Mailbox<E, C::PublicKey>,
     router: router::Actor<E, C::PublicKey>,
     router_mailbox: router::Mailbox<C::PublicKey>,
 }
 
-impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics, C: Scheme>
+impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics, C: Signer>
     Network<E, C>
 {
     /// Create a new instance of an `authenticated` network.
@@ -50,7 +50,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
     ///
     /// * A tuple containing the network instance and the oracle that
     ///   can be used by a developer to configure which peers are authorized.
-    pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<E, C>) {
+    pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<E, C::PublicKey>) {
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
             context.with_label("tracker"),
             tracker::Config {

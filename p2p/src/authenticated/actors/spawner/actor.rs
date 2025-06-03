@@ -6,7 +6,7 @@ use crate::authenticated::{
     actors::{peer, router, tracker},
     metrics,
 };
-use commonware_cryptography::Verifier;
+use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota};
@@ -19,7 +19,7 @@ pub struct Actor<
     E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
     Si: Sink,
     St: Stream,
-    C: Verifier,
+    C: PublicKey,
 > {
     context: E,
 
@@ -30,7 +30,7 @@ pub struct Actor<
     allowed_peers_rate: Quota,
     peer_gossip_max_count: usize,
 
-    receiver: mpsc::Receiver<Message<E, Si, St, C::PublicKey>>,
+    receiver: mpsc::Receiver<Message<E, Si, St, C>>,
 
     connections: Gauge,
     sent_messages: Family<metrics::Message, Counter>,
@@ -42,10 +42,10 @@ impl<
         E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
         Si: Sink,
         St: Stream,
-        C: Verifier,
+        C: PublicKey,
     > Actor<E, Si, St, C>
 {
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<E, Si, St, C::PublicKey>) {
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<E, Si, St, C>) {
         let connections = Gauge::default();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
@@ -90,12 +90,12 @@ impl<
     pub fn start(
         mut self,
         tracker: tracker::Mailbox<E, C>,
-        router: router::Mailbox<C::PublicKey>,
+        router: router::Mailbox<C>,
     ) -> Handle<()> {
         self.context.spawn_ref()(self.run(tracker, router))
     }
 
-    async fn run(mut self, tracker: tracker::Mailbox<E, C>, router: router::Mailbox<C::PublicKey>) {
+    async fn run(mut self, tracker: tracker::Mailbox<E, C>, router: router::Mailbox<C>) {
         while let Some(msg) = self.receiver.next().await {
             match msg {
                 Message::Spawn {

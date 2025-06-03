@@ -1,4 +1,4 @@
-use commonware_cryptography::Scheme;
+use commonware_cryptography::Signer;
 use commonware_utils::NZU32;
 use governor::Quota;
 use std::{net::SocketAddr, time::Duration};
@@ -14,7 +14,7 @@ pub type Bootstrapper<P> = (P, SocketAddr);
 /// If this is not synchronized, connections could be unnecessarily dropped, messages could be parsed incorrectly,
 /// and/or peers will rate limit each other during normal operation.
 #[derive(Clone)]
-pub struct Config<C: Scheme> {
+pub struct Config<C: Signer> {
     /// Cryptographic primitives.
     pub crypto: C,
 
@@ -110,7 +110,7 @@ pub struct Config<C: Scheme> {
     pub allowed_peers_rate: Quota,
 }
 
-impl<C: Scheme> Config<C> {
+impl<C: Signer> Config<C> {
     /// Generates a configuration with reasonable defaults for usage in production.
     pub fn recommended(
         crypto: C,

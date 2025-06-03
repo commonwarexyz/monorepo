@@ -11,7 +11,7 @@ use crate::{
     },
     Automaton, Relay, Reporter, Supervisor, LATENCY,
 };
-use commonware_cryptography::{Digest, Scheme};
+use commonware_cryptography::{Digest, PublicKey, Signer};
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
@@ -52,17 +52,17 @@ type Finalizable<'a, V, D> = Option<(
 const GENESIS_VIEW: View = 0;
 
 struct Round<
-    C: Scheme,
+    C: PublicKey,
     D: Digest,
     R: Reporter<Activity = Activity<C::Signature, D>>,
-    S: Supervisor<Index = View, PublicKey = C::PublicKey>,
+    S: Supervisor<Index = View, PublicKey = C>,
 > {
     start: SystemTime,
     supervisor: S,
     reporter: R,
 
     view: View,
-    leader: C::PublicKey,
+    leader: C,
     leader_deadline: Option<SystemTime>,
     advance_deadline: Option<SystemTime>,
     nullify_retry: Option<SystemTime>,
@@ -91,10 +91,10 @@ struct Round<
 }
 
 impl<
-        C: Scheme,
+        C: PublicKey,
         D: Digest,
         R: Reporter<Activity = Activity<C::Signature, D>>,
-        S: Supervisor<Index = View, PublicKey = C::PublicKey>,
+        S: Supervisor<Index = View, PublicKey = C>,
     > Round<C, D, R, S>
 {
     pub fn new(current: SystemTime, reporter: R, supervisor: S, view: View) -> Self {
@@ -310,7 +310,7 @@ impl<
 
 pub struct Actor<
     E: Clock + Rng + Spawner + Storage + Metrics,
-    C: Scheme,
+    C: Signer,
     D: Digest,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
@@ -346,7 +346,7 @@ pub struct Actor<
 
     last_finalized: View,
     view: View,
-    views: BTreeMap<View, Round<C, D, F, S>>,
+    views: BTreeMap<View, Round<C::PublicKey, D, F, S>>,
 
     current_view: Gauge,
     tracked_views: Gauge,
@@ -359,7 +359,7 @@ pub struct Actor<
 
 impl<
         E: Clock + Rng + Spawner + Storage + Metrics,
-        C: Scheme,
+        C: Signer,
         D: Digest,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
@@ -700,7 +700,7 @@ impl<
         };
 
         // Verify the signature
-        if !nullify.verify::<C>(&self.namespace, public_key) {
+        if !nullify.verify(&self.namespace, public_key) {
             return false;
         }
 
@@ -1019,7 +1019,7 @@ impl<
         };
 
         // Verify the signature
-        if !notarize.verify::<C>(&self.namespace, public_key) {
+        if !notarize.verify(&self.namespace, public_key) {
             return false;
         }
 
@@ -1071,7 +1071,7 @@ impl<
         let Some(participants) = self.supervisor.participants(view) else {
             return false;
         };
-        if !notarization.verify::<C>(&self.namespace, participants) {
+        if !notarization.verify(&self.namespace, participants) {
             return false;
         }
 
@@ -1140,7 +1140,7 @@ impl<
         let Some(participants) = self.supervisor.participants(nullification.view) else {
             return false;
         };
-        if !nullification.verify::<C>(&self.namespace, participants) {
+        if !nullification.verify(&self.namespace, participants) {
             return false;
         }
 
@@ -1197,7 +1197,7 @@ impl<
         };
 
         // Verify the signature
-        if !finalize.verify::<C>(&self.namespace, public_key) {
+        if !finalize.verify(&self.namespace, public_key) {
             return false;
         }
 
@@ -1249,7 +1249,7 @@ impl<
         let Some(participants) = self.supervisor.participants(view) else {
             return false;
         };
-        if !finalization.verify::<C>(&self.namespace, participants) {
+        if !finalization.verify(&self.namespace, participants) {
             return false;
         }
 

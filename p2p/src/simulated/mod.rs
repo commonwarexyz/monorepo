@@ -13,15 +13,15 @@
 //!
 //! ```rust
 //! use commonware_p2p::simulated::{Config, Link, Network};
-//! use commonware_cryptography::{Ed25519, Signer, Verifier};
+//! use commonware_cryptography::{ed25519, PrivateKey, Signer as _, PublicKey as _, PrivateKeyExt as _};
 //! use commonware_runtime::{deterministic, Spawner, Runner, Metrics};
 //!
 //! // Generate peers
 //! let peers = vec![
-//!     Ed25519::from_seed(0).public_key(),
-//!     Ed25519::from_seed(1).public_key(),
-//!     Ed25519::from_seed(2).public_key(),
-//!     Ed25519::from_seed(3).public_key(),
+//!     ed25519::PrivateKey::from_seed(0).public_key(),
+//!     ed25519::PrivateKey::from_seed(1).public_key(),
+//!     ed25519::PrivateKey::from_seed(2).public_key(),
+//!     ed25519::PrivateKey::from_seed(3).public_key(),
 //! ];
 //!
 //! // Configure network
@@ -124,7 +124,7 @@ mod tests {
     use super::*;
     use crate::{Receiver, Recipients, Sender};
     use bytes::Bytes;
-    use commonware_cryptography::{Ed25519, Signer};
+    use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt as _, Signer as _};
     use commonware_macros::select;
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
     use futures::{channel::mpsc, SinkExt, StreamExt};
@@ -152,7 +152,7 @@ mod tests {
             let mut agents = BTreeMap::new();
             let (seen_sender, mut seen_receiver) = mpsc::channel(1024);
             for i in 0..size {
-                let pk = Ed25519::from_seed(i as u64).public_key();
+                let pk = PrivateKey::from_seed(i as u64).public_key();
                 let (sender, mut receiver) = oracle.register(pk.clone(), 0).await.unwrap();
                 agents.insert(pk, sender);
                 let mut agent_sender = seen_sender.clone();
@@ -169,7 +169,7 @@ mod tests {
             }
 
             // Randomly link agents
-            let only_inbound = Ed25519::from_seed(0).public_key();
+            let only_inbound = PrivateKey::from_seed(0).public_key();
             for agent in agents.keys() {
                 if agent == &only_inbound {
                     // Test that we can gracefully handle missing links
@@ -267,7 +267,7 @@ mod tests {
             // Register agents
             let mut agents = HashMap::new();
             for i in 0..10 {
-                let pk = Ed25519::from_seed(i as u64).public_key();
+                let pk = PrivateKey::from_seed(i as u64).public_key();
                 let (sender, _) = oracle.register(pk.clone(), 0).await.unwrap();
                 agents.insert(pk, sender);
             }
@@ -305,7 +305,7 @@ mod tests {
             network.start();
 
             // Register agents
-            let pk = Ed25519::from_seed(0).public_key();
+            let pk = PrivateKey::from_seed(0).public_key();
             oracle.register(pk.clone(), 0).await.unwrap();
 
             // Attempt to link self
@@ -342,7 +342,7 @@ mod tests {
             network.start();
 
             // Register agents
-            let pk = Ed25519::from_seed(0).public_key();
+            let pk = PrivateKey::from_seed(0).public_key();
             oracle.register(pk.clone(), 0).await.unwrap();
             let result = oracle.register(pk, 0).await;
 
@@ -367,8 +367,8 @@ mod tests {
             network.start();
 
             // Register agents
-            let pk1 = Ed25519::from_seed(0).public_key();
-            let pk2 = Ed25519::from_seed(1).public_key();
+            let pk1 = PrivateKey::from_seed(0).public_key();
+            let pk2 = PrivateKey::from_seed(1).public_key();
             oracle.register(pk1.clone(), 0).await.unwrap();
             oracle.register(pk2.clone(), 0).await.unwrap();
 
@@ -406,8 +406,8 @@ mod tests {
             network.start();
 
             // Register agents
-            let pk1 = Ed25519::from_seed(0).public_key();
-            let pk2 = Ed25519::from_seed(1).public_key();
+            let pk1 = PrivateKey::from_seed(0).public_key();
+            let pk2 = PrivateKey::from_seed(1).public_key();
             oracle.register(pk1.clone(), 0).await.unwrap();
             oracle.register(pk2.clone(), 0).await.unwrap();
 
@@ -461,8 +461,8 @@ mod tests {
             network.start();
 
             // Register agents
-            let pk1 = Ed25519::from_seed(0).public_key();
-            let pk2 = Ed25519::from_seed(1).public_key();
+            let pk1 = PrivateKey::from_seed(0).public_key();
+            let pk2 = PrivateKey::from_seed(1).public_key();
             let (mut sender1, mut receiver1) = oracle.register(pk1.clone(), 0).await.unwrap();
             let (mut sender2, mut receiver2) = oracle.register(pk2.clone(), 0).await.unwrap();
 
@@ -534,8 +534,8 @@ mod tests {
             network.start();
 
             // Register agents
-            let pk1 = Ed25519::from_seed(0).public_key();
-            let pk2 = Ed25519::from_seed(1).public_key();
+            let pk1 = PrivateKey::from_seed(0).public_key();
+            let pk2 = PrivateKey::from_seed(1).public_key();
             let (mut sender1, _) = oracle.register(pk1.clone(), 0).await.unwrap();
             let (_, mut receiver2) = oracle.register(pk2.clone(), 1).await.unwrap();
 
@@ -586,8 +586,8 @@ mod tests {
             network.start();
 
             // Define agents
-            let pk1 = Ed25519::from_seed(0).public_key();
-            let pk2 = Ed25519::from_seed(1).public_key();
+            let pk1 = PrivateKey::from_seed(0).public_key();
+            let pk2 = PrivateKey::from_seed(1).public_key();
             let (mut sender1, mut receiver1) = oracle.register(pk1.clone(), 0).await.unwrap();
             let (mut sender2, mut receiver2) = oracle.register(pk2.clone(), 0).await.unwrap();
 
@@ -655,8 +655,8 @@ mod tests {
             network.start();
 
             // Register agents
-            let pk1 = Ed25519::from_seed(0).public_key();
-            let pk2 = Ed25519::from_seed(1).public_key();
+            let pk1 = PrivateKey::from_seed(0).public_key();
+            let pk2 = PrivateKey::from_seed(1).public_key();
             let (mut sender1, mut receiver1) = oracle.register(pk1.clone(), 0).await.unwrap();
             let (mut sender2, mut receiver2) = oracle.register(pk2.clone(), 0).await.unwrap();
 

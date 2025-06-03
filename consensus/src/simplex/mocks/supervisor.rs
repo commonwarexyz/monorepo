@@ -6,16 +6,16 @@ use crate::{
     Monitor, Reporter, Supervisor as Su,
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
-use commonware_cryptography::{Digest, Verifier};
+use commonware_cryptography::{Digest, PublicKey};
 use futures::channel::mpsc::{Receiver, Sender};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, Mutex},
 };
 
-pub struct Config<C: Verifier> {
+pub struct Config<C: PublicKey> {
     pub namespace: Vec<u8>,
-    pub participants: BTreeMap<View, Vec<C::PublicKey>>,
+    pub participants: BTreeMap<View, Vec<C>>,
 }
 
 type Participation<P, D> = HashMap<View, HashMap<D, HashSet<P>>>;
@@ -23,29 +23,29 @@ type Faults<P, S, D> = HashMap<P, HashMap<View, HashSet<Activity<S, D>>>>;
 type Participants<P> = BTreeMap<View, (HashMap<P, u32>, Vec<P>)>;
 
 #[derive(Clone)]
-pub struct Supervisor<C: Verifier, D: Digest> {
-    participants: Participants<C::PublicKey>,
+pub struct Supervisor<C: PublicKey, D: Digest> {
+    participants: Participants<C>,
 
     namespace: Vec<u8>,
 
-    pub leaders: Arc<Mutex<HashMap<View, C::PublicKey>>>,
-    pub notarizes: Arc<Mutex<Participation<C::PublicKey, D>>>,
+    pub leaders: Arc<Mutex<HashMap<View, C>>>,
+    pub notarizes: Arc<Mutex<Participation<C, D>>>,
     #[allow(clippy::type_complexity)]
     pub notarizations: Arc<Mutex<HashMap<View, Notarization<C::Signature, D>>>>,
-    pub nullifies: Arc<Mutex<HashMap<View, HashSet<C::PublicKey>>>>,
+    pub nullifies: Arc<Mutex<HashMap<View, HashSet<C>>>>,
     pub nullifications: Arc<Mutex<HashMap<View, Nullification<C::Signature>>>>,
     #[allow(clippy::type_complexity)]
-    pub finalizes: Arc<Mutex<Participation<C::PublicKey, D>>>,
+    pub finalizes: Arc<Mutex<Participation<C, D>>>,
     #[allow(clippy::type_complexity)]
     pub finalizations: Arc<Mutex<HashMap<View, Finalization<C::Signature, D>>>>,
     #[allow(clippy::type_complexity)]
-    pub faults: Arc<Mutex<Faults<C::PublicKey, C::Signature, D>>>,
+    pub faults: Arc<Mutex<Faults<C, C::Signature, D>>>,
 
     latest: Arc<Mutex<View>>,
     subscribers: Arc<Mutex<Vec<Sender<View>>>>,
 }
 
-impl<C: Verifier, D: Digest> Supervisor<C, D> {
+impl<C: PublicKey, D: Digest> Supervisor<C, D> {
     pub fn new(cfg: Config<C>) -> Self {
         let mut parsed_participants = BTreeMap::new();
         for (view, mut validators) in cfg.participants.into_iter() {
@@ -73,9 +73,9 @@ impl<C: Verifier, D: Digest> Supervisor<C, D> {
     }
 }
 
-impl<C: Verifier, D: Digest> Su for Supervisor<C, D> {
+impl<C: PublicKey, D: Digest> Su for Supervisor<C, D> {
     type Index = View;
-    type PublicKey = C::PublicKey;
+    type PublicKey = C;
 
     fn leader(&self, index: Self::Index) -> Option<Self::PublicKey> {
         let closest = match self.participants.range(..=index).next_back() {
@@ -114,7 +114,7 @@ impl<C: Verifier, D: Digest> Su for Supervisor<C, D> {
     }
 }
 
-impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
+impl<C: PublicKey, D: Digest> Reporter for Supervisor<C, D> {
     type Activity = Activity<C::Signature, D>;
 
     async fn report(&mut self, activity: Activity<C::Signature, D>) {
@@ -126,7 +126,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                 let view = notarize.view();
                 let participants = self.participants(view).unwrap();
                 let public_key = participants[notarize.signer() as usize].clone();
-                if !notarize.verify::<C>(&self.namespace, &public_key) {
+                if !notarize.verify(&self.namespace, &public_key) {
                     panic!("signature verification failed");
                 }
                 let encoded = notarize.encode();
@@ -143,7 +143,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
             Activity::Notarization(notarization) => {
                 let view = notarization.view();
                 let participants = self.participants(view).unwrap();
-                if !notarization.verify::<C>(&self.namespace, participants) {
+                if !notarization.verify(&self.namespace, participants) {
                     panic!("signature verification failed");
                 }
                 let encoded = notarization.encode();
@@ -168,7 +168,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                 let view = nullify.view();
                 let participants = self.participants(view).unwrap();
                 let public_key = participants[nullify.signer() as usize].clone();
-                if !nullify.verify::<C>(&self.namespace, &public_key) {
+                if !nullify.verify(&self.namespace, &public_key) {
                     panic!("signature verification failed");
                 }
                 let encoded = nullify.encode();
@@ -183,7 +183,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
             Activity::Nullification(nullification) => {
                 let view = nullification.view();
                 let participants = self.participants(view).unwrap();
-                if !nullification.verify::<C>(&self.namespace, participants) {
+                if !nullification.verify(&self.namespace, participants) {
                     panic!("signature verification failed");
                 }
                 let encoded = nullification.encode();
@@ -204,7 +204,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                 let view = finalize.view();
                 let participants = self.participants(view).unwrap();
                 let public_key = participants[finalize.signer() as usize].clone();
-                if !finalize.verify::<C>(&self.namespace, &public_key) {
+                if !finalize.verify(&self.namespace, &public_key) {
                     panic!("signature verification failed");
                 }
                 let encoded = finalize.encode();
@@ -221,7 +221,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
             Activity::Finalization(finalization) => {
                 let view = finalization.view();
                 let participants = self.participants(view).unwrap();
-                if !finalization.verify::<C>(&self.namespace, participants) {
+                if !finalization.verify(&self.namespace, participants) {
                     panic!("signature verification failed");
                 }
                 let encoded = finalization.encode();
@@ -253,7 +253,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                 let view = conflicting.view();
                 let participants = self.participants(view).unwrap();
                 let public_key = participants[conflicting.signer() as usize].clone();
-                if !conflicting.verify::<C>(&self.namespace, &public_key) {
+                if !conflicting.verify(&self.namespace, &public_key) {
                     panic!("signature verification failed");
                 }
                 let encoded = conflicting.encode();
@@ -271,7 +271,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                 let view = conflicting.view();
                 let participants = self.participants(view).unwrap();
                 let public_key = participants[conflicting.signer() as usize].clone();
-                if !conflicting.verify::<C>(&self.namespace, &public_key) {
+                if !conflicting.verify(&self.namespace, &public_key) {
                     panic!("signature verification failed");
                 }
                 let encoded = conflicting.encode();
@@ -289,7 +289,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
                 let view = conflicting.view();
                 let participants = self.participants(view).unwrap();
                 let public_key = participants[conflicting.signer() as usize].clone();
-                if !conflicting.verify::<C>(&self.namespace, &public_key) {
+                if !conflicting.verify(&self.namespace, &public_key) {
                     panic!("signature verification failed");
                 }
                 let encoded = conflicting.encode();
@@ -307,7 +307,7 @@ impl<C: Verifier, D: Digest> Reporter for Supervisor<C, D> {
     }
 }
 
-impl<C: Verifier, D: Digest> Monitor for Supervisor<C, D> {
+impl<C: PublicKey, D: Digest> Monitor for Supervisor<C, D> {
     type Index = View;
     async fn subscribe(&mut self) -> (Self::Index, Receiver<Self::Index>) {
         let (sender, receiver) = futures::channel::mpsc::channel(128);

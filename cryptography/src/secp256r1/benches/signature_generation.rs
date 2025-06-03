@@ -1,4 +1,4 @@
-use commonware_cryptography::{Secp256r1, Signer};
+use commonware_cryptography::{secp256r1, PrivateKeyExt as _, Signer as _};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
 use std::hint::black_box;
@@ -16,8 +16,8 @@ fn benchmark_signature_generation(c: &mut Criterion) {
         ),
         |b| {
             b.iter_batched(
-                || Secp256r1::new(&mut thread_rng()),
-                |mut signer| {
+                || secp256r1::PrivateKey::from_rng(&mut thread_rng()),
+                |signer| {
                     black_box(signer.sign(Some(namespace), &msg));
                 },
                 BatchSize::SmallInput,

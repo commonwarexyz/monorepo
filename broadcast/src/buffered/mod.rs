@@ -36,7 +36,10 @@ mod tests {
     use super::{mocks::TestMessage, *};
     use crate::Broadcaster;
     use commonware_codec::RangeCfg;
-    use commonware_cryptography::{ed25519::PublicKey, Committable, Digestible, Ed25519, Signer};
+    use commonware_cryptography::{
+        ed25519::{PrivateKey, PublicKey},
+        Committable, Digestible, PrivateKeyExt as _, Signer as _,
+    };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
         simulated::{Link, Network, Oracle, Receiver, Sender},
@@ -74,7 +77,7 @@ mod tests {
         network.start();
 
         let mut schemes = (0..num_peers)
-            .map(|i| Ed25519::from_seed(i as u64))
+            .map(|i| PrivateKey::from_seed(i as u64))
             .collect::<Vec<_>>();
         schemes.sort_by_key(|s| s.public_key());
         let peers: Vec<PublicKey> = schemes.iter().map(|c| (c.public_key())).collect();

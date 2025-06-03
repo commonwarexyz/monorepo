@@ -2,7 +2,7 @@ use clap::{Arg, Command};
 use commonware_codec::DecodeExt;
 use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
-    Ed25519, Signer,
+    Signer as _,
 };
 use commonware_deployer::ec2::{Hosts, METRICS_PORT};
 use commonware_flood::Config;
@@ -54,8 +54,7 @@ fn main() {
     info!(peers = peers.len(), "loaded peers");
     let key = from_hex_formatted(&config.private_key).expect("Could not parse private key");
     let key = PrivateKey::decode(key.as_ref()).expect("Private key is invalid");
-    let signer = Ed25519::from(key);
-    let public_key = signer.public_key();
+    let public_key = key.public_key();
 
     // Initialize runtime
     let cfg = tokio::Config::new().with_worker_threads(config.worker_threads);
@@ -111,7 +110,7 @@ fn main() {
 
         // Configure network
         let mut p2p_cfg = authenticated::Config::aggressive(
-            signer.clone(),
+            key.clone(),
             &union(FLOOD_NAMESPACE, b"_P2P"),
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
             SocketAddr::new(*ip, config.port),

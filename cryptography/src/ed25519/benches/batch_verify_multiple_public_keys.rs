@@ -1,4 +1,4 @@
-use commonware_cryptography::{ed25519::Ed25519Batch, BatchScheme, Ed25519, Signer};
+use commonware_cryptography::{ed25519, BatchVerifier, PrivateKeyExt as _, Signer as _};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
 use std::hint::black_box;
@@ -11,9 +11,9 @@ fn benchmark_batch_verify_multiple_public_keys(c: &mut Criterion) {
         c.bench_function(&format!("{}/pks={}", module_path!(), n_signers), |b| {
             b.iter_batched(
                 || {
-                    let mut batch = Ed25519Batch::new();
+                    let mut batch = ed25519::Batch::new();
                     for _ in 0..n_signers {
-                        let mut signer = Ed25519::new(&mut thread_rng());
+                        let signer = ed25519::PrivateKey::from_rng(&mut thread_rng());
                         let sig = signer.sign(Some(namespace), &msg);
                         assert!(batch.add(Some(namespace), &msg, &signer.public_key(), &sig));
                     }

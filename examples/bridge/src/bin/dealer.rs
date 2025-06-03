@@ -5,7 +5,7 @@ use commonware_cryptography::{
         dkg::ops,
         primitives::{poly, variant::MinSig},
     },
-    Ed25519, Signer,
+    ed25519, PrivateKeyExt as _, Signer as _,
 };
 use commonware_utils::{hex, quorum};
 use rand::{rngs::StdRng, SeedableRng};
@@ -41,7 +41,7 @@ fn main() {
         panic!("Please provide at least one participant");
     }
     for peer in participants {
-        let verifier = Ed25519::from_seed(peer).public_key();
+        let verifier = ed25519::PrivateKey::from_seed(peer).public_key();
         validators.push((peer, verifier));
     }
     validators.sort_by(|(_, a), (_, b)| a.cmp(b));

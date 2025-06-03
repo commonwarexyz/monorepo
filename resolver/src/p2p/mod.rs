@@ -81,7 +81,10 @@ mod tests {
     };
     use crate::Resolver;
     use bytes::Bytes;
-    use commonware_cryptography::{ed25519::PublicKey, Ed25519, Signer};
+    use commonware_cryptography::{
+        ed25519::{PrivateKey, PublicKey},
+        PrivateKeyExt as _, Signer,
+    };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
@@ -110,7 +113,7 @@ mod tests {
         peer_seeds: &[u64],
     ) -> (
         Oracle<PublicKey>,
-        Vec<Ed25519>,
+        Vec<PrivateKey>,
         Vec<PublicKey>,
         Vec<(Sender<PublicKey>, Receiver<PublicKey>)>,
     ) {
@@ -122,9 +125,9 @@ mod tests {
         );
         network.start();
 
-        let schemes: Vec<Ed25519> = peer_seeds
+        let schemes: Vec<PrivateKey> = peer_seeds
             .iter()
-            .map(|seed| Ed25519::from_seed(*seed))
+            .map(|seed| PrivateKey::from_seed(*seed))
             .collect();
         let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
 
@@ -157,20 +160,21 @@ mod tests {
     async fn setup_and_spawn_actor(
         context: &deterministic::Context,
         coordinator: &Coordinator<PublicKey>,
-        scheme: Ed25519,
+        signer: impl Signer<PublicKey = PublicKey>,
         connection: (Sender<PublicKey>, Receiver<PublicKey>),
         consumer: Consumer<Key, Bytes>,
         producer: Producer<Key, Bytes>,
     ) -> Mailbox<Key> {
+        let public_key = signer.public_key();
         let (engine, mailbox) = Engine::new(
-            context.with_label(&format!("actor_{}", scheme.public_key())),
+            context.with_label(&format!("actor_{}", public_key)),
             Config {
                 coordinator: coordinator.clone(),
                 consumer,
                 producer,
                 mailbox_size: MAILBOX_SIZE,
                 requester_config: commonware_p2p::utils::requester::Config {
-                    public_key: scheme.public_key(),
+                    public_key,
                     rate_limit: governor::Quota::per_second(NZU32!(RATE_LIMIT)),
                     initial: INITIAL_DURATION,
                     timeout: TIMEOUT,

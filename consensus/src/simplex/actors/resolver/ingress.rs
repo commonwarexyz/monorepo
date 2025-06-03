@@ -1,9 +1,8 @@
 use crate::simplex::types::{Notarization, Nullification, View};
-use commonware_cryptography::Digest;
-use commonware_utils::Array;
+use commonware_cryptography::{Digest, Signature};
 use futures::{channel::mpsc, SinkExt};
 
-pub enum Message<S: Array, D: Digest> {
+pub enum Message<S: Signature, D: Digest> {
     Fetch {
         notarizations: Vec<View>,
         nullifications: Vec<View>,
@@ -21,11 +20,11 @@ pub enum Message<S: Array, D: Digest> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<S: Array, D: Digest> {
+pub struct Mailbox<S: Signature, D: Digest> {
     sender: mpsc::Sender<Message<S, D>>,
 }
 
-impl<S: Array, D: Digest> Mailbox<S, D> {
+impl<S: Signature, D: Digest> Mailbox<S, D> {
     pub fn new(sender: mpsc::Sender<Message<S, D>>) -> Self {
         Self { sender }
     }

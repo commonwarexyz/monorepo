@@ -3,7 +3,7 @@ use commonware_cryptography::{
         dkg::{Dealer, Player},
         primitives::variant::MinSig,
     },
-    Ed25519, Signer,
+    ed25519, PrivateKeyExt as _, Signer as _,
 };
 use commonware_utils::quorum;
 use criterion::{criterion_group, BatchSize, Criterion};
@@ -21,7 +21,7 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
 
         // Create contributors
         let mut contributors = (0..n)
-            .map(|i| Ed25519::from_seed(i as u64).public_key())
+            .map(|i| ed25519::PrivateKey::from_seed(i as u64).public_key())
             .collect::<Vec<_>>();
         contributors.sort();
 

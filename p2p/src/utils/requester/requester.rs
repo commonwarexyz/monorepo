@@ -256,7 +256,8 @@ impl<E: Clock + GClock + Rng + Metrics, P: Array> Requester<E, P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{Ed25519, Signer};
+    use commonware_cryptography::ed25519::PrivateKey;
+    use commonware_cryptography::{PrivateKeyExt as _, Signer as _};
     use commonware_runtime::deterministic;
     use commonware_runtime::Runner;
     use commonware_utils::NZU32;
@@ -269,7 +270,7 @@ mod tests {
         let executor = deterministic::Runner::seeded(0);
         executor.start(|context| async move {
             // Create requester
-            let scheme = Ed25519::from_seed(0);
+            let scheme = PrivateKey::from_seed(0);
             let me = scheme.public_key();
             let timeout = Duration::from_secs(5);
             let config = Config {
@@ -291,7 +292,7 @@ mod tests {
             assert!(requester.handle(&me, 0).is_none());
 
             // Initialize requester
-            let other = Ed25519::from_seed(1).public_key();
+            let other = PrivateKey::from_seed(1).public_key();
             requester.reconcile(&[me.clone(), other.clone()]);
 
             // Get request
@@ -377,7 +378,7 @@ mod tests {
         let executor = deterministic::Runner::seeded(0);
         executor.start(|context| async move {
             // Create requester
-            let scheme = Ed25519::from_seed(0);
+            let scheme = PrivateKey::from_seed(0);
             let me = scheme.public_key();
             let timeout = Duration::from_secs(5);
             let config = Config {
@@ -395,8 +396,8 @@ mod tests {
             assert_eq!(requester.next(), None);
 
             // Initialize requester
-            let other1 = Ed25519::from_seed(1).public_key();
-            let other2 = Ed25519::from_seed(2).public_key();
+            let other1 = PrivateKey::from_seed(1).public_key();
+            let other2 = PrivateKey::from_seed(2).public_key();
             requester.reconcile(&[me.clone(), other1.clone(), other2.clone()]);
 
             // Get request
@@ -439,7 +440,7 @@ mod tests {
             assert!(requester.cancel(id).is_some());
 
             // Add another participant
-            let other3 = Ed25519::from_seed(3).public_key();
+            let other3 = PrivateKey::from_seed(3).public_key();
             requester.reconcile(&[me, other1, other2.clone(), other3.clone()]);
 
             // Get request (new should be prioritized because lower default time)

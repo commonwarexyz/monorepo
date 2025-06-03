@@ -56,7 +56,8 @@ mod handler;
 mod logger;
 
 use clap::{value_parser, Arg, Command};
-use commonware_cryptography::{Ed25519, Signer};
+use commonware_cryptography::PrivateKeyExt as _;
+use commonware_cryptography::{ed25519, Signer as _};
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::tokio;
 use commonware_runtime::Metrics;
@@ -111,7 +112,7 @@ fn main() {
         .expect("Please provide identity");
     let parts = me.split('@').collect::<Vec<&str>>();
     let key = parts[0].parse::<u64>().expect("Key not well-formed");
-    let signer = Ed25519::from_seed(key);
+    let signer = ed25519::PrivateKey::from_seed(key);
     info!(key = ?signer.public_key(), "loaded signer");
 
     // Configure my port
@@ -128,7 +129,7 @@ fn main() {
         panic!("Please provide at least one friend");
     }
     for peer in allowed_keys {
-        let verifier = Ed25519::from_seed(peer).public_key();
+        let verifier = ed25519::PrivateKey::from_seed(peer).public_key();
         info!(key = ?verifier, "registered authorized key");
         recipients.push(verifier);
     }
@@ -142,7 +143,7 @@ fn main() {
             let bootstrapper_key = parts[0]
                 .parse::<u64>()
                 .expect("Bootstrapper key not well-formed");
-            let verifier = Ed25519::from_seed(bootstrapper_key).public_key();
+            let verifier = ed25519::PrivateKey::from_seed(bootstrapper_key).public_key();
             let bootstrapper_address =
                 SocketAddr::from_str(parts[1]).expect("Bootstrapper address not well-formed");
             bootstrapper_identities.push((verifier, bootstrapper_address));

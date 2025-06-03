@@ -702,7 +702,7 @@ impl Link {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{Ed25519, Signer, Specification};
+    use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
     use commonware_runtime::{deterministic, Runner};
 
     const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
@@ -719,8 +719,8 @@ mod tests {
             network_context.spawn(|_| network.run());
 
             // Create two public keys
-            let pk1 = Ed25519::from_seed(1).public_key();
-            let pk2 = Ed25519::from_seed(2).public_key();
+            let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
+            let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
 
             // Register
             oracle.register(pk1.clone(), 0).await.unwrap();
@@ -761,7 +761,7 @@ mod tests {
         let runner = deterministic::Runner::default();
 
         runner.start(|context| async move {
-            type PublicKey = <Ed25519 as Specification>::PublicKey;
+            type PublicKey = ed25519::PublicKey;
             let (mut network, _) =
                 Network::<deterministic::Context, PublicKey>::new(context.clone(), cfg);
 

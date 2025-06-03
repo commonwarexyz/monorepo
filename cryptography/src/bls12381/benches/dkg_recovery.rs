@@ -1,6 +1,6 @@
 use commonware_cryptography::bls12381::dkg::{Dealer, Player};
 use commonware_cryptography::bls12381::primitives::variant::MinSig;
-use commonware_cryptography::{Ed25519, Signer};
+use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
 use commonware_utils::quorum;
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::rngs::StdRng;
@@ -20,7 +20,7 @@ fn benchmark_dkg_recovery(c: &mut Criterion) {
                 || {
                     // Create contributors
                     let mut contributors = (0..n)
-                        .map(|i| Ed25519::from_seed(i as u64).public_key())
+                        .map(|i| ed25519::PrivateKey::from_seed(i as u64).public_key())
                         .collect::<Vec<_>>();
                     contributors.sort();
 

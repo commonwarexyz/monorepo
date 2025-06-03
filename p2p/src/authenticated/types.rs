@@ -2,7 +2,7 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, ReadRangeExt, Write,
 };
-use commonware_cryptography::{Signer, Verifier};
+use commonware_cryptography::{PublicKey, Signer};
 use commonware_utils::BitVec as UtilsBitVec;
 use std::net::SocketAddr;
 
@@ -35,7 +35,7 @@ pub struct Config {
 
 /// Payload is the only allowed message format that can be sent between peers.
 #[derive(Clone, Debug)]
-pub enum Payload<C: Verifier> {
+pub enum Payload<C: PublicKey> {
     /// Bit vector that represents the peers a peer knows about.
     ///
     /// Also used as a ping message to keep the connection alive.
@@ -48,7 +48,7 @@ pub enum Payload<C: Verifier> {
     Data(Data),
 }
 
-impl<C: Verifier> EncodeSize for Payload<C> {
+impl<C: PublicKey> EncodeSize for Payload<C> {
     fn encode_size(&self) -> usize {
         (match self {
             Payload::BitVec(bit_vec) => bit_vec.encode_size(),
@@ -58,7 +58,7 @@ impl<C: Verifier> EncodeSize for Payload<C> {
     }
 }
 
-impl<C: Verifier> Write for Payload<C> {
+impl<C: PublicKey> Write for Payload<C> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             Payload::BitVec(bit_vec) => {
@@ -77,7 +77,7 @@ impl<C: Verifier> Write for Payload<C> {
     }
 }
 
-impl<C: Verifier> Read for Payload<C> {
+impl<C: PublicKey> Read for Payload<C> {
     type Cfg = Config;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
@@ -145,7 +145,7 @@ impl Read for BitVec {
 /// This is used to share the peer's socket address and public key with other peers in a verified
 /// manner.
 #[derive(Clone, Debug)]
-pub struct PeerInfo<C: Verifier> {
+pub struct PeerInfo<C: PublicKey> {
     /// The socket address of the peer.
     pub socket: SocketAddr,
 
@@ -153,25 +153,24 @@ pub struct PeerInfo<C: Verifier> {
     pub timestamp: u64,
 
     /// The public key of the peer.
-    pub public_key: C::PublicKey,
+    pub public_key: C,
 
     /// The peer's signature over the socket and timestamp.
     pub signature: C::Signature,
 }
 
-impl<C: Verifier> PeerInfo<C> {
+impl<C: PublicKey> PeerInfo<C> {
     /// Verify the signature of the peer info.
     pub fn verify(&self, namespace: &[u8]) -> bool {
-        C::verify(
+        self.public_key.verify(
             Some(namespace),
             &(self.socket, self.timestamp).encode(),
-            &self.public_key,
             &self.signature,
         )
     }
 
-    pub fn sign<S: Signer<PublicKey = C::PublicKey, Signature = C::Signature>>(
-        signer: &mut S,
+    pub fn sign<Sk: Signer<PublicKey = C, Signature = C::Signature>>(
+        signer: &Sk,
         namespace: &[u8],
         socket: SocketAddr,
         timestamp: u64,
@@ -186,7 +185,7 @@ impl<C: Verifier> PeerInfo<C> {
     }
 }
 
-impl<C: Verifier> EncodeSize for PeerInfo<C> {
+impl<C: PublicKey> EncodeSize for PeerInfo<C> {
     fn encode_size(&self) -> usize {
         self.socket.encode_size()
             + UInt(self.timestamp).encode_size()
@@ -195,7 +194,7 @@ impl<C: Verifier> EncodeSize for PeerInfo<C> {
     }
 }
 
-impl<C: Verifier> Write for PeerInfo<C> {
+impl<C: PublicKey> Write for PeerInfo<C> {
     fn write(&self, buf: &mut impl BufMut) {
         self.socket.write(buf);
         UInt(self.timestamp).write(buf);
@@ -204,13 +203,13 @@ impl<C: Verifier> Write for PeerInfo<C> {
     }
 }
 
-impl<C: Verifier> Read for PeerInfo<C> {
+impl<C: PublicKey> Read for PeerInfo<C> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let socket = SocketAddr::read(buf)?;
         let timestamp = UInt::read(buf)?.into();
-        let public_key = C::PublicKey::read(buf)?;
+        let public_key = C::read(buf)?;
         let signature = C::Signature::read(buf)?;
         Ok(PeerInfo {
             socket,
@@ -261,11 +260,11 @@ mod tests {
     use super::*;
     use bytes::BytesMut;
     use commonware_codec::{Decode, DecodeRangeExt};
-    use commonware_cryptography::{Secp256r1, Signer};
+    use commonware_cryptography::{secp256r1, PrivateKeyExt as _};
 
-    fn signed_peer_info() -> PeerInfo<Secp256r1> {
+    fn signed_peer_info() -> PeerInfo<secp256r1::PublicKey> {
         let mut rng = rand::thread_rng();
-        let mut c = Secp256r1::new(&mut rng);
+        let c = secp256r1::PrivateKey::from_rng(&mut rng);
         PeerInfo {
             socket: SocketAddr::from(([127, 0, 0, 1], 8080)),
             timestamp: 1234567890,
@@ -291,7 +290,7 @@ mod tests {
     fn test_signed_peer_info_codec() {
         let original = vec![signed_peer_info(), signed_peer_info(), signed_peer_info()];
         let encoded = original.encode();
-        let decoded = Vec::<PeerInfo<Secp256r1>>::decode_range(encoded, 3..=3).unwrap();
+        let decoded = Vec::<PeerInfo<secp256r1::PublicKey>>::decode_range(encoded, 3..=3).unwrap();
         for (original, decoded) in original.iter().zip(decoded.iter()) {
             assert_eq!(original.socket, decoded.socket);
             assert_eq!(original.timestamp, decoded.timestamp);
@@ -299,10 +298,10 @@ mod tests {
             assert_eq!(original.signature, decoded.signature);
         }
 
-        let too_short = Vec::<PeerInfo<Secp256r1>>::decode_range(original.encode(), ..3);
+        let too_short = Vec::<PeerInfo<secp256r1::PublicKey>>::decode_range(original.encode(), ..3);
         assert!(matches!(too_short, Err(Error::InvalidLength(3))));
 
-        let too_long = Vec::<PeerInfo<Secp256r1>>::decode_range(original.encode(), 4..);
+        let too_long = Vec::<PeerInfo<secp256r1::PublicKey>>::decode_range(original.encode(), 4..);
         assert!(matches!(too_long, Err(Error::InvalidLength(3))));
     }
 
@@ -336,9 +335,9 @@ mod tests {
             index: 1234,
             bits: UtilsBitVec::ones(100),
         };
-        let encoded: BytesMut = Payload::<Secp256r1>::BitVec(original.clone()).encode();
-        let decoded = match Payload::<Secp256r1>::decode_cfg(encoded, &cfg) {
-            Ok(Payload::<Secp256r1>::BitVec(b)) => b,
+        let encoded: BytesMut = Payload::<secp256r1::PublicKey>::BitVec(original.clone()).encode();
+        let decoded = match Payload::<secp256r1::PublicKey>::decode_cfg(encoded, &cfg) {
+            Ok(Payload::<secp256r1::PublicKey>::BitVec(b)) => b,
             _ => panic!(),
         };
         assert_eq!(original, decoded);
@@ -346,8 +345,8 @@ mod tests {
         // Test Peers
         let original = vec![signed_peer_info(), signed_peer_info()];
         let encoded = Payload::Peers(original.clone()).encode();
-        let decoded = match Payload::<Secp256r1>::decode_cfg(encoded, &cfg) {
-            Ok(Payload::<Secp256r1>::Peers(p)) => p,
+        let decoded = match Payload::<secp256r1::PublicKey>::decode_cfg(encoded, &cfg) {
+            Ok(Payload::<secp256r1::PublicKey>::Peers(p)) => p,
             _ => panic!(),
         };
         for (a, b) in original.iter().zip(decoded.iter()) {
@@ -362,9 +361,9 @@ mod tests {
             channel: 12345,
             message: Bytes::from("Hello, world!"),
         };
-        let encoded = Payload::<Secp256r1>::Data(original.clone()).encode();
-        let decoded = match Payload::<Secp256r1>::decode_cfg(encoded, &cfg) {
-            Ok(Payload::<Secp256r1>::Data(d)) => d,
+        let encoded = Payload::<secp256r1::PublicKey>::Data(original.clone()).encode();
+        let decoded = match Payload::<secp256r1::PublicKey>::decode_cfg(encoded, &cfg) {
+            Ok(Payload::<secp256r1::PublicKey>::Data(d)) => d,
             _ => panic!(),
         };
         assert_eq!(original, decoded);
@@ -377,7 +376,7 @@ mod tests {
             max_bit_vec: 1024,
         };
         let invalid_payload = [3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
-        let result = Payload::<Secp256r1>::decode_cfg(&invalid_payload[..], &cfg);
+        let result = Payload::<secp256r1::PublicKey>::decode_cfg(&invalid_payload[..], &cfg);
         assert!(result.is_err());
     }
 
@@ -385,7 +384,7 @@ mod tests {
     fn test_max_payload_data_overhead() {
         let message = Bytes::from(vec![0; 1 << 29]);
         let message_len = message.len();
-        let payload = Payload::<Secp256r1>::Data(Data {
+        let payload = Payload::<secp256r1::PublicKey>::Data(Data {
             channel: u32::MAX,
             message,
         });

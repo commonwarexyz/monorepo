@@ -8,7 +8,7 @@ use commonware_cryptography::{
         dkg::{player::Output, Dealer, Player},
         primitives::{group, variant::MinSig},
     },
-    Scheme,
+    Signer, Verifier as _,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -21,7 +21,7 @@ use tracing::{debug, info, warn};
 
 /// A DKG/Resharing contributor that can be configured to behave honestly
 /// or deviate as a rogue, lazy, or forger.
-pub struct Contributor<E: Clock + Rng + Spawner, C: Scheme> {
+pub struct Contributor<E: Clock + Rng + Spawner, C: Signer> {
     context: E,
     crypto: C,
     dkg_phase_timeout: Duration,
@@ -37,7 +37,7 @@ pub struct Contributor<E: Clock + Rng + Spawner, C: Scheme> {
     signatures: mpsc::Sender<(u64, Output<MinSig>)>,
 }
 
-impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
+impl<E: Clock + Rng + Spawner, C: Signer> Contributor<E, C> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         context: E,
@@ -288,7 +288,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
 
                                         // Verify signature on incoming ack
                                         let payload = payload(round, &me, commitment);
-                                        if !C::verify(Some(ACK_NAMESPACE), &payload, &s, &signature) {
+                                        if !s.verify(Some(ACK_NAMESPACE), &payload, &signature) {
                                             warn!(round, sender = ?s, "received invalid ack signature");
                                             continue;
                                         }

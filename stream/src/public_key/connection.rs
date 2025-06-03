@@ -6,7 +6,7 @@ use crate::{
 use bytes::Bytes;
 use chacha20poly1305::{aead::Aead, ChaCha20Poly1305};
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::Scheme;
+use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
 use commonware_utils::SystemTimeExt as _;
@@ -18,7 +18,7 @@ use std::time::SystemTime;
 const ENCRYPTION_TAG_LENGTH: usize = 16;
 
 /// An incoming connection with a verified peer handshake.
-pub struct IncomingConnection<C: Scheme, Si: Sink, St: Stream> {
+pub struct IncomingConnection<C: Signer, Si: Sink, St: Stream> {
     config: Config<C>,
     sink: Si,
     stream: St,
@@ -31,7 +31,7 @@ pub struct IncomingConnection<C: Scheme, Si: Sink, St: Stream> {
     dialer_handshake_bytes: Bytes,
 }
 
-impl<C: Scheme, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
+impl<C: Signer, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
     pub async fn verify<E: Clock + Spawner>(
         context: &E,
         config: Config<C>,
@@ -49,10 +49,10 @@ impl<C: Scheme, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
 
         // Verify handshake message from peer
         let signed_handshake =
-            handshake::Signed::<C>::decode(msg.as_ref()).map_err(Error::UnableToDecode)?;
+            handshake::Signed::decode(msg.as_ref()).map_err(Error::UnableToDecode)?;
         signed_handshake.verify(
             context,
-            &config.crypto,
+            &config.crypto.public_key(),
             &config.namespace,
             config.synchrony_bound,
             config.max_handshake_age,
@@ -118,7 +118,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
     ///
     /// This will send a handshake message to the peer, wait for a response,
     /// and verify the peer's handshake message.
-    pub async fn upgrade_dialer<R: Rng + CryptoRng + Spawner + Clock, C: Scheme>(
+    pub async fn upgrade_dialer<R: Rng + CryptoRng + Spawner + Clock, C: Signer>(
         mut context: R,
         mut config: Config<C>,
         mut sink: Si,
@@ -141,7 +141,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let d2l_msg = handshake::Signed::sign(
             &mut config.crypto,
             &config.namespace,
-            handshake::Info::<C>::new(
+            handshake::Info::new(
                 peer.clone(),
                 x25519::PublicKey::from_secret(&secret),
                 timestamp,
@@ -171,10 +171,10 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
 
         // Verify handshake message from peer
         let signed_handshake =
-            handshake::Signed::<C>::decode(l2d_msg.as_ref()).map_err(Error::UnableToDecode)?;
+            handshake::Signed::decode(l2d_msg.as_ref()).map_err(Error::UnableToDecode)?;
         signed_handshake.verify(
             &context,
-            &config.crypto,
+            &config.crypto.public_key(),
             &config.namespace,
             config.synchrony_bound,
             config.max_handshake_age,
@@ -212,7 +212,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
     /// Because we already verified the peer's handshake, this function
     /// only needs to send our handshake message for the connection to be fully
     /// initialized.
-    pub async fn upgrade_listener<R: Rng + CryptoRng + Spawner + Clock, C: Scheme>(
+    pub async fn upgrade_listener<R: Rng + CryptoRng + Spawner + Clock, C: Signer>(
         mut context: R,
         incoming: IncomingConnection<C, Si, St>,
     ) -> Result<Self, Error> {
@@ -232,7 +232,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let l2d_msg = handshake::Signed::sign(
             &mut crypto,
             &namespace,
-            handshake::Info::<C>::new(
+            handshake::Info::new(
                 incoming.peer_public_key,
                 x25519::PublicKey::from_secret(&secret),
                 timestamp,
@@ -353,7 +353,10 @@ mod tests {
     use super::*;
     use crate::{Receiver as _, Sender as _};
     use chacha20poly1305::KeyInit;
-    use commonware_cryptography::{Ed25519, Signer};
+    use commonware_cryptography::{
+        ed25519::{PrivateKey, PublicKey},
+        PrivateKeyExt as _,
+    };
     use commonware_runtime::{deterministic, mocks, Metrics, Runner};
     use std::time::Duration;
 
@@ -493,8 +496,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create cryptographic identities
-            let dialer_crypto = Ed25519::from_seed(0);
-            let listener_crypto = Ed25519::from_seed(1);
+            let dialer_crypto = PrivateKey::from_seed(0);
+            let listener_crypto = PrivateKey::from_seed(1);
 
             // Set up mock channels for transport simulation
             let (dialer_sink, listener_stream) = mocks::Channel::init();
@@ -580,9 +583,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create cryptographic identities
-            let dialer_crypto = Ed25519::from_seed(0);
-            let expected_peer = Ed25519::from_seed(1).public_key();
-            let mut actual_peer = Ed25519::from_seed(2);
+            let dialer_crypto = PrivateKey::from_seed(0);
+            let expected_peer = PrivateKey::from_seed(1).public_key();
+            let mut actual_peer = PrivateKey::from_seed(2);
 
             // Set up mock channels
             let (dialer_sink, mut peer_stream) = mocks::Channel::init();
@@ -604,7 +607,7 @@ mod tests {
                 move |mut context| async move {
                     // Read the handshake from dialer
                     let msg = recv_frame(&mut peer_stream, 1024).await.unwrap();
-                    let _ = handshake::Signed::<Ed25519>::decode(msg).unwrap(); // Simulate reading
+                    let _ = handshake::Signed::<PublicKey>::decode(msg).unwrap(); // Simulate reading
 
                     // Create and send own handshake
                     let secret = x25519::new(&mut context);
@@ -642,8 +645,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create cryptographic identities
-            let dialer_crypto = Ed25519::from_seed(0);
-            let mut listener_crypto = Ed25519::from_seed(1);
+            let dialer_crypto = PrivateKey::from_seed(0);
+            let mut listener_crypto = PrivateKey::from_seed(1);
             let listener_public_key = listener_crypto.public_key();
 
             // Set up mock channels
@@ -667,7 +670,7 @@ mod tests {
                 move |context| async move {
                     // Read the handshake from dialer
                     let msg = recv_frame(&mut peer_stream, 1024).await.unwrap();
-                    let _ = handshake::Signed::<Ed25519>::decode(msg).unwrap();
+                    let _ = handshake::Signed::<PublicKey>::decode(msg).unwrap();
 
                     // Create a custom handshake info bytes with zero ephemeral key
                     let info = handshake::Info::new(
@@ -707,8 +710,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create cryptographic identities
-            let mut dialer_crypto = Ed25519::from_seed(0);
-            let listener_crypto = Ed25519::from_seed(1);
+            let mut dialer_crypto = PrivateKey::from_seed(0);
+            let listener_crypto = PrivateKey::from_seed(1);
 
             // Set up mock channels
             let (mut dialer_sink, listener_stream) = mocks::Channel::init();
@@ -762,7 +765,7 @@ mod tests {
     fn test_listener_rejects_handshake_signed_with_own_key() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let self_crypto = Ed25519::from_seed(0);
+            let self_crypto = PrivateKey::from_seed(0);
             let self_public_key = self_crypto.public_key();
 
             let config = Config {
@@ -805,11 +808,8 @@ mod tests {
 
                         async move {
                             let timestamp = task_ctx.current().epoch_millis();
-                            let info = super::handshake::Info::<Ed25519>::new(
-                                recipient_pk,
-                                ephemeral_pk,
-                                timestamp,
-                            );
+                            let info =
+                                super::handshake::Info::new(recipient_pk, ephemeral_pk, timestamp);
                             let signed_handshake = super::handshake::Signed::sign(
                                 &mut crypto_for_signing,
                                 &namespace,
@@ -837,7 +837,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create cryptographic identity.
-            let self_crypto = Ed25519::from_seed(0);
+            let self_crypto = PrivateKey::from_seed(0);
             let self_public_key = self_crypto.public_key();
 
             // Configure dialer parameters.

@@ -5,13 +5,13 @@ use crate::{
     Supervisor,
 };
 use commonware_codec::{Decode, Encode};
-use commonware_cryptography::{Hasher, Scheme};
+use commonware_cryptography::{Hasher, Signer};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Handle, Spawner};
 use std::marker::PhantomData;
 use tracing::debug;
 
-pub struct Config<C: Scheme, S: Supervisor<Index = View, PublicKey = C::PublicKey>> {
+pub struct Config<C: Signer, S: Supervisor<Index = View, PublicKey = C::PublicKey>> {
     pub crypto: C,
     pub supervisor: S,
     pub namespace: Vec<u8>,
@@ -19,7 +19,7 @@ pub struct Config<C: Scheme, S: Supervisor<Index = View, PublicKey = C::PublicKe
 
 pub struct Nuller<
     E: Spawner,
-    C: Scheme,
+    C: Signer,
     H: Hasher,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
 > {
@@ -31,7 +31,7 @@ pub struct Nuller<
     namespace: Vec<u8>,
 }
 
-impl<E: Spawner, C: Scheme, H: Hasher, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
+impl<E: Spawner, C: Signer, H: Hasher, S: Supervisor<Index = View, PublicKey = C::PublicKey>>
     Nuller<E, C, H, S>
 {
     pub fn new(context: E, cfg: Config<C, S>) -> Self {

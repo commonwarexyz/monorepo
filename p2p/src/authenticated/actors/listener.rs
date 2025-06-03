@@ -1,7 +1,7 @@
 //! Listener
 
 use crate::authenticated::actors::{spawner, tracker};
-use commonware_cryptography::Scheme;
+use commonware_cryptography::Signer;
 use commonware_runtime::{
     telemetry::traces::status, Clock, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf,
 };
@@ -18,7 +18,7 @@ use std::net::SocketAddr;
 use tracing::{debug, debug_span, Instrument};
 
 /// Configuration for the listener actor.
-pub struct Config<C: Scheme> {
+pub struct Config<C: Signer> {
     pub address: SocketAddr,
     pub stream_cfg: StreamConfig<C>,
     pub allowed_incoming_connection_rate: Quota,
@@ -26,7 +26,7 @@ pub struct Config<C: Scheme> {
 
 pub struct Actor<
     E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metrics,
-    C: Scheme,
+    C: Signer,
 > {
     context: E,
 
@@ -37,7 +37,7 @@ pub struct Actor<
     handshakes_rate_limited: Counter,
 }
 
-impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metrics, C: Scheme>
+impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metrics, C: Signer>
     Actor<E, C>
 {
     pub fn new(context: E, cfg: Config<C>) -> Self {
@@ -69,7 +69,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         stream_cfg: StreamConfig<C>,
         sink: SinkOf<E>,
         stream: StreamOf<E>,
-        mut tracker: tracker::Mailbox<E, C>,
+        mut tracker: tracker::Mailbox<E, C::PublicKey>,
         mut supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
     ) {
         // Create span
@@ -128,7 +128,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 
     pub fn start(
         self,
-        tracker: tracker::Mailbox<E, C>,
+        tracker: tracker::Mailbox<E, C::PublicKey>,
         supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
     ) -> Handle<()> {
         self.context
@@ -138,7 +138,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 
     async fn run(
         self,
-        tracker: tracker::Mailbox<E, C>,
+        tracker: tracker::Mailbox<E, C::PublicKey>,
         supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
     ) {
         // Start listening for incoming connections

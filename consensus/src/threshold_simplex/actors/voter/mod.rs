@@ -9,12 +9,12 @@ use crate::{
 };
 pub use actor::Actor;
 use commonware_cryptography::{bls12381::primitives::group, Digest};
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Scheme};
+use commonware_cryptography::{bls12381::primitives::variant::Variant, Signer};
 use commonware_p2p::Blocker;
 pub use ingress::{Mailbox, Message};
 
 pub struct Config<
-    C: Scheme,
+    C: Signer,
     B: Blocker,
     V: Variant,
     D: Digest,
@@ -57,7 +57,7 @@ mod tests {
             dkg::ops,
             primitives::{ops::threshold_signature_recover, variant::MinSig},
         },
-        hash, Ed25519, Sha256, Signer,
+        ed25519, hash, PrivateKeyExt as _, Sha256,
     };
     use commonware_macros::test_traced;
     use commonware_p2p::{
@@ -96,7 +96,7 @@ mod tests {
             let mut schemes = Vec::new();
             let mut validators = Vec::new();
             for i in 0..n {
-                let scheme = Ed25519::from_seed(i as u64);
+                let scheme = ed25519::PrivateKey::from_seed(i as u64);
                 let pk = scheme.public_key();
                 schemes.push(scheme);
                 validators.push(pk);
@@ -405,23 +405,23 @@ mod tests {
             network.start();
 
             // Get participants
-            let mut schemes = Vec::new();
+            let mut private_keys = Vec::new();
             let mut validators = Vec::new();
             for i in 0..n {
-                let scheme = Ed25519::from_seed(i as u64);
-                validators.push(scheme.public_key());
-                schemes.push(scheme);
+                let private_key = ed25519::PrivateKey::from_seed(i as u64);
+                validators.push(private_key.public_key());
+                private_keys.push(private_key);
             }
             validators.sort();
-            schemes.sort_by_key(|s| s.public_key());
+            private_keys.sort_by_key(|s| s.public_key());
 
             // Derive threshold shares
             let (polynomial, shares) =
                 ops::generate_shares::<_, MinSig>(&mut context, None, n, threshold);
 
             // Setup the target Voter actor (validator 0)
-            let scheme = schemes[0].clone();
-            let validator = scheme.public_key();
+            let private_key = private_keys[0].clone();
+            let validator = private_key.public_key();
             let mut participants = BTreeMap::new();
             participants.insert(
                 0,
@@ -444,7 +444,7 @@ mod tests {
                 mocks::application::Application::new(context.with_label("app"), app_config);
             actor.start();
             let voter_config = Config {
-                crypto: scheme.clone(),
+                crypto: private_key.clone(),
                 blocker: oracle.control(validator.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -473,7 +473,7 @@ mod tests {
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Create a dummy network mailbox
-            let peer = schemes[1].public_key();
+            let peer = private_keys[1].public_key();
             let (pending_sender, _pending_receiver) =
                 oracle.register(validator.clone(), 0).await.unwrap();
             let (recovered_sender, recovered_receiver) =

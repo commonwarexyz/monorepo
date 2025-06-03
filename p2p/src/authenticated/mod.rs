@@ -100,7 +100,7 @@
 //!
 //! ```rust
 //! use commonware_p2p::{authenticated::{self, Network}, Sender, Recipients};
-//! use commonware_cryptography::{Ed25519, Signer, Verifier};
+//! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, PrivateKeyExt as _};
 //! use commonware_runtime::{tokio, Spawner, Runner, Metrics};
 //! use commonware_utils::NZU32;
 //! use governor::Quota;
@@ -113,15 +113,15 @@
 //! // Generate identity
 //! //
 //! // In production, the signer should be generated from a secure source of entropy.
-//! let signer = Ed25519::from_seed(0);
+//! let signer = ed25519::PrivateKey::from_seed(0);
 //!
 //! // Generate peers
 //! //
 //! // In production, peer identities will be provided by some external source of truth
 //! // (like the staking set of a blockchain).
-//! let peer1 = Ed25519::from_seed(1).public_key();
-//! let peer2 = Ed25519::from_seed(2).public_key();
-//! let peer3 = Ed25519::from_seed(3).public_key();
+//! let peer1 = ed25519::PrivateKey::from_seed(1).public_key();
+//! let peer2 = ed25519::PrivateKey::from_seed(2).public_key();
+//! let peer3 = ed25519::PrivateKey::from_seed(3).public_key();
 //!
 //! // Configure bootstrappers
 //! //
@@ -210,7 +210,7 @@ pub use network::Network;
 mod tests {
     use super::*;
     use crate::{Receiver, Recipients, Sender};
-    use commonware_cryptography::{Ed25519, Signer};
+    use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         deterministic, tokio, Clock, Metrics, Network as RNetwork, Runner, Spawner,
@@ -247,7 +247,7 @@ mod tests {
         // Create peers
         let mut peers = Vec::new();
         for i in 0..n {
-            peers.push(Ed25519::from_seed(i as u64));
+            peers.push(ed25519::PrivateKey::from_seed(i as u64));
         }
         let addresses = peers.iter().map(|p| p.public_key()).collect::<Vec<_>>();
 
@@ -490,7 +490,7 @@ mod tests {
             // Create peers
             let mut peers = Vec::new();
             for i in 0..n {
-                peers.push(Ed25519::from_seed(i as u64));
+                peers.push(ed25519::PrivateKey::from_seed(i as u64));
             }
             let addresses = peers.iter().map(|p| p.public_key()).collect::<Vec<_>>();
 
@@ -592,7 +592,7 @@ mod tests {
             // Create peers
             let mut peers = Vec::new();
             for i in 0..n {
-                peers.push(Ed25519::from_seed(i as u64));
+                peers.push(ed25519::PrivateKey::from_seed(i as u64));
             }
             let addresses = peers.iter().map(|p| p.public_key()).collect::<Vec<_>>();
 

@@ -15,7 +15,7 @@ use super::{
 use crate::{Automaton, Monitor, Relay, Reporter, Supervisor, ThresholdSupervisor};
 use commonware_cryptography::{
     bls12381::primitives::{group, poly, variant::Variant},
-    Digest, Scheme,
+    Digest, PublicKey, Signer,
 };
 use commonware_macros::select;
 use commonware_p2p::{
@@ -44,9 +44,9 @@ use std::{
 use tracing::{debug, error, info, warn};
 
 /// Represents a pending verification request to the automaton.
-struct Verify<C: Scheme, D: Digest, E: Clock> {
+struct Verify<C: PublicKey, D: Digest, E: Clock> {
     timer: histogram::Timer<E>,
-    context: Context<C::PublicKey>,
+    context: Context<C>,
     payload: D,
     result: Result<bool, Error>,
 }
@@ -54,12 +54,12 @@ struct Verify<C: Scheme, D: Digest, E: Clock> {
 /// Instance of the engine.
 pub struct Engine<
     E: Clock + Spawner + Storage + Metrics,
-    C: Scheme,
+    C: Signer,
     V: Variant,
     D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
     R: Relay<Digest = D>,
-    Z: Reporter<Activity = Activity<C, V, D>>,
+    Z: Reporter<Activity = Activity<C::PublicKey, V, D>>,
     M: Monitor<Index = Epoch>,
     Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
     TSu: ThresholdSupervisor<
@@ -130,7 +130,7 @@ pub struct Engine<
     //
     // There is no limit to the number of futures in this pool, so the automaton
     // can apply backpressure by dropping the verification requests if necessary.
-    pending_verifies: FuturesPool<Verify<C, D, E>>,
+    pending_verifies: FuturesPool<Verify<C::PublicKey, D, E>>,
 
     ////////////////////////////////////////
     // Storage
@@ -157,7 +157,7 @@ pub struct Engine<
 
     // A map of sequencer public keys to their journals.
     #[allow(clippy::type_complexity)]
-    journals: BTreeMap<C::PublicKey, Journal<E, Node<C, V, D>>>,
+    journals: BTreeMap<C::PublicKey, Journal<E, Node<C::PublicKey, V, D>>>,
 
     ////////////////////////////////////////
     // State
@@ -167,7 +167,7 @@ pub struct Engine<
     // The tip is a `Node` which is comprised of a `Chunk` and,
     // if not the genesis chunk for that sequencer,
     // a threshold signature over the parent chunk.
-    tip_manager: TipManager<C, V, D>,
+    tip_manager: TipManager<C::PublicKey, V, D>,
 
     // Tracks the acknowledgements for chunks.
     // This is comprised of partial signatures or threshold signatures.
@@ -202,12 +202,12 @@ pub struct Engine<
 
 impl<
         E: Clock + Spawner + Storage + Metrics,
-        C: Scheme,
+        C: Signer,
         V: Variant,
         D: Digest,
         A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
         R: Relay<Digest = D>,
-        Z: Reporter<Activity = Activity<C, V, D>>,
+        Z: Reporter<Activity = Activity<C::PublicKey, V, D>>,
         M: Monitor<Index = Epoch>,
         Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
         TSu: ThresholdSupervisor<
@@ -247,7 +247,7 @@ impl<
             journal_name_prefix: cfg.journal_name_prefix,
             journal_compression: cfg.journal_compression,
             journals: BTreeMap::new(),
-            tip_manager: TipManager::<C, V, D>::new(),
+            tip_manager: TipManager::<C::PublicKey, V, D>::new(),
             ack_manager: AckManager::<C::PublicKey, V, D>::new(),
             epoch: 0,
             priority_proposals: cfg.priority_proposals,
@@ -603,7 +603,7 @@ impl<
     /// Handles a valid `Node` message, storing it as the tip.
     /// Alerts the automaton of the new node.
     /// Also appends the `Node` to the journal if it's new.
-    async fn handle_node(&mut self, node: &Node<C, V, D>) {
+    async fn handle_node(&mut self, node: &Node<C::PublicKey, V, D>) {
         // Store the tip
         let is_new = self.tip_manager.put(node);
 
@@ -680,7 +680,7 @@ impl<
         &mut self,
         context: Context<C::PublicKey>,
         payload: D,
-        node_sender: &mut WrappedSender<NetS, Node<C, V, D>>,
+        node_sender: &mut WrappedSender<NetS, Node<C::PublicKey, V, D>>,
     ) -> Result<(), Error> {
         let mut guard = self.metrics.propose.guard(Status::Dropped);
         let me = self.crypto.public_key();
@@ -747,7 +747,7 @@ impl<
     /// - this instance has not yet collected the threshold signature for the chunk.
     async fn rebroadcast(
         &mut self,
-        node_sender: &mut WrappedSender<NetS, Node<C, V, D>>,
+        node_sender: &mut WrappedSender<NetS, Node<C::PublicKey, V, D>>,
     ) -> Result<(), Error> {
         let mut guard = self.metrics.rebroadcast.guard(Status::Dropped);
 
@@ -784,8 +784,8 @@ impl<
     /// Send a  `Node` message to all validators in the given epoch.
     async fn broadcast(
         &mut self,
-        node: Node<C, V, D>,
-        node_sender: &mut WrappedSender<NetS, Node<C, V, D>>,
+        node: Node<C::PublicKey, V, D>,
+        node_sender: &mut WrappedSender<NetS, Node<C::PublicKey, V, D>>,
         epoch: Epoch,
     ) -> Result<(), Error> {
         // Get the validators for the epoch
@@ -823,7 +823,7 @@ impl<
     /// Else returns an error if the `Node` is invalid.
     fn validate_node(
         &mut self,
-        node: &Node<C, V, D>,
+        node: &Node<C::PublicKey, V, D>,
         sender: &C::PublicKey,
     ) -> Result<Option<Chunk<C::PublicKey, D>>, Error> {
         // Verify the sender
@@ -968,9 +968,10 @@ impl<
             codec_config: (),
             write_buffer: self.journal_write_buffer,
         };
-        let journal = Journal::<_, Node<C, V, D>>::init(self.context.with_label("journal"), cfg)
-            .await
-            .expect("unable to init journal");
+        let journal =
+            Journal::<_, Node<C::PublicKey, V, D>>::init(self.context.with_label("journal"), cfg)
+                .await
+                .expect("unable to init journal");
 
         // Replay journal
         {
@@ -985,7 +986,7 @@ impl<
 
             // Read from the stream, which may be in arbitrary order.
             // Remember the highest node height
-            let mut tip: Option<Node<C, V, D>> = None;
+            let mut tip: Option<Node<C::PublicKey, V, D>> = None;
             let mut num_items = 0;
             while let Some(msg) = stream.next().await {
                 let (_, _, _, node) = msg.expect("unable to read from journal");
@@ -1021,7 +1022,7 @@ impl<
     ///
     /// To prevent ever writing two conflicting `Chunk`s at the same height,
     /// the journal must already be open and replayed.
-    async fn journal_append(&mut self, node: Node<C, V, D>) {
+    async fn journal_append(&mut self, node: Node<C::PublicKey, V, D>) {
         let section = self.get_journal_section(node.chunk.height);
         self.journals
             .get_mut(&node.chunk.sequencer)

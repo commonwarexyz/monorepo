@@ -14,8 +14,9 @@ use commonware_cryptography::{
         group::G2,
         variant::{MinSig, Variant},
     },
+    ed25519,
     sha256::Digest as Sha256Digest,
-    Digest, Ed25519, Hasher, Sha256, Signer,
+    Digest, Hasher, PrivateKeyExt as _, Sha256, Signer as _,
 };
 use commonware_runtime::{tokio, Listener, Metrics, Network, Runner, Spawner};
 use commonware_stream::{
@@ -91,7 +92,7 @@ fn main() {
         panic!("Identity not well-formed");
     }
     let key = parts[0].parse::<u64>().expect("Key not well-formed");
-    let signer = Ed25519::from_seed(key);
+    let signer = ed25519::PrivateKey::from_seed(key);
     tracing::info!(key = ?signer.public_key(), "loaded signer");
 
     // Configure my port
@@ -109,7 +110,7 @@ fn main() {
         panic!("Please provide at least one participant");
     }
     for peer in participants {
-        let verifier = Ed25519::from_seed(peer).public_key();
+        let verifier = ed25519::PrivateKey::from_seed(peer).public_key();
         tracing::info!(key = ?verifier, "registered authorized key");
         validators.insert(verifier);
     }
