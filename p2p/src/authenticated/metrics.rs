@@ -1,6 +1,7 @@
 use crate::Channel;
 use commonware_utils::Array;
-use prometheus_client::encoding::EncodeLabelSet;
+use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue, LabelValueEncoder};
+use std::fmt::Write;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct Peer {
@@ -15,39 +16,54 @@ impl Peer {
     }
 }
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub enum MessageType {
+    BitVec,
+    Peers,
+    Data(u32),
+    Invalid,
+}
+
+impl EncodeLabelValue for MessageType {
+    fn encode(&self, encoder: &mut LabelValueEncoder) -> Result<(), std::fmt::Error> {
+        match self {
+            MessageType::BitVec => encoder.write_str("bit_vec"),
+            MessageType::Peers => encoder.write_str("peers"),
+            MessageType::Data(channel) => encoder.write_str(&format!("data_{}", channel)),
+            MessageType::Invalid => encoder.write_str("invalid"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct Message {
     pub peer: String,
-    pub message: i32,
+    pub message: MessageType,
 }
 
 impl Message {
-    const BIT_VEC_TYPE: i32 = -1;
-    const PEERS_TYPE: i32 = -2;
-    const INVALID_TYPE: i32 = i32::MIN;
-
     pub fn new_bit_vec(peer: &impl Array) -> Self {
         Self {
             peer: peer.to_string(),
-            message: Self::BIT_VEC_TYPE,
+            message: MessageType::BitVec,
         }
     }
     pub fn new_peers(peer: &impl Array) -> Self {
         Self {
             peer: peer.to_string(),
-            message: Self::PEERS_TYPE,
+            message: MessageType::Peers,
         }
     }
     pub fn new_data(peer: &impl Array, channel: Channel) -> Self {
         Self {
             peer: peer.to_string(),
-            message: channel as i32,
+            message: MessageType::Data(channel),
         }
     }
     pub fn new_invalid(peer: &impl Array) -> Self {
         Self {
             peer: peer.to_string(),
-            message: Self::INVALID_TYPE,
+            message: MessageType::Invalid,
         }
     }
 }
