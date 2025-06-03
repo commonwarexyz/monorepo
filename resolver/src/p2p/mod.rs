@@ -82,7 +82,7 @@ mod tests {
     use crate::Resolver;
     use bytes::Bytes;
     use commonware_cryptography::{
-        ed25519::{self, PublicKey},
+        ed25519::{PrivateKey, PublicKey},
         PrivateKey as _, PrivateKeyGen as _,
     };
     use commonware_macros::{select, test_traced};
@@ -113,7 +113,7 @@ mod tests {
         peer_seeds: &[u64],
     ) -> (
         Oracle<PublicKey>,
-        Vec<ed25519::PrivateKey>,
+        Vec<PrivateKey>,
         Vec<PublicKey>,
         Vec<(Sender<PublicKey>, Receiver<PublicKey>)>,
     ) {
@@ -125,9 +125,9 @@ mod tests {
         );
         network.start();
 
-        let schemes: Vec<ed25519::PrivateKey> = peer_seeds
+        let schemes: Vec<PrivateKey> = peer_seeds
             .iter()
-            .map(|seed| ed25519::PrivateKey::from_seed(*seed))
+            .map(|seed| PrivateKey::from_seed(*seed))
             .collect();
         let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
 
@@ -160,7 +160,7 @@ mod tests {
     async fn setup_and_spawn_actor(
         context: &deterministic::Context,
         coordinator: &Coordinator<PublicKey>,
-        scheme: ed25519::PrivateKey,
+        scheme: PrivateKey,
         connection: (Sender<PublicKey>, Receiver<PublicKey>),
         consumer: Consumer<Key, Bytes>,
         producer: Producer<Key, Bytes>,

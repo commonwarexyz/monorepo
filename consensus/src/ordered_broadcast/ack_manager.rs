@@ -159,7 +159,8 @@ mod tests {
             dkg::ops::generate_shares,
             primitives::variant::{MinPk, MinSig},
         },
-        ed25519, sha256,
+        ed25519::PublicKey,
+        sha256,
     };
 
     /// Aggregated helper functions to reduce duplication in tests.
@@ -180,16 +181,16 @@ mod tests {
         }
 
         /// Generate a fixed public key for testing.
-        pub fn gen_public_key(val: u8) -> ed25519::PublicKey {
-            ed25519::PublicKey::decode([val; ed25519::PublicKey::SIZE].as_ref()).unwrap()
+        pub fn gen_public_key(val: u8) -> PublicKey {
+            PublicKey::decode([val; PublicKey::SIZE].as_ref()).unwrap()
         }
 
         /// Create an Ack by signing a partial with the provided share.
         pub fn create_ack<V: Variant>(
             share: &Share,
-            chunk: Chunk<ed25519::PublicKey, sha256::Digest>,
+            chunk: Chunk<PublicKey, sha256::Digest>,
             epoch: Epoch,
-        ) -> Ack<ed25519::PublicKey, V, sha256::Digest> {
+        ) -> Ack<PublicKey, V, sha256::Digest> {
             Ack::sign(NAMESPACE, share, chunk, epoch)
         }
 
@@ -204,7 +205,7 @@ mod tests {
         /// Generate a threshold signature directly from the shares specified by `indices`.
         pub fn generate_threshold_from_indices<V: Variant>(
             shares: &[Share],
-            chunk: &Chunk<ed25519::PublicKey, sha256::Digest>,
+            chunk: &Chunk<PublicKey, sha256::Digest>,
             epoch: &Epoch,
             quorum: u32,
             indices: &[usize],
@@ -219,10 +220,10 @@ mod tests {
         /// Create a vector of acks for the given share indices.
         pub fn create_acks_for_indices<V: Variant>(
             shares: &[Share],
-            chunk: Chunk<ed25519::PublicKey, sha256::Digest>,
+            chunk: Chunk<PublicKey, sha256::Digest>,
             epoch: Epoch,
             indices: &[usize],
-        ) -> Vec<Ack<ed25519::PublicKey, V, sha256::Digest>> {
+        ) -> Vec<Ack<PublicKey, V, sha256::Digest>> {
             indices
                 .iter()
                 .map(|&i| create_ack(&shares[i], chunk.clone(), epoch))
@@ -232,9 +233,9 @@ mod tests {
         /// Add acks (generated from the provided share indices) to the manager.
         /// Returns the threshold signature if produced.
         pub fn add_acks_for_indices<V: Variant>(
-            manager: &mut AckManager<ed25519::PublicKey, V, sha256::Digest>,
+            manager: &mut AckManager<PublicKey, V, sha256::Digest>,
             shares: &[Share],
-            chunk: Chunk<ed25519::PublicKey, sha256::Digest>,
+            chunk: Chunk<PublicKey, sha256::Digest>,
             epoch: Epoch,
             quorum: u32,
             indices: &[usize],
@@ -255,7 +256,7 @@ mod tests {
         let num_validators = 6;
         let quorum = 3;
         let shares = helpers::setup_shares::<V>(num_validators, quorum);
-        let mut acks = AckManager::<ed25519::PublicKey, V, sha256::Digest>::new();
+        let mut acks = AckManager::<PublicKey, V, sha256::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let height = 10;
         let epoch = 5;
@@ -284,7 +285,7 @@ mod tests {
         let num_validators = 4;
         let quorum = 3;
         let shares = helpers::setup_shares::<V>(num_validators, quorum);
-        let mut acks = AckManager::<ed25519::PublicKey, V, sha256::Digest>::new();
+        let mut acks = AckManager::<PublicKey, V, sha256::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let epoch = 10;
         let height1 = 10;
@@ -332,7 +333,7 @@ mod tests {
         let num_validators = 4;
         let quorum = 3;
         let shares = helpers::setup_shares::<V>(num_validators, quorum);
-        let mut acks = AckManager::<ed25519::PublicKey, V, sha256::Digest>::new();
+        let mut acks = AckManager::<PublicKey, V, sha256::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let epoch = 10;
 
@@ -401,7 +402,7 @@ mod tests {
         let num_validators = 4;
         let quorum = 3;
         let shares = helpers::setup_shares::<V>(num_validators, quorum);
-        let mut acks = AckManager::<ed25519::PublicKey, V, sha256::Digest>::new();
+        let mut acks = AckManager::<PublicKey, V, sha256::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let height = 30;
         let epoch1 = 1;
@@ -444,7 +445,7 @@ mod tests {
         let num_validators = 4;
         let quorum = 3;
         let shares = helpers::setup_shares::<V>(num_validators, quorum);
-        let mut acks = AckManager::<ed25519::PublicKey, V, sha256::Digest>::new();
+        let mut acks = AckManager::<PublicKey, V, sha256::Digest>::new();
         let epoch = 99;
         let sequencer = helpers::gen_public_key(1);
         let height = 42;
@@ -482,7 +483,7 @@ mod tests {
         let num_validators = 4;
         let quorum = 3;
         let shares = helpers::setup_shares::<V>(num_validators, quorum);
-        let mut acks = AckManager::<ed25519::PublicKey, V, sha256::Digest>::new();
+        let mut acks = AckManager::<PublicKey, V, sha256::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let epoch = 1;
         let height = 10;
@@ -504,7 +505,7 @@ mod tests {
         let num_validators = 4;
         let quorum = 3;
         let shares = helpers::setup_shares::<V>(num_validators, quorum);
-        let mut acks = AckManager::<ed25519::PublicKey, V, sha256::Digest>::new();
+        let mut acks = AckManager::<PublicKey, V, sha256::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let epoch = 1;
         let height = 10;
@@ -534,7 +535,7 @@ mod tests {
         let num_validators = 4;
         let quorum = 3;
         let shares = helpers::setup_shares::<V>(num_validators, quorum);
-        let mut acks = AckManager::<ed25519::PublicKey, V, sha256::Digest>::new();
+        let mut acks = AckManager::<PublicKey, V, sha256::Digest>::new();
 
         let sequencer1 = helpers::gen_public_key(1);
         let sequencer2 = helpers::gen_public_key(3);
@@ -567,7 +568,7 @@ mod tests {
         let num_validators = 4;
         let quorum = 3;
         let shares = helpers::setup_shares::<V>(num_validators, quorum);
-        let mut acks = AckManager::<ed25519::PublicKey, V, sha256::Digest>::new();
+        let mut acks = AckManager::<PublicKey, V, sha256::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let epoch = 1;
         let height = 10;
@@ -591,7 +592,7 @@ mod tests {
         let num_validators = 6;
         let quorum = 3;
         let shares = helpers::setup_shares::<V>(num_validators, quorum);
-        let mut acks = AckManager::<ed25519::PublicKey, V, sha256::Digest>::new();
+        let mut acks = AckManager::<PublicKey, V, sha256::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let epoch = 1;
         let height = 10;

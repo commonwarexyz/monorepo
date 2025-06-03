@@ -1489,7 +1489,9 @@ mod tests {
     use super::*;
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
-        ed25519, sha256::Digest as Sha256Digest, PrivateKeyGen as _, Signer as _,
+        ed25519::{PrivateKey, PublicKey, Signature},
+        sha256::Digest as Sha256Digest,
+        PrivateKey as _, PrivateKeyGen as _, Signer as _,
     };
 
     const NAMESPACE: &[u8] = b"test";
@@ -1499,8 +1501,8 @@ mod tests {
         Sha256Digest::from([v; 32]) // Simple fixed digest for testing
     }
 
-    fn sample_scheme(v: u64) -> ed25519::PrivateKey {
-        ed25519::PrivateKey::from_seed(v)
+    fn sample_scheme(v: u64) -> PrivateKey {
+        PrivateKey::from_seed(v)
     }
 
     #[test]
@@ -1517,9 +1519,9 @@ mod tests {
         let proposal = Proposal::new(10, 5, sample_digest(1));
         let notarize = Notarize::sign(NAMESPACE, &mut scheme, 0, proposal);
         let encoded = notarize.encode();
-        let decoded = Notarize::<ed25519::Signature, Sha256Digest>::decode(encoded).unwrap();
+        let decoded = Notarize::<Signature, Sha256Digest>::decode(encoded).unwrap();
         assert_eq!(notarize, decoded);
-        assert!(decoded.verify::<ed25519::PublicKey>(NAMESPACE, &scheme.public_key()));
+        assert!(decoded.verify::<PublicKey>(NAMESPACE, &scheme.public_key()));
     }
 
     #[test]
@@ -1533,13 +1535,11 @@ mod tests {
         let notarization = Notarization::new(proposal.clone(), signatures.clone());
         let encoded = notarization.encode();
         let decoded =
-            Notarization::<ed25519::Signature, Sha256Digest>::decode_cfg(encoded, &usize::MAX)
-                .unwrap();
+            Notarization::<Signature, Sha256Digest>::decode_cfg(encoded, &usize::MAX).unwrap();
         assert_eq!(notarization, decoded);
-        assert!(decoded.verify::<ed25519::PublicKey>(
-            NAMESPACE,
-            &[scheme_1.public_key(), scheme_2.public_key()]
-        ));
+        assert!(
+            decoded.verify::<PublicKey>(NAMESPACE, &[scheme_1.public_key(), scheme_2.public_key()])
+        );
     }
 
     #[test]
@@ -1547,9 +1547,9 @@ mod tests {
         let mut scheme = sample_scheme(0);
         let nullify = Nullify::sign(NAMESPACE, &mut scheme, 0, 10);
         let encoded = nullify.encode();
-        let decoded = Nullify::<ed25519::Signature>::decode(encoded).unwrap();
+        let decoded = Nullify::<Signature>::decode(encoded).unwrap();
         assert_eq!(nullify, decoded);
-        assert!(decoded.verify::<ed25519::PublicKey>(NAMESPACE, &scheme.public_key()));
+        assert!(decoded.verify::<PublicKey>(NAMESPACE, &scheme.public_key()));
     }
 
     #[test]
@@ -1561,13 +1561,11 @@ mod tests {
         let signatures = vec![nullify_1.signature.clone(), nullify_2.signature.clone()];
         let nullification = Nullification::new(10, signatures.clone());
         let encoded = nullification.encode();
-        let decoded =
-            Nullification::<ed25519::Signature>::decode_cfg(encoded, &usize::MAX).unwrap();
+        let decoded = Nullification::<Signature>::decode_cfg(encoded, &usize::MAX).unwrap();
         assert_eq!(nullification, decoded);
-        assert!(decoded.verify::<ed25519::PublicKey>(
-            NAMESPACE,
-            &[scheme_1.public_key(), scheme_2.public_key()]
-        ));
+        assert!(
+            decoded.verify::<PublicKey>(NAMESPACE, &[scheme_1.public_key(), scheme_2.public_key()])
+        );
     }
 
     #[test]
@@ -1576,7 +1574,7 @@ mod tests {
         let proposal = Proposal::new(10, 5, sample_digest(1));
         let finalize = Finalize::sign(NAMESPACE, &mut scheme, 0, proposal);
         let encoded = finalize.encode();
-        let decoded = Finalize::<ed25519::Signature, Sha256Digest>::decode(encoded).unwrap();
+        let decoded = Finalize::<Signature, Sha256Digest>::decode(encoded).unwrap();
         assert_eq!(finalize, decoded);
     }
 
@@ -1591,25 +1589,21 @@ mod tests {
         let finalization = Finalization::new(proposal.clone(), signatures.clone());
         let encoded = finalization.encode();
         let decoded =
-            Finalization::<ed25519::Signature, Sha256Digest>::decode_cfg(encoded, &usize::MAX)
-                .unwrap();
+            Finalization::<Signature, Sha256Digest>::decode_cfg(encoded, &usize::MAX).unwrap();
         assert_eq!(finalization, decoded);
-        assert!(decoded.verify::<ed25519::PublicKey>(
-            NAMESPACE,
-            &[scheme_1.public_key(), scheme_2.public_key()]
-        ));
+        assert!(
+            decoded.verify::<PublicKey>(NAMESPACE, &[scheme_1.public_key(), scheme_2.public_key()])
+        );
     }
 
     #[test]
     fn test_backfiller_encode_decode() {
         let request = Request::new(1, vec![10, 11], vec![12, 13]);
-        let backfiller = Backfiller::Request::<ed25519::Signature, Sha256Digest>(request.clone());
+        let backfiller = Backfiller::Request::<Signature, Sha256Digest>(request.clone());
         let encoded = backfiller.encode();
-        let decoded = Backfiller::<ed25519::Signature, Sha256Digest>::decode_cfg(
-            encoded,
-            &(usize::MAX, usize::MAX),
-        )
-        .unwrap();
+        let decoded =
+            Backfiller::<Signature, Sha256Digest>::decode_cfg(encoded, &(usize::MAX, usize::MAX))
+                .unwrap();
         assert!(matches!(decoded, Backfiller::Request(r) if r == request));
     }
 
@@ -1629,11 +1623,9 @@ mod tests {
         let notarization = Notarization::new(proposal.clone(), vec![notarize.signature.clone()]);
         let response = Response::new(1, vec![notarization], vec![]);
         let encoded = response.encode();
-        let decoded = Response::<ed25519::Signature, Sha256Digest>::decode_cfg(
-            encoded,
-            &(usize::MAX, usize::MAX),
-        )
-        .unwrap();
+        let decoded =
+            Response::<Signature, Sha256Digest>::decode_cfg(encoded, &(usize::MAX, usize::MAX))
+                .unwrap();
         assert_eq!(response, decoded);
     }
 
@@ -1646,10 +1638,9 @@ mod tests {
         let notarize2 = Notarize::sign(NAMESPACE, &mut scheme, 0, proposal2.clone());
         let conflicting = ConflictingNotarize::new(notarize1, notarize2);
         let encoded = conflicting.encode();
-        let decoded =
-            ConflictingNotarize::<ed25519::Signature, Sha256Digest>::decode(encoded).unwrap();
+        let decoded = ConflictingNotarize::<Signature, Sha256Digest>::decode(encoded).unwrap();
         assert_eq!(conflicting, decoded);
-        assert!(conflicting.verify::<ed25519::PublicKey>(NAMESPACE, &scheme.public_key()));
+        assert!(conflicting.verify::<PublicKey>(NAMESPACE, &scheme.public_key()));
     }
 
     #[test]
@@ -1661,10 +1652,9 @@ mod tests {
         let finalize2 = Finalize::sign(NAMESPACE, &mut scheme, 0, proposal2.clone());
         let conflicting = ConflictingFinalize::new(finalize1, finalize2);
         let encoded = conflicting.encode();
-        let decoded =
-            ConflictingFinalize::<ed25519::Signature, Sha256Digest>::decode(encoded).unwrap();
+        let decoded = ConflictingFinalize::<Signature, Sha256Digest>::decode(encoded).unwrap();
         assert_eq!(conflicting, decoded);
-        assert!(conflicting.verify::<ed25519::PublicKey>(NAMESPACE, &scheme.public_key()));
+        assert!(conflicting.verify::<PublicKey>(NAMESPACE, &scheme.public_key()));
     }
 
     #[test]
@@ -1675,9 +1665,9 @@ mod tests {
         let finalize = Finalize::sign(NAMESPACE, &mut scheme, 1, proposal.clone());
         let nullify_finalize = NullifyFinalize::new(nullify, finalize);
         let encoded = nullify_finalize.encode();
-        let decoded = NullifyFinalize::<ed25519::Signature, Sha256Digest>::decode(encoded).unwrap();
+        let decoded = NullifyFinalize::<Signature, Sha256Digest>::decode(encoded).unwrap();
         assert_eq!(nullify_finalize, decoded);
-        assert!(nullify_finalize.verify::<ed25519::PublicKey>(NAMESPACE, &scheme.public_key()));
+        assert!(nullify_finalize.verify::<PublicKey>(NAMESPACE, &scheme.public_key()));
     }
 
     #[test]
@@ -1687,7 +1677,7 @@ mod tests {
         let notarize = Notarize::sign(NAMESPACE, &mut scheme, 0, proposal);
 
         // Verify with wrong namespace - should fail
-        assert!(!notarize.verify::<ed25519::PublicKey>(b"wrong_namespace", &scheme.public_key()));
+        assert!(!notarize.verify::<PublicKey>(b"wrong_namespace", &scheme.public_key()));
     }
 
     #[test]
@@ -1698,7 +1688,7 @@ mod tests {
         let notarize = Notarize::sign(NAMESPACE, &mut scheme1, 0, proposal);
 
         // Verify with wrong public key - should fail
-        assert!(!notarize.verify::<ed25519::PublicKey>(NAMESPACE, &scheme2.public_key()));
+        assert!(!notarize.verify::<PublicKey>(NAMESPACE, &scheme2.public_key()));
     }
 
     #[test]
@@ -1722,7 +1712,7 @@ mod tests {
         ];
 
         // Should fail because we only have 2 signatures but need 3 for quorum
-        assert!(!notarization.verify::<ed25519::PublicKey>(NAMESPACE, &validators));
+        assert!(!notarization.verify::<PublicKey>(NAMESPACE, &validators));
     }
 
     #[test]
@@ -1733,7 +1723,8 @@ mod tests {
 
         // Create notarize with invalid public key index (3, which is out of bounds)
         let notarize_1 = Notarize::sign(NAMESPACE, &mut scheme_1, 0, proposal.clone());
-        let invalid_sig = Signature::new(3, scheme_2.sign(Some(NAMESPACE), &proposal.encode()));
+        let invalid_sig =
+            super::Signature::new(3, scheme_2.sign(Some(NAMESPACE), &proposal.encode()));
 
         // Create a notarization with an invalid signature (refers to index 3, but there are only 2 validators)
         let signatures = vec![notarize_1.signature.clone(), invalid_sig];
@@ -1743,7 +1734,7 @@ mod tests {
         let validators = vec![scheme_1.public_key(), scheme_2.public_key()];
 
         // Should fail because the second signature refers to an invalid validator index
-        assert!(!notarization.verify::<ed25519::PublicKey>(NAMESPACE, &validators));
+        assert!(!notarization.verify::<PublicKey>(NAMESPACE, &validators));
     }
 
     #[test]
@@ -1762,7 +1753,7 @@ mod tests {
         let conflict = ConflictingNotarize::new(notarize1, notarize2);
 
         // Verify the evidence is valid - both signatures should be valid
-        assert!(conflict.verify::<ed25519::PublicKey>(NAMESPACE, &scheme.public_key()));
+        assert!(conflict.verify::<PublicKey>(NAMESPACE, &scheme.public_key()));
 
         // Now create invalid evidence
         let mut scheme2 = sample_scheme(1);
@@ -1781,8 +1772,8 @@ mod tests {
         };
 
         // Verify should fail with either key because the signatures are from different validators
-        assert!(!invalid_conflict.verify::<ed25519::PublicKey>(NAMESPACE, &scheme.public_key()));
-        assert!(!invalid_conflict.verify::<ed25519::PublicKey>(NAMESPACE, &scheme2.public_key()));
+        assert!(!invalid_conflict.verify::<PublicKey>(NAMESPACE, &scheme.public_key()));
+        assert!(!invalid_conflict.verify::<PublicKey>(NAMESPACE, &scheme2.public_key()));
     }
 
     #[test]
@@ -1801,7 +1792,7 @@ mod tests {
         let conflict = NullifyFinalize::new(nullify, finalize);
 
         // Verify the evidence is valid
-        assert!(conflict.verify::<ed25519::PublicKey>(NAMESPACE, &scheme.public_key()));
+        assert!(conflict.verify::<PublicKey>(NAMESPACE, &scheme.public_key()));
 
         // Now create invalid evidence with different validators
         let mut scheme2 = sample_scheme(1);
@@ -1810,7 +1801,7 @@ mod tests {
 
         // This will compile but verification with wrong key should fail
         let conflict2 = NullifyFinalize::new(nullify2, finalize2);
-        assert!(!conflict2.verify::<ed25519::PublicKey>(NAMESPACE, &scheme.public_key()));
+        assert!(!conflict2.verify::<PublicKey>(NAMESPACE, &scheme.public_key()));
         // Wrong key
     }
 
@@ -1831,15 +1822,16 @@ mod tests {
         let validators = vec![scheme_1.public_key(), scheme_2.public_key()];
 
         // Valid verification
-        assert!(nullification.verify::<ed25519::PublicKey>(NAMESPACE, &validators));
+        assert!(nullification.verify::<PublicKey>(NAMESPACE, &validators));
 
         // Create a nullification with tampered signature
-        let tampered_sig = Signature::new(2, scheme_1.sign(Some(NAMESPACE), &nullify_1.encode()));
+        let tampered_sig =
+            super::Signature::new(2, scheme_1.sign(Some(NAMESPACE), &nullify_1.encode()));
 
         let invalid_signatures = vec![nullify_1.signature.clone(), tampered_sig];
         let invalid_nullification = Nullification::new(10, invalid_signatures);
 
         // Verification should fail with tampered signature
-        assert!(!invalid_nullification.verify::<ed25519::PublicKey>(NAMESPACE, &validators));
+        assert!(!invalid_nullification.verify::<PublicKey>(NAMESPACE, &validators));
     }
 }

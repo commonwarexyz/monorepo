@@ -59,7 +59,7 @@ mod tests {
     use bytes::Bytes;
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
-        ed25519::{self, PublicKey, Signature},
+        ed25519::{PrivateKey, PublicKey, Signature},
         sha256::{self, Digest},
     };
     use rand::SeedableRng;
@@ -76,7 +76,7 @@ mod tests {
             sequencer: PublicKey,
             height: u64,
             payload: &str,
-        ) -> Node<ed25519::PublicKey, V, Digest> {
+        ) -> Node<PublicKey, V, Digest> {
             let signature = {
                 let mut data = Bytes::from(vec![3u8; Signature::SIZE]);
                 Signature::decode(&mut data).unwrap()
@@ -89,18 +89,18 @@ mod tests {
         }
 
         /// Generates a deterministic public key for testing using the provided seed.
-        pub fn deterministic_public_key(seed: u64) -> ed25519::PublicKey {
+        pub fn deterministic_public_key(seed: u64) -> PublicKey {
             let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-            ed25519::PrivateKey::from_rng(&mut rng).public_key()
+            PrivateKey::from_rng(&mut rng).public_key()
         }
 
         /// Inserts a tip into the given TipManager and returns the inserted node.
         pub fn insert_tip<V: Variant>(
-            manager: &mut TipManager<ed25519::PublicKey, V, Digest>,
-            key: ed25519::PublicKey,
+            manager: &mut TipManager<PublicKey, V, Digest>,
+            key: PublicKey,
             height: u64,
             payload: &str,
-        ) -> Node<ed25519::PublicKey, V, Digest> {
+        ) -> Node<PublicKey, V, Digest> {
             let node = create_dummy_node(key.clone(), height, payload);
             manager.put(&node);
             node
@@ -109,7 +109,7 @@ mod tests {
 
     /// Different payloads for the same sequencer and height produce distinct thresholds.
     fn put_new_tip<V: Variant>() {
-        let mut manager = TipManager::<ed25519::PublicKey, V, Digest>::new();
+        let mut manager = TipManager::<PublicKey, V, Digest>::new();
         let key = helpers::deterministic_public_key(1);
         let node = helpers::create_dummy_node(key.clone(), 1, "payload");
         assert!(manager.put(&node));
@@ -127,7 +127,7 @@ mod tests {
 
     /// Inserting a tip with the same height and payload returns false.
     fn put_same_height_same_payload<V: Variant>() {
-        let mut manager = TipManager::<ed25519::PublicKey, V, Digest>::new();
+        let mut manager = TipManager::<PublicKey, V, Digest>::new();
         let key = helpers::deterministic_public_key(2);
         let node = helpers::create_dummy_node(key.clone(), 1, "payload");
         assert!(manager.put(&node));
@@ -146,7 +146,7 @@ mod tests {
 
     /// Inserting a tip with a higher height updates the stored tip.
     fn put_higher_tip<V: Variant>() {
-        let mut manager = TipManager::<ed25519::PublicKey, V, Digest>::new();
+        let mut manager = TipManager::<PublicKey, V, Digest>::new();
         let key = helpers::deterministic_public_key(3);
         let node1 = helpers::create_dummy_node(key.clone(), 1, "payload1");
         assert!(manager.put(&node1));
@@ -168,7 +168,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "Attempted to insert a lower-height tip")]
     fn test_put_lower_tip_panics() {
-        let mut manager = TipManager::<ed25519::PublicKey, MinSig, Digest>::new();
+        let mut manager = TipManager::<PublicKey, MinSig, Digest>::new();
         let key = helpers::deterministic_public_key(4);
         let node1 = helpers::create_dummy_node(key.clone(), 2, "payload");
         assert!(manager.put(&node1));
@@ -180,7 +180,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_put_same_height_different_payload_panics() {
-        let mut manager = TipManager::<ed25519::PublicKey, MinSig, Digest>::new();
+        let mut manager = TipManager::<PublicKey, MinSig, Digest>::new();
         let key = helpers::deterministic_public_key(5);
         let node1 = helpers::create_dummy_node(key.clone(), 1, "payload1");
         assert!(manager.put(&node1));
@@ -191,14 +191,14 @@ mod tests {
     /// Getting a tip for a nonexistent sequencer returns None.
     #[test]
     fn test_get_nonexistent() {
-        let manager = TipManager::<ed25519::PublicKey, MinSig, Digest>::new();
+        let manager = TipManager::<PublicKey, MinSig, Digest>::new();
         let key = helpers::deterministic_public_key(6);
         assert!(manager.get(&key).is_none());
     }
 
     /// Multiple sequencers are handled independently.
     fn multiple_sequencers<V: Variant>() {
-        let mut manager = TipManager::<ed25519::PublicKey, V, Digest>::new();
+        let mut manager = TipManager::<PublicKey, V, Digest>::new();
         let key1 = helpers::deterministic_public_key(10);
         let key2 = helpers::deterministic_public_key(20);
         let node1 = helpers::insert_tip(&mut manager, key1.clone(), 1, "payload1");
@@ -218,7 +218,7 @@ mod tests {
 
     /// Multiple updates for the same sequencer yield the tip with the highest height.
     fn put_multiple_updates<V: Variant>() {
-        let mut manager = TipManager::<ed25519::PublicKey, V, Digest>::new();
+        let mut manager = TipManager::<PublicKey, V, Digest>::new();
         let key = helpers::deterministic_public_key(7);
 
         // Insert tip with height 1.

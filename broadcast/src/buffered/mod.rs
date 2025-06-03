@@ -37,7 +37,7 @@ mod tests {
     use crate::Broadcaster;
     use commonware_codec::RangeCfg;
     use commonware_cryptography::{
-        ed25519::{self, PublicKey},
+        ed25519::{PrivateKey, PublicKey},
         Committable, Digestible, PrivateKey as _, PrivateKeyGen as _,
     };
     use commonware_macros::{select, test_traced};
@@ -77,7 +77,7 @@ mod tests {
         network.start();
 
         let mut schemes = (0..num_peers)
-            .map(|i| ed25519::PrivateKey::from_seed(i as u64))
+            .map(|i| PrivateKey::from_seed(i as u64))
             .collect::<Vec<_>>();
         schemes.sort_by_key(|s| s.public_key());
         let peers: Vec<PublicKey> = schemes.iter().map(|c| (c.public_key())).collect();

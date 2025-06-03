@@ -353,7 +353,10 @@ mod tests {
     use super::*;
     use crate::{Receiver as _, Sender as _};
     use chacha20poly1305::KeyInit;
-    use commonware_cryptography::{ed25519, PrivateKeyGen as _};
+    use commonware_cryptography::{
+        ed25519::{PrivateKey, PublicKey},
+        PrivateKey as _, PrivateKeyGen as _,
+    };
     use commonware_runtime::{deterministic, mocks, Metrics, Runner};
     use std::time::Duration;
 
@@ -493,8 +496,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create cryptographic identities
-            let dialer_crypto = ed25519::PrivateKey::from_seed(0);
-            let listener_crypto = ed25519::PrivateKey::from_seed(1);
+            let dialer_crypto = PrivateKey::from_seed(0);
+            let listener_crypto = PrivateKey::from_seed(1);
 
             // Set up mock channels for transport simulation
             let (dialer_sink, listener_stream) = mocks::Channel::init();
@@ -580,9 +583,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create cryptographic identities
-            let dialer_crypto = ed25519::PrivateKey::from_seed(0);
-            let expected_peer = ed25519::PrivateKey::from_seed(1).public_key();
-            let mut actual_peer = ed25519::PrivateKey::from_seed(2);
+            let dialer_crypto = PrivateKey::from_seed(0);
+            let expected_peer = PrivateKey::from_seed(1).public_key();
+            let mut actual_peer = PrivateKey::from_seed(2);
 
             // Set up mock channels
             let (dialer_sink, mut peer_stream) = mocks::Channel::init();
@@ -604,7 +607,7 @@ mod tests {
                 move |mut context| async move {
                     // Read the handshake from dialer
                     let msg = recv_frame(&mut peer_stream, 1024).await.unwrap();
-                    let _ = handshake::Signed::<ed25519::PublicKey>::decode(msg).unwrap(); // Simulate reading
+                    let _ = handshake::Signed::<PublicKey>::decode(msg).unwrap(); // Simulate reading
 
                     // Create and send own handshake
                     let secret = x25519::new(&mut context);
@@ -642,8 +645,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create cryptographic identities
-            let dialer_crypto = ed25519::PrivateKey::from_seed(0);
-            let mut listener_crypto = ed25519::PrivateKey::from_seed(1);
+            let dialer_crypto = PrivateKey::from_seed(0);
+            let mut listener_crypto = PrivateKey::from_seed(1);
             let listener_public_key = listener_crypto.public_key();
 
             // Set up mock channels
@@ -667,7 +670,7 @@ mod tests {
                 move |context| async move {
                     // Read the handshake from dialer
                     let msg = recv_frame(&mut peer_stream, 1024).await.unwrap();
-                    let _ = handshake::Signed::<ed25519::PublicKey>::decode(msg).unwrap();
+                    let _ = handshake::Signed::<PublicKey>::decode(msg).unwrap();
 
                     // Create a custom handshake info bytes with zero ephemeral key
                     let info = handshake::Info::new(
@@ -707,8 +710,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create cryptographic identities
-            let mut dialer_crypto = ed25519::PrivateKey::from_seed(0);
-            let listener_crypto = ed25519::PrivateKey::from_seed(1);
+            let mut dialer_crypto = PrivateKey::from_seed(0);
+            let listener_crypto = PrivateKey::from_seed(1);
 
             // Set up mock channels
             let (mut dialer_sink, listener_stream) = mocks::Channel::init();
@@ -762,7 +765,7 @@ mod tests {
     fn test_listener_rejects_handshake_signed_with_own_key() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let self_crypto = ed25519::PrivateKey::from_seed(0);
+            let self_crypto = PrivateKey::from_seed(0);
             let self_public_key = self_crypto.public_key();
 
             let config = Config {
@@ -805,7 +808,7 @@ mod tests {
 
                         async move {
                             let timestamp = task_ctx.current().epoch_millis();
-                            let info = super::handshake::Info::<ed25519::PublicKey>::new(
+                            let info = super::handshake::Info::<PublicKey>::new(
                                 recipient_pk,
                                 ephemeral_pk,
                                 timestamp,
@@ -837,7 +840,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create cryptographic identity.
-            let self_crypto = ed25519::PrivateKey::from_seed(0);
+            let self_crypto = PrivateKey::from_seed(0);
             let self_public_key = self_crypto.public_key();
 
             // Configure dialer parameters.
