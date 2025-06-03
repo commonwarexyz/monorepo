@@ -59,7 +59,7 @@ jobs:
         run: cargo bench ${{ matrix.cargo_flags }} --no-run
       - name: Run benchmarks
         env:
-          COMMONWARE_STORAGE_DIR: "$GITHUB_WORKSPACE/benchmarks"
+          COMMONWARE_STORAGE_DIRECTORY: "$GITHUB_WORKSPACE/benchmarks"
         run: |
           cargo bench ${{ matrix.cargo_flags }} \
             --benches -p ${{ matrix.package }} \
