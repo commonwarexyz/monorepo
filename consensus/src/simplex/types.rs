@@ -4,8 +4,8 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write,
 };
-use commonware_cryptography::{Digest, PrivateKey, PublicKey, Signature as SigTrait};
-use commonware_utils::{quorum, union, Array};
+use commonware_cryptography::{Digest, PrivateKey, Signature as SigTrait, Verifier};
+use commonware_utils::{quorum, union};
 
 /// View is a monotonically increasing counter that represents the current focus of consensus.
 pub type View = u64;
@@ -74,7 +74,7 @@ pub fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
 /// Returns (threshold, len) where threshold is the minimum number of validators
 /// required for a quorum, and len is the total number of validators
 #[inline]
-pub fn threshold<P: Array>(validators: &[P]) -> (u32, u32) {
+pub fn threshold<P>(validators: &[P]) -> (u32, u32) {
     let len = validators.len() as u32;
     let threshold = quorum(len);
     (threshold, len)
@@ -309,7 +309,7 @@ impl<S: SigTrait, D: Digest> Notarize<S, D> {
     /// Verifies the signature on this notarize using the provided verifier.
     ///
     /// This ensures that the notarize was actually produced by the claimed validator.
-    pub fn verify<K: PublicKey<Signature = S>>(&self, namespace: &[u8], public_key: &K) -> bool {
+    pub fn verify<K: Verifier<Signature = S>>(&self, namespace: &[u8], public_key: &K) -> bool {
         let notarize_namespace = notarize_namespace(namespace);
         let message = self.proposal.encode();
         public_key.verify(
@@ -405,11 +405,7 @@ impl<S: SigTrait, D: Digest> Notarization<S, D> {
     /// 3. All signers are in the validator set
     ///
     /// In `read_cfg`, we ensure that the signatures are sorted by public key index and are unique.
-    pub fn verify<K: PublicKey<Signature = S>>(
-        &self,
-        namespace: &[u8],
-        participants: &[K],
-    ) -> bool {
+    pub fn verify<K: Verifier<Signature = S>>(&self, namespace: &[u8], participants: &[K]) -> bool {
         // Get allowed signers
         let (threshold, count) = threshold(participants);
         if self.signatures.len() < threshold as usize {
@@ -500,7 +496,7 @@ impl<S: SigTrait> Nullify<S> {
     }
 
     /// Verifies the signature on this nullify using the provided verifier.
-    pub fn verify<K: PublicKey<Signature = S>>(&self, namespace: &[u8], public_key: &K) -> bool {
+    pub fn verify<K: Verifier<Signature = S>>(&self, namespace: &[u8], public_key: &K) -> bool {
         let nullify_namespace = nullify_namespace(namespace);
         let message = view_message(self.view);
         public_key.verify(
@@ -585,11 +581,7 @@ impl<S: SigTrait> Nullification<S> {
     /// Verifies all signatures in this nullification using the provided verifier.
     ///
     /// Similar to Notarization::verify, ensures quorum of valid signatures from validators.
-    pub fn verify<K: PublicKey<Signature = S>>(
-        &self,
-        namespace: &[u8],
-        participants: &[K],
-    ) -> bool {
+    pub fn verify<K: Verifier<Signature = S>>(&self, namespace: &[u8], participants: &[K]) -> bool {
         // Get allowed signers
         let (threshold, count) = threshold(participants);
         if self.signatures.len() < threshold as usize {
@@ -681,7 +673,7 @@ impl<S: SigTrait, D: Digest> Finalize<S, D> {
     }
 
     /// Verifies the signature on this finalize using the provided verifier.
-    pub fn verify<K: PublicKey<Signature = S>>(&self, namespace: &[u8], public_key: &K) -> bool {
+    pub fn verify<K: Verifier<Signature = S>>(&self, namespace: &[u8], public_key: &K) -> bool {
         let finalize_namespace = finalize_namespace(namespace);
         let message = self.proposal.encode();
         public_key.verify(
@@ -772,11 +764,7 @@ impl<S: SigTrait, D: Digest> Finalization<S, D> {
     /// Verifies all signatures in this finalization using the provided verifier.
     ///
     /// Similar to Notarization::verify, ensures quorum of valid signatures from validators.
-    pub fn verify<V: PublicKey<Signature = S>>(
-        &self,
-        namespace: &[u8],
-        participants: &[V],
-    ) -> bool {
+    pub fn verify<V: Verifier<Signature = S>>(&self, namespace: &[u8], participants: &[V]) -> bool {
         // Get allowed signers
         let (threshold, count) = threshold(participants);
         if self.signatures.len() < threshold as usize {
@@ -1207,10 +1195,9 @@ impl<S: SigTrait, D: Digest> ConflictingNotarize<S, D> {
     }
 
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
-    pub fn verify<V: PublicKey<Signature = S>>(&self, namespace: &[u8], public_key: &V) -> bool {
+    pub fn verify<V: Verifier<Signature = S>>(&self, namespace: &[u8], public_key: &V) -> bool {
         let (notarize_1, notarize_2) = self.notarizes();
-        notarize_1.verify::<V>(namespace, public_key)
-            && notarize_2.verify::<V>(namespace, public_key)
+        notarize_1.verify(namespace, public_key) && notarize_2.verify(namespace, public_key)
     }
 }
 
@@ -1330,10 +1317,9 @@ impl<S: SigTrait, D: Digest> ConflictingFinalize<S, D> {
     }
 
     /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
-    pub fn verify<V: PublicKey<Signature = S>>(&self, namespace: &[u8], public_key: &V) -> bool {
+    pub fn verify<V: Verifier<Signature = S>>(&self, namespace: &[u8], public_key: &V) -> bool {
         let (finalize_1, finalize_2) = self.finalizes();
-        finalize_1.verify::<V>(namespace, public_key)
-            && finalize_2.verify::<V>(namespace, public_key)
+        finalize_1.verify(namespace, public_key) && finalize_2.verify(namespace, public_key)
     }
 }
 
@@ -1428,10 +1414,10 @@ impl<S: SigTrait, D: Digest> NullifyFinalize<S, D> {
     }
 
     /// Verifies that both the nullify and finalize signatures are valid, proving Byzantine behavior.
-    pub fn verify<V: PublicKey<Signature = S>>(&self, namespace: &[u8], public_key: &V) -> bool {
+    pub fn verify<V: Verifier<Signature = S>>(&self, namespace: &[u8], public_key: &V) -> bool {
         let nullify = Nullify::new(self.proposal.view(), self.view_signature.clone());
         let finalize = Finalize::new(self.proposal.clone(), self.finalize_signature.clone());
-        nullify.verify::<V>(namespace, public_key) && finalize.verify::<V>(namespace, public_key)
+        nullify.verify(namespace, public_key) && finalize.verify(namespace, public_key)
     }
 }
 
