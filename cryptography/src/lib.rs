@@ -25,7 +25,7 @@ pub trait Signer {
 }
 
 /// A private key, able to derive its public key and sign messages.
-pub trait PrivateKey: Signer + Sized + ReadExt + Encode + PartialEq + Array {
+pub trait PrivateKey: Signer + Send + Sync + Clone + 'static {
     /// The corresponding public key type.
     type PublicKey: PublicKey<Signature = Self::Signature>;
 
