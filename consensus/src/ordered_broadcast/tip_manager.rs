@@ -69,7 +69,7 @@ mod tests {
         use super::*;
         use crate::ordered_broadcast::types::Chunk;
         use commonware_codec::{DecodeExt, FixedSize};
-        use commonware_cryptography::{PrivateKey as _, PrivateKeyGen as _};
+        use commonware_cryptography::{PrivateKey as _, PrivateKeyExt as _};
 
         /// Creates a dummy link for testing.
         pub fn create_dummy_node<V: Variant>(

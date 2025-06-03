@@ -137,7 +137,7 @@ mod tests {
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
-        PrivateKey as _, PrivateKeyGen as _, Sha256,
+        PrivateKey as _, PrivateKeyExt as _, Sha256,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};

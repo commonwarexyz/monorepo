@@ -17,6 +17,7 @@ pub mod secp256r1;
 
 /// Produces signatures over messages.
 pub trait Signer {
+    /// The type of signature produced by this signer.
     type Signature: Signature;
 
     /// Sign a message with the given namespace.
@@ -28,10 +29,13 @@ pub trait PrivateKey: Signer + Sized + ReadExt + Encode + PartialEq + Array {
     /// The corresponding public key type.
     type PublicKey: PublicKey<Signature = Self::Signature>;
 
+    /// Returns the public key corresponding to this private key.
     fn public_key(&self) -> Self::PublicKey;
 }
 
-pub trait PrivateKeyGen: PrivateKey {
+/// A private key that can be generated from a seed or RNG.
+pub trait PrivateKeyExt: PrivateKey {
+    /// Create a private key from a seed.
     fn from_seed(seed: u64) -> Self {
         let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
         Self::from_rng(&mut rng)
@@ -41,7 +45,9 @@ pub trait PrivateKeyGen: PrivateKey {
     fn from_rng<R: Rng + CryptoRng>(rng: &mut R) -> Self;
 }
 
+/// Verifies signatures over messages.
 pub trait Verifier {
+    /// The type of signature that this verifier can verify.
     type Signature: Signature;
 
     /// Verify that `sig` is a valid signature over `msg`.
@@ -174,18 +180,18 @@ mod tests {
     use commonware_codec::{DecodeExt, FixedSize};
     use rand::rngs::OsRng;
 
-    fn test_validate<C: PrivateKeyGen>() {
+    fn test_validate<C: PrivateKeyExt>() {
         let private_key = C::from_rng(&mut OsRng);
         let public_key = private_key.public_key();
         assert!(C::PublicKey::decode(public_key.as_ref()).is_ok());
     }
 
-    fn test_validate_invalid_public_key<C: PrivateKeyGen>() {
+    fn test_validate_invalid_public_key<C: PrivateKeyExt>() {
         let result = C::PublicKey::decode(vec![0; 1024].as_ref());
         assert!(result.is_err());
     }
 
-    fn test_sign_and_verify<C: PrivateKeyGen>() {
+    fn test_sign_and_verify<C: PrivateKeyExt>() {
         let private_key = C::from_seed(0);
         let namespace = Some(&b"test_namespace"[..]);
         let message = b"test_message";
@@ -194,7 +200,7 @@ mod tests {
         assert!(public_key.verify(namespace, message, &signature));
     }
 
-    fn test_sign_and_verify_wrong_message<C: PrivateKeyGen>() {
+    fn test_sign_and_verify_wrong_message<C: PrivateKeyExt>() {
         let private_key = C::from_seed(0);
         let namespace: Option<&[u8]> = Some(&b"test_namespace"[..]);
         let message = b"test_message";
@@ -204,7 +210,7 @@ mod tests {
         assert!(!public_key.verify(namespace, wrong_message, &signature));
     }
 
-    fn test_sign_and_verify_wrong_namespace<C: PrivateKeyGen>() {
+    fn test_sign_and_verify_wrong_namespace<C: PrivateKeyExt>() {
         let private_key = C::from_seed(0);
         let namespace = Some(&b"test_namespace"[..]);
         let wrong_namespace = Some(&b"wrong_namespace"[..]);
@@ -214,7 +220,7 @@ mod tests {
         assert!(!public_key.verify(wrong_namespace, message, &signature));
     }
 
-    fn test_empty_vs_none_namespace<C: PrivateKeyGen>() {
+    fn test_empty_vs_none_namespace<C: PrivateKeyExt>() {
         let private_key = C::from_seed(0);
         let empty_namespace = Some(&b""[..]);
         let message = b"test_message";
@@ -224,7 +230,7 @@ mod tests {
         assert!(!public_key.verify(None, message, &signature));
     }
 
-    fn test_signature_determinism<C: PrivateKeyGen>() {
+    fn test_signature_determinism<C: PrivateKeyExt>() {
         let private_key_1 = C::from_seed(0);
         let private_key_2 = C::from_seed(0);
         let namespace = Some(&b"test_namespace"[..]);
@@ -235,7 +241,7 @@ mod tests {
         assert_eq!(signature_1, signature_2);
     }
 
-    fn test_invalid_signature_publickey_pair<C: PrivateKeyGen>() {
+    fn test_invalid_signature_publickey_pair<C: PrivateKeyExt>() {
         let private_key = C::from_seed(0);
         let private_key_2 = C::from_seed(1);
         let namespace = Some(&b"test_namespace"[..]);

@@ -10,7 +10,7 @@ use commonware_cryptography::{
         poly::{Poly, Public},
         variant::{MinSig, Variant},
     },
-    ed25519, PrivateKey as _, PrivateKeyGen as _, Sha256,
+    ed25519, PrivateKey as _, PrivateKeyExt as _, Sha256,
 };
 use commonware_p2p::authenticated;
 use commonware_runtime::{tokio, Metrics, Network, Runner};

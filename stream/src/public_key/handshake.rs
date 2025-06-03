@@ -199,7 +199,7 @@ mod tests {
     use commonware_codec::DecodeExt;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey as edPublicKey},
-        PrivateKey as _, PrivateKeyGen as _, Verifier as _,
+        PrivateKey as _, PrivateKeyExt as _, Verifier as _,
     };
     use commonware_runtime::{deterministic, mocks, Metrics, Runner, Spawner};
     use x25519::PublicKey;

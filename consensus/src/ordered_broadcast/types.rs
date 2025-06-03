@@ -822,7 +822,7 @@ mod tests {
         },
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
-        PrivateKey as _, PrivateKeyGen as _, Signer,
+        PrivateKey as _, PrivateKeyExt as _, Signer,
     };
     use commonware_utils::quorum;
     use rand::{rngs::StdRng, SeedableRng};

@@ -1,6 +1,6 @@
 use commonware_cryptography::bls12381::dkg::{Dealer, Player};
 use commonware_cryptography::bls12381::primitives::variant::MinSig;
-use commonware_cryptography::{ed25519, PrivateKey as _, PrivateKeyGen as _};
+use commonware_cryptography::{ed25519, PrivateKey as _, PrivateKeyExt as _};
 use commonware_utils::quorum;
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::rngs::StdRng;

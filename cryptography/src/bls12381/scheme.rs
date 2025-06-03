@@ -29,7 +29,7 @@ use super::primitives::{
     ops,
     variant::{MinPk, Variant},
 };
-use crate::{Array, BatchScheme, PrivateKey as _, PrivateKeyGen};
+use crate::{Array, BatchScheme, PrivateKey as _, PrivateKeyExt};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     DecodeExt, EncodeFixed, Error as CodecError, FixedSize, Read, ReadExt, Write,
@@ -143,7 +143,7 @@ impl crate::Signer for PrivateKey {
     }
 }
 
-impl PrivateKeyGen for PrivateKey {
+impl PrivateKeyExt for PrivateKey {
     fn from_rng<R: Rng + CryptoRng>(rng: &mut R) -> Self {
         let (private, _) = ops::keypair::<_, MinPk>(rng);
         let raw = private.encode_fixed();

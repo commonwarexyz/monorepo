@@ -257,7 +257,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: Array> Requester<E, P> {
 mod tests {
     use super::*;
     use commonware_cryptography::ed25519::PrivateKey;
-    use commonware_cryptography::{PrivateKey as _, PrivateKeyGen as _};
+    use commonware_cryptography::{PrivateKey as _, PrivateKeyExt as _};
     use commonware_runtime::deterministic;
     use commonware_runtime::Runner;
     use commonware_utils::NZU32;

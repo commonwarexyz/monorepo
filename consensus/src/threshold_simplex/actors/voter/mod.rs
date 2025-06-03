@@ -57,7 +57,7 @@ mod tests {
             dkg::ops,
             primitives::{ops::threshold_signature_recover, variant::MinSig},
         },
-        ed25519, hash, PrivateKeyGen as _, Sha256,
+        ed25519, hash, PrivateKeyExt as _, Sha256,
     };
     use commonware_macros::test_traced;
     use commonware_p2p::{

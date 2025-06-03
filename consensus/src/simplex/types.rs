@@ -1477,7 +1477,7 @@ mod tests {
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey, Signature},
         sha256::Digest as Sha256Digest,
-        PrivateKey as _, PrivateKeyGen as _,
+        PrivateKey as _, PrivateKeyExt as _,
     };
 
     const NAMESPACE: &[u8] = b"test";

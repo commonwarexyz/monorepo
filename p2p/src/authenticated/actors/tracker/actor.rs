@@ -247,7 +247,7 @@ mod tests {
         // Blocker is implicitly available via oracle.block() due to Oracle implementing crate::Blocker
     };
     use commonware_codec::{DecodeExt, Encode};
-    use commonware_cryptography::PrivateKeyGen as _;
+    use commonware_cryptography::PrivateKeyExt as _;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey, Signature},
         PrivateKey as PrivateKeyTrait, Signer as _,

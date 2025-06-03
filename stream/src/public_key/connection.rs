@@ -355,7 +355,7 @@ mod tests {
     use chacha20poly1305::KeyInit;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
-        PrivateKey as _, PrivateKeyGen as _,
+        PrivateKey as _, PrivateKeyExt as _,
     };
     use commonware_runtime::{deterministic, mocks, Metrics, Runner};
     use std::time::Duration;

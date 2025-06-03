@@ -192,7 +192,7 @@ mod tests {
     };
     use crate::bls12381::primitives::poly::public;
     use crate::bls12381::primitives::variant::{MinPk, MinSig, Variant};
-    use crate::{ed25519::PrivateKey, PrivateKey as _, PrivateKeyGen as _};
+    use crate::{ed25519::PrivateKey, PrivateKey as _, PrivateKeyExt as _};
     use arbiter::Output;
     use commonware_utils::quorum;
     use rand::rngs::StdRng;

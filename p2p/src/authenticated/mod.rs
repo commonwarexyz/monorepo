@@ -210,7 +210,7 @@ pub use network::Network;
 mod tests {
     use super::*;
     use crate::{Receiver, Recipients, Sender};
-    use commonware_cryptography::{ed25519, PrivateKey as _, PrivateKeyGen as _};
+    use commonware_cryptography::{ed25519, PrivateKey as _, PrivateKeyExt as _};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         deterministic, tokio, Clock, Metrics, Network as RNetwork, Runner, Spawner,

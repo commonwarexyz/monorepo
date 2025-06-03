@@ -5,7 +5,7 @@ use commonware_cryptography::{
         dkg::ops,
         primitives::{poly, variant::MinSig},
     },
-    ed25519, PrivateKey as _, PrivateKeyGen as _,
+    ed25519, PrivateKey as _, PrivateKeyExt as _,
 };
 use commonware_utils::{hex, quorum};
 use rand::{rngs::StdRng, SeedableRng};

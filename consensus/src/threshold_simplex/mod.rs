@@ -216,7 +216,7 @@ mod tests {
             primitives::variant::{MinPk, MinSig, Variant},
         },
         ed25519::PrivateKey,
-        PrivateKey as _, PrivateKeyGen as _, Sha256,
+        PrivateKey as _, PrivateKeyExt as _, Sha256,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};

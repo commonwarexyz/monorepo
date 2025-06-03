@@ -124,7 +124,7 @@ mod tests {
     use super::*;
     use crate::{Receiver, Recipients, Sender};
     use bytes::Bytes;
-    use commonware_cryptography::{ed25519::PrivateKey, PrivateKey as _, PrivateKeyGen as _};
+    use commonware_cryptography::{ed25519::PrivateKey, PrivateKey as _, PrivateKeyExt as _};
     use commonware_macros::select;
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
     use futures::{channel::mpsc, SinkExt, StreamExt};
