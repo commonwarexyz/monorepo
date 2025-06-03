@@ -27,7 +27,7 @@ async fn bench_run(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, items_to_r
 /// Benchmark the sequential read of items from a journal containing exactly that
 /// number of items.
 fn bench_fixed_read_sequential(c: &mut Criterion) {
-    let cfg = tokio::Config::new().with_storage_directory_from_env();
+    let cfg = tokio::Config::default().with_storage_directory_from_env();
     let runner = TokioBenchRunner::new(cfg);
     for items in [1_000, 10_000, 100_000, 500_000] {
         c.bench_function(

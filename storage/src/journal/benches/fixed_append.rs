@@ -14,7 +14,7 @@ const ITEMS_PER_BLOB: u64 = 10_000;
 const ITEM_SIZE: usize = 32;
 
 fn bench_fixed_append(c: &mut Criterion) {
-    let cfg = tokio::Config::new().with_storage_directory_from_env();
+    let cfg = tokio::Config::default().with_storage_directory_from_env();
     let runner = TokioBenchRunner::new(cfg);
     for items_to_write in [1_000, 10_000, 100_000, 1_000_000] {
         c.bench_function(
