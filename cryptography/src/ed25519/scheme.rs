@@ -1,4 +1,4 @@
-use crate::{Array, PrivateKeyGen};
+use crate::{Array, BatchScheme, PrivateKeyGen};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_utils::{hex, union_unique};
@@ -311,7 +311,7 @@ pub struct Batch {
     verifier: ed25519_consensus::batch::Verifier,
 }
 
-impl crate::BatchScheme<PrivateKey> for Batch {
+impl BatchScheme<PrivateKey> for Batch {
     fn new() -> Self {
         Batch {
             verifier: ed25519_consensus::batch::Verifier::new(),
@@ -347,7 +347,7 @@ impl crate::BatchScheme<PrivateKey> for Batch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ed25519, BatchScheme as _, Signer as _, Verifier as _};
+    use crate::{ed25519, Signer as _, Verifier as _};
     use commonware_codec::{DecodeExt, Encode};
     use rand::rngs::OsRng;
 

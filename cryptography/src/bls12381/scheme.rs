@@ -29,7 +29,7 @@ use super::primitives::{
     ops,
     variant::{MinPk, Variant},
 };
-use crate::{Array, PrivateKey as _, PrivateKeyGen};
+use crate::{Array, BatchScheme, PrivateKey as _, PrivateKeyGen};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     DecodeExt, EncodeFixed, Error as CodecError, FixedSize, Read, ReadExt, Write,
@@ -348,7 +348,7 @@ pub struct Batch {
     signatures: Vec<<MinPk as Variant>::Signature>,
 }
 
-impl crate::BatchScheme<PrivateKey> for Batch {
+impl BatchScheme<PrivateKey> for Batch {
     fn new() -> Self {
         Self {
             publics: Vec::new(),
