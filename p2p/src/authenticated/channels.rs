@@ -116,7 +116,10 @@ impl<P: Array> crate::Receiver for Receiver<P> {
         let (sender, mut message) = self.receiver.next().await.ok_or(Error::NetworkClosed)?;
 
         // Unpad the message
-        message = self.config.padding.unpad(message)?;
+        message = self
+            .config
+            .padding
+            .unpad(&mut message, self.config.max_size)?;
 
         // If compression is enabled, decompress the message before returning.
         if self.config.compression.is_some() {
