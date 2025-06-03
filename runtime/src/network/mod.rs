@@ -97,7 +97,6 @@ mod tests {
             for _ in 0..3 {
                 let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
 
-                // runtime.spawn(async move {
                 let read = stream
                     .recv(vec![0; CLIENT_SEND_DATA.len()])
                     .await

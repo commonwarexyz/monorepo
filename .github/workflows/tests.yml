@@ -40,8 +40,7 @@ jobs:
       matrix:
         features:
           - "--features commonware-runtime/iouring-storage"
-          # TODO: Re-enable when #954 is resolved
-          #- "--features commonware-runtime/iouring-network"
+          - "--features commonware-runtime/iouring-network"
           - ""
     steps:
     - name: Checkout repository
@@ -58,8 +57,7 @@ jobs:
       matrix:
         features:
           - "--features commonware-runtime/iouring-storage"
-          # TODO: Re-enable when #954 is resolved
-          #- "--features commonware-runtime/iouring-network"
+          - "--features commonware-runtime/iouring-network"
           - ""
     steps:
     - name: Checkout repository
