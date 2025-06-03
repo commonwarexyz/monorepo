@@ -10,9 +10,9 @@ use commonware_utils::SystemTimeExt;
 use std::time::Duration;
 
 /// Handshake information that is signed over by the sender.
-pub struct Info<K: PublicKey> {
+pub struct Info<C: PublicKey> {
     /// The public key of the recipient.
-    recipient: K,
+    recipient: C,
 
     /// The ephemeral public key of the sender.
     ///
@@ -23,8 +23,8 @@ pub struct Info<K: PublicKey> {
     timestamp: u64,
 }
 
-impl<K: PublicKey> Info<K> {
-    pub fn new(recipient: K, ephemeral_public_key: x25519::PublicKey, timestamp: u64) -> Self {
+impl<C: PublicKey> Info<C> {
+    pub fn new(recipient: C, ephemeral_public_key: x25519::PublicKey, timestamp: u64) -> Self {
         Self {
             recipient,
             ephemeral_public_key,
@@ -33,7 +33,7 @@ impl<K: PublicKey> Info<K> {
     }
 }
 
-impl<K: PublicKey> Write for Info<K> {
+impl<C: PublicKey> Write for Info<C> {
     fn write(&self, buf: &mut impl BufMut) {
         self.recipient.write(buf);
         self.ephemeral_public_key.write(buf);
@@ -41,11 +41,11 @@ impl<K: PublicKey> Write for Info<K> {
     }
 }
 
-impl<K: PublicKey> Read for Info<K> {
+impl<C: PublicKey> Read for Info<C> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let recipient = K::read(buf)?;
+        let recipient = C::read(buf)?;
         let ephemeral_public_key = x25519::PublicKey::read(buf)?;
         let timestamp = UInt::read(buf)?.into();
         Ok(Info {
