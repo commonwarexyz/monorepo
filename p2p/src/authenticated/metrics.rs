@@ -20,7 +20,7 @@ impl Peer {
 pub enum MessageType {
     BitVec,
     Peers,
-    Data(i32),
+    Data(u32),
     Invalid,
 }
 
@@ -57,7 +57,7 @@ impl Message {
     pub fn new_data(peer: &impl Array, channel: Channel) -> Self {
         Self {
             peer: peer.to_string(),
-            message: MessageType::Data(channel as i32),
+            message: MessageType::Data(channel),
         }
     }
     pub fn new_invalid(peer: &impl Array) -> Self {
