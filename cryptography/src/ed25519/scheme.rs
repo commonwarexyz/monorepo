@@ -22,9 +22,7 @@ pub struct PrivateKey {
     key: ed25519_consensus::SigningKey,
 }
 
-impl crate::PrivateKey for PrivateKey {
-    type PublicKey = PublicKey;
-}
+impl crate::PrivateKey for PrivateKey {}
 
 impl crate::Signer for PrivateKey {
     type Signature = Signature;

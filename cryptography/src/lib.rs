@@ -30,10 +30,7 @@ pub trait Signer: Send + Sync + Clone + 'static {
 }
 
 /// A [Signer] that can be serialized/deserialized.
-pub trait PrivateKey: Signer + Sized + ReadExt + Encode + PartialEq + Array {
-    /// The corresponding public key type.
-    type PublicKey: PublicKey<Signature = Self::Signature>;
-}
+pub trait PrivateKey: Signer + Sized + ReadExt + Encode + PartialEq + Array {}
 
 /// A [PrivateKey] that can be generated from a seed or RNG.
 pub trait PrivateKeyExt: PrivateKey {
@@ -185,7 +182,7 @@ mod tests {
     fn test_validate<C: PrivateKeyExt>() {
         let private_key = C::from_rng(&mut OsRng);
         let public_key = private_key.public_key();
-        assert!(<C as Signer>::PublicKey::decode(public_key.as_ref()).is_ok());
+        assert!(C::PublicKey::decode(public_key.as_ref()).is_ok());
     }
 
     fn test_validate_invalid_public_key<C: Signer>() {
