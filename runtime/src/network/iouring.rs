@@ -323,8 +323,17 @@ mod tests {
     #[tokio::test]
     async fn test_trait() {
         tests::test_network_trait(|| {
-            Network::start(Config::default(), &mut Registry::default())
-                .expect("Failed to start io_uring")
+            Network::start(
+                Config {
+                    iouring_config: iouring::Config {
+                        force_poll: Some(Duration::from_millis(100)),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                &mut Registry::default(),
+            )
+            .expect("Failed to start io_uring")
         })
         .await;
     }
