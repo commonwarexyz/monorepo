@@ -48,8 +48,8 @@ impl<C: PrivateKey, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
         };
 
         // Verify handshake message from peer
-        let signed_handshake = handshake::Signed::<C::PublicKey>::decode(msg.as_ref())
-            .map_err(Error::UnableToDecode)?;
+        let signed_handshake =
+            handshake::Signed::decode(msg.as_ref()).map_err(Error::UnableToDecode)?;
         signed_handshake.verify(
             context,
             &config.crypto.public_key(),
