@@ -160,11 +160,13 @@
 //!     // Register some channel
 //!     const MAX_MESSAGE_BACKLOG: usize = 128;
 //!     const COMPRESSION_LEVEL: Option<i32> = Some(3);
+//!     const PADDING: Padding = Padding::None;
 //!     let (mut sender, receiver) = network.register(
 //!         0,
 //!         Quota::per_second(NZU32!(1)),
 //!         MAX_MESSAGE_BACKLOG,
 //!         COMPRESSION_LEVEL,
+//!         PADDING,
 //!     );
 //!
 //!     // Run network
