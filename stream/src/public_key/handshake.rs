@@ -124,6 +124,15 @@ impl<C: PublicKey> Signed<C> {
             return Err(Error::HandshakeNotForUs);
         }
 
+        // Verify that the handshake is not signed by us
+        //
+        // This could indicate a self-connection attempt, which is not allowed.
+        // It could also indicate a replay attack or a malformed message.
+        // Either way, fail early to avoid any potential issues.
+        if *crypto == self.signer {
+            return Err(Error::HandshakeUsesOurKey);
+        }
+
         // Verify that the timestamp in the handshake is recent
         //
         // This prevents an adversary from reopening an encrypted connection
@@ -390,8 +399,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Setup a mock sink and stream
-            let (sink, _) = mocks::Channel::init();
-            let (_, stream) = mocks::Channel::init();
+            let (sink, _stream) = mocks::Channel::init();
+            let (_sink, stream) = mocks::Channel::init();
 
             // Call the verify function for one peer, but never send the handshake from the other
             let config = Config {
@@ -413,16 +422,17 @@ mod tests {
     fn test_handshake_verify_invalid_signature() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut crypto = ed25519::PrivateKey::from_seed(0);
-            let recipient = crypto.public_key();
+            let mut sender = ed25519::PrivateKey::from_seed(0);
+            let recipient = ed25519::PrivateKey::from_seed(1);
             let ephemeral_public_key = x25519::PublicKey::from_bytes([0u8; 32]);
 
+            // The peer creates a valid handshake intended for us
             let handshake = Signed::sign(
-                &mut crypto,
+                &mut sender,
                 TEST_NAMESPACE,
                 Info {
                     timestamp: 0,
-                    recipient,
+                    recipient: recipient.public_key(),
                     ephemeral_public_key,
                 },
             );
@@ -435,7 +445,7 @@ mod tests {
             // Verify the handshake
             let result = handshake.verify(
                 &context,
-                &crypto.public_key(),
+                &recipient.public_key(),
                 TEST_NAMESPACE,
                 Duration::from_secs(5),
                 Duration::from_secs(5),
@@ -449,13 +459,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut signer = ed25519::PrivateKey::from_seed(0);
-            let recipient = signer.public_key();
+            let recipient = ed25519::PrivateKey::from_seed(1).public_key();
             let ephemeral_public_key = x25519::PublicKey::from_bytes([0u8; 32]);
 
             let timeout_duration = Duration::from_secs(5);
             let synchrony_bound = Duration::from_secs(0);
 
-            // Create a handshake, setting the timestamp to 0.
+            // The peer creates a handshake, setting the timestamp to 0.
             let handshake = Signed::sign(
                 &mut signer,
                 TEST_NAMESPACE,
@@ -501,14 +511,14 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut signer = ed25519::PrivateKey::from_seed(0);
-            let recipient = signer.public_key();
+            let recipient = ed25519::PrivateKey::from_seed(1).public_key();
             let ephemeral_public_key = x25519::PublicKey::from_bytes([0u8; 32]);
 
             let timeout_duration = Duration::from_secs(0);
             const SYNCHRONY_BOUND_MILLIS: u64 = 5_000;
             let synchrony_bound = Duration::from_millis(SYNCHRONY_BOUND_MILLIS);
 
-            // Create a handshake at the synchrony bound.
+            // The peer creates a handshake at the synchrony bound.
             let handshake_ok = Signed::sign(
                 &mut signer,
                 TEST_NAMESPACE,
