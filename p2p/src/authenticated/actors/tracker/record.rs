@@ -55,6 +55,10 @@ pub struct Record<C: Verifier> {
     /// Number of peer sets this peer is part of.
     sets: usize,
 
+    /// The highest timestamp (in epoch milliseconds) of the peer's dial handshake. Must be
+    /// monotonically increasing. Used to prevent replay attacks. Defaults to `0`.
+    timestamp: u64,
+
     /// If `true`, the record should persist even if the peer is not part of any peer sets.
     persistent: bool,
 }
@@ -68,6 +72,7 @@ impl<C: Verifier> Record<C> {
             address: Address::Unknown,
             status: Status::Inert,
             sets: 0,
+            timestamp: 0,
             persistent: false,
         }
     }
@@ -78,6 +83,7 @@ impl<C: Verifier> Record<C> {
             address: Address::Myself(info),
             status: Status::Inert,
             sets: 0,
+            timestamp: 0,
             persistent: true,
         }
     }
@@ -88,6 +94,7 @@ impl<C: Verifier> Record<C> {
             address: Address::Bootstrapper(socket),
             status: Status::Inert,
             sets: 0,
+            timestamp: 0,
             persistent: true,
         }
     }
@@ -201,7 +208,22 @@ impl<C: Verifier> Record<C> {
         }
     }
 
+    /// Set the timestamp of the record.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the provided timestamp is not strictly greater than the current timestamp.
+    pub fn set_timestamp(&mut self, timestamp: u64) {
+        assert!(timestamp > self.timestamp);
+        self.timestamp = timestamp;
+    }
+
     // ---------- Getters ----------
+
+    /// Returns the highest `timestamp` that this peer has dialed us with.
+    pub fn timestamp(&self) -> u64 {
+        self.timestamp
+    }
 
     /// Returns `true` if the record is blocked.
     pub fn blocked(&self) -> bool {
