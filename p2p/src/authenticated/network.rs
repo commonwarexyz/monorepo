@@ -6,7 +6,7 @@ use super::{
     config::Config,
     types,
 };
-use crate::Channel;
+use crate::{authenticated::padding, Channel};
 use commonware_cryptography::Scheme;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics, Network as RNetwork, Spawner};
@@ -99,6 +99,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
     /// * `rate` - Rate at which messages can be received over the channel.
     /// * `backlog` - Maximum number of messages that can be queued on the channel before blocking.
     /// * `compression` - Optional compression level (using `zstd`) to use for messages on the channel.
+    /// * `padding` - Padding strategy to use for messages on the channel.
     ///
     /// # Returns
     ///
@@ -111,11 +112,13 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
         rate: Quota,
         backlog: usize,
         compression: Option<i32>,
+        padding: padding::Padding,
     ) -> (
         channels::Sender<C::PublicKey>,
         channels::Receiver<C::PublicKey>,
     ) {
-        self.channels.register(channel, rate, backlog, compression)
+        self.channels
+            .register(channel, rate, backlog, compression, padding)
     }
 
     /// Starts the network.

@@ -184,6 +184,7 @@ mod config;
 mod ip;
 mod metrics;
 mod network;
+mod padding;
 mod types;
 
 use thiserror::Error;
@@ -197,6 +198,10 @@ pub enum Error {
     CompressionFailed,
     #[error("decompression failed")]
     DecompressionFailed,
+    #[error("padding failed")]
+    PaddingFailed,
+    #[error("unpadding failed")]
+    UnpaddingFailed,
     #[error("network closed")]
     NetworkClosed,
 }
@@ -205,6 +210,7 @@ pub use actors::tracker::Oracle;
 pub use channels::{Receiver, Sender};
 pub use config::{Bootstrapper, Config};
 pub use network::Network;
+pub use padding::Padding;
 
 #[cfg(test)]
 mod tests {
@@ -288,6 +294,7 @@ mod tests {
                 Quota::per_second(NZU32!(5)), // Ensure we hit the rate limit
                 DEFAULT_MESSAGE_BACKLOG,
                 None,
+                Padding::None,
             );
 
             // Wait to connect to all peers, and then send messages to everyone
@@ -537,6 +544,7 @@ mod tests {
                     Quota::per_second(NZU32!(10)),
                     DEFAULT_MESSAGE_BACKLOG,
                     None,
+                    Padding::None,
                 );
 
                 // Wait to connect to all peers, and then send messages to everyone
@@ -615,6 +623,7 @@ mod tests {
                 Quota::per_second(NZU32!(10)),
                 DEFAULT_MESSAGE_BACKLOG,
                 compression,
+                Padding::None,
             );
 
             // Wait to connect to all peers, and then send messages to everyone

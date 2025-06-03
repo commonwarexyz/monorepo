@@ -50,7 +50,7 @@ mod gui;
 use clap::{value_parser, Arg, Command};
 use commonware_consensus::simplex;
 use commonware_cryptography::{Ed25519, Sha256, Signer};
-use commonware_p2p::authenticated::{self, Network};
+use commonware_p2p::authenticated::{self, Network, Padding};
 use commonware_runtime::{tokio, Metrics, Runner};
 use commonware_utils::{union, NZU32};
 use governor::Quota;
@@ -170,12 +170,14 @@ fn main() {
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
             Some(3),
+            Padding::None,
         );
         let (resolver_sender, resolver_receiver) = network.register(
             1,
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
             Some(3),
+            Padding::None,
         );
 
         // Initialize application

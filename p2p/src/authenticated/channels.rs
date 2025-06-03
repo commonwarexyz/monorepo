@@ -1,5 +1,5 @@
 use super::{actors::Messenger, Error};
-use crate::{Channel, Message, Recipients};
+use crate::{authenticated::Padding, Channel, Message, Recipients};
 use bytes::Bytes;
 use commonware_utils::Array;
 use futures::{channel::mpsc, StreamExt};
@@ -7,29 +7,35 @@ use governor::Quota;
 use std::collections::BTreeMap;
 use zstd::bulk::{compress, decompress};
 
+/// Configuration for a channel.
+#[derive(Clone, Debug)]
+pub struct Config {
+    /// The unique identifier of the channel.
+    pub channel: Channel,
+
+    /// Maximum size of a message that can be sent over the channel.
+    pub max_size: usize,
+
+    /// Compression level to use when sending messages.
+    ///
+    /// If `None`, compression is disabled.
+    pub compression: Option<i32>,
+
+    /// The padding strategy to use for messages sent over the channel.
+    pub padding: Padding,
+}
+
 /// Sender is the mechanism used to send arbitrary bytes to
 /// a set of recipients over a pre-defined channel.
 #[derive(Clone, Debug)]
 pub struct Sender<P: Array> {
-    channel: Channel,
-    max_size: usize,
-    compression: Option<i32>,
+    config: Config,
     messenger: Messenger<P>,
 }
 
 impl<P: Array> Sender<P> {
-    pub(super) fn new(
-        channel: Channel,
-        max_size: usize,
-        compression: Option<i32>,
-        messenger: Messenger<P>,
-    ) -> Self {
-        Self {
-            channel,
-            max_size,
-            compression,
-            messenger,
-        }
+    pub(super) fn new(config: Config, messenger: Messenger<P>) -> Self {
+        Self { config, messenger }
     }
 }
 
@@ -63,21 +69,24 @@ impl<P: Array> crate::Sender for Sender<P> {
         priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Error> {
         // If compression is enabled, compress the message before sending.
-        if let Some(level) = self.compression {
+        if let Some(level) = self.config.compression {
             let compressed = compress(&message, level).map_err(|_| Error::CompressionFailed)?;
             message = compressed.into();
         }
 
+        // Pad the message
+        message = self.config.padding.pad(message)?;
+
         // Ensure message isn't too large
         let message_len = message.len();
-        if message_len > self.max_size {
+        if message_len > self.config.max_size {
             return Err(Error::MessageTooLarge(message_len));
         }
 
         // Wait for messenger to let us know who we sent to
         Ok(self
             .messenger
-            .content(recipients, self.channel, message, priority)
+            .content(recipients, self.config.channel, message, priority)
             .await)
     }
 }
@@ -85,22 +94,13 @@ impl<P: Array> crate::Sender for Sender<P> {
 /// Channel to asynchronously receive messages from a channel.
 #[derive(Debug)]
 pub struct Receiver<P: Array> {
-    max_size: usize,
-    compression: bool,
+    config: Config,
     receiver: mpsc::Receiver<Message<P>>,
 }
 
 impl<P: Array> Receiver<P> {
-    pub(super) fn new(
-        max_size: usize,
-        compression: bool,
-        receiver: mpsc::Receiver<Message<P>>,
-    ) -> Self {
-        Self {
-            max_size,
-            compression,
-            receiver,
-        }
+    pub(super) fn new(config: Config, receiver: mpsc::Receiver<Message<P>>) -> Self {
+        Self { config, receiver }
     }
 }
 
@@ -115,10 +115,13 @@ impl<P: Array> crate::Receiver for Receiver<P> {
     async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Error> {
         let (sender, mut message) = self.receiver.next().await.ok_or(Error::NetworkClosed)?;
 
+        // Unpad the message
+        message = self.config.padding.unpad(message)?;
+
         // If compression is enabled, decompress the message before returning.
-        if self.compression {
-            let buf =
-                decompress(&message, self.max_size).map_err(|_| Error::DecompressionFailed)?;
+        if self.config.compression.is_some() {
+            let buf = decompress(&message, self.config.max_size)
+                .map_err(|_| Error::DecompressionFailed)?;
             message = buf.into();
         }
 
@@ -150,14 +153,21 @@ impl<P: Array> Channels<P> {
         rate: governor::Quota,
         backlog: usize,
         compression: Option<i32>,
+        padding: Padding,
     ) -> (Sender<P>, Receiver<P>) {
         let (sender, receiver) = mpsc::channel(backlog);
         if self.receivers.insert(channel, (rate, sender)).is_some() {
             panic!("duplicate channel registration: {}", channel);
         }
+        let config = Config {
+            channel,
+            max_size: self.max_size,
+            compression,
+            padding,
+        };
         (
-            Sender::new(channel, self.max_size, compression, self.messenger.clone()),
-            Receiver::new(self.max_size, compression.is_some(), receiver),
+            Sender::new(config.clone(), self.messenger.clone()),
+            Receiver::new(config, receiver),
         )
     }
 

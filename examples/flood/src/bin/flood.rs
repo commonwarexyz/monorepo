@@ -6,7 +6,10 @@ use commonware_cryptography::{
 };
 use commonware_deployer::ec2::{Hosts, METRICS_PORT};
 use commonware_flood::Config;
-use commonware_p2p::{authenticated, Receiver, Recipients, Sender};
+use commonware_p2p::{
+    authenticated::{self, Padding},
+    Receiver, Recipients, Sender,
+};
 use commonware_runtime::{tokio, Metrics, Runner, Spawner};
 use commonware_utils::{from_hex_formatted, union, NZU32};
 use futures::future::try_join_all;
@@ -133,6 +136,7 @@ fn main() {
             Quota::per_second(NZU32!(u32::MAX)),
             config.message_backlog,
             None,
+            Padding::None,
         );
 
         // Create network
