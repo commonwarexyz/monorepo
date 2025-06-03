@@ -46,10 +46,11 @@ impl<
         cfg.assert();
 
         // Create voter
+        let public_key = cfg.crypto.public_key();
         let (voter, voter_mailbox) = voter::Actor::new(
             context.with_label("voter"),
             voter::Config {
-                crypto: cfg.crypto.clone(),
+                crypto: cfg.crypto,
                 automaton: cfg.automaton,
                 relay: cfg.relay,
                 reporter: cfg.reporter,
@@ -74,7 +75,7 @@ impl<
         let (resolver, resolver_mailbox) = resolver::Actor::new(
             context.with_label("resolver"),
             resolver::Config {
-                crypto: cfg.crypto.public_key(),
+                crypto: public_key,
                 supervisor: cfg.supervisor,
                 mailbox_size: cfg.mailbox_size,
                 namespace: cfg.namespace,
