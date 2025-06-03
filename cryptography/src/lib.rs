@@ -15,17 +15,27 @@ pub mod sha256;
 pub use sha256::{hash, CoreSha256, Sha256};
 pub mod secp256r1;
 
-/// Produces signatures over messages and has a corresponding public key.
+/// Produces [Signature]s over messages that can be verified with a corresponding [PublicKey].
 pub trait Signer: Send + Sync + Clone + 'static {
-    /// The type of signature produced by this signer.
+    /// The type of [Signature] produced by this [Signer].
     type Signature: Signature;
-    /// The corresponding public key type.
+
+    /// The corresponding [PublicKey] type.
     type PublicKey: PublicKey<Signature = Self::Signature>;
 
-    /// Returns the public key corresponding to this private key.
+    /// Returns the [PublicKey] corresponding to this [Signer].
     fn public_key(&self) -> Self::PublicKey;
 
     /// Sign a message with the given namespace.
+    ///
+    /// The message should not be hashed prior to calling this function. If a particular scheme
+    /// requires a payload to be hashed before it is signed, it will be done internally.
+    ///
+    /// A namespace should be used to prevent cross-domain attacks (where a signature can be reused
+    /// in a different context). It must be prepended to the message so that a signature meant for
+    /// one context cannot be used unexpectedly in another (i.e. signing a message on the network
+    /// layer can't accidentally spend funds on the execution layer). See
+    /// [union_unique](commonware_utils::union_unique) for details.
     fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Self::Signature;
 }
 
@@ -34,33 +44,43 @@ pub trait PrivateKey: Signer + Sized + ReadExt + Encode + PartialEq + Array {}
 
 /// A [PrivateKey] that can be generated from a seed or RNG.
 pub trait PrivateKeyExt: PrivateKey {
-    /// Create a private key from a seed.
+    /// Create a [PrivateKey] from a seed.
+    ///
+    /// # Warning
+    ///
+    /// This function is insecure and should only be used for examples
+    /// and testing.
     fn from_seed(seed: u64) -> Self {
         let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
         Self::from_rng(&mut rng)
     }
 
-    /// Create a fresh private key using the supplied RNG.
+    /// Create a fresh [PrivateKey] using the supplied RNG.
     fn from_rng<R: Rng + CryptoRng>(rng: &mut R) -> Self;
 }
 
-/// Verifies signatures over messages.
+/// Verifies [Signature]s over messages.
 pub trait Verifier {
-    /// The type of signature that this verifier can verify.
+    /// The type of [Signature] that this verifier can verify.
     type Signature: Signature;
 
-    /// Verify that `sig` is a valid signature over `msg`.
+    /// Verify that a [Signature] is a valid over a given message.
+    ///
+    /// The message should not be hashed prior to calling this function. If a particular
+    /// scheme requires a payload to be hashed before it is signed, it will be done internally.
+    ///
+    /// Because namespace is prepended to message before signing, the namespace provided here must
+    /// match the namespace provided during signing.
     fn verify(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Self::Signature) -> bool;
 }
 
-/// A public key, able to verify signatures.
+/// A [PublicKey], able to verify [Signature]s.
 pub trait PublicKey: Verifier + Sized + ReadExt + Encode + PartialEq + Array {}
 
-/// A signature over a message by some private key.
+/// A [Signature] over a message.
 pub trait Signature: Sized + Clone + ReadExt + Encode + PartialEq + Array {}
 
-// /// Implementation that can indicate whether all `Signatures` are correct or that some `Signature`
-// /// is incorrect.
+/// Verifies whether all [Signature]s are correct or that some [Signature] is incorrect.
 pub trait BatchVerifier<K: PublicKey> {
     /// Create a new batch verifier.
     fn new() -> Self;
@@ -101,7 +121,7 @@ pub trait BatchVerifier<K: PublicKey> {
 /// Specializes the [commonware_utils::Array] trait with the Copy trait for cryptographic digests
 /// (which should be cheap to clone).
 pub trait Digest: Array + Copy {
-    /// Generate a random digest.
+    /// Generate a random [Digest].
     ///
     /// # Warning
     ///
@@ -114,6 +134,7 @@ pub trait Digest: Array + Copy {
 pub trait Digestible: Clone + Sized + Send + Sync + 'static {
     /// The type of digest produced by this object.
     type Digest: Digest;
+
     /// Returns a unique representation of the object as a [Digest].
     ///
     /// If many objects with [Digest]s are related (map to some higher-level
