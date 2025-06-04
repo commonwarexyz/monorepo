@@ -255,13 +255,9 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                             // If the channel handler is closed, we log an error but don't
                             // close the peer (as other channels may still be open).
                             let sender = senders.get_mut(&data.channel).unwrap();
-                            if let Err(e) = sender
-                                .send((peer.clone(), data.message))
-                                .await
-                                .map_err(|_| Error::ChannelClosed(data.channel))
-                            {
-                                debug!(err=?e, "failed to send message to client");
-                            }
+                            let _ = sender.send((peer.clone(), data.message)).await.inspect_err(
+                                |e| debug!(err=?e, channel=data.channel, "failed to send message to client"),
+                            );
                         }
                     }
                 }
