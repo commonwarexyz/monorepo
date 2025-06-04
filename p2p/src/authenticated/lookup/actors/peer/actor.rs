@@ -79,7 +79,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         sender: &mut Sender<Si>,
         sent_messages: &Family<metrics::Message, Counter>,
         metric: metrics::Message,
-        payload: types::Payload,
+        payload: types::Data,
     ) -> Result<(), Error> {
         let msg = payload.encode();
         sender.send(&msg).await.map_err(Error::SendFailed)?;
@@ -145,12 +145,12 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                         },
                         msg_high = self.high.next() => {
                             let msg = Self::validate_msg(msg_high, &rate_limits)?;
-                            Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), types::Payload::Data(msg))
+                            Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), msg)
                                 .await?;
                         },
                         msg_low = self.low.next() => {
                             let msg = Self::validate_msg(msg_low, &rate_limits)?;
-                            Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), types::Payload::Data(msg))
+                            Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), msg)
                                 .await?;
                         }
                     }
@@ -166,8 +166,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                         .receive()
                         .await
                         .map_err(Error::ReceiveFailed)?;
-                    let msg = match types::Payload::decode_cfg(msg, &()) {
-                        Ok(msg) => msg,
+                    let data = match types::Data::decode_cfg(msg, &(..).into()) {
+                        Ok(data) => data,
                         Err(err) => {
                             info!(?err, ?peer, "failed to decode message");
                             self.received_messages
@@ -176,47 +176,40 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                             return Err(Error::DecodeFailed(err));
                         }
                     };
-                    match msg {
-                        types::Payload::Data(data) => {
-                            self.received_messages
+                    self.received_messages
+                        .get_or_create(&metrics::Message::new_data(&peer, data.channel))
+                        .inc();
+
+                    // Ensure peer is not spamming us with content messages
+                    let entry = rate_limits.get(&data.channel);
+                    if entry.is_none() {
+                        // We permit unknown messages to be received in case peers
+                        // are on a newer version than us
+                        continue;
+                    }
+                    let rate_limiter = entry.unwrap();
+                    match rate_limiter.check() {
+                        Ok(_) => {}
+                        Err(negative) => {
+                            self.rate_limited
                                 .get_or_create(&metrics::Message::new_data(&peer, data.channel))
                                 .inc();
-
-                            // Ensure peer is not spamming us with content messages
-                            let entry = rate_limits.get(&data.channel);
-                            if entry.is_none() {
-                                // We permit unknown messages to be received in case peers
-                                // are on a newer version than us
-                                continue;
-                            }
-                            let rate_limiter = entry.unwrap();
-                            match rate_limiter.check() {
-                                Ok(_) => {}
-                                Err(negative) => {
-                                    self.rate_limited
-                                        .get_or_create(&metrics::Message::new_data(
-                                            &peer,
-                                            data.channel,
-                                        ))
-                                        .inc();
-                                    let wait = negative.wait_time_from(context.now());
-                                    context.sleep(wait).await;
-                                }
-                            }
-
-                            // Send message to client
-                            //
-                            // If the channel handler is closed, we log an error but don't
-                            // close the peer (as other channels may still be open).
-                            let sender = senders.get_mut(&data.channel).unwrap();
-                            if let Err(e) = sender
-                                .send((peer.clone(), data.message))
-                                .await
-                                .map_err(|_| Error::ChannelClosed(data.channel))
-                            {
-                                debug!(err=?e, "failed to send message to client");
-                            }
+                            let wait = negative.wait_time_from(context.now());
+                            context.sleep(wait).await;
                         }
+                    }
+
+                    // Send message to client
+                    //
+                    // If the channel handler is closed, we log an error but don't
+                    // close the peer (as other channels may still be open).
+                    let sender = senders.get_mut(&data.channel).unwrap();
+                    if let Err(e) = sender
+                        .send((peer.clone(), data.message))
+                        .await
+                        .map_err(|_| Error::ChannelClosed(data.channel))
+                    {
+                        debug!(err=?e, "failed to send message to client");
                     }
                 }
             });
