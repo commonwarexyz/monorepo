@@ -203,15 +203,12 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                                 .inc();
 
                             // Ensure peer is not spamming us with bit vectors
-                            match bit_vec_rate_limiter.check() {
-                                Ok(_) => {}
-                                Err(negative) => {
-                                    self.rate_limited
-                                        .get_or_create(&metrics::Message::new_bit_vec(&peer))
-                                        .inc();
-                                    let wait = negative.wait_time_from(context.now());
-                                    context.sleep(wait).await;
-                                }
+                            if let Err(wait_until) = bit_vec_rate_limiter.check() {
+                                self.rate_limited
+                                    .get_or_create(&metrics::Message::new_bit_vec(&peer))
+                                    .inc();
+                                let wait = wait_until.wait_time_from(context.now());
+                                context.sleep(wait).await;
                             }
 
                             // Gather useful peers
@@ -223,15 +220,12 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                                 .inc();
 
                             // Ensure peer is not spamming us with peer messages
-                            match peers_rate_limiter.check() {
-                                Ok(_) => {}
-                                Err(negative) => {
-                                    self.rate_limited
-                                        .get_or_create(&metrics::Message::new_peers(&peer))
-                                        .inc();
-                                    let wait = negative.wait_time_from(context.now());
-                                    context.sleep(wait).await;
-                                }
+                            if let Err(wait_until) = peers_rate_limiter.check() {
+                                self.rate_limited
+                                    .get_or_create(&metrics::Message::new_peers(&peer))
+                                    .inc();
+                                let wait = wait_until.wait_time_from(context.now());
+                                context.sleep(wait).await;
                             }
 
                             // Send peers to tracker
@@ -243,25 +237,17 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                                 .inc();
 
                             // Ensure peer is not spamming us with content messages
-                            let entry = rate_limits.get(&data.channel);
-                            if entry.is_none() {
+                            let Some(rate_limiter) = rate_limits.get(&data.channel) else {
                                 // We permit unknown messages to be received in case peers
                                 // are on a newer version than us
                                 continue;
-                            }
-                            let rate_limiter = entry.unwrap();
-                            match rate_limiter.check() {
-                                Ok(_) => {}
-                                Err(negative) => {
-                                    self.rate_limited
-                                        .get_or_create(&metrics::Message::new_data(
-                                            &peer,
-                                            data.channel,
-                                        ))
-                                        .inc();
-                                    let wait = negative.wait_time_from(context.now());
-                                    context.sleep(wait).await;
-                                }
+                            };
+                            if let Err(wait_until) = rate_limiter.check() {
+                                self.rate_limited
+                                    .get_or_create(&metrics::Message::new_data(&peer, data.channel))
+                                    .inc();
+                                let wait_duration = wait_until.wait_time_from(context.now());
+                                context.sleep(wait_duration).await;
                             }
 
                             // Send message to client

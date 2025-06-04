@@ -173,7 +173,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
                 .inc();
 
             // We may have to update the sets.
-            let want = self.peers.get(&peer).unwrap().want(self.dial_fail_limit);
+            let want = record.want(self.dial_fail_limit);
             for set in self.sets.values_mut() {
                 set.update(&peer, !want);
             }
