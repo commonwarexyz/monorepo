@@ -1,9 +1,8 @@
 use super::types::{Ack, Epoch};
 use commonware_cryptography::{
     bls12381::primitives::{ops, poly::PartialSignature, variant::Variant},
-    Digest,
+    Digest, PublicKey,
 };
-use commonware_utils::Array;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// A struct representing a set of partial signatures for a payload digest.
@@ -35,7 +34,7 @@ impl<V: Variant, D: Digest> Default for Evidence<V, D> {
 
 /// Manages acknowledgements for chunks.
 #[derive(Default)]
-pub struct AckManager<P: Array, V: Variant, D: Digest> {
+pub struct AckManager<P: PublicKey, V: Variant, D: Digest> {
     // Acknowledgements for digests.
     //
     // Map from Sequencer => Height => Epoch => Evidence
@@ -49,7 +48,7 @@ pub struct AckManager<P: Array, V: Variant, D: Digest> {
     acks: HashMap<P, BTreeMap<u64, BTreeMap<Epoch, Evidence<V, D>>>>,
 }
 
-impl<P: Array, V: Variant, D: Digest> AckManager<P, V, D> {
+impl<P: PublicKey, V: Variant, D: Digest> AckManager<P, V, D> {
     /// Creates a new `AckManager`.
     pub fn new() -> Self {
         Self {

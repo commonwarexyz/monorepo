@@ -2,16 +2,15 @@
 //! This includes things like how to produce/verify blocks and how to identify which
 //! participants are active at a given view.
 
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{Hasher, PublicKey};
 
 mod actor;
 pub use actor::Application;
-use commonware_utils::Array;
 mod ingress;
 mod supervisor;
 
 /// Configuration for the application.
-pub struct Config<P: Array, H: Hasher> {
+pub struct Config<P: PublicKey, H: Hasher> {
     /// Hashing scheme to use.
     pub hasher: H,
 

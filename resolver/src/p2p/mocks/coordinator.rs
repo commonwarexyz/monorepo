@@ -1,4 +1,4 @@
-use crate::Array;
+use commonware_cryptography::PublicKey;
 use commonware_runtime::Spawner;
 use futures::channel::mpsc;
 use futures::StreamExt;
@@ -12,18 +12,18 @@ pub enum CoordinatorMsg<P> {
 
 /// A coordinator that can be used for testing
 #[derive(Clone)]
-pub struct Coordinator<P: Array> {
+pub struct Coordinator<P: PublicKey> {
     /// The state of the coordinator
     state: Arc<Mutex<State<P>>>,
 }
 
 /// The state of the coordinator
-struct State<P: Array> {
+struct State<P: PublicKey> {
     peers: Vec<P>,
     peer_set_id: u64,
 }
 
-impl<P: Array> Coordinator<P> {
+impl<P: PublicKey> Coordinator<P> {
     /// Creates a new coordinator with the given initial peers
     pub fn new(initial_peers: Vec<P>) -> Self {
         let state = State {
@@ -71,7 +71,7 @@ impl<P: Array> Coordinator<P> {
     }
 }
 
-impl<P: Array> crate::p2p::Coordinator for Coordinator<P> {
+impl<P: PublicKey> crate::p2p::Coordinator for Coordinator<P> {
     type PublicKey = P;
 
     fn peers(&self) -> &Vec<Self::PublicKey> {

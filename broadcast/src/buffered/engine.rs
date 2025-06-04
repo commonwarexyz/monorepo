@@ -1,7 +1,7 @@
 use super::{metrics, Config, Mailbox, Message};
 use crate::buffered::metrics::SequencerLabel;
 use commonware_codec::Codec;
-use commonware_cryptography::{Committable, Digestible};
+use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
@@ -11,7 +11,6 @@ use commonware_runtime::{
     telemetry::metrics::status::{CounterExt, Status},
     Clock, Handle, Metrics, Spawner,
 };
-use commonware_utils::Array;
 use futures::{
     channel::{mpsc, oneshot},
     StreamExt,
@@ -48,7 +47,7 @@ struct Pair<Dc, Dd> {
 /// - Receiving messages from the network
 /// - Storing messages in the cache
 /// - Responding to requests from the application
-pub struct Engine<E: Clock + Spawner + Metrics, P: Array, M: Committable + Digestible + Codec> {
+pub struct Engine<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + Codec> {
     ////////////////////////////////////////
     // Interfaces
     ////////////////////////////////////////
@@ -109,7 +108,9 @@ pub struct Engine<E: Clock + Spawner + Metrics, P: Array, M: Committable + Diges
     metrics: metrics::Metrics,
 }
 
-impl<E: Clock + Spawner + Metrics, P: Array, M: Committable + Digestible + Codec> Engine<E, P, M> {
+impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + Codec>
+    Engine<E, P, M>
+{
     /// Creates a new engine with the given context and configuration.
     /// Returns the engine and a mailbox for sending messages to the engine.
     pub fn new(context: E, cfg: Config<P, M::Cfg>) -> (Self, Mailbox<P, M>) {

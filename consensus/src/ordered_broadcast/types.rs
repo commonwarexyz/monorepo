@@ -13,7 +13,7 @@ use commonware_cryptography::{
     },
     Digest, PublicKey, Signer,
 };
-use commonware_utils::{union, Array};
+use commonware_utils::union;
 use futures::channel::oneshot;
 use std::hash::{Hash, Hasher};
 
@@ -176,7 +176,7 @@ pub type Epoch = u64;
 /// Carries the necessary context for the automaton to verify a payload, including
 /// the sequencer's public key and its sequencer-specific height.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct Context<P: Array> {
+pub struct Context<P: PublicKey> {
     /// Sequencer's public key.
     pub sequencer: P,
 
@@ -191,7 +191,7 @@ pub struct Context<P: Array> {
 /// acknowledge chunks with partial signatures, which are then aggregated into threshold
 /// signatures to prove reliable broadcast.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Chunk<P: Array, D: Digest> {
+pub struct Chunk<P: PublicKey, D: Digest> {
     /// Sequencer's public key.
     pub sequencer: P,
 
@@ -202,7 +202,7 @@ pub struct Chunk<P: Array, D: Digest> {
     pub payload: D,
 }
 
-impl<P: Array, D: Digest> Chunk<P, D> {
+impl<P: PublicKey, D: Digest> Chunk<P, D> {
     /// Create a new chunk with the given sequencer, height, and payload.
     ///
     /// This is the basic unit of data in the ordered broadcast system.
@@ -215,7 +215,7 @@ impl<P: Array, D: Digest> Chunk<P, D> {
     }
 }
 
-impl<P: Array, D: Digest> Write for Chunk<P, D> {
+impl<P: PublicKey, D: Digest> Write for Chunk<P, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.sequencer.write(writer);
         UInt(self.height).write(writer);
@@ -223,7 +223,7 @@ impl<P: Array, D: Digest> Write for Chunk<P, D> {
     }
 }
 
-impl<P: Array, D: Digest> Read for Chunk<P, D> {
+impl<P: PublicKey, D: Digest> Read for Chunk<P, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -238,7 +238,7 @@ impl<P: Array, D: Digest> Read for Chunk<P, D> {
     }
 }
 
-impl<P: Array, D: Digest> EncodeSize for Chunk<P, D> {
+impl<P: PublicKey, D: Digest> EncodeSize for Chunk<P, D> {
     fn encode_size(&self) -> usize {
         self.sequencer.encode_size() + UInt(self.height).encode_size() + self.payload.encode_size()
     }
@@ -489,7 +489,7 @@ impl<C: PublicKey, V: Variant, D: Digest> Eq for Node<C, V, D> {}
 /// once enough validators (a quorum) have acknowledged the chunk. This threshold signature
 /// serves as proof that the chunk was reliably broadcast.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Ack<P: Array, V: Variant, D: Digest> {
+pub struct Ack<P: PublicKey, V: Variant, D: Digest> {
     /// Chunk that is being acknowledged.
     pub chunk: Chunk<P, D>,
 
@@ -502,7 +502,7 @@ pub struct Ack<P: Array, V: Variant, D: Digest> {
     pub signature: PartialSignature<V>,
 }
 
-impl<P: Array, V: Variant, D: Digest> Ack<P, V, D> {
+impl<P: PublicKey, V: Variant, D: Digest> Ack<P, V, D> {
     /// Create a new ack with the given chunk, epoch, and signature.
     pub fn new(chunk: Chunk<P, D>, epoch: Epoch, signature: PartialSignature<V>) -> Self {
         Self {
@@ -562,7 +562,7 @@ impl<P: Array, V: Variant, D: Digest> Ack<P, V, D> {
     }
 }
 
-impl<P: Array, V: Variant, D: Digest> Write for Ack<P, V, D> {
+impl<P: PublicKey, V: Variant, D: Digest> Write for Ack<P, V, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.chunk.write(writer);
         UInt(self.epoch).write(writer);
@@ -570,7 +570,7 @@ impl<P: Array, V: Variant, D: Digest> Write for Ack<P, V, D> {
     }
 }
 
-impl<P: Array, V: Variant, D: Digest> Read for Ack<P, V, D> {
+impl<P: PublicKey, V: Variant, D: Digest> Read for Ack<P, V, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -585,7 +585,7 @@ impl<P: Array, V: Variant, D: Digest> Read for Ack<P, V, D> {
     }
 }
 
-impl<P: Array, V: Variant, D: Digest> EncodeSize for Ack<P, V, D> {
+impl<P: PublicKey, V: Variant, D: Digest> EncodeSize for Ack<P, V, D> {
     fn encode_size(&self) -> usize {
         self.chunk.encode_size() + UInt(self.epoch).encode_size() + self.signature.encode_size()
     }
@@ -735,7 +735,7 @@ impl<C: PublicKey, D: Digest> Eq for Proposal<C, D> {}
 /// 2. Allowing sequencers to build chains of chunks
 /// 3. Preventing sequencers from creating forks in their chains
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Lock<P: Array, V: Variant, D: Digest> {
+pub struct Lock<P: PublicKey, V: Variant, D: Digest> {
     /// Chunk that is being locked.
     pub chunk: Chunk<P, D>,
 
@@ -748,7 +748,7 @@ pub struct Lock<P: Array, V: Variant, D: Digest> {
     pub signature: V::Signature,
 }
 
-impl<P: Array, V: Variant, D: Digest> Lock<P, V, D> {
+impl<P: PublicKey, V: Variant, D: Digest> Lock<P, V, D> {
     /// Create a new Lock with the given chunk, epoch, and signature.
     pub fn new(chunk: Chunk<P, D>, epoch: Epoch, signature: V::Signature) -> Self {
         Self {
@@ -777,7 +777,7 @@ impl<P: Array, V: Variant, D: Digest> Lock<P, V, D> {
     }
 }
 
-impl<P: Array, V: Variant, D: Digest> Write for Lock<P, V, D> {
+impl<P: PublicKey, V: Variant, D: Digest> Write for Lock<P, V, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.chunk.write(writer);
         UInt(self.epoch).write(writer);
@@ -785,7 +785,7 @@ impl<P: Array, V: Variant, D: Digest> Write for Lock<P, V, D> {
     }
 }
 
-impl<P: Array, V: Variant, D: Digest> Read for Lock<P, V, D> {
+impl<P: PublicKey, V: Variant, D: Digest> Read for Lock<P, V, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -800,7 +800,7 @@ impl<P: Array, V: Variant, D: Digest> Read for Lock<P, V, D> {
     }
 }
 
-impl<P: Array, V: Variant, D: Digest> EncodeSize for Lock<P, V, D> {
+impl<P: PublicKey, V: Variant, D: Digest> EncodeSize for Lock<P, V, D> {
     fn encode_size(&self) -> usize {
         self.chunk.encode_size() + UInt(self.epoch).encode_size() + self.signature.encode_size()
     }

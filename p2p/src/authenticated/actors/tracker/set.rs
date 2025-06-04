@@ -1,8 +1,9 @@
-use commonware_utils::{Array, BitVec};
+use commonware_cryptography::PublicKey;
+use commonware_utils::BitVec;
 use std::collections::HashMap;
 
 /// Represents a set of peers and their knowledge of each other.
-pub struct Set<P: Array> {
+pub struct Set<P: PublicKey> {
     /// The list of peers, sorted.
     sorted: Vec<P>,
 
@@ -13,7 +14,7 @@ pub struct Set<P: Array> {
     knowledge: BitVec,
 }
 
-impl<P: Array> Set<P> {
+impl<P: PublicKey> Set<P> {
     /// Creates a new set for the given index.
     pub fn new(mut peers: Vec<P>) -> Self {
         peers.sort();
@@ -49,7 +50,7 @@ impl<P: Array> Set<P> {
     }
 }
 
-impl<'a, P: Array> IntoIterator for &'a Set<P> {
+impl<'a, P: PublicKey> IntoIterator for &'a Set<P> {
     type Item = &'a P;
     type IntoIter = std::slice::Iter<'a, P>;
 
@@ -58,7 +59,7 @@ impl<'a, P: Array> IntoIterator for &'a Set<P> {
     }
 }
 
-impl<P: Array> std::ops::Index<usize> for Set<P> {
+impl<P: PublicKey> std::ops::Index<usize> for Set<P> {
     type Output = P;
 
     fn index(&self, index: usize) -> &Self::Output {
@@ -69,15 +70,24 @@ impl<P: Array> std::ops::Index<usize> for Set<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_utils::{array::U64, BitVec};
+    use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
+    use commonware_utils::BitVec;
     use std::collections::HashSet;
 
-    fn create_test_peers() -> Vec<U64> {
-        vec![U64::new(3), U64::new(1), U64::new(2)]
+    fn create_test_peers() -> Vec<ed25519::PublicKey> {
+        vec![
+            ed25519::PrivateKey::from_seed(3).public_key(),
+            ed25519::PrivateKey::from_seed(1).public_key(),
+            ed25519::PrivateKey::from_seed(2).public_key(),
+        ]
     }
 
-    fn expected_sorted_peers() -> Vec<U64> {
-        vec![U64::new(1), U64::new(2), U64::new(3)]
+    fn expected_sorted_peers() -> Vec<ed25519::PublicKey> {
+        vec![
+            ed25519::PrivateKey::from_seed(2).public_key(), // 191fc38f134aaf1b7fdb1f86330b9d03e94bd4ba884f490389de964448e89b3f
+            ed25519::PrivateKey::from_seed(3).public_key(), // c5bbbb60e412879bbec7bb769804fa8e36e68af10d5477280b63deeaca931bed
+            ed25519::PrivateKey::from_seed(1).public_key(), // ff87a0b0a3c7c0ce827e9cada5ff79e75a44a0633bfcb5b50f99307ddb26b337
+        ]
     }
 
     #[test]
@@ -109,8 +119,8 @@ mod tests {
     fn test_update_knowledge_single_peer() {
         let peers = create_test_peers();
         let mut set = Set::new(peers);
-        let peer_to_update = U64::new(2);
-        let non_existent_peer = U64::new(4);
+        let peer_to_update = ed25519::PrivateKey::from_seed(3).public_key();
+        let non_existent_peer = ed25519::PrivateKey::from_seed(4).public_key();
 
         assert_eq!(
             set.knowledge(),
@@ -161,9 +171,9 @@ mod tests {
     fn test_update_multiple_peers() {
         let peers = create_test_peers();
         let mut set = Set::new(peers);
-        let peer1 = U64::new(1);
-        let peer2 = U64::new(2);
-        let peer3 = U64::new(3);
+        let peer1 = ed25519::PrivateKey::from_seed(2).public_key();
+        let peer2 = ed25519::PrivateKey::from_seed(3).public_key();
+        let peer3 = ed25519::PrivateKey::from_seed(1).public_key();
 
         assert!(set.update(&peer1, true));
         assert!(set.update(&peer3, true));
@@ -189,11 +199,11 @@ mod tests {
         let set = Set::new(peers);
         assert_eq!(set.len(), 3);
 
-        let single_peer = vec![U64::new(10)];
+        let single_peer = vec![ed25519::PrivateKey::from_seed(10).public_key()];
         let single_set = Set::new(single_peer);
         assert_eq!(single_set.len(), 1);
 
-        let empty_peers: Vec<U64> = vec![];
+        let empty_peers: Vec<ed25519::PublicKey> = vec![];
         let empty_set = Set::new(empty_peers);
         assert_eq!(empty_set.len(), 0);
     }
@@ -202,8 +212,8 @@ mod tests {
     fn test_knowledge_reflects_updates_and_cloning() {
         let peers = create_test_peers();
         let mut set = Set::new(peers);
-        let peer1 = U64::new(1);
-        let peer2 = U64::new(2);
+        let peer1 = ed25519::PrivateKey::from_seed(2).public_key();
+        let peer2 = ed25519::PrivateKey::from_seed(3).public_key();
 
         let knowledge_before_updates = set.knowledge();
         assert_eq!(
@@ -246,16 +256,16 @@ mod tests {
         let set = Set::new(peers_data);
 
         let expected_peers = expected_sorted_peers();
-        let iterated_peers: Vec<&U64> = set.into_iter().collect();
-        let expected_refs: Vec<&U64> = expected_peers.iter().collect();
+        let iterated_peers: Vec<&ed25519::PublicKey> = set.into_iter().collect();
+        let expected_refs: Vec<&ed25519::PublicKey> = expected_peers.iter().collect();
 
         assert_eq!(
             iterated_peers, expected_refs,
             "Iterator should yield peers in sorted order"
         );
 
-        let iterated_set: HashSet<U64> = set.into_iter().cloned().collect();
-        let expected_set: HashSet<U64> = expected_peers.into_iter().collect();
+        let iterated_set: HashSet<ed25519::PublicKey> = set.into_iter().cloned().collect();
+        let expected_set: HashSet<ed25519::PublicKey> = expected_peers.into_iter().collect();
         assert_eq!(
             iterated_set, expected_set,
             "Iterated elements should match expected unique peers"
@@ -276,20 +286,20 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_index_out_of_bounds_positive() {
-        let peers: Vec<U64> = vec![U64::new(1)];
+        let peers: Vec<ed25519::PublicKey> = vec![ed25519::PrivateKey::from_seed(1).public_key()];
         let set = Set::new(peers);
         let _ = set[1];
     }
 
     #[test]
     fn test_empty_set_behavior() {
-        let peers: Vec<U64> = Vec::new();
+        let peers: Vec<ed25519::PublicKey> = Vec::new();
         let mut set = Set::new(peers);
 
         assert_eq!(set.len(), 0);
         assert_eq!(set.knowledge(), BitVec::zeroes(0));
 
-        let update_result = set.update(&U64::new(1), true);
+        let update_result = set.update(&ed25519::PrivateKey::from_seed(1).public_key(), true);
         assert!(!update_result, "Update on empty set should fail");
 
         let mut count = 0;
@@ -301,26 +311,36 @@ mod tests {
 
     #[test]
     fn test_single_peer_set() {
-        let peers = vec![U64::new(42)];
+        let peers = vec![ed25519::PrivateKey::from_seed(42).public_key()];
         let mut set = Set::new(peers.clone());
 
         assert_eq!(set.len(), 1);
-        assert_eq!(set.sorted, vec![U64::new(42)]);
-        assert_eq!(set.order.get(&U64::new(42)), Some(&0));
+        assert_eq!(
+            set.sorted,
+            vec![ed25519::PrivateKey::from_seed(42).public_key()]
+        );
+        assert_eq!(
+            set.order
+                .get(&ed25519::PrivateKey::from_seed(42).public_key()),
+            Some(&0)
+        );
         assert_eq!(set.knowledge(), BitVec::from(vec![false]));
 
-        assert!(set.update(&U64::new(42), true));
+        assert!(set.update(&ed25519::PrivateKey::from_seed(42).public_key(), true));
         assert_eq!(set.knowledge(), BitVec::from(vec![true]));
 
-        assert!(set.update(&U64::new(42), false));
+        assert!(set.update(&ed25519::PrivateKey::from_seed(42).public_key(), false));
         assert_eq!(set.knowledge(), BitVec::from(vec![false]));
 
-        assert_eq!(set[0], U64::new(42));
+        assert_eq!(set[0], ed25519::PrivateKey::from_seed(42).public_key());
 
         let mut iterated = vec![];
         for peer in &set {
             iterated.push(peer.clone());
         }
-        assert_eq!(iterated, vec![U64::new(42)]);
+        assert_eq!(
+            iterated,
+            vec![ed25519::PrivateKey::from_seed(42).public_key()]
+        );
     }
 }

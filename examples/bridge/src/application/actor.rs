@@ -15,11 +15,10 @@ use commonware_cryptography::{
         poly,
         variant::{MinSig, Variant},
     },
-    Hasher,
+    Hasher, PublicKey,
 };
 use commonware_runtime::{Sink, Spawner, Stream};
 use commonware_stream::{public_key::Connection, Receiver, Sender};
-use commonware_utils::Array;
 use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
 use tracing::{debug, info};
@@ -40,7 +39,7 @@ pub struct Application<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> {
 
 impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
     /// Create a new application actor.
-    pub fn new<P: Array>(
+    pub fn new<P: PublicKey>(
         context: R,
         config: Config<H, Si, St, P>,
     ) -> (Self, Supervisor<P>, Mailbox<H::Digest>) {

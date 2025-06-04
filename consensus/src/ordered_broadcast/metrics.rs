@@ -1,8 +1,8 @@
+use commonware_cryptography::PublicKey;
 use commonware_runtime::{
     telemetry::metrics::{histogram, status},
     Clock, Metrics as RuntimeMetrics,
 };
-use commonware_utils::Array;
 use prometheus_client::{
     encoding::EncodeLabelSet,
     metrics::{counter::Counter, family::Family, gauge::Gauge, histogram::Histogram},
@@ -18,7 +18,7 @@ pub struct SequencerLabel {
 
 impl SequencerLabel {
     /// Create a new sequencer label from a public key
-    pub fn from<A: Array>(sequencer: &A) -> Self {
+    pub fn from<P: PublicKey>(sequencer: &P) -> Self {
         Self {
             sequencer: sequencer.to_string(),
         }

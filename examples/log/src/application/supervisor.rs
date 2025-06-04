@@ -2,15 +2,14 @@ use commonware_consensus::{
     simplex::types::{Activity, View, Viewable},
     Reporter, Supervisor as Su,
 };
-use commonware_cryptography::{Digest, Signature};
-use commonware_utils::Array;
+use commonware_cryptography::{Digest, PublicKey, Signature};
 use std::{collections::HashMap, marker::PhantomData};
 use tracing::info;
 
 /// Implementation of `commonware-consensus::Supervisor`.
 // TODO(#755): Use `commonware-cryptography::Specification`.
 #[derive(Clone)]
-pub struct Supervisor<P: Array, S: Signature, D: Digest> {
+pub struct Supervisor<P: PublicKey, S: Signature, D: Digest> {
     participants: Vec<P>,
     participants_map: HashMap<P, u32>,
 
@@ -18,7 +17,7 @@ pub struct Supervisor<P: Array, S: Signature, D: Digest> {
     _phantom_d: PhantomData<D>,
 }
 
-impl<P: Array, S: Signature, D: Digest> Supervisor<P, S, D> {
+impl<P: PublicKey, S: Signature, D: Digest> Supervisor<P, S, D> {
     pub fn new(mut participants: Vec<P>) -> Self {
         // Setup participants
         participants.sort();
@@ -38,7 +37,7 @@ impl<P: Array, S: Signature, D: Digest> Supervisor<P, S, D> {
     }
 }
 
-impl<P: Array, S: Signature, D: Digest> Su for Supervisor<P, S, D> {
+impl<P: PublicKey, S: Signature, D: Digest> Su for Supervisor<P, S, D> {
     type Index = View;
     type PublicKey = P;
 
@@ -55,7 +54,7 @@ impl<P: Array, S: Signature, D: Digest> Su for Supervisor<P, S, D> {
     }
 }
 
-impl<P: Array, S: Signature, D: Digest> Reporter for Supervisor<P, S, D> {
+impl<P: PublicKey, S: Signature, D: Digest> Reporter for Supervisor<P, S, D> {
     type Activity = Activity<S, D>;
 
     async fn report(&mut self, activity: Self::Activity) {

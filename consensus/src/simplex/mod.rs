@@ -137,12 +137,12 @@ mod tests {
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
-        PrivateKeyExt as _, Sha256, Signer as _,
+        PrivateKeyExt as _, PublicKey as CPublicKey, Sha256, Signer as _,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
-    use commonware_utils::{quorum, Array, NZU32};
+    use commonware_utils::{quorum, NZU32};
     use engine::Engine;
     use futures::{future::join_all, StreamExt};
     use governor::Quota;
@@ -156,7 +156,7 @@ mod tests {
     use types::Activity;
 
     /// Registers all validators using the oracle.
-    async fn register_validators<P: Array>(
+    async fn register_validators<P: CPublicKey>(
         oracle: &mut Oracle<P>,
         validators: &[P],
     ) -> HashMap<P, ((Sender<P>, Receiver<P>), (Sender<P>, Receiver<P>))> {
@@ -189,7 +189,7 @@ mod tests {
     /// The `action` parameter determines the action (e.g. link, unlink) to take.
     /// The `restrict_to` function can be used to restrict the linking to certain connections,
     /// otherwise all validators will be linked to all other validators.
-    async fn link_validators<P: Array>(
+    async fn link_validators<P: CPublicKey>(
         oracle: &mut Oracle<P>,
         validators: &[P],
         action: Action,

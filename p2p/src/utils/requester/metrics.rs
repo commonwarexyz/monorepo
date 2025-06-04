@@ -1,7 +1,7 @@
 //! Metrics for the requester.
 
+use commonware_cryptography::PublicKey;
 use commonware_runtime::telemetry::metrics::{histogram::Buckets, status};
-use commonware_utils::Array;
 use prometheus_client::{
     encoding::EncodeLabelSet,
     metrics::{family::Family, gauge::Gauge, histogram::Histogram},
@@ -16,7 +16,7 @@ pub struct PeerLabel {
 
 impl PeerLabel {
     /// Create a new peer label from a public key
-    pub fn from<A: Array>(peer: &A) -> Self {
+    pub fn from<P: PublicKey>(peer: &P) -> Self {
         Self {
             peer: peer.to_string(),
         }

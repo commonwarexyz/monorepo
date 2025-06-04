@@ -1,11 +1,12 @@
 //! Requester for sending rate-limited requests to peers.
 
 use super::{Config, PeerLabel};
+use commonware_cryptography::PublicKey;
 use commonware_runtime::{
     telemetry::metrics::status::{CounterExt, Status},
     Clock, Metrics,
 };
-use commonware_utils::{Array, PrioritySet};
+use commonware_utils::PrioritySet;
 use either::Either;
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,
@@ -30,7 +31,7 @@ pub type ID = u64;
 /// of the most performant peers (based on our latency observations). To encourage
 /// exploration, set the value of `initial` to less than the expected latency of
 /// performant peers and/or periodically set `shuffle` in `request`.
-pub struct Requester<E: Clock + GClock + Rng + Metrics, P: Array> {
+pub struct Requester<E: Clock + GClock + Rng + Metrics, P: PublicKey> {
     context: E,
     public_key: P,
     metrics: super::Metrics,
@@ -60,7 +61,7 @@ pub struct Requester<E: Clock + GClock + Rng + Metrics, P: Array> {
 /// this struct in case we want to `resolve` or `timeout` the request. This approach
 /// makes it impossible to forget to remove a handled request if it doesn't warrant
 /// updating the performance of the participant.
-pub struct Request<P: Array> {
+pub struct Request<P: PublicKey> {
     /// Unique identifier for the request.
     pub id: ID,
 
@@ -71,7 +72,7 @@ pub struct Request<P: Array> {
     start: SystemTime,
 }
 
-impl<E: Clock + GClock + Rng + Metrics, P: Array> Requester<E, P> {
+impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
     /// Create a new requester.
     pub fn new(context: E, config: Config<P>) -> Self {
         let rate_limiter = RateLimiter::hashmap_with_clock(config.rate_limit, &context);

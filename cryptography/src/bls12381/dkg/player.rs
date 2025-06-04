@@ -10,7 +10,7 @@ use crate::{
             variant::Variant,
         },
     },
-    Array,
+    PublicKey,
 };
 use commonware_utils::quorum;
 use std::collections::{BTreeMap, HashMap};
@@ -28,7 +28,7 @@ pub struct Output<V: Variant> {
 }
 
 /// Track commitments and dealings distributed by dealers.
-pub struct Player<P: Array, V: Variant> {
+pub struct Player<P: PublicKey, V: Variant> {
     me: u32,
     dealer_threshold: u32,
     player_threshold: u32,
@@ -40,7 +40,7 @@ pub struct Player<P: Array, V: Variant> {
     dealings: HashMap<u32, (poly::Public<V>, Share)>,
 }
 
-impl<P: Array, V: Variant> Player<P, V> {
+impl<P: PublicKey, V: Variant> Player<P, V> {
     /// Create a new player for a DKG/Resharing procedure.
     pub fn new(
         me: P,

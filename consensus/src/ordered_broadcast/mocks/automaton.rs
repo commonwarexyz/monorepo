@@ -1,17 +1,16 @@
 use crate::{ordered_broadcast::types::Context, Automaton as A, Relay as R};
 use bytes::Bytes;
-use commonware_cryptography::{sha256, Hasher, Sha256};
-use commonware_utils::Array;
+use commonware_cryptography::{sha256, Hasher, PublicKey, Sha256};
 use futures::channel::oneshot;
 use tracing::trace;
 
 #[derive(Clone)]
-pub struct Automaton<P: Array> {
+pub struct Automaton<P: PublicKey> {
     invalid_when: fn(u64) -> bool,
     _phantom: std::marker::PhantomData<P>,
 }
 
-impl<P: Array> Automaton<P> {
+impl<P: PublicKey> Automaton<P> {
     pub fn new(invalid_when: fn(u64) -> bool) -> Self {
         Self {
             invalid_when,
@@ -20,7 +19,7 @@ impl<P: Array> Automaton<P> {
     }
 }
 
-impl<P: Array> A for Automaton<P> {
+impl<P: PublicKey> A for Automaton<P> {
     type Context = Context<P>;
     type Digest = sha256::Digest;
 
@@ -60,7 +59,7 @@ impl<P: Array> A for Automaton<P> {
     }
 }
 
-impl<P: Array> R for Automaton<P> {
+impl<P: PublicKey> R for Automaton<P> {
     type Digest = sha256::Digest;
     async fn broadcast(&mut self, payload: Self::Digest) {
         trace!(?payload, "broadcast");

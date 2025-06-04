@@ -1,7 +1,7 @@
 use super::{actors::Messenger, Error};
 use crate::{Channel, Message, Recipients};
 use bytes::Bytes;
-use commonware_utils::Array;
+use commonware_cryptography::PublicKey;
 use futures::{channel::mpsc, StreamExt};
 use governor::Quota;
 use std::collections::BTreeMap;
@@ -10,14 +10,14 @@ use zstd::bulk::{compress, decompress};
 /// Sender is the mechanism used to send arbitrary bytes to
 /// a set of recipients over a pre-defined channel.
 #[derive(Clone, Debug)]
-pub struct Sender<P: Array> {
+pub struct Sender<P: PublicKey> {
     channel: Channel,
     max_size: usize,
     compression: Option<i32>,
     messenger: Messenger<P>,
 }
 
-impl<P: Array> Sender<P> {
+impl<P: PublicKey> Sender<P> {
     pub(super) fn new(
         channel: Channel,
         max_size: usize,
@@ -33,7 +33,7 @@ impl<P: Array> Sender<P> {
     }
 }
 
-impl<P: Array> crate::Sender for Sender<P> {
+impl<P: PublicKey> crate::Sender for Sender<P> {
     type Error = Error;
     type PublicKey = P;
 
@@ -84,13 +84,13 @@ impl<P: Array> crate::Sender for Sender<P> {
 
 /// Channel to asynchronously receive messages from a channel.
 #[derive(Debug)]
-pub struct Receiver<P: Array> {
+pub struct Receiver<P: PublicKey> {
     max_size: usize,
     compression: bool,
     receiver: mpsc::Receiver<Message<P>>,
 }
 
-impl<P: Array> Receiver<P> {
+impl<P: PublicKey> Receiver<P> {
     pub(super) fn new(
         max_size: usize,
         compression: bool,
@@ -104,7 +104,7 @@ impl<P: Array> Receiver<P> {
     }
 }
 
-impl<P: Array> crate::Receiver for Receiver<P> {
+impl<P: PublicKey> crate::Receiver for Receiver<P> {
     type Error = Error;
     type PublicKey = P;
 
@@ -129,13 +129,13 @@ impl<P: Array> crate::Receiver for Receiver<P> {
 }
 
 #[derive(Clone)]
-pub struct Channels<P: Array> {
+pub struct Channels<P: PublicKey> {
     messenger: Messenger<P>,
     max_size: usize,
     receivers: BTreeMap<Channel, (Quota, mpsc::Sender<Message<P>>)>,
 }
 
-impl<P: Array> Channels<P> {
+impl<P: PublicKey> Channels<P> {
     pub fn new(messenger: Messenger<P>, max_size: usize) -> Self {
         Self {
             messenger,

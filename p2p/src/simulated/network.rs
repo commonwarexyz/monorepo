@@ -7,10 +7,10 @@ use super::{
 use crate::{Channel, Message, Recipients};
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, FixedSize};
+use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Listener as _, Metrics, Network as RNetwork, Spawner};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
-use commonware_utils::Array;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -35,7 +35,7 @@ pub struct Config {
 }
 
 /// Implementation of a simulated network.
-pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: Array> {
+pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> {
     context: E,
 
     // Maximum size of a message that can be sent over the network
@@ -68,7 +68,7 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: Array> {
     sent_messages: Family<metrics::Message, Counter>,
 }
 
-impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: Array> Network<E, P> {
+impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> {
     /// Create a new simulated network with a given runtime and configuration.
     ///
     /// Returns a tuple containing the network instance and the oracle that can
@@ -384,7 +384,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: Array> Network<E, P> {
 
 /// Implementation of a [`crate::Sender`] for the simulated network.
 #[derive(Clone, Debug)]
-pub struct Sender<P: Array> {
+pub struct Sender<P: PublicKey> {
     me: P,
     channel: Channel,
     max_size: usize,
@@ -392,7 +392,7 @@ pub struct Sender<P: Array> {
     low: mpsc::UnboundedSender<Task<P>>,
 }
 
-impl<P: Array> Sender<P> {
+impl<P: PublicKey> Sender<P> {
     fn new(
         context: impl Spawner + Metrics,
         me: P,
@@ -440,7 +440,7 @@ impl<P: Array> Sender<P> {
     }
 }
 
-impl<P: Array> crate::Sender for Sender<P> {
+impl<P: PublicKey> crate::Sender for Sender<P> {
     type Error = Error;
     type PublicKey = P;
 
@@ -471,11 +471,11 @@ type MessageReceiverResult<P> = Result<MessageReceiver<P>, Error>;
 
 /// Implementation of a [`crate::Receiver`] for the simulated network.
 #[derive(Debug)]
-pub struct Receiver<P: Array> {
+pub struct Receiver<P: PublicKey> {
     receiver: MessageReceiver<P>,
 }
 
-impl<P: Array> crate::Receiver for Receiver<P> {
+impl<P: PublicKey> crate::Receiver for Receiver<P> {
     type Error = Error;
     type PublicKey = P;
 
@@ -487,7 +487,7 @@ impl<P: Array> crate::Receiver for Receiver<P> {
 /// A peer in the simulated network.
 ///
 /// The peer can register channels, which allows it to receive messages sent to the channel from other peers.
-struct Peer<P: Array> {
+struct Peer<P: PublicKey> {
     // Socket address that the peer is listening on
     socket: SocketAddr,
 
@@ -495,7 +495,7 @@ struct Peer<P: Array> {
     control: mpsc::UnboundedSender<(Channel, oneshot::Sender<MessageReceiverResult<P>>)>,
 }
 
-impl<P: Array> Peer<P> {
+impl<P: PublicKey> Peer<P> {
     /// Create and return a new peer.
     ///
     /// The peer will listen for incoming connections on the given `socket` address.
@@ -648,7 +648,7 @@ struct Link {
 }
 
 impl Link {
-    fn new<E: Spawner + RNetwork + Metrics, P: Array>(
+    fn new<E: Spawner + RNetwork + Metrics, P: PublicKey>(
         context: &mut E,
         dialer: P,
         socket: SocketAddr,

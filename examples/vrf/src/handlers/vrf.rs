@@ -1,16 +1,18 @@
 use crate::handlers::wire;
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::bls12381::{
-    dkg::player::Output,
-    primitives::{
-        ops,
-        variant::{MinSig, Variant},
+use commonware_cryptography::{
+    bls12381::{
+        dkg::player::Output,
+        primitives::{
+            ops,
+            variant::{MinSig, Variant},
+        },
     },
+    PublicKey,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
-use commonware_utils::Array;
 use futures::{channel::mpsc, StreamExt};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -20,7 +22,7 @@ const VRF_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_VRF_";
 
 /// Generate bias-resistant, verifiable randomness using BLS12-381
 /// Threshold Signatures.
-pub struct Vrf<E: Clock + Spawner, P: Array> {
+pub struct Vrf<E: Clock + Spawner, P: PublicKey> {
     context: E,
     timeout: Duration,
     threshold: u32,
@@ -29,7 +31,7 @@ pub struct Vrf<E: Clock + Spawner, P: Array> {
     requests: mpsc::Receiver<(u64, Output<MinSig>)>,
 }
 
-impl<E: Clock + Spawner, P: Array> Vrf<E, P> {
+impl<E: Clock + Spawner, P: PublicKey> Vrf<E, P> {
     pub fn new(
         context: E,
         timeout: Duration,

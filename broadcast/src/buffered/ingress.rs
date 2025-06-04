@@ -1,15 +1,14 @@
 use crate::Broadcaster;
 use commonware_codec::Codec;
-use commonware_cryptography::{Committable, Digestible};
+use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_p2p::Recipients;
-use commonware_utils::Array;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
 
 /// Message types that can be sent to the `Mailbox`
-pub enum Message<P: Array, M: Committable + Digestible> {
+pub enum Message<P: PublicKey, M: Committable + Digestible> {
     /// Broadcast a [`Message`](crate::Broadcaster::Message) to the network.
     ///
     /// The responder will be sent a list of peers that received the message.
@@ -42,17 +41,17 @@ pub enum Message<P: Array, M: Committable + Digestible> {
 
 /// Ingress mailbox for [`Engine`](super::Engine).
 #[derive(Clone)]
-pub struct Mailbox<P: Array, M: Committable + Digestible + Codec> {
+pub struct Mailbox<P: PublicKey, M: Committable + Digestible + Codec> {
     sender: mpsc::Sender<Message<P, M>>,
 }
 
-impl<P: Array, M: Committable + Digestible + Codec> Mailbox<P, M> {
+impl<P: PublicKey, M: Committable + Digestible + Codec> Mailbox<P, M> {
     pub(super) fn new(sender: mpsc::Sender<Message<P, M>>) -> Self {
         Self { sender }
     }
 }
 
-impl<P: Array, M: Committable + Digestible + Codec> Mailbox<P, M> {
+impl<P: PublicKey, M: Committable + Digestible + Codec> Mailbox<P, M> {
     /// Subscribe to a message by peer (optionally), commitment, and digest (optionally).
     ///
     /// The responder will be sent the first message for an commitment when it is available; either
@@ -122,7 +121,7 @@ impl<P: Array, M: Committable + Digestible + Codec> Mailbox<P, M> {
     }
 }
 
-impl<P: Array, M: Committable + Digestible + Codec> Broadcaster for Mailbox<P, M> {
+impl<P: PublicKey, M: Committable + Digestible + Codec> Broadcaster for Mailbox<P, M> {
     type Recipients = Recipients<P>;
     type Message = M;
     type Response = Vec<P>;

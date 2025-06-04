@@ -29,6 +29,7 @@
 //! depends on the rate-limiting configuration of the `Requester` and of the underlying P2P network.
 
 use bytes::Bytes;
+use commonware_cryptography::PublicKey;
 use commonware_utils::Array;
 use futures::channel::oneshot;
 use std::future::Future;
@@ -58,7 +59,7 @@ pub trait Producer: Clone + Send + 'static {
 /// Manages the set of peers that can be used to fetch data.
 pub trait Coordinator: Clone + Send + Sync + 'static {
     /// Type used to uniquely identify peers.
-    type PublicKey: Array;
+    type PublicKey: PublicKey;
 
     /// Returns the current list of peers that can be used to fetch data.
     ///
