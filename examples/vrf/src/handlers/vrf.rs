@@ -1,16 +1,18 @@
 use crate::handlers::wire;
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::bls12381::{
-    dkg::player::Output,
-    primitives::{
-        ops,
-        variant::{MinSig, Variant},
+use commonware_cryptography::{
+    bls12381::{
+        dkg::player::Output,
+        primitives::{
+            ops,
+            variant::{MinSig, Variant},
+        },
     },
+    PublicKey,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
-use commonware_utils::Array;
 use futures::{channel::mpsc, StreamExt};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;

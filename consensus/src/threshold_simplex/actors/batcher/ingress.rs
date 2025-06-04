@@ -1,6 +1,5 @@
 use crate::threshold_simplex::types::{View, Voter};
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
-use commonware_utils::Array;
+use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PublicKey};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,

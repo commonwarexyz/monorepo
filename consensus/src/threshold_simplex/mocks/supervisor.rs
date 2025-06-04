@@ -16,9 +16,9 @@ use commonware_cryptography::{
             variant::Variant,
         },
     },
-    Digest,
+    Digest, PublicKey,
 };
-use commonware_utils::{modulo, Array};
+use commonware_utils::modulo;
 use futures::channel::mpsc::{Receiver, Sender};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},

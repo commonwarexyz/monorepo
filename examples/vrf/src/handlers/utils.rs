@@ -1,6 +1,8 @@
 use commonware_codec::{EncodeSize, FixedSize, Write};
-use commonware_cryptography::bls12381::primitives::{poly, variant::MinSig};
-use commonware_utils::Array;
+use commonware_cryptography::{
+    bls12381::primitives::{poly, variant::MinSig},
+    PublicKey,
+};
 
 pub const ACK_NAMESPACE: &[u8] = b"_COMMONWARE_DKG_ACK_";
 

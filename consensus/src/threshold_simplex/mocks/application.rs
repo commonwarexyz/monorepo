@@ -2,10 +2,9 @@ use super::relay::Relay;
 use crate::{threshold_simplex::types::Context, Automaton as Au, Relay as Re};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{FixedSize, ReadExt};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Spawner};
-use commonware_utils::Array;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,

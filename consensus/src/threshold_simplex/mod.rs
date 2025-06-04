@@ -216,12 +216,12 @@ mod tests {
             primitives::variant::{MinPk, MinSig, Variant},
         },
         ed25519::PrivateKey,
-        PrivateKeyExt as _, Sha256, Signer as _,
+        PrivateKeyExt as _, PublicKey, Sha256, Signer as _,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
-    use commonware_utils::{quorum, Array, NZU32};
+    use commonware_utils::{quorum, NZU32};
     use engine::Engine;
     use futures::{future::join_all, StreamExt};
     use governor::Quota;
