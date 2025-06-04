@@ -3,9 +3,9 @@ use super::{
     supervisor::Supervisor,
     Config,
 };
-use commonware_cryptography::{Hasher, Signature};
+use commonware_cryptography::{Hasher, PublicKey, Signature};
 use commonware_runtime::{Handle, Spawner};
-use commonware_utils::{hex, Array};
+use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
 use std::marker::PhantomData;

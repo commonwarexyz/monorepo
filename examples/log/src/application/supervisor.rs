@@ -2,8 +2,7 @@ use commonware_consensus::{
     simplex::types::{Activity, View, Viewable},
     Reporter, Supervisor as Su,
 };
-use commonware_cryptography::{Digest, Signature};
-use commonware_utils::Array;
+use commonware_cryptography::{Digest, PublicKey, Signature};
 use std::{collections::HashMap, marker::PhantomData};
 use tracing::info;
 

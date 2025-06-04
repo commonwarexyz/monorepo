@@ -44,7 +44,7 @@ impl<D: Digest, P: PublicKey> Relay<D, P> {
         };
         for mut channel in channels {
             channel
-                .send((payload.0.clone(), payload.1.clone()))
+                .send((payload.0, payload.1.clone()))
                 .await
                 .expect("Failed to send");
         }

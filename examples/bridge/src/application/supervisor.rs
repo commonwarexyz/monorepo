@@ -2,15 +2,18 @@ use commonware_codec::Encode;
 use commonware_consensus::{
     threshold_simplex::types::View, Supervisor as Su, ThresholdSupervisor as TSu,
 };
-use commonware_cryptography::bls12381::{
-    dkg::ops::evaluate_all,
-    primitives::{
-        group,
-        poly::{self, Public},
-        variant::{MinSig, Variant},
+use commonware_cryptography::{
+    bls12381::{
+        dkg::ops::evaluate_all,
+        primitives::{
+            group,
+            poly::{self, Public},
+            variant::{MinSig, Variant},
+        },
     },
+    PublicKey,
 };
-use commonware_utils::{modulo, Array};
+use commonware_utils::modulo;
 use std::collections::HashMap;
 
 /// Implementation of `commonware-consensus::Supervisor`.

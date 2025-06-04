@@ -8,9 +8,8 @@ use commonware_cryptography::{
         poly::Public,
         variant::{MinSig, Variant},
     },
-    Hasher,
+    Hasher, PublicKey,
 };
-use commonware_utils::Array;
 
 mod actor;
 pub use actor::Application;

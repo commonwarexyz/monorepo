@@ -15,11 +15,10 @@ use commonware_cryptography::{
         poly,
         variant::{MinSig, Variant},
     },
-    Hasher,
+    Hasher, PublicKey,
 };
 use commonware_runtime::{Sink, Spawner, Stream};
 use commonware_stream::{public_key::Connection, Receiver, Sender};
-use commonware_utils::Array;
 use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
 use tracing::{debug, info};
