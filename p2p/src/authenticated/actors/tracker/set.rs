@@ -71,7 +71,7 @@ impl<P: PublicKey> std::ops::Index<usize> for Set<P> {
 mod tests {
     use super::*;
     use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
-    use commonware_utils::{array::U64, BitVec};
+    use commonware_utils::BitVec;
     use std::collections::HashSet;
 
     fn create_test_peers() -> Vec<ed25519::PublicKey> {
