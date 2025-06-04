@@ -77,7 +77,7 @@ impl<P: PublicKey> crate::Sender for Sender<P> {
         // Wait for messenger to let us know who we sent to
         Ok(self
             .messenger
-            .content(recipients, self.channel, message, priority)
+            .send(recipients, self.channel, message, priority)
             .await)
     }
 }
