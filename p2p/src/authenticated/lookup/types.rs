@@ -1,7 +1,5 @@
 use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{
-    varint::UInt, Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, ReadRangeExt, Write,
-};
+use commonware_codec::{varint::UInt, Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{PublicKey, Signer};
 use commonware_utils::BitVec as UtilsBitVec;
 use std::net::SocketAddr;
@@ -14,10 +12,6 @@ use std::net::SocketAddr;
 /// - 5: Message length varint (lengths longer than 32 bits are forbidden by the codec)
 pub const MAX_PAYLOAD_DATA_OVERHEAD: usize = 1 + 5 + 5;
 
-/// Prefix byte used to identify a [Payload] with variant BitVec.
-const BIT_VEC_PREFIX: u8 = 0;
-/// Prefix byte used to identify a [Payload] with variant Peers.
-const PEERS_PREFIX: u8 = 1;
 /// Prefix byte used to identify a [Payload] with variant Data.
 const DATA_PREFIX: u8 = 2;
 
@@ -33,42 +27,25 @@ pub struct Config {
     pub max_bit_vec: usize,
 }
 
+// TODO danlaine: remove this unary enum
 /// Payload is the only allowed message format that can be sent between peers.
 #[derive(Clone, Debug)]
-pub enum Payload<C: PublicKey> {
-    /// Bit vector that represents the peers a peer knows about.
-    ///
-    /// Also used as a ping message to keep the connection alive.
-    BitVec(BitVec),
-
-    /// A vector of verifiable peer information.
-    Peers(Vec<PeerInfo<C>>),
-
+pub enum Payload {
     /// Arbitrary data sent between peers.
     Data(Data),
 }
 
-impl<C: PublicKey> EncodeSize for Payload<C> {
+impl EncodeSize for Payload {
     fn encode_size(&self) -> usize {
         (match self {
-            Payload::BitVec(bit_vec) => bit_vec.encode_size(),
-            Payload::Peers(peers) => peers.encode_size(),
             Payload::Data(data) => data.encode_size(),
         }) + 1
     }
 }
 
-impl<C: PublicKey> Write for Payload<C> {
+impl Write for Payload {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Payload::BitVec(bit_vec) => {
-                BIT_VEC_PREFIX.write(buf);
-                bit_vec.write(buf);
-            }
-            Payload::Peers(peers) => {
-                PEERS_PREFIX.write(buf);
-                peers.write(buf);
-            }
             Payload::Data(data) => {
                 DATA_PREFIX.write(buf);
                 data.write(buf);
@@ -77,20 +54,12 @@ impl<C: PublicKey> Write for Payload<C> {
     }
 }
 
-impl<C: PublicKey> Read for Payload<C> {
+impl Read for Payload {
     type Cfg = Config;
 
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, Error> {
         let payload_type = <u8>::read(buf)?;
         match payload_type {
-            BIT_VEC_PREFIX => {
-                let bit_vec = BitVec::read_cfg(buf, &cfg.max_bit_vec)?;
-                Ok(Payload::BitVec(bit_vec))
-            }
-            PEERS_PREFIX => {
-                let peers = Vec::<PeerInfo<C>>::read_range(buf, ..=cfg.max_peers)?;
-                Ok(Payload::Peers(peers))
-            }
             DATA_PREFIX => {
                 // Don't limit the size of the data to be read.
                 // The max message size should already be limited by the p2p layer.
@@ -258,7 +227,6 @@ impl Read for Data {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::BytesMut;
     use commonware_codec::{Decode, DecodeRangeExt};
     use commonware_cryptography::{secp256r1, PrivateKeyExt as _};
 
@@ -330,40 +298,14 @@ mod tests {
             max_bit_vec: 1024,
         };
 
-        // Test BitVec
-        let original = BitVec {
-            index: 1234,
-            bits: UtilsBitVec::ones(100),
-        };
-        let encoded: BytesMut = Payload::<secp256r1::PublicKey>::BitVec(original.clone()).encode();
-        let decoded = match Payload::<secp256r1::PublicKey>::decode_cfg(encoded, &cfg) {
-            Ok(Payload::<secp256r1::PublicKey>::BitVec(b)) => b,
-            _ => panic!(),
-        };
-        assert_eq!(original, decoded);
-
-        // Test Peers
-        let original = vec![signed_peer_info(), signed_peer_info()];
-        let encoded = Payload::Peers(original.clone()).encode();
-        let decoded = match Payload::<secp256r1::PublicKey>::decode_cfg(encoded, &cfg) {
-            Ok(Payload::<secp256r1::PublicKey>::Peers(p)) => p,
-            _ => panic!(),
-        };
-        for (a, b) in original.iter().zip(decoded.iter()) {
-            assert_eq!(a.socket, b.socket);
-            assert_eq!(a.timestamp, b.timestamp);
-            assert_eq!(a.public_key, b.public_key);
-            assert_eq!(a.signature, b.signature);
-        }
-
         // Test Data
         let original = Data {
             channel: 12345,
             message: Bytes::from("Hello, world!"),
         };
-        let encoded = Payload::<secp256r1::PublicKey>::Data(original.clone()).encode();
-        let decoded = match Payload::<secp256r1::PublicKey>::decode_cfg(encoded, &cfg) {
-            Ok(Payload::<secp256r1::PublicKey>::Data(d)) => d,
+        let encoded = Payload::Data(original.clone()).encode();
+        let decoded = match Payload::decode_cfg(encoded, &cfg) {
+            Ok(Payload::Data(d)) => d,
             _ => panic!(),
         };
         assert_eq!(original, decoded);
@@ -376,7 +318,7 @@ mod tests {
             max_bit_vec: 1024,
         };
         let invalid_payload = [3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
-        let result = Payload::<secp256r1::PublicKey>::decode_cfg(&invalid_payload[..], &cfg);
+        let result = Payload::decode_cfg(&invalid_payload[..], &cfg);
         assert!(result.is_err());
     }
 
@@ -384,7 +326,7 @@ mod tests {
     fn test_max_payload_data_overhead() {
         let message = Bytes::from(vec![0; 1 << 29]);
         let message_len = message.len();
-        let payload = Payload::<secp256r1::PublicKey>::Data(Data {
+        let payload = Payload::Data(Data {
             channel: u32::MAX,
             message,
         });

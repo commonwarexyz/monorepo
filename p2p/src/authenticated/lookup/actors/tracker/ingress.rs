@@ -32,39 +32,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
         dialer: bool,
 
         /// The mailbox of the peer actor.
-        peer: peer::Mailbox<C>,
-    },
-
-    /// Ready to send a [`types::Payload::BitVec`] message to a peer. This message doubles as a
-    /// keep-alive signal to the peer.
-    ///
-    /// This request is formed on a recurring interval.
-    Construct {
-        /// The public key of the peer.
-        public_key: C,
-
-        /// The mailbox of the peer actor.
-        peer: peer::Mailbox<C>,
-    },
-
-    /// Notify the tracker that a [`types::Payload::BitVec`] message has been received from a peer.
-    ///
-    /// The tracker will construct a [`types::Payload::Peers`] message in response.
-    BitVec {
-        /// The bit vector received.
-        bit_vec: types::BitVec,
-
-        /// The mailbox of the peer actor.
-        peer: peer::Mailbox<C>,
-    },
-
-    /// Notify the tracker that a [`types::Payload::Peers`] message has been received from a peer.
-    Peers {
-        /// The list of peers received.
-        peers: Vec<types::PeerInfo<C>>,
-
-        /// The mailbox of the peer actor.
-        peer: peer::Mailbox<C>,
+        peer: peer::Mailbox,
     },
 
     // ---------- Used by dialer ----------
@@ -115,37 +83,13 @@ impl<E: Spawner + Metrics, C: PublicKey> Mailbox<E, C> {
     }
 
     /// Send a `Connect` message to the tracker.
-    pub async fn connect(&mut self, public_key: C, dialer: bool, peer: peer::Mailbox<C>) {
+    pub async fn connect(&mut self, public_key: C, dialer: bool, peer: peer::Mailbox) {
         self.sender
             .send(Message::Connect {
                 public_key,
                 dialer,
                 peer,
             })
-            .await
-            .unwrap();
-    }
-
-    /// Send a `Construct` message to the tracker.
-    pub async fn construct(&mut self, public_key: C, peer: peer::Mailbox<C>) {
-        self.sender
-            .send(Message::Construct { public_key, peer })
-            .await
-            .unwrap();
-    }
-
-    /// Send a `BitVec` message to the tracker.
-    pub async fn bit_vec(&mut self, bit_vec: types::BitVec, peer: peer::Mailbox<C>) {
-        self.sender
-            .send(Message::BitVec { bit_vec, peer })
-            .await
-            .unwrap();
-    }
-
-    /// Send a `Peers` message to the tracker.
-    pub async fn peers(&mut self, peers: Vec<types::PeerInfo<C>>, peer: peer::Mailbox<C>) {
-        self.sender
-            .send(Message::Peers { peers, peer })
             .await
             .unwrap();
     }

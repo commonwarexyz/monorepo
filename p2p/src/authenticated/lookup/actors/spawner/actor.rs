@@ -9,10 +9,9 @@ use crate::authenticated::lookup::{
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
 use futures::{channel::mpsc, StreamExt};
-use governor::{clock::ReasonablyRealtime, Quota};
+use governor::clock::ReasonablyRealtime;
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
 use rand::{CryptoRng, Rng};
-use std::time::Duration;
 use tracing::debug;
 
 pub struct Actor<
@@ -24,10 +23,7 @@ pub struct Actor<
     context: E,
 
     mailbox_size: usize,
-    gossip_bit_vec_frequency: Duration,
-    allowed_bit_vec_rate: Quota,
     max_peer_set_size: usize,
-    allowed_peers_rate: Quota,
     peer_gossip_max_count: usize,
 
     receiver: mpsc::Receiver<Message<E, Si, St, C>>,
@@ -72,10 +68,7 @@ impl<
             Self {
                 context,
                 mailbox_size: cfg.mailbox_size,
-                gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
-                allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
                 max_peer_set_size: cfg.max_peer_set_size,
-                allowed_peers_rate: cfg.allowed_peers_rate,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
                 receiver,
                 connections,
@@ -127,10 +120,7 @@ impl<
                                     received_messages,
                                     rate_limited,
                                     mailbox_size: self.mailbox_size,
-                                    gossip_bit_vec_frequency: self.gossip_bit_vec_frequency,
-                                    allowed_bit_vec_rate: self.allowed_bit_vec_rate,
                                     max_peer_set_size: self.max_peer_set_size,
-                                    allowed_peers_rate: self.allowed_peers_rate,
                                     peer_gossip_max_count: self.peer_gossip_max_count,
                                 },
                                 reservation,
