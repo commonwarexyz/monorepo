@@ -76,7 +76,7 @@ impl<P: PublicKey> Messenger<P> {
     }
 
     /// Sends a message to the given `recipients`.
-    pub async fn send(
+    pub async fn content(
         &mut self,
         recipients: Recipients<P>,
         channel: Channel,
