@@ -290,7 +290,7 @@ impl<C: PublicKey> Record<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::types::PeerInfo;
+    use crate::authenticated::discovery::types::PeerInfo;
     use commonware_codec::Encode;
     use commonware_cryptography::{secp256r1, PrivateKeyExt};
     use std::net::SocketAddr;
