@@ -1,8 +1,7 @@
 use crate::Broadcaster;
 use commonware_codec::Codec;
-use commonware_cryptography::{Committable, Digestible};
+use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_p2p::Recipients;
-use commonware_utils::Array;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,

@@ -29,6 +29,7 @@
 //! depends on the rate-limiting configuration of the `Requester` and of the underlying P2P network.
 
 use bytes::Bytes;
+use commonware_cryptography::PublicKey;
 use commonware_utils::Array;
 use futures::channel::oneshot;
 use std::future::Future;

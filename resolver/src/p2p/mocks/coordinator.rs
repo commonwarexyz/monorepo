@@ -1,4 +1,4 @@
-use crate::Array;
+use commonware_cryptography::PublicKey;
 use commonware_runtime::Spawner;
 use futures::channel::mpsc;
 use futures::StreamExt;

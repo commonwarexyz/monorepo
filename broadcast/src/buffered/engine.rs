@@ -11,7 +11,6 @@ use commonware_runtime::{
     telemetry::metrics::status::{CounterExt, Status},
     Clock, Handle, Metrics, Spawner,
 };
-use commonware_utils::Array;
 use futures::{
     channel::{mpsc, oneshot},
     StreamExt,

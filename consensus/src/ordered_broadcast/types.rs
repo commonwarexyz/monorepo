@@ -13,7 +13,7 @@ use commonware_cryptography::{
     },
     Digest, PublicKey, Signer,
 };
-use commonware_utils::{union, Array};
+use commonware_utils::union;
 use futures::channel::oneshot;
 use std::hash::{Hash, Hasher};
 

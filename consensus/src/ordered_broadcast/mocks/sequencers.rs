@@ -1,5 +1,5 @@
 use crate::{ordered_broadcast::types::Epoch, Supervisor};
-use commonware_utils::Array;
+use commonware_cryptography::PublicKey;
 use std::collections::HashMap;
 
 #[derive(Clone)]

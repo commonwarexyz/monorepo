@@ -3,6 +3,7 @@ use crate::{
     Consumer,
 };
 use bytes::Bytes;
+use commonware_cryptography::PublicKey;
 use commonware_p2p::utils::requester;
 use commonware_utils::Array;
 use std::time::Duration;

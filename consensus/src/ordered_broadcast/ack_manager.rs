@@ -1,9 +1,8 @@
 use super::types::{Ack, Epoch};
 use commonware_cryptography::{
     bls12381::primitives::{ops, poly::PartialSignature, variant::Variant},
-    Digest,
+    Digest, PublicKey,
 };
-use commonware_utils::Array;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// A struct representing a set of partial signatures for a payload digest.

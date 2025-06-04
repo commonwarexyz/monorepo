@@ -7,7 +7,6 @@
 
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use commonware_utils::Array;
 use std::error::Error as StdError;
 use std::fmt::Debug;
 use std::future::Future;

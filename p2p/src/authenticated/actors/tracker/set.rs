@@ -1,9 +1,8 @@
-use commonware_cryptography::PublicKey;
-use commonware_utils::BitVec;
+use commonware_utils::{Array, BitVec};
 use std::collections::HashMap;
 
 /// Represents a set of peers and their knowledge of each other.
-pub struct Set<P: PublicKey> {
+pub struct Set<P: Array> {
     /// The list of peers, sorted.
     sorted: Vec<P>,
 
@@ -14,7 +13,7 @@ pub struct Set<P: PublicKey> {
     knowledge: BitVec,
 }
 
-impl<P: PublicKey> Set<P> {
+impl<P: Array> Set<P> {
     /// Creates a new set for the given index.
     pub fn new(mut peers: Vec<P>) -> Self {
         peers.sort();
@@ -50,7 +49,7 @@ impl<P: PublicKey> Set<P> {
     }
 }
 
-impl<'a, P: PublicKey> IntoIterator for &'a Set<P> {
+impl<'a, P: Array> IntoIterator for &'a Set<P> {
     type Item = &'a P;
     type IntoIter = std::slice::Iter<'a, P>;
 
@@ -59,7 +58,7 @@ impl<'a, P: PublicKey> IntoIterator for &'a Set<P> {
     }
 }
 
-impl<P: PublicKey> std::ops::Index<usize> for Set<P> {
+impl<P: Array> std::ops::Index<usize> for Set<P> {
     type Output = P;
 
     fn index(&self, index: usize) -> &Self::Output {

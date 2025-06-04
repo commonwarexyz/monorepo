@@ -1,10 +1,12 @@
 use crate::{ordered_broadcast::types::Epoch, Supervisor, ThresholdSupervisor};
-use commonware_cryptography::bls12381::primitives::{
-    group::Share,
-    poly::{public, Public},
-    variant::Variant,
+use commonware_cryptography::{
+    bls12381::primitives::{
+        group::Share,
+        poly::{public, Public},
+        variant::Variant,
+    },
+    PublicKey,
 };
-use commonware_utils::Array;
 use std::{collections::HashMap, marker::PhantomData};
 
 #[derive(Clone)]

@@ -7,6 +7,7 @@ use super::{
 use super::{wire, Coordinator, Producer};
 use crate::Consumer;
 use bytes::Bytes;
+use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
