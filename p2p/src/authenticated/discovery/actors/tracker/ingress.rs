@@ -1,5 +1,5 @@
 use super::Reservation;
-use crate::authenticated::{actors::peer, types};
+use crate::authenticated::discovery::{actors::peer, types};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Metrics, Spawner};
 use futures::{

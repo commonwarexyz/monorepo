@@ -1,4 +1,4 @@
-use crate::authenticated::metrics;
+use crate::authenticated::discovery::metrics;
 use commonware_runtime::Metrics as RuntimeMetrics;
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
 

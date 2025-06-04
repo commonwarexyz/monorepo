@@ -1,4 +1,4 @@
-use crate::authenticated::actors::tracker::Reservation;
+use crate::authenticated::discovery::actors::tracker::Reservation;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Metrics, Sink, Spawner, Stream};
 use commonware_stream::public_key::Connection;

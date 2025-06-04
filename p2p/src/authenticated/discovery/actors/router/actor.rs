@@ -3,7 +3,7 @@ use super::{
     Config,
 };
 use crate::{
-    authenticated::{actors::peer, channels::Channels, metrics},
+    authenticated::discovery::{actors::peer, channels::Channels, metrics},
     Channel, Recipients,
 };
 use bytes::Bytes;

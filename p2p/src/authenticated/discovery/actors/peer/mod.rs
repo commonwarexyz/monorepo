@@ -1,16 +1,16 @@
 //! Peer
 
-use crate::authenticated::metrics;
+use crate::authenticated::discovery::metrics;
 use commonware_codec::Error as CodecError;
 use governor::Quota;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::time::Duration;
 use thiserror::Error;
 
-mod actor;
+pub mod actor;
 pub use actor::Actor;
 
-mod ingress;
+pub mod ingress;
 pub use ingress::{Mailbox, Message, Relay};
 
 pub struct Config {

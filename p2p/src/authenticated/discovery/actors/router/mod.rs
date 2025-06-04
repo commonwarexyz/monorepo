@@ -1,5 +1,5 @@
-mod actor;
-mod ingress;
+pub mod actor;
+pub mod ingress;
 
 pub use actor::Actor;
 pub use ingress::{Mailbox, Messenger};

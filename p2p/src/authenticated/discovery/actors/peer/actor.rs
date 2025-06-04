@@ -1,5 +1,5 @@
 use super::{Config, Error, Mailbox, Message, Relay};
-use crate::authenticated::{
+use crate::authenticated::discovery::{
     actors::tracker::{self, Metadata, Reservation},
     channels::Channels,
     metrics, types,

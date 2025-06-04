@@ -1,6 +1,6 @@
 //! Listener
 
-use crate::authenticated::actors::{spawner, tracker};
+use crate::authenticated::discovery::actors::{spawner, tracker};
 use commonware_cryptography::Signer;
 use commonware_runtime::{
     telemetry::traces::status, Clock, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf,

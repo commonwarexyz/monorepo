@@ -1,6 +1,6 @@
 //! Tracker
 
-use crate::authenticated::config::Bootstrapper;
+use crate::authenticated::discovery::config::Bootstrapper;
 use commonware_cryptography::Signer;
 use governor::Quota;
 use std::net::IpAddr;
@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use thiserror::Error;
 
-mod actor;
+pub mod actor;
 mod directory;
 mod ingress;
 mod metadata;

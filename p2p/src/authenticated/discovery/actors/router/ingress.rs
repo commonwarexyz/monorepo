@@ -1,5 +1,5 @@
 use crate::{
-    authenticated::{actors::peer, channels::Channels},
+    authenticated::discovery::{actors::peer, channels::Channels},
     Channel, Recipients,
 };
 use bytes::Bytes;

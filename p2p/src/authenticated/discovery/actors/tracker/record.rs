@@ -1,4 +1,4 @@
-use crate::authenticated::types::PeerInfo;
+use crate::authenticated::discovery::types::PeerInfo;
 use commonware_cryptography::PublicKey;
 use std::net::SocketAddr;
 use tracing::trace;
