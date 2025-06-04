@@ -84,9 +84,9 @@ mod tests {
 
     fn expected_sorted_peers() -> Vec<ed25519::PublicKey> {
         vec![
-            ed25519::PrivateKey::from_seed(1).public_key(),
-            ed25519::PrivateKey::from_seed(2).public_key(),
-            ed25519::PrivateKey::from_seed(3).public_key(),
+            ed25519::PrivateKey::from_seed(2).public_key(), // 191fc38f134aaf1b7fdb1f86330b9d03e94bd4ba884f490389de964448e89b3f
+            ed25519::PrivateKey::from_seed(3).public_key(), // c5bbbb60e412879bbec7bb769804fa8e36e68af10d5477280b63deeaca931bed
+            ed25519::PrivateKey::from_seed(1).public_key(), // ff87a0b0a3c7c0ce827e9cada5ff79e75a44a0633bfcb5b50f99307ddb26b337
         ]
     }
 
@@ -119,7 +119,7 @@ mod tests {
     fn test_update_knowledge_single_peer() {
         let peers = create_test_peers();
         let mut set = Set::new(peers);
-        let peer_to_update = ed25519::PrivateKey::from_seed(2).public_key();
+        let peer_to_update = ed25519::PrivateKey::from_seed(3).public_key();
         let non_existent_peer = ed25519::PrivateKey::from_seed(4).public_key();
 
         assert_eq!(
@@ -171,9 +171,9 @@ mod tests {
     fn test_update_multiple_peers() {
         let peers = create_test_peers();
         let mut set = Set::new(peers);
-        let peer1 = ed25519::PrivateKey::from_seed(1).public_key();
-        let peer2 = ed25519::PrivateKey::from_seed(2).public_key();
-        let peer3 = ed25519::PrivateKey::from_seed(3).public_key();
+        let peer1 = ed25519::PrivateKey::from_seed(2).public_key();
+        let peer2 = ed25519::PrivateKey::from_seed(3).public_key();
+        let peer3 = ed25519::PrivateKey::from_seed(1).public_key();
 
         assert!(set.update(&peer1, true));
         assert!(set.update(&peer3, true));
@@ -212,8 +212,8 @@ mod tests {
     fn test_knowledge_reflects_updates_and_cloning() {
         let peers = create_test_peers();
         let mut set = Set::new(peers);
-        let peer1 = ed25519::PrivateKey::from_seed(1).public_key();
-        let peer2 = ed25519::PrivateKey::from_seed(2).public_key();
+        let peer1 = ed25519::PrivateKey::from_seed(2).public_key();
+        let peer2 = ed25519::PrivateKey::from_seed(3).public_key();
 
         let knowledge_before_updates = set.knowledge();
         assert_eq!(
