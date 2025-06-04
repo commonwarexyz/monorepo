@@ -151,13 +151,10 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         // Loop over incoming connections as fast as our rate limiter allows
         loop {
             // Ensure we don't attempt to perform too many handshakes at once
-            match self.rate_limiter.check() {
-                Ok(_) => {}
-                Err(negative) => {
-                    self.handshakes_rate_limited.inc();
-                    let wait = negative.wait_time_from(self.context.now());
-                    self.context.sleep(wait).await;
-                }
+            if let Err(wait_until) = self.rate_limiter.check() {
+                self.handshakes_rate_limited.inc();
+                let wait = wait_until.wait_time_from(self.context.now());
+                self.context.sleep(wait).await;
             }
 
             // Accept a new connection
