@@ -8,7 +8,7 @@ use commonware_utils::Array;
 use std::{collections::HashMap, marker::PhantomData};
 
 #[derive(Clone)]
-pub struct Validators<P: Array, V: Variant> {
+pub struct Validators<P: PublicKey, V: Variant> {
     polynomial: Public<V>,
     validators: Vec<P>,
     validators_map: HashMap<P, u32>,
@@ -17,7 +17,7 @@ pub struct Validators<P: Array, V: Variant> {
     _phantom: PhantomData<V>,
 }
 
-impl<P: Array, V: Variant> Validators<P, V> {
+impl<P: PublicKey, V: Variant> Validators<P, V> {
     pub fn new(polynomial: Public<V>, mut validators: Vec<P>, share: Option<Share>) -> Self {
         // Setup validators
         validators.sort();
@@ -37,7 +37,7 @@ impl<P: Array, V: Variant> Validators<P, V> {
     }
 }
 
-impl<P: Array, V: Variant> Supervisor for Validators<P, V> {
+impl<P: PublicKey, V: Variant> Supervisor for Validators<P, V> {
     type Index = Epoch;
     type PublicKey = P;
 
@@ -54,7 +54,7 @@ impl<P: Array, V: Variant> Supervisor for Validators<P, V> {
     }
 }
 
-impl<P: Array, V: Variant> ThresholdSupervisor for Validators<P, V> {
+impl<P: PublicKey, V: Variant> ThresholdSupervisor for Validators<P, V> {
     type Polynomial = Public<V>;
     type Identity = V::Public;
     type Share = Share;

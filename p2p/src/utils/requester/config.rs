@@ -1,11 +1,11 @@
 //! Configuration for `Requester`.
 
-use commonware_utils::Array;
+use commonware_cryptography::PublicKey;
 use governor::Quota;
 use std::time::Duration;
 
 /// Configuration for the requester.
-pub struct Config<P: Array> {
+pub struct Config<P: PublicKey> {
     /// Cryptographic primitives.
     pub public_key: P,
 

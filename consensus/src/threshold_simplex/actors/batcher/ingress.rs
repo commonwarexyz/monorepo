@@ -6,7 +6,7 @@ use futures::{
     SinkExt,
 };
 
-pub enum Message<P: Array, V: Variant, D: Digest> {
+pub enum Message<P: PublicKey, V: Variant, D: Digest> {
     Update {
         current: View,
         leader: P,
@@ -18,11 +18,11 @@ pub enum Message<P: Array, V: Variant, D: Digest> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<P: Array, V: Variant, D: Digest> {
+pub struct Mailbox<P: PublicKey, V: Variant, D: Digest> {
     sender: mpsc::Sender<Message<P, V, D>>,
 }
 
-impl<P: Array, V: Variant, D: Digest> Mailbox<P, V, D> {
+impl<P: PublicKey, V: Variant, D: Digest> Mailbox<P, V, D> {
     pub fn new(sender: mpsc::Sender<Message<P, V, D>>) -> Self {
         Self { sender }
     }

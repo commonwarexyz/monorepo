@@ -1,5 +1,5 @@
 use crate::Channel;
-use commonware_utils::Array;
+use commonware_cryptography::PublicKey;
 use prometheus_client::encoding::EncodeLabelSet;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -10,7 +10,7 @@ pub struct Message {
 }
 
 impl Message {
-    pub fn new<P: Array>(origin: &P, recipient: &P, channel: Channel) -> Self {
+    pub fn new<P: PublicKey>(origin: &P, recipient: &P, channel: Channel) -> Self {
         Self {
             origin: origin.to_string(),
             recipient: recipient.to_string(),

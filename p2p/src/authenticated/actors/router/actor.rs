@@ -7,14 +7,14 @@ use crate::{
     Channel, Recipients,
 };
 use bytes::Bytes;
+use commonware_cryptography::PublicKey;
 use commonware_runtime::{Handle, Metrics, Spawner};
-use commonware_utils::Array;
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::collections::BTreeMap;
 use tracing::debug;
 
-pub struct Actor<E: Spawner + Metrics, P: Array> {
+pub struct Actor<E: Spawner + Metrics, P: PublicKey> {
     context: E,
 
     control: mpsc::Receiver<Message<P>>,
@@ -23,7 +23,7 @@ pub struct Actor<E: Spawner + Metrics, P: Array> {
     messages_dropped: Family<metrics::Message, Counter>,
 }
 
-impl<E: Spawner + Metrics, P: Array> Actor<E, P> {
+impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<P>, Messenger<P>) {
         // Create mailbox
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);

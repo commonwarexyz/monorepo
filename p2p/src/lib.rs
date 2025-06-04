@@ -6,6 +6,7 @@
 //! expect breaking changes and occasional instability.
 
 use bytes::Bytes;
+use commonware_cryptography::PublicKey;
 use commonware_utils::Array;
 use std::error::Error as StdError;
 use std::fmt::Debug;
@@ -26,7 +27,7 @@ pub type Channel = u32;
 
 /// Enum indicating the set of recipients to send a message to.
 #[derive(Clone)]
-pub enum Recipients<P: Array> {
+pub enum Recipients<P: PublicKey> {
     All,
     Some(Vec<P>),
     One(P),
@@ -38,7 +39,7 @@ pub trait Sender: Clone + Debug + Send + 'static {
     type Error: Debug + StdError + Send;
 
     /// Public key type used to identify recipients.
-    type PublicKey: Array;
+    type PublicKey: PublicKey;
 
     /// Send a message to a set of recipients.
     fn send(

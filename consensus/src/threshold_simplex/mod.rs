@@ -235,7 +235,7 @@ mod tests {
     use types::Activity;
 
     /// Registers all validators using the oracle.
-    async fn register_validators<P: Array>(
+    async fn register_validators<P: PublicKey>(
         oracle: &mut Oracle<P>,
         validators: &[P],
     ) -> HashMap<
@@ -278,7 +278,7 @@ mod tests {
     /// The `action` parameter determines the action (e.g. link, unlink) to take.
     /// The `restrict_to` function can be used to restrict the linking to certain connections,
     /// otherwise all validators will be linked to all other validators.
-    async fn link_validators<P: Array>(
+    async fn link_validators<P: PublicKey>(
         oracle: &mut Oracle<P>,
         validators: &[P],
         action: Action,

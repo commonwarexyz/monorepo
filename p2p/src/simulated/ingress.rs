@@ -1,13 +1,13 @@
 use super::{Error, Receiver, Sender};
 use crate::Channel;
-use commonware_utils::Array;
+use commonware_cryptography::PublicKey;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
 use rand_distr::Normal;
 
-pub enum Message<P: Array> {
+pub enum Message<P: PublicKey> {
     Register {
         public_key: P,
         channel: Channel,
@@ -58,11 +58,11 @@ pub struct Link {
 /// At any point, peers can be added/removed and links
 /// between said peers can be modified.
 #[derive(Clone)]
-pub struct Oracle<P: Array> {
+pub struct Oracle<P: PublicKey> {
     sender: mpsc::UnboundedSender<Message<P>>,
 }
 
-impl<P: Array> Oracle<P> {
+impl<P: PublicKey> Oracle<P> {
     /// Create a new instance of the oracle.
     pub(crate) fn new(sender: mpsc::UnboundedSender<Message<P>>) -> Self {
         Self { sender }
@@ -167,7 +167,7 @@ impl<P: Array> Oracle<P> {
 
 /// Individual control interface for a peer in the simulated network.
 #[derive(Clone)]
-pub struct Control<P: Array> {
+pub struct Control<P: PublicKey> {
     /// The public key of the peer this control interface is for.
     me: P,
 
@@ -175,7 +175,7 @@ pub struct Control<P: Array> {
     sender: mpsc::UnboundedSender<Message<P>>,
 }
 
-impl<P: Array> crate::Blocker for Control<P> {
+impl<P: PublicKey> crate::Blocker for Control<P> {
     type PublicKey = P;
 
     async fn block(&mut self, public_key: P) {

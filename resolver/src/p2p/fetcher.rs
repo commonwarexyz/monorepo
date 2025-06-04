@@ -37,7 +37,7 @@ enum SendError<S: Sender> {
 /// cancellation). Upon retry, requests may either be placed in active or pending state again.
 pub struct Fetcher<
     E: Clock + GClock + Rng + Metrics,
-    P: Array,
+    P: PublicKey,
     Key: Array,
     NetS: Sender<PublicKey = P>,
 > {
@@ -63,7 +63,7 @@ pub struct Fetcher<
     _s: PhantomData<NetS>,
 }
 
-impl<E: Clock + GClock + Rng + Metrics, P: Array, Key: Array, NetS: Sender<PublicKey = P>>
+impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Array, NetS: Sender<PublicKey = P>>
     Fetcher<E, P, Key, NetS>
 {
     /// Creates a new fetcher.

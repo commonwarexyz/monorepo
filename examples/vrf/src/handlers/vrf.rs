@@ -20,7 +20,7 @@ const VRF_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_VRF_";
 
 /// Generate bias-resistant, verifiable randomness using BLS12-381
 /// Threshold Signatures.
-pub struct Vrf<E: Clock + Spawner, P: Array> {
+pub struct Vrf<E: Clock + Spawner, P: PublicKey> {
     context: E,
     timeout: Duration,
     threshold: u32,
@@ -29,7 +29,7 @@ pub struct Vrf<E: Clock + Spawner, P: Array> {
     requests: mpsc::Receiver<(u64, Output<MinSig>)>,
 }
 
-impl<E: Clock + Spawner, P: Array> Vrf<E, P> {
+impl<E: Clock + Spawner, P: PublicKey> Vrf<E, P> {
     pub fn new(
         context: E,
         timeout: Duration,

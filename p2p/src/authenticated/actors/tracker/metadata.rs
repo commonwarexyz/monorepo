@@ -1,9 +1,9 @@
-use commonware_utils::Array;
+use commonware_cryptography::PublicKey;
 use std::net::SocketAddr;
 
 /// Metadata for a peer connection.
 #[derive(Clone, Debug)]
-pub enum Metadata<P: Array> {
+pub enum Metadata<P: PublicKey> {
     /// We are the Dialer.
     ///
     /// Contains:
@@ -18,7 +18,7 @@ pub enum Metadata<P: Array> {
     Listener(P),
 }
 
-impl<P: Array> Metadata<P> {
+impl<P: PublicKey> Metadata<P> {
     /// Get the public key of the peer associated with this metadata.
     pub fn public_key(&self) -> &P {
         match self {

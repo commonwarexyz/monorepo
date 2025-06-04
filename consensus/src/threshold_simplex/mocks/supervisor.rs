@@ -27,7 +27,7 @@ use std::{
 
 type ViewInfo<P, V> = (Vec<V>, HashMap<P, u32>, Vec<P>, group::Share);
 
-pub struct Config<P: Array, V: Variant> {
+pub struct Config<P: PublicKey, V: Variant> {
     pub namespace: Vec<u8>,
     pub participants: BTreeMap<View, (poly::Public<V>, Vec<P>, group::Share)>,
 }
@@ -36,7 +36,7 @@ type Participation<P, D> = HashMap<View, HashMap<D, HashSet<P>>>;
 type Faults<P, V, D> = HashMap<P, HashMap<View, HashSet<Activity<V, D>>>>;
 
 #[derive(Clone)]
-pub struct Supervisor<P: Array, V: Variant, D: Digest> {
+pub struct Supervisor<P: PublicKey, V: Variant, D: Digest> {
     identity: V::Public,
     participants: BTreeMap<View, ViewInfo<P, V::Public>>,
 
@@ -57,7 +57,7 @@ pub struct Supervisor<P: Array, V: Variant, D: Digest> {
     subscribers: Arc<Mutex<Vec<Sender<View>>>>,
 }
 
-impl<P: Array, V: Variant, D: Digest> Supervisor<P, V, D> {
+impl<P: PublicKey, V: Variant, D: Digest> Supervisor<P, V, D> {
     pub fn new(cfg: Config<P, V>) -> Self {
         let mut identity = None;
         let mut parsed_participants = BTreeMap::new();
@@ -96,7 +96,7 @@ impl<P: Array, V: Variant, D: Digest> Supervisor<P, V, D> {
     }
 }
 
-impl<P: Array, V: Variant, D: Digest> Su for Supervisor<P, V, D> {
+impl<P: PublicKey, V: Variant, D: Digest> Su for Supervisor<P, V, D> {
     type Index = View;
     type PublicKey = P;
 
@@ -125,7 +125,7 @@ impl<P: Array, V: Variant, D: Digest> Su for Supervisor<P, V, D> {
     }
 }
 
-impl<P: Array, V: Variant, D: Digest> TSu for Supervisor<P, V, D> {
+impl<P: PublicKey, V: Variant, D: Digest> TSu for Supervisor<P, V, D> {
     type Seed = V::Signature;
     type Identity = V::Public;
     type Polynomial = Vec<V::Public>;
@@ -174,7 +174,7 @@ impl<P: Array, V: Variant, D: Digest> TSu for Supervisor<P, V, D> {
     }
 }
 
-impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
+impl<P: PublicKey, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
     type Activity = Activity<V, D>;
 
     async fn report(&mut self, activity: Self::Activity) {
@@ -420,7 +420,7 @@ impl<P: Array, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
     }
 }
 
-impl<P: Array, V: Variant, D: Digest> Monitor for Supervisor<P, V, D> {
+impl<P: PublicKey, V: Variant, D: Digest> Monitor for Supervisor<P, V, D> {
     type Index = View;
     async fn subscribe(&mut self) -> (Self::Index, Receiver<Self::Index>) {
         let (tx, rx) = futures::channel::mpsc::channel(128);

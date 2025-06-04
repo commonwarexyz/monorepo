@@ -102,7 +102,7 @@ const GENESIS_BYTES: &[u8] = b"genesis";
 
 type Latency = (f64, f64);
 
-pub struct Config<H: Hasher, P: Array> {
+pub struct Config<H: Hasher, P: PublicKey> {
     pub hasher: H,
 
     pub relay: Arc<Relay<H::Digest, P>>,
@@ -117,7 +117,7 @@ pub struct Config<H: Hasher, P: Array> {
     pub verify_latency: Latency,
 }
 
-pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: Array> {
+pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
     context: E,
     hasher: H,
     participant: P,
@@ -135,7 +135,7 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: Array> {
     verified: HashSet<H::Digest>,
 }
 
-impl<E: Clock + RngCore + Spawner, H: Hasher, P: Array> Application<E, H, P> {
+impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
     pub fn new(context: E, cfg: Config<H, P>) -> (Self, Mailbox<H::Digest>) {
         // Register self on relay
         let broadcast = cfg.relay.register(cfg.participant.clone());

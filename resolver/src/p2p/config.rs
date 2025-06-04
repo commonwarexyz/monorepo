@@ -9,7 +9,7 @@ use std::time::Duration;
 
 /// Configuration for the peer actor.
 pub struct Config<
-    P: Array,
+    P: PublicKey,
     D: Coordinator<PublicKey = P>,
     Key: Array,
     Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,

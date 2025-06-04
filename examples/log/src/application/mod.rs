@@ -11,7 +11,7 @@ mod ingress;
 mod supervisor;
 
 /// Configuration for the application.
-pub struct Config<P: Array, H: Hasher> {
+pub struct Config<P: PublicKey, H: Hasher> {
     /// Hashing scheme to use.
     pub hasher: H,
 

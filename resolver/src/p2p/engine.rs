@@ -31,7 +31,7 @@ use std::{collections::HashMap, marker::PhantomData};
 use tracing::{debug, error, trace, warn};
 
 /// Represents a pending serve operation.
-struct Serve<E: Clock, P: Array> {
+struct Serve<E: Clock, P: PublicKey> {
     timer: histogram::Timer<E>,
     peer: P,
     id: u64,
@@ -41,7 +41,7 @@ struct Serve<E: Clock, P: Array> {
 /// Manages incoming and outgoing P2P requests, coordinating fetch and serve operations.
 pub struct Engine<
     E: Clock + GClock + Spawner + Rng + Metrics,
-    P: Array,
+    P: PublicKey,
     D: Coordinator<PublicKey = P>,
     Key: Array,
     Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
@@ -92,7 +92,7 @@ pub struct Engine<
 
 impl<
         E: Clock + GClock + Spawner + Rng + Metrics,
-        P: Array,
+        P: PublicKey,
         D: Coordinator<PublicKey = P>,
         Key: Array,
         Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,

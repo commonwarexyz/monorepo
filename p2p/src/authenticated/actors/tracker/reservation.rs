@@ -1,11 +1,11 @@
 use super::Metadata;
+use commonware_cryptography::PublicKey;
 use commonware_runtime::{Metrics, Spawner};
-use commonware_utils::Array;
 use futures::{channel::mpsc, SinkExt};
 
 /// Reservation for a peer in the network. This is used to ensure that the peer is reserved only
 /// once, and that the reservation is released when the peer connection fails or is closed.
-pub struct Reservation<E: Spawner + Metrics, P: Array> {
+pub struct Reservation<E: Spawner + Metrics, P: PublicKey> {
     /// Context needed to spawn tasks if needed.
     context: E,
 
@@ -19,7 +19,7 @@ pub struct Reservation<E: Spawner + Metrics, P: Array> {
     closer: Option<mpsc::Sender<Metadata<P>>>,
 }
 
-impl<E: Spawner + Metrics, P: Array> Reservation<E, P> {
+impl<E: Spawner + Metrics, P: PublicKey> Reservation<E, P> {
     /// Create a new reservation for a peer.
     pub fn new(context: E, metadata: Metadata<P>, closer: mpsc::Sender<Metadata<P>>) -> Self {
         Self {
@@ -30,14 +30,14 @@ impl<E: Spawner + Metrics, P: Array> Reservation<E, P> {
     }
 }
 
-impl<E: Spawner + Metrics, P: Array> Reservation<E, P> {
+impl<E: Spawner + Metrics, P: PublicKey> Reservation<E, P> {
     /// Returns the metadata associated with this reservation.
     pub fn metadata(&self) -> &Metadata<P> {
         &self.metadata
     }
 }
 
-impl<E: Spawner + Metrics, P: Array> Drop for Reservation<E, P> {
+impl<E: Spawner + Metrics, P: PublicKey> Drop for Reservation<E, P> {
     fn drop(&mut self) {
         let mut closer = self.closer.take().expect("Reservation::drop called twice");
 
