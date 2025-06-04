@@ -1,5 +1,5 @@
 use super::Error;
-use crate::{authenticated::discovery::types, Channel};
+use crate::{authenticated::lookup::types, Channel};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use futures::{channel::mpsc, SinkExt};

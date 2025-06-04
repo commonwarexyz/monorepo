@@ -1,6 +1,6 @@
 //! Actor responsible for dialing peers and establishing connections.
 
-use crate::authenticated::discovery::{
+use crate::authenticated::lookup::{
     actors::{
         spawner,
         tracker::{self, Metadata, Reservation},

@@ -1,6 +1,6 @@
 //! Peer
 
-use crate::authenticated::discovery::metrics;
+use crate::authenticated::lookup::metrics;
 use commonware_codec::Error as CodecError;
 use governor::Quota;
 use prometheus_client::metrics::{counter::Counter, family::Family};

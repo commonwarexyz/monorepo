@@ -1,6 +1,6 @@
 //! Tracker
 
-use crate::authenticated::discovery::config::Bootstrapper;
+use crate::authenticated::lookup::config::Bootstrapper;
 use commonware_cryptography::Signer;
 use governor::Quota;
 use std::net::IpAddr;

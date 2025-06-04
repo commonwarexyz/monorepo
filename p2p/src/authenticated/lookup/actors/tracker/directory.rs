@@ -1,5 +1,5 @@
 use super::{metrics::Metrics, record::Record, set::Set, Metadata, Reservation};
-use crate::authenticated::discovery::{
+use crate::authenticated::lookup::{
     metrics,
     types::{self, PeerInfo},
 };

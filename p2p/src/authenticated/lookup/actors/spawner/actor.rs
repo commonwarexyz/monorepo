@@ -2,7 +2,7 @@ use super::{
     ingress::{Mailbox, Message},
     Config,
 };
-use crate::authenticated::discovery::{
+use crate::authenticated::lookup::{
     actors::{peer, router, tracker},
     metrics,
 };

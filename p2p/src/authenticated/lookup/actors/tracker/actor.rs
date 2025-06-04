@@ -3,7 +3,7 @@ use super::{
     ingress::{Mailbox, Message, Oracle},
     Config, Error,
 };
-use crate::authenticated::discovery::{ip, types};
+use crate::authenticated::lookup::{ip, types};
 use commonware_cryptography::Signer;
 use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::{union, SystemTimeExt};
@@ -238,7 +238,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 mod tests {
     use super::*;
     use crate::{
-        authenticated::discovery::{
+        authenticated::lookup::{
             actors::{peer, tracker},
             config::Bootstrapper,
             types,
@@ -899,10 +899,7 @@ mod tests {
             assert!(reservation.is_some());
             if let Some(res) = reservation {
                 match res.metadata() {
-                    crate::authenticated::discovery::actors::tracker::Metadata::Dialer(
-                        pk,
-                        addr,
-                    ) => {
+                    crate::authenticated::lookup::actors::tracker::Metadata::Dialer(pk, addr) => {
                         assert_eq!(pk, &boot_pk);
                         assert_eq!(*addr, boot_addr);
                     }
