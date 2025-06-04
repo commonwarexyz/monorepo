@@ -7,6 +7,7 @@ mod ingress;
 pub use actor::Actor;
 pub use ingress::Mailbox;
 
+/// Configuration for the spawner [Actor].
 pub struct Config {
     pub mailbox_size: usize,
     pub gossip_bit_vec_frequency: Duration,
