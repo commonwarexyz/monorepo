@@ -270,7 +270,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                             // close the peer (as other channels may still be open).
                             let sender = senders.get_mut(&data.channel).unwrap();
                             let _ = sender.send((peer.clone(), data.message)).await.inspect_err(
-                                |e| debug!(err=?e, "failed to send message to client"),
+                                |e| debug!(err=?e, channel=data.channel, "failed to send message to client"),
                             );
                         }
                     }
