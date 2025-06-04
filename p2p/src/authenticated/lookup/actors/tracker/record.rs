@@ -97,6 +97,8 @@ impl<C: PublicKey> Record<C> {
     /// Attempt to update the [`PeerInfo`] of a discovered peer.
     ///
     /// Returns true if the update was successful.
+    /// TODO danlaine: use or remove this code
+    #[allow(dead_code)]
     pub fn update(&mut self, info: PeerInfo<C>) -> bool {
         match &self.address {
             Address::Myself(_) => false,

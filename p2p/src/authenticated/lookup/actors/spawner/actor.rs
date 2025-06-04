@@ -23,8 +23,6 @@ pub struct Actor<
     context: E,
 
     mailbox_size: usize,
-    max_peer_set_size: usize,
-    peer_gossip_max_count: usize,
 
     receiver: mpsc::Receiver<Message<E, Si, St, C>>,
 
@@ -68,8 +66,6 @@ impl<
             Self {
                 context,
                 mailbox_size: cfg.mailbox_size,
-                max_peer_set_size: cfg.max_peer_set_size,
-                peer_gossip_max_count: cfg.peer_gossip_max_count,
                 receiver,
                 connections,
                 sent_messages,
@@ -120,8 +116,6 @@ impl<
                                     received_messages,
                                     rate_limited,
                                     mailbox_size: self.mailbox_size,
-                                    max_peer_set_size: self.max_peer_set_size,
-                                    peer_gossip_max_count: self.peer_gossip_max_count,
                                 },
                                 reservation,
                             );

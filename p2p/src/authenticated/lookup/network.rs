@@ -58,12 +58,9 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 namespace: union(&cfg.namespace, TRACKER_SUFFIX),
                 address: cfg.dialable,
                 bootstrappers: cfg.bootstrappers.clone(),
-                allow_private_ips: cfg.allow_private_ips,
                 mailbox_size: cfg.mailbox_size,
-                synchrony_bound: cfg.synchrony_bound,
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 allowed_connection_rate_per_peer: cfg.allowed_connection_rate_per_peer,
-                peer_gossip_max_count: cfg.peer_gossip_max_count,
                 max_peer_set_size: cfg.max_peer_set_size,
                 dial_fail_limit: cfg.dial_fail_limit,
             },
@@ -137,8 +134,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
             self.context.with_label("spawner"),
             spawner::Config {
                 mailbox_size: self.cfg.mailbox_size,
-                max_peer_set_size: self.cfg.max_peer_set_size,
-                peer_gossip_max_count: self.cfg.peer_gossip_max_count,
             },
         );
         let mut spawner_task =

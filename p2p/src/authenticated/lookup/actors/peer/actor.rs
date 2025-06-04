@@ -22,8 +22,6 @@ use tracing::{debug, info};
 pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey> {
     context: E,
 
-    codec_config: types::Config,
-
     mailbox: Mailbox,
     control: mpsc::Receiver<Message>,
     high: mpsc::Receiver<types::Data>,
@@ -49,10 +47,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
             Self {
                 context,
                 mailbox: Mailbox::new(control_sender),
-                codec_config: types::Config {
-                    max_bit_vec: cfg.max_peer_set_size,
-                    max_peers: cfg.peer_gossip_max_count,
-                },
                 control: control_receiver,
                 high: high_receiver,
                 low: low_receiver,
@@ -172,7 +166,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                         .receive()
                         .await
                         .map_err(Error::ReceiveFailed)?;
-                    let msg = match types::Payload::decode_cfg(msg, &self.codec_config) {
+                    let msg = match types::Payload::decode_cfg(msg, &()) {
                         Ok(msg) => msg,
                         Err(err) => {
                             info!(?err, ?peer, "failed to decode message");

@@ -13,8 +13,6 @@ pub use ingress::{Mailbox, Message, Relay};
 
 pub struct Config {
     pub mailbox_size: usize,
-    pub max_peer_set_size: usize,
-    pub peer_gossip_max_count: usize,
 
     pub sent_messages: Family<metrics::Message, Counter>,
     pub received_messages: Family<metrics::Message, Counter>,

@@ -5,13 +5,12 @@ use crate::authenticated::lookup::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner};
-use commonware_utils::SystemTimeExt;
 use futures::channel::mpsc;
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,
 };
-use rand::{seq::IteratorRandom, Rng};
+use rand::Rng;
 use std::{
     collections::{BTreeMap, HashMap},
     net::SocketAddr,
@@ -152,8 +151,9 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         }
     }
 
+    // TODO danlaine: change this function to update_peer (singular)?
     /// Using a list of (already-validated) peer information, update the records.
-    pub fn update_peers(&mut self, infos: Vec<types::PeerInfo<C>>) {
+    pub fn _update_peers(&mut self, infos: Vec<types::PeerInfo<C>>) {
         for info in infos {
             // Update peer address
             //
@@ -252,15 +252,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         self.reserve(Metadata::Listener(peer.clone()))
     }
 
-    /// Returns a [`types::BitVec`] for a random peer set.
-    pub fn get_random_bit_vec(&mut self) -> Option<types::BitVec> {
-        let (&index, set) = self.sets.iter().choose(&mut self.context)?;
-        Some(types::BitVec {
-            index,
-            bits: set.knowledge(),
-        })
-    }
-
     /// Attempt to block a peer, updating the metrics accordingly.
     pub fn block(&mut self, peer: &C) {
         if self.peers.get_mut(peer).is_some_and(|r| r.block()) {
@@ -273,46 +264,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     /// Returns the sharable information for a given peer.
     pub fn info(&self, peer: &C) -> Option<PeerInfo<C>> {
         self.peers.get(peer).and_then(|r| r.sharable())
-    }
-
-    /// Returns all available peer information for a given bit vector.
-    ///
-    /// Returns `None` if the bit vector is malformed.
-    pub fn infos(&self, bit_vec: types::BitVec) -> Option<Vec<types::PeerInfo<C>>> {
-        let Some(set) = self.sets.get(&bit_vec.index) else {
-            // Don't consider unknown indices as errors, just ignore them.
-            debug!(index = bit_vec.index, "requested peer set not found");
-            return Some(vec![]);
-        };
-
-        // Ensure that the bit vector is the same size as the peer set
-        if bit_vec.bits.len() != set.len() {
-            debug!(
-                index = bit_vec.index,
-                expected = set.len(),
-                actual = bit_vec.bits.len(),
-                "bit vector length mismatch"
-            );
-            return None;
-        }
-
-        // Compile peers to send
-        let peers: Vec<_> = bit_vec
-            .bits
-            .iter()
-            .enumerate()
-            .filter_map(|(i, b)| {
-                let peer = (!b).then_some(&set[i])?; // Only consider peers that the requester wants
-                let info = self.peers.get(peer).and_then(|r| r.sharable());
-                // We may have information signed over a timestamp greater than the current time,
-                // but within our synchrony bound. Avoid sharing this information as it could get us
-                // blocked by other peers due to clock skew. Consider timestamps earlier than the
-                // current time to be safe enough to share.
-                info.filter(|i| i.timestamp <= self.context.current().epoch_millis())
-            })
-            .collect();
-
-        Some(peers)
     }
 
     /// Returns true if the peer is able to be connected to.

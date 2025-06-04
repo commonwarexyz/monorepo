@@ -1,16 +1,15 @@
 use super::{
     directory::{self, Directory},
     ingress::{Mailbox, Message, Oracle},
-    Config, Error,
+    Config,
 };
-use crate::authenticated::lookup::{ip, types};
+use crate::authenticated::lookup::types;
 use commonware_cryptography::Signer;
 use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::{union, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
 use governor::clock::Clock as GClock;
 use rand::Rng;
-use std::time::Duration;
 use tracing::debug;
 
 // Bytes to add to the namespace to prevent replay attacks.
@@ -24,21 +23,8 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
     /// For signing and verifying messages.
     crypto: C,
 
-    /// The namespace used to sign and verify [`types::PeerInfo`] messages.
-    ip_namespace: Vec<u8>,
-
-    /// Whether to allow private IPs.
-    allow_private_ips: bool,
-
-    /// The time bound for synchrony. Messages with timestamps greater than this far into the
-    /// future will be considered malformed.
-    synchrony_bound: Duration,
-
     /// The maximum number of peers in a set.
     max_peer_set_size: usize,
-
-    /// The maximum number of [`types::PeerInfo`] allowable in a single message.
-    peer_gossip_max_count: usize,
 
     // ---------- Message-Passing ----------
     /// The mailbox for the actor.
@@ -76,56 +62,13 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
             Self {
                 context,
                 crypto: cfg.crypto,
-                ip_namespace,
-                allow_private_ips: cfg.allow_private_ips,
-                synchrony_bound: cfg.synchrony_bound,
                 max_peer_set_size: cfg.max_peer_set_size,
-                peer_gossip_max_count: cfg.peer_gossip_max_count,
                 receiver,
                 directory,
             },
             Mailbox::new(sender.clone()),
             Oracle::new(sender),
         )
-    }
-
-    /// Handle an incoming list of peer information.
-    ///
-    /// Returns an error if the list itself or any entries can be considered malformed.
-    fn validate(&mut self, infos: &Vec<types::PeerInfo<C::PublicKey>>) -> Result<(), Error> {
-        // Ensure there aren't too many peers sent
-        if infos.len() > self.peer_gossip_max_count {
-            return Err(Error::TooManyPeers(infos.len()));
-        }
-
-        // We allow peers to be sent in any order when responding to a bit vector (allows
-        // for selecting a random subset of peers when there are too many) and allow
-        // for duplicates (no need to create an additional set to check this)
-        for info in infos {
-            // Check if IP is allowed
-            if !self.allow_private_ips && !ip::is_global(info.socket.ip()) {
-                return Err(Error::PrivateIPsNotAllowed(info.socket.ip()));
-            }
-
-            // Check if peer is us
-            if info.public_key == self.crypto.public_key() {
-                return Err(Error::ReceivedSelf);
-            }
-
-            // If any timestamp is too far into the future, disconnect from the peer
-            if Duration::from_millis(info.timestamp)
-                > self.context.current().epoch() + self.synchrony_bound
-            {
-                return Err(Error::SynchronyBound);
-            }
-
-            // If any signature is invalid, disconnect from the peer
-            if !info.verify(&self.ip_namespace) {
-                return Err(Error::InvalidSignature);
-            }
-        }
-
-        Ok(())
     }
 
     /// Start the actor and run it in the background.
@@ -161,8 +104,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                     self.directory.connect(&public_key, dialer);
 
                     // Proactively send our own info to the peer
-                    let info = self.directory.info(&self.crypto.public_key()).unwrap();
                     // TODO danlaine: do we need to send the peer anything here?
+                    let _info = self.directory.info(&self.crypto.public_key()).unwrap();
                     // let _ = peer.peers(vec![info]).await;
                 }
                 Message::Dialable { responder } => {
@@ -197,29 +140,23 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 mod tests {
     use super::*;
     use crate::{
-        authenticated::lookup::{
-            actors::{peer, tracker},
-            config::Bootstrapper,
-            types,
-        },
+        authenticated::lookup::{actors::peer, config::Bootstrapper},
         Blocker,
         // Blocker is implicitly available via oracle.block() due to Oracle implementing crate::Blocker
     };
-    use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::PrivateKeyExt as _;
     use commonware_cryptography::{
-        ed25519::{PrivateKey, PublicKey, Signature},
+        ed25519::{PrivateKey, PublicKey},
         Signer,
     };
     use commonware_runtime::{
-        deterministic::{self, Context},
+        deterministic::{self},
         Clock, Runner,
     };
     use commonware_utils::NZU32;
     use governor::Quota;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::time::Duration;
-    use types::PeerInfo;
 
     // Test Configuration Setup
     fn default_test_config<C: Signer>(
@@ -231,12 +168,9 @@ mod tests {
             namespace: b"test_tracker_actor_namespace".to_vec(),
             address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             bootstrappers,
-            allow_private_ips: true,
             mailbox_size: 32,
-            synchrony_bound: Duration::from_secs(10),
             tracked_peer_sets: 2,
             allowed_connection_rate_per_peer: Quota::per_second(NZU32!(5)),
-            peer_gossip_max_count: 5,
             max_peer_set_size: 128,
             dial_fail_limit: 1,
         }
@@ -306,9 +240,6 @@ mod tests {
         actor_handle: Handle<()>,
         mailbox: Mailbox<deterministic::Context, PublicKey>,
         oracle: Oracle<deterministic::Context, PublicKey>,
-        ip_namespace: Vec<u8>,
-        tracker_pk: PublicKey,
-        tracker_signer: PrivateKey,
         cfg: Config<PrivateKey>, // Store cloned config for access to its values
     }
 
@@ -316,23 +247,16 @@ mod tests {
         runner_context: deterministic::Context,
         cfg_to_clone: Config<PrivateKey>, // Pass by value to allow cloning
     ) -> TestHarness {
-        let tracker_signer = cfg_to_clone.crypto.clone();
-        let tracker_pk = tracker_signer.public_key();
-        let ip_namespace_base = cfg_to_clone.namespace.clone();
         let stored_cfg = cfg_to_clone.clone(); // Clone for storing in harness
 
         // Actor::new takes ownership, so clone again if cfg_to_clone is needed later
         let (actor, mailbox, oracle) = Actor::new(runner_context.clone(), cfg_to_clone);
-        let ip_namespace = union(&ip_namespace_base, super::NAMESPACE_SUFFIX_IP);
         let actor_handle = runner_context.spawn(|_| actor.run());
 
         TestHarness {
             actor_handle,
             mailbox,
             oracle,
-            ip_namespace,
-            tracker_pk,
-            tracker_signer,
             cfg: stored_cfg,
         }
     }
