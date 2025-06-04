@@ -106,7 +106,7 @@ cfg_if::cfg_if! {
             type Index;
 
             /// Public key used to identify participants.
-            type PublicKey: Array;
+            type PublicKey: PublicKey;
 
             /// Return the leader at a given index for the provided seed.
             fn leader(&self, index: Self::Index) -> Option<Self::PublicKey>;

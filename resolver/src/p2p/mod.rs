@@ -58,7 +58,7 @@ pub trait Producer: Clone + Send + 'static {
 /// Manages the set of peers that can be used to fetch data.
 pub trait Coordinator: Clone + Send + Sync + 'static {
     /// Type used to uniquely identify peers.
-    type PublicKey: Array;
+    type PublicKey: PublicKey;
 
     /// Returns the current list of peers that can be used to fetch data.
     ///

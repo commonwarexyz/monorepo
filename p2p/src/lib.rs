@@ -56,7 +56,7 @@ pub trait Receiver: Debug + Send + 'static {
     type Error: Debug + StdError + Send;
 
     /// Public key type used to identify recipients.
-    type PublicKey: Array;
+    type PublicKey: PublicKey;
 
     /// Receive a message from an arbitrary recipient.
     fn recv(
@@ -67,7 +67,7 @@ pub trait Receiver: Debug + Send + 'static {
 /// Interface for blocking other peers.
 pub trait Blocker: Clone + Send + 'static {
     /// Public key type used to identify peers.
-    type PublicKey: Array;
+    type PublicKey: PublicKey;
 
     /// Block a peer, disconnecting them if currently connected and preventing future connections.
     fn block(&mut self, peer: Self::PublicKey) -> impl Future<Output = ()> + Send;

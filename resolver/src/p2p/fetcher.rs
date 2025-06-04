@@ -1,5 +1,6 @@
 use crate::p2p::wire;
 use bimap::BiHashMap;
+use commonware_cryptography::PublicKey;
 use commonware_p2p::{
     utils::{
         codec::WrappedSender,
