@@ -1,5 +1,8 @@
 use super::Reservation;
-use crate::authenticated::discovery::{actors::peer, types};
+use crate::authenticated::{
+    discovery::{actors::peer, types},
+    peer_info::PeerInfo,
+};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Metrics, Spawner};
 use futures::{
@@ -61,7 +64,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
     /// Notify the tracker that a [`types::Payload::Peers`] message has been received from a peer.
     Peers {
         /// The list of peers received.
-        peers: Vec<types::PeerInfo<C>>,
+        peers: Vec<PeerInfo<C>>,
 
         /// The mailbox of the peer actor.
         peer: peer::Mailbox<C>,
@@ -143,7 +146,7 @@ impl<E: Spawner + Metrics, C: PublicKey> Mailbox<E, C> {
     }
 
     /// Send a `Peers` message to the tracker.
-    pub async fn peers(&mut self, peers: Vec<types::PeerInfo<C>>, peer: peer::Mailbox<C>) {
+    pub async fn peers(&mut self, peers: Vec<PeerInfo<C>>, peer: peer::Mailbox<C>) {
         self.sender
             .send(Message::Peers { peers, peer })
             .await

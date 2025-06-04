@@ -3,7 +3,7 @@ use super::{
     ingress::{Mailbox, Message, Oracle},
     Config,
 };
-use crate::authenticated::lookup::types;
+use crate::authenticated::PeerInfo;
 use commonware_cryptography::Signer;
 use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::{union, SystemTimeExt};
@@ -46,7 +46,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         let socket = cfg.address;
         let timestamp = context.current().epoch_millis();
         let ip_namespace = union(&cfg.namespace, NAMESPACE_SUFFIX_IP);
-        let myself = types::PeerInfo::sign(&cfg.crypto, &ip_namespace, socket, timestamp);
+        let myself = PeerInfo::sign(&cfg.crypto, &ip_namespace, socket, timestamp);
 
         // General initialization
         let directory_cfg = directory::Config {

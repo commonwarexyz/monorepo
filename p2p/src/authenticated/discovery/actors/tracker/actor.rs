@@ -3,7 +3,7 @@ use super::{
     ingress::{Mailbox, Message, Oracle},
     Config, Error,
 };
-use crate::authenticated::discovery::{ip, types};
+use crate::authenticated::{discovery::ip, peer_info::PeerInfo};
 use commonware_cryptography::Signer;
 use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::{union, SystemTimeExt};
@@ -24,7 +24,7 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
     /// For signing and verifying messages.
     crypto: C,
 
-    /// The namespace used to sign and verify [`types::PeerInfo`] messages.
+    /// The namespace used to sign and verify [`PeerInfo`] messages.
     ip_namespace: Vec<u8>,
 
     /// Whether to allow private IPs.
@@ -37,7 +37,7 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
     /// The maximum number of peers in a set.
     max_peer_set_size: usize,
 
-    /// The maximum number of [`types::PeerInfo`] allowable in a single message.
+    /// The maximum number of [`PeerInfo`] allowable in a single message.
     peer_gossip_max_count: usize,
 
     // ---------- Message-Passing ----------
@@ -60,7 +60,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         let socket = cfg.address;
         let timestamp = context.current().epoch_millis();
         let ip_namespace = union(&cfg.namespace, NAMESPACE_SUFFIX_IP);
-        let myself = types::PeerInfo::sign(&cfg.crypto, &ip_namespace, socket, timestamp);
+        let myself = PeerInfo::sign(&cfg.crypto, &ip_namespace, socket, timestamp);
 
         // General initialization
         let directory_cfg = directory::Config {
@@ -92,7 +92,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
     /// Handle an incoming list of peer information.
     ///
     /// Returns an error if the list itself or any entries can be considered malformed.
-    fn validate(&mut self, infos: &Vec<types::PeerInfo<C::PublicKey>>) -> Result<(), Error> {
+    fn validate(&mut self, infos: &Vec<PeerInfo<C::PublicKey>>) -> Result<(), Error> {
         // Ensure there aren't too many peers sent
         if infos.len() > self.peer_gossip_max_count {
             return Err(Error::TooManyPeers(infos.len()));
@@ -264,7 +264,7 @@ mod tests {
         collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},
     };
-    use types::PeerInfo;
+    use PeerInfo;
 
     // Test Configuration Setup
     fn default_test_config<C: Signer>(

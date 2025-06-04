@@ -1,8 +1,5 @@
 use super::{metrics::Metrics, record::Record, set::Set, Metadata, Reservation};
-use crate::authenticated::lookup::{
-    metrics,
-    types::{self, PeerInfo},
-};
+use crate::authenticated::{lookup::metrics, peer_info::PeerInfo};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner};
 use futures::channel::mpsc;
@@ -153,7 +150,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
 
     // TODO danlaine: change this function to update_peer (singular)?
     /// Using a list of (already-validated) peer information, update the records.
-    pub fn _update_peers(&mut self, infos: Vec<types::PeerInfo<C>>) {
+    pub fn _update_peers(&mut self, infos: Vec<PeerInfo<C>>) {
         for info in infos {
             // Update peer address
             //
