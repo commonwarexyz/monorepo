@@ -1,5 +1,8 @@
 use crate::{
-    authenticated::lookup::{actors::peer, channels::Channels},
+    authenticated::{
+        lookup::{channels::Channels, types},
+        Relay,
+    },
     Channel, Recipients,
 };
 use bytes::Bytes;
@@ -14,7 +17,7 @@ pub enum Message<P: PublicKey> {
     /// Notify the router that a peer is ready to communicate.
     Ready {
         peer: P,
-        relay: peer::Relay,
+        relay: Relay<types::Data>,
         channels: oneshot::Sender<Channels<P>>,
     },
     /// Notify the router that a peer is no longer available.
@@ -43,7 +46,7 @@ impl<P: PublicKey> Mailbox<P> {
     }
 
     /// Notify the router that a peer is ready to communicate.
-    pub async fn ready(&mut self, peer: P, relay: peer::Relay) -> Channels<P> {
+    pub async fn ready(&mut self, peer: P, relay: Relay<types::Data>) -> Channels<P> {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(Message::Ready {
