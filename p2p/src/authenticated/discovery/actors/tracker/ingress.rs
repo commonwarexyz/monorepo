@@ -1,5 +1,6 @@
 use super::Reservation;
 use crate::authenticated::{
+    self,
     discovery::{actors::peer, types},
     peer_info::PeerInfo,
 };
@@ -35,7 +36,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
         dialer: bool,
 
         /// The mailbox of the peer actor.
-        peer: peer::Mailbox<C>,
+        peer: authenticated::Mailbox<peer::Message<C>>,
     },
 
     /// Ready to send a [`types::Payload::BitVec`] message to a peer. This message doubles as a
@@ -47,7 +48,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
         public_key: C,
 
         /// The mailbox of the peer actor.
-        peer: peer::Mailbox<C>,
+        peer: authenticated::Mailbox<peer::Message<C>>,
     },
 
     /// Notify the tracker that a [`types::Payload::BitVec`] message has been received from a peer.
@@ -58,7 +59,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
         bit_vec: types::BitVec,
 
         /// The mailbox of the peer actor.
-        peer: peer::Mailbox<C>,
+        peer: authenticated::Mailbox<peer::Message<C>>,
     },
 
     /// Notify the tracker that a [`types::Payload::Peers`] message has been received from a peer.
@@ -67,7 +68,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
         peers: Vec<PeerInfo<C>>,
 
         /// The mailbox of the peer actor.
-        peer: peer::Mailbox<C>,
+        peer: authenticated::Mailbox<peer::Message<C>>,
     },
 
     // ---------- Used by dialer ----------
@@ -118,7 +119,12 @@ impl<E: Spawner + Metrics, C: PublicKey> Mailbox<E, C> {
     }
 
     /// Send a `Connect` message to the tracker.
-    pub async fn connect(&mut self, public_key: C, dialer: bool, peer: peer::Mailbox<C>) {
+    pub async fn connect(
+        &mut self,
+        public_key: C,
+        dialer: bool,
+        peer: authenticated::Mailbox<peer::Message<C>>,
+    ) {
         self.sender
             .send(Message::Connect {
                 public_key,
@@ -130,7 +136,11 @@ impl<E: Spawner + Metrics, C: PublicKey> Mailbox<E, C> {
     }
 
     /// Send a `Construct` message to the tracker.
-    pub async fn construct(&mut self, public_key: C, peer: peer::Mailbox<C>) {
+    pub async fn construct(
+        &mut self,
+        public_key: C,
+        peer: authenticated::Mailbox<peer::Message<C>>,
+    ) {
         self.sender
             .send(Message::Construct { public_key, peer })
             .await
@@ -138,7 +148,11 @@ impl<E: Spawner + Metrics, C: PublicKey> Mailbox<E, C> {
     }
 
     /// Send a `BitVec` message to the tracker.
-    pub async fn bit_vec(&mut self, bit_vec: types::BitVec, peer: peer::Mailbox<C>) {
+    pub async fn bit_vec(
+        &mut self,
+        bit_vec: types::BitVec,
+        peer: authenticated::Mailbox<peer::Message<C>>,
+    ) {
         self.sender
             .send(Message::BitVec { bit_vec, peer })
             .await
@@ -146,7 +160,11 @@ impl<E: Spawner + Metrics, C: PublicKey> Mailbox<E, C> {
     }
 
     /// Send a `Peers` message to the tracker.
-    pub async fn peers(&mut self, peers: Vec<PeerInfo<C>>, peer: peer::Mailbox<C>) {
+    pub async fn peers(
+        &mut self,
+        peers: Vec<PeerInfo<C>>,
+        peer: authenticated::Mailbox<peer::Message<C>>,
+    ) {
         self.sender
             .send(Message::Peers { peers, peer })
             .await

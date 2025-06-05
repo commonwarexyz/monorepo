@@ -11,7 +11,7 @@ pub mod actor;
 pub use actor::Actor;
 
 pub mod ingress;
-pub use ingress::{Mailbox, Message, Relay};
+pub use ingress::{Message, Relay};
 
 pub struct Config {
     pub mailbox_size: usize,

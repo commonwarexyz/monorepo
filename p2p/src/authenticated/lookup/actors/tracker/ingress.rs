@@ -1,5 +1,5 @@
 use super::Reservation;
-use crate::authenticated::lookup::actors::peer;
+use crate::authenticated::{self, lookup::actors::peer};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Metrics, Spawner};
 use futures::{
@@ -32,7 +32,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
         dialer: bool,
 
         /// The mailbox of the peer actor.
-        peer: peer::Mailbox,
+        peer: authenticated::Mailbox<peer::Message>,
     },
 
     // ---------- Used by dialer ----------
@@ -83,7 +83,12 @@ impl<E: Spawner + Metrics, C: PublicKey> Mailbox<E, C> {
     }
 
     /// Send a `Connect` message to the tracker.
-    pub async fn connect(&mut self, public_key: C, dialer: bool, peer: peer::Mailbox) {
+    pub async fn connect(
+        &mut self,
+        public_key: C,
+        dialer: bool,
+        peer: authenticated::Mailbox<peer::Message>,
+    ) {
         self.sender
             .send(Message::Connect {
                 public_key,

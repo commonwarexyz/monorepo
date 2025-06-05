@@ -1,8 +1,11 @@
-use super::{Config, Error, Mailbox, Message, Relay};
-use crate::authenticated::lookup::{
-    actors::tracker::{self, Metadata, Reservation},
-    channels::Channels,
-    metrics, types,
+use super::{Config, Error, Message, Relay};
+use crate::authenticated::{
+    lookup::{
+        actors::tracker::{self, Metadata, Reservation},
+        channels::Channels,
+        metrics, types,
+    },
+    Mailbox,
 };
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
@@ -22,7 +25,7 @@ use tracing::{debug, info};
 pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey> {
     context: E,
 
-    mailbox: Mailbox,
+    mailbox: Mailbox<Message>,
     control: mpsc::Receiver<Message>,
     high: mpsc::Receiver<types::Data>,
     low: mpsc::Receiver<types::Data>,
