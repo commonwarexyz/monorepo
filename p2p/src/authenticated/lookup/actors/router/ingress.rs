@@ -1,7 +1,7 @@
 use crate::{
     authenticated::{
         lookup::{channels::Channels, types},
-        Relay,
+        Mailbox, Relay,
     },
     Channel, Recipients,
 };
@@ -32,23 +32,11 @@ pub enum Message<P: PublicKey> {
     },
 }
 
-#[derive(Clone)]
-/// Sends messages to a router to notify it about peer availability.
-pub struct Mailbox<P: PublicKey> {
-    sender: mpsc::Sender<Message<P>>,
-}
-
-impl<P: PublicKey> Mailbox<P> {
-    /// Returns a new [Mailbox] with the given sender.
-    /// (The router has the corresponding receiver.)
-    pub fn new(sender: mpsc::Sender<Message<P>>) -> Self {
-        Self { sender }
-    }
-
+impl<P: PublicKey> Mailbox<Message<P>> {
     /// Notify the router that a peer is ready to communicate.
     pub async fn ready(&mut self, peer: P, relay: Relay<types::Data>) -> Channels<P> {
         let (response, receiver) = oneshot::channel();
-        self.sender
+        self.0
             .send(Message::Ready {
                 peer,
                 relay,
@@ -61,7 +49,7 @@ impl<P: PublicKey> Mailbox<P> {
 
     /// Notify the router that a peer is no longer available.
     pub async fn release(&mut self, peer: P) {
-        self.sender.send(Message::Release { peer }).await.unwrap();
+        self.0.send(Message::Release { peer }).await.unwrap();
     }
 }
 
