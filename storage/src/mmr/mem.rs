@@ -18,10 +18,11 @@ use crate::mmr::{
 };
 use commonware_cryptography::Hasher as CHasher;
 use rayon::{
-    iter::{IntoParallelRefIterator, ParallelIterator},
+    iter::{IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator},
     ThreadPool,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
+use tracing::warn;
 
 /// Implementation of `Mmr`.
 ///
@@ -335,7 +336,9 @@ impl<H: CHasher> Mmr<H> {
             return Err(ElementPruned(pos));
         }
 
-        // Update the digest of the leaf node.
+        // Update the digest of the leaf node. TODO: we compute the leaf digest and path here. It
+        // might be more efficient to delay this work until sync, but that would require we retain a
+        //
         let digest = hasher.leaf_digest(pos, element).await?;
         let index = self.pos_to_index(pos);
         self.nodes[index] = digest;
@@ -406,6 +409,7 @@ impl<H: CHasher> Mmr<H> {
         }
         let mut nodes: Vec<(u64, u32)> = self.dirty_nodes.iter().copied().collect();
         self.dirty_nodes.clear();
+        // Sort by increasing height.
         nodes.sort_by(|a, b| a.1.cmp(&b.1));
 
         let mut same_height = Vec::new();
@@ -477,40 +481,133 @@ impl<H: CHasher> Mmr<H> {
         pool: &mut ThreadPool,
         min_nodes_to_parallelize: usize,
     ) {
-        if self.dirty_nodes.len() < min_nodes_to_parallelize {
+        assert_ne!(min_nodes_to_parallelize, 0);
+        if self.dirty_nodes.len() < min_nodes_to_parallelize * 2 {
             self.sync(hasher);
             return;
         }
+
+        let num_threads = pool.current_num_threads();
         let mut nodes: Vec<(u64, u32)> = self.dirty_nodes.iter().copied().collect();
         self.dirty_nodes.clear();
-        nodes.sort_by(|a, b| a.1.cmp(&b.1));
 
-        let mut same_height = Vec::new();
-        let mut current_height = 1;
-        for (i, (pos, height)) in nodes.iter().enumerate() {
-            if *height == current_height {
-                same_height.push(*pos);
+        // Find a good height cap that will allow us to get a well-balanced partitioning of
+        // subtrees.
+        nodes.sort_by(|a, b| b.1.cmp(&a.1)); // decreasing height
+        let mut height_cap = 0;
+        let mut count_at_height = 0;
+        for (_, height) in nodes.iter() {
+            if *height != height_cap {
+                // Multiplying by ~3 ensures we have small enough subtrees to efficiently "bin pack"
+                if count_at_height >= num_threads * 3 {
+                    break;
+                }
+                count_at_height = 1;
+                height_cap = *height;
                 continue;
             }
-            if same_height.len() < min_nodes_to_parallelize {
-                self.dirty_nodes = nodes[i - same_height.len()..].iter().copied().collect();
-                self.sync(hasher);
-                return;
+            count_at_height += 1;
+        }
+        let max_height = height_cap;
+
+        // Pretend we have one extra core to make sure the last job is not too small. If we end up
+        // with one extra job, we'll just lump that work in with the final job.
+        let mut target_job_size = nodes.len() / (num_threads + 1);
+        if target_job_size < min_nodes_to_parallelize {
+            target_job_size = min_nodes_to_parallelize;
+        }
+
+        // Sort nodes by increasing position.
+        nodes.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // The final job computes the digests at the very top of the tree, and must take place after
+        // all other jobs complete.
+        let mut final_job = Vec::<(u64, u32)>::with_capacity(num_threads * 2);
+        let mut jobs = Vec::<Vec<(u64, u32)>>::new();
+        let mut current_job = Vec::<(u64, u32)>::with_capacity(target_job_size * 2);
+        for (pos, height) in nodes.iter() {
+            if *height >= max_height {
+                final_job.push((*pos, *height));
+                if current_job.len() >= target_job_size {
+                    jobs.push(current_job.clone());
+                    current_job.clear();
+                }
+                continue;
             }
-            self.update_node_digests(pool, &same_height, current_height);
-            same_height.clear();
-            current_height += 1;
-            same_height.push(*pos);
+            current_job.push((*pos, *height));
         }
-        if same_height.len() < min_nodes_to_parallelize {
-            self.dirty_nodes = nodes[nodes.len() - same_height.len()..]
-                .iter()
-                .copied()
+        if !current_job.is_empty() {
+            if jobs.len() < pool.current_num_threads() {
+                jobs.push(current_job);
+            } else {
+                // Just handle leftover nodes with the final job.
+                final_job.extend(current_job);
+            }
+        }
+        if jobs.len() != pool.current_num_threads() {
+            // TODO: We could try subtree partitioning again after decrementing max_height when this
+            // happens.
+            warn!(
+                jobs = jobs.len(),
+                threads = pool.current_num_threads(),
+                nodes = nodes.len(),
+                max_height,
+                "number of jobs different than number of threads",
+            );
+        }
+
+        // Process jobs (except final one) in parallel.
+        pool.install(|| {
+            let computed_digests: Vec<HashMap<u64, H::Digest>> = jobs
+                .par_iter_mut()
+                .map_init(
+                    || H::new(),
+                    |hasher, nodes| {
+                        nodes.sort_by(|a, b| a.1.cmp(&b.1));
+                        // TODO: allow for non-Standard hashing.
+                        let mut hasher = Standard::new(hasher);
+                        let mut results = HashMap::with_capacity(nodes.len());
+                        for (pos, height) in nodes {
+                            let left = *pos - (1 << *height);
+                            let right = *pos - 1;
+                            if *height == 1 {
+                                // For first-level parents, children digests are in the MMR.
+                                let digest = hasher.node_digest(
+                                    *pos,
+                                    self.get_node_unchecked(left),
+                                    self.get_node_unchecked(right),
+                                );
+                                results.insert(*pos, digest);
+                                continue;
+                            }
+                            // Otherwise children digests are potentially in the results map.
+                            let digest = hasher.node_digest(
+                                *pos,
+                                results
+                                    .get(&left)
+                                    .unwrap_or_else(|| self.get_node_unchecked(left)),
+                                results
+                                    .get(&right)
+                                    .unwrap_or_else(|| self.get_node_unchecked(right)),
+                            );
+                            results.insert(*pos, digest);
+                        }
+                        results
+                    },
+                )
                 .collect();
-            self.sync(hasher);
-            return;
-        }
-        self.update_node_digests(pool, &same_height, current_height);
+
+            for job_results in computed_digests {
+                for (pos, digest) in job_results {
+                    let index = self.pos_to_index(pos);
+                    self.nodes[index] = digest;
+                }
+            }
+        });
+
+        // Now process the final job, which must be done after all other jobs complete.
+        self.dirty_nodes = final_job.into_iter().collect();
+        self.sync(hasher);
     }
 
     /// Computes the root of the MMR.

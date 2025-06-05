@@ -12,16 +12,22 @@ use std::time::Instant;
 enum SyncType {
     NoBatching,
     Batched,
-    Parallel,
+    ParallelByLevel,
+    ParallelBySubtree,
 }
 //
 /// Benchmark the performance of randomly updating leaves in an MMR.
 fn bench_update(c: &mut Criterion) {
     let cfg = Config::default();
     let runner = tokio::Runner::new(cfg);
-    for updates in [100_000, 1_000_000] {
+    for updates in [1_000_000, 100_000] {
         for leaves in [10_000u64, 100_000, 1_000_000, 5_000_000, 10_000_000] {
-            for sync_type in [SyncType::NoBatching, SyncType::Batched, SyncType::Parallel] {
+            //    for leaves in [10_000_000, 5_000_000, 1_000_000] {
+            for sync_type in [
+                /*SyncType::NoBatching, SyncType::Batched,*/
+                SyncType::ParallelByLevel,
+                SyncType::ParallelBySubtree,
+            ] {
                 c.bench_function(
                     &format!(
                         "{}/updates={} leaves={} sync_type={:?}",
@@ -47,7 +53,8 @@ fn bench_update(c: &mut Criterion) {
                                 leaf_positions.push(pos);
                             }
                             let ctx = context::get::<commonware_runtime::tokio::Context>();
-                            let mut pool = commonware_runtime::create_pool(ctx.clone(), 8).unwrap();
+                            let mut pool =
+                                commonware_runtime::create_pool(ctx.clone(), 12).unwrap();
 
                             // Randomly update leaves -- this is what we are benchmarking.
                             let start = Instant::now();
@@ -66,10 +73,16 @@ fn bench_update(c: &mut Criterion) {
                                         .unwrap();
                                 }
                             }
-                            if sync_type == SyncType::Parallel {
-                                mmr.sync_parallel_by_level(&mut h, &mut pool, 100);
-                            } else {
-                                mmr.sync(&mut h);
+                            match sync_type {
+                                SyncType::ParallelByLevel => {
+                                    mmr.sync_parallel_by_level(&mut h, &mut pool, 100);
+                                }
+                                SyncType::ParallelBySubtree => {
+                                    mmr.sync_parallel_by_subtree(&mut h, &mut pool, 100);
+                                }
+                                _ => {
+                                    mmr.sync(&mut h);
+                                }
                             }
                             start.elapsed()
                         });

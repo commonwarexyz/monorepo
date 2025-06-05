@@ -65,7 +65,7 @@ pub async fn build_parallel_and_check_test_roots(
         let element = hasher.inner().finalize();
         mem_mmr.add_batched(&mut hasher, &element).await.unwrap();
     }
-    mem_mmr.sync_parallel_by_level(&mut hasher, pool, 20);
+    mem_mmr.sync_parallel_by_subtree(&mut hasher, pool, 20);
 
     assert_eq!(
         hex(&mem_mmr.root(&mut hasher)),
