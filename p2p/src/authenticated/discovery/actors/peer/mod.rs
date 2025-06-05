@@ -44,6 +44,4 @@ pub enum Error {
     MessageDropped,
     #[error("invalid channel")]
     InvalidChannel,
-    #[error("channel closed: {0}")]
-    ChannelClosed(u32),
 }

@@ -9,15 +9,17 @@ use futures::{
     SinkExt,
 };
 
+/// Messages that can be processed by the router.
 pub enum Message<P: PublicKey> {
+    /// Notify the router that a peer is ready to communicate.
     Ready {
         peer: P,
         relay: peer::Relay,
         channels: oneshot::Sender<Channels<P>>,
     },
-    Release {
-        peer: P,
-    },
+    /// Notify the router that a peer is no longer available.
+    Release { peer: P },
+    /// Send a message to one or more recipients.
     Content {
         recipients: Recipients<P>,
         channel: Channel,
@@ -28,15 +30,19 @@ pub enum Message<P: PublicKey> {
 }
 
 #[derive(Clone)]
+/// Sends messages to a router to notify it about peer availability.
 pub struct Mailbox<P: PublicKey> {
     sender: mpsc::Sender<Message<P>>,
 }
 
 impl<P: PublicKey> Mailbox<P> {
+    /// Returns a new [Mailbox] with the given sender.
+    /// (The router has the corresponding receiver.)
     pub fn new(sender: mpsc::Sender<Message<P>>) -> Self {
         Self { sender }
     }
 
+    /// Notify the router that a peer is ready to communicate.
     pub async fn ready(&mut self, peer: P, relay: peer::Relay) -> Channels<P> {
         let (response, receiver) = oneshot::channel();
         self.sender
@@ -50,21 +56,26 @@ impl<P: PublicKey> Mailbox<P> {
         receiver.await.unwrap()
     }
 
+    /// Notify the router that a peer is no longer available.
     pub async fn release(&mut self, peer: P) {
         self.sender.send(Message::Release { peer }).await.unwrap();
     }
 }
 
 #[derive(Clone, Debug)]
+/// Sends messages containing content to the router to send to peers.
 pub struct Messenger<P: PublicKey> {
     sender: mpsc::Sender<Message<P>>,
 }
 
 impl<P: PublicKey> Messenger<P> {
+    /// Returns a new [Messenger] with the given sender.
+    /// (The router has the corresponding receiver.)
     pub fn new(sender: mpsc::Sender<Message<P>>) -> Self {
         Self { sender }
     }
 
+    /// Sends a message to the given `recipients`.
     pub async fn content(
         &mut self,
         recipients: Recipients<P>,
