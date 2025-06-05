@@ -2,9 +2,12 @@ use super::{
     ingress::{Mailbox, Message},
     Config,
 };
-use crate::authenticated::discovery::{
-    actors::{peer, router, tracker},
-    metrics,
+use crate::authenticated::{
+    self,
+    discovery::{
+        actors::{peer, router::ingress, tracker},
+        metrics,
+    },
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
@@ -90,12 +93,16 @@ impl<
     pub fn start(
         mut self,
         tracker: tracker::Mailbox<E, C>,
-        router: router::Mailbox<C>,
+        router: authenticated::Mailbox<ingress::Message<C>>,
     ) -> Handle<()> {
         self.context.spawn_ref()(self.run(tracker, router))
     }
 
-    async fn run(mut self, tracker: tracker::Mailbox<E, C>, router: router::Mailbox<C>) {
+    async fn run(
+        mut self,
+        tracker: tracker::Mailbox<E, C>,
+        router: authenticated::Mailbox<ingress::Message<C>>,
+    ) {
         while let Some(msg) = self.receiver.next().await {
             match msg {
                 Message::Spawn {

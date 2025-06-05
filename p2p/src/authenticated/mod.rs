@@ -7,7 +7,7 @@ use thiserror::Error;
 
 // TODO danlaine: remove this and just use sender directly
 /// A mailbox for sending messages to an actor.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Mailbox<T>(mpsc::Sender<T>);
 
 impl<T> Mailbox<T> {
@@ -21,6 +21,12 @@ impl<T> Mailbox<T> {
     pub fn test() -> (Self, mpsc::Receiver<T>) {
         let (sender, receiver) = mpsc::channel(1);
         (Self(sender), receiver)
+    }
+}
+
+impl<T> Clone for Mailbox<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
     }
 }
 

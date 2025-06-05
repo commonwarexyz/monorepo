@@ -1,5 +1,5 @@
 use super::{
-    ingress::{Mailbox, Message, Messenger},
+    ingress::{Message, Messenger},
     Config,
 };
 use crate::{
@@ -27,7 +27,10 @@ pub struct Actor<E: Spawner + Metrics, P: PublicKey> {
 }
 
 impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<P>, Messenger<P>) {
+    pub fn new(
+        context: E,
+        cfg: Config,
+    ) -> (Self, authenticated::Mailbox<Message<P>>, Messenger<P>) {
         // Create mailbox
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
 
@@ -47,7 +50,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
                 connections: BTreeMap::new(),
                 messages_dropped,
             },
-            Mailbox::new(control_sender.clone()),
+            authenticated::Mailbox::new(control_sender.clone()),
             Messenger::new(control_sender),
         )
     }

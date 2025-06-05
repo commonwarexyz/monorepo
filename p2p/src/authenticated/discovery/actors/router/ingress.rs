@@ -30,23 +30,14 @@ pub enum Message<P: PublicKey> {
     },
 }
 
-#[derive(Clone)]
-pub struct Mailbox<P: PublicKey> {
-    sender: mpsc::Sender<Message<P>>,
-}
-
-impl<P: PublicKey> Mailbox<P> {
-    pub fn new(sender: mpsc::Sender<Message<P>>) -> Self {
-        Self { sender }
-    }
-
+impl<P: PublicKey> authenticated::Mailbox<Message<P>> {
     pub async fn ready(
         &mut self,
         peer: P,
         relay: authenticated::Relay<types::Data>,
     ) -> Channels<P> {
         let (response, receiver) = oneshot::channel();
-        self.sender
+        self.0
             .send(Message::Ready {
                 peer,
                 relay,
@@ -58,7 +49,7 @@ impl<P: PublicKey> Mailbox<P> {
     }
 
     pub async fn release(&mut self, peer: P) {
-        self.sender.send(Message::Release { peer }).await.unwrap();
+        self.0.send(Message::Release { peer }).await.unwrap();
     }
 }
 
