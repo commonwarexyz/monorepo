@@ -1,7 +1,4 @@
-use super::{
-    ingress::{Mailbox, Message},
-    Config,
-};
+use super::{ingress::Message, Config};
 use crate::authenticated::{
     self,
     discovery::{
@@ -48,7 +45,7 @@ impl<
         C: PublicKey,
     > Actor<E, Si, St, C>
 {
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<E, Si, St, C>) {
+    pub fn new(context: E, cfg: Config) -> (Self, authenticated::Mailbox<Message<E, Si, St, C>>) {
         let connections = Gauge::default();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
@@ -86,7 +83,7 @@ impl<
                 received_messages,
                 rate_limited,
             },
-            Mailbox::new(sender),
+            authenticated::Mailbox::new(sender),
         )
     }
 

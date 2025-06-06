@@ -1,13 +1,11 @@
-use super::{
-    ingress::{Mailbox, Message},
-    Config,
-};
+use super::{ingress::Message, Config};
 use crate::authenticated::{
     self,
     lookup::{
         actors::{peer, router::ingress, tracker},
         metrics,
     },
+    Mailbox,
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
@@ -42,7 +40,7 @@ impl<
         C: PublicKey,
     > Actor<E, Si, St, C>
 {
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<E, Si, St, C>) {
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<E, Si, St, C>>) {
         let connections = Gauge::default();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();

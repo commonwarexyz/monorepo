@@ -1,8 +1,8 @@
-use crate::authenticated::lookup::actors::tracker::Reservation;
+use crate::authenticated::{lookup::actors::tracker::Reservation, Mailbox};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Metrics, Sink, Spawner, Stream};
 use commonware_stream::public_key::Connection;
-use futures::{channel::mpsc, SinkExt};
+use futures::SinkExt;
 
 /// Messages that can be processed by the spawner [Actor](super::Actor).
 pub enum Message<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKey> {
@@ -17,21 +17,12 @@ pub enum Message<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKe
     },
 }
 
-/// Sends messages to the spawner [Actor](super::Actor).
-pub struct Mailbox<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKey> {
-    sender: mpsc::Sender<Message<E, Si, St, P>>,
-}
-
-impl<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKey> Mailbox<E, Si, St, P> {
-    /// Returns a new [Mailbox] with the given `sender`.
-    /// (The [Actor](super::Actor) has the corresponding receiver.)
-    pub fn new(sender: mpsc::Sender<Message<E, Si, St, P>>) -> Self {
-        Self { sender }
-    }
-
+impl<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKey>
+    Mailbox<Message<E, Si, St, P>>
+{
     /// Send a message to the [Actor](super::Actor) to spawn a new task for the given peer.
     pub async fn spawn(&mut self, connection: Connection<Si, St>, reservation: Reservation<E, P>) {
-        self.sender
+        self.0
             .send(Message::Spawn {
                 peer: reservation.metadata().public_key().clone(),
                 connection,
@@ -39,19 +30,5 @@ impl<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKey> Mailbox<E
             })
             .await
             .unwrap();
-    }
-}
-
-impl<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKey> Clone
-    for Mailbox<E, Si, St, P>
-{
-    /// Clone the mailbox.
-    ///
-    /// We manually implement `clone` because the auto-generated `derive` would
-    /// require the `E`, `C`, `Si`, and `St` types to be `Clone`.
-    fn clone(&self) -> Self {
-        Self {
-            sender: self.sender.clone(),
-        }
     }
 }
