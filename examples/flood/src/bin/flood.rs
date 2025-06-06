@@ -109,7 +109,7 @@ fn main() {
         }
 
         // Configure network
-        let mut p2p_cfg = authenticated::Config::aggressive(
+        let mut p2p_cfg = authenticated::discovery::Config::aggressive(
             key.clone(),
             &union(FLOOD_NAMESPACE, b"_P2P"),
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
@@ -121,7 +121,7 @@ fn main() {
 
         // Start p2p
         let (mut network, mut oracle) =
-            authenticated::Network::new(context.with_label("network"), p2p_cfg);
+            authenticated::discovery::Network::new(context.with_label("network"), p2p_cfg);
 
         // Provide authorized peers
         oracle.register(0, peer_keys.clone()).await;

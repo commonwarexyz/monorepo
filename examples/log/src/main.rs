@@ -50,7 +50,7 @@ mod gui;
 use clap::{value_parser, Arg, Command};
 use commonware_consensus::simplex;
 use commonware_cryptography::{ed25519, PrivateKeyExt as _, Sha256, Signer as _};
-use commonware_p2p::authenticated::{self, Network};
+use commonware_p2p::authenticated::{self, discovery::Network};
 use commonware_runtime::{tokio, Metrics, Runner};
 use commonware_utils::{union, NZU32};
 use governor::Quota;
@@ -141,7 +141,7 @@ fn main() {
     let executor = tokio::Runner::new(runtime_cfg.clone());
 
     // Configure network
-    let p2p_cfg = authenticated::Config::aggressive(
+    let p2p_cfg = authenticated::discovery::Config::aggressive(
         signer.clone(),
         &union(APPLICATION_NAMESPACE, b"_P2P"),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),

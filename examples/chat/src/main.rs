@@ -58,7 +58,8 @@ mod logger;
 use clap::{value_parser, Arg, Command};
 use commonware_cryptography::PrivateKeyExt as _;
 use commonware_cryptography::{ed25519, Signer as _};
-use commonware_p2p::authenticated::{self, Network};
+use commonware_p2p::authenticated;
+use commonware_p2p::authenticated::discovery::Network;
 use commonware_runtime::tokio;
 use commonware_runtime::Metrics;
 use commonware_runtime::Runner as _;
@@ -152,7 +153,7 @@ fn main() {
 
     // Configure network
     const MAX_MESSAGE_SIZE: usize = 1024; // 1 KB
-    let p2p_cfg = authenticated::Config::aggressive(
+    let p2p_cfg = authenticated::discovery::Config::aggressive(
         signer.clone(),
         APPLICATION_NAMESPACE,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),

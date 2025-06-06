@@ -83,7 +83,7 @@ use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
     PrivateKeyExt as _, Signer as _,
 };
-use commonware_p2p::authenticated::{self, Network};
+use commonware_p2p::authenticated::{self, discovery::Network};
 use commonware_runtime::{tokio, Metrics, Runner};
 use commonware_utils::{quorum, NZU32};
 use governor::Quota;
@@ -207,7 +207,7 @@ fn main() {
 
     // Configure network
     const MAX_MESSAGE_SIZE: usize = 1024 * 1024; // 1 MB
-    let p2p_cfg = authenticated::Config::aggressive(
+    let p2p_cfg = authenticated::discovery::Config::aggressive(
         signer.clone(),
         APPLICATION_NAMESPACE,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
