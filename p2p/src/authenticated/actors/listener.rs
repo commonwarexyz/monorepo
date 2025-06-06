@@ -73,7 +73,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         sink: SinkOf<E>,
         stream: StreamOf<E>,
         mut tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
-        mut supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        mut supervisor: Mailbox<spawner::Message<E, C::PublicKey>>,
     ) {
         // Create span
         let span = debug_span!("listener", ?address);
@@ -132,7 +132,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
     pub fn start(
         self,
         tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
-        supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        supervisor: Mailbox<spawner::Message<E, C::PublicKey>>,
     ) -> Handle<()> {
         self.context
             .clone()
@@ -142,7 +142,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
     async fn run(
         self,
         tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
-        supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        supervisor: Mailbox<spawner::Message<E, C::PublicKey>>,
     ) {
         // Start listening for incoming connections
         let mut listener = self

@@ -9,9 +9,7 @@ use crate::authenticated::{
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select;
-use commonware_runtime::{
-    telemetry::traces::status, Clock, Handle, Metrics, Network, SinkOf, Spawner, StreamOf,
-};
+use commonware_runtime::{telemetry::traces::status, Clock, Handle, Metrics, Network, Spawner};
 use commonware_stream::public_key::{Config as StreamConfig, Connection};
 use commonware_utils::SystemTimeExt;
 use governor::clock::Clock as GClock;
@@ -79,7 +77,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
     async fn dial_peer(
         &mut self,
         reservation: Reservation<E, C::PublicKey>,
-        supervisor: &mut Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        supervisor: &mut Mailbox<spawner::Message<E, C::PublicKey>>,
     ) {
         // Extract metadata from the reservation
         let Metadata::Dialer(peer, address) = reservation.metadata().clone() else {
@@ -139,7 +137,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
     pub fn start(
         self,
         tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
-        supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        supervisor: Mailbox<spawner::Message<E, C::PublicKey>>,
     ) -> Handle<()> {
         self.context
             .clone()
@@ -149,7 +147,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
     async fn run(
         mut self,
         mut tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
-        mut supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        mut supervisor: Mailbox<spawner::Message<E, C::PublicKey>>,
     ) {
         let mut dial_deadline = self.context.current();
         let mut query_deadline = self.context.current();
