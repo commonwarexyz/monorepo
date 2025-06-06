@@ -127,7 +127,11 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
             let dialer = matches!(self.reservation.metadata(), Metadata::Dialer(..));
             move |context| async move {
                 // Allow tracker to initialize the peer
-                tracker.connect(peer.clone(), dialer, mailbox.clone()).await;
+                tracker.send(tracker::Message::Connect {
+                    public_key: peer.clone(),
+                    dialer,
+                    peer: mailbox.clone(),
+                }).await.unwrap();
 
                 // Set the initial deadline to now to start gossiping immediately
                 let mut deadline = context.current();
@@ -137,7 +141,10 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                     select! {
                         _ = context.sleep_until(deadline) => {
                             // Get latest bitset from tracker (also used as ping)
-                            tracker.construct(peer.clone(), mailbox.clone()).await;
+                            tracker.send(tracker::Message::Construct {
+                                public_key: peer.clone(),
+                                peer: mailbox.clone(),
+                            }).await.unwrap();
 
                             // Reset ticker
                             deadline = context.current() + self.gossip_bit_vec_frequency;
@@ -212,7 +219,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                             }
 
                             // Gather useful peers
-                            tracker.bit_vec(bit_vec, self.mailbox.clone()).await;
+                            tracker.send(tracker::Message::BitVec { bit_vec, peer: self.mailbox.clone() }).await.unwrap();
                         }
                         types::Payload::Peers(peers) => {
                             self.received_messages
@@ -229,7 +236,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                             }
 
                             // Send peers to tracker
-                            tracker.peers(peers, self.mailbox.clone()).await;
+                            tracker.send(tracker::Message::Peers { peers, peer: self.mailbox.clone() }).await.unwrap();
                         }
                         types::Payload::Data(data) => {
                             self.received_messages

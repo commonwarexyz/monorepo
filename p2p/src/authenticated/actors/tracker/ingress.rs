@@ -102,72 +102,46 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
     },
 }
 
-impl<E: Spawner + Metrics, C: PublicKey> Mailbox<Message<E, C>> {
-    /// Send a `Connect` message to the tracker.
-    pub async fn connect(&mut self, public_key: C, dialer: bool, peer: Mailbox<peer::Message<C>>) {
-        self.send(Message::Connect {
-            public_key,
-            dialer,
-            peer,
-        })
-        .await
-        .unwrap();
-    }
-
-    /// Send a `Construct` message to the tracker.
-    pub async fn construct(&mut self, public_key: C, peer: Mailbox<peer::Message<C>>) {
-        self.send(Message::Construct { public_key, peer })
-            .await
-            .unwrap();
-    }
-
-    /// Send a `BitVec` message to the tracker.
-    pub async fn bit_vec(&mut self, bit_vec: types::BitVec, peer: Mailbox<peer::Message<C>>) {
-        self.send(Message::BitVec { bit_vec, peer }).await.unwrap();
-    }
-
-    /// Send a `Peers` message to the tracker.
-    pub async fn peers(&mut self, peers: Vec<types::PeerInfo<C>>, peer: Mailbox<peer::Message<C>>) {
-        self.send(Message::Peers { peers, peer }).await.unwrap();
-    }
-
-    /// Send a `Block` message to the tracker.
-    pub async fn dialable(&mut self) -> Vec<C> {
-        let (sender, receiver) = oneshot::channel();
-        self.send(Message::Dialable { responder: sender })
-            .await
-            .unwrap();
-        receiver.await.unwrap()
-    }
-
-    /// Send a `Dial` message to the tracker.
-    pub async fn dial(&mut self, public_key: C) -> Option<Reservation<E, C>> {
-        let (tx, rx) = oneshot::channel();
-        self.send(Message::Dial {
-            public_key,
-            reservation: tx,
-        })
-        .await
-        .unwrap();
-        rx.await.unwrap()
-    }
-
-    /// Send a `Listen` message to the tracker.
-    pub async fn listen(&mut self, public_key: C) -> Option<Reservation<E, C>> {
-        let (tx, rx) = oneshot::channel();
-        self.send(Message::Listen {
-            public_key,
-            reservation: tx,
-        })
-        .await
-        .unwrap();
-        rx.await.unwrap()
-    }
+async fn send_with_oneshot<T, R, F>(mailbox: &mut Mailbox<T>, make_msg: F) -> R
+where
+    F: FnOnce(oneshot::Sender<R>) -> T,
+{
+    let (tx, rx) = oneshot::channel();
+    mailbox.send(make_msg(tx)).await.unwrap();
+    rx.await.unwrap()
 }
 
-/// Mechanism to register authorized peers.
-///
-/// Peers that are not explicitly authorized
+/// Send a `Block` message to the tracker.
+pub async fn dialable<E: Spawner + Metrics, C: PublicKey>(
+    sender: &mut Mailbox<Message<E, C>>,
+) -> Vec<C> {
+    send_with_oneshot(sender, |responder| Message::Dialable { responder }).await
+}
+
+/// Send a `Dial` message to the tracker.
+pub async fn dial<E: Spawner + Metrics, C: PublicKey>(
+    mailbox: &mut Mailbox<Message<E, C>>,
+    public_key: C,
+) -> Option<Reservation<E, C>> {
+    send_with_oneshot(mailbox, |responder| Message::Dial {
+        public_key,
+        reservation: responder,
+    })
+    .await
+}
+
+/// Send a `Listen` message to the tracker.
+pub async fn listen<E: Spawner + Metrics, C: PublicKey>(
+    mailbox: &mut Mailbox<Message<E, C>>,
+    public_key: C,
+) -> Option<Reservation<E, C>> {
+    send_with_oneshot(mailbox, |responder| Message::Listen {
+        public_key,
+        reservation: responder,
+    })
+    .await
+}
+
 /// will be blocked by commonware-p2p.
 #[derive(Clone)]
 pub struct Oracle<E: Spawner + Metrics, C: PublicKey> {
