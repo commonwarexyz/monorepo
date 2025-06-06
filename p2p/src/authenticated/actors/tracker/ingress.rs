@@ -103,17 +103,6 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
 }
 
 impl<E: Spawner + Metrics, C: PublicKey> Mailbox<Message<E, C>> {
-    /// Send a `Connect` message to the tracker.
-    pub async fn connect(&mut self, public_key: C, dialer: bool, peer: Mailbox<peer::Message<C>>) {
-        self.send(Message::Connect {
-            public_key,
-            dialer,
-            peer,
-        })
-        .await
-        .unwrap();
-    }
-
     /// Send a `Construct` message to the tracker.
     pub async fn construct(&mut self, public_key: C, peer: Mailbox<peer::Message<C>>) {
         self.send(Message::Construct { public_key, peer })

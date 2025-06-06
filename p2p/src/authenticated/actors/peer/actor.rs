@@ -127,7 +127,11 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
             let dialer = matches!(self.reservation.metadata(), Metadata::Dialer(..));
             move |context| async move {
                 // Allow tracker to initialize the peer
-                tracker.connect(peer.clone(), dialer, mailbox.clone()).await;
+                tracker.send(tracker::Message::Connect {
+                    public_key: peer.clone(),
+                    dialer,
+                    peer: mailbox.clone(),
+                }).await.unwrap();
 
                 // Set the initial deadline to now to start gossiping immediately
                 let mut deadline = context.current();

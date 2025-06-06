@@ -339,8 +339,13 @@ mod tests {
             .expect("reservation failed");
         let dialer = false;
         mailbox
-            .connect(peer.clone(), dialer, peer_mailbox.clone())
-            .await;
+            .send(tracker::Message::Connect {
+                public_key: peer.clone(),
+                dialer,
+                peer: peer_mailbox.clone(),
+            })
+            .await
+            .unwrap();
         let response = peer_receiver
             .next()
             .await
@@ -419,15 +424,27 @@ mod tests {
 
             // Connect as listener
             mailbox
-                .connect(unauth_pk.clone(), false, peer_mailbox.clone())
-                .await;
+                .send(tracker::Message::Connect {
+                    public_key: unauth_pk.clone(),
+                    dialer: false,
+                    peer: peer_mailbox.clone(),
+                })
+                .await
+                .unwrap();
             assert!(
                 matches!(peer_receiver.next().await, Some(peer::Message::Kill)),
                 "Unauthorized peer should be killed on Connect"
             );
 
             // Connect as dialer
-            mailbox.connect(unauth_pk, true, peer_mailbox).await;
+            mailbox
+                .send(tracker::Message::Connect {
+                    public_key: unauth_pk.clone(),
+                    dialer: true,
+                    peer: peer_mailbox,
+                })
+                .await
+                .unwrap();
             assert!(
                 matches!(peer_receiver.next().await, Some(peer::Message::Kill)),
                 "Unauthorized peer should be killed on Connect"
@@ -459,8 +476,13 @@ mod tests {
 
             let _res = mailbox.listen(auth_pk.clone()).await.unwrap();
             mailbox
-                .connect(auth_pk.clone(), false, peer_mailbox.clone())
-                .await;
+                .send(tracker::Message::Connect {
+                    public_key: auth_pk.clone(),
+                    dialer: false,
+                    peer: peer_mailbox.clone(),
+                })
+                .await
+                .unwrap();
 
             match peer_receiver.next().await {
                 Some(peer::Message::Peers(infos)) => {
