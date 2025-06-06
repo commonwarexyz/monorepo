@@ -103,23 +103,6 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
 }
 
 impl<E: Spawner + Metrics, C: PublicKey> Mailbox<Message<E, C>> {
-    /// Send a `Construct` message to the tracker.
-    pub async fn construct(&mut self, public_key: C, peer: Mailbox<peer::Message<C>>) {
-        self.send(Message::Construct { public_key, peer })
-            .await
-            .unwrap();
-    }
-
-    /// Send a `BitVec` message to the tracker.
-    pub async fn bit_vec(&mut self, bit_vec: types::BitVec, peer: Mailbox<peer::Message<C>>) {
-        self.send(Message::BitVec { bit_vec, peer }).await.unwrap();
-    }
-
-    /// Send a `Peers` message to the tracker.
-    pub async fn peers(&mut self, peers: Vec<types::PeerInfo<C>>, peer: Mailbox<peer::Message<C>>) {
-        self.send(Message::Peers { peers, peer }).await.unwrap();
-    }
-
     /// Send a `Block` message to the tracker.
     pub async fn dialable(&mut self) -> Vec<C> {
         let (sender, receiver) = oneshot::channel();
