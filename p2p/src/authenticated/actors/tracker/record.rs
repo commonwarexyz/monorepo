@@ -54,9 +54,6 @@ pub struct Record<C: PublicKey> {
 
     /// Number of peer sets this peer is part of.
     sets: usize,
-
-    /// If `true`, the record should persist even if the peer is not part of any peer sets.
-    persistent: bool,
 }
 
 impl<C: PublicKey> Record<C> {
@@ -68,7 +65,6 @@ impl<C: PublicKey> Record<C> {
             address: Address::Unknown,
             status: Status::Inert,
             sets: 0,
-            persistent: false,
         }
     }
 
@@ -78,7 +74,6 @@ impl<C: PublicKey> Record<C> {
             address: Address::Myself(info),
             status: Status::Inert,
             sets: 0,
-            persistent: true,
         }
     }
 
@@ -88,7 +83,6 @@ impl<C: PublicKey> Record<C> {
             address: Address::Bootstrapper(socket),
             status: Status::Inert,
             sets: 0,
-            persistent: true,
         }
     }
 
@@ -134,7 +128,6 @@ impl<C: PublicKey> Record<C> {
             return false;
         }
         self.address = Address::Blocked;
-        self.persistent = false;
         true
     }
 
@@ -274,7 +267,7 @@ impl<C: PublicKey> Record<C> {
 
     /// Returns `true` if the record can safely be deleted.
     pub fn deletable(&self) -> bool {
-        self.sets == 0 && !self.persistent && matches!(self.status, Status::Inert)
+        self.sets == 0 && !self.persistent() && matches!(self.status, Status::Inert)
     }
 
     /// Returns `true` if the record is allowed to be used for connection.
@@ -282,9 +275,13 @@ impl<C: PublicKey> Record<C> {
         match self.address {
             Address::Blocked | Address::Myself(_) => false,
             Address::Bootstrapper(_) | Address::Unknown | Address::Discovered(_, _) => {
-                self.sets > 0 || self.persistent
+                self.sets > 0 || self.persistent()
             }
         }
+    }
+
+    fn persistent(&self) -> bool {
+        matches!(self.address, Address::Myself(_) | Address::Bootstrapper(_))
     }
 }
 #[cfg(test)]
@@ -347,7 +344,7 @@ mod tests {
         assert!(matches!(record.address, Address::Unknown));
         assert_eq!(record.status, Status::Inert);
         assert_eq!(record.sets, 0);
-        assert!(!record.persistent);
+        assert!(!record.persistent());
         assert_eq!(record.socket(), None);
         assert!(record.sharable().is_none());
         assert!(!record.blocked());
@@ -366,7 +363,7 @@ mod tests {
         );
         assert_eq!(record.status, Status::Inert);
         assert_eq!(record.sets, 0);
-        assert!(record.persistent);
+        assert!(record.persistent());
         assert_eq!(record.socket(), Some(my_info.socket),);
         assert!(compare_optional_peer_info(
             record.sharable().as_ref(),
@@ -386,7 +383,7 @@ mod tests {
         assert!(matches!(record.address, Address::Bootstrapper(s) if s == socket));
         assert_eq!(record.status, Status::Inert);
         assert_eq!(record.sets, 0);
-        assert!(record.persistent);
+        assert!(record.persistent());
         assert_eq!(record.socket(), Some(socket));
         assert!(record.sharable().is_none());
         assert!(!record.blocked());
@@ -409,7 +406,7 @@ mod tests {
             "Address should be Discovered with 0 failures"
         );
         assert!(record.sharable().is_none(), "Info not sharable yet");
-        assert!(!record.persistent);
+        assert!(!record.persistent());
     }
 
     #[test]
@@ -418,7 +415,7 @@ mod tests {
         let mut record = Record::<secp256r1::PublicKey>::bootstrapper(socket);
         let peer_info = create_peer_info::<secp256r1::PrivateKey>(2, socket, 1000);
 
-        assert!(record.persistent, "Should start as persistent");
+        assert!(record.persistent(), "Should start as persistent");
         assert!(record.update(peer_info.clone()));
         assert_eq!(record.socket(), Some(socket));
         assert!(
@@ -426,7 +423,7 @@ mod tests {
             "Address should be Discovered with 0 failures"
         );
         assert!(record.sharable().is_none());
-        assert!(record.persistent, "Should remain persistent after update");
+        assert!(record.persistent(), "Should remain persistent after update");
     }
 
     #[test]
@@ -568,40 +565,43 @@ mod tests {
 
         // Block an Unknown record
         let mut record_unknown = Record::<secp256r1::PublicKey>::unknown();
-        assert!(!record_unknown.persistent);
+        assert!(!record_unknown.persistent());
         assert!(record_unknown.block()); // Newly blocked
         assert!(record_unknown.blocked());
         assert!(matches!(record_unknown.address, Address::Blocked));
         assert_eq!(record_unknown.status, Status::Inert);
-        assert!(!record_unknown.persistent, "Blocking sets persistent=false");
+        assert!(
+            !record_unknown.persistent(),
+            "Blocking sets persistent=false"
+        );
         assert!(!record_unknown.block()); // Already blocked
 
         // Block a Bootstrapper record (initially persistent)
         let mut record_boot = Record::<secp256r1::PublicKey>::bootstrapper(test_socket());
-        assert!(record_boot.persistent);
+        assert!(record_boot.persistent());
         assert!(record_boot.block());
         assert!(record_boot.blocked());
         assert!(matches!(record_boot.address, Address::Blocked));
-        assert!(!record_boot.persistent, "Blocking sets persistent=false");
+        assert!(!record_boot.persistent(), "Blocking sets persistent=false");
 
         // Block a Discovered record (initially not persistent)
         let mut record_disc = Record::<secp256r1::PublicKey>::unknown();
         assert!(record_disc.update(sample_peer_info.clone()));
-        assert!(!record_disc.persistent);
+        assert!(!record_disc.persistent());
         assert!(record_disc.block());
         assert!(record_disc.blocked());
         assert!(matches!(record_disc.address, Address::Blocked));
-        assert!(!record_disc.persistent);
+        assert!(!record_disc.persistent());
 
         // Block a Discovered record that came from a Bootstrapper (initially persistent)
         let mut record_disc_from_boot = Record::<secp256r1::PublicKey>::bootstrapper(test_socket());
         assert!(record_disc_from_boot.update(sample_peer_info.clone()));
-        assert!(record_disc_from_boot.persistent);
+        assert!(record_disc_from_boot.persistent());
         assert!(record_disc_from_boot.block());
         assert!(record_disc_from_boot.blocked());
         assert!(matches!(record_disc_from_boot.address, Address::Blocked));
         assert!(
-            !record_disc_from_boot.persistent,
+            !record_disc_from_boot.persistent(),
             "Blocking sets persistent=false"
         );
 
@@ -883,10 +883,10 @@ mod tests {
 
         // Blocking makes a record non-persistent, but deletability still depends on sets/status
         let mut record_blocked = Record::<secp256r1::PublicKey>::bootstrapper(test_socket());
-        assert!(record_blocked.persistent);
+        assert!(record_blocked.persistent());
         record_blocked.increment(); // sets = 1
         assert!(record_blocked.block());
-        assert!(!record_blocked.persistent);
+        assert!(!record_blocked.persistent());
         assert!(!record_blocked.deletable()); // sets = 1
         record_blocked.decrement(); // sets = 0
         assert!(record_blocked.deletable()); // sets = 0, !persistent, Inert
