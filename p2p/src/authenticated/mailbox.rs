@@ -1,6 +1,5 @@
 use futures::{channel::mpsc, SinkExt as _};
 
-// TODO danlaine: remove this and just use sender directly
 /// A mailbox wraps a sender for messages of type `T`.
 #[derive(Debug)]
 pub struct Mailbox<T>(mpsc::Sender<T>);
@@ -11,7 +10,7 @@ impl<T> Mailbox<T> {
         Self(sender)
     }
 
-    /// Returns a new mailbox and a receiver for testing purposes.
+    /// Returns a new mailbox and the corresponding receiver.
     /// The capacity of the channel is 1.
     #[cfg(test)]
     pub fn test() -> (Self, mpsc::Receiver<T>) {
