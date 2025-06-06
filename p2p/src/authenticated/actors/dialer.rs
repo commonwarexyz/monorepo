@@ -153,7 +153,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
 
     async fn run(
         mut self,
-        mut tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
+        mut tracker_mailbox: Mailbox<tracker::Message<E, C::PublicKey>>,
         mut supervisor: Mailbox<spawner::Message<E, C::PublicKey>>,
     ) {
         let mut dial_deadline = self.context.current();
@@ -171,7 +171,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
                     // If a peer is reserved, attempt to dial it.
                     while let Some(peer) = self.queue.pop() {
                         // Attempt to reserve peer.
-                        let Some(reservation) = tracker.dial(peer).await else {
+                        let Some(reservation) = tracker::dial(&mut tracker_mailbox, peer).await else {
                             continue;
                         };
                         self.dial_peer(reservation, &mut supervisor).await;
@@ -188,7 +188,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
                     if self.queue.is_empty() {
                         // Query the tracker for dialable peers and shuffle the list to prevent
                         // starvation.
-                        self.queue = tracker.dialable().await;
+                        self.queue = tracker::dialable(&mut tracker_mailbox).await;
                         self.queue.shuffle(&mut self.context);
                     }
                 }

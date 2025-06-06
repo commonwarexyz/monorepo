@@ -333,8 +333,7 @@ mod tests {
         peer_mailbox: &Mailbox<peer::Message<PublicKey>>,
         peer_receiver: &mut mpsc::Receiver<peer::Message<PublicKey>>,
     ) -> tracker::Reservation<Context, PublicKey> {
-        let res = mailbox
-            .listen(peer.clone())
+        let res = tracker::listen(mailbox, peer.clone())
             .await
             .expect("reservation failed");
         let dialer = false;
@@ -408,7 +407,7 @@ mod tests {
                 .collect();
             oracle.register(0, too_many_peers).await;
             // Ensure the message is processed causing the panic
-            let _ = mailbox.dialable().await;
+            let _ = tracker::dialable(&mut mailbox).await;
         });
     }
 
@@ -474,7 +473,9 @@ mod tests {
 
             let (peer_mailbox, mut peer_receiver) = Mailbox::test();
 
-            let _res = mailbox.listen(auth_pk.clone()).await.unwrap();
+            let _res = tracker::listen(&mut mailbox, auth_pk.clone())
+                .await
+                .unwrap();
             mailbox
                 .send(tracker::Message::Connect {
                     public_key: auth_pk.clone(),
@@ -659,7 +660,7 @@ mod tests {
                 Some(peer::Message::Kill)
             ));
 
-            let dialable_peers = mailbox.dialable().await;
+            let dialable_peers = tracker::dialable(&mut mailbox).await;
             assert!(!dialable_peers.iter().any(|peer| peer == &pk1));
         });
     }
@@ -912,22 +913,22 @@ mod tests {
 
             let (_peer_signer, peer_pk) = new_signer_and_pk(1);
 
-            let reservation = mailbox.listen(peer_pk.clone()).await;
+            let reservation = tracker::listen(&mut mailbox, peer_pk.clone()).await;
             assert!(reservation.is_none());
 
             oracle.register(0, vec![peer_pk.clone()]).await;
             context.sleep(Duration::from_millis(10)).await; // Allow register to process
 
-            let reservation = mailbox.listen(peer_pk.clone()).await;
+            let reservation = tracker::listen(&mut mailbox, peer_pk.clone()).await;
             assert!(reservation.is_some());
 
-            let failed_reservation = mailbox.listen(peer_pk.clone()).await;
+            let failed_reservation = tracker::listen(&mut mailbox, peer_pk.clone()).await;
             assert!(failed_reservation.is_none());
 
             drop(reservation.unwrap());
             context.sleep(Duration::from_millis(1_010)).await; // Allow release and rate limit to pass
 
-            let reservation_after_release = mailbox.listen(peer_pk.clone()).await;
+            let reservation_after_release = tracker::listen(&mut mailbox, peer_pk.clone()).await;
             assert!(reservation_after_release.is_some());
         });
     }
@@ -942,7 +943,7 @@ mod tests {
                 default_test_config(PrivateKey::from_seed(0), vec![(boot_pk.clone(), boot_addr)]);
             let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg_initial);
 
-            let dialable_peers = mailbox.dialable().await;
+            let dialable_peers = tracker::dialable(&mut mailbox).await;
             assert_eq!(dialable_peers.len(), 1);
             assert_eq!(dialable_peers[0], boot_pk);
         });
@@ -959,7 +960,7 @@ mod tests {
 
             let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg_initial);
 
-            let reservation = mailbox.dial(boot_pk.clone()).await;
+            let reservation = tracker::dial(&mut mailbox, boot_pk.clone()).await;
             assert!(reservation.is_some());
             if let Some(res) = reservation {
                 match res.metadata() {
@@ -972,7 +973,7 @@ mod tests {
             }
 
             let (_unknown_signer, unknown_pk) = new_signer_and_pk(100);
-            let no_reservation = mailbox.dial(unknown_pk).await;
+            let no_reservation = tracker::dial(&mut mailbox, unknown_pk).await;
             assert!(no_reservation.is_none());
         });
     }

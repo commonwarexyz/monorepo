@@ -72,7 +72,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         stream_cfg: StreamConfig<C>,
         sink: SinkOf<E>,
         stream: StreamOf<E>,
-        mut tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
+        mut tracker_mailbox: Mailbox<tracker::Message<E, C::PublicKey>>,
         mut supervisor: Mailbox<spawner::Message<E, C::PublicKey>>,
     ) {
         // Create span
@@ -99,8 +99,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         //
         // Reserve also checks if the peer is authorized.
         let peer = incoming.peer();
-        let Some(reservation) = tracker
-            .listen(peer.clone())
+        let Some(reservation) = tracker::listen(&mut tracker_mailbox, peer.clone())
             .instrument(debug_span!("reserve"))
             .await
         else {

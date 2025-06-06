@@ -102,39 +102,48 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
     },
 }
 
-impl<E: Spawner + Metrics, C: PublicKey> Mailbox<Message<E, C>> {
-    /// Send a `Block` message to the tracker.
-    pub async fn dialable(&mut self) -> Vec<C> {
-        let (sender, receiver) = oneshot::channel();
-        self.send(Message::Dialable { responder: sender })
-            .await
-            .unwrap();
-        receiver.await.unwrap()
-    }
+/// Send a `Block` message to the tracker.
+pub async fn dialable<E: Spawner + Metrics, C: PublicKey>(
+    sender: &mut Mailbox<Message<E, C>>,
+) -> Vec<C> {
+    let (tx, rx) = oneshot::channel();
+    sender
+        .send(Message::Dialable { responder: tx })
+        .await
+        .unwrap();
+    rx.await.unwrap()
+}
 
-    /// Send a `Dial` message to the tracker.
-    pub async fn dial(&mut self, public_key: C) -> Option<Reservation<E, C>> {
-        let (tx, rx) = oneshot::channel();
-        self.send(Message::Dial {
+/// Send a `Dial` message to the tracker.
+pub async fn dial<E: Spawner + Metrics, C: PublicKey>(
+    mailbox: &mut Mailbox<Message<E, C>>,
+    public_key: C,
+) -> Option<Reservation<E, C>> {
+    let (tx, rx) = oneshot::channel();
+    mailbox
+        .send(Message::Dial {
             public_key,
             reservation: tx,
         })
         .await
         .unwrap();
-        rx.await.unwrap()
-    }
+    rx.await.unwrap()
+}
 
-    /// Send a `Listen` message to the tracker.
-    pub async fn listen(&mut self, public_key: C) -> Option<Reservation<E, C>> {
-        let (tx, rx) = oneshot::channel();
-        self.send(Message::Listen {
+/// Send a `Listen` message to the tracker.
+pub async fn listen<E: Spawner + Metrics, C: PublicKey>(
+    mailbox: &mut Mailbox<Message<E, C>>,
+    public_key: C,
+) -> Option<Reservation<E, C>> {
+    let (tx, rx) = oneshot::channel();
+    mailbox
+        .send(Message::Listen {
             public_key,
             reservation: tx,
         })
         .await
         .unwrap();
-        rx.await.unwrap()
-    }
+    rx.await.unwrap()
 }
 
 /// Mechanism to register authorized peers.

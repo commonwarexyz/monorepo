@@ -18,7 +18,7 @@ mod reservation;
 mod set;
 
 pub use actor::Actor;
-pub use ingress::{Message, Oracle};
+pub use ingress::{dial, dialable, listen, Message, Oracle};
 pub use metadata::Metadata;
 pub use reservation::Reservation;
 
