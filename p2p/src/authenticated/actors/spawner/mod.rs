@@ -5,7 +5,7 @@ mod actor;
 mod ingress;
 
 pub use actor::Actor;
-pub use ingress::Mailbox;
+pub use ingress::Message;
 
 /// Configuration for the spawner [Actor].
 pub struct Config {

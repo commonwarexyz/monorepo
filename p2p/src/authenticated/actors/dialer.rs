@@ -1,6 +1,7 @@
 //! Actor responsible for dialing peers and establishing connections.
 
 use crate::authenticated::{
+    self,
     actors::{
         spawner,
         tracker::{self, Metadata, Reservation},
@@ -79,7 +80,9 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
     async fn dial_peer(
         &mut self,
         reservation: Reservation<E, C::PublicKey>,
-        supervisor: &mut spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
+        supervisor: &mut authenticated::Mailbox<
+            spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
+        >,
     ) {
         // Extract metadata from the reservation
         let Metadata::Dialer(peer, address) = reservation.metadata().clone() else {
@@ -139,7 +142,9 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
     pub fn start(
         self,
         tracker: tracker::Mailbox<E, C::PublicKey>,
-        supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
+        supervisor: authenticated::Mailbox<
+            spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
+        >,
     ) -> Handle<()> {
         self.context
             .clone()
@@ -149,7 +154,9 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
     async fn run(
         mut self,
         mut tracker: tracker::Mailbox<E, C::PublicKey>,
-        mut supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
+        mut supervisor: authenticated::Mailbox<
+            spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
+        >,
     ) {
         let mut dial_deadline = self.context.current();
         let mut query_deadline = self.context.current();
