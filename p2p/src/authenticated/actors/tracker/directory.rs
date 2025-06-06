@@ -79,8 +79,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     ) -> Self {
         // Create the list of peers and add the bootstrappers.
         let mut peers = HashMap::new();
-        for (peer, socket) in bootstrappers {
-            peers.insert(peer, Record::bootstrapper(socket));
+        for (peer, address) in bootstrappers {
+            peers.insert(peer, Record::bootstrapper(address));
         }
 
         // Add myself to the list of peers.
@@ -118,8 +118,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
             self.metrics.reserved.dec();
 
             // If the reservation was taken by the dialer, record the failure.
-            if let Metadata::Dialer(_, socket) = metadata {
-                record.dial_failure(socket);
+            if let Metadata::Dialer(_, address) = metadata {
+                record.dial_failure(address);
             }
 
             let want = record.want(self.dial_fail_limit);
@@ -224,7 +224,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         self.rate_limiter.shrink_to_fit();
     }
 
-    /// Returns a vector of dialable peers. That is, unconnected peers for which we have a socket.
+    /// Returns a vector of dialable peers. That is, unconnected peers for which we have an address.
     pub fn dialable(&self) -> Vec<C> {
         // Collect peers with known addresses
         let mut result: Vec<_> = self
@@ -241,8 +241,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     ///
     /// Returns `Some` on success, `None` otherwise.
     pub fn dial(&mut self, peer: &C) -> Option<Reservation<E, C>> {
-        let socket = self.peers.get(peer)?.socket()?;
-        self.reserve(Metadata::Dialer(peer.clone(), socket))
+        let address = self.peers.get(peer)?.address()?;
+        self.reserve(Metadata::Dialer(peer.clone(), address))
     }
 
     /// Attempt to reserve a peer for the listener.

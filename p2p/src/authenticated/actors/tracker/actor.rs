@@ -57,10 +57,10 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         cfg: Config<C>,
     ) -> (Self, Mailbox<E, C::PublicKey>, Oracle<E, C::PublicKey>) {
         // Sign my own information
-        let socket = cfg.address;
+        let address = cfg.address;
         let timestamp = context.current().epoch_millis();
         let ip_namespace = union(&cfg.namespace, NAMESPACE_SUFFIX_IP);
-        let myself = types::PeerInfo::sign(&cfg.crypto, &ip_namespace, socket, timestamp);
+        let myself = types::PeerInfo::sign(&cfg.crypto, &ip_namespace, address, timestamp);
 
         // General initialization
         let directory_cfg = directory::Config {
@@ -104,8 +104,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         let my_public_key = self.crypto.public_key();
         for info in infos {
             // Check if IP is allowed
-            if !self.allow_private_ips && !ip::is_global(info.socket.ip()) {
-                return Err(Error::PrivateIPsNotAllowed(info.socket.ip()));
+            if !self.allow_private_ips && !ip::is_global(info.address.ip()) {
+                return Err(Error::PrivateIPsNotAllowed(info.address.ip()));
             }
 
             // Check if peer is us
@@ -299,13 +299,13 @@ mod tests {
     fn new_peer_info(
         signer: &mut PrivateKey,
         ip_namespace: &[u8],
-        socket: SocketAddr,
+        address: SocketAddr,
         timestamp: u64,
         target_pk_override: Option<PublicKey>,
         make_sig_invalid: bool,
     ) -> PeerInfo<PublicKey> {
         let peer_info_pk = target_pk_override.unwrap_or_else(|| signer.public_key());
-        let mut signature = signer.sign(Some(ip_namespace), &(socket, timestamp).encode());
+        let mut signature = signer.sign(Some(ip_namespace), &(address, timestamp).encode());
 
         if make_sig_invalid && !signature.as_ref().is_empty() {
             let mut sig_bytes = signature.encode();
@@ -314,7 +314,7 @@ mod tests {
         }
 
         PeerInfo {
-            socket,
+            address,
             timestamp,
             public_key: peer_info_pk,
             signature,
@@ -463,7 +463,7 @@ mod tests {
                     assert_eq!(infos.len(), 1);
                     let tracker_info = &infos[0];
                     assert_eq!(tracker_info.public_key, tracker_pk);
-                    assert_eq!(tracker_info.socket, cfg.address);
+                    assert_eq!(tracker_info.address, cfg.address);
                     assert!(tracker_info.verify(&ip_namespace));
                 }
                 _ => panic!("Expected Peers message with tracker info"),
@@ -736,7 +736,7 @@ mod tests {
                     assert_eq!(received_peers_info.len(), 1);
                     let received_pk2_info = &received_peers_info[0];
                     assert_eq!(received_pk2_info.public_key, pk2);
-                    assert_eq!(received_pk2_info.socket, pk2_addr);
+                    assert_eq!(received_pk2_info.address, pk2_addr);
                     assert_eq!(received_pk2_info.timestamp, pk2_timestamp);
                 }
                 _ => panic!("pk1 did not receive expected PeerInfo for pk2",),
@@ -981,11 +981,11 @@ mod tests {
             } = setup_actor(context.clone(), cfg);
 
             let (mut s2, pk2) = new_signer_and_pk(2);
-            let private_socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080);
+            let private_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080);
             let info = new_peer_info(
                 &mut s2,
                 &ip_namespace,
-                private_socket,
+                private_address,
                 context.current().epoch_millis(),
                 Some(pk2),
                 false,
@@ -1198,7 +1198,7 @@ mod tests {
                 Some(peer::Message::Peers(infos)) => {
                     assert_eq!(infos.len(), 1, "Expected 1 PeerInfo (for peer1)");
                     assert_eq!(infos[0].public_key, peer1_pk);
-                    assert_eq!(infos[0].socket, peer1_addr);
+                    assert_eq!(infos[0].address, peer1_addr);
                 }
                 _ => panic!("Expected Peers message from tracker"),
             }

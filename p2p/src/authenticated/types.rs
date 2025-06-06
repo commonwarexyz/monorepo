@@ -140,22 +140,22 @@ impl Read for BitVec {
     }
 }
 
-/// A signed message from a peer attesting to its own socket address and public key at a given time.
+/// A signed message from a peer attesting to its own address and public key at a given time.
 ///
-/// This is used to share the peer's socket address and public key with other peers in a verified
+/// This is used to share the peer's address and public key with other peers in a verified
 /// manner.
 #[derive(Clone, Debug)]
 pub struct PeerInfo<C: PublicKey> {
-    /// The socket address of the peer.
-    pub socket: SocketAddr,
+    /// The address of the peer.
+    pub address: SocketAddr,
 
-    /// The timestamp (epoch milliseconds) at which the socket was signed over.
+    /// The timestamp (epoch milliseconds) at which the address was signed over.
     pub timestamp: u64,
 
     /// The public key of the peer.
     pub public_key: C,
 
-    /// The peer's signature over the socket and timestamp.
+    /// The peer's signature over the address and timestamp.
     pub signature: C::Signature,
 }
 
@@ -164,7 +164,7 @@ impl<C: PublicKey> PeerInfo<C> {
     pub fn verify(&self, namespace: &[u8]) -> bool {
         self.public_key.verify(
             Some(namespace),
-            &(self.socket, self.timestamp).encode(),
+            &(self.address, self.timestamp).encode(),
             &self.signature,
         )
     }
@@ -172,12 +172,12 @@ impl<C: PublicKey> PeerInfo<C> {
     pub fn sign<Sk: Signer<PublicKey = C, Signature = C::Signature>>(
         signer: &Sk,
         namespace: &[u8],
-        socket: SocketAddr,
+        address: SocketAddr,
         timestamp: u64,
     ) -> Self {
-        let signature = signer.sign(Some(namespace), &(socket, timestamp).encode());
+        let signature = signer.sign(Some(namespace), &(address, timestamp).encode());
         PeerInfo {
-            socket,
+            address,
             timestamp,
             public_key: signer.public_key(),
             signature,
@@ -187,7 +187,7 @@ impl<C: PublicKey> PeerInfo<C> {
 
 impl<C: PublicKey> EncodeSize for PeerInfo<C> {
     fn encode_size(&self) -> usize {
-        self.socket.encode_size()
+        self.address.encode_size()
             + UInt(self.timestamp).encode_size()
             + self.public_key.encode_size()
             + self.signature.encode_size()
@@ -196,7 +196,7 @@ impl<C: PublicKey> EncodeSize for PeerInfo<C> {
 
 impl<C: PublicKey> Write for PeerInfo<C> {
     fn write(&self, buf: &mut impl BufMut) {
-        self.socket.write(buf);
+        self.address.write(buf);
         UInt(self.timestamp).write(buf);
         self.public_key.write(buf);
         self.signature.write(buf);
@@ -207,12 +207,12 @@ impl<C: PublicKey> Read for PeerInfo<C> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let socket = SocketAddr::read(buf)?;
+        let address = SocketAddr::read(buf)?;
         let timestamp = UInt::read(buf)?.into();
         let public_key = C::read(buf)?;
         let signature = C::Signature::read(buf)?;
         Ok(PeerInfo {
-            socket,
+            address,
             timestamp,
             public_key,
             signature,
@@ -266,7 +266,7 @@ mod tests {
         let mut rng = rand::thread_rng();
         let c = secp256r1::PrivateKey::from_rng(&mut rng);
         PeerInfo {
-            socket: SocketAddr::from(([127, 0, 0, 1], 8080)),
+            address: SocketAddr::from(([127, 0, 0, 1], 8080)),
             timestamp: 1234567890,
             public_key: c.public_key(),
             signature: c.sign(None, &[1, 2, 3, 4, 5]),
@@ -292,7 +292,7 @@ mod tests {
         let encoded = original.encode();
         let decoded = Vec::<PeerInfo<secp256r1::PublicKey>>::decode_range(encoded, 3..=3).unwrap();
         for (original, decoded) in original.iter().zip(decoded.iter()) {
-            assert_eq!(original.socket, decoded.socket);
+            assert_eq!(original.address, decoded.address);
             assert_eq!(original.timestamp, decoded.timestamp);
             assert_eq!(original.public_key, decoded.public_key);
             assert_eq!(original.signature, decoded.signature);
@@ -350,7 +350,7 @@ mod tests {
             _ => panic!(),
         };
         for (a, b) in original.iter().zip(decoded.iter()) {
-            assert_eq!(a.socket, b.socket);
+            assert_eq!(a.address, b.address);
             assert_eq!(a.timestamp, b.timestamp);
             assert_eq!(a.public_key, b.public_key);
             assert_eq!(a.signature, b.signature);
