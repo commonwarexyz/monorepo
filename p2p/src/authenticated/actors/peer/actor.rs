@@ -104,7 +104,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         mut self,
         peer: C,
         connection: Connection<Si, St>,
-        mut tracker: tracker::Mailbox<E, C>,
+        mut tracker: Mailbox<tracker::Message<E, C>>,
         channels: Channels<C>,
     ) -> Error {
         // Instantiate rate limiters for each message type

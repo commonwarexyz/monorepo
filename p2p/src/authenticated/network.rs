@@ -32,7 +32,7 @@ pub struct Network<
 
     channels: Channels<C::PublicKey>,
     tracker: tracker::Actor<E, C>,
-    tracker_mailbox: tracker::Mailbox<E, C::PublicKey>,
+    tracker_mailbox: Mailbox<tracker::Message<E, C::PublicKey>>,
     router: router::Actor<E, C::PublicKey>,
     router_mailbox: Mailbox<router::Message<C::PublicKey>>,
 }

@@ -1,6 +1,5 @@
 use super::{ingress::Message, Config};
 use crate::authenticated::{
-    self,
     actors::{peer, router, tracker},
     metrics, Mailbox,
 };
@@ -87,16 +86,16 @@ impl<
 
     pub fn start(
         mut self,
-        tracker: tracker::Mailbox<E, C>,
-        router: authenticated::Mailbox<router::Message<C>>,
+        tracker: Mailbox<tracker::Message<E, C>>,
+        router: Mailbox<router::Message<C>>,
     ) -> Handle<()> {
         self.context.spawn_ref()(self.run(tracker, router))
     }
 
     async fn run(
         mut self,
-        tracker: tracker::Mailbox<E, C>,
-        router: authenticated::Mailbox<router::Message<C>>,
+        tracker: Mailbox<tracker::Message<E, C>>,
+        router: Mailbox<router::Message<C>>,
     ) {
         while let Some(msg) = self.receiver.next().await {
             match msg {
