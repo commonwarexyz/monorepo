@@ -3,7 +3,7 @@ use super::{
     ingress::{Message, Oracle},
     Config, Error,
 };
-use crate::authenticated::{ip, types, Mailbox};
+use crate::authenticated::{actors::peer, ip, types, Mailbox};
 use commonware_cryptography::Signer;
 use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::{union, SystemTimeExt};
@@ -158,7 +158,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 } => {
                     // Kill if peer is not authorized
                     if !self.directory.allowed(&public_key) {
-                        peer.kill().await;
+                        let _ = peer.send(peer::Message::Kill).await;
                         continue;
                     }
 
@@ -167,7 +167,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
                     // Proactively send our own info to the peer
                     let info = self.directory.info(&self.crypto.public_key()).unwrap();
-                    let _ = peer.peers(vec![info]).await;
+                    let _ = peer.send(peer::Message::Peers(vec![info])).await;
                 }
                 Message::Construct {
                     public_key,
@@ -175,19 +175,19 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 } => {
                     // Kill if peer is not authorized
                     if !self.directory.allowed(&public_key) {
-                        peer.kill().await;
+                        let _ = peer.send(peer::Message::Kill).await;
                         continue;
                     }
 
                     if let Some(bit_vec) = self.directory.get_random_bit_vec() {
-                        let _ = peer.bit_vec(bit_vec).await;
+                        let _ = peer.send(peer::Message::BitVec(bit_vec)).await;
                     } else {
                         debug!("no peer sets available");
                     };
                 }
                 Message::BitVec { bit_vec, mut peer } => {
                     let Some(mut infos) = self.directory.infos(bit_vec) else {
-                        peer.kill().await;
+                        let _ = peer.send(peer::Message::Kill).await;
                         continue;
                     };
 
@@ -200,13 +200,13 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
                     // Send the info
                     if !infos.is_empty() {
-                        peer.peers(infos).await;
+                        let _ = peer.send(peer::Message::Peers(infos)).await;
                     }
                 }
                 Message::Peers { peers, mut peer } => {
                     if let Err(e) = self.validate(&peers) {
                         debug!(error = ?e, "failed to handle peers");
-                        peer.kill().await;
+                        let _ = peer.send(peer::Message::Kill).await;
                         continue;
                     }
                     self.directory.update_peers(peers);

@@ -1,8 +1,5 @@
 use super::Error;
-use crate::{
-    authenticated::{types, Mailbox},
-    Channel,
-};
+use crate::{authenticated::types, Channel};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use futures::{channel::mpsc, SinkExt};
@@ -18,20 +15,6 @@ pub enum Message<C: PublicKey> {
 
     /// Kill the peer actor.
     Kill,
-}
-
-impl<C: PublicKey> Mailbox<Message<C>> {
-    pub async fn bit_vec(&mut self, bit_vec: types::BitVec) {
-        let _ = self.send(Message::BitVec(bit_vec)).await;
-    }
-
-    pub async fn peers(&mut self, peers: Vec<types::PeerInfo<C>>) {
-        let _ = self.send(Message::Peers(peers)).await;
-    }
-
-    pub async fn kill(&mut self) {
-        let _ = self.send(Message::Kill).await;
-    }
 }
 
 #[derive(Clone)]

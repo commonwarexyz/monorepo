@@ -5,7 +5,10 @@ use crate::authenticated::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Handle, Metrics, Network, Spawner};
-use futures::{channel::mpsc, StreamExt};
+use futures::{
+    channel::{mpsc, oneshot},
+    StreamExt,
+};
 use governor::{clock::ReasonablyRealtime, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
 use rand::{CryptoRng, Rng};
@@ -134,7 +137,18 @@ impl<
                             );
 
                             // Register peer with the router
-                            let channels = router.ready(peer.clone(), messenger).await;
+                            let channels = {
+                                let (response, receiver) = oneshot::channel();
+                                router
+                                    .send(router::Message::Ready {
+                                        peer: peer.clone(),
+                                        relay: messenger,
+                                        channels: response,
+                                    })
+                                    .await
+                                    .unwrap();
+                                receiver.await.unwrap()
+                            };
 
                             // Run peer
                             let e = actor.run(peer.clone(), connection, tracker, channels).await;
@@ -142,7 +156,7 @@ impl<
 
                             // Let the router know the peer has exited
                             debug!(error = ?e, ?peer, "peer shutdown");
-                            router.release(peer).await;
+                            let _ = router.send(router::Message::Release { peer }).await;
                         });
                 }
             }

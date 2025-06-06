@@ -1,5 +1,5 @@
 use crate::{
-    authenticated::{actors::peer, channels::Channels, Mailbox},
+    authenticated::{actors::peer, channels::Channels},
     Channel, Recipients,
 };
 use bytes::Bytes;
@@ -27,26 +27,6 @@ pub enum Message<P: PublicKey> {
         priority: bool,
         success: oneshot::Sender<Vec<P>>,
     },
-}
-
-impl<P: PublicKey> Mailbox<Message<P>> {
-    /// Notify the router that a peer is ready to communicate.
-    pub async fn ready(&mut self, peer: P, relay: peer::Relay) -> Channels<P> {
-        let (response, receiver) = oneshot::channel();
-        self.send(Message::Ready {
-            peer,
-            relay,
-            channels: response,
-        })
-        .await
-        .unwrap();
-        receiver.await.unwrap()
-    }
-
-    /// Notify the router that a peer is no longer available.
-    pub async fn release(&mut self, peer: P) {
-        self.send(Message::Release { peer }).await.unwrap();
-    }
 }
 
 #[derive(Clone, Debug)]
