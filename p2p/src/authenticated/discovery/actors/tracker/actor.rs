@@ -1,9 +1,9 @@
 use super::{
     directory::{self, Directory},
-    ingress::{Mailbox, Message, Oracle},
+    ingress::{Message, Oracle},
     Config, Error,
 };
-use crate::authenticated::{discovery::ip, peer_info::PeerInfo};
+use crate::authenticated::{discovery::ip, peer_info::PeerInfo, Mailbox};
 use commonware_cryptography::Signer;
 use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::{union, SystemTimeExt};
@@ -55,7 +55,11 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
     pub fn new(
         context: E,
         cfg: Config<C>,
-    ) -> (Self, Mailbox<E, C::PublicKey>, Oracle<E, C::PublicKey>) {
+    ) -> (
+        Self,
+        Mailbox<Message<E, C::PublicKey>>,
+        Oracle<E, C::PublicKey>,
+    ) {
         // Sign my own information
         let socket = cfg.address;
         let timestamp = context.current().epoch_millis();
@@ -327,7 +331,7 @@ mod tests {
     // Mock a connection to a peer by reserving it as if it had dialed us and the `peer` actor had
     // sent an initialization.
     async fn connect_to_peer(
-        mailbox: &mut tracker::Mailbox<Context, PublicKey>,
+        mailbox: &mut Mailbox<Message<Context, PublicKey>>,
         peer: &PublicKey,
         peer_mailbox: &authenticated::Mailbox<peer::Message<PublicKey>>,
         peer_receiver: &mut mpsc::Receiver<peer::Message<PublicKey>>,
@@ -352,7 +356,7 @@ mod tests {
     struct TestHarness {
         #[allow(dead_code)]
         actor_handle: Handle<()>,
-        mailbox: Mailbox<deterministic::Context, PublicKey>,
+        mailbox: Mailbox<Message<deterministic::Context, PublicKey>>,
         oracle: Oracle<deterministic::Context, PublicKey>,
         ip_namespace: Vec<u8>,
         tracker_pk: PublicKey,

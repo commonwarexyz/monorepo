@@ -1,9 +1,9 @@
 use super::{
     directory::{self, Directory},
-    ingress::{Mailbox, Message, Oracle},
+    ingress::{Message, Oracle},
     Config,
 };
-use crate::authenticated::PeerInfo;
+use crate::authenticated::{Mailbox, PeerInfo};
 use commonware_cryptography::Signer;
 use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::{union, SystemTimeExt};
@@ -41,7 +41,11 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
     pub fn new(
         context: E,
         cfg: Config<C>,
-    ) -> (Self, Mailbox<E, C::PublicKey>, Oracle<E, C::PublicKey>) {
+    ) -> (
+        Self,
+        Mailbox<Message<E, C::PublicKey>>,
+        Oracle<E, C::PublicKey>,
+    ) {
         // Sign my own information
         let socket = cfg.address;
         let timestamp = context.current().epoch_millis();
@@ -241,7 +245,7 @@ mod tests {
     struct TestHarness {
         #[allow(dead_code)]
         actor_handle: Handle<()>,
-        mailbox: Mailbox<deterministic::Context, PublicKey>,
+        mailbox: Mailbox<Message<deterministic::Context, PublicKey>>,
         oracle: Oracle<deterministic::Context, PublicKey>,
         cfg: Config<PrivateKey>, // Store cloned config for access to its values
     }

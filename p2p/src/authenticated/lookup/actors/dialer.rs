@@ -9,6 +9,7 @@ use crate::authenticated::{
         },
         metrics,
     },
+    Mailbox,
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select;
@@ -143,7 +144,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
     /// Start the dialer actor.
     pub fn start(
         self,
-        tracker: tracker::Mailbox<E, C::PublicKey>,
+        tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
         supervisor: authenticated::Mailbox<
             spawner::ingress::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
         >,
@@ -155,7 +156,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
 
     async fn run(
         mut self,
-        mut tracker: tracker::Mailbox<E, C::PublicKey>,
+        mut tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
         mut supervisor: authenticated::Mailbox<
             spawner::ingress::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
         >,

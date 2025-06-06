@@ -79,7 +79,7 @@ impl<
 
     pub fn start(
         mut self,
-        tracker: tracker::Mailbox<E, C>,
+        tracker: Mailbox<tracker::Message<E, C>>,
         router: authenticated::Mailbox<ingress::Message<C>>,
     ) -> Handle<()> {
         self.context.spawn_ref()(self.run(tracker, router))
@@ -87,7 +87,7 @@ impl<
 
     async fn run(
         mut self,
-        tracker: tracker::Mailbox<E, C>,
+        tracker: Mailbox<tracker::Message<E, C>>,
         router: authenticated::Mailbox<ingress::Message<C>>,
     ) {
         while let Some(msg) = self.receiver.next().await {

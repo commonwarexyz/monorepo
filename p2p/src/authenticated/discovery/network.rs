@@ -7,7 +7,7 @@ use super::{
     types,
 };
 use crate::{
-    authenticated::{self, discovery::actors::router::Message},
+    authenticated::{self, discovery::actors::router::Message, Mailbox},
     Channel,
 };
 use commonware_cryptography::Signer;
@@ -35,7 +35,7 @@ pub struct Network<
 
     channels: Channels<C::PublicKey>,
     tracker: tracker::Actor<E, C>,
-    tracker_mailbox: tracker::Mailbox<E, C::PublicKey>,
+    tracker_mailbox: Mailbox<tracker::Message<E, C::PublicKey>>,
     router: router::Actor<E, C::PublicKey>,
     router_mailbox: authenticated::Mailbox<Message<C::PublicKey>>,
 }
