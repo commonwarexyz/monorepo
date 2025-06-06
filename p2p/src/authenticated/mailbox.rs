@@ -7,7 +7,7 @@ pub struct Mailbox<T>(mpsc::Sender<T>);
 
 impl<T> Mailbox<T> {
     /// Returns a new mailbox with the given sender.
-    fn new(sender: mpsc::Sender<T>) -> Self {
+    pub fn new(sender: mpsc::Sender<T>) -> Self {
         Self(sender)
     }
 

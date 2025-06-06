@@ -3,6 +3,7 @@ use super::{
     Config,
 };
 use crate::authenticated::{
+    self,
     actors::{peer, router, tracker},
     metrics,
 };
@@ -90,12 +91,16 @@ impl<
     pub fn start(
         mut self,
         tracker: tracker::Mailbox<E, C>,
-        router: router::Mailbox<C>,
+        router: authenticated::Mailbox<router::Message<C>>,
     ) -> Handle<()> {
         self.context.spawn_ref()(self.run(tracker, router))
     }
 
-    async fn run(mut self, tracker: tracker::Mailbox<E, C>, router: router::Mailbox<C>) {
+    async fn run(
+        mut self,
+        tracker: tracker::Mailbox<E, C>,
+        router: authenticated::Mailbox<router::Message<C>>,
+    ) {
         while let Some(msg) = self.receiver.next().await {
             match msg {
                 Message::Spawn {
