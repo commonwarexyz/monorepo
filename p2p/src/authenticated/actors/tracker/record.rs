@@ -20,7 +20,7 @@ pub enum Address<C: PublicKey> {
     /// Discovered this peer's address from other peers.
     ///
     /// The `usize` indicates the number of times dialing this record has failed.
-    Discovered(PeerInfo<C>, usize),
+    Known(PeerInfo<C>, usize),
 
     /// Peer is blocked.
     /// We don't care to track its information.
@@ -40,7 +40,7 @@ pub enum Status {
 
     /// The peer is connected.
     /// Must return to [`Status::Inert`] after the connection is closed.
-    Active,
+    Connected,
 }
 
 /// Represents a record of a peer's address and associated information.
@@ -96,10 +96,10 @@ impl<C: PublicKey> Record<C> {
             Address::Myself(_) => false,
             Address::Blocked => false,
             Address::Unknown | Address::Bootstrapper(_) => {
-                self.address = Address::Discovered(info, 0);
+                self.address = Address::Known(info, 0);
                 true
             }
-            Address::Discovered(prev, _) => {
+            Address::Known(prev, _) => {
                 // Ensure the new info is more recent.
                 let existing_ts = prev.timestamp;
                 let incoming_ts = info.timestamp;
@@ -113,7 +113,7 @@ impl<C: PublicKey> Record<C> {
                     );
                     return false;
                 }
-                self.address = Address::Discovered(info, 0);
+                self.address = Address::Known(info, 0);
                 true
             }
         }
@@ -164,7 +164,7 @@ impl<C: PublicKey> Record<C> {
     /// The peer must have the status [`Status::Reserved`].
     pub fn connect(&mut self) {
         assert!(matches!(self.status, Status::Reserved));
-        self.status = Status::Active;
+        self.status = Status::Connected;
     }
 
     /// Releases any reservation on the peer.
@@ -176,7 +176,7 @@ impl<C: PublicKey> Record<C> {
     /// Indicate that there was a dial failure for this peer using the given `socket`, which is
     /// checked against the existing record to ensure that we correctly attribute the failure.
     pub fn dial_failure(&mut self, socket: SocketAddr) {
-        if let Address::Discovered(info, fails) = &mut self.address {
+        if let Address::Known(info, fails) = &mut self.address {
             if info.socket == socket {
                 *fails += 1;
             }
@@ -189,7 +189,7 @@ impl<C: PublicKey> Record<C> {
     /// from the record. However, in this case, the record would already have the `fails` set to 0,
     /// so we can avoid checking against the socket.
     pub fn dial_success(&mut self) {
-        if let Address::Discovered(_, fails) = &mut self.address {
+        if let Address::Known(_, fails) = &mut self.address {
             *fails = 0;
         }
     }
@@ -211,7 +211,7 @@ impl<C: PublicKey> Record<C> {
         self.status == Status::Inert
             && matches!(
                 self.address,
-                Address::Bootstrapper(_) | Address::Discovered(_, _)
+                Address::Bootstrapper(_) | Address::Known(_, _)
             )
     }
 
@@ -221,7 +221,7 @@ impl<C: PublicKey> Record<C> {
             Address::Unknown => None,
             Address::Myself(info) => Some(info.socket),
             Address::Bootstrapper(socket) => Some(*socket),
-            Address::Discovered(info, _) => Some(info.socket),
+            Address::Known(info, _) => Some(info.socket),
             Address::Blocked => None,
         }
     }
@@ -233,7 +233,7 @@ impl<C: PublicKey> Record<C> {
             Address::Unknown => None,
             Address::Myself(info) => Some(info),
             Address::Bootstrapper(_) => None,
-            Address::Discovered(info, _) => (self.status == Status::Active).then_some(info),
+            Address::Known(info, _) => (self.status == Status::Connected).then_some(info),
             Address::Blocked => None,
         }
         .cloned()
@@ -242,7 +242,7 @@ impl<C: PublicKey> Record<C> {
     /// Returns `true` if the peer is reserved (or active).
     /// This is used to determine if we should attempt to reserve the peer again.
     pub fn reserved(&self) -> bool {
-        matches!(self.status, Status::Reserved | Status::Active)
+        matches!(self.status, Status::Reserved | Status::Connected)
     }
 
     /// Returns `true` if we want to ask for updated peer information for this peer.
@@ -261,7 +261,7 @@ impl<C: PublicKey> Record<C> {
         match self.address {
             Address::Myself(_) | Address::Blocked => false,
             Address::Unknown | Address::Bootstrapper(_) => true,
-            Address::Discovered(_, fails) => self.status != Status::Active && fails >= min_fails,
+            Address::Known(_, fails) => self.status != Status::Connected && fails >= min_fails,
         }
     }
 
@@ -274,7 +274,7 @@ impl<C: PublicKey> Record<C> {
     pub fn allowed(&self) -> bool {
         match self.address {
             Address::Blocked | Address::Myself(_) => false,
-            Address::Bootstrapper(_) | Address::Unknown | Address::Discovered(_, _) => {
+            Address::Bootstrapper(_) | Address::Unknown | Address::Known(_, _) => {
                 self.sets > 0 || self.persistent()
             }
         }
@@ -402,7 +402,7 @@ mod tests {
         assert!(record.update(peer_info.clone()));
         assert_eq!(record.socket(), Some(socket));
         assert!(
-            matches!(&record.address, Address::Discovered(info, 0) if peer_info_contents_are_equal(info, &peer_info)),
+            matches!(&record.address, Address::Known(info, 0) if peer_info_contents_are_equal(info, &peer_info)),
             "Address should be Discovered with 0 failures"
         );
         assert!(record.sharable().is_none(), "Info not sharable yet");
@@ -419,7 +419,7 @@ mod tests {
         assert!(record.update(peer_info.clone()));
         assert_eq!(record.socket(), Some(socket));
         assert!(
-            matches!(&record.address, Address::Discovered(info, 0) if peer_info_contents_are_equal(info, &peer_info)),
+            matches!(&record.address, Address::Known(info, 0) if peer_info_contents_are_equal(info, &peer_info)),
             "Address should be Discovered with 0 failures"
         );
         assert!(record.sharable().is_none());
@@ -438,7 +438,7 @@ mod tests {
 
         assert_eq!(record.socket(), Some(socket));
         assert!(
-            matches!(&record.address, Address::Discovered(info, 0) if peer_info_contents_are_equal(info, &peer_info_new)),
+            matches!(&record.address, Address::Known(info, 0) if peer_info_contents_are_equal(info, &peer_info_new)),
             "Address should contain newer info"
         );
     }
@@ -455,13 +455,13 @@ mod tests {
 
         assert!(!record.update(peer_info_older));
         assert!(
-            matches!(&record.address, Address::Discovered(info, 0) if peer_info_contents_are_equal(info, &peer_info_current)),
+            matches!(&record.address, Address::Known(info, 0) if peer_info_contents_are_equal(info, &peer_info_current)),
             "Address should not update with older info"
         );
 
         assert!(!record.update(peer_info_equal));
         assert!(
-            matches!(&record.address, Address::Discovered(info, 0) if peer_info_contents_are_equal(info, &peer_info_current)),
+            matches!(&record.address, Address::Known(info, 0) if peer_info_contents_are_equal(info, &peer_info_current)),
             "Address should not update with equal timestamp info"
         );
     }
@@ -500,7 +500,7 @@ mod tests {
 
         assert!(record.update(peer_info_pk1_ts1000.clone()));
         assert!(
-            matches!(&record.address, Address::Discovered(info, 0) if peer_info_contents_are_equal(info, &peer_info_pk1_ts1000))
+            matches!(&record.address, Address::Known(info, 0) if peer_info_contents_are_equal(info, &peer_info_pk1_ts1000))
         );
 
         // Update should succeed based on newer timestamp, even if PK differs (though context matters)
@@ -509,7 +509,7 @@ mod tests {
             "Update should succeed based on newer timestamp"
         );
         assert!(
-            matches!(&record.address, Address::Discovered(info, 0) if peer_info_contents_are_equal(info, &peer_info_pk2_ts2000))
+            matches!(&record.address, Address::Known(info, 0) if peer_info_contents_are_equal(info, &peer_info_pk2_ts2000))
         );
     }
 
@@ -617,7 +617,7 @@ mod tests {
         assert!(record_active.reserve());
         record_active.connect();
         assert!(record_active.block());
-        assert_eq!(record_active.status, Status::Active);
+        assert_eq!(record_active.status, Status::Connected);
     }
 
     #[test]
@@ -651,11 +651,11 @@ mod tests {
         assert_eq!(record.status, Status::Reserved);
 
         record.connect();
-        assert_eq!(record.status, Status::Active);
+        assert_eq!(record.status, Status::Connected);
         assert!(record.reserved()); // reserved() is true for Active too
 
         assert!(!record.reserve(), "Cannot reserve when Active");
-        assert_eq!(record.status, Status::Active);
+        assert_eq!(record.status, Status::Connected);
 
         record.release(); // Release from Active
         assert_eq!(record.status, Status::Inert);
@@ -758,33 +758,33 @@ mod tests {
 
         // Discover
         assert!(record.update(peer_info.clone()));
-        assert!(matches!(&record.address, Address::Discovered(_, 0)));
+        assert!(matches!(&record.address, Address::Known(_, 0)));
 
         // Fail dial 1
         record.dial_failure(socket);
-        assert!(matches!(&record.address, Address::Discovered(_, 1)));
+        assert!(matches!(&record.address, Address::Known(_, 1)));
 
         // Fail dial 2
         record.dial_failure(socket);
-        assert!(matches!(&record.address, Address::Discovered(_, 2)));
+        assert!(matches!(&record.address, Address::Known(_, 2)));
 
         // Fail dial for wrong socket
         record.dial_failure(test_socket2());
         assert!(
-            matches!(&record.address, Address::Discovered(_, 2)),
+            matches!(&record.address, Address::Known(_, 2)),
             "Failure count should not change for wrong socket"
         );
 
         // Success resets failures
         record.dial_success();
         assert!(
-            matches!(&record.address, Address::Discovered(_, 0)),
+            matches!(&record.address, Address::Known(_, 0)),
             "Failures should reset"
         );
 
         // Fail dial again
         record.dial_failure(socket);
-        assert!(matches!(&record.address, Address::Discovered(_, 1)));
+        assert!(matches!(&record.address, Address::Known(_, 1)));
     }
 
     #[test]
