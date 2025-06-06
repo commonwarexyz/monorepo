@@ -35,7 +35,7 @@ pub enum Status {
     Inert,
 
     /// The peer connection is reserved by an actor that is attempting to establish a connection.
-    /// Will either be upgraded to [`Status::Active`] or downgraded to [`Status::Inert`].
+    /// Will either be upgraded to [`Status::Connected`] or downgraded to [`Status::Inert`].
     Reserved,
 
     /// The peer is connected.
@@ -239,7 +239,7 @@ impl<C: PublicKey> Record<C> {
         .cloned()
     }
 
-    /// Returns `true` if the peer is reserved (or active).
+    /// Returns `true` if the peer is reserved (or connected).
     /// This is used to determine if we should attempt to reserve the peer again.
     pub fn reserved(&self) -> bool {
         matches!(self.status, Status::Reserved | Status::Connected)
@@ -612,12 +612,12 @@ mod tests {
         assert!(record_reserved.block());
         assert_eq!(record_reserved.status, Status::Reserved);
 
-        let mut record_active = Record::<secp256r1::PublicKey>::unknown();
-        assert!(record_active.update(sample_peer_info.clone()));
-        assert!(record_active.reserve());
-        record_active.connect();
-        assert!(record_active.block());
-        assert_eq!(record_active.status, Status::Connected);
+        let mut record_connected = Record::<secp256r1::PublicKey>::unknown();
+        assert!(record_connected.update(sample_peer_info.clone()));
+        assert!(record_connected.reserve());
+        record_connected.connect();
+        assert!(record_connected.block());
+        assert_eq!(record_connected.status, Status::Connected);
     }
 
     #[test]
@@ -652,12 +652,12 @@ mod tests {
 
         record.connect();
         assert_eq!(record.status, Status::Connected);
-        assert!(record.reserved()); // reserved() is true for Active too
+        assert!(record.reserved()); // reserved() is true for Connected too
 
-        assert!(!record.reserve(), "Cannot reserve when Active");
+        assert!(!record.reserve(), "Cannot reserve when Connected");
         assert_eq!(record.status, Status::Connected);
 
-        record.release(); // Release from Active
+        record.release(); // Release from Connected
         assert_eq!(record.status, Status::Inert);
         assert!(!record.reserved());
 
@@ -676,7 +676,7 @@ mod tests {
 
     #[test]
     #[should_panic]
-    fn test_connect_when_active_panics() {
+    fn test_connect_when_connected_panics() {
         let mut record = Record::<secp256r1::PublicKey>::unknown();
         assert!(record.reserve());
         record.connect();
