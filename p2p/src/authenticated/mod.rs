@@ -182,7 +182,6 @@ mod actors;
 mod channels;
 mod config;
 mod ip;
-mod mailbox;
 mod metrics;
 mod network;
 mod types;
@@ -205,7 +204,6 @@ pub enum Error {
 pub use actors::tracker::Oracle;
 pub use channels::{Receiver, Sender};
 pub use config::{Bootstrapper, Config};
-pub use mailbox::Mailbox;
 pub use network::Network;
 
 #[cfg(test)]

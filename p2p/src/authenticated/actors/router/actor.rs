@@ -3,13 +3,16 @@ use super::{
     Config,
 };
 use crate::{
-    authenticated::{actors::peer, channels::Channels, metrics, Mailbox},
+    authenticated::{actors::peer, channels::Channels, metrics},
     Channel, Recipients,
 };
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Handle, Metrics, Spawner};
-use futures::{channel::mpsc, StreamExt};
+use futures::{
+    channel::mpsc::{self, Sender},
+    StreamExt,
+};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::collections::BTreeMap;
 use tracing::debug;
@@ -27,7 +30,7 @@ pub struct Actor<E: Spawner + Metrics, P: PublicKey> {
 impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
     /// Returns a new [Actor] along with a [Mailbox] and [Messenger]
     /// that can be used to send messages to the router.
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<P>>, Messenger<P>) {
+    pub fn new(context: E, cfg: Config) -> (Self, Sender<Message<P>>, Messenger<P>) {
         // Create mailbox
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
 
@@ -47,7 +50,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
                 connections: BTreeMap::new(),
                 messages_dropped,
             },
-            Mailbox::new(control_sender.clone()),
+            control_sender.clone(),
             Messenger::new(control_sender),
         )
     }

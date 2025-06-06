@@ -1,9 +1,12 @@
 use super::Reservation;
-use crate::authenticated::{actors::peer, types, Mailbox};
+use crate::authenticated::{actors::peer, types};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Metrics, Spawner};
 use futures::{
-    channel::{mpsc, oneshot},
+    channel::{
+        mpsc::{self, Sender},
+        oneshot,
+    },
     SinkExt,
 };
 
@@ -32,7 +35,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
         dialer: bool,
 
         /// The mailbox of the peer actor.
-        peer: Mailbox<peer::Message<C>>,
+        peer: Sender<peer::Message<C>>,
     },
 
     /// Ready to send a [`types::Payload::BitVec`] message to a peer. This message doubles as a
@@ -44,7 +47,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
         public_key: C,
 
         /// The mailbox of the peer actor.
-        peer: Mailbox<peer::Message<C>>,
+        peer: Sender<peer::Message<C>>,
     },
 
     /// Notify the tracker that a [`types::Payload::BitVec`] message has been received from a peer.
@@ -55,7 +58,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
         bit_vec: types::BitVec,
 
         /// The mailbox of the peer actor.
-        peer: Mailbox<peer::Message<C>>,
+        peer: Sender<peer::Message<C>>,
     },
 
     /// Notify the tracker that a [`types::Payload::Peers`] message has been received from a peer.
@@ -64,7 +67,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
         peers: Vec<types::PeerInfo<C>>,
 
         /// The mailbox of the peer actor.
-        peer: Mailbox<peer::Message<C>>,
+        peer: Sender<peer::Message<C>>,
     },
 
     // ---------- Used by dialer ----------
@@ -102,7 +105,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
     },
 }
 
-async fn send_with_oneshot<T, R, F>(mailbox: &mut Mailbox<T>, make_msg: F) -> R
+async fn send_with_oneshot<T, R, F>(mailbox: &mut Sender<T>, make_msg: F) -> R
 where
     F: FnOnce(oneshot::Sender<R>) -> T,
 {
@@ -113,14 +116,14 @@ where
 
 /// Send a `Block` message to the tracker.
 pub async fn dialable<E: Spawner + Metrics, C: PublicKey>(
-    sender: &mut Mailbox<Message<E, C>>,
+    sender: &mut Sender<Message<E, C>>,
 ) -> Vec<C> {
     send_with_oneshot(sender, |responder| Message::Dialable { responder }).await
 }
 
 /// Send a `Dial` message to the tracker.
 pub async fn dial<E: Spawner + Metrics, C: PublicKey>(
-    mailbox: &mut Mailbox<Message<E, C>>,
+    mailbox: &mut Sender<Message<E, C>>,
     public_key: C,
 ) -> Option<Reservation<E, C>> {
     send_with_oneshot(mailbox, |responder| Message::Dial {
@@ -132,7 +135,7 @@ pub async fn dial<E: Spawner + Metrics, C: PublicKey>(
 
 /// Send a `Listen` message to the tracker.
 pub async fn listen<E: Spawner + Metrics, C: PublicKey>(
-    mailbox: &mut Mailbox<Message<E, C>>,
+    mailbox: &mut Sender<Message<E, C>>,
     public_key: C,
 ) -> Option<Reservation<E, C>> {
     send_with_oneshot(mailbox, |responder| Message::Listen {
