@@ -102,16 +102,20 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
     },
 }
 
+async fn send_with_oneshot<T, R, F>(mailbox: &mut Mailbox<T>, make_msg: F) -> R
+where
+    F: FnOnce(oneshot::Sender<R>) -> T,
+{
+    let (tx, rx) = oneshot::channel();
+    mailbox.send(make_msg(tx)).await.unwrap();
+    rx.await.unwrap()
+}
+
 /// Send a `Block` message to the tracker.
 pub async fn dialable<E: Spawner + Metrics, C: PublicKey>(
     sender: &mut Mailbox<Message<E, C>>,
 ) -> Vec<C> {
-    let (tx, rx) = oneshot::channel();
-    sender
-        .send(Message::Dialable { responder: tx })
-        .await
-        .unwrap();
-    rx.await.unwrap()
+    send_with_oneshot(sender, |responder| Message::Dialable { responder }).await
 }
 
 /// Send a `Dial` message to the tracker.
@@ -119,15 +123,11 @@ pub async fn dial<E: Spawner + Metrics, C: PublicKey>(
     mailbox: &mut Mailbox<Message<E, C>>,
     public_key: C,
 ) -> Option<Reservation<E, C>> {
-    let (tx, rx) = oneshot::channel();
-    mailbox
-        .send(Message::Dial {
-            public_key,
-            reservation: tx,
-        })
-        .await
-        .unwrap();
-    rx.await.unwrap()
+    send_with_oneshot(mailbox, |responder| Message::Dial {
+        public_key,
+        reservation: responder,
+    })
+    .await
 }
 
 /// Send a `Listen` message to the tracker.
@@ -135,20 +135,13 @@ pub async fn listen<E: Spawner + Metrics, C: PublicKey>(
     mailbox: &mut Mailbox<Message<E, C>>,
     public_key: C,
 ) -> Option<Reservation<E, C>> {
-    let (tx, rx) = oneshot::channel();
-    mailbox
-        .send(Message::Listen {
-            public_key,
-            reservation: tx,
-        })
-        .await
-        .unwrap();
-    rx.await.unwrap()
+    send_with_oneshot(mailbox, |responder| Message::Listen {
+        public_key,
+        reservation: responder,
+    })
+    .await
 }
 
-/// Mechanism to register authorized peers.
-///
-/// Peers that are not explicitly authorized
 /// will be blocked by commonware-p2p.
 #[derive(Clone)]
 pub struct Oracle<E: Spawner + Metrics, C: PublicKey> {
