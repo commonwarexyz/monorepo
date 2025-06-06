@@ -438,7 +438,7 @@ mod tests {
             // Connect as dialer
             mailbox
                 .send(tracker::Message::Connect {
-                    public_key: unauth_pk.clone(),
+                    public_key: unauth_pk,
                     dialer: true,
                     peer: peer_mailbox,
                 })

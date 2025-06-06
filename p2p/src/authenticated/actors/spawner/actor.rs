@@ -156,7 +156,10 @@ impl<
 
                             // Let the router know the peer has exited
                             debug!(error = ?e, ?peer, "peer shutdown");
-                            let _ = router.send(router::Message::Release { peer }).await;
+                            router
+                                .send(router::Message::Release { peer })
+                                .await
+                                .unwrap();
                         });
                 }
             }
