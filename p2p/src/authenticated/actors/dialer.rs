@@ -128,7 +128,14 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
                 drop(guard);
 
                 // Start peer to handle messages
-                supervisor.spawn(instance, reservation).await;
+                supervisor
+                    .send(spawner::Message::Spawn {
+                        peer: peer.clone(),
+                        connection: instance,
+                        reservation,
+                    })
+                    .await
+                    .unwrap();
             }
         });
     }

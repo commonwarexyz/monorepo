@@ -126,7 +126,14 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         drop(guard);
 
         // Start peer to handle messages
-        supervisor.spawn(stream, reservation).await;
+        supervisor
+            .send(spawner::Message::Spawn {
+                peer: peer.clone(),
+                connection: stream,
+                reservation,
+            })
+            .await
+            .unwrap();
     }
 
     pub fn start(
