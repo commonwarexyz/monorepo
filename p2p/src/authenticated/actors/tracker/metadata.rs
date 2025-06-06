@@ -8,7 +8,7 @@ pub enum Metadata<P: PublicKey> {
     ///
     /// Contains:
     /// - The public key of the peer.
-    /// - The socket address of the peer.
+    /// - The address of the peer.
     Dialer(P, SocketAddr),
 
     /// We are the Listener.
