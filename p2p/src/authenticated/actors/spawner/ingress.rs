@@ -17,7 +17,7 @@ pub enum Message<E: Spawner + Clock + Metrics + Network, P: PublicKey> {
 }
 
 impl<E: Spawner + Clock + Metrics + Network, P: PublicKey> Mailbox<Message<E, P>> {
-    /// Send a message to the [Actor](super::Actor) to spawn a new task for the given peer.
+    /// Send a message to the actor to spawn a new task for the given peer.
     pub async fn spawn(
         &mut self,
         connection: Connection<SinkOf<E>, StreamOf<E>>,
