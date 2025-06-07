@@ -1116,7 +1116,7 @@ mod tests {
         a.mul(&Scalar::rand(&mut rng));
         let mut b = G1::one();
         b.mul(&Scalar::rand(&mut rng));
-        let c = a.clone();
+        let c = a;
 
         // Test reflexivity: a == a
         assert_eq!(a.cmp(&c), std::cmp::Ordering::Equal);
@@ -1145,7 +1145,7 @@ mod tests {
         a.mul(&Scalar::rand(&mut rng));
         let mut b = G2::one();
         b.mul(&Scalar::rand(&mut rng));
-        let c = a.clone();
+        let c = a;
 
         // Test reflexivity: a == a
         assert_eq!(a.cmp(&c), std::cmp::Ordering::Equal);
@@ -1188,7 +1188,7 @@ mod tests {
         // Test G1
         let mut g1_1 = G1::one();
         g1_1.mul(&Scalar::rand(&mut rng));
-        let g1_2 = g1_1.clone();
+        let g1_2 = g1_1;
         assert_eq!(g1_1.cmp(&g1_2), std::cmp::Ordering::Equal);
 
         let mut h1 = DefaultHasher::new();
@@ -1200,7 +1200,7 @@ mod tests {
         // Test G2
         let mut g2_1 = G2::one();
         g2_1.mul(&Scalar::rand(&mut rng));
-        let g2_2 = g2_1.clone();
+        let g2_2 = g2_1;
         assert_eq!(g2_1.cmp(&g2_2), std::cmp::Ordering::Equal);
 
         let mut h1 = DefaultHasher::new();
