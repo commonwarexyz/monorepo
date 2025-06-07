@@ -272,7 +272,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
 
     /// Returns the sharable information for a given peer.
     pub fn info(&self, peer: &C) -> Option<PeerInfo<C>> {
-        self.peers.get(peer).and_then(|r| r.sharable())
+        self.peers.get(peer).and_then(|r| r.shareable())
     }
 
     /// Returns all available peer information for a given bit vector.
@@ -303,7 +303,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
             .enumerate()
             .filter_map(|(i, b)| {
                 let peer = (!b).then_some(&set[i])?; // Only consider peers that the requester wants
-                let info = self.peers.get(peer).and_then(|r| r.sharable());
+                let info = self.peers.get(peer).and_then(|r| r.shareable());
                 // We may have information signed over a timestamp greater than the current time,
                 // but within our synchrony bound. Avoid sharing this information as it could get us
                 // blocked by other peers due to clock skew. Consider timestamps earlier than the

@@ -381,7 +381,7 @@ impl<C: PublicKey> Record<C> {
 
     /// Get the peer information if it is sharable. The information is considered sharable if it is
     /// known and we are connected to the peer.
-    pub fn sharable(&self) -> Option<PeerInfo<C>> {
+    pub fn shareable(&self) -> Option<PeerInfo<C>> {
         match self {
             Record::Unknown { .. } | Record::Blocked { .. } | Record::Bootstrapper { .. } => None,
             Record::Myself { info, .. } => Some(info.clone()),
