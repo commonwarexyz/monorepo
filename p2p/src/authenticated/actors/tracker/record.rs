@@ -1,31 +1,31 @@
 use crate::authenticated::types::PeerInfo;
 use commonware_cryptography::PublicKey;
-use std::{net::SocketAddr, ops::Add};
+use std::net::SocketAddr;
 use tracing::trace;
 
-/// Represents information known about a peer's address.
-#[derive(Clone, Debug)]
-pub enum Address<C: PublicKey> {
-    /// Peer address is not yet known.
-    /// Can be upgraded to `Discovered`.
-    Unknown,
+// /// Represents information known about a peer's address.
+// #[derive(Clone, Debug)]
+// pub enum Address<C: PublicKey> {
+//     /// Peer address is not yet known.
+//     /// Can be upgraded to `Discovered`.
+//     Unknown,
 
-    /// Peer is the local node.
-    Myself(PeerInfo<C>),
+//     /// Peer is the local node.
+//     Myself(PeerInfo<C>),
 
-    /// Address is provided during initialization.
-    /// Can be upgraded to `Discovered`.
-    Bootstrapper(SocketAddr),
+//     /// Address is provided during initialization.
+//     /// Can be upgraded to `Discovered`.
+//     Bootstrapper(SocketAddr),
 
-    /// Discovered this peer's address from other peers.
-    ///
-    /// The `usize` indicates the number of times dialing this record has failed.
-    Known(PeerInfo<C>, usize),
+//     /// Discovered this peer's address from other peers.
+//     ///
+//     /// The `usize` indicates the number of times dialing this record has failed.
+//     Known(PeerInfo<C>, usize),
 
-    /// Peer is blocked.
-    /// We don't care to track its information.
-    Blocked,
-}
+//     /// Peer is blocked.
+//     /// We don't care to track its information.
+//     Blocked,
+// }
 
 /// Represents the connection status of a peer.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -58,6 +58,7 @@ pub enum Record<C: PublicKey> {
         info: PeerInfo<C>,
         status: Status,
         sets: usize,
+        dial_fails: usize,
     },
 
     /// The peer is blocked.
@@ -124,6 +125,7 @@ impl<C: PublicKey> Record<C> {
                     info,
                     status: Status::Inert,
                     sets: *sets,
+                    dial_fails: 0,
                 };
                 true
             }
@@ -133,6 +135,7 @@ impl<C: PublicKey> Record<C> {
                     info,
                     status: Status::Inert,
                     sets: 0,
+                    dial_fails: 0,
                 };
                 true
             }
@@ -140,6 +143,7 @@ impl<C: PublicKey> Record<C> {
                 info: existing_info,
                 status: _,
                 sets,
+                dial_fails,
             } => {
                 // Ensure the new info is more recent.
                 let existing_ts = existing_info.timestamp;
@@ -160,6 +164,7 @@ impl<C: PublicKey> Record<C> {
                     info,
                     status: Status::Inert,
                     sets: *sets,
+                    dial_fails: *dial_fails,
                 };
                 true
             }
@@ -277,23 +282,23 @@ impl<C: PublicKey> Record<C> {
     // TODO danlaine: refactor code to remove unreachable!() calls.
     pub fn connect(&mut self) {
         match self {
-            Record::Unknown { sets } => unreachable!("Cannot connect an unknown peer"),
-            Record::Myself { info, sets } => unreachable!("Cannot connect to myself"),
-            Record::Blocked { sets } => {
+            Record::Unknown { .. } => unreachable!("Cannot connect an unknown peer"),
+            Record::Myself { .. } => unreachable!("Cannot connect to myself"),
+            Record::Blocked { .. } => {
                 unreachable!("Cannot connect a blocked peer");
             }
-            Record::Known { info, status, sets } if status != &Status::Reserved => {
+            Record::Known { status, .. } if status != &Status::Reserved => {
                 unreachable!("Cannot connect a peer that is not reserved")
             }
-            Record::Known { info, status, sets } => {
-                *status = Status::Connected;
+            Record::Bootstrapper { .. } => {
+                unreachable!("Cannot connect a bootstrapper");
             }
-            Record::Bootstrapper { peer, sets } => {
-                *self = Record::Known {
-                    info: peer,
-                    status: Status::Connected,
-                    sets: *sets,
-                };
+            Record::Known { status, .. } => {
+                assert!(
+                    *status == Status::Reserved,
+                    "Cannot connect a peer that is not reserved"
+                );
+                *status = Status::Connected;
             }
         }
         // assert!(matches!(self.status, Status::Reserved));
@@ -302,18 +307,45 @@ impl<C: PublicKey> Record<C> {
 
     /// Releases any reservation on the peer.
     pub fn release(&mut self) {
-        assert!(self.status != Status::Inert, "Cannot release an Inert peer");
-        self.status = Status::Inert;
+        match self {
+            Record::Unknown { .. } => unreachable!("Cannot release an unknown peer"),
+            Record::Myself { .. } => unreachable!("Cannot release to myself"),
+            Record::Blocked { .. } => {
+                unreachable!("Cannot release a blocked peer");
+            }
+            Record::Known { status, .. } if status != &Status::Reserved => {
+                unreachable!("Cannot release a peer that is not reserved")
+            }
+            Record::Bootstrapper { .. } => {
+                unreachable!("Cannot release a bootstrapper peer");
+            }
+            Record::Known { status, .. } => {
+                *status = Status::Connected;
+            }
+        }
+        // assert!(self.status != Status::Inert, "Cannot release an Inert peer");
+        // self.status = Status::Inert;
     }
 
     /// Indicate that there was a dial failure for this peer using the given `socket`, which is
     /// checked against the existing record to ensure that we correctly attribute the failure.
     pub fn dial_failure(&mut self, socket: SocketAddr) {
-        if let Address::Known(info, fails) = &mut self.address {
-            if info.socket == socket {
-                *fails += 1;
+        match self {
+            Record::Known {
+                info, dial_fails, ..
+            } => {
+                if info.socket == socket {
+                    // TODO danlaine: do we need this address check?
+                    *dial_fails += 1;
+                }
             }
+            _ => {} // TODO danlaine: should we error here?
         }
+        // if let Address::Known(info, fails) = &mut self.address {
+        //     if info.socket == socket {
+        //         *fails += 1;
+        //     }
+        // }
     }
 
     /// Indicate that a dial succeeded for this peer.
@@ -322,9 +354,15 @@ impl<C: PublicKey> Record<C> {
     /// from the record. However, in this case, the record would already have the `fails` set to 0,
     /// so we can avoid checking against the socket.
     pub fn dial_success(&mut self) {
-        if let Address::Known(_, fails) = &mut self.address {
-            *fails = 0;
+        match self {
+            Record::Known { dial_fails, .. } => {
+                *dial_fails = 0;
+            }
+            _ => {} // TODO danlaine: should we error here?
         }
+        // if let Address::Known(_, fails) = &mut self.address {
+        //     *fails = 0;
+        // }
     }
 
     // ---------- Getters ----------
@@ -344,11 +382,7 @@ impl<C: PublicKey> Record<C> {
         match self {
             Record::Unknown { .. } | Record::Blocked { .. } | Record::Myself { .. } => false,
             Record::Bootstrapper { .. } => true,
-            Record::Known {
-                info: _,
-                status,
-                sets: _,
-            } if status == &Status::Connected => false,
+            Record::Known { status, .. } if status == &Status::Connected => false,
             Record::Known { .. } => true,
         }
         // self.status == Status::Inert
@@ -402,11 +436,9 @@ impl<C: PublicKey> Record<C> {
     /// This is used to determine if we should attempt to reserve the peer again.
     pub fn reserved(&self) -> bool {
         match self {
-            Record::Known {
-                info: _,
-                status,
-                sets: _,
-            } => return matches!(status, Status::Reserved | Status::Connected),
+            Record::Known { status, .. } => {
+                return matches!(status, Status::Reserved | Status::Connected)
+            }
             _ => false,
         }
     }
@@ -421,11 +453,7 @@ impl<C: PublicKey> Record<C> {
         match self {
             Record::Myself { .. } | Record::Blocked { .. } => false,
             Record::Unknown { .. } | Record::Bootstrapper { .. } => true,
-            Record::Known {
-                info: _,
-                status,
-                sets,
-            } => {
+            Record::Known { status, sets, .. } => {
                 // We want to ask for updated peer info if we are not connected and
                 // have failed dialing it at least `min_fails` times.
                 // TODO danlaine: replace sets with record_min_fails.
@@ -451,11 +479,7 @@ impl<C: PublicKey> Record<C> {
             Record::Myself { .. } | Record::Bootstrapper { .. } => false,
             Record::Unknown { sets } => *sets == 0,
             Record::Blocked { sets } => *sets == 0,
-            Record::Known {
-                info: _,
-                status,
-                sets,
-            } => *sets == 0 && status == &Status::Inert,
+            Record::Known { status, sets, .. } => *sets == 0 && status == &Status::Inert,
         }
         // self.sets == 0 && !self.persistent() && matches!(self.status, Status::Inert)
     }
@@ -466,11 +490,7 @@ impl<C: PublicKey> Record<C> {
             Record::Myself { .. } | Record::Blocked { .. } => false,
             Record::Bootstrapper { .. } => true,
             Record::Unknown { sets } => *sets > 0,
-            Record::Known {
-                info: _,
-                status: _,
-                sets,
-            } => *sets > 0,
+            Record::Known { sets, .. } => *sets > 0,
         }
         // match self.address {
         //     Address::Blocked | Address::Myself(_) => false,
@@ -478,11 +498,6 @@ impl<C: PublicKey> Record<C> {
         //         self.sets > 0 || self.persistent()
         //     }
         // }
-    }
-
-    fn persistent(&self) -> bool {
-        matches!(self, Record::Myself { .. } | Record::Bootstrapper { .. })
-        // matches!(self.address, Address::Myself(_) | Address::Bootstrapper(_))
     }
 }
 #[cfg(test)]
