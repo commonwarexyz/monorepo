@@ -1,6 +1,6 @@
 use crate::authenticated::types::PeerInfo;
 use commonware_cryptography::PublicKey;
-use std::net::SocketAddr;
+use std::{net::SocketAddr, ops::Add};
 use tracing::trace;
 
 /// Represents information known about a peer's address.
@@ -43,47 +43,71 @@ pub enum Status {
     Connected,
 }
 
-/// Represents a record of a peer's address and associated information.
-#[derive(Clone, Debug)]
-pub struct Record<C: PublicKey> {
-    /// Address state of the peer.
-    address: Address<C>,
+pub enum Record<C: PublicKey> {
+    /// We don't know this peer's address.
+    Unknown { sets: usize },
 
-    /// Connection status of the peer.
-    status: Status,
+    /// The peer is myself.
+    Myself { info: PeerInfo<C>, sets: usize },
 
-    /// Number of peer sets this peer is part of.
-    sets: usize,
+    /// The peer is a bootstrapper with a known address.
+    Bootstrapper { peer: SocketAddr, sets: usize },
+
+    /// The peer is known and has been discovered.
+    Known {
+        info: PeerInfo<C>,
+        status: Status,
+        sets: usize,
+    },
+
+    /// The peer is blocked.
+    Blocked { sets: usize },
 }
+
+// /// Represents a record of a peer's address and associated information.
+// #[derive(Clone, Debug)]
+// pub struct Record<C: PublicKey> {
+//     /// Address state of the peer.
+//     address: Address<C>,
+
+//     /// Connection status of the peer.
+//     status: Status,
+
+//     /// Number of peer sets this peer is part of.
+//     sets: usize,
+// }
 
 impl<C: PublicKey> Record<C> {
     // ---------- Constructors ----------
 
     /// Create a new record with an unknown address.
     pub fn unknown() -> Self {
-        Record {
-            address: Address::Unknown,
-            status: Status::Inert,
-            sets: 0,
-        }
+        Self::Unknown { sets: 0 }
+        // Record {
+        //     address: Address::Unknown,
+        //     status: Status::Inert,
+        //     sets: 0,
+        // }
     }
 
     /// Create a new record with the local node's information.
     pub fn myself(info: PeerInfo<C>) -> Self {
-        Record {
-            address: Address::Myself(info),
-            status: Status::Inert,
-            sets: 0,
-        }
+        Self::Myself { info, sets: 0 }
+        // Record {
+        //     address: Address::Myself(info),
+        //     status: Status::Inert,
+        //     sets: 0,
+        // }
     }
 
     /// Create a new record with a bootstrapper address.
-    pub fn bootstrapper(socket: SocketAddr) -> Self {
-        Record {
-            address: Address::Bootstrapper(socket),
-            status: Status::Inert,
-            sets: 0,
-        }
+    pub fn bootstrapper(peer: SocketAddr) -> Self {
+        Self::Bootstrapper { peer, sets: 0 }
+        // Record {
+        //     address: Address::Bootstrapper(socket),
+        //     status: Status::Inert,
+        //     sets: 0,
+        // }
     }
 
     // ---------- Setters ----------
@@ -92,16 +116,33 @@ impl<C: PublicKey> Record<C> {
     ///
     /// Returns true if the update was successful.
     pub fn update(&mut self, info: PeerInfo<C>) -> bool {
-        match &self.address {
-            Address::Myself(_) => false,
-            Address::Blocked => false,
-            Address::Unknown | Address::Bootstrapper(_) => {
-                self.address = Address::Known(info, 0);
+        match self {
+            Self::Blocked { .. } | Self::Myself { .. } => false,
+            Self::Unknown { sets } => {
+                // Transition from Unknown to Known.
+                *self = Self::Known {
+                    info,
+                    status: Status::Inert,
+                    sets: *sets,
+                };
                 true
             }
-            Address::Known(prev, _) => {
+            Self::Bootstrapper { .. } => {
+                // Transition from Bootstrapper to Known.
+                *self = Self::Known {
+                    info,
+                    status: Status::Inert,
+                    sets: 0,
+                };
+                true
+            }
+            Self::Known {
+                info: existing_info,
+                status: _,
+                sets,
+            } => {
                 // Ensure the new info is more recent.
-                let existing_ts = prev.timestamp;
+                let existing_ts = existing_info.timestamp;
                 let incoming_ts = info.timestamp;
                 if existing_ts >= incoming_ts {
                     let peer = info.public_key;
@@ -113,10 +154,41 @@ impl<C: PublicKey> Record<C> {
                     );
                     return false;
                 }
-                self.address = Address::Known(info, 0);
+
+                // Transition from Known to Known.
+                *self = Self::Known {
+                    info,
+                    status: Status::Inert,
+                    sets: *sets,
+                };
                 true
             }
         }
+        // match &self.address {
+        //     Address::Myself(_) => false,
+        //     Address::Blocked => false,
+        //     Address::Unknown | Address::Bootstrapper(_) => {
+        //         self.address = Address::Known(info, 0);
+        //         true
+        //     }
+        //     Address::Known(prev, _) => {
+        //         // Ensure the new info is more recent.
+        //         let existing_ts = prev.timestamp;
+        //         let incoming_ts = info.timestamp;
+        //         if existing_ts >= incoming_ts {
+        //             let peer = info.public_key;
+        //             trace!(
+        //                 ?peer,
+        //                 ?existing_ts,
+        //                 ?incoming_ts,
+        //                 "peer discovery not updated"
+        //             );
+        //             return false;
+        //         }
+        //         self.address = Address::Known(info, 0);
+        //         true
+        //     }
+        // }
     }
 
     /// Attempt to mark the peer as blocked.
@@ -124,16 +196,28 @@ impl<C: PublicKey> Record<C> {
     /// Returns `true` if the peer was newly blocked.
     /// Returns `false` if the peer was already blocked or is the local node (unblockable).
     pub fn block(&mut self) -> bool {
-        if matches!(self.address, Address::Blocked | Address::Myself(_)) {
-            return false;
-        }
-        self.address = Address::Blocked;
+        let sets = match self {
+            Self::Blocked { .. } | Self::Myself { .. } => {
+                return false;
+            }
+            Self::Unknown { sets } => sets,
+            Self::Bootstrapper { peer: _, sets } => sets,
+            Self::Known { info: _, sets, .. } => sets,
+        };
+        *self = Self::Blocked { sets: *sets };
         true
     }
 
     /// Increase the count of peer sets this peer is part of.
     pub fn increment(&mut self) {
-        self.sets = self.sets.checked_add(1).unwrap();
+        let sets = match self {
+            Self::Unknown { sets } => sets,
+            Self::Myself { sets, .. } => sets,
+            Self::Bootstrapper { sets, .. } => sets,
+            Self::Known { sets, .. } => sets,
+            Self::Blocked { sets } => sets,
+        };
+        *sets = sets.wrapping_add(1);
     }
 
     /// Decrease the count of peer sets this peer is part of.
@@ -142,29 +226,78 @@ impl<C: PublicKey> Record<C> {
     /// - The count reaches zero
     /// - The peer is not a bootstrapper or the local node
     pub fn decrement(&mut self) {
-        self.sets = self.sets.checked_sub(1).unwrap();
+        let sets = match self {
+            Self::Unknown { sets } => sets,
+            Self::Myself { sets, .. } => sets,
+            Self::Bootstrapper { sets, .. } => sets,
+            Self::Known { sets, .. } => sets,
+            Self::Blocked { sets } => sets,
+        };
+        *sets = sets.wrapping_sub(1);
     }
 
     /// Attempt to reserve the peer for connection.
     ///
     /// Returns `true` if the reservation was successful, `false` otherwise.
     pub fn reserve(&mut self) -> bool {
-        if matches!(self.address, Address::Blocked | Address::Myself(_)) {
-            return false;
+        match self {
+            Self::Blocked { .. } | Self::Myself { .. } => false,
+            Self::Unknown { .. } => {
+                // Cannot reserve an unknown peer.
+                false
+            }
+            Self::Bootstrapper { .. } => {
+                // Bootstrapper can be reserved.
+                // *self = true
+                todo!()
+            }
+            Self::Known { status, .. } => {
+                if *status == Status::Inert {
+                    *status = Status::Reserved;
+                    true
+                } else {
+                    false
+                }
+            }
         }
-        if matches!(self.status, Status::Inert) {
-            self.status = Status::Reserved;
-            return true;
-        }
-        false
+
+        // if matches!(self.address, Address::Blocked | Address::Myself(_)) {
+        //     return false;
+        // }
+        // if matches!(self.status, Status::Inert) {
+        //     self.status = Status::Reserved;
+        //     return true;
+        // }
+        // false
     }
 
     /// Marks the peer as connected.
     ///
     /// The peer must have the status [`Status::Reserved`].
+    // TODO danlaine: refactor code to remove unreachable!() calls.
     pub fn connect(&mut self) {
-        assert!(matches!(self.status, Status::Reserved));
-        self.status = Status::Connected;
+        match self {
+            Record::Unknown { sets } => unreachable!("Cannot connect an unknown peer"),
+            Record::Myself { info, sets } => unreachable!("Cannot connect to myself"),
+            Record::Blocked { sets } => {
+                unreachable!("Cannot connect a blocked peer");
+            }
+            Record::Known { info, status, sets } if status != &Status::Reserved => {
+                unreachable!("Cannot connect a peer that is not reserved")
+            }
+            Record::Known { info, status, sets } => {
+                *status = Status::Connected;
+            }
+            Record::Bootstrapper { peer, sets } => {
+                *self = Record::Known {
+                    info: peer,
+                    status: Status::Connected,
+                    sets: *sets,
+                };
+            }
+        }
+        // assert!(matches!(self.status, Status::Reserved));
+        // self.status = Status::Connected;
     }
 
     /// Releases any reservation on the peer.
@@ -198,7 +331,7 @@ impl<C: PublicKey> Record<C> {
 
     /// Returns `true` if the record is blocked.
     pub fn blocked(&self) -> bool {
-        matches!(self.address, Address::Blocked)
+        matches!(self, Record::Blocked { .. })
     }
 
     /// Returns `true` if the record is dialable.
@@ -208,41 +341,74 @@ impl<C: PublicKey> Record<C> {
     /// - It is not ourselves
     /// - We are not already connected
     pub fn dialable(&self) -> bool {
-        self.status == Status::Inert
-            && matches!(
-                self.address,
-                Address::Bootstrapper(_) | Address::Known(_, _)
-            )
+        match self {
+            Record::Unknown { .. } | Record::Blocked { .. } | Record::Myself { .. } => false,
+            Record::Bootstrapper { .. } => true,
+            Record::Known {
+                info: _,
+                status,
+                sets: _,
+            } if status == &Status::Connected => false,
+            Record::Known { .. } => true,
+        }
+        // self.status == Status::Inert
+        //     && matches!(
+        //         self.address,
+        //         Address::Bootstrapper(_) | Address::Known(_, _)
+        //     )
     }
 
     /// Return the socket of the peer, if known.
     pub fn socket(&self) -> Option<SocketAddr> {
-        match &self.address {
-            Address::Unknown => None,
-            Address::Myself(info) => Some(info.socket),
-            Address::Bootstrapper(socket) => Some(*socket),
-            Address::Known(info, _) => Some(info.socket),
-            Address::Blocked => None,
+        match self {
+            Record::Unknown { .. } | Record::Blocked { .. } => None,
+            Record::Myself { info, .. } => Some(info.socket),
+            Record::Bootstrapper { peer, sets: _ } => Some(*peer),
+            Record::Known { info, .. } => Some(info.socket),
         }
+        // match &self {
+        //     Address::Unknown => None,
+        //     Address::Myself(info) => Some(info.socket),
+        //     Address::Bootstrapper(socket) => Some(*socket),
+        //     Address::Known(info, _) => Some(info.socket),
+        //     Address::Blocked => None,
+        // }
     }
 
     /// Get the peer information if it is sharable. The information is considered sharable if it is
     /// known and we are connected to the peer.
     pub fn sharable(&self) -> Option<PeerInfo<C>> {
-        match &self.address {
-            Address::Unknown => None,
-            Address::Myself(info) => Some(info),
-            Address::Bootstrapper(_) => None,
-            Address::Known(info, _) => (self.status == Status::Connected).then_some(info),
-            Address::Blocked => None,
+        match self {
+            Record::Unknown { .. } | Record::Blocked { .. } | Record::Bootstrapper { .. } => None,
+            Record::Myself { info, .. } => Some(info.clone()),
+            Record::Known {
+                info,
+                status: Status::Connected,
+                ..
+            } => Some(info.clone()),
+            Record::Known { .. } => None,
         }
-        .cloned()
+        // match &self.address {
+        //     Address::Unknown => None,
+        //     Address::Myself(info) => Some(info),
+        //     Address::Bootstrapper(_) => None,
+        //     Address::Known(info, _) => (self.status == Status::Connected).then_some(info),
+        //     Address::Blocked => None,
+        // }
+        // .cloned()
     }
 
     /// Returns `true` if the peer is reserved (or connected).
     /// This is used to determine if we should attempt to reserve the peer again.
     pub fn reserved(&self) -> bool {
-        matches!(self.status, Status::Reserved | Status::Connected)
+        match self {
+            Record::Known {
+                info: _,
+                status,
+                sets: _,
+            } => return matches!(status, Status::Reserved | Status::Connected),
+            _ => false,
+        }
     }
 
     /// Returns `true` if we want to ask for updated peer information for this peer.
@@ -252,36 +418,71 @@ impl<C: PublicKey> Record<C> {
     /// - Returns true for addresses for which we do have peer info if-and-only-if we have failed to
     ///   dial at least `min_fails` times.
     pub fn want(&self, min_fails: usize) -> bool {
+        match self {
+            Record::Myself { .. } | Record::Blocked { .. } => false,
+            Record::Unknown { .. } | Record::Bootstrapper { .. } => true,
+            Record::Known {
+                info: _,
+                status,
+                sets,
+            } => {
+                // We want to ask for updated peer info if we are not connected and
+                // have failed dialing it at least `min_fails` times.
+                // TODO danlaine: replace sets with record_min_fails.
+                *status != Status::Connected && sets >= &min_fails
+            }
+        }
         // Ignore how many sets the peer is part of.
         // If the peer is not in any sets, this function is not called anyway.
 
         // Return true if we either:
         // - Don't have signed peer info
         // - Are not connected to the peer and have failed dialing it
-        match self.address {
-            Address::Myself(_) | Address::Blocked => false,
-            Address::Unknown | Address::Bootstrapper(_) => true,
-            Address::Known(_, fails) => self.status != Status::Connected && fails >= min_fails,
-        }
+        // match self.address {
+        //     Address::Myself(_) | Address::Blocked => false,
+        //     Address::Unknown | Address::Bootstrapper(_) => true,
+        //     Address::Known(_, fails) => self.status != Status::Connected && fails >= min_fails,
+        // }
     }
 
     /// Returns `true` if the record can safely be deleted.
     pub fn deletable(&self) -> bool {
-        self.sets == 0 && !self.persistent() && matches!(self.status, Status::Inert)
+        match self {
+            Record::Myself { .. } | Record::Bootstrapper { .. } => false,
+            Record::Unknown { sets } => *sets == 0,
+            Record::Blocked { sets } => *sets == 0,
+            Record::Known {
+                info: _,
+                status,
+                sets,
+            } => *sets == 0 && status == &Status::Inert,
+        }
+        // self.sets == 0 && !self.persistent() && matches!(self.status, Status::Inert)
     }
 
     /// Returns `true` if the record is allowed to be used for connection.
     pub fn allowed(&self) -> bool {
-        match self.address {
-            Address::Blocked | Address::Myself(_) => false,
-            Address::Bootstrapper(_) | Address::Unknown | Address::Known(_, _) => {
-                self.sets > 0 || self.persistent()
-            }
+        match self {
+            Record::Myself { .. } | Record::Blocked { .. } => false,
+            Record::Bootstrapper { .. } => true,
+            Record::Unknown { sets } => *sets > 0,
+            Record::Known {
+                info: _,
+                status: _,
+                sets,
+            } => *sets > 0,
         }
+        // match self.address {
+        //     Address::Blocked | Address::Myself(_) => false,
+        //     Address::Bootstrapper(_) | Address::Unknown | Address::Known(_, _) => {
+        //         self.sets > 0 || self.persistent()
+        //     }
+        // }
     }
 
     fn persistent(&self) -> bool {
-        matches!(self.address, Address::Myself(_) | Address::Bootstrapper(_))
+        matches!(self, Record::Myself { .. } | Record::Bootstrapper { .. })
+        // matches!(self.address, Address::Myself(_) | Address::Bootstrapper(_))
     }
 }
 #[cfg(test)]
