@@ -120,9 +120,7 @@ impl<C: PublicKey> Record<C> {
             }
             Self::Known {
                 info: existing_info,
-                status: _,
-                sets,
-                dial_fails,
+                ..
             } => {
                 // Ensure the new info is more recent.
                 let existing_ts = existing_info.timestamp;
@@ -137,14 +135,7 @@ impl<C: PublicKey> Record<C> {
                     );
                     return false;
                 }
-
-                // Transition from Known to Known.
-                *self = Self::Known {
-                    info,
-                    status: Status::Inert,
-                    sets: *sets,
-                    dial_fails: *dial_fails,
-                };
+                *existing_info = info;
                 true
             }
         }
