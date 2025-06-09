@@ -51,7 +51,11 @@ pub enum Record<C: PublicKey> {
     Myself { info: PeerInfo<C>, sets: usize },
 
     /// The peer is a bootstrapper with a known address.
-    Bootstrapper { peer: SocketAddr, sets: usize },
+    Bootstrapper {
+        peer: SocketAddr,
+        sets: usize,
+        reserved: bool,
+    },
 
     /// The peer is known and has been discovered.
     Known {
@@ -91,7 +95,11 @@ impl<C: PublicKey> Record<C> {
 
     /// Create a new record with a bootstrapper address.
     pub fn bootstrapper(peer: SocketAddr) -> Self {
-        Self::Bootstrapper { peer, sets: 0 }
+        Self::Bootstrapper {
+            peer,
+            sets: 0,
+            reserved: false,
+        }
     }
 
     /// Attempt to update the [`PeerInfo`] of a discovered peer.
@@ -176,7 +184,7 @@ impl<C: PublicKey> Record<C> {
                 return false;
             }
             Self::Unknown { sets } => sets,
-            Self::Bootstrapper { peer: _, sets } => sets,
+            Self::Bootstrapper { sets, .. } => sets,
             Self::Known { info: _, sets, .. } => sets,
         };
         *self = Self::Blocked { sets: *sets };
@@ -217,14 +225,14 @@ impl<C: PublicKey> Record<C> {
     pub fn reserve(&mut self) -> bool {
         match self {
             Self::Blocked { .. } | Self::Myself { .. } => false,
-            Self::Unknown { .. } => {
-                // Cannot reserve an unknown peer.
-                false
-            }
-            Self::Bootstrapper { .. } => {
-                // Bootstrapper can be reserved.
-                // *self = true
-                todo!()
+            Self::Unknown { .. } => false,
+            Self::Bootstrapper { reserved, .. } => {
+                if *reserved {
+                    false
+                } else {
+                    *reserved = true;
+                    true
+                }
             }
             Self::Known { status, .. } => {
                 if *status == Status::Inert {
@@ -286,8 +294,12 @@ impl<C: PublicKey> Record<C> {
             Record::Known { status, .. } if status != &Status::Reserved => {
                 unreachable!("Cannot release a peer that is not reserved")
             }
-            Record::Bootstrapper { .. } => {
-                unreachable!("Cannot release a bootstrapper peer");
+            Record::Bootstrapper { reserved, .. } => {
+                assert!(
+                    *reserved,
+                    "Cannot release a bootstrapper that is not reserved"
+                );
+                *reserved = false;
             }
             Record::Known { status, .. } => {
                 *status = Status::Connected;
@@ -367,7 +379,7 @@ impl<C: PublicKey> Record<C> {
         match self {
             Record::Unknown { .. } | Record::Blocked { .. } => None,
             Record::Myself { info, .. } => Some(info.socket),
-            Record::Bootstrapper { peer, sets: _ } => Some(*peer),
+            Record::Bootstrapper { peer, .. } => Some(*peer),
             Record::Known { info, .. } => Some(info.socket),
         }
         // match &self {
@@ -423,11 +435,12 @@ impl<C: PublicKey> Record<C> {
         match self {
             Record::Myself { .. } | Record::Blocked { .. } => false,
             Record::Unknown { .. } | Record::Bootstrapper { .. } => true,
-            Record::Known { status, sets, .. } => {
+            Record::Known {
+                status, dial_fails, ..
+            } => {
                 // We want to ask for updated peer info if we are not connected and
                 // have failed dialing it at least `min_fails` times.
-                // TODO danlaine: replace sets with record_min_fails.
-                *status != Status::Connected && sets >= &min_fails
+                *status != Status::Connected && dial_fails >= &min_fails
             }
         }
         // Ignore how many sets the peer is part of.
