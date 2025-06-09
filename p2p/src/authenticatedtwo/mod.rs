@@ -16,6 +16,8 @@ use rand::{seq::SliceRandom as _, Rng};
 enum Event<P: PublicKey, Si: Sink, St: Stream> {
     IncomingConnection { peer: P, sink: Si, stream: St },
     OutboundConnection { peer: P, sink: Si, stream: St },
+    TryConnect,
+    UpdateWantedPeers,
     SendPeers,
     PeerReady(P),
     PeerDisconnected(P),
@@ -60,6 +62,7 @@ struct Network<E: RNetwork + Spawner + Rng + Clock + GClock + RuntimeMetrics, P:
     channels: HashMap<u32, mpsc::Sender<Bytes>>,
     tracker: Tracker<E, P>,
     peers: HashMap<P, Peer<P>>,
+    wanted_peers: Vec<P>,
     connections: BTreeMap<P, mpsc::Sender<types::Data>>,
 }
 
@@ -72,12 +75,19 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + RuntimeMetrics, P: PublicKey
             };
 
             match event {
+                Event::UpdateWantedPeers => {
+                    self.wanted_peers = self.tracker.directory.dialable();
+                }
+                Event::TryConnect => {
+                    while let Some(peer) = self.wanted_peers.pop() {
+                        // TODO start task to try to dial peer
+                    }
+                }
                 Event::IncomingConnection { peer, sink, stream } => {
-                    // TODO: check whether we should accept this connection
-                    if self.peers.contains_key(&peer) {
-                        // Peer already connected, skip.
+                    if let Some(_) = self.tracker.directory.listen(&peer) {
                         continue;
                     }
+
                     // Create a new peer.
                     self.context
                         .with_label("peer")
