@@ -9,7 +9,7 @@ use commonware_cryptography::PublicKey;
 use commonware_runtime::{
     Clock, Metrics as RuntimeMetrics, Network as RNetwork, Sink, SinkOf, Spawner, Stream, StreamOf,
 };
-use futures::{channel::mpsc, SinkExt};
+use futures::{channel::mpsc, SinkExt, StreamExt as _};
 use governor::clock::Clock as GClock;
 use rand::{seq::SliceRandom as _, Rng};
 
@@ -26,25 +26,23 @@ struct Tracker<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, P: PublicKey>
     context: E,
     peer_gossip_max_count: usize,
     directory: Directory<E, P>,
-    _phantom: std::marker::PhantomData<P>, // TODO remove
 }
 
 impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, P: PublicKey> Tracker<E, P> {
     fn handle_bit_vec(&mut self, bit_vec: types::BitVec) -> Vec<PeerInfo<P>> {
-        // TODO implement
-        let Some(mut infos) = self.directory.infos(bit_vec) else {
+        let Some(mut peers) = self.directory.infos(bit_vec) else {
             // TODO danlaine: can this happen?
             return vec![];
         };
 
         // Truncate to a random selection of peers if we have too many infos
         let max = self.peer_gossip_max_count;
-        if infos.len() > max {
-            infos.partial_shuffle(&mut self.context, max);
-            infos.truncate(max);
+        if peers.len() > max {
+            peers.partial_shuffle(&mut self.context, max);
+            peers.truncate(max);
         }
 
-        infos
+        peers
     }
 
     fn handle_peers(&mut self, peers: Vec<types::PeerInfo<P>>) {
@@ -58,6 +56,7 @@ struct Peer<P: PublicKey> {
 
 struct Network<E: RNetwork + Spawner + Rng + Clock + GClock + RuntimeMetrics, P: PublicKey> {
     context: E,
+    events_rx: mpsc::Receiver<Event<P, SinkOf<E>, StreamOf<E>>>,
     channels: HashMap<u32, mpsc::Sender<Bytes>>,
     tracker: Tracker<E, P>,
     peers: HashMap<P, Peer<P>>,
@@ -68,16 +67,11 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + RuntimeMetrics, P: PublicKey
     pub async fn run(mut self, rx: mpsc::Receiver<Vec<u8>>) {
         loop {
             // Wait for an event.
-            let Some(event) = self.next_event().await else {
-                // If no event is available, break the loop.
+            let Some(event) = self.events_rx.next().await else {
                 break;
             };
 
-            // Process the event.
             match event {
-                Event::SendPeers => {
-                    // TODO: update peers
-                }
                 Event::IncomingConnection { peer, sink, stream } => {
                     // TODO: check whether we should accept this connection
                     if self.peers.contains_key(&peer) {
@@ -144,8 +138,5 @@ impl<E: RNetwork + Spawner + Rng + Clock + GClock + RuntimeMetrics, P: PublicKey
         }
     }
 
-    async fn next_event(&mut self) -> Option<Event<P, SinkOf<E>, StreamOf<E>>> {
-        // TODO implement
-        None
-    }
+    async fn next_event(&mut self) -> Option<Event<P, SinkOf<E>, StreamOf<E>>> {}
 }
