@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::authenticated::{
     tracker::directory::Directory,
@@ -13,8 +13,12 @@ use futures::{channel::mpsc, SinkExt};
 use governor::clock::Clock as GClock;
 use rand::{seq::SliceRandom as _, Rng};
 
-enum Event<P: PublicKey> {
-    IncomingConnection,
+enum Event<P: PublicKey, Si: Sink, St: Stream> {
+    IncomingConnection { peer: P, sink: Si, stream: St },
+    OutboundConnection { peer: P, sink: Si, stream: St },
+    SendPeers,
+    PeerReady(P),
+    PeerDisconnected(P),
     ReadMessage(P, types::Payload<P>),
 }
 
@@ -52,26 +56,63 @@ struct Peer<P: PublicKey> {
     tx: mpsc::Sender<types::Payload<P>>,
 }
 
-struct Network<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, P: PublicKey> {
+struct Network<E: RNetwork + Spawner + Rng + Clock + GClock + RuntimeMetrics, P: PublicKey> {
+    context: E,
     channels: HashMap<u32, mpsc::Sender<Bytes>>,
     tracker: Tracker<E, P>,
     peers: HashMap<P, Peer<P>>,
-    _phantom: std::marker::PhantomData<P>, // TODO remove
+    connections: BTreeMap<P, mpsc::Sender<types::Data>>,
 }
 
-impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, P: PublicKey> Network<E, P> {
+impl<E: RNetwork + Spawner + Rng + Clock + GClock + RuntimeMetrics, P: PublicKey> Network<E, P> {
     pub async fn run(mut self, rx: mpsc::Receiver<Vec<u8>>) {
         loop {
             // Wait for an event.
-            let event = self.next_event().await;
+            let Some(event) = self.next_event().await else {
+                // If no event is available, break the loop.
+                break;
+            };
 
             // Process the event.
             match event {
-                Some(Event::IncomingConnection) => {
-                    // Handle incoming connection.
-                    // TODO implement
+                Event::SendPeers => {
+                    // TODO: update peers
                 }
-                Some(Event::ReadMessage(peer, message)) => match message {
+                Event::IncomingConnection { peer, sink, stream } => {
+                    // TODO: check whether we should accept this connection
+                    if self.peers.contains_key(&peer) {
+                        // Peer already connected, skip.
+                        continue;
+                    }
+                    // Create a new peer.
+                    self.context
+                        .with_label("peer")
+                        .spawn(move |_context| async {
+                            // TODO launch peer
+                        });
+                }
+                Event::OutboundConnection { peer, sink, stream } => {
+                    // TODO: check whether we should accept this connection
+                    if self.peers.contains_key(&peer) {
+                        // Peer already connected, skip.
+                        continue;
+                    }
+                    // Create a new peer.
+                    self.context
+                        .with_label("peer")
+                        .spawn(move |_context| async {
+                            // TODO launch peer
+                        });
+                }
+                Event::PeerReady(_peer) => {
+                    // Peer is ready, we can now send messages to it.
+                    // TODO: what do we need to do here?
+                }
+                Event::PeerDisconnected(_peer) => {
+                    // Peer disconnected, remove it from the tracker and peers.
+                    // TODO handle this
+                }
+                Event::ReadMessage(peer, message) => match message {
                     types::Payload::BitVec(bit_vec) => {
                         let peer_infos = self.tracker.handle_bit_vec(bit_vec);
                         if peer_infos.is_empty() {
@@ -96,15 +137,14 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, P: PublicKey> Network<E
                         }
                     }
                 },
-                None => {
-                    // No more events, exit loop.
-                    break;
+                _ => {
+                    todo!()
                 }
             }
         }
     }
 
-    async fn next_event(&mut self) -> Option<Event<P>> {
+    async fn next_event(&mut self) -> Option<Event<P, SinkOf<E>, StreamOf<E>>> {
         // TODO implement
         None
     }
