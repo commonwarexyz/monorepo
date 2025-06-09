@@ -28,7 +28,7 @@ pub struct Actor<E: Spawner + Metrics, P: PublicKey> {
 }
 
 impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
-    /// Returns a new [Actor] along with a [Mailbox] and [Messenger]
+    /// Returns a new [Actor] along with a [Sender] and [Messenger]
     /// that can be used to send messages to the router.
     pub fn new(context: E, cfg: Config) -> (Self, Sender<Message<P>>, Messenger<P>) {
         // Create mailbox
