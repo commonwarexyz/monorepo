@@ -9,7 +9,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 mod actor;
-mod directory;
+pub mod directory;
 mod ingress;
 mod metadata;
 mod metrics;

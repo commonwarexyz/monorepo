@@ -184,8 +184,9 @@ mod config;
 mod ip;
 mod metrics;
 mod network;
-mod types;
+pub mod types;
 
+pub use actors::tracker;
 use thiserror::Error;
 
 /// Errors that can occur when interacting with the network.
