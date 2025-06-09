@@ -6,12 +6,13 @@ use super::{
     config::Config,
     types,
 };
-use crate::{authenticated::Mailbox, Channel};
+use crate::Channel;
 use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics, Network as RNetwork, Spawner};
 use commonware_stream::public_key;
 use commonware_utils::union;
+use futures::channel::mpsc::Sender;
 use governor::{clock::ReasonablyRealtime, Quota};
 use rand::{CryptoRng, Rng};
 use tracing::{debug, info, warn};
@@ -32,9 +33,9 @@ pub struct Network<
 
     channels: Channels<C::PublicKey>,
     tracker: tracker::Actor<E, C>,
-    tracker_mailbox: Mailbox<tracker::Message<E, C::PublicKey>>,
+    tracker_mailbox: Sender<tracker::Message<E, C::PublicKey>>,
     router: router::Actor<E, C::PublicKey>,
-    router_mailbox: Mailbox<router::Message<C::PublicKey>>,
+    router_mailbox: Sender<router::Message<C::PublicKey>>,
 }
 
 impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics, C: Signer>

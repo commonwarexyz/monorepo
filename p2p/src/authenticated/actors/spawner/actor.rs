@@ -1,13 +1,16 @@
 use super::{ingress::Message, Config};
 use crate::authenticated::{
     actors::{peer, router, tracker},
-    metrics, Mailbox,
+    metrics,
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Handle, Metrics, Network, Spawner};
 use futures::{
-    channel::{mpsc, oneshot},
-    StreamExt,
+    channel::{
+        mpsc::{self, Sender},
+        oneshot,
+    },
+    SinkExt as _, StreamExt,
 };
 use governor::{clock::ReasonablyRealtime, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
@@ -41,7 +44,7 @@ impl<
         C: PublicKey,
     > Actor<E, C>
 {
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<E, C>>) {
+    pub fn new(context: E, cfg: Config) -> (Self, Sender<Message<E, C>>) {
         let connections = Gauge::default();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
@@ -79,22 +82,22 @@ impl<
                 received_messages,
                 rate_limited,
             },
-            Mailbox::new(sender),
+            sender,
         )
     }
 
     pub fn start(
         mut self,
-        tracker: Mailbox<tracker::Message<E, C>>,
-        router: Mailbox<router::Message<C>>,
+        tracker: Sender<tracker::Message<E, C>>,
+        router: Sender<router::Message<C>>,
     ) -> Handle<()> {
         self.context.spawn_ref()(self.run(tracker, router))
     }
 
     async fn run(
         mut self,
-        tracker: Mailbox<tracker::Message<E, C>>,
-        router: Mailbox<router::Message<C>>,
+        tracker: Sender<tracker::Message<E, C>>,
+        router: Sender<router::Message<C>>,
     ) {
         while let Some(msg) = self.receiver.next().await {
             match msg {

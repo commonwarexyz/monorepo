@@ -5,13 +5,14 @@ use crate::authenticated::{
         spawner,
         tracker::{self, Metadata, Reservation},
     },
-    metrics, Mailbox,
+    metrics,
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{telemetry::traces::status, Clock, Handle, Metrics, Network, Spawner};
 use commonware_stream::public_key::{Config as StreamConfig, Connection};
 use commonware_utils::SystemTimeExt;
+use futures::{channel::mpsc::Sender, SinkExt as _};
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
@@ -77,7 +78,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
     async fn dial_peer(
         &mut self,
         reservation: Reservation<E, C::PublicKey>,
-        supervisor: &mut Mailbox<spawner::Message<E, C::PublicKey>>,
+        supervisor: &mut Sender<spawner::Message<E, C::PublicKey>>,
     ) {
         // Extract metadata from the reservation
         let Metadata::Dialer(peer, address) = reservation.metadata().clone() else {
@@ -143,8 +144,8 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
     /// Start the dialer actor.
     pub fn start(
         self,
-        tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
-        supervisor: Mailbox<spawner::Message<E, C::PublicKey>>,
+        tracker: Sender<tracker::Message<E, C::PublicKey>>,
+        supervisor: Sender<spawner::Message<E, C::PublicKey>>,
     ) -> Handle<()> {
         self.context
             .clone()
@@ -153,8 +154,8 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
 
     async fn run(
         mut self,
-        mut tracker_mailbox: Mailbox<tracker::Message<E, C::PublicKey>>,
-        mut supervisor: Mailbox<spawner::Message<E, C::PublicKey>>,
+        mut tracker_mailbox: Sender<tracker::Message<E, C::PublicKey>>,
+        mut supervisor: Sender<spawner::Message<E, C::PublicKey>>,
     ) {
         let mut dial_deadline = self.context.current();
         let mut query_deadline = self.context.current();

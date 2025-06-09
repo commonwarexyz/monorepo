@@ -1,14 +1,12 @@
 //! Listener
 
-use crate::authenticated::{
-    actors::{spawner, tracker},
-    Mailbox,
-};
+use crate::authenticated::actors::{spawner, tracker};
 use commonware_cryptography::Signer;
 use commonware_runtime::{
     telemetry::traces::status, Clock, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf,
 };
 use commonware_stream::public_key::{Config as StreamConfig, Connection, IncomingConnection};
+use futures::{channel::mpsc::Sender, SinkExt as _};
 use governor::{
     clock::ReasonablyRealtime,
     middleware::NoOpMiddleware,
@@ -72,8 +70,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         stream_cfg: StreamConfig<C>,
         sink: SinkOf<E>,
         stream: StreamOf<E>,
-        mut tracker_mailbox: Mailbox<tracker::Message<E, C::PublicKey>>,
-        mut supervisor: Mailbox<spawner::Message<E, C::PublicKey>>,
+        mut tracker_mailbox: Sender<tracker::Message<E, C::PublicKey>>,
+        mut supervisor: Sender<spawner::Message<E, C::PublicKey>>,
     ) {
         // Create span
         let span = debug_span!("listener", ?address);
@@ -137,8 +135,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 
     pub fn start(
         self,
-        tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
-        supervisor: Mailbox<spawner::Message<E, C::PublicKey>>,
+        tracker: Sender<tracker::Message<E, C::PublicKey>>,
+        supervisor: Sender<spawner::Message<E, C::PublicKey>>,
     ) -> Handle<()> {
         self.context
             .clone()
@@ -147,8 +145,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 
     async fn run(
         self,
-        tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
-        supervisor: Mailbox<spawner::Message<E, C::PublicKey>>,
+        tracker: Sender<tracker::Message<E, C::PublicKey>>,
+        supervisor: Sender<spawner::Message<E, C::PublicKey>>,
     ) {
         // Start listening for incoming connections
         let mut listener = self
