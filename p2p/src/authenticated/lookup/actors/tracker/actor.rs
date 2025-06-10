@@ -20,9 +20,6 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
     context: E,
 
     // ---------- Configuration ----------
-    /// For signing and verifying messages.
-    crypto: C,
-
     /// The maximum number of peers in a set.
     max_peer_set_size: usize,
 
@@ -56,7 +53,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         let directory_cfg = directory::Config {
             mailbox_size: cfg.mailbox_size,
             max_sets: cfg.tracked_peer_sets,
-            dial_fail_limit: cfg.dial_fail_limit,
             rate_limit: cfg.allowed_connection_rate_per_peer,
         };
         let directory = Directory::init(context.clone(), cfg.bootstrappers, myself, directory_cfg);
@@ -65,7 +61,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         (
             Self {
                 context,
-                crypto: cfg.crypto,
                 max_peer_set_size: cfg.max_peer_set_size,
                 receiver,
                 directory,
@@ -98,7 +93,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 }
                 Message::Connect {
                     public_key,
-                    dialer,
+                    dialer: _, // TODO remove
                     mut peer,
                 } => {
                     // Kill if peer is not authorized
@@ -108,7 +103,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                     }
 
                     // Mark the record as connected
-                    self.directory.connect(&public_key, dialer);
+                    self.directory.connect(&public_key);
 
                     // TODO danlaine: do we need to send the peer anything here?
                 }

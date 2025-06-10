@@ -22,10 +22,6 @@ pub struct Config {
     /// The maximum number of peer sets to track.
     pub max_sets: usize,
 
-    /// The minimum number of times we should fail to dial a peer before attempting to ask other
-    /// peers for its peer info again.
-    pub dial_fail_limit: usize,
-
     /// The rate limit for allowing reservations per-peer.
     pub rate_limit: Quota,
 }
@@ -37,10 +33,6 @@ pub struct Directory<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Publ
     // ---------- Configuration ----------
     /// The maximum number of peer sets to track.
     max_sets: usize,
-
-    /// The minimum number of times we should fail to dial a peer before attempting to ask other
-    /// peers for its peer info again.
-    dial_fail_limit: usize,
 
     // ---------- State ----------
     /// The records of all peers.
@@ -92,7 +84,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         Self {
             context,
             max_sets: cfg.max_sets,
-            dial_fail_limit: cfg.dial_fail_limit,
             peers,
             sets: BTreeMap::new(),
             rate_limiter,
@@ -113,15 +104,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
             record.release();
             self.metrics.reserved.dec();
 
-            // If the reservation was taken by the dialer, record the failure.
-            if let Metadata::Dialer(_, socket) = metadata {
-                record.dial_failure(socket);
-            }
-
-            let want = record.want(self.dial_fail_limit);
-            for set in self.sets.values_mut() {
-                set.update(peer, !want);
-            }
             self.delete_if_needed(peer);
         }
     }
@@ -133,49 +115,10 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     /// # Panics
     ///
     /// Panics if the peer is not tracked or if the peer is not in the reserved state.
-    pub fn connect(&mut self, peer: &C, dialer: bool) {
+    pub fn connect(&mut self, peer: &C) {
         // Set the record as connected
         let record = self.peers.get_mut(peer).unwrap();
-        if dialer {
-            record.dial_success();
-        }
         record.connect();
-
-        // We may have to update the sets.
-        let want = record.want(self.dial_fail_limit);
-        for set in self.sets.values_mut() {
-            set.update(peer, !want);
-        }
-    }
-
-    // TODO danlaine: change this function to update_peer (singular)?
-    /// Using a list of (already-validated) peer information, update the records.
-    pub fn _update_peers(&mut self, infos: Vec<PeerInfo<C>>) {
-        for info in infos {
-            // Update peer address
-            //
-            // It is not safe to rate limit how many times this can happen
-            // over some interval because a malicious peer may just replay
-            // old IPs to prevent us from propagating a new one.
-            let peer = info.public_key.clone();
-            let Some(record) = self.peers.get_mut(&peer) else {
-                continue;
-            };
-            if !record.update(info) {
-                continue;
-            }
-            self.metrics
-                .updates
-                .get_or_create(&metrics::Peer::new(&peer))
-                .inc();
-
-            // We may have to update the sets.
-            let want = record.want(self.dial_fail_limit);
-            for set in self.sets.values_mut() {
-                set.update(&peer, !want);
-            }
-            debug!(?peer, "updated peer record");
-        }
     }
 
     pub fn set_address(&mut self, peer: &C, address: SocketAddr) {
@@ -189,12 +132,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
             .updates
             .get_or_create(&metrics::Peer::new(peer))
             .inc();
-
-        // We may have to update the sets.
-        let want = record.want(self.dial_fail_limit);
-        for set in self.sets.values_mut() {
-            set.update(peer, !want);
-        }
     }
 
     /// Stores a new peer set.
@@ -214,14 +151,13 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         }
 
         // Create and store new peer set
-        let mut set = Set::new(peers.clone());
+        let set = Set::new(peers.clone());
         for peer in peers.iter() {
             let record = self.peers.entry(peer.clone()).or_insert_with(|| {
                 self.metrics.tracked.inc();
                 Record::unknown()
             });
             record.increment();
-            set.update(peer, !record.want(self.dial_fail_limit));
         }
         self.sets.insert(index, set);
 

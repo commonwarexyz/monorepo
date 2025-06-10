@@ -1,52 +1,21 @@
 use commonware_cryptography::PublicKey;
-use commonware_utils::BitVec;
-use std::collections::HashMap;
 
 /// Represents a set of peers and their knowledge of each other.
 pub struct Set<P: PublicKey> {
     /// The list of peers, sorted.
     sorted: Vec<P>,
-
-    /// The index of each peer in the sorted list, for quick lookup.
-    order: HashMap<P, usize>,
-
-    /// For each peer, whether I know their peer info or not.
-    knowledge: BitVec,
 }
 
 impl<P: PublicKey> Set<P> {
     /// Creates a new set for the given index.
     pub fn new(mut peers: Vec<P>) -> Self {
         peers.sort();
-        let mut order = HashMap::new();
-        for (i, peer) in peers.iter().enumerate() {
-            order.insert(peer.clone(), i);
-        }
-        let knowledge = BitVec::zeroes(peers.len());
-        Self {
-            sorted: peers,
-            order,
-            knowledge,
-        }
-    }
-
-    /// Marks the given peer as known or unknown.
-    pub fn update(&mut self, peer: &P, known: bool) -> bool {
-        if let Some(idx) = self.order.get(peer) {
-            self.knowledge.set_to(*idx, known);
-            return true;
-        }
-        false
+        Self { sorted: peers }
     }
 
     /// Returns the number of peers in the set.
     pub fn len(&self) -> usize {
         self.sorted.len()
-    }
-
-    /// Returns the bit vector indicating which peers are known.
-    pub fn knowledge(&self) -> BitVec {
-        self.knowledge.clone()
     }
 }
 

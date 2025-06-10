@@ -29,7 +29,6 @@ pub struct Config<C: Signer> {
     pub tracked_peer_sets: usize,
     pub max_peer_set_size: usize,
     pub allowed_connection_rate_per_peer: Quota,
-    pub dial_fail_limit: usize,
 }
 
 // TODO danlaine: use or remove
