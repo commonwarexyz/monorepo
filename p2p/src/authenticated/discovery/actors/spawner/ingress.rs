@@ -4,10 +4,15 @@ use commonware_runtime::{Clock, Metrics, Sink, Spawner, Stream};
 use commonware_stream::public_key::Connection;
 use futures::{channel::mpsc, SinkExt};
 
+/// Messages that can be processed by the spawner [Actor](super::Actor).
 pub enum Message<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKey> {
+    /// Notify the spawner to create a new task for the given peer.
     Spawn {
+        /// The peer's public key.
         peer: P,
+        /// The connection to the peer.
         connection: Connection<Si, St>,
+        /// The reservation for the peer.
         reservation: Reservation<E, P>,
     },
 }
