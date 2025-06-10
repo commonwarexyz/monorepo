@@ -59,7 +59,6 @@ use clap::{value_parser, Arg, Command};
 use commonware_cryptography::PrivateKeyExt as _;
 use commonware_cryptography::{ed25519, Signer as _};
 use commonware_p2p::authenticated;
-use commonware_p2p::authenticated::discovery::Network;
 use commonware_runtime::tokio;
 use commonware_runtime::Metrics;
 use commonware_runtime::Runner as _;
@@ -165,7 +164,8 @@ fn main() {
     // Start context
     executor.start(|context| async move {
         // Initialize network
-        let (mut network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
+        let (mut network, mut oracle) =
+            authenticated::discovery::Network::new(context.with_label("network"), p2p_cfg);
 
         // Provide authorized peers
         //
