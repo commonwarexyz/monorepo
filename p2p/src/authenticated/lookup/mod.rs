@@ -397,7 +397,7 @@ mod tests {
 
         // Give each peer the address of all other peers
         for oracle in oracles.iter_mut() {
-            for (i, (_, pub_key, addr)) in peers.iter().enumerate() {
+            for (_, (_, pub_key, addr)) in peers.iter().enumerate() {
                 oracle.update_address(pub_key.clone(), addr.clone()).await;
             }
         }
@@ -474,7 +474,7 @@ mod tests {
         let executor = tokio::Runner::new(cfg.clone());
         executor.start(|context| async move {
             const MAX_MESSAGE_SIZE: usize = 1_024 * 1_024; // 1MB
-            let base_port = 3000;
+            let base_port = 4000;
             let n = 10;
             run_network(context, MAX_MESSAGE_SIZE, base_port, n, Mode::One).await;
         });
