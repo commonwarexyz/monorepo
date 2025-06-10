@@ -315,32 +315,40 @@ impl<H: CHasher> Mmr<H> {
             return Ok(());
         }
 
-        panic!("invalid MMR")
+        unreachable!("invalid pos {}:{}", pos, self.size())
     }
 
-    /// Change the digest of any retained leaf, but without updating ancestors until `sync` is
-    /// called. Returns ElementPruned error if the specified leaf has been pruned.
+    /// Batch update the digests of multiple retained leaves. If any one doesn't exist, then
+    /// ElementPruned is returned for the first one found.
     pub async fn update_leaf_batched(
         &mut self,
         hasher: &mut impl Hasher<H>,
-        pos: u64,
-        element: &[u8],
+        updates: impl Iterator<Item = (u64, impl AsRef<[u8]>)>,
     ) -> Result<(), Error> {
-        if pos < self.pruned_to_pos {
-            return Err(ElementPruned(pos));
+        for (pos, element) in updates {
+            if pos < self.pruned_to_pos {
+                return Err(ElementPruned(pos));
+            }
+
+            // Update the digest of the leaf node and mark its ancestors as dirty.
+            let digest = hasher.leaf_digest(pos, element.as_ref()).await?;
+            let index = self.pos_to_index(pos);
+            self.nodes[index] = digest;
+            self.mark_dirty(pos);
         }
 
-        // Update the digest of the leaf node.
-        let digest = hasher.leaf_digest(pos, element).await?;
-        let index = self.pos_to_index(pos);
-        self.nodes[index] = digest;
+        Ok(())
+    }
 
+    /// Mark the non-leaf nodes in the path from the given position to the root as dirty, so that
+    /// their digests are appropriately recomputed during the next `sync`.
+    fn mark_dirty(&mut self, pos: u64) {
         for (peak_pos, mut height) in self.peak_iterator() {
             if peak_pos < pos {
                 continue;
             }
 
-            // We have found the mountain containing the path we need to update. Traverse it from
+            // We have found the mountain containing the path we are looking for. Traverse it from
             // leaf to root, that way we can exit early if we hit a node that is already dirty.
             let path = PathIterator::new(pos, peak_pos, height)
                 .collect::<Vec<_>>()
@@ -351,13 +359,12 @@ impl<H: CHasher> Mmr<H> {
                 if !self.dirty_nodes.insert((parent_pos, height)) {
                     break;
                 }
-
                 height += 1;
             }
-            break;
+            return;
         }
 
-        Ok(())
+        unreachable!("invalid pos {}:{}", pos, self.size());
     }
 
     /// Returns whether there are pending updates.
@@ -735,8 +742,10 @@ mod tests {
     fn test_mem_mmr_root_stability() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
+            // Test root stability under different MMR building methods.
             let mut mmr = Mmr::new();
             build_and_check_test_roots_mmr(&mut mmr).await;
+
             let mut mmr = Mmr::new();
             build_batched_and_check_test_roots(&mut mmr).await;
         });
@@ -745,7 +754,7 @@ mod tests {
     /// Build the MMR corresponding to the stability test while pruning after each add, and confirm
     /// the static roots match that from the root computation.
     #[test]
-    fn test_mem_mmr_test_root_stability_while_pruning() {
+    fn test_mem_mmr_root_stability_while_pruning() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = Sha256::default();
@@ -899,23 +908,32 @@ mod tests {
             let root = mmr.root(&mut hasher);
 
             // Change a handful of leaves using a batch update.
+            let mut updates = Vec::new();
             for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
-                mmr.update_leaf_batched(&mut hasher, leaves[leaf], &element)
-                    .await
-                    .unwrap();
+                updates.push((leaves[leaf], &element));
             }
+            mmr.update_leaf_batched(&mut hasher, updates.into_iter())
+                .await
+                .unwrap();
+
             mmr.sync(&mut hasher);
             let updated_root = mmr.root(&mut hasher);
-            assert_ne!(root, updated_root);
+            assert_eq!(
+                "af3acad6aad59c1a880de643b1200a0962a95d06c087ebf677f29eb93fc359a4",
+                hex(&updated_root)
+            );
 
             // Batch-restore the changed leaves to their original values.
+            let mut updates = Vec::new();
             for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
                 c_hasher.update(&leaf.to_be_bytes());
                 let element = c_hasher.finalize();
-                mmr.update_leaf(&mut hasher, leaves[leaf], &element)
-                    .await
-                    .unwrap();
+                updates.push((leaves[leaf], element));
             }
+            mmr.update_leaf_batched(&mut hasher, updates.into_iter())
+                .await
+                .unwrap();
+
             mmr.sync(&mut hasher);
             let restored_root = mmr.root(&mut hasher);
             assert_eq!(root, restored_root);
