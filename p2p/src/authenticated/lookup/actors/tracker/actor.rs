@@ -93,7 +93,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 }
                 Message::Connect {
                     public_key,
-                    dialer: _, // TODO remove
                     mut peer,
                 } => {
                     // Kill if peer is not authorized

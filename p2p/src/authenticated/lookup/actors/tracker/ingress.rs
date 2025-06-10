@@ -38,9 +38,6 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
         /// The public key of the peer.
         public_key: C,
 
-        /// `true` if we are the dialer, `false` if we are the listener.
-        dialer: bool,
-
         /// The mailbox of the peer actor.
         peer: authenticated::Mailbox<peer::Message>,
     },
@@ -82,18 +79,9 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
 
 impl<E: Spawner + Metrics, C: PublicKey> Mailbox<Message<E, C>> {
     /// Send a `Connect` message to the tracker.
-    pub async fn connect(
-        &mut self,
-        public_key: C,
-        dialer: bool,
-        peer: authenticated::Mailbox<peer::Message>,
-    ) {
+    pub async fn connect(&mut self, public_key: C, peer: authenticated::Mailbox<peer::Message>) {
         self.0
-            .send(Message::Connect {
-                public_key,
-                dialer,
-                peer,
-            })
+            .send(Message::Connect { public_key, peer })
             .await
             .unwrap();
     }
