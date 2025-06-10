@@ -100,10 +100,6 @@ impl<E: Clock + Spawner, P: PublicKey> Vrf<E, P> {
                                     continue;
                                 }
                             };
-                            if !received.insert(*dealer) {
-                                warn!(round, dealer, "received duplicate signature");
-                                continue;
-                            }
                             let msg = match wire::Vrf::decode(msg) {
                                 Ok(msg) => msg,
                                 Err(_) => {
@@ -116,6 +112,14 @@ impl<E: Clock + Spawner, P: PublicKey> Vrf<E, P> {
                                     round,
                                     msg.round, "received signature message with wrong round"
                                 );
+                                continue;
+                            }
+                            if &msg.signature.index != dealer {
+                                warn!(round, dealer, "received signature from wrong player");
+                                continue;
+                            }
+                            if !received.insert(*dealer) {
+                                warn!(round, dealer, "received duplicate signature");
                                 continue;
                             }
                             match ops::partial_verify_message::<MinSig>(&output.public, Some(VRF_NAMESPACE), &payload, &msg.signature) {
