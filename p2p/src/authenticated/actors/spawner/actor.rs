@@ -30,7 +30,8 @@ pub struct Actor<
     allowed_peers_rate: Quota,
     peer_gossip_max_count: usize,
 
-    receiver: mpsc::Receiver<Message<E, Si, St, C>>,
+    // Receives messages sent by other actors.
+    rx: mpsc::Receiver<Message<E, Si, St, C>>,
 
     connections: Gauge,
     sent_messages: Family<metrics::Message, Counter>,
@@ -66,7 +67,7 @@ impl<
             "messages rate limited",
             rate_limited.clone(),
         );
-        let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
+        let (tx, rx) = mpsc::channel(cfg.mailbox_size);
 
         (
             Self {
@@ -77,13 +78,13 @@ impl<
                 max_peer_set_size: cfg.max_peer_set_size,
                 allowed_peers_rate: cfg.allowed_peers_rate,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
-                receiver,
+                rx,
                 connections,
                 sent_messages,
                 received_messages,
                 rate_limited,
             },
-            Mailbox::new(sender),
+            Mailbox::new(tx),
         )
     }
 
@@ -95,8 +96,8 @@ impl<
         self.context.spawn_ref()(self.run(tracker, router))
     }
 
-    async fn run(mut self, tracker: tracker::Mailbox<E, C>, router: router::Mailbox<C>) {
-        while let Some(msg) = self.receiver.next().await {
+    async fn run(mut self, tracker_tx: tracker::Mailbox<E, C>, router_tx: router::Mailbox<C>) {
+        while let Some(msg) = self.rx.next().await {
             match msg {
                 Message::Spawn {
                     peer,
@@ -111,8 +112,8 @@ impl<
                     let sent_messages = self.sent_messages.clone();
                     let received_messages = self.received_messages.clone();
                     let rate_limited = self.rate_limited.clone();
-                    let tracker = tracker.clone();
-                    let mut router = router.clone();
+                    let tracker = tracker_tx.clone();
+                    let mut router = router_tx.clone();
 
                     // Spawn peer
                     self.context
@@ -136,7 +137,7 @@ impl<
                                 reservation,
                             );
 
-                            // Register peer with the router
+                            // Register peer with the router and get the router's channels.
                             let channels = router.ready(peer.clone(), messenger).await;
 
                             // Run peer

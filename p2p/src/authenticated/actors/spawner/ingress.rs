@@ -19,19 +19,19 @@ pub enum Message<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKe
 
 /// Sends messages to the spawner [Actor](super::Actor).
 pub struct Mailbox<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKey> {
-    sender: mpsc::Sender<Message<E, Si, St, P>>,
+    tx: mpsc::Sender<Message<E, Si, St, P>>,
 }
 
 impl<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKey> Mailbox<E, Si, St, P> {
-    /// Returns a new [Mailbox] with the given `sender`.
+    /// Returns a new [Mailbox] with the given sender.
     /// (The [Actor](super::Actor) has the corresponding receiver.)
-    pub fn new(sender: mpsc::Sender<Message<E, Si, St, P>>) -> Self {
-        Self { sender }
+    pub fn new(tx: mpsc::Sender<Message<E, Si, St, P>>) -> Self {
+        Self { tx }
     }
 
     /// Send a message to the [Actor](super::Actor) to spawn a new task for the given peer.
     pub async fn spawn(&mut self, connection: Connection<Si, St>, reservation: Reservation<E, P>) {
-        self.sender
+        self.tx
             .send(Message::Spawn {
                 peer: reservation.metadata().public_key().clone(),
                 connection,
@@ -51,7 +51,7 @@ impl<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKey> Clone
     /// require the `E`, `C`, `Si`, and `St` types to be `Clone`.
     fn clone(&self) -> Self {
         Self {
-            sender: self.sender.clone(),
+            tx: self.tx.clone(),
         }
     }
 }

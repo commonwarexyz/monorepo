@@ -18,7 +18,7 @@ use tracing::debug;
 pub struct Actor<E: Spawner + Metrics, P: PublicKey> {
     context: E,
 
-    control: mpsc::Receiver<Message<P>>,
+    control_rx: mpsc::Receiver<Message<P>>,
     connections: BTreeMap<P, peer::Relay>,
 
     messages_dropped: Family<metrics::Message, Counter>,
@@ -29,7 +29,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
     /// that can be used to send messages to the router.
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<P>, Messenger<P>) {
         // Create mailbox
-        let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
+        let (control_tx, control_rx) = mpsc::channel(cfg.mailbox_size);
 
         // Create metrics
         let messages_dropped = Family::<metrics::Message, Counter>::default();
@@ -43,64 +43,65 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
         (
             Self {
                 context,
-                control: control_receiver,
+                control_rx,
                 connections: BTreeMap::new(),
                 messages_dropped,
             },
-            Mailbox::new(control_sender.clone()),
-            Messenger::new(control_sender),
+            Mailbox::new(control_tx.clone()),
+            Messenger::new(control_tx),
         )
     }
 
-    /// Sends a message to the given `recipient`.
+    /// Sends a message to the given `peer`.
     async fn send(
         &mut self,
-        recipient: &P,
+        peer: &P,
         channel: Channel,
         message: Bytes,
         priority: bool,
         sent: &mut Vec<P>,
     ) {
-        if let Some(messenger) = self.connections.get_mut(recipient) {
+        if let Some(messenger) = self.connections.get_mut(peer) {
             if messenger
                 .content(channel, message.clone(), priority)
                 .await
                 .is_ok()
             {
-                sent.push(recipient.clone());
+                sent.push(peer.clone());
             } else {
                 self.messages_dropped
-                    .get_or_create(&metrics::Message::new_data(recipient, channel))
+                    .get_or_create(&metrics::Message::new_data(peer, channel))
                     .inc();
             }
         } else {
             self.messages_dropped
-                .get_or_create(&metrics::Message::new_data(recipient, channel))
+                .get_or_create(&metrics::Message::new_data(peer, channel))
                 .inc();
         }
     }
 
     /// Starts a new task that runs the router [Actor].
     /// Returns a [Handle] that can be used to await the completion of the task,
-    /// which will run until its `control` receiver is closed.
-    pub fn start(mut self, routing: Channels<P>) -> Handle<()> {
-        self.context.spawn_ref()(self.run(routing))
+    /// which will run until its `control_rx` receiver is closed.
+    pub fn start(mut self, channels: Channels<P>) -> Handle<()> {
+        self.context.spawn_ref()(self.run(channels))
     }
 
     /// Runs the [Actor] event loop, processing incoming messages control messages
     /// ([Message::Ready], [Message::Release]) and content messages ([Message::Content]).
-    /// Returns when the `control` channel is closed.
-    async fn run(mut self, routing: Channels<P>) {
-        while let Some(msg) = self.control.next().await {
+    /// Returns when the `control_rx` channel is closed.
+    async fn run(mut self, channels: Channels<P>) {
+        while let Some(msg) = self.control_rx.next().await {
             match msg {
                 Message::Ready {
                     peer,
                     relay,
-                    channels,
+                    channels_tx,
                 } => {
                     debug!(?peer, "peer ready");
                     self.connections.insert(peer, relay);
-                    let _ = channels.send(routing.clone());
+                    // Send the channels to the peer
+                    let _ = channels_tx.send(channels.clone());
                 }
                 Message::Release { peer } => {
                     debug!(?peer, "peer released");
@@ -111,7 +112,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
                     channel,
                     message,
                     priority,
-                    success,
+                    sent_tx: success,
                 } => {
                     let mut sent = Vec::new();
                     match recipients {
