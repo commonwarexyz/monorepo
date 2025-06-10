@@ -7,10 +7,10 @@ use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::time::Duration;
 use thiserror::Error;
 
-pub mod actor;
+mod actor;
 pub use actor::Actor;
 
-pub mod ingress;
+mod ingress;
 pub use ingress::{Mailbox, Message, Relay};
 
 pub struct Config {
