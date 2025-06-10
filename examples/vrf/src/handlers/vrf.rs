@@ -100,6 +100,12 @@ impl<E: Clock + Spawner, P: PublicKey> Vrf<E, P> {
                                     continue;
                                 }
                             };
+                            // We mark we received a message from a dealer during this round before checking if its valid to
+                            // avoid doing useless work (where the dealer can keep sending us outdated/invalid messages).
+                            if !received.insert(*dealer) {
+                                warn!(round, dealer, "received duplicate signature");
+                                continue;
+                            }
                             let msg = match wire::Vrf::decode(msg) {
                                 Ok(msg) => msg,
                                 Err(_) => {
@@ -114,12 +120,8 @@ impl<E: Clock + Spawner, P: PublicKey> Vrf<E, P> {
                                 );
                                 continue;
                             }
-                            // We mark we received a message from the dealer before checking if its valid to
-                            // avoid doing useless work (where the dealer can keep sending us invalid messages).
-                            if !received.insert(*dealer) {
-                                warn!(round, dealer, "received duplicate signature");
-                                continue;
-                            }
+                            // We must check that the signature is from the correct dealer to ensure malicious dealers don't provide
+                            // us with multiple instances of the same partial signature.
                             if &msg.signature.index != dealer {
                                 warn!(round, dealer, "received signature from wrong player");
                                 continue;
