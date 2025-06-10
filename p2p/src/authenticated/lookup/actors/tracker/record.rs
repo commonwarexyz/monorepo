@@ -4,14 +4,13 @@ use std::net::SocketAddr;
 #[derive(Clone, Debug)]
 pub enum Address {
     /// Peer address is not yet known.
-    /// Can be upgraded to `Discovered`.
+    /// Can be upgraded to `Known`.
     Unknown,
 
     /// Peer is the local node.
     Myself(SocketAddr),
 
     /// Address is provided during initialization.
-    /// Can be upgraded to `Discovered`.
     Known(SocketAddr),
 
     /// Peer is blocked.
@@ -194,7 +193,7 @@ impl Record {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::PeerInfo;
+    use crate::authenticated::peer_info::PeerInfo;
     use commonware_codec::Encode;
     use commonware_cryptography::{secp256r1, PrivateKeyExt, PublicKey};
     use std::net::SocketAddr;
