@@ -26,7 +26,8 @@ struct Config<E: Signer + Clock> {
     peer_gossip_max_count: usize,
 }
 
-struct Tracker<P: PublicKey, E: Signer<PublicKey = P, Signature = P::Signature> + Clock> {
+pub(super) struct Tracker<P: PublicKey, E: Signer<PublicKey = P, Signature = P::Signature> + Clock>
+{
     cfg: Config<E>,
     /// The current known information about each peer.
     peers: BTreeMap<P, PeerInfo<P>>,
@@ -42,7 +43,7 @@ impl<P: PublicKey, E: Signer<PublicKey = P, Signature = P::Signature> + Clock> T
     }
 }
 
-impl<P: PublicKey, S: Signer<PublicKey = P, Signature = P::Signature> + Clock> Tracker<P, S> {
+impl<P: PublicKey, E: Signer<PublicKey = P, Signature = P::Signature> + Clock> Tracker<P, E> {
     fn validate(&mut self, infos: &Vec<PeerInfo<P>>) -> Result<(), Error> {
         // Ensure there aren't too many peers sent
         if infos.len() > self.cfg.peer_gossip_max_count {
