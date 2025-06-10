@@ -2464,7 +2464,7 @@ mod tests {
     }
 
     #[test]
-    fn test_threshold_signature_derive_partials() {
+    fn test_threshold_derive_missing_partials() {
         threshold_derive_missing_partials::<MinPk>();
         threshold_derive_missing_partials::<MinSig>();
     }
