@@ -3,7 +3,6 @@
 use crate::authenticated::{
     self,
     lookup::actors::{spawner, tracker},
-    Mailbox,
 };
 use commonware_cryptography::Signer;
 use commonware_runtime::{
@@ -72,10 +71,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         stream_cfg: StreamConfig<C>,
         sink: SinkOf<E>,
         stream: StreamOf<E>,
-        mut tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
-        mut supervisor: authenticated::Mailbox<
-            spawner::ingress::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
-        >,
+        mut tracker: tracker::Mailbox<E, C::PublicKey>,
+        mut supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
     ) {
         // Create span
         let span = debug_span!("listener");

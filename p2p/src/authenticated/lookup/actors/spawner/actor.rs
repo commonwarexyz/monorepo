@@ -79,17 +79,13 @@ impl<
 
     pub fn start(
         mut self,
-        tracker: Mailbox<tracker::Message<E, C>>,
-        router: authenticated::Mailbox<ingress::Message<C>>,
+        tracker: tracker::Mailbox<E, C>,
+        router: router::Mailbox<C>,
     ) -> Handle<()> {
         self.context.spawn_ref()(self.run(tracker, router))
     }
 
-    async fn run(
-        mut self,
-        tracker: Mailbox<tracker::Message<E, C>>,
-        router: authenticated::Mailbox<ingress::Message<C>>,
-    ) {
+    async fn run(mut self, tracker: tracker::Mailbox<E, C>, router: router::Mailbox<C>) {
         while let Some(msg) = self.receiver.next().await {
             match msg {
                 Message::Spawn {

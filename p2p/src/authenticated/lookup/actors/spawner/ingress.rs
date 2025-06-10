@@ -1,8 +1,8 @@
-use crate::authenticated::{lookup::actors::tracker::Reservation, Mailbox};
+use crate::authenticated::lookup::actors::tracker::Reservation;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Metrics, Sink, Spawner, Stream};
 use commonware_stream::public_key::Connection;
-use futures::SinkExt;
+use futures::{channel::mpsc, SinkExt};
 
 /// Messages that can be processed by the spawner [Actor](super::Actor).
 pub enum Message<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKey> {
@@ -16,13 +16,21 @@ pub enum Message<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKe
         reservation: Reservation<E, P>,
     },
 }
+/// Sends messages to the spawner [Actor](super::Actor).
+pub struct Mailbox<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKey> {
+    sender: mpsc::Sender<Message<E, Si, St, P>>,
+}
 
-impl<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKey>
-    Mailbox<Message<E, Si, St, P>>
-{
+impl<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKey> Mailbox<E, Si, St, P> {
+    /// Returns a new [Mailbox] with the given `sender`.
+    /// (The [Actor](super::Actor) has the corresponding receiver.)
+    pub fn new(sender: mpsc::Sender<Message<E, Si, St, P>>) -> Self {
+        Self { sender }
+    }
+
     /// Send a message to the [Actor](super::Actor) to spawn a new task for the given peer.
     pub async fn spawn(&mut self, connection: Connection<Si, St>, reservation: Reservation<E, P>) {
-        self.0
+        self.sender
             .send(Message::Spawn {
                 peer: reservation.metadata().public_key().clone(),
                 connection,

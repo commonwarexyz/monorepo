@@ -1,9 +1,6 @@
 //! Listener
 
-use crate::authenticated::{
-    self,
-    discovery::actors::{spawner::ingress::Message, tracker},
-};
+use crate::authenticated::discovery::actors::{spawner, tracker};
 use commonware_cryptography::Signer;
 use commonware_runtime::{
     telemetry::traces::status, Clock, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf,
@@ -72,8 +69,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         stream_cfg: StreamConfig<C>,
         sink: SinkOf<E>,
         stream: StreamOf<E>,
-        mut tracker: authenticated::Mailbox<tracker::Message<E, C::PublicKey>>,
-        mut supervisor: authenticated::Mailbox<Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        mut tracker: tracker::Mailbox<E, C::PublicKey>,
+        mut supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
     ) {
         // Create span
         let span = debug_span!("listener", ?address);
@@ -131,8 +128,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 
     pub fn start(
         self,
-        tracker: authenticated::Mailbox<tracker::Message<E, C::PublicKey>>,
-        supervisor: authenticated::Mailbox<Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        tracker: tracker::Mailbox<E, C::PublicKey>,
+        supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
     ) -> Handle<()> {
         self.context
             .clone()
@@ -141,8 +138,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 
     async fn run(
         self,
-        tracker: authenticated::Mailbox<tracker::Message<E, C::PublicKey>>,
-        supervisor: authenticated::Mailbox<Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        tracker: tracker::Mailbox<E, C::PublicKey>,
+        supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
     ) {
         // Start listening for incoming connections
         let mut listener = self

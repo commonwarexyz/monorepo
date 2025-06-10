@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use super::Reservation;
-use crate::authenticated::{self, lookup::actors::peer, Mailbox};
+use crate::authenticated::{self, lookup::actors::peer};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Metrics, Spawner};
 use futures::{
@@ -39,7 +39,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
         public_key: C,
 
         /// The mailbox of the peer actor.
-        peer: authenticated::Mailbox<peer::Message>,
+        peer: peer::Mailbox<peer::Message>,
     },
 
     // ---------- Used by dialer ----------
@@ -79,7 +79,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
 
 impl<E: Spawner + Metrics, C: PublicKey> Mailbox<Message<E, C>> {
     /// Send a `Connect` message to the tracker.
-    pub async fn connect(&mut self, public_key: C, peer: authenticated::Mailbox<peer::Message>) {
+    pub async fn connect(&mut self, public_key: C, peer: peer::Mailbox<C>) {
         self.0
             .send(Message::Connect { public_key, peer })
             .await

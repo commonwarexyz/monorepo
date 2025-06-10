@@ -1,8 +1,5 @@
 use crate::{
-    authenticated::{
-        self,
-        discovery::{channels::Channels, types},
-    },
+    authenticated::discovery::{actors::peer, channels::Channels},
     Channel, Recipients,
 };
 use bytes::Bytes;
@@ -15,7 +12,7 @@ use futures::{
 pub enum Message<P: PublicKey> {
     Ready {
         peer: P,
-        relay: authenticated::Relay<types::Data>,
+        relay: peer::Relay,
         channels: oneshot::Sender<Channels<P>>,
     },
     Release {
@@ -30,14 +27,21 @@ pub enum Message<P: PublicKey> {
     },
 }
 
-impl<P: PublicKey> authenticated::Mailbox<Message<P>> {
-    pub async fn ready(
-        &mut self,
-        peer: P,
-        relay: authenticated::Relay<types::Data>,
-    ) -> Channels<P> {
+#[derive(Clone)]
+/// Sends messages to a router to notify it about peer availability.
+pub struct Mailbox<P: PublicKey> {
+    sender: mpsc::Sender<Message<P>>,
+}
+
+impl<P: PublicKey> Mailbox<P> {
+    /// Returns a new [Mailbox] with the given sender.
+    /// (The router has the corresponding receiver.)
+    pub fn new(sender: mpsc::Sender<Message<P>>) -> Self {
+        Self { sender }
+    }
+    pub async fn ready(&mut self, peer: P, relay: peer::Relay) -> Channels<P> {
         let (response, receiver) = oneshot::channel();
-        self.0
+        self.sender
             .send(Message::Ready {
                 peer,
                 relay,
@@ -49,7 +53,7 @@ impl<P: PublicKey> authenticated::Mailbox<Message<P>> {
     }
 
     pub async fn release(&mut self, peer: P) {
-        self.0.send(Message::Release { peer }).await.unwrap();
+        self.sender.send(Message::Release { peer }).await.unwrap();
     }
 }
 

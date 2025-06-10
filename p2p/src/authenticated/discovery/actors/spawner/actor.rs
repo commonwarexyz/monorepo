@@ -1,14 +1,17 @@
-use super::{ingress::Message, Config};
+use super::{ingress::Message, Config, Mailbox};
 use crate::authenticated::{
     self,
     discovery::{
-        actors::{peer, router::ingress, tracker},
+        actors::{
+            peer,
+            router::{self, ingress},
+            tracker,
+        },
         metrics,
     },
-    Mailbox,
 };
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
+use commonware_runtime::{Clock, Handle, Metrics, Sink, SinkOf, Spawner, Stream, StreamOf};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
@@ -46,7 +49,7 @@ impl<
         C: PublicKey,
     > Actor<E, Si, St, C>
 {
-    pub fn new(context: E, cfg: Config) -> (Self, authenticated::Mailbox<Message<E, Si, St, C>>) {
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<E, Si, St, C>) {
         let connections = Gauge::default();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
@@ -84,23 +87,19 @@ impl<
                 received_messages,
                 rate_limited,
             },
-            authenticated::Mailbox::new(sender),
+            Mailbox::new(sender),
         )
     }
 
     pub fn start(
         mut self,
-        tracker: Mailbox<tracker::Message<E, C>>,
-        router: authenticated::Mailbox<ingress::Message<C>>,
+        tracker: tracker::Mailbox<E, C>,
+        router: router::Mailbox<C>,
     ) -> Handle<()> {
         self.context.spawn_ref()(self.run(tracker, router))
     }
 
-    async fn run(
-        mut self,
-        tracker: Mailbox<tracker::Message<E, C>>,
-        router: authenticated::Mailbox<ingress::Message<C>>,
-    ) {
+    async fn run(mut self, tracker: tracker::Mailbox<E, C>, router: router::Mailbox<C>) {
         while let Some(msg) = self.receiver.next().await {
             match msg {
                 Message::Spawn {
