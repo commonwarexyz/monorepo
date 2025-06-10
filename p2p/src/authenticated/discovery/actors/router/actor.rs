@@ -49,7 +49,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
         )
     }
 
-    async fn send_to_recipient(
+    async fn send(
         &mut self,
         recipient: &P,
         channel: Channel,
@@ -102,14 +102,12 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
                     let mut sent = Vec::new();
                     match recipients {
                         Recipients::One(recipient) => {
-                            self.send_to_recipient(
-                                &recipient, channel, message, priority, &mut sent,
-                            )
-                            .await;
+                            self.send(&recipient, channel, message, priority, &mut sent)
+                                .await;
                         }
                         Recipients::Some(recipients) => {
                             for recipient in recipients {
-                                self.send_to_recipient(
+                                self.send(
                                     &recipient,
                                     channel,
                                     message.clone(),
