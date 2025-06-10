@@ -1,10 +1,9 @@
-use super::{ingress::Message, Config, Mailbox};
+use super::{
+    ingress::{Mailbox, Message},
+    Config,
+};
 use crate::authenticated::discovery::{
-    actors::{
-        peer,
-        router::{self},
-        tracker,
-    },
+    actors::{peer, router, tracker},
     metrics,
 };
 use commonware_cryptography::PublicKey;
