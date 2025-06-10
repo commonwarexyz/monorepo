@@ -82,7 +82,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                     self.directory.add_set(index, peers);
                 }
                 Message::UpdateAddress { peer, address } => {
-                    self.directory.set_address(&peer, address);
+                    self.directory.update_address(&peer, address);
                 }
                 Message::Connect {
                     public_key,

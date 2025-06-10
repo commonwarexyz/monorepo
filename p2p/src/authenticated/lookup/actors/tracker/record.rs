@@ -86,7 +86,7 @@ impl Record {
 
     // ---------- Setters ----------
 
-    pub fn set_address(&mut self, address: SocketAddr) {
+    pub fn update_address(&mut self, address: SocketAddr) {
         self.address = Address::Known(address);
     }
 
