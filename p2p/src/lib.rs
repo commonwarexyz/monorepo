@@ -12,6 +12,7 @@ use std::fmt::Debug;
 use std::future::Future;
 
 pub mod authenticated;
+mod new;
 pub mod simulated;
 pub mod utils;
 
