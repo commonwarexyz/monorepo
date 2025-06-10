@@ -1,8 +1,8 @@
+use commonware_cryptography::PublicKey;
 use std::marker::PhantomData;
 
-use commonware_cryptography::PublicKey;
-
 mod peer;
+mod tracker;
 
 enum Event<P: PublicKey> {
     PeerConnected(P),
@@ -20,8 +20,7 @@ impl<P: PublicKey> Network<P> {
     async fn run(mut self) {
         loop {
             // Handle incoming events
-            let event = self.next_event().await;
-            match event {
+            match self.next_event().await {
                 Event::PeerConnected(peer) => {
                     println!("Peer connected: {:?}", peer);
                 }
