@@ -1,4 +1,4 @@
-use super::{metrics::Metrics, record::Record, set::Set, Metadata, Reservation};
+use super::{metrics::Metrics, record::Record, Metadata, Reservation};
 use crate::authenticated::{lookup::metrics, peer_info::PeerInfo};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner};
@@ -39,7 +39,7 @@ pub struct Directory<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Publ
     peers: HashMap<C, Record<C>>,
 
     /// The peer sets
-    sets: BTreeMap<u64, Set<C>>,
+    sets: BTreeMap<u64, Vec<C>>,
 
     /// Rate limiter for connection attempts.
     #[allow(clippy::type_complexity)]
@@ -151,23 +151,22 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         }
 
         // Create and store new peer set
-        let set = Set::new(peers.clone());
-        for peer in peers.iter() {
+        for peer in &peers {
             let record = self.peers.entry(peer.clone()).or_insert_with(|| {
                 self.metrics.tracked.inc();
                 Record::unknown()
             });
             record.increment();
         }
-        self.sets.insert(index, set);
+        self.sets.insert(index, peers);
 
         // Remove oldest entries if necessary
         while self.sets.len() > self.max_sets {
             let (index, set) = self.sets.pop_first().unwrap();
             debug!(index, "removed oldest peer set");
             set.into_iter().for_each(|peer| {
-                self.peers.get_mut(peer).unwrap().decrement();
-                self.delete_if_needed(peer);
+                self.peers.get_mut(&peer).unwrap().decrement();
+                self.delete_if_needed(&peer);
             });
         }
 

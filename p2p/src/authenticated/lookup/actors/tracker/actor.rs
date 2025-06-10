@@ -174,7 +174,6 @@ mod tests {
             tracked_peer_sets: 2,
             allowed_connection_rate_per_peer: Quota::per_second(NZU32!(5)),
             max_peer_set_size: 128,
-            dial_fail_limit: 1,
         }
     }
 

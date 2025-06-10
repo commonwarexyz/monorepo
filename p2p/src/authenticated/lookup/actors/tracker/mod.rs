@@ -12,7 +12,6 @@ mod metadata;
 mod metrics;
 mod record;
 mod reservation;
-mod set;
 
 pub use actor::Actor;
 pub use ingress::{Message, Oracle};
