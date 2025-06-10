@@ -40,7 +40,7 @@
 //!   [i8], [i16], [i32], [i64], [i128],
 //!   [f32], [f64], [u8; N],
 //!   and [usize] (must fit within a [u32] for cross-platform compatibility).
-//! - Collections: [Vec<T>], [Option<T>]
+//! - Collections: [`Vec<T>`], [`Option<T>`]
 //! - Tuples: `(T1, T2, ...)` (up to 12 elements)
 //! - Networking:
 //!   [Ipv4Addr](std::net::Ipv4Addr),

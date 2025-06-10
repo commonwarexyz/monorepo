@@ -1,7 +1,7 @@
 //! Bit-vector implementation
 //!
 //! The bit-vector is a compact representation of a sequence of bits, using [u8] "blocks" for a
-//! more-efficient memory layout than doing a [Vec<bool>]. Thus, if the length of the bit-vector
+//! more-efficient memory layout than doing a [`Vec<bool>`]. Thus, if the length of the bit-vector
 //! is not a multiple of 8, the last block will contain some bits that are not part of the vector.
 //! An invariant of the implementation is that any bits in the last block that are not part of the
 //! vector are set to 0.

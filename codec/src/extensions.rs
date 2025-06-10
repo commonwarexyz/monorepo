@@ -36,7 +36,7 @@ impl<X: Default, T: Decode<Cfg = X>> DecodeExt<X> for T {}
 
 /// Extension trait for reading types whose config is `(RangeCfg, X)` where `X` is [Default].
 ///
-/// Useful for reading collections like [Vec<T>] where `T` implements [Read] with no specific
+/// Useful for reading collections like [`Vec<T>`] where `T` implements [Read] with no specific
 /// configuration. Import this trait to use the `.read_range()` method.
 pub trait ReadRangeExt<X: Default>: Read<Cfg = (RangeCfg, X)> {
     /// Reads a value using only a range configuration.
