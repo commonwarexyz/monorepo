@@ -332,13 +332,13 @@ mod tests {
 
         // Test Known (not persistent)
         let addr = test_socket();
-        let mut record_disc = Record::unknown();
-        record_disc.update_address(addr);
-        assert!(record_disc.deletable());
-        record_disc.increment(); // sets = 1
-        assert!(!record_disc.deletable());
-        record_disc.decrement(); // sets = 0
-        assert!(record_disc.deletable());
+        let mut record_known = Record::unknown();
+        record_known.update_address(addr);
+        assert!(record_known.deletable());
+        record_known.increment(); // sets = 1
+        assert!(!record_known.deletable());
+        record_known.decrement(); // sets = 0
+        assert!(record_known.deletable());
 
         // Test Bootstrapper (persistent)
         let mut record_boot = Record::bootstrapper(addr);
@@ -388,23 +388,23 @@ mod tests {
         assert!(!record_boot.persistent, "Blocking sets persistent=false");
 
         // Block a Known record (initially not persistent)
-        let mut record_disc = Record::unknown();
-        record_disc.update_address(addr);
-        assert!(!record_disc.persistent);
-        assert!(record_disc.block());
-        assert!(record_disc.blocked());
-        assert!(matches!(record_disc.address, Address::Blocked));
-        assert!(!record_disc.persistent);
+        let mut record_known = Record::unknown();
+        record_known.update_address(addr);
+        assert!(!record_known.persistent);
+        assert!(record_known.block());
+        assert!(record_known.blocked());
+        assert!(matches!(record_known.address, Address::Blocked));
+        assert!(!record_known.persistent);
 
         // Block a Known record that came from a Bootstrapper (initially persistent)
-        let mut record_disc_from_boot = Record::bootstrapper(addr);
-        record_disc_from_boot.update_address(addr);
-        assert!(record_disc_from_boot.persistent);
-        assert!(record_disc_from_boot.block());
-        assert!(record_disc_from_boot.blocked());
-        assert!(matches!(record_disc_from_boot.address, Address::Blocked));
+        let mut record_known_from_boot = Record::bootstrapper(addr);
+        record_known_from_boot.update_address(addr);
+        assert!(record_known_from_boot.persistent);
+        assert!(record_known_from_boot.block());
+        assert!(record_known_from_boot.blocked());
+        assert!(matches!(record_known_from_boot.address, Address::Blocked));
         assert!(
-            !record_disc_from_boot.persistent,
+            !record_known_from_boot.persistent,
             "Blocking sets persistent=false"
         );
 
@@ -562,7 +562,7 @@ mod tests {
         record_pers.update_address(addr);
         assert!(record_pers.allowed());
 
-        // Non-persistent records (Unknown, Discovered) require sets > 0
+        // Non-persistent records (Unknown, Known) require sets > 0
         let mut record_unknown = Record::unknown();
         assert!(!record_unknown.allowed()); // sets = 0, !persistent
         record_unknown.increment(); // sets = 1
