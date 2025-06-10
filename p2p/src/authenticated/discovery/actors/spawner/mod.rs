@@ -1,8 +1,8 @@
 use governor::Quota;
 use std::time::Duration;
 
-pub mod actor;
-pub mod ingress;
+mod actor;
+mod ingress;
 
 pub use actor::Actor;
 pub use ingress::Mailbox;
