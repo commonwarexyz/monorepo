@@ -114,12 +114,14 @@ impl<E: Clock + Spawner, P: PublicKey> Vrf<E, P> {
                                 );
                                 continue;
                             }
-                            if &msg.signature.index != dealer {
-                                warn!(round, dealer, "received signature from wrong player");
-                                continue;
-                            }
+                            // We mark we received a message from the dealer before checking if its valid to
+                            // avoid doing useless work (where the dealer can keep sending us invalid messages).
                             if !received.insert(*dealer) {
                                 warn!(round, dealer, "received duplicate signature");
+                                continue;
+                            }
+                            if &msg.signature.index != dealer {
+                                warn!(round, dealer, "received signature from wrong player");
                                 continue;
                             }
                             match ops::partial_verify_message::<MinSig>(&output.public, Some(VRF_NAMESPACE), &payload, &msg.signature) {
