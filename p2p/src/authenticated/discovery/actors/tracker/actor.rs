@@ -324,7 +324,7 @@ mod tests {
     // Mock a connection to a peer by reserving it as if it had dialed us and the `peer` actor had
     // sent an initialization.
     async fn connect_to_peer(
-        mailbox: &mut Mailbox<Context, PublicKey>,
+        mailbox: &mut tracker::Mailbox<Context, PublicKey>,
         peer: &PublicKey,
         peer_mailbox: &peer::Mailbox<PublicKey>,
         peer_receiver: &mut mpsc::Receiver<peer::Message<PublicKey>>,
