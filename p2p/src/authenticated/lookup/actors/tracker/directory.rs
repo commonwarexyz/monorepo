@@ -73,7 +73,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
 
         // Add myself to the list of peers.
         // Overwrites the entry if myself is also a bootstrapper.
-        peers.insert(myself.0.clone(), Record::myself(myself.1));
+        peers.insert(myself.0, Record::myself(myself.1));
         let rate_limiter = RateLimiter::hashmap_with_clock(cfg.rate_limit, &context);
 
         // Other initialization.
