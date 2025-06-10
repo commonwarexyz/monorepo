@@ -1,4 +1,4 @@
-//! Codec implementation for [Vec<T>].
+//! Codec implementation for [`Vec<T>`].
 //!
 //! For portability and consistency between architectures,
 //! the length of the vector must fit within a [u32].
