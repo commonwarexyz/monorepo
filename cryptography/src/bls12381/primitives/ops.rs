@@ -42,6 +42,18 @@ pub fn hash_message<V: Variant>(dst: DST, message: &[u8]) -> V::Signature {
     hm
 }
 
+/// Hashes the provided message with the domain separation tag (DST) and namespace to
+/// the curve.
+pub fn hash_message_namespace<V: Variant>(
+    dst: DST,
+    namespace: &[u8],
+    message: &[u8],
+) -> V::Signature {
+    let mut hm = V::Signature::zero();
+    hm.map(dst, &union_unique(namespace, message));
+    hm
+}
+
 /// Signs the provided message with the private key.
 pub fn sign<V: Variant>(private: &Scalar, dst: DST, message: &[u8]) -> V::Signature {
     let mut hm = hash_message::<V>(dst, message);
@@ -239,7 +251,7 @@ where
     let mut hm_sum = V::Signature::zero();
     for (namespace, msg) in messages {
         let hm = match namespace {
-            Some(namespace) => hash_message::<V>(V::MESSAGE, &union_unique(namespace, msg)),
+            Some(namespace) => hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
             None => hash_message::<V>(V::MESSAGE, msg),
         };
         hm_sum.add(&hm);
@@ -614,7 +626,7 @@ where
         let mut hm_sum = V::Signature::zero();
         for (namespace, msg) in messages {
             let hm = match namespace {
-                Some(namespace) => hash_message::<V>(V::MESSAGE, &union_unique(namespace, msg)),
+                Some(namespace) => hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
                 None => hash_message::<V>(V::MESSAGE, msg),
             };
             hm_sum.add(&hm);
@@ -632,7 +644,7 @@ where
             messages
                 .into_par_iter()
                 .map(|(namespace, msg)| match namespace {
-                    Some(namespace) => hash_message::<V>(V::MESSAGE, &union_unique(namespace, msg)),
+                    Some(namespace) => hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
                     None => hash_message::<V>(V::MESSAGE, msg),
                 })
                 .reduce(V::Signature::zero, |mut sum, hm| {
