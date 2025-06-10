@@ -29,6 +29,7 @@ impl<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKey> Mailbox<E
         Self { sender }
     }
 
+    /// Send a message to the [Actor](super::Actor) to spawn a new task for the given peer.
     pub async fn spawn(&mut self, connection: Connection<Si, St>, reservation: Reservation<E, P>) {
         self.sender
             .send(Message::Spawn {
