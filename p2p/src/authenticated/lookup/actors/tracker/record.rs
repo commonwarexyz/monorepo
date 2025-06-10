@@ -194,29 +194,7 @@ impl Record {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::peer_info::PeerInfo;
-    use commonware_codec::Encode;
-    use commonware_cryptography::{secp256r1, PrivateKeyExt};
     use std::net::SocketAddr;
-
-    // Helper function to create signed peer info for testing
-    fn create_peer_info<S>(
-        signer_seed: u64,
-        socket: SocketAddr,
-        timestamp: u64,
-    ) -> PeerInfo<S::PublicKey>
-    where
-        S: PrivateKeyExt,
-    {
-        let signer = S::from_seed(signer_seed);
-        let signature = signer.sign(None, &(socket, timestamp).encode());
-        PeerInfo {
-            socket,
-            timestamp,
-            public_key: signer.public_key(),
-            signature,
-        }
-    }
 
     // Common test sockets
     fn test_socket() -> SocketAddr {
@@ -239,17 +217,13 @@ mod tests {
 
     #[test]
     fn test_myself_initial_state() {
-        let my_info = create_peer_info::<secp256r1::PrivateKey>(0, test_socket(), 100);
-        let my_addr = test_socket();
-        let record = Record::myself(my_addr);
-        match record.address {
-            Address::Myself(addr) => assert_eq!(addr, my_addr),
-            _ => panic!("Expected Address::Myself"),
-        }
+        let socket = test_socket();
+        let record = Record::myself(socket);
+        assert!(matches!(record.address, Address::Myself(got_socket) if got_socket == socket));
         assert_eq!(record.status, Status::Inert);
         assert_eq!(record.sets, 0);
         assert!(record.persistent);
-        assert_eq!(record.socket(), Some(my_info.socket),);
+        assert_eq!(record.socket(), Some(socket));
         assert!(!record.blocked());
         assert!(!record.reserved());
         assert!(!record.deletable());
@@ -296,8 +270,8 @@ mod tests {
 
     #[test]
     fn test_myself_blocked_to_known() {
-        let addr = test_socket();
-        let mut record = Record::myself(addr);
+        let socket = test_socket();
+        let mut record = Record::myself(socket);
         record.block();
         assert!(!record.blocked(), "Can't block myself");
     }
@@ -331,9 +305,9 @@ mod tests {
         assert!(record_unknown.deletable());
 
         // Test Known (not persistent)
-        let addr = test_socket();
+        let socket = test_socket();
         let mut record_known = Record::unknown();
-        record_known.update_address(addr);
+        record_known.update_address(socket);
         assert!(record_known.deletable());
         record_known.increment(); // sets = 1
         assert!(!record_known.deletable());
@@ -341,7 +315,7 @@ mod tests {
         assert!(record_known.deletable());
 
         // Test Bootstrapper (persistent)
-        let mut record_boot = Record::bootstrapper(addr);
+        let mut record_boot = Record::bootstrapper(socket);
         assert!(!record_boot.deletable()); // Persistent
         record_boot.increment(); // sets = 1
         assert!(!record_boot.deletable());
@@ -349,7 +323,7 @@ mod tests {
         assert!(!record_boot.deletable()); // Still persistent
 
         // Test Myself (persistent)
-        let mut record_myself = Record::myself(addr);
+        let mut record_myself = Record::myself(socket);
         assert!(!record_myself.deletable()); // Persistent
         record_myself.increment(); // sets = 1
         assert!(!record_myself.deletable());
@@ -367,7 +341,7 @@ mod tests {
 
     #[test]
     fn test_block_behavior_and_persistence() {
-        let addr = test_socket();
+        let socket = test_socket();
 
         // Block an Unknown record
         let mut record_unknown = Record::unknown();
@@ -389,7 +363,7 @@ mod tests {
 
         // Block a Known record (initially not persistent)
         let mut record_known = Record::unknown();
-        record_known.update_address(addr);
+        record_known.update_address(socket);
         assert!(!record_known.persistent);
         assert!(record_known.block());
         assert!(record_known.blocked());
@@ -397,8 +371,8 @@ mod tests {
         assert!(!record_known.persistent);
 
         // Block a Known record that came from a Bootstrapper (initially persistent)
-        let mut record_known_from_boot = Record::bootstrapper(addr);
-        record_known_from_boot.update_address(addr);
+        let mut record_known_from_boot = Record::bootstrapper(socket);
+        record_known_from_boot.update_address(socket);
         assert!(record_known_from_boot.persistent);
         assert!(record_known_from_boot.block());
         assert!(record_known_from_boot.blocked());
@@ -410,13 +384,13 @@ mod tests {
 
         // Check status remains unchanged when blocking
         let mut record_reserved = Record::unknown();
-        record_reserved.update_address(addr);
+        record_reserved.update_address(socket);
         assert!(record_reserved.reserve());
         assert!(record_reserved.block());
         assert_eq!(record_reserved.status, Status::Reserved);
 
         let mut record_active = Record::unknown();
-        record_active.update_address(addr);
+        record_active.update_address(socket);
         assert!(record_active.reserve());
         record_active.connect();
         assert!(record_active.block());
@@ -425,10 +399,12 @@ mod tests {
 
     #[test]
     fn test_block_myself_and_already_blocked() {
-        let addr = test_socket();
-        let mut record_myself = Record::myself(addr);
+        let socket = test_socket();
+        let mut record_myself = Record::myself(socket);
         assert!(!record_myself.block(), "Cannot block myself");
-        assert!(matches!(&record_myself.address, Address::Myself(got_addr) if *got_addr == addr));
+        assert!(
+            matches!(&record_myself.address, Address::Myself(got_socket) if *got_socket == socket)
+        );
 
         let mut record_to_be_blocked = Record::unknown();
         assert!(record_to_be_blocked.block());
@@ -505,13 +481,13 @@ mod tests {
 
     #[test]
     fn test_deletable_logic_detailed() {
-        let addr = test_socket();
+        let socket = test_socket();
 
         // Persistent records are never deletable regardless of sets count
-        assert!(!Record::myself(addr).deletable());
+        assert!(!Record::myself(socket).deletable());
         assert!(!Record::bootstrapper(test_socket()).deletable());
         let mut record_pers = Record::bootstrapper(test_socket());
-        record_pers.update_address(addr.clone());
+        record_pers.update_address(socket);
         assert!(!record_pers.deletable());
 
         // Non-persistent records depend on sets count and status
@@ -548,18 +524,18 @@ mod tests {
 
     #[test]
     fn test_allowed_logic_detailed() {
-        let addr = test_socket();
+        let socket = test_socket();
 
         // Blocked and Myself are never allowed
         let mut record_blocked = Record::unknown();
         record_blocked.block();
         assert!(!record_blocked.allowed());
-        assert!(!Record::myself(addr).allowed());
+        assert!(!Record::myself(socket).allowed());
 
         // Persistent records (Bootstrapper, Myself before blocking) are allowed even with sets=0
-        assert!(Record::bootstrapper(test_socket()).allowed());
-        let mut record_pers = Record::bootstrapper(test_socket());
-        record_pers.update_address(addr);
+        assert!(Record::bootstrapper(socket).allowed());
+        let mut record_pers = Record::bootstrapper(socket);
+        record_pers.update_address(socket);
         assert!(record_pers.allowed());
 
         // Non-persistent records (Unknown, Known) require sets > 0
@@ -571,7 +547,7 @@ mod tests {
         assert!(!record_unknown.allowed());
 
         let mut record_known = Record::unknown();
-        record_known.update_address(addr);
+        record_known.update_address(socket);
         assert!(!record_known.allowed()); // sets = 0, !persistent
         record_known.increment(); // sets = 1
         assert!(record_known.allowed()); // sets > 0
