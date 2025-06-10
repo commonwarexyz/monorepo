@@ -2,6 +2,7 @@ use commonware_cryptography::PublicKey;
 use std::marker::PhantomData;
 
 mod peer;
+mod peer_info;
 mod tracker;
 
 enum Event<P: PublicKey> {

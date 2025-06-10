@@ -204,6 +204,7 @@ pub enum Error {
 pub use actors::tracker::Oracle;
 pub use channels::{Receiver, Sender};
 pub use config::{Bootstrapper, Config};
+pub use ip::is_global;
 pub use network::Network;
 
 #[cfg(test)]

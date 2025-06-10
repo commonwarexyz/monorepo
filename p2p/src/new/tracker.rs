@@ -1,99 +1,91 @@
-use std::{collections::BTreeMap, net::SocketAddr};
+use std::{collections::BTreeMap, time::Duration};
 
-use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, Encode as _, EncodeSize, Error, Read, ReadExt as _, Write};
 use commonware_cryptography::{PublicKey, Signer};
+use commonware_runtime::Clock;
+use commonware_utils::SystemTimeExt as _;
 
-struct Tracker<P: PublicKey> {
+use crate::{authenticated::is_global, new::peer_info::PeerInfo};
+
+struct Config<E: Signer + Clock> {
+    context: E,
+
+    /// The namespace used to sign and verify [PeerInfo] messages.
+    ip_namespace: Vec<u8>,
+
+    /// Whether to allow private IPs.
+    allow_private_ips: bool,
+
+    /// The time bound for synchrony. Messages with timestamps greater than this far into the
+    /// future will be considered malformed.
+    synchrony_bound: Duration,
+
+    /// The maximum number of peers in a set.
+    max_peer_set_size: usize,
+
+    /// The maximum number of [`types::PeerInfo`] allowable in a single message.
+    peer_gossip_max_count: usize,
+}
+
+struct Tracker<P: PublicKey, E: Signer<PublicKey = P, Signature = P::Signature> + Clock> {
+    cfg: Config<E>,
     /// The current known information about each peer.
     peers: BTreeMap<P, PeerInfo<P>>,
 }
 
-impl<P: PublicKey> Tracker<P> {
+impl<P: PublicKey, E: Signer<PublicKey = P, Signature = P::Signature> + Clock> Tracker<P, E> {
     /// Create a new tracker.
-    pub fn new() -> Self {
+    pub fn new(cfg: Config<E>) -> Self {
         Self {
+            cfg,
             peers: BTreeMap::new(),
         }
     }
 }
 
-/// A signed message from a peer attesting to its own socket address and public key at a given time.
-///
-/// This is used to share the peer's socket address and public key with other peers in a verified
-/// manner.
-#[derive(Clone, Debug)]
-pub struct PeerInfo<P: PublicKey> {
-    /// The socket address of the peer.
-    pub socket: SocketAddr,
-
-    /// The timestamp (epoch milliseconds) at which the socket was signed over.
-    pub timestamp: u64,
-
-    /// The public key of the peer.
-    pub public_key: P,
-
-    /// The peer's signature over the socket and timestamp.
-    pub signature: P::Signature,
-}
-
-impl<C: PublicKey> PeerInfo<C> {
-    /// Verify the signature of the peer info.
-    pub fn verify(&self, namespace: &[u8]) -> bool {
-        self.public_key.verify(
-            Some(namespace),
-            &(self.socket, self.timestamp).encode(),
-            &self.signature,
-        )
-    }
-
-    pub fn sign<Sk: Signer<PublicKey = C, Signature = C::Signature>>(
-        signer: &Sk,
-        namespace: &[u8],
-        socket: SocketAddr,
-        timestamp: u64,
-    ) -> Self {
-        let signature = signer.sign(Some(namespace), &(socket, timestamp).encode());
-        PeerInfo {
-            socket,
-            timestamp,
-            public_key: signer.public_key(),
-            signature,
+impl<P: PublicKey, S: Signer<PublicKey = P, Signature = P::Signature> + Clock> Tracker<P, S> {
+    fn validate(&mut self, infos: &Vec<PeerInfo<P>>) -> Result<(), Error> {
+        // Ensure there aren't too many peers sent
+        if infos.len() > self.cfg.peer_gossip_max_count {
+            return Err(Error::TooManyPeers(infos.len()));
         }
+
+        // We allow peers to be sent in any order when responding to a bit vector (allows
+        // for selecting a random subset of peers when there are too many) and allow
+        // for duplicates (no need to create an additional set to check this)
+        let my_public_key = self.cfg.context.public_key();
+        for info in infos {
+            // Check if IP is allowed
+            if !self.cfg.allow_private_ips && !is_global(info.socket.ip()) {
+                return Err(Error::PrivateIPsNotAllowed(info.socket.ip()));
+            }
+
+            // Check if peer is us
+            if info.public_key == my_public_key {
+                return Err(Error::ReceivedSelf);
+            }
+
+            // If any timestamp is too far into the future, disconnect from the peer
+            if Duration::from_millis(info.timestamp)
+                > self.cfg.context.current().epoch() + self.cfg.synchrony_bound
+            {
+                return Err(Error::SynchronyBound);
+            }
+
+            // If any signature is invalid, disconnect from the peer
+            if !info.verify(&self.cfg.ip_namespace) {
+                return Err(Error::InvalidSignature);
+            }
+        }
+
+        Ok(())
     }
 }
 
-impl<C: PublicKey> EncodeSize for PeerInfo<C> {
-    fn encode_size(&self) -> usize {
-        self.socket.encode_size()
-            + UInt(self.timestamp).encode_size()
-            + self.public_key.encode_size()
-            + self.signature.encode_size()
-    }
-}
-
-impl<C: PublicKey> Write for PeerInfo<C> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.socket.write(buf);
-        UInt(self.timestamp).write(buf);
-        self.public_key.write(buf);
-        self.signature.write(buf);
-    }
-}
-
-impl<C: PublicKey> Read for PeerInfo<C> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let socket = SocketAddr::read(buf)?;
-        let timestamp = UInt::read(buf)?.into();
-        let public_key = C::read(buf)?;
-        let signature = C::Signature::read(buf)?;
-        Ok(PeerInfo {
-            socket,
-            timestamp,
-            public_key,
-            signature,
-        })
-    }
+#[derive(Debug)]
+enum Error {
+    TooManyPeers(usize),
+    PrivateIPsNotAllowed(std::net::IpAddr),
+    ReceivedSelf,
+    SynchronyBound,
+    InvalidSignature,
 }
