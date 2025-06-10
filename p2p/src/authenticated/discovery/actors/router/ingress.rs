@@ -39,6 +39,7 @@ impl<P: PublicKey> Mailbox<P> {
     pub fn new(sender: mpsc::Sender<Message<P>>) -> Self {
         Self { sender }
     }
+
     pub async fn ready(&mut self, peer: P, relay: peer::Relay) -> Channels<P> {
         let (response, receiver) = oneshot::channel();
         self.sender
