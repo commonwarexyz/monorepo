@@ -127,6 +127,10 @@ impl<C: PublicKey> Record<C> {
         }
     }
 
+    pub fn set_address(&mut self, address: SocketAddr) {
+        self.address = Address::Discovered(PeerInfo::new(address), 0);
+    }
+
     /// Attempt to mark the peer as blocked.
     ///
     /// Returns `true` if the peer was newly blocked.

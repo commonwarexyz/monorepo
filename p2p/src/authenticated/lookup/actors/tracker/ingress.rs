@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 use super::Reservation;
 use crate::authenticated::{self, lookup::actors::peer, Mailbox};
 use commonware_cryptography::PublicKey;
@@ -14,6 +16,14 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
     ///
     /// The vector of peers must be sorted in ascending order by public key.
     Register { index: u64, peers: Vec<C> },
+
+    UpdateAddress {
+        /// The public key of the peer to update.
+        peer: C,
+
+        /// The new address of the peer.
+        address: SocketAddr,
+    },
 
     // ---------- Used by blocker ----------
     /// Block a peer, disconnecting them if currently connected and preventing future connections
@@ -152,6 +162,14 @@ impl<E: Spawner + Metrics, C: PublicKey> Oracle<E, C> {
     /// * `peers` - Vector of authorized peers at an `index` (does not need to be sorted).
     pub async fn register(&mut self, index: u64, peers: Vec<C>) {
         let _ = self.sender.send(Message::Register { index, peers }).await;
+    }
+
+    /// Update a peer's address.
+    pub async fn update_address(&mut self, peer: C, address: SocketAddr) {
+        let _ = self
+            .sender
+            .send(Message::UpdateAddress { peer, address })
+            .await;
     }
 }
 

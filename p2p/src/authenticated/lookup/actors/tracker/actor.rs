@@ -93,6 +93,9 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
                     self.directory.add_set(index, peers);
                 }
+                Message::UpdateAddress { peer, address } => {
+                    self.directory.set_address(&peer, address);
+                }
                 Message::Connect {
                     public_key,
                     dialer,
@@ -107,10 +110,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                     // Mark the record as connected
                     self.directory.connect(&public_key, dialer);
 
-                    // Proactively send our own info to the peer
                     // TODO danlaine: do we need to send the peer anything here?
-                    let _info = self.directory.info(&self.crypto.public_key()).unwrap();
-                    // let _ = peer.peers(vec![info]).await;
                 }
                 Message::Dialable { responder } => {
                     let _ = responder.send(self.directory.dialable());

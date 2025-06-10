@@ -178,6 +178,25 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         }
     }
 
+    pub fn set_address(&mut self, peer: &C, address: SocketAddr) {
+        // Update peer address
+        let Some(record) = self.peers.get_mut(peer) else {
+            debug!(?peer, "peer not tracked");
+            return;
+        };
+        record.set_address(address);
+        self.metrics
+            .updates
+            .get_or_create(&metrics::Peer::new(peer))
+            .inc();
+
+        // We may have to update the sets.
+        let want = record.want(self.dial_fail_limit);
+        for set in self.sets.values_mut() {
+            set.update(peer, !want);
+        }
+    }
+
     /// Stores a new peer set.
     pub fn add_set(&mut self, index: u64, peers: Vec<C>) {
         // Check if peer set already exists
@@ -257,11 +276,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     }
 
     // ---------- Getters ----------
-
-    /// Returns the sharable information for a given peer.
-    pub fn info(&self, peer: &C) -> Option<PeerInfo<C>> {
-        self.peers.get(peer).and_then(|r| r.sharable())
-    }
 
     /// Returns true if the peer is able to be connected to.
     pub fn allowed(&self, peer: &C) -> bool {

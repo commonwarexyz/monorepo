@@ -35,6 +35,4 @@ pub enum Error {
     UnexpectedFailure(commonware_runtime::Error),
     #[error("invalid channel")]
     InvalidChannel,
-    #[error("channel closed: {0}")]
-    ChannelClosed(u32),
 }
