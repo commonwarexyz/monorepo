@@ -5,54 +5,54 @@
 //! Provides traits and implementations for efficient and safe binary serialization and
 //! deserialization of structured data. The library focuses on:
 //!
-//! - **Performance:** Uses the [`bytes`] crate and aims to minimize allocations.
+//! - **Performance:** Uses the [bytes] crate and aims to minimize allocations.
 //! - **Safety:** Deserialization of untrusted data is made safer via the `Cfg` associated type in
-//!   the [`Read`] trait, allowing users to impose limits (like maximum lengths) or other strict
+//!   the [Read] trait, allowing users to impose limits (like maximum lengths) or other strict
 //!   constraints on the data.
 //! - **Ease of Use:** Provides implementations for common Rust types and uses extension traits
-//!   ([`ReadExt`], [`DecodeExt`], etc.) for ergonomic usage.
+//!   ([ReadExt], [DecodeExt], etc.) for ergonomic usage.
 //!
 //! # Core Concepts
 //!
 //! The library revolves around a few core traits:
 //!
-//! - [`Write`]: Implement this to define how your type is written to a byte buffer.
-//! - [`Read`]: Implement this to define how your type is read from a byte buffer.
+//! - [Write]: Implement this to define how your type is written to a byte buffer.
+//! - [Read]: Implement this to define how your type is read from a byte buffer.
 //!   It has an associated `Cfg` type, primarily used to enforce constraints (e.g., size limits)
 //!   when reading untrusted data. Use `()` if no config is needed.
-//! - [`EncodeSize`]: Implement this to calculate the exact encoded byte size of a value.
+//! - [EncodeSize]: Implement this to calculate the exact encoded byte size of a value.
 //!   Required for efficient buffer pre-allocation.
-//! - [`FixedSize`]: Marker trait for types whose encoded size is constant. Automatically
-//!   implements [`EncodeSize`].
+//! - [FixedSize]: Marker trait for types whose encoded size is constant. Automatically
+//!   implements [EncodeSize].
 //!
 //! Helper traits combine these for convenience:
 //!
-//! - [`Encode`]: Combines [`Write`] + [`EncodeSize`]. Provides [`Encode::encode()`] method.
-//! - [`Decode`]: Requires [`Read`]. Provides [`Decode::decode_cfg()`] method that ensures
+//! - [Encode]: Combines [Write] + [EncodeSize]. Provides [Encode::encode()] method.
+//! - [Decode]: Requires [Read]. Provides [Decode::decode_cfg()] method that ensures
 //!   that the entire buffer is consumed.
-//! - [`Codec`]: Combines [`Encode`] + [`Decode`].
+//! - [Codec]: Combines [Encode] + [Decode].
 //!
 //! # Supported Types
 //!
 //! Natively supports encoding/decoding for:
-//! - Primitives: [`bool`],
-//!   [`u8`], [`u16`], [`u32`], [`u64`], [`u128`],
-//!   [`i8`], [`i16`], [`i32`], [`i64`], [`i128`],
-//!   [`f32`], [`f64`], `[u8; N]`,
-//!   and [`usize`] (must fit within a [`u32`] for cross-platform compatibility).
-//! - Collections: [`Vec<T>`], [`Option<T>`]
+//! - Primitives: [bool],
+//!   [u8], [u16], [u32], [u64], [u128],
+//!   [i8], [i16], [i32], [i64], [i128],
+//!   [f32], [f64], `[u8; N]`,
+//!   and [usize] (must fit within a [u32] for cross-platform compatibility).
+//! - Collections: [Vec<T>], [Option<T>]
 //! - Tuples: `(T1, T2, ...)` (up to 12 elements)
 //! - Networking:
-//!   [`Ipv4Addr`](`std::net::Ipv4Addr`),
-//!   [`Ipv6Addr`](`std::net::Ipv6Addr`),
-//!   [`SocketAddrV4`](`std::net::SocketAddrV4`),
-//!   [`SocketAddrV6`](`std::net::SocketAddrV6`),
-//!   [`SocketAddr`](`std::net::SocketAddr`)
-//! - Common External Types: [`::bytes::Bytes`]
+//!   [Ipv4Addr](`std::net::Ipv4Addr`),
+//!   [Ipv6Addr](`std::net::Ipv6Addr`),
+//!   [SocketAddrV4](`std::net::SocketAddrV4`),
+//!   [SocketAddrV6](`std::net::SocketAddrV6`),
+//!   [SocketAddr](`std::net::SocketAddr`)
+//! - Common External Types: [::bytes::Bytes]
 //!
 //! # Implementing for Custom Types
 //!
-//! You typically need to implement [`Write`], [`EncodeSize`] (unless [`FixedSize`]), and [`Read`]
+//! You typically need to implement [Write], [EncodeSize] (unless [FixedSize]), and [Read]
 //! for your custom structs and enums.
 //!
 //! ## Example 1. Fixed-Size Type

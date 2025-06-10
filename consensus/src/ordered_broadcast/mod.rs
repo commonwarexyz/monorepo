@@ -21,7 +21,7 @@
 //!
 //! # Design
 //!
-//! The core of the module is the [`Engine`]. It is responsible for:
+//! The core of the module is the [Engine]. It is responsible for:
 //! - Broadcasting nodes (if a sequencer)
 //! - Signing chunks (if a validator)
 //! - Tracking the latest chunk in each sequencer’s chain

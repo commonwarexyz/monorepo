@@ -6,7 +6,7 @@ use commonware_cryptography::{PublicKey, Signer};
 use commonware_utils::BitVec as UtilsBitVec;
 use std::net::SocketAddr;
 
-/// The maximum overhead (in bytes) when encoding a `message` into a [`Payload::Data`].
+/// The maximum overhead (in bytes) when encoding a `message` into a [Payload::Data].
 ///
 /// The byte overhead is calculated as the sum of the following:
 /// - 1: Payload enum value

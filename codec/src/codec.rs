@@ -8,7 +8,7 @@ use bytes::{Buf, BufMut, BytesMut};
 /// Implementing this trait signifies that the encoded representation of this type *always* has the
 /// same byte length, regardless of the specific value.
 ///
-/// This automatically provides an implementation of [`EncodeSize`].
+/// This automatically provides an implementation of [EncodeSize].
 pub trait FixedSize {
     /// The size of the encoded value (in bytes).
     const SIZE: usize;
@@ -16,7 +16,7 @@ pub trait FixedSize {
 
 /// Trait for types that can provide their encoded size in bytes.
 ///
-/// This must be implemented by all encodable types. For types implementing [`FixedSize`], this
+/// This must be implemented by all encodable types. For types implementing [FixedSize], this
 /// trait is implemented automatically. For variable-size types, this requires calculating the size
 /// based on the value.
 pub trait EncodeSize {
@@ -53,20 +53,20 @@ pub trait Read: Sized {
     /// Implementations should consume the exact number of bytes required from `buf` to reconstruct
     /// the value.
     ///
-    /// Returns [`Error`] if decoding fails due to invalid data, insufficient bytes in the buffer,
+    /// Returns [Error] if decoding fails due to invalid data, insufficient bytes in the buffer,
     /// or violation of constraints imposed by the `cfg`.
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error>;
 }
 
-/// Trait combining [`Write`] and [`EncodeSize`] for types that can be fully encoded.
+/// Trait combining [Write] and [EncodeSize] for types that can be fully encoded.
 ///
-/// This trait provides the convenience [`encode`](Encode::encode) method which handles
+/// This trait provides the convenience [encode](Encode::encode) method which handles
 /// buffer allocation, writing, and size assertion in one go.
 pub trait Encode: Write + EncodeSize {
-    /// Encodes `self` into a new [`BytesMut`] buffer.
+    /// Encodes `self` into a new [BytesMut] buffer.
     ///
-    /// This method calculates the required size using [`EncodeSize::encode_size`], allocates a
-    /// buffer of that exact capacity, writes the value using [`Write::write`], and performs a
+    /// This method calculates the required size using [EncodeSize::encode_size], allocates a
+    /// buffer of that exact capacity, writes the value using [Write::write], and performs a
     /// sanity check assertion.
     ///
     /// # Panics
@@ -85,13 +85,13 @@ pub trait Encode: Write + EncodeSize {
 // Automatically implement `Encode` for types that implement `Write` and `EncodeSize`.
 impl<T: Write + EncodeSize> Encode for T {}
 
-/// Trait combining [`Read`] with a check for remaining bytes.
+/// Trait combining [Read] with a check for remaining bytes.
 ///
 /// Ensures that *all* bytes from the input buffer were consumed during decoding.
 pub trait Decode: Read {
     /// Decodes a value from `buf` using `cfg`, ensuring the entire buffer is consumed.
     ///
-    /// Returns [`Error`] if decoding fails via [`Read::read_cfg`] or if there are leftover bytes in
+    /// Returns [Error] if decoding fails via [Read::read_cfg] or if there are leftover bytes in
     /// `buf` after reading.
     fn decode_cfg(mut buf: impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let result = Self::read_cfg(&mut buf, cfg)?;
@@ -109,7 +109,7 @@ pub trait Decode: Read {
 // Automatically implement `Decode` for types that implement `Read`.
 impl<T: Read> Decode for T {}
 
-/// Convenience trait combining [`Encode`] and [`Decode`].
+/// Convenience trait combining [Encode] and [Decode].
 ///
 /// Represents types that can be both fully encoded and decoded.
 pub trait Codec: Encode + Decode {}
@@ -117,7 +117,7 @@ pub trait Codec: Encode + Decode {}
 /// Automatically implement `Codec` for types that implement `Encode` and `Decode`.
 impl<T: Encode + Decode> Codec for T {}
 
-/// Convenience trait for [`FixedSize`] types that can be encoded directly into a fixed-size array.
+/// Convenience trait for [FixedSize] types that can be encoded directly into a fixed-size array.
 pub trait EncodeFixed: Write + FixedSize {
     /// Encodes `self` into a fixed-size byte array `[u8; N]`.
     ///
