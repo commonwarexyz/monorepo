@@ -54,7 +54,7 @@ impl<H: CHasher> Default for Mmr<H> {
 
 impl<H: CHasher> Builder<H> for Mmr<H> {
     async fn add(&mut self, hasher: &mut impl Hasher<H>, element: &[u8]) -> Result<u64, Error> {
-        self.add(hasher, element).await
+        Ok(self.add(hasher, element))
     }
 
     fn root(&self, hasher: &mut impl Hasher<H>) -> H::Digest {
@@ -172,23 +172,19 @@ impl<H: CHasher> Mmr<H> {
     /// # Warning
     ///
     /// Panics if there are unprocessed batch updates.
-    pub async fn add(&mut self, hasher: &mut impl Hasher<H>, element: &[u8]) -> Result<u64, Error> {
+    pub fn add(&mut self, hasher: &mut impl Hasher<H>, element: &[u8]) -> u64 {
         let leaf_pos = self.size();
-        let digest = hasher.leaf_digest(leaf_pos, element).await?;
+        let digest = hasher.leaf_digest(leaf_pos, element);
         self.add_leaf_digest(hasher, digest);
 
-        Ok(leaf_pos)
+        leaf_pos
     }
 
     /// Add an element to the MMR and return its position in the MMR, but without updating ancestors
-    /// until `sync` is called.
-    pub async fn add_batched(
-        &mut self,
-        hasher: &mut impl Hasher<H>,
-        element: &[u8],
-    ) -> Result<u64, Error> {
+    /// until `sync` is called. Returns the position of the leaf in the MMR.
+    pub fn add_batched(&mut self, hasher: &mut impl Hasher<H>, element: &[u8]) -> u64 {
         let leaf_pos = self.size();
-        let digest = hasher.leaf_digest(leaf_pos, element).await?;
+        let digest = hasher.leaf_digest(leaf_pos, element);
 
         // Compute the new parent nodes if any, and insert them into the MMR
         // with a dummy digest, and add each to the dirty nodes set.
@@ -206,7 +202,7 @@ impl<H: CHasher> Mmr<H> {
             height += 1;
         }
 
-        Ok(leaf_pos)
+        leaf_pos
     }
 
     /// Add a leaf's `digest` to the MMR, generating the necessary parent nodes to maintain the
@@ -270,23 +266,18 @@ impl<H: CHasher> Mmr<H> {
     ///
     /// # Warning
     ///
-    /// - Panics if `pos` does not correspond to a leaf.
+    /// - Panics if `pos` does not correspond to a leaf, or if the leaf has been pruned.
     ///
     /// - This method will change the root and invalidate any previous inclusion proofs.
     ///
     /// - Use of this method will prevent using this structure as a base mmr for grafting.
-    pub async fn update_leaf(
-        &mut self,
-        hasher: &mut impl Hasher<H>,
-        pos: u64,
-        element: &[u8],
-    ) -> Result<(), Error> {
+    pub fn update_leaf(&mut self, hasher: &mut impl Hasher<H>, pos: u64, element: &[u8]) {
         if pos < self.pruned_to_pos {
-            return Err(ElementPruned(pos));
+            panic!("element pruned: pos={}", pos);
         }
 
         // Update the digest of the leaf node.
-        let mut digest = hasher.leaf_digest(pos, element).await?;
+        let mut digest = hasher.leaf_digest(pos, element);
         let mut index = self.pos_to_index(pos);
         self.nodes[index] = digest;
 
@@ -295,7 +286,6 @@ impl<H: CHasher> Mmr<H> {
             if peak_pos < pos {
                 continue;
             }
-
             // We have found the mountain containing the path we need to update.
             let path: Vec<_> = PathIterator::new(pos, peak_pos, height).collect();
             for (parent_pos, sibling_pos) in path.into_iter().rev() {
@@ -312,32 +302,33 @@ impl<H: CHasher> Mmr<H> {
                 index = self.pos_to_index(parent_pos);
                 self.nodes[index] = digest;
             }
-            return Ok(());
+            return;
         }
 
-        unreachable!("invalid pos {}:{}", pos, self.size())
+        panic!("invalid pos {}:{}", pos, self.size())
     }
 
-    /// Batch update the digests of multiple retained leaves. If any one doesn't exist, then
-    /// ElementPruned is returned for the first one found.
-    pub async fn update_leaf_batched(
+    /// Batch update the digests of multiple retained leaves.
+    ///
+    /// # Warning
+    ///
+    /// Panics if any of the updated leaves has been pruned.
+    pub fn update_leaf_batched(
         &mut self,
         hasher: &mut impl Hasher<H>,
         updates: impl Iterator<Item = (u64, impl AsRef<[u8]>)>,
-    ) -> Result<(), Error> {
+    ) {
         for (pos, element) in updates {
             if pos < self.pruned_to_pos {
-                return Err(ElementPruned(pos));
+                panic!("element pruned: pos={}", pos);
             }
 
             // Update the digest of the leaf node and mark its ancestors as dirty.
-            let digest = hasher.leaf_digest(pos, element.as_ref()).await?;
+            let digest = hasher.leaf_digest(pos, element.as_ref());
             let index = self.pos_to_index(pos);
             self.nodes[index] = digest;
             self.mark_dirty(pos);
         }
-
-        Ok(())
     }
 
     /// Mark the non-leaf nodes in the path from the given position to the root as dirty, so that
@@ -364,7 +355,7 @@ impl<H: CHasher> Mmr<H> {
             return;
         }
 
-        unreachable!("invalid pos {}:{}", pos, self.size());
+        panic!("invalid pos {}:{}", pos, self.size());
     }
 
     /// Returns whether there are pending updates.
@@ -539,8 +530,7 @@ mod tests {
     fn test_mem_mmr_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut hasher = Sha256::default();
-            let mut hasher = Standard::new(&mut hasher);
+            let mut hasher: Standard<Sha256> = Standard::new();
             let mut mmr = Mmr::new();
             assert_eq!(
                 mmr.peak_iterator().next(),
@@ -572,10 +562,9 @@ mod tests {
             let mut mmr = Mmr::new();
             let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
             let mut leaves: Vec<u64> = Vec::new();
-            let mut hasher = Sha256::default();
-            let mut hasher = Standard::new(&mut hasher);
+            let mut hasher: Standard<Sha256> = Standard::new();
             for _ in 0..11 {
-                leaves.push(mmr.add(&mut hasher, &element).await.unwrap());
+                leaves.push(mmr.add(&mut hasher, &element));
                 assert_eq!(mmr.last_leaf_pos().unwrap(), *leaves.last().unwrap());
                 let peaks: Vec<(u64, u32)> = mmr.peak_iterator().collect();
                 assert_ne!(peaks.len(), 0);
@@ -608,7 +597,7 @@ mod tests {
 
             // verify leaf digests
             for leaf in leaves.iter().by_ref() {
-                let digest = hasher.leaf_digest(*leaf, &element).await.unwrap();
+                let digest = hasher.leaf_digest(*leaf, &element);
                 assert_eq!(mmr.get_node(*leaf).unwrap(), digest);
             }
 
@@ -699,11 +688,10 @@ mod tests {
         executor.start(|_| async move {
             let mut mmr = Mmr::new();
             let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
-            let mut hasher = Sha256::default();
-            let mut hasher = Standard::new(&mut hasher);
+            let mut hasher: Standard<Sha256> = Standard::new();
             for _ in 0..1000 {
                 mmr.prune_all();
-                mmr.add(&mut hasher, &element).await.unwrap();
+                mmr.add(&mut hasher, &element);
             }
         });
     }
@@ -715,8 +703,7 @@ mod tests {
         executor.start(|_| async move {
             let mut mmr = Mmr::new();
             let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
-            let mut hasher = Sha256::default();
-            let mut hasher = Standard::new(&mut hasher);
+            let mut hasher: Standard<Sha256> = Standard::new();
             for _ in 0..1001 {
                 assert!(
                     PeakIterator::check_validity(mmr.size()),
@@ -724,7 +711,7 @@ mod tests {
                     mmr.size()
                 );
                 let old_size = mmr.size();
-                mmr.add(&mut hasher, &element).await.unwrap();
+                mmr.add(&mut hasher, &element);
                 for size in old_size + 1..mmr.size() {
                     assert!(
                         !PeakIterator::check_validity(size),
@@ -757,17 +744,15 @@ mod tests {
     fn test_mem_mmr_root_stability_while_pruning() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut hasher = Sha256::default();
-            let mut hasher = Standard::new(&mut hasher);
-            let mut c_hasher = Sha256::default();
+            let mut hasher: Standard<Sha256> = Standard::new();
             let mut mmr = Mmr::new();
             for i in 0u64..199 {
                 let root = mmr.root(&mut hasher);
                 let expected_root = ROOTS[i as usize];
                 assert_eq!(hex(&root), expected_root, "at: {}", i);
-                c_hasher.update(&i.to_be_bytes());
-                let element = c_hasher.finalize();
-                mmr.add(&mut hasher, &element).await.unwrap();
+                hasher.inner().update(&i.to_be_bytes());
+                let element = hasher.inner().finalize();
+                mmr.add(&mut hasher, &element);
                 mmr.prune_all();
             }
         });
@@ -782,7 +767,7 @@ mod tests {
         for i in 0u64..199 {
             c_hasher.update(&i.to_be_bytes());
             let element = c_hasher.finalize();
-            leaves.push(mmr.add(hasher, &element).await.unwrap());
+            leaves.push(mmr.add(hasher, &element));
         }
         mmr.sync(hasher);
 
@@ -793,9 +778,7 @@ mod tests {
     fn test_mem_mmr_pop() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut hasher = Sha256::default();
-            let mut hasher = Standard::new(&mut hasher);
-            let mut c_hasher = Sha256::default();
+            let mut hasher: Standard<Sha256> = Standard::new();
             let (mut mmr, _) = compute_big_mmr(&mut hasher).await.unwrap();
             let root = mmr.root(&mut hasher);
             let expected_root = ROOTS[199];
@@ -816,9 +799,9 @@ mod tests {
 
             // Test that we can pop all elements up to and including the oldest retained leaf.
             for i in 0u64..199 {
-                c_hasher.update(&i.to_be_bytes());
-                let element = c_hasher.finalize();
-                mmr.add(&mut hasher, &element).await.unwrap();
+                hasher.inner().update(&i.to_be_bytes());
+                let element = hasher.inner().finalize();
+                mmr.add(&mut hasher, &element);
             }
 
             let leaf_pos = leaf_num_to_pos(100);
@@ -834,9 +817,7 @@ mod tests {
 
     #[test]
     fn test_mem_mmr_update_leaf() {
-        let mut hasher = Sha256::default();
-        let mut hasher = Standard::new(&mut hasher);
-        let mut c_hasher = Sha256::default();
+        let mut hasher: Standard<Sha256> = Standard::new();
         let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
@@ -847,35 +828,23 @@ mod tests {
             // to its previous state then we update the leaf to its original value.
             for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
                 // Change the leaf.
-                mmr.update_leaf(&mut hasher, leaves[leaf], &element)
-                    .await
-                    .unwrap();
+                mmr.update_leaf(&mut hasher, leaves[leaf], &element);
                 let updated_root = mmr.root(&mut hasher);
                 assert!(root != updated_root);
 
                 // Restore the leaf to its original value, ensure the root is as before.
-                c_hasher.update(&leaf.to_be_bytes());
-                let element = c_hasher.finalize();
-                mmr.update_leaf(&mut hasher, leaves[leaf], &element)
-                    .await
-                    .unwrap();
+                hasher.inner().update(&leaf.to_be_bytes());
+                let element = hasher.inner().finalize();
+                mmr.update_leaf(&mut hasher, leaves[leaf], &element);
                 let restored_root = mmr.root(&mut hasher);
                 assert_eq!(root, restored_root);
             }
 
-            // Confirm the function gracefully handles failures when the MMR is pruned.
-            mmr.prune_to_pos(leaves[150]);
-            assert!(matches!(
-                mmr.update_leaf(&mut hasher, leaves[149], &element).await,
-                Err(ElementPruned(_))
-            ));
             // Confirm the tree has all the hashes necessary to update any element after pruning.
+            mmr.prune_to_pos(leaves[150]);
             for &leaf_pos in &leaves[150..=190] {
                 mmr.prune_to_pos(leaf_pos);
-                assert!(mmr
-                    .update_leaf(&mut hasher, leaf_pos, &element)
-                    .await
-                    .is_ok());
+                mmr.update_leaf(&mut hasher, leaf_pos, &element);
             }
         });
     }
@@ -883,24 +852,34 @@ mod tests {
     #[test]
     #[should_panic(expected = "pos was not for a leaf")]
     fn test_mem_mmr_update_leaf_panic_invalid() {
-        let mut hasher = Sha256::default();
-        let mut hasher = Standard::new(&mut hasher);
+        let mut hasher: Standard<Sha256> = Standard::new();
         let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let (mut mmr, _) = compute_big_mmr(&mut hasher).await.unwrap();
             let not_a_leaf_pos = 2;
+            mmr.update_leaf(&mut hasher, not_a_leaf_pos, &element);
+        });
+    }
 
-            let _ = mmr.update_leaf(&mut hasher, not_a_leaf_pos, &element).await;
+    #[test]
+    #[should_panic(expected = "element pruned")]
+    fn test_mem_mmr_update_leaf_panic_pruned() {
+        let mut hasher: Standard<Sha256> = Standard::new();
+        let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
+
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let (mut mmr, _) = compute_big_mmr(&mut hasher).await.unwrap();
+            mmr.prune_all();
+            mmr.update_leaf(&mut hasher, 0, &element);
         });
     }
 
     #[test]
     fn test_mem_mmr_batch_update_leaf() {
-        let mut hasher = Sha256::default();
-        let mut hasher = Standard::new(&mut hasher);
-        let mut c_hasher = Sha256::default();
+        let mut hasher: Standard<Sha256> = Standard::new();
         let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
@@ -912,9 +891,7 @@ mod tests {
             for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
                 updates.push((leaves[leaf], &element));
             }
-            mmr.update_leaf_batched(&mut hasher, updates.into_iter())
-                .await
-                .unwrap();
+            mmr.update_leaf_batched(&mut hasher, updates.into_iter());
 
             mmr.sync(&mut hasher);
             let updated_root = mmr.root(&mut hasher);
@@ -926,13 +903,11 @@ mod tests {
             // Batch-restore the changed leaves to their original values.
             let mut updates = Vec::new();
             for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
-                c_hasher.update(&leaf.to_be_bytes());
-                let element = c_hasher.finalize();
+                hasher.inner().update(&leaf.to_be_bytes());
+                let element = hasher.inner().finalize();
                 updates.push((leaves[leaf], element));
             }
-            mmr.update_leaf_batched(&mut hasher, updates.into_iter())
-                .await
-                .unwrap();
+            mmr.update_leaf_batched(&mut hasher, updates.into_iter());
 
             mmr.sync(&mut hasher);
             let restored_root = mmr.root(&mut hasher);

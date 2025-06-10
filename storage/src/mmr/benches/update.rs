@@ -1,4 +1,4 @@
-use commonware_cryptography::{sha256, Digest as _, Hasher, Sha256};
+use commonware_cryptography::{sha256, Digest as _, Sha256};
 use commonware_runtime::{benchmarks::tokio, tokio::Config};
 use commonware_storage::mmr::{hasher::Standard, mem::Mmr};
 use criterion::{criterion_group, Criterion};
@@ -26,14 +26,13 @@ fn bench_update(c: &mut Criterion) {
                             let mut elements = Vec::with_capacity(leaves as usize);
                             let mut sampler = StdRng::seed_from_u64(0);
                             let mut leaf_positions = Vec::with_capacity(leaves as usize);
-                            let mut h = Sha256::new();
-                            let mut h = Standard::new(&mut h);
+                            let mut h = Standard::new();
 
                             // Append random elements to MMR
                             for _ in 0..leaves {
                                 let digest = sha256::Digest::random(&mut sampler);
                                 elements.push(digest);
-                                let pos = mmr.add(&mut h, &digest).await.unwrap();
+                                let pos = mmr.add(&mut h, &digest);
                                 leaf_positions.push(pos);
                             }
 
@@ -50,12 +49,10 @@ fn bench_update(c: &mut Criterion) {
                                 leaf_map.insert(rand_leaf_pos, *new_element);
                             }
                             if batched {
-                                mmr.update_leaf_batched(&mut h, leaf_map.into_iter())
-                                    .await
-                                    .unwrap();
+                                mmr.update_leaf_batched(&mut h, leaf_map.into_iter());
                             } else {
                                 for (pos, element) in leaf_map {
-                                    mmr.update_leaf(&mut h, pos, &element).await.unwrap();
+                                    mmr.update_leaf(&mut h, pos, &element);
                                 }
                             }
 
