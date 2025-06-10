@@ -16,6 +16,7 @@ use crate::mmr::{
     Hasher,
 };
 use commonware_cryptography::Hasher as CHasher;
+use rayon::{prelude::*, ThreadPool};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Implementation of `Mmr`.
@@ -358,6 +359,38 @@ impl<H: CHasher> Mmr<H> {
         panic!("invalid pos {}:{}", pos, self.size());
     }
 
+    /// Batch update the digests of multiple retained leaves using multiple threads.
+    pub fn update_leaf_parallel<T: AsRef<[u8]> + Sync>(
+        &mut self,
+        hasher: &mut impl Hasher<H>,
+        pool: &mut ThreadPool,
+        min_to_parallelize: usize,
+        updates: Vec<(u64, T)>,
+    ) {
+        if updates.len() < min_to_parallelize {
+            return self.update_leaf_batched(hasher, updates.into_iter());
+        }
+
+        pool.install(|| {
+            let digests: Vec<(u64, H::Digest)> = updates
+                .par_iter()
+                .map_init(
+                    || hasher.clone(),
+                    |hasher, (pos, elem)| {
+                        let digest = hasher.leaf_digest(*pos, elem.as_ref());
+                        (*pos, digest)
+                    },
+                )
+                .collect();
+
+            for (pos, digest) in digests {
+                let index = self.pos_to_index(pos);
+                self.nodes[index] = digest;
+                self.mark_dirty(pos);
+            }
+        });
+    }
+
     /// Returns whether there are pending updates.
     pub fn is_dirty(&self) -> bool {
         !self.dirty_nodes.is_empty()
@@ -383,6 +416,93 @@ impl<H: CHasher> Mmr<H> {
             let index = self.pos_to_index(pos);
             self.nodes[index] = digest;
         }
+    }
+
+    /// Process any pending batched updates, using parallel hash workers as long as the number of
+    /// computations that can be parallelized exceeds `min_to_parallelize`.
+    ///
+    /// This implementation parallelizes the digest of computations of nodes at the same height,
+    /// starting from the bottom and working up to the peaks. If ever the number of remaining digest
+    /// computations is less than the `min_to_parallelize`, it switches to the serial
+    /// implementation.
+    pub fn sync_parallel(
+        &mut self,
+        hasher: &mut impl Hasher<H>,
+        pool: &mut ThreadPool,
+        min_to_parallelize: usize,
+    ) {
+        if self.dirty_nodes.len() < min_to_parallelize {
+            self.sync(hasher);
+            return;
+        }
+        let mut nodes: Vec<(u64, u32)> = self.dirty_nodes.iter().copied().collect();
+        self.dirty_nodes.clear();
+        // Sort by increasing height.
+        nodes.sort_by(|a, b| a.1.cmp(&b.1));
+
+        let mut same_height = Vec::new();
+        let mut current_height = 1;
+        for (i, (pos, height)) in nodes.iter().enumerate() {
+            if *height == current_height {
+                same_height.push(*pos);
+                continue;
+            }
+            if same_height.len() < min_to_parallelize {
+                self.dirty_nodes = nodes[i - same_height.len()..].iter().copied().collect();
+                self.sync(hasher);
+                return;
+            }
+            self.update_node_digests(hasher, pool, &same_height, current_height);
+            same_height.clear();
+            current_height += 1;
+            same_height.push(*pos);
+        }
+
+        if same_height.len() < min_to_parallelize {
+            self.dirty_nodes = nodes[nodes.len() - same_height.len()..]
+                .iter()
+                .copied()
+                .collect();
+            self.sync(hasher);
+            return;
+        }
+
+        self.update_node_digests(hasher, pool, &same_height, current_height);
+    }
+
+    /// Update digests of the given set of nodes of equal height in the MMR. Since they are all at
+    /// the same height, this can be done in parallel without synchronization.
+    fn update_node_digests(
+        &mut self,
+        hasher: &mut impl Hasher<H>,
+        pool: &mut ThreadPool,
+        same_height: &[u64],
+        height: u32,
+    ) {
+        let two_h = 1 << height;
+        pool.install(|| {
+            let computed_digests: Vec<(usize, H::Digest)> = same_height
+                .par_iter()
+                .map_init(
+                    || hasher.clone(),
+                    |hasher, &pos| {
+                        let left = pos - two_h;
+                        let right = pos - 1;
+                        let digest = hasher.node_digest(
+                            pos,
+                            self.get_node_unchecked(left),
+                            self.get_node_unchecked(right),
+                        );
+                        let index = self.pos_to_index(pos);
+                        (index, digest)
+                    },
+                )
+                .collect();
+
+            for (index, digest) in computed_digests {
+                self.nodes[index] = digest;
+            }
+        });
     }
 
     /// Computes the root of the MMR.
@@ -518,11 +638,15 @@ mod tests {
     use crate::mmr::{
         hasher::Standard,
         iterator::leaf_num_to_pos,
-        tests::{build_and_check_test_roots_mmr, build_batched_and_check_test_roots, ROOTS},
+        tests::{
+            build_and_check_test_roots_mmr, build_batched_and_check_test_roots,
+            build_parallel_and_check_test_roots, ROOTS,
+        },
     };
     use commonware_cryptography::Sha256;
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{deterministic, tokio, Runner};
     use commonware_utils::hex;
+    use rayon::ThreadPoolBuilder;
 
     /// Test empty MMR behavior.
     #[test]
@@ -737,6 +861,18 @@ mod tests {
         });
     }
 
+    /// Test root stability using the parallel builder implementation. This requires we use the
+    /// tokio runtime since the deterministic runtime would block due to being single-threaded.
+    #[test]
+    fn test_mem_mmr_root_stability_parallel() {
+        let executor = tokio::Runner::default();
+        executor.start(|context| async move {
+            let mut mmr = Mmr::new();
+            let mut pool = commonware_runtime::create_pool(context, 4).unwrap();
+            build_parallel_and_check_test_roots(&mut pool, &mut mmr).await;
+        });
+    }
+
     /// Build the MMR corresponding to the stability test while pruning after each add, and confirm
     /// the static roots match that from the root computation.
     #[test]
@@ -911,6 +1047,22 @@ mod tests {
             mmr.sync(&mut hasher);
             let restored_root = mmr.root(&mut hasher);
             assert_eq!(root, restored_root);
+
+            // Repeat the batch update only using parallel sync.
+            let mut updates = Vec::new();
+            for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
+                updates.push((leaves[leaf], &element));
+            }
+            // let mut pool = commonware_runtime::create_pool(context, 4).unwrap();
+            let mut pool = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+            mmr.update_leaf_parallel(&mut hasher, &mut pool, 1, updates);
+
+            mmr.sync_parallel(&mut hasher, &mut pool, 1);
+            let updated_root = mmr.root(&mut hasher);
+            assert_eq!(
+                "af3acad6aad59c1a880de643b1200a0962a95d06c087ebf677f29eb93fc359a4",
+                hex(&updated_root)
+            );
         });
     }
 }

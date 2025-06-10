@@ -212,7 +212,7 @@ impl<
             snapshot,
             inactivity_floor_loc,
             uncommitted_ops: 0,
-            hasher,
+            hasher: Standard::<H>::new(),
         };
 
         Ok(Self {

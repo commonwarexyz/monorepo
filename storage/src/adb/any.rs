@@ -216,11 +216,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         Ok((mmr, log))
     }
 
-    /// Builds the database's snapshot by replaying the log starting at `start_leaf_num`. If a bitmap is
-    /// provided, then a bit is appended for each operation in the operation log, with its value
-    /// reflecting its activity status. The bitmap is expected to already have a number of bits
-    /// corresponding to the portion of the database below the inactivity floor, and this method
-    /// will panic otherwise.
+    /// Builds the database's snapshot by replaying the log starting at `start_leaf_num`.
+    ///
+    /// If a bitmap is provided, then a bit is appended for each operation in the operation log,
+    /// with its value reflecting its activity status. The bitmap is expected to already have a
+    /// number of bits corresponding to the portion of the database below the inactivity floor, and
+    /// this method will panic otherwise. The caller is responsible for syncing any changes made to
+    /// the bitmap.
     pub(super) async fn build_snapshot_from_log<const N: usize>(
         start_leaf_num: u64,
         log: &Journal<E, Operation<K, V>>,
