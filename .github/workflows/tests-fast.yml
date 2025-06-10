@@ -61,9 +61,9 @@ jobs:
       uses: actions/checkout@v4
     - name: Install nightly Rust toolchain
       run: rustup toolchain install nightly
-    - name: Get Rust version
-      id: rust-version
-      run: echo "rust_version=$(rustc +nightly --version)" >> "$GITHUB_OUTPUT"
+    - name: Get nightly date
+      id: nightly-date
+      run: echo "nightly_date=$(date +'%Y-%m-%d')" >> "$GITHUB_OUTPUT"
     - name: Run setup
       uses: ./.github/actions/setup
     - name: Cache cargo-udeps
@@ -71,7 +71,7 @@ jobs:
       uses: actions/cache@v4
       with:
         path: ~/.cargo/bin/cargo-udeps
-        key: ${{ runner.os }}-${{ env.UDEPS_VERSION }}-cargo-udeps-${{ steps.rust-version.outputs.rust_version }}
+        key: ${{ runner.os }}-${{ env.UDEPS_VERSION }}-cargo-udeps-nightly-${{ steps.nightly-date.outputs.nightly_date }}
     - name: Install cargo-udeps
       if: steps.cargo-udeps-cache.outputs.cache-hit != 'true'
       run: cargo +nightly install cargo-udeps --version ${{ env.UDEPS_VERSION }}
@@ -88,6 +88,11 @@ jobs:
       uses: ./.github/actions/setup
     - name: Add WASM target
       run: rustup target add wasm32-unknown-unknown
+    - name: Cache WASM target
+      uses: actions/cache@v4
+      with:
+        path: target/wasm32-unknown-unknown
+        key: ${{ runner.os }}-wasm-target-${{ hashFiles('**/Cargo.lock') }}
     - name: Build cryptography
       run: cargo build --target wasm32-unknown-unknown --release --manifest-path cryptography/Cargo.toml && du -h target/wasm32-unknown-unknown/release/commonware_cryptography.wasm
     - name: Build macros
