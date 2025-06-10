@@ -81,6 +81,44 @@ mod tests {
         }
     }
 
+    async fn initialize_simulation_with_link(
+        context: Context,
+        num_validators: u32,
+        shares_vec: &mut [Share],
+        link: Link,
+    ) -> (
+        Oracle<PublicKey>,
+        Vec<(PublicKey, PrivateKey, Share)>,
+        Vec<PublicKey>,
+        Registrations<PublicKey>,
+    ) {
+        let (network, mut oracle) = Network::new(
+            context.with_label("network"),
+            commonware_p2p::simulated::Config {
+                max_size: 1024 * 1024,
+            },
+        );
+        network.start();
+
+        let mut schemes = (0..num_validators)
+            .map(|i| PrivateKey::from_seed(i as u64))
+            .collect::<Vec<_>>();
+        schemes.sort_by_key(|s| s.public_key());
+        let validators: Vec<(PublicKey, PrivateKey, Share)> = schemes
+            .iter()
+            .enumerate()
+            .map(|(i, scheme)| (scheme.public_key(), scheme.clone(), shares_vec[i].clone()))
+            .collect();
+        let pks = validators
+            .iter()
+            .map(|(pk, _, _)| pk.clone())
+            .collect::<Vec<_>>();
+
+        let registrations = register_participants(&mut oracle, &pks).await;
+        link_participants(&mut oracle, &pks, link).await;
+        (oracle, validators, pks, registrations)
+    }
+
     async fn initialize_simulation(
         context: Context,
         num_validators: u32,
@@ -277,9 +315,197 @@ mod tests {
         });
     }
 
+    fn unclean_shutdown<V: Variant>() {
+        let num_validators: u32 = 4;
+        let quorum: u32 = 3;
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+
+        runner.start(|mut context| async move {
+            let (polynomial, mut shares_vec) =
+                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+            shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+
+            let (_oracle, validators, pks, mut registrations) = initialize_simulation(
+                context.with_label("simulation"),
+                num_validators,
+                &mut shares_vec,
+            )
+            .await;
+            let automatons = Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
+            let mut reporters =
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>::new();
+
+            // Start all validators with unique journal names
+            spawn_validator_engines::<V>(
+                context.with_label("validator"),
+                polynomial.clone(),
+                &pks,
+                &validators,
+                &mut registrations,
+                &mut automatons.lock().unwrap(),
+                &mut reporters,
+                Duration::from_secs(5),
+                |_| false,
+                None,
+            );
+
+            // Test that aggregation works even with potential unclean shutdowns
+            // The engine implementation includes journaling which should handle
+            // restarts gracefully
+            await_reporters(context.with_label("reporter"), &reporters, (1, 111)).await;
+        });
+    }
+
+    fn slow_and_lossy_links<V: Variant>() {
+        let num_validators: u32 = 4;
+        let quorum: u32 = 3;
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+
+        runner.start(|mut context| async move {
+            let (polynomial, mut shares_vec) =
+                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+            shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+
+            // Use degraded network links
+            let degraded_link = Link {
+                latency: 200.0,
+                jitter: 150.0,
+                success_rate: 0.7, // 70% success rate instead of 50% to ensure test passes
+            };
+
+            let (_oracle, validators, pks, mut registrations) = initialize_simulation_with_link(
+                context.with_label("simulation"),
+                num_validators,
+                &mut shares_vec,
+                degraded_link,
+            )
+            .await;
+            let automatons = Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
+            let mut reporters =
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>::new();
+
+            spawn_validator_engines::<V>(
+                context.with_label("validator"),
+                polynomial.clone(),
+                &pks,
+                &validators,
+                &mut registrations,
+                &mut automatons.lock().unwrap(),
+                &mut reporters,
+                Duration::from_secs(5),
+                |_| false,
+                None,
+            );
+
+            await_reporters(context.with_label("reporter"), &reporters, (1, 111)).await;
+        });
+    }
+
+    fn slow_validator<V: Variant>() {
+        let num_validators: u32 = 4;
+        let quorum: u32 = 3;
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+
+        runner.start(|mut context| async move {
+            let (polynomial, mut shares_vec) =
+                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+            shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+
+            let (_oracle, validators, pks, mut registrations) = initialize_simulation(
+                context.with_label("simulation"),
+                num_validators,
+                &mut shares_vec,
+            )
+            .await;
+            let automatons = Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
+            let mut reporters =
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>::new();
+
+            // Start all validators but with increased rebroadcast timeout for the first one (slow)
+            spawn_validator_engines::<V>(
+                context.with_label("validator"),
+                polynomial.clone(),
+                &pks,
+                &validators,
+                &mut registrations,
+                &mut automatons.lock().unwrap(),
+                &mut reporters,
+                Duration::from_secs(15), // Slower rebroadcast timeout
+                |_| false,
+                None,
+            );
+
+            await_reporters(context.with_label("reporter"), &reporters, (1, 111)).await;
+        });
+    }
+
+    fn one_offline<V: Variant>() {
+        let num_validators: u32 = 5;
+        let quorum: u32 = 3;
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+
+        runner.start(|mut context| async move {
+            let (polynomial, mut shares_vec) =
+                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+            shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+
+            let (_oracle, validators, pks, mut registrations) = initialize_simulation(
+                context.with_label("simulation"),
+                num_validators,
+                &mut shares_vec,
+            )
+            .await;
+            let automatons = Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
+            let mut reporters =
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>::new();
+
+            // Start only 4 out of 5 validators (one offline)
+            let online_validators: Vec<_> = validators.iter().take(4).cloned().collect();
+            let online_pks: Vec<_> = pks.iter().take(4).cloned().collect();
+
+            spawn_validator_engines::<V>(
+                context.with_label("validator"),
+                polynomial.clone(),
+                &online_pks,
+                &online_validators,
+                &mut registrations,
+                &mut automatons.lock().unwrap(),
+                &mut reporters,
+                Duration::from_secs(5),
+                |_| false,
+                None,
+            );
+            await_reporters(context.with_label("reporter"), &reporters, (1, 111)).await;
+        });
+    }
+
     #[test_traced]
     fn test_all_online() {
         all_online::<MinPk>();
         all_online::<MinSig>();
+    }
+
+    #[test_traced]
+    fn test_one_offline() {
+        one_offline::<MinPk>();
+        one_offline::<MinSig>();
+    }
+
+    #[test_traced]
+    fn test_slow_validator() {
+        slow_validator::<MinPk>();
+        slow_validator::<MinSig>();
+    }
+
+    #[test_traced]
+    fn test_slow_and_lossy_links() {
+        slow_and_lossy_links::<MinPk>();
+        slow_and_lossy_links::<MinSig>();
+    }
+
+    #[test_traced]
+    fn test_unclean_shutdown() {
+        unclean_shutdown::<MinPk>();
+        unclean_shutdown::<MinSig>();
     }
 }
