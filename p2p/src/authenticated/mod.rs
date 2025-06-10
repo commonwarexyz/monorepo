@@ -1,6 +1,5 @@
 pub mod discovery;
 pub mod lookup;
-mod peer_info;
 use futures::{channel::mpsc, SinkExt as _};
 use thiserror::Error;
 

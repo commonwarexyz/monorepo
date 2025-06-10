@@ -1,4 +1,7 @@
-use crate::authenticated::{discovery::types, peer_info::PeerInfo, Mailbox};
+use crate::authenticated::{
+    discovery::types::{self, PeerInfo},
+    Mailbox,
+};
 use commonware_cryptography::PublicKey;
 use futures::SinkExt;
 

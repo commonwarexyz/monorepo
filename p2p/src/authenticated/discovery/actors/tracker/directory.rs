@@ -1,11 +1,5 @@
 use super::{metrics::Metrics, record::Record, set::Set, Metadata, Reservation};
-use crate::authenticated::{
-    discovery::{
-        metrics,
-        types::{self},
-    },
-    peer_info::PeerInfo,
-};
+use crate::authenticated::discovery::{metrics, types};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::SystemTimeExt;
@@ -77,7 +71,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     pub fn init(
         context: E,
         bootstrappers: Vec<(C, SocketAddr)>,
-        myself: PeerInfo<C>,
+        myself: types::PeerInfo<C>,
         cfg: Config,
     ) -> Self {
         // Create the list of peers and add the bootstrappers.
@@ -156,7 +150,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     }
 
     /// Using a list of (already-validated) peer information, update the records.
-    pub fn update_peers(&mut self, infos: Vec<PeerInfo<C>>) {
+    pub fn update_peers(&mut self, infos: Vec<types::PeerInfo<C>>) {
         for info in infos {
             // Update peer address
             //
@@ -274,14 +268,14 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     // ---------- Getters ----------
 
     /// Returns the sharable information for a given peer.
-    pub fn info(&self, peer: &C) -> Option<PeerInfo<C>> {
+    pub fn info(&self, peer: &C) -> Option<types::PeerInfo<C>> {
         self.peers.get(peer).and_then(|r| r.sharable())
     }
 
     /// Returns all available peer information for a given bit vector.
     ///
     /// Returns `None` if the bit vector is malformed.
-    pub fn infos(&self, bit_vec: types::BitVec) -> Option<Vec<PeerInfo<C>>> {
+    pub fn infos(&self, bit_vec: types::BitVec) -> Option<Vec<types::PeerInfo<C>>> {
         let Some(set) = self.sets.get(&bit_vec.index) else {
             // Don't consider unknown indices as errors, just ignore them.
             debug!(index = bit_vec.index, "requested peer set not found");
