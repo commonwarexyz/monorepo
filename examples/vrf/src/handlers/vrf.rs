@@ -92,14 +92,16 @@ impl<E: Clock + Spawner, P: PublicKey> Vrf<E, P> {
                 },
                 result = receiver.recv() => {
                     match result {
-                        Ok((sender, msg)) => {
-                            let dealer = match self.ordered_contributors.get(&sender) {
-                                Some(sender) => sender,
+                        Ok((peer, msg)) => {
+                            let dealer = match self.ordered_contributors.get(&peer) {
+                                Some(dealer) => dealer,
                                 None => {
                                     warn!(round, "received signature from invalid player");
                                     continue;
                                 }
                             };
+                            // We mark we received a message from a dealer during this round before checking if its valid to
+                            // avoid doing useless work (where the dealer can keep sending us outdated/invalid messages).
                             if !received.insert(*dealer) {
                                 warn!(round, dealer, "received duplicate signature");
                                 continue;
@@ -116,6 +118,12 @@ impl<E: Clock + Spawner, P: PublicKey> Vrf<E, P> {
                                     round,
                                     msg.round, "received signature message with wrong round"
                                 );
+                                continue;
+                            }
+                            // We must check that the signature is from the correct dealer to ensure malicious dealers don't provide
+                            // us with multiple instances of the same partial signature.
+                            if msg.signature.index != *dealer {
+                                warn!(round, dealer, "received signature from wrong player");
                                 continue;
                             }
                             match ops::partial_verify_message::<MinSig>(&output.public, Some(VRF_NAMESPACE), &payload, &msg.signature) {
