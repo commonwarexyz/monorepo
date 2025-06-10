@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use super::Reservation;
-use crate::authenticated::{self, lookup::actors::peer};
+use crate::authenticated::lookup::actors::peer;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Metrics, Spawner};
 use futures::{
@@ -39,7 +39,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
         public_key: C,
 
         /// The mailbox of the peer actor.
-        peer: peer::Mailbox<peer::Message>,
+        peer: peer::Mailbox,
     },
 
     // ---------- Used by dialer ----------
@@ -77,10 +77,21 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
     },
 }
 
-impl<E: Spawner + Metrics, C: PublicKey> Mailbox<Message<E, C>> {
+/// Mailbox for sending messages to the tracker actor.
+#[derive(Clone)]
+pub struct Mailbox<E: Spawner + Metrics, C: PublicKey> {
+    sender: mpsc::Sender<Message<E, C>>,
+}
+
+impl<E: Spawner + Metrics, C: PublicKey> Mailbox<E, C> {
+    /// Create a new mailbox for the tracker.
+    pub(super) fn new(sender: mpsc::Sender<Message<E, C>>) -> Self {
+        Self { sender }
+    }
+
     /// Send a `Connect` message to the tracker.
-    pub async fn connect(&mut self, public_key: C, peer: peer::Mailbox<C>) {
-        self.0
+    pub async fn connect(&mut self, public_key: C, peer: peer::Mailbox) {
+        self.sender
             .send(Message::Connect { public_key, peer })
             .await
             .unwrap();
@@ -89,7 +100,7 @@ impl<E: Spawner + Metrics, C: PublicKey> Mailbox<Message<E, C>> {
     /// Send a `Block` message to the tracker.
     pub async fn dialable(&mut self) -> Vec<C> {
         let (sender, receiver) = oneshot::channel();
-        self.0
+        self.sender
             .send(Message::Dialable { responder: sender })
             .await
             .unwrap();
@@ -99,7 +110,7 @@ impl<E: Spawner + Metrics, C: PublicKey> Mailbox<Message<E, C>> {
     /// Send a `Dial` message to the tracker.
     pub async fn dial(&mut self, public_key: C) -> Option<Reservation<E, C>> {
         let (tx, rx) = oneshot::channel();
-        self.0
+        self.sender
             .send(Message::Dial {
                 public_key,
                 reservation: tx,
@@ -112,7 +123,7 @@ impl<E: Spawner + Metrics, C: PublicKey> Mailbox<Message<E, C>> {
     /// Send a `Listen` message to the tracker.
     pub async fn listen(&mut self, public_key: C) -> Option<Reservation<E, C>> {
         let (tx, rx) = oneshot::channel();
-        self.0
+        self.sender
             .send(Message::Listen {
                 public_key,
                 reservation: tx,

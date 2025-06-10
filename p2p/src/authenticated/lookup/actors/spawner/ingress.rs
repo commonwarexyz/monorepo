@@ -40,3 +40,13 @@ impl<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKey> Mailbox<E
             .unwrap();
     }
 }
+
+impl<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKey> Clone
+    for Mailbox<E, Si, St, P>
+{
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+        }
+    }
+}

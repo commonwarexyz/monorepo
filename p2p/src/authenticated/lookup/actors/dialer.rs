@@ -1,15 +1,11 @@
 //! Actor responsible for dialing peers and establishing connections.
 
-use crate::authenticated::{
-    self,
-    lookup::{
-        actors::{
-            spawner,
-            tracker::{self, Metadata, Reservation},
-        },
-        metrics,
+use crate::authenticated::lookup::{
+    actors::{
+        spawner,
+        tracker::{self, Metadata, Reservation},
     },
-    Mailbox,
+    metrics,
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select;
@@ -83,9 +79,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
     async fn dial_peer(
         &mut self,
         reservation: Reservation<E, C::PublicKey>,
-        supervisor: &mut authenticated::Mailbox<
-            spawner::ingress::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
-        >,
+        supervisor: &mut spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
     ) {
         // Extract metadata from the reservation
         let Metadata::Dialer(peer, address) = reservation.metadata().clone() else {
@@ -144,10 +138,8 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
     /// Start the dialer actor.
     pub fn start(
         self,
-        tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
-        supervisor: authenticated::Mailbox<
-            spawner::ingress::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
-        >,
+        tracker: tracker::Mailbox<E, C::PublicKey>,
+        supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
     ) -> Handle<()> {
         self.context
             .clone()
@@ -156,10 +148,8 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
 
     async fn run(
         mut self,
-        mut tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
-        mut supervisor: authenticated::Mailbox<
-            spawner::ingress::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
-        >,
+        mut tracker: tracker::Mailbox<E, C::PublicKey>,
+        mut supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
     ) {
         let mut dial_deadline = self.context.current();
         let mut query_deadline = self.context.current();

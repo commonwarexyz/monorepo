@@ -1,17 +1,14 @@
 use super::{ingress::Message, Config, Mailbox};
-use crate::authenticated::{
-    self,
-    discovery::{
-        actors::{
-            peer,
-            router::{self, ingress},
-            tracker,
-        },
-        metrics,
+use crate::authenticated::discovery::{
+    actors::{
+        peer,
+        router::{self},
+        tracker,
     },
+    metrics,
 };
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Clock, Handle, Metrics, Sink, SinkOf, Spawner, Stream, StreamOf};
+use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};

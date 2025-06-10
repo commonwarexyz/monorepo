@@ -1,13 +1,9 @@
 use super::{
     ingress::{Message, Messenger},
-    Config,
+    Config, Mailbox,
 };
 use crate::{
-    authenticated::{
-        self,
-        lookup::{channels::Channels, metrics, types},
-        Relay,
-    },
+    authenticated::lookup::{actors::peer::Relay, channels::Channels, metrics},
     Channel, Recipients,
 };
 use bytes::Bytes;
@@ -23,7 +19,7 @@ pub struct Actor<E: Spawner + Metrics, P: PublicKey> {
     context: E,
 
     control: mpsc::Receiver<Message<P>>,
-    connections: BTreeMap<P, Relay<types::Data>>,
+    connections: BTreeMap<P, Relay>,
 
     messages_dropped: Family<metrics::Message, Counter>,
 }
@@ -31,10 +27,7 @@ pub struct Actor<E: Spawner + Metrics, P: PublicKey> {
 impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
     /// Returns a new [Actor] along with a [Mailbox] and [Messenger]
     /// that can be used to send messages to the router.
-    pub fn new(
-        context: E,
-        cfg: Config,
-    ) -> (Self, authenticated::Mailbox<Message<P>>, Messenger<P>) {
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<P>, Messenger<P>) {
         // Create mailbox
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
 
@@ -54,7 +47,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
                 connections: BTreeMap::new(),
                 messages_dropped,
             },
-            authenticated::Mailbox::new(control_sender.clone()),
+            Mailbox::new(control_sender.clone()),
             Messenger::new(control_sender),
         )
     }
@@ -70,13 +63,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
     ) {
         if let Some(messenger) = self.connections.get_mut(recipient) {
             if messenger
-                .content(
-                    types::Data {
-                        channel,
-                        message: message.clone(),
-                    },
-                    priority,
-                )
+                .content(channel, message.clone(), priority)
                 .await
                 .is_ok()
             {
@@ -148,13 +135,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
                             // Send to all connected peers
                             for (recipient, messenger) in self.connections.iter_mut() {
                                 if messenger
-                                    .content(
-                                        types::Data {
-                                            channel,
-                                            message: message.clone(),
-                                        },
-                                        priority,
-                                    )
+                                    .content(channel, message.clone(), priority)
                                     .await
                                     .is_ok()
                                 {

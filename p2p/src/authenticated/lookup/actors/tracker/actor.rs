@@ -1,9 +1,8 @@
 use super::{
     directory::{self, Directory},
-    ingress::{Message, Oracle},
+    ingress::{Mailbox, Message, Oracle},
     Config,
 };
-use crate::authenticated::Mailbox;
 use commonware_cryptography::Signer;
 use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
 use futures::{channel::mpsc, StreamExt};
@@ -34,11 +33,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
     pub fn new(
         context: E,
         cfg: Config<C>,
-    ) -> (
-        Self,
-        Mailbox<Message<E, C::PublicKey>>,
-        Oracle<E, C::PublicKey>,
-    ) {
+    ) -> (Self, Mailbox<E, C::PublicKey>, Oracle<E, C::PublicKey>) {
         // Sign my own information
         let myself = (cfg.crypto.public_key(), cfg.address);
 
@@ -131,10 +126,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 mod tests {
     use super::*;
     use crate::{
-        authenticated::{
-            self,
-            lookup::{actors::peer, config::Bootstrapper},
-        },
+        authenticated::lookup::{actors::peer, config::Bootstrapper},
         Blocker,
         // Blocker is implicitly available via oracle.block() due to Oracle implementing crate::Blocker
     };
@@ -230,7 +222,7 @@ mod tests {
     struct TestHarness {
         #[allow(dead_code)]
         actor_handle: Handle<()>,
-        mailbox: Mailbox<Message<deterministic::Context, PublicKey>>,
+        mailbox: Mailbox<deterministic::Context, PublicKey>,
         oracle: Oracle<deterministic::Context, PublicKey>,
         cfg: Config<PrivateKey>, // Store cloned config for access to its values
     }
@@ -282,7 +274,7 @@ mod tests {
             let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg);
 
             let (_unauth_signer, unauth_pk) = new_signer_and_pk(1);
-            let (peer_mailbox, mut peer_receiver) = authenticated::Mailbox::test();
+            let (peer_mailbox, mut peer_receiver) = peer::Mailbox::test();
 
             // Connect as listener
             mailbox.connect(unauth_pk.clone(), peer_mailbox).await;
