@@ -38,16 +38,16 @@
 //! - Primitives: [bool],
 //!   [u8], [u16], [u32], [u64], [u128],
 //!   [i8], [i16], [i32], [i64], [i128],
-//!   [f32], [f64], `[u8; N]`,
+//!   [f32], [f64], [u8; N],
 //!   and [usize] (must fit within a [u32] for cross-platform compatibility).
 //! - Collections: [Vec<T>], [Option<T>]
 //! - Tuples: `(T1, T2, ...)` (up to 12 elements)
 //! - Networking:
-//!   [Ipv4Addr](`std::net::Ipv4Addr`),
-//!   [Ipv6Addr](`std::net::Ipv6Addr`),
-//!   [SocketAddrV4](`std::net::SocketAddrV4`),
-//!   [SocketAddrV6](`std::net::SocketAddrV6`),
-//!   [SocketAddr](`std::net::SocketAddr`)
+//!   [Ipv4Addr](std::net::Ipv4Addr),
+//!   [Ipv6Addr](std::net::Ipv6Addr),
+//!   [SocketAddrV4](std::net::SocketAddrV4),
+//!   [SocketAddrV6](std::net::SocketAddrV6),
+//!   [SocketAddr](std::net::SocketAddr)
 //! - Common External Types: [::bytes::Bytes]
 //!
 //! # Implementing for Custom Types

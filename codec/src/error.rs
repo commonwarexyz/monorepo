@@ -63,7 +63,7 @@ pub enum Error {
     Invalid(&'static str, &'static str),
 
     /// An error occurred in underlying code (e.g., external library call, complex validation)
-    /// and has been wrapped into a codec [enum@Error].
+    /// and has been wrapped into a codec [Error].
     ///
     /// - The `&'static str` provides context about the operation being performed.
     /// - The boxed [std::error::Error] is the original source error.
