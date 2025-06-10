@@ -58,7 +58,7 @@ mod logger;
 use clap::{value_parser, Arg, Command};
 use commonware_cryptography::PrivateKeyExt as _;
 use commonware_cryptography::{ed25519, Signer as _};
-use commonware_p2p::authenticated;
+use commonware_p2p::authenticated::discovery;
 use commonware_runtime::tokio;
 use commonware_runtime::Metrics;
 use commonware_runtime::Runner as _;
@@ -152,7 +152,7 @@ fn main() {
 
     // Configure network
     const MAX_MESSAGE_SIZE: usize = 1024; // 1 KB
-    let p2p_cfg = authenticated::discovery::Config::aggressive(
+    let p2p_cfg = discovery::Config::aggressive(
         signer.clone(),
         APPLICATION_NAMESPACE,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
@@ -165,7 +165,7 @@ fn main() {
     executor.start(|context| async move {
         // Initialize network
         let (mut network, mut oracle) =
-            authenticated::discovery::Network::new(context.with_label("network"), p2p_cfg);
+            discovery::Network::new(context.with_label("network"), p2p_cfg);
 
         // Provide authorized peers
         //
