@@ -86,6 +86,7 @@ impl Record {
     // ---------- Setters ----------
 
     pub fn update_address(&mut self, address: SocketAddr) {
+        // TODO: what should we do if this peer is blocked?
         self.address = Address::Known(address);
     }
 
@@ -195,7 +196,7 @@ mod tests {
     use super::*;
     use crate::authenticated::peer_info::PeerInfo;
     use commonware_codec::Encode;
-    use commonware_cryptography::{secp256r1, PrivateKeyExt, PublicKey};
+    use commonware_cryptography::{secp256r1, PrivateKeyExt};
     use std::net::SocketAddr;
 
     // Helper function to create signed peer info for testing
@@ -221,32 +222,10 @@ mod tests {
     fn test_socket() -> SocketAddr {
         SocketAddr::from(([127, 0, 0, 1], 8080))
     }
-    fn test_socket2() -> SocketAddr {
-        SocketAddr::from(([127, 0, 0, 1], 8081))
-    }
-
-    // Helper function to compare the contents of two PeerInfo instances
-    fn peer_info_contents_are_equal<S: PublicKey>(
-        actual: &PeerInfo<S>,
-        expected: &PeerInfo<S>,
-    ) -> bool {
-        actual.socket == expected.socket
-            && actual.timestamp == expected.timestamp
-            && actual.public_key == expected.public_key
-            && actual.signature == expected.signature
-    }
-
-    // Helper function to compare an Option<&PeerInfo<S>> with a &PeerInfo<S>
-    fn compare_optional_peer_info<S: PublicKey>(
-        actual_opt: Option<&PeerInfo<S>>,
-        expected: &PeerInfo<S>,
-    ) -> bool {
-        actual_opt.is_some_and(|actual| peer_info_contents_are_equal(actual, expected))
-    }
 
     #[test]
     fn test_unknown_initial_state() {
-        let record = Record::<secp256r1::PublicKey>::unknown();
+        let record = Record::unknown();
         assert!(matches!(record.address, Address::Unknown));
         assert_eq!(record.status, Status::Inert);
         assert_eq!(record.sets, 0);
@@ -261,10 +240,12 @@ mod tests {
     #[test]
     fn test_myself_initial_state() {
         let my_info = create_peer_info::<secp256r1::PrivateKey>(0, test_socket(), 100);
-        let record = Record::<secp256r1::PublicKey>::myself(my_info.clone());
-        assert!(
-            matches!(&record.address, Address::Myself(info) if peer_info_contents_are_equal(info, &my_info))
-        );
+        let my_addr = test_socket();
+        let record = Record::myself(my_addr);
+        match record.address {
+            Address::Myself(addr) => assert_eq!(addr, my_addr),
+            _ => panic!("Expected Address::Myself"),
+        }
         assert_eq!(record.status, Status::Inert);
         assert_eq!(record.sets, 0);
         assert!(record.persistent);
@@ -278,7 +259,7 @@ mod tests {
     #[test]
     fn test_bootstrapper_initial_state() {
         let socket = test_socket();
-        let record = Record::<secp256r1::PublicKey>::bootstrapper(socket);
+        let record = Record::bootstrapper(socket);
         assert!(matches!(record.address, Address::Known(s) if s == socket));
         assert_eq!(record.status, Status::Inert);
         assert_eq!(record.sets, 0);
@@ -291,139 +272,68 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_to_discovered() {
+    fn test_unknown_to_known() {
         let socket = test_socket();
-        let mut record = Record::<secp256r1::PublicKey>::unknown();
-        let peer_info = create_peer_info::<secp256r1::PrivateKey>(1, socket, 1000);
+        let mut record = Record::unknown();
 
-        assert!(record.update(peer_info.clone()));
+        record.update_address(socket);
         assert_eq!(record.socket(), Some(socket));
-        assert!(
-            matches!(&record.address, Address::Discovered(info, 0) if peer_info_contents_are_equal(info, &peer_info)),
-            "Address should be Discovered with 0 failures"
-        );
-        assert!(record.sharable().is_none(), "Info not sharable yet");
+        assert!(matches!(&record.address, Address::Known(got_socket) if *got_socket == socket));
         assert!(!record.persistent);
     }
 
     #[test]
-    fn test_bootstrapper_to_discovered() {
+    fn test_bootstrapper_to_known() {
         let socket = test_socket();
-        let mut record = Record::<secp256r1::PublicKey>::bootstrapper(socket);
-        let peer_info = create_peer_info::<secp256r1::PrivateKey>(2, socket, 1000);
+        let mut record = Record::bootstrapper(socket);
 
         assert!(record.persistent, "Should start as persistent");
-        assert!(record.update(peer_info.clone()));
+        record.update_address(socket);
         assert_eq!(record.socket(), Some(socket));
-        assert!(
-            matches!(&record.address, Address::Discovered(info, 0) if peer_info_contents_are_equal(info, &peer_info)),
-            "Address should be Discovered with 0 failures"
-        );
-        assert!(record.sharable().is_none());
+        assert!(matches!(&record.address, Address::Known(got_socket) if *got_socket == socket));
         assert!(record.persistent, "Should remain persistent after update");
     }
 
     #[test]
-    fn test_discovered_update_newer_timestamp() {
+    fn test_myself_blocked_to_known() {
+        let addr = test_socket();
+        let mut record = Record::myself(addr);
+        record.block();
+        assert!(!record.blocked(), "Can't block myself");
+    }
+
+    #[test]
+    fn test_other_blocked_to_known() {
         let socket = test_socket();
-        let mut record = Record::<secp256r1::PublicKey>::unknown();
-        let peer_info_old = create_peer_info::<secp256r1::PrivateKey>(3, socket, 1000);
-        let peer_info_new = create_peer_info::<secp256r1::PrivateKey>(3, socket, 2000);
+        let mut record = Record::unknown();
+        record.update_address(socket);
+        assert!(matches!(&record.address, Address::Known(s) if *s == socket));
 
-        assert!(record.update(peer_info_old.clone()));
-        assert!(record.update(peer_info_new.clone()));
+        // Block the record
+        assert!(record.block());
+        assert!(record.blocked());
+        assert!(matches!(record.address, Address::Blocked));
 
+        // Unblock and check it goes back to Known
+        record.update_address(socket);
         assert_eq!(record.socket(), Some(socket));
-        assert!(
-            matches!(&record.address, Address::Discovered(info, 0) if peer_info_contents_are_equal(info, &peer_info_new)),
-            "Address should contain newer info"
-        );
-    }
-
-    #[test]
-    fn test_discovered_no_update_older_or_equal_timestamp() {
-        let socket = test_socket();
-        let mut record = Record::<secp256r1::PublicKey>::unknown();
-        let peer_info_current = create_peer_info::<secp256r1::PrivateKey>(5, socket, 1000);
-        let peer_info_older = create_peer_info::<secp256r1::PrivateKey>(5, socket, 500);
-        let peer_info_equal = create_peer_info::<secp256r1::PrivateKey>(5, socket, 1000);
-
-        assert!(record.update(peer_info_current.clone()));
-
-        assert!(!record.update(peer_info_older));
-        assert!(
-            matches!(&record.address, Address::Discovered(info, 0) if peer_info_contents_are_equal(info, &peer_info_current)),
-            "Address should not update with older info"
-        );
-
-        assert!(!record.update(peer_info_equal));
-        assert!(
-            matches!(&record.address, Address::Discovered(info, 0) if peer_info_contents_are_equal(info, &peer_info_current)),
-            "Address should not update with equal timestamp info"
-        );
-    }
-
-    #[test]
-    fn test_update_myself_and_blocked() {
-        let my_info = create_peer_info::<secp256r1::PrivateKey>(0, test_socket(), 100);
-        let mut record_myself = Record::myself(my_info.clone());
-        let other_info = create_peer_info::<secp256r1::PrivateKey>(1, test_socket2(), 200);
-        let newer_my_info = create_peer_info::<secp256r1::PrivateKey>(0, test_socket(), 300);
-
-        // Cannot update Myself record with other info or newer self info
-        assert!(!record_myself.update(other_info.clone()));
-        assert!(!record_myself.update(newer_my_info.clone()));
-        assert!(
-            matches!(&record_myself.address, Address::Myself(info) if peer_info_contents_are_equal(info, &my_info)),
-            "Myself record should remain unchanged"
-        );
-
-        // Cannot update a Blocked record
-        let mut record_blocked = Record::<secp256r1::PublicKey>::unknown();
-        assert!(record_blocked.block());
-        assert!(!record_blocked.update(other_info));
-        assert!(matches!(record_blocked.address, Address::Blocked));
-    }
-
-    #[test]
-    fn test_update_with_different_public_key() {
-        // While unlikely in normal operation (update uses PeerInfo tied to a specific record),
-        // the `update` method itself doesn't check the public key matches.
-        let socket = test_socket();
-        let mut record = Record::<secp256r1::PublicKey>::unknown();
-
-        let peer_info_pk1_ts1000 = create_peer_info::<secp256r1::PrivateKey>(10, socket, 1000);
-        let peer_info_pk2_ts2000 = create_peer_info::<secp256r1::PrivateKey>(11, socket, 2000);
-
-        assert!(record.update(peer_info_pk1_ts1000.clone()));
-        assert!(
-            matches!(&record.address, Address::Discovered(info, 0) if peer_info_contents_are_equal(info, &peer_info_pk1_ts1000))
-        );
-
-        // Update should succeed based on newer timestamp, even if PK differs (though context matters)
-        assert!(
-            record.update(peer_info_pk2_ts2000.clone()),
-            "Update should succeed based on newer timestamp"
-        );
-        assert!(
-            matches!(&record.address, Address::Discovered(info, 0) if peer_info_contents_are_equal(info, &peer_info_pk2_ts2000))
-        );
+        assert!(matches!(&record.address, Address::Known(s) if *s == socket));
     }
 
     #[test]
     fn test_increment_decrement_and_deletable() {
         // Test Unknown (not persistent)
-        let mut record_unknown = Record::<secp256r1::PublicKey>::unknown();
+        let mut record_unknown = Record::unknown();
         assert!(record_unknown.deletable());
         record_unknown.increment(); // sets = 1
         assert!(!record_unknown.deletable());
         record_unknown.decrement(); // sets = 0
         assert!(record_unknown.deletable());
 
-        // Test Discovered (not persistent)
-        let peer_info = create_peer_info::<secp256r1::PrivateKey>(7, test_socket(), 1000);
-        let mut record_disc = Record::<secp256r1::PublicKey>::unknown();
-        assert!(record_disc.update(peer_info));
+        // Test Known (not persistent)
+        let addr = test_socket();
+        let mut record_disc = Record::unknown();
+        record_disc.update_address(addr);
         assert!(record_disc.deletable());
         record_disc.increment(); // sets = 1
         assert!(!record_disc.deletable());
@@ -431,7 +341,7 @@ mod tests {
         assert!(record_disc.deletable());
 
         // Test Bootstrapper (persistent)
-        let mut record_boot = Record::<secp256r1::PublicKey>::bootstrapper(test_socket());
+        let mut record_boot = Record::bootstrapper(addr);
         assert!(!record_boot.deletable()); // Persistent
         record_boot.increment(); // sets = 1
         assert!(!record_boot.deletable());
@@ -439,8 +349,7 @@ mod tests {
         assert!(!record_boot.deletable()); // Still persistent
 
         // Test Myself (persistent)
-        let my_info = create_peer_info::<secp256r1::PrivateKey>(0, test_socket(), 100);
-        let mut record_myself = Record::myself(my_info);
+        let mut record_myself = Record::myself(addr);
         assert!(!record_myself.deletable()); // Persistent
         record_myself.increment(); // sets = 1
         assert!(!record_myself.deletable());
@@ -451,17 +360,17 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_decrement_panics_at_zero() {
-        let mut record = Record::<secp256r1::PublicKey>::unknown();
+        let mut record = Record::unknown();
         assert_eq!(record.sets, 0);
         record.decrement(); // Panics
     }
 
     #[test]
     fn test_block_behavior_and_persistence() {
-        let sample_peer_info = create_peer_info::<secp256r1::PrivateKey>(20, test_socket(), 1000);
+        let addr = test_socket();
 
         // Block an Unknown record
-        let mut record_unknown = Record::<secp256r1::PublicKey>::unknown();
+        let mut record_unknown = Record::unknown();
         assert!(!record_unknown.persistent);
         assert!(record_unknown.block()); // Newly blocked
         assert!(record_unknown.blocked());
@@ -471,25 +380,25 @@ mod tests {
         assert!(!record_unknown.block()); // Already blocked
 
         // Block a Bootstrapper record (initially persistent)
-        let mut record_boot = Record::<secp256r1::PublicKey>::bootstrapper(test_socket());
+        let mut record_boot = Record::bootstrapper(test_socket());
         assert!(record_boot.persistent);
         assert!(record_boot.block());
         assert!(record_boot.blocked());
         assert!(matches!(record_boot.address, Address::Blocked));
         assert!(!record_boot.persistent, "Blocking sets persistent=false");
 
-        // Block a Discovered record (initially not persistent)
-        let mut record_disc = Record::<secp256r1::PublicKey>::unknown();
-        assert!(record_disc.update(sample_peer_info.clone()));
+        // Block a Known record (initially not persistent)
+        let mut record_disc = Record::unknown();
+        record_disc.update_address(addr);
         assert!(!record_disc.persistent);
         assert!(record_disc.block());
         assert!(record_disc.blocked());
         assert!(matches!(record_disc.address, Address::Blocked));
         assert!(!record_disc.persistent);
 
-        // Block a Discovered record that came from a Bootstrapper (initially persistent)
-        let mut record_disc_from_boot = Record::<secp256r1::PublicKey>::bootstrapper(test_socket());
-        assert!(record_disc_from_boot.update(sample_peer_info.clone()));
+        // Block a Known record that came from a Bootstrapper (initially persistent)
+        let mut record_disc_from_boot = Record::bootstrapper(addr);
+        record_disc_from_boot.update_address(addr);
         assert!(record_disc_from_boot.persistent);
         assert!(record_disc_from_boot.block());
         assert!(record_disc_from_boot.blocked());
@@ -500,14 +409,14 @@ mod tests {
         );
 
         // Check status remains unchanged when blocking
-        let mut record_reserved = Record::<secp256r1::PublicKey>::unknown();
-        assert!(record_reserved.update(sample_peer_info.clone()));
+        let mut record_reserved = Record::unknown();
+        record_reserved.update_address(addr);
         assert!(record_reserved.reserve());
         assert!(record_reserved.block());
         assert_eq!(record_reserved.status, Status::Reserved);
 
-        let mut record_active = Record::<secp256r1::PublicKey>::unknown();
-        assert!(record_active.update(sample_peer_info.clone()));
+        let mut record_active = Record::unknown();
+        record_active.update_address(addr);
         assert!(record_active.reserve());
         record_active.connect();
         assert!(record_active.block());
@@ -516,14 +425,12 @@ mod tests {
 
     #[test]
     fn test_block_myself_and_already_blocked() {
-        let my_info = create_peer_info::<secp256r1::PrivateKey>(0, test_socket(), 100);
-        let mut record_myself = Record::myself(my_info.clone());
+        let addr = test_socket();
+        let mut record_myself = Record::myself(addr);
         assert!(!record_myself.block(), "Cannot block myself");
-        assert!(
-            matches!(&record_myself.address, Address::Myself(info) if peer_info_contents_are_equal(info, &my_info))
-        );
+        assert!(matches!(&record_myself.address, Address::Myself(got_addr) if *got_addr == addr));
 
-        let mut record_to_be_blocked = Record::<secp256r1::PublicKey>::unknown();
+        let mut record_to_be_blocked = Record::unknown();
         assert!(record_to_be_blocked.block());
         assert!(
             !record_to_be_blocked.block(),
@@ -534,7 +441,7 @@ mod tests {
 
     #[test]
     fn test_status_transitions_reserve_connect_release() {
-        let mut record = Record::<secp256r1::PublicKey>::unknown();
+        let mut record = Record::unknown();
 
         assert_eq!(record.status, Status::Inert);
         assert!(record.reserve());
@@ -564,14 +471,14 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_connect_when_not_reserved_panics_from_inert() {
-        let mut record = Record::<secp256r1::PublicKey>::unknown();
+        let mut record = Record::unknown();
         record.connect(); // Should panic
     }
 
     #[test]
     #[should_panic]
     fn test_connect_when_active_panics() {
-        let mut record = Record::<secp256r1::PublicKey>::unknown();
+        let mut record = Record::unknown();
         assert!(record.reserve());
         record.connect();
         record.connect(); // Should panic
@@ -580,57 +487,13 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_release_when_inert_panics() {
-        let mut record = Record::<secp256r1::PublicKey>::unknown();
+        let mut record = Record::unknown();
         record.release(); // Should panic
     }
 
     #[test]
-    fn test_sharable_logic() {
-        let socket = test_socket();
-        let peer_info_data = create_peer_info::<secp256r1::PrivateKey>(12, socket, 100);
-
-        // Unknown: Not sharable
-        let record_unknown = Record::<secp256r1::PublicKey>::unknown();
-        assert!(record_unknown.sharable().is_none());
-
-        // Myself: Sharable
-        let record_myself = Record::myself(peer_info_data.clone());
-        assert!(compare_optional_peer_info(
-            record_myself.sharable().as_ref(),
-            &peer_info_data
-        ));
-
-        // Bootstrapper (no PeerInfo yet): Not sharable
-        let record_boot = Record::<secp256r1::PublicKey>::bootstrapper(socket);
-        assert!(record_boot.sharable().is_none());
-
-        // Blocked: Not sharable
-        let mut record_blocked = Record::<secp256r1::PublicKey>::unknown();
-        record_blocked.block();
-        assert!(record_blocked.sharable().is_none());
-
-        // Discovered but not Active: Not sharable
-        let mut record_disc = Record::<secp256r1::PublicKey>::unknown();
-        assert!(record_disc.update(peer_info_data.clone()));
-        assert!(record_disc.sharable().is_none()); // Status Inert
-        assert!(record_disc.reserve());
-        assert!(record_disc.sharable().is_none()); // Status Reserved
-
-        // Discovered and Active: Sharable
-        record_disc.connect();
-        assert!(compare_optional_peer_info(
-            record_disc.sharable().as_ref(),
-            &peer_info_data
-        ));
-
-        // Released after Active: Not sharable
-        record_disc.release();
-        assert!(record_disc.sharable().is_none());
-    }
-
-    #[test]
     fn test_reserved_status_check() {
-        let mut record = Record::<secp256r1::PublicKey>::unknown();
+        let mut record = Record::unknown();
         assert!(!record.reserved()); // Inert
         assert!(record.reserve());
         assert!(record.reserved()); // Reserved
@@ -641,121 +504,18 @@ mod tests {
     }
 
     #[test]
-    fn test_dial_failure_and_dial_success() {
-        let socket = test_socket();
-        let peer_info = create_peer_info::<secp256r1::PrivateKey>(18, socket, 1000);
-        let mut record = Record::<secp256r1::PublicKey>::unknown();
-
-        // Cannot fail dial before discovered
-        record.dial_failure(socket);
-        assert!(matches!(record.address, Address::Unknown));
-
-        // Discover
-        assert!(record.update(peer_info.clone()));
-        assert!(matches!(&record.address, Address::Discovered(_, 0)));
-
-        // Fail dial 1
-        record.dial_failure(socket);
-        assert!(matches!(&record.address, Address::Discovered(_, 1)));
-
-        // Fail dial 2
-        record.dial_failure(socket);
-        assert!(matches!(&record.address, Address::Discovered(_, 2)));
-
-        // Fail dial for wrong socket
-        record.dial_failure(test_socket2());
-        assert!(
-            matches!(&record.address, Address::Discovered(_, 2)),
-            "Failure count should not change for wrong socket"
-        );
-
-        // Success resets failures
-        record.dial_success();
-        assert!(
-            matches!(&record.address, Address::Discovered(_, 0)),
-            "Failures should reset"
-        );
-
-        // Fail dial again
-        record.dial_failure(socket);
-        assert!(matches!(&record.address, Address::Discovered(_, 1)));
-    }
-
-    #[test]
-    fn test_want_logic_with_min_fails() {
-        let socket = test_socket();
-        let peer_info = create_peer_info::<secp256r1::PrivateKey>(13, socket, 100);
-        let min_fails = 2;
-
-        // Unknown and Bootstrapper always want info
-        assert!(Record::<secp256r1::PublicKey>::unknown().want(min_fails));
-        assert!(Record::<secp256r1::PublicKey>::bootstrapper(socket).want(min_fails));
-
-        // Myself and Blocked never want info
-        assert!(!Record::myself(peer_info.clone()).want(min_fails));
-        let mut blocked = Record::<secp256r1::PublicKey>::unknown();
-        blocked.block();
-        assert!(!blocked.want(min_fails));
-
-        let mut record_disc = Record::<secp256r1::PublicKey>::unknown();
-        assert!(record_disc.update(peer_info.clone()));
-
-        // Status Inert
-        assert!(
-            !record_disc.want(min_fails),
-            "Should not want when fails=0 < min_fails"
-        );
-        record_disc.dial_failure(socket); // fails = 1
-        assert!(
-            !record_disc.want(min_fails),
-            "Should not want when fails=1 < min_fails"
-        );
-        record_disc.dial_failure(socket); // fails = 2
-        assert!(
-            record_disc.want(min_fails),
-            "Should want when fails=2 >= min_fails"
-        );
-
-        // Status Reserved
-        assert!(record_disc.reserve());
-        assert!(
-            record_disc.want(min_fails),
-            "Should still want when Reserved and fails >= min_fails"
-        );
-
-        // Status Active
-        record_disc.connect();
-        assert!(!record_disc.want(min_fails), "Should not want when Active");
-
-        // Status Inert again (after release)
-        record_disc.release();
-        assert!(record_disc.want(min_fails));
-
-        // Reset failures
-        record_disc.dial_success(); // Reset failures
-        assert!(
-            !record_disc.want(min_fails),
-            "Should not want when Inert and fails=0"
-        );
-        record_disc.dial_failure(socket); // fails = 1
-        assert!(!record_disc.want(min_fails));
-        record_disc.dial_failure(socket); // fails = 2
-        assert!(record_disc.want(min_fails));
-    }
-
-    #[test]
     fn test_deletable_logic_detailed() {
-        let peer_info = create_peer_info::<secp256r1::PrivateKey>(14, test_socket(), 100);
+        let addr = test_socket();
 
         // Persistent records are never deletable regardless of sets count
-        assert!(!Record::myself(peer_info.clone()).deletable());
-        assert!(!Record::<secp256r1::PublicKey>::bootstrapper(test_socket()).deletable());
-        let mut record_pers = Record::<secp256r1::PublicKey>::bootstrapper(test_socket());
-        assert!(record_pers.update(peer_info.clone()));
+        assert!(!Record::myself(addr).deletable());
+        assert!(!Record::bootstrapper(test_socket()).deletable());
+        let mut record_pers = Record::bootstrapper(test_socket());
+        record_pers.update_address(addr.clone());
         assert!(!record_pers.deletable());
 
         // Non-persistent records depend on sets count and status
-        let mut record = Record::<secp256r1::PublicKey>::unknown(); // Not persistent
+        let mut record = Record::unknown(); // Not persistent
         assert_eq!(record.sets, 0);
         assert_eq!(record.status, Status::Inert);
         assert!(record.deletable()); // sets = 0, !persistent, Inert
@@ -776,7 +536,7 @@ mod tests {
         assert!(record.deletable()); // sets = 0, !persistent, Inert
 
         // Blocking makes a record non-persistent, but deletability still depends on sets/status
-        let mut record_blocked = Record::<secp256r1::PublicKey>::bootstrapper(test_socket());
+        let mut record_blocked = Record::bootstrapper(test_socket());
         assert!(record_blocked.persistent);
         record_blocked.increment(); // sets = 1
         assert!(record_blocked.block());
@@ -788,32 +548,32 @@ mod tests {
 
     #[test]
     fn test_allowed_logic_detailed() {
-        let peer_info = create_peer_info::<secp256r1::PrivateKey>(16, test_socket(), 100);
+        let addr = test_socket();
 
         // Blocked and Myself are never allowed
-        let mut record_blocked = Record::<secp256r1::PublicKey>::unknown();
+        let mut record_blocked = Record::unknown();
         record_blocked.block();
         assert!(!record_blocked.allowed());
-        assert!(!Record::myself(peer_info.clone()).allowed());
+        assert!(!Record::myself(addr).allowed());
 
         // Persistent records (Bootstrapper, Myself before blocking) are allowed even with sets=0
-        assert!(Record::<secp256r1::PublicKey>::bootstrapper(test_socket()).allowed());
-        let mut record_pers = Record::<secp256r1::PublicKey>::bootstrapper(test_socket());
-        assert!(record_pers.update(peer_info.clone()));
+        assert!(Record::bootstrapper(test_socket()).allowed());
+        let mut record_pers = Record::bootstrapper(test_socket());
+        record_pers.update_address(addr);
         assert!(record_pers.allowed());
 
         // Non-persistent records (Unknown, Discovered) require sets > 0
-        let mut record_unknown = Record::<secp256r1::PublicKey>::unknown();
+        let mut record_unknown = Record::unknown();
         assert!(!record_unknown.allowed()); // sets = 0, !persistent
         record_unknown.increment(); // sets = 1
         assert!(record_unknown.allowed()); // sets > 0
         record_unknown.decrement(); // sets = 0
         assert!(!record_unknown.allowed());
 
-        let mut record_disc = Record::<secp256r1::PublicKey>::unknown();
-        assert!(record_disc.update(peer_info.clone()));
-        assert!(!record_disc.allowed()); // sets = 0, !persistent
-        record_disc.increment(); // sets = 1
-        assert!(record_disc.allowed()); // sets > 0
+        let mut record_known = Record::unknown();
+        record_known.update_address(addr);
+        assert!(!record_known.allowed()); // sets = 0, !persistent
+        record_known.increment(); // sets = 1
+        assert!(record_known.allowed()); // sets > 0
     }
 }

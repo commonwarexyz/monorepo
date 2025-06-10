@@ -285,16 +285,7 @@ mod tests {
             let (peer_mailbox, mut peer_receiver) = authenticated::Mailbox::test();
 
             // Connect as listener
-            mailbox
-                .connect(unauth_pk.clone(), false, peer_mailbox.clone())
-                .await;
-            assert!(
-                matches!(peer_receiver.next().await, Some(peer::Message::Kill)),
-                "Unauthorized peer should be killed on Connect"
-            );
-
-            // Connect as dialer
-            mailbox.connect(unauth_pk, true, peer_mailbox).await;
+            mailbox.connect(unauth_pk.clone(), peer_mailbox).await;
             assert!(
                 matches!(peer_receiver.next().await, Some(peer::Message::Kill)),
                 "Unauthorized peer should be killed on Connect"
