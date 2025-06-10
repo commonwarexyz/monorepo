@@ -2,7 +2,7 @@ use crate::{aggregation::types::Epoch, Supervisor, ThresholdSupervisor};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::Share,
-        poly::{public, Public},
+        poly::{self, Public},
         variant::Variant,
     },
     PublicKey,
@@ -77,7 +77,7 @@ impl<P: PublicKey, V: Variant> Supervisor for Validators<P, V> {
 
 impl<P: PublicKey, V: Variant> ThresholdSupervisor for Validators<P, V> {
     type Polynomial = Public<V>;
-    type Identity = V::Public;
+    type Identity = poly::Public<V>;
     type Share = Share;
     type Seed = V::Signature;
 
@@ -88,12 +88,10 @@ impl<P: PublicKey, V: Variant> ThresholdSupervisor for Validators<P, V> {
     fn identity(&self) -> &Self::Identity {
         // Return the identity from the first available polynomial
         // In practice, this would be managed more carefully
-        let first_polynomial = self
-            .polynomials
+        self.polynomials
             .values()
             .next()
-            .expect("No polynomials available");
-        public::<V>(first_polynomial)
+            .expect("No polynomials available")
     }
 
     fn polynomial(&self, epoch: Self::Index) -> Option<&Self::Polynomial> {
