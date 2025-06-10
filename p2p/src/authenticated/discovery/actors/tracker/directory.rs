@@ -153,7 +153,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     }
 
     /// Using a list of (already-validated) peer information, update the records.
-    pub fn update_peers(&mut self, infos: Vec<PeerInfo<C>>) {
+    pub fn update_peers(&mut self, infos: Vec<types::PeerInfo<C>>) {
         for info in infos {
             // Update peer address
             //
@@ -173,7 +173,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
                 .inc();
 
             // We may have to update the sets.
-            let want = self.peers.get(&peer).unwrap().want(self.dial_fail_limit);
+            let want = record.want(self.dial_fail_limit);
             for set in self.sets.values_mut() {
                 set.update(&peer, !want);
             }
@@ -271,14 +271,14 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     // ---------- Getters ----------
 
     /// Returns the sharable information for a given peer.
-    pub fn info(&self, peer: &C) -> Option<PeerInfo<C>> {
+    pub fn info(&self, peer: &C) -> Option<types::PeerInfo<C>> {
         self.peers.get(peer).and_then(|r| r.sharable())
     }
 
     /// Returns all available peer information for a given bit vector.
     ///
     /// Returns `None` if the bit vector is malformed.
-    pub fn infos(&self, bit_vec: types::BitVec) -> Option<Vec<PeerInfo<C>>> {
+    pub fn infos(&self, bit_vec: types::BitVec) -> Option<Vec<types::PeerInfo<C>>> {
         let Some(set) = self.sets.get(&bit_vec.index) else {
             // Don't consider unknown indices as errors, just ignore them.
             debug!(index = bit_vec.index, "requested peer set not found");
