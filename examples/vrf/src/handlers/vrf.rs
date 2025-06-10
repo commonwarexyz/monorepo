@@ -122,7 +122,7 @@ impl<E: Clock + Spawner, P: PublicKey> Vrf<E, P> {
                             }
                             // We must check that the signature is from the correct dealer to ensure malicious dealers don't provide
                             // us with multiple instances of the same partial signature.
-                            if &msg.signature.index != dealer {
+                            if msg.signature.index != *dealer {
                                 warn!(round, dealer, "received signature from wrong player");
                                 continue;
                             }
