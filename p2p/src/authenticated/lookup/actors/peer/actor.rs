@@ -147,8 +147,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                                     return Err(Error::PeerKilled(peer.to_string()))
                                 }
                             }
-                            // Self::send(&mut conn_sender, &self.sent_messages, metric, payload)
-                            //     .await?;
                         },
                         msg_high = self.high.next() => {
                             let msg = Self::validate_msg(msg_high, &rate_limits)?;
@@ -188,22 +186,17 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                         .inc();
 
                     // Ensure peer is not spamming us with content messages
-                    let entry = rate_limits.get(&data.channel);
-                    if entry.is_none() {
+                    let Some(rate_limiter) = rate_limits.get(&data.channel) else {
                         // We permit unknown messages to be received in case peers
                         // are on a newer version than us
                         continue;
-                    }
-                    let rate_limiter = entry.unwrap();
-                    match rate_limiter.check() {
-                        Ok(_) => {}
-                        Err(negative) => {
-                            self.rate_limited
-                                .get_or_create(&metrics::Message::new_data(&peer, data.channel))
-                                .inc();
-                            let wait = negative.wait_time_from(context.now());
-                            context.sleep(wait).await;
-                        }
+                    };
+                    if let Err(wait_until) = rate_limiter.check() {
+                        self.rate_limited
+                            .get_or_create(&metrics::Message::new_data(&peer, data.channel))
+                            .inc();
+                        let wait_duration = wait_until.wait_time_from(context.now());
+                        context.sleep(wait_duration).await;
                     }
 
                     // Send message to client
@@ -211,13 +204,9 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                     // If the channel handler is closed, we log an error but don't
                     // close the peer (as other channels may still be open).
                     let sender = senders.get_mut(&data.channel).unwrap();
-                    if let Err(e) = sender
-                        .send((peer.clone(), data.message))
-                        .await
-                        .map_err(|_| Error::ChannelClosed(data.channel))
-                    {
-                        debug!(err=?e, "failed to send message to client");
-                    }
+                    let _ = sender.send((peer.clone(), data.message)).await.inspect_err(
+                        |e| debug!(err=?e, channel=data.channel, "failed to send message to client"),
+                    );
                 }
             });
 
