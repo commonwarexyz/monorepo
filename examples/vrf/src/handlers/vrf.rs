@@ -92,9 +92,9 @@ impl<E: Clock + Spawner, P: PublicKey> Vrf<E, P> {
                 },
                 result = receiver.recv() => {
                     match result {
-                        Ok((sender, msg)) => {
-                            let dealer = match self.ordered_contributors.get(&sender) {
-                                Some(sender) => sender,
+                        Ok((peer, msg)) => {
+                            let dealer = match self.ordered_contributors.get(&peer) {
+                                Some(dealer) => dealer,
                                 None => {
                                     warn!(round, "received signature from invalid player");
                                     continue;
