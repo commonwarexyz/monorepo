@@ -271,7 +271,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     // ---------- Getters ----------
 
     /// Returns the sharable information for a given peer.
-    pub fn info(&self, peer: &C) -> Option<types::PeerInfo<C>> {
+    pub fn info(&self, peer: &C) -> Option<PeerInfo<C>> {
         self.peers.get(peer).and_then(|r| r.sharable())
     }
 
