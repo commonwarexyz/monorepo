@@ -10,31 +10,20 @@ runs:
         echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
         echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
         echo "SCCACHE_CACHE_SIZE=6G" >> "$GITHUB_ENV"
-    - name: Get Rust version
-      id: rust-version
-      shell: bash
-      run: echo "rust_version=$(rustc --version)" >> "$GITHUB_OUTPUT"
     - name: Cache cargo registry
       uses: actions/cache@v4
       with:
         path: ~/.cargo/registry
-        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo-registry-
+        key: ${{ runner.os }}-cargo-registry
     - name: Cache cargo git
       uses: actions/cache@v4
       with:
         path: ~/.cargo/git
-        key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo-git-
-    - name: Cache target directory
-      uses: actions/cache@v4
-      with:
-        path: target
-        key: ${{ runner.os }}-target-${{ steps.rust-version.outputs.rust_version }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-target-${{ steps.rust-version.outputs.rust_version }}-
+        key: ${{ runner.os }}-cargo-git
+    - name: Get Rust version
+      id: rust-version
+      shell: bash
+      run: echo "rust_version=$(rustc --version)" >> "$GITHUB_OUTPUT"
     - name: Cache cargo-cache
       id: cargo-cache-cache
       uses: actions/cache@v4
