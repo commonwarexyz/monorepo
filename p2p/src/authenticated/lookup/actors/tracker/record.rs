@@ -1,16 +1,14 @@
-use crate::authenticated::PeerInfo;
-use commonware_cryptography::PublicKey;
 use std::net::SocketAddr;
 
 /// Represents information known about a peer's address.
 #[derive(Clone, Debug)]
-pub enum Address<C: PublicKey> {
+pub enum Address {
     /// Peer address is not yet known.
     /// Can be upgraded to `Discovered`.
     Unknown,
 
     /// Peer is the local node.
-    Myself(PeerInfo<C>),
+    Myself(SocketAddr),
 
     /// Address is provided during initialization.
     /// Can be upgraded to `Discovered`.
@@ -39,9 +37,9 @@ pub enum Status {
 
 /// Represents a record of a peer's address and associated information.
 #[derive(Clone, Debug)]
-pub struct Record<C: PublicKey> {
+pub struct Record {
     /// Address state of the peer.
-    address: Address<C>,
+    address: Address,
 
     /// Connection status of the peer.
     status: Status,
@@ -53,7 +51,7 @@ pub struct Record<C: PublicKey> {
     persistent: bool,
 }
 
-impl<C: PublicKey> Record<C> {
+impl Record {
     // ---------- Constructors ----------
 
     /// Create a new record with an unknown address.
@@ -67,9 +65,9 @@ impl<C: PublicKey> Record<C> {
     }
 
     /// Create a new record with the local node's information.
-    pub fn myself(info: PeerInfo<C>) -> Self {
+    pub fn myself(socket: SocketAddr) -> Self {
         Record {
-            address: Address::Myself(info),
+            address: Address::Myself(socket),
             status: Status::Inert,
             sets: 0,
             persistent: true,
@@ -168,7 +166,7 @@ impl<C: PublicKey> Record<C> {
     pub fn socket(&self) -> Option<SocketAddr> {
         match &self.address {
             Address::Unknown => None,
-            Address::Myself(info) => Some(info.socket),
+            Address::Myself(addr) => Some(*addr),
             Address::Known(addr) => Some(*addr),
             Address::Blocked => None,
         }
@@ -198,7 +196,7 @@ mod tests {
     use super::*;
     use crate::authenticated::PeerInfo;
     use commonware_codec::Encode;
-    use commonware_cryptography::{secp256r1, PrivateKeyExt};
+    use commonware_cryptography::{secp256r1, PrivateKeyExt, PublicKey};
     use std::net::SocketAddr;
 
     // Helper function to create signed peer info for testing

@@ -3,17 +3,13 @@ use super::{
     ingress::{Message, Oracle},
     Config,
 };
-use crate::authenticated::{Mailbox, PeerInfo};
+use crate::authenticated::Mailbox;
 use commonware_cryptography::Signer;
 use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
-use commonware_utils::{union, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
 use governor::clock::Clock as GClock;
 use rand::Rng;
 use tracing::debug;
-
-// Bytes to add to the namespace to prevent replay attacks.
-const NAMESPACE_SUFFIX_IP: &[u8] = b"_IP";
 
 /// The tracker actor that manages peer discovery and connection reservations.
 pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> {
@@ -44,10 +40,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         Oracle<E, C::PublicKey>,
     ) {
         // Sign my own information
-        let socket = cfg.address;
-        let timestamp = context.current().epoch_millis();
-        let ip_namespace = union(&cfg.namespace, NAMESPACE_SUFFIX_IP);
-        let myself = PeerInfo::sign(&cfg.crypto, &ip_namespace, socket, timestamp);
+        let myself = (cfg.crypto.public_key(), cfg.address);
 
         // General initialization
         let directory_cfg = directory::Config {
@@ -166,7 +159,6 @@ mod tests {
     ) -> Config<C> {
         Config {
             crypto,
-            namespace: b"test_tracker_actor_namespace".to_vec(),
             address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             bootstrappers,
             mailbox_size: 32,

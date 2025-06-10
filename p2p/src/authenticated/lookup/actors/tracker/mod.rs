@@ -21,7 +21,6 @@ pub use reservation::Reservation;
 #[derive(Clone, Debug)]
 pub struct Config<C: Signer> {
     pub crypto: C,
-    pub namespace: Vec<u8>,
     pub address: SocketAddr,
     pub bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
     pub mailbox_size: usize,

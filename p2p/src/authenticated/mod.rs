@@ -2,7 +2,6 @@ pub mod discovery;
 pub mod lookup;
 mod peer_info;
 use futures::{channel::mpsc, SinkExt as _};
-use peer_info::PeerInfo;
 use thiserror::Error;
 
 // TODO danlaine: remove this and just use sender directly

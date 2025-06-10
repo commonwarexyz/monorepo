@@ -1,5 +1,5 @@
 use super::{metrics::Metrics, record::Record, Metadata, Reservation};
-use crate::authenticated::{lookup::metrics, peer_info::PeerInfo};
+use crate::authenticated::lookup::metrics;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner};
 use futures::channel::mpsc;
@@ -36,7 +36,7 @@ pub struct Directory<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Publ
 
     // ---------- State ----------
     /// The records of all peers.
-    peers: HashMap<C, Record<C>>,
+    peers: HashMap<C, Record>,
 
     /// The peer sets
     sets: BTreeMap<u64, Vec<C>>,
@@ -62,7 +62,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     pub fn init(
         context: E,
         bootstrappers: Vec<(C, SocketAddr)>,
-        myself: PeerInfo<C>,
+        myself: (C, SocketAddr),
         cfg: Config,
     ) -> Self {
         // Create the list of peers and add the bootstrappers.
@@ -73,7 +73,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
 
         // Add myself to the list of peers.
         // Overwrites the entry if myself is also a bootstrapper.
-        peers.insert(myself.public_key.clone(), Record::myself(myself));
+        peers.insert(myself.0.clone(), Record::myself(myself.1));
         let rate_limiter = RateLimiter::hashmap_with_clock(cfg.rate_limit, &context);
 
         // Other initialization.
@@ -121,8 +121,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         record.connect();
     }
 
+    /// Sets the peer's address. No-op if the peer is not tracked.
     pub fn set_address(&mut self, peer: &C, address: SocketAddr) {
-        // Update peer address
         let Some(record) = self.peers.get_mut(peer) else {
             debug!(?peer, "peer not tracked");
             return;

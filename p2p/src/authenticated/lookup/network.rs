@@ -19,9 +19,6 @@ use governor::{clock::ReasonablyRealtime, Quota};
 use rand::{CryptoRng, Rng};
 use tracing::{debug, info, warn};
 
-/// Unique suffix for all messages signed by the tracker.
-const TRACKER_SUFFIX: &[u8] = b"_TRACKER";
-
 /// Unique suffix for all messages signed in a stream.
 const STREAM_SUFFIX: &[u8] = b"_STREAM";
 
@@ -58,7 +55,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
             context.with_label("tracker"),
             tracker::Config {
                 crypto: cfg.crypto.clone(),
-                namespace: union(&cfg.namespace, TRACKER_SUFFIX),
                 address: cfg.dialable,
                 bootstrappers: cfg.bootstrappers.clone(),
                 mailbox_size: cfg.mailbox_size,

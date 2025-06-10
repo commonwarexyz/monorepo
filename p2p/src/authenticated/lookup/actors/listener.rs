@@ -69,7 +69,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 
     async fn handshake(
         context: E,
-        address: SocketAddr,
         stream_cfg: StreamConfig<C>,
         sink: SinkOf<E>,
         stream: StreamOf<E>,
@@ -79,7 +78,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         >,
     ) {
         // Create span
-        let span = debug_span!("listener", ?address);
+        let span = debug_span!("listener");
         let guard = span.enter();
 
         // Wait for the peer to send us their public key
@@ -183,9 +182,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                 let tracker = tracker.clone();
                 let supervisor = supervisor.clone();
                 move |context| {
-                    Self::handshake(
-                        context, address, stream_cfg, sink, stream, tracker, supervisor,
-                    )
+                    Self::handshake(context, stream_cfg, sink, stream, tracker, supervisor)
                 }
             });
         }
