@@ -14,12 +14,24 @@ runs:
       uses: actions/cache@v4
       with:
         path: ~/.cargo/registry
-        key: ${{ runner.os }}-cargo-registry
+        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-registry-
     - name: Cache cargo git
       uses: actions/cache@v4
       with:
         path: ~/.cargo/git
-        key: ${{ runner.os }}-cargo-git
+        key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-git-
+    - name: Cache target directory
+      uses: actions/cache@v4
+      with:
+        path: target
+        key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/*.rs') }}
+        restore-keys: |
+          ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}-
+          ${{ runner.os }}-target-
     - name: Get Rust version
       id: rust-version
       shell: bash
