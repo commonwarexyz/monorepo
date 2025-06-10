@@ -42,6 +42,18 @@ pub fn hash_message<V: Variant>(dst: DST, message: &[u8]) -> V::Signature {
     hm
 }
 
+/// Hashes the provided message with the domain separation tag (DST) and namespace to
+/// the curve.
+pub fn hash_message_namespace<V: Variant>(
+    dst: DST,
+    namespace: &[u8],
+    message: &[u8],
+) -> V::Signature {
+    let mut hm = V::Signature::zero();
+    hm.map(dst, &union_unique(namespace, message));
+    hm
+}
+
 /// Signs the provided message with the private key.
 pub fn sign<V: Variant>(private: &Scalar, dst: DST, message: &[u8]) -> V::Signature {
     let mut hm = hash_message::<V>(dst, message);
@@ -238,10 +250,9 @@ where
     // Sum the hashed messages
     let mut hm_sum = V::Signature::zero();
     for (namespace, msg) in messages {
-        let mut hm = V::Signature::zero();
-        match namespace {
-            Some(namespace) => hm.map(V::MESSAGE, &union_unique(namespace, msg)),
-            None => hm.map(V::MESSAGE, msg),
+        let hm = match namespace {
+            Some(namespace) => hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
+            None => hash_message::<V>(V::MESSAGE, msg),
         };
         hm_sum.add(&hm);
     }
@@ -614,10 +625,9 @@ where
         // Avoid pool overhead when concurrency is 1
         let mut hm_sum = V::Signature::zero();
         for (namespace, msg) in messages {
-            let mut hm = V::Signature::zero();
-            match namespace {
-                Some(namespace) => hm.map(V::MESSAGE, &union_unique(namespace, msg)),
-                None => hm.map(V::MESSAGE, msg),
+            let hm = match namespace {
+                Some(namespace) => hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
+                None => hash_message::<V>(V::MESSAGE, msg),
             };
             hm_sum.add(&hm);
         }
@@ -633,13 +643,9 @@ where
         pool.install(move || {
             messages
                 .into_par_iter()
-                .map(|(namespace, msg)| {
-                    let mut hm = V::Signature::zero();
-                    match namespace {
-                        Some(namespace) => hm.map(V::MESSAGE, &union_unique(namespace, msg)),
-                        None => hm.map(V::MESSAGE, msg),
-                    };
-                    hm
+                .map(|(namespace, msg)| match namespace {
+                    Some(namespace) => hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
+                    None => hash_message::<V>(V::MESSAGE, msg),
                 })
                 .reduce(V::Signature::zero, |mut sum, hm| {
                     sum.add(&hm);
@@ -2366,5 +2372,100 @@ mod tests {
         // Fail batch verification with a manipulated signature
         signatures[0].add(&<MinPk as Variant>::Signature::one());
         assert!(MinPk::batch_verify(&mut OsRng, &publics, &hms, &signatures).is_err());
+    }
+
+    fn threshold_derive_missing_partials<V: Variant>() {
+        // Helper to compute the Lagrange basis polynomial l_i(x) evaluated at a specific point `eval_at_x`.
+        fn lagrange_coeff(eval_at_x: u32, i_x: u32, x_coords: &[u32]) -> Scalar {
+            // Initialize the numerator and denominator.
+            let mut num = Scalar::one();
+            let mut den = Scalar::one();
+
+            // Initialize the evaluation point and the index.
+            let mut eval_at_scalar = Scalar::zero();
+            eval_at_scalar.set_int(eval_at_x + 1);
+            let mut xi = Scalar::zero();
+            xi.set_int(i_x + 1);
+
+            // Compute the Lagrange coefficients.
+            for &j_x in x_coords {
+                // Skip if the index is the same.
+                if i_x == j_x {
+                    continue;
+                }
+
+                // Initialize the other index.
+                let mut xj = Scalar::zero();
+                xj.set_int(j_x + 1);
+
+                // Numerator: product over j!=i of (eval_at - x_j)
+                let mut term = eval_at_scalar.clone();
+                term.sub(&xj);
+                num.mul(&term);
+
+                // Denominator: product over j!=i of (x_i - x_j)
+                let mut diff = xi.clone();
+                diff.sub(&xj);
+                den.mul(&diff);
+            }
+
+            // The result is num / den
+            num.mul(&den.inverse().expect("should not have duplicate indices"));
+            num
+        }
+
+        // Generate the public polynomial and the private shares for n participants.
+        let mut rng = StdRng::seed_from_u64(0);
+        let (n, t) = (5, quorum(5));
+        let (public, shares) = generate_shares::<_, V>(&mut rng, None, n, t);
+
+        // Produce partial signatures for every participant.
+        let namespace = Some(&b"test"[..]);
+        let msg = b"hello";
+        let all_partials: Vec<_> = shares
+            .iter()
+            .map(|s| partial_sign_message::<V>(s, namespace, msg))
+            .collect();
+
+        // Take the first `t` partials to use for deriving the others.
+        let recovery_partials: Vec<_> = all_partials.iter().take(t as usize).collect();
+        let recovery_indices: Vec<u32> = recovery_partials.iter().map(|p| p.index).collect();
+
+        // For each participant, derive their partial signature from the recovery set.
+        //
+        // The derived signature is a linear combination of the recovery signatures:
+        // s_target = sum_{i in recovery_set} s_i * l_i(target_x)
+        for target in &shares {
+            // Get the target index.
+            let target = target.index;
+
+            // Compute the Lagrange coefficients (the scalars) for this combination.
+            let scalars: Vec<Scalar> = recovery_indices
+                .iter()
+                .map(|&recovery_index| lagrange_coeff(target, recovery_index, &recovery_indices))
+                .collect();
+
+            // We then use MSM (Multi-Scalar Multiplication) to compute the sum efficiently.
+            let points: Vec<_> = recovery_partials.iter().map(|p| p.value).collect();
+            let derived = <V as Variant>::Signature::msm(&points, &scalars);
+            let derived = Eval {
+                index: target,
+                value: derived,
+            };
+
+            // Verify that the derived partial signature is cryptographically valid.
+            partial_verify_message::<V>(&public, namespace, msg, &derived)
+                .expect("derived signature should be valid");
+
+            // Verify that the derived signature matches the one originally created.
+            let original = all_partials.iter().find(|p| p.index == target).unwrap();
+            assert_eq!(derived.value, original.value);
+        }
+    }
+
+    #[test]
+    fn test_threshold_derive_missing_partials() {
+        threshold_derive_missing_partials::<MinPk>();
+        threshold_derive_missing_partials::<MinSig>();
     }
 }

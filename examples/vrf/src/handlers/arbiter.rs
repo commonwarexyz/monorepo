@@ -92,12 +92,12 @@ impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
                 },
                 result = receiver.recv() => {
                     match result {
-                        Ok((sender, msg)) =>{
+                        Ok((peer, msg)) =>{
                             // Parse msg
                             let msg = match wire::Dkg::decode_cfg(msg, &self.contributors.len()) {
                                 Ok(msg) => msg,
                                 Err(_) => {
-                                    arbiter.disqualify(sender);
+                                    arbiter.disqualify(peer);
                                     continue;
                                 }
                             };
@@ -110,13 +110,13 @@ impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
                             };
 
                             // Validate the signature of each ack
-                            let payload = payload(round, &sender, &commitment);
+                            let payload = payload(round, &peer, &commitment);
                             if !acks.iter().all(|(i, sig)| {
                                 self.contributors.get(*i as usize).map(|signer| {
                                     signer.verify(Some(ACK_NAMESPACE), &payload,  sig)
                                 }).unwrap_or(false)
                             }) {
-                                arbiter.disqualify(sender);
+                                arbiter.disqualify(peer);
                                 continue;
                             }
 
@@ -124,8 +124,8 @@ impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
                             //
                             // Any faults here will be considered as a disqualification.
                             let ack_indices: Vec<u32> = acks.keys().copied().collect();
-                            if let Err(e) = arbiter.commitment(sender.clone(), commitment, ack_indices, reveals) {
-                                warn!(round, error = ?e, ?sender, "failed to process commitment");
+                            if let Err(e) = arbiter.commitment(peer.clone(), commitment, ack_indices, reveals) {
+                                warn!(round, error = ?e, ?peer, "failed to process commitment");
                                 break;
                             }
 
