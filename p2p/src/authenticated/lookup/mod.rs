@@ -159,7 +159,6 @@ mod tests {
         deterministic, tokio, Clock, Metrics, Network as RNetwork, Runner, Spawner,
     };
     use commonware_utils::NZU32;
-    use futures::executor;
     use governor::{clock::ReasonablyRealtime, Quota};
     use rand::{CryptoRng, Rng};
     use std::collections::HashSet;
@@ -168,8 +167,6 @@ mod tests {
         net::{IpAddr, Ipv4Addr, SocketAddr},
         time::Duration,
     };
-    use tracing::debug;
-    use tracing_subscriber::field::debug;
 
     #[derive(Copy, Clone)]
     enum Mode {
@@ -614,6 +611,7 @@ mod tests {
                 ],
                 MAX_MESSAGE_SIZE,
             );
+
             let (mut network1, mut oracle1) = Network::new(context.with_label("network1"), config);
             oracle1
                 .register(0, vec![peer1_pk.clone(), peer2_pk.clone()])
@@ -654,7 +652,7 @@ mod tests {
 
             // Send a message from peer1 to peer2
             let msg: Bytes = peer1_pk.to_vec().into();
-            let (mut network1_sender, peer2_pk) = context
+            let (_network1_sender, peer2_pk) = context
                 .clone()
                 .spawn(|context| async move {
                     // Keep trying to send until we succeed
@@ -688,7 +686,6 @@ mod tests {
             // Stop network 2
             network2.abort();
             let _ = network2.await;
-            debug!("TODO delete me: network2 stopped");
 
             // Restart network 2 with a new address for peer2
             let peer2_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3003);
@@ -727,16 +724,14 @@ mod tests {
                         _ => context.sleep(Duration::from_millis(100)).await,
                     }
                 }
-                println!("TODO delete me: sent!");
             });
 
-            // Receive the message on peer2
+            // Receive the message on peer1
             let receive_handle = context.spawn(|context| async move {
                 loop {
-                    // Wait for the message to be received by peer2
+                    // Wait for the message to be received by peer1
                     if let Ok((sender, message)) = network1_receiver.recv().await {
-                        println!("TODO delete me: received!");
-                        assert_eq!(sender, peer1_pk);
+                        assert_eq!(sender, peer2_pk);
                         assert_eq!(message, peer1_pk.to_vec());
                         break;
                     } else {

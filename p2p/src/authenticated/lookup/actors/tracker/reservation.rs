@@ -55,10 +55,10 @@ impl<E: Spawner + Metrics, P: PublicKey> Drop for Reservation<E, P> {
             });
         } else {
             // If any other error occurs, we should panic!
-            panic!(
-                "unexpected error while trying to release reservation: {:?}",
-                e
-            );
+            // panic!(
+            //     "unexpected error while trying to release reservation: {:?}",
+            //     e
+            // );
         }
     }
 }

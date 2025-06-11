@@ -84,7 +84,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                     public_key,
                     mut peer,
                 } => {
-                    debug!("TODO remove tracker received Connect from {}", public_key);
                     // Kill if peer is not authorized
                     if !self.directory.allowed(&public_key) {
                         peer.kill().await;

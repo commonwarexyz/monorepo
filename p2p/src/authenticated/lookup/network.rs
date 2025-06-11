@@ -34,6 +34,26 @@ pub struct Network<
     router_mailbox: router::Mailbox<C::PublicKey>,
 }
 
+/// Guard that aborts all tasks when dropped.
+/// This ensures that all the network's sub-tasks stop when the network stops.
+struct TaskGuard {
+    tracker_task: Handle<()>,
+    router_task: Handle<()>,
+    spawner_task: Handle<()>,
+    listener_task: Handle<()>,
+    dialer_task: Handle<()>,
+}
+
+impl Drop for TaskGuard {
+    fn drop(&mut self) {
+        self.tracker_task.abort();
+        self.router_task.abort();
+        self.spawner_task.abort();
+        self.listener_task.abort();
+        self.dialer_task.abort();
+    }
+}
+
 impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics, C: Signer>
     Network<E, C>
 {
@@ -119,10 +139,10 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
 
     async fn run(self) {
         // Start tracker
-        let mut tracker_task = self.tracker.start();
+        let tracker_task = self.tracker.start();
 
         // Start router
-        let mut router_task = self.router.start(self.channels);
+        let router_task = self.router.start(self.channels);
 
         // Start spawner
         let (spawner, spawner_mailbox) = spawner::Actor::new(
@@ -132,8 +152,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 ping_frequency: self.cfg.ping_frequency,
             },
         );
-        let mut spawner_task =
-            spawner.start(self.tracker_mailbox.clone(), self.router_mailbox.clone());
+        let spawner_task = spawner.start(self.tracker_mailbox.clone(), self.router_mailbox.clone());
 
         // Start listener
         let stream_cfg = public_key::Config {
@@ -152,8 +171,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 allowed_incoming_connection_rate: self.cfg.allowed_incoming_connection_rate,
             },
         );
-        let mut listener_task =
-            listener.start(self.tracker_mailbox.clone(), spawner_mailbox.clone());
+        let listener_task = listener.start(self.tracker_mailbox.clone(), spawner_mailbox.clone());
 
         // Start dialer
         let dialer = dialer::Actor::new(
@@ -164,42 +182,45 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 query_frequency: self.cfg.query_frequency,
             },
         );
-        let mut dialer_task = dialer.start(self.tracker_mailbox, spawner_mailbox);
+        let dialer_task = dialer.start(self.tracker_mailbox, spawner_mailbox);
+
+        let mut _guard = TaskGuard {
+            tracker_task,
+            router_task,
+            spawner_task,
+            listener_task,
+            dialer_task,
+        };
 
         // Wait for first actor to exit
         info!("network started");
         let err = select! {
-            tracker = &mut tracker_task => {
+            tracker = &mut _guard.tracker_task => {
                 debug!("tracker exited");
                 tracker
             },
-            router = &mut router_task => {
+            router = &mut _guard.router_task => {
                 debug!("router exited");
                 router
             },
-            spawner = &mut spawner_task => {
+            spawner = &mut _guard.spawner_task => {
                 debug!("spawner exited");
                 spawner
             },
-            listener = &mut listener_task => {
+            listener = &mut _guard.listener_task => {
                 debug!("listener exited");
                 listener
             },
-            dialer = &mut dialer_task => {
+            dialer = &mut _guard.dialer_task => {
                 debug!("dialer exited");
                 dialer
             },
         }
         .unwrap_err();
-
-        // Ensure all tasks close
-        tracker_task.abort();
-        router_task.abort();
-        spawner_task.abort();
-        listener_task.abort();
-        dialer_task.abort();
+        debug!("network shutdown started");
 
         // Log error
-        warn!(error=?err, "network shutdown")
+        drop(_guard); // Abort all tasks
+        warn!(error=?err, "network shutdown");
     }
 }

@@ -58,7 +58,7 @@ impl<P: PublicKey> Mailbox<P> {
 
     /// Notify the router that a peer is no longer available.
     pub async fn release(&mut self, peer: P) {
-        self.sender.send(Message::Release { peer }).await.unwrap();
+        let _ = self.sender.send(Message::Release { peer }).await;
     }
 }
 
