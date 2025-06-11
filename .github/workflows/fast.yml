@@ -26,7 +26,7 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
     - name: Install nightly Rust toolchain
-      run: rustup toolchain install nightly
+      run: rustup toolchain install nightly && rustup component add --toolchain nightly rustfmt
     - name: Run setup
       uses: ./.github/actions/setup
     - name: Lint
