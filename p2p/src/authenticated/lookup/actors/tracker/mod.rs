@@ -28,18 +28,3 @@ pub struct Config<C: Signer> {
     pub max_peer_set_size: usize,
     pub allowed_connection_rate_per_peer: Quota,
 }
-
-// TODO danlaine: use or remove
-// #[derive(Error, Debug)]
-// pub enum Error {
-//     #[error("too many peers: {0}")]
-//     TooManyPeers(usize),
-//     #[error("private IPs not allowed: {0}")]
-//     PrivateIPsNotAllowed(IpAddr),
-//     #[error("received self")]
-//     ReceivedSelf,
-//     #[error("invalid signature")]
-//     InvalidSignature,
-//     #[error("synchrony bound violated")]
-//     SynchronyBound,
-// }
