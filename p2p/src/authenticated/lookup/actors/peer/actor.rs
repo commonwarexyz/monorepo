@@ -105,6 +105,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
             senders.insert(channel, sender);
         }
         let rate_limits = Arc::new(rate_limits);
+        debug!("TODO remove: in peer actor for {}", peer);
 
         // Send/Receive messages from the peer
         let (mut conn_sender, mut conn_receiver) = connection.split();
@@ -124,6 +125,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                 loop {
                     select! {
                         _ = context.sleep_until(deadline) => {
+                            // debug!("TODO remove: pinging peer {}", peer);
+
                             // Periodically send a ping to the peer
                             Self::send(
                                 &mut conn_sender,
@@ -174,6 +177,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                             self.received_messages
                                 .get_or_create(&metrics::Message::new_ping(&peer))
                                 .inc();
+                            // debug!(?peer, "TODO remove received ping message");
                             continue; // Ignore ping messages
                         }
                         Ok(types::Message::Data(data)) => data,
@@ -202,6 +206,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                         let wait_duration = wait_until.wait_time_from(context.now());
                         context.sleep(wait_duration).await;
                     }
+                    debug!("TODO remove: got {:?} from {}", data.message, peer);
 
                     // Send message to client
                     //
@@ -227,6 +232,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                 receive_result
             }
         };
+        debug!("TODO remove exiting peer actor");
 
         // Parse error
         match result {

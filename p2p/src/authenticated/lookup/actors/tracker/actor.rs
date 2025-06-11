@@ -77,12 +77,14 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                     self.directory.add_set(index, peers);
                 }
                 Message::UpdateAddress { peer, address } => {
+                    println!("tracker received UpdateAddress for {}: {}", peer, address);
                     self.directory.update_address(&peer, address);
                 }
                 Message::Connect {
                     public_key,
                     mut peer,
                 } => {
+                    debug!("TODO remove tracker received Connect from {}", public_key);
                     // Kill if peer is not authorized
                     if !self.directory.allowed(&public_key) {
                         peer.kill().await;
