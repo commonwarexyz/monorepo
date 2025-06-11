@@ -60,7 +60,24 @@ struct DigestRequest<D: Digest, E: Clock> {
     timer: histogram::Timer<E>,
 }
 
-/// Instance of the engine.
+/// The main aggregation engine that coordinates threshold signature consensus.
+///
+/// The Engine manages the aggregation of partial signatures from validators to form
+/// threshold signatures. It handles epoch transitions, network communication, and
+/// ensures Byzantine fault tolerance through cryptographic verification.
+///
+/// # Type Parameters
+///
+/// - `E`: Runtime context providing clock, spawning, storage, and metrics
+/// - `P`: Public key type for validator identification
+/// - `V`: BLS signature variant (MinPk or MinSig)
+/// - `D`: Digest type for message hashing
+/// - `A`: Automaton for proposing and verifying digests
+/// - `Z`: Reporter for receiving consensus notifications
+/// - `M`: Monitor for tracking epochs
+/// - `TSu`: Threshold supervisor managing validators and cryptographic shares
+/// - `NetS`: Network sender for broadcasting messages
+/// - `NetR`: Network receiver for handling incoming messages
 pub struct Engine<
     E: Clock + Spawner + Storage + Metrics,
     P: PublicKey,
@@ -171,7 +188,29 @@ impl<
         NetR: Receiver<PublicKey = P>,
     > Engine<E, P, V, D, A, Z, M, TSu, NetS, NetR>
 {
-    /// Creates a new engine with the given context and configuration.
+    /// Creates a new aggregation engine with the given context and configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `context` - Runtime context providing clock, spawning, storage, and metrics capabilities
+    /// * `cfg` - Configuration containing all required components and parameters
+    ///
+    /// # Returns
+    ///
+    /// A new Engine instance ready to be started with network channels.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let engine = Engine::new(context, Config {
+    ///     monitor,
+    ///     validators,
+    ///     automaton,
+    ///     reporter,
+    ///     namespace: b"my-app".to_vec(),
+    ///     // ... other config fields
+    /// });
+    /// ```
     pub fn new(context: E, cfg: Config<P, V, D, A, Z, M, TSu>) -> Self {
         let metrics = metrics::Metrics::init(context.clone());
 
@@ -205,7 +244,27 @@ impl<
         }
     }
 
-    /// Runs the engine until the context is stopped.
+    /// Starts the aggregation engine with the provided network channels.
+    ///
+    /// This method spawns the engine's main event loop and returns immediately with a handle.
+    /// The engine will run until the runtime context is stopped or an unrecoverable error occurs.
+    ///
+    /// # Arguments
+    ///
+    /// * `network` - A tuple of (sender, receiver) for network communication
+    ///
+    /// # Returns
+    ///
+    /// A [`Handle`] that can be used to wait for the engine to complete.
+    ///
+    /// # Behavior
+    ///
+    /// The engine will:
+    /// - Initialize its journal and replay any existing state
+    /// - Subscribe to epoch updates from the monitor  
+    /// - Begin proposing digests and collecting partial signatures
+    /// - Aggregate signatures into threshold signatures when quorum is reached
+    /// - Handle network partitions and validator failures gracefully
     pub fn start(mut self, network: (NetS, NetR)) -> Handle<()> {
         self.context.spawn_ref()(self.run(network))
     }
