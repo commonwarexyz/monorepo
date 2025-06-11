@@ -1,17 +1,24 @@
-## Codec Fuzzing
+# Fuzzing
 
-_All of the following commands are run from the `codec/fuzz` directory, and have been tested on Ubuntu 24.02_
+_All of the following commands are run from the crate specific `*/fuzz` (e.g. `codec/fuzz`) directory._
 
 ### Getting Started
+
+The following docs outline how to run the `cargo-fuzz` fuzzer setup in the `codec` crate, but apply to all crates where fuzzing is enabled.
 
 To run the fuzzer, [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) is needed (e.g. `cargo install cargo-fuzz`). 
 
 A fuzz target can then be run with:
 
 ```bash
-$ cargo fuzz run codec # Run with empty starting corpus and default libfuzzer options
-$ nohup cargo fuzz run codec fuzz/corpus/codec_roundtrip/ -j 25 -a -- -max_len=5000 -timeout=1 -workers=25 & # Run 25 workers with a custom timeout, max input len and pre-specified corpus
-$ cargo fuzz run codec --help # Print available fuzzer options
+# Run with empty starting corpus and default libfuzzer options
+$ cargo fuzz run codec
+
+# Run 25 workers with a custom timeout, max input len and pre-specified corpus
+$ nohup cargo fuzz run codec fuzz/corpus/codec_roundtrip/ -j 25 -a -- -max_len=5000 -timeout=1 -workers=25 & 
+
+# Print available fuzzer options
+$ cargo fuzz run codec --help 
 ```
 
 ### Coverage
@@ -27,9 +34,16 @@ $ rustup component add llvm-tools-preview # Required to generate coverage report
 The coverage report can then be generated with:
 
 ```bash
-$ cargo fuzz coverage codec corpus/codec/ # Run the fuzzer with the given corpus to generate coverage data
-$ llvm-cov show ../target/<ARCH>/coverage/<ARCH>/release/codec -instr-profile=coverage/codec/coverage.profdata > coverage.txt # Generate a text version output of the coverage data
+# Run the fuzzer with the given corpus to generate coverage data
+$ cargo fuzz coverage codec corpus/codec/ 
+
+# Generate a text version output of the coverage data
+$ llvm-cov show ../target/<ARCH>/coverage/<ARCH>/release/codec -instr-profile=coverage/codec/coverage.profdata > coverage.txt 
 $ llvm-cov show ../target/x86_64-unknown-linux-gnu/coverage/x86_64-unknown-linux-gnu/release/codec -instr-profile=coverage/codec/coverage.profdata > coverage.txt # Example on Ubuntu
+
+# Prints a CLI readable coverage report
+$ llvm-cov report -instr-profile=coverage/codec/coverage.profdata ../target/<ARCH>/coverage/<ARCH>/release/codec 
+$ llvm-cov report -instr-profile=coverage/codec/coverage.profdata ../target/x86_64-unknown-linux-gnu/coverage/x86_64-unknown-linux-gnu/release/codec # Example on Ubuntu
 ```
 
 For more information on the available report outputs see:
