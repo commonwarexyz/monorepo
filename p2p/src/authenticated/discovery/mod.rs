@@ -1,6 +1,6 @@
 //! Communicate with a fixed set of authenticated peers over encrypted connections.
 //!
-//! `authenticated` provides multiplexed communication between fully-connected peers
+//! `discovery` provides multiplexed communication between fully-connected peers
 //! identified by a developer-specified cryptographic identity (i.e. BLS, ed25519, etc.).
 //! Peer discovery occurs automatically using ordered bit vectors (sorted by authorized
 //! cryptographic identities) to efficiently communicate knowledge of dialable peers.
