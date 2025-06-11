@@ -16,7 +16,7 @@ pub(super) use ingress::Message;
 
 pub struct Config {
     pub mailbox_size: usize,
-
+    pub ping_frequency: std::time::Duration,
     pub sent_messages: Family<metrics::Message, Counter>,
     pub received_messages: Family<metrics::Message, Counter>,
     pub rate_limited: Family<metrics::Message, Counter>,

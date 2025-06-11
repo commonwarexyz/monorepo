@@ -98,7 +98,7 @@ impl<C: PublicKey> Read for Payload<C> {
                 Ok(Payload::Data(data))
             }
             _ => Err(Error::Invalid(
-                "p2p::authenticated::Payload",
+                "p2p::authenticated::discovery::Payload",
                 "Invalid type",
             )),
         }

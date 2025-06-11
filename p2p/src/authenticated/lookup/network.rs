@@ -129,6 +129,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
             self.context.with_label("spawner"),
             spawner::Config {
                 mailbox_size: self.cfg.mailbox_size,
+                ping_frequency: self.cfg.ping_frequency,
             },
         );
         let mut spawner_task =

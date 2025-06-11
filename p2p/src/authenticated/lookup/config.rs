@@ -45,6 +45,9 @@ pub struct Config<C: Signer> {
     /// sending a message will be blocked until the mailbox is processed.
     pub mailbox_size: usize,
 
+    /// Frequency at which we send ping messages to peers.
+    pub ping_frequency: Duration,
+
     /// Time into the future that a timestamp can be and still be considered valid.
     pub synchrony_bound: Duration,
 
@@ -130,6 +133,7 @@ impl<C: Signer> Config<C> {
             allow_private_ips: false,
             max_message_size,
             mailbox_size: 1_000,
+            ping_frequency: Duration::from_secs(50),
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
@@ -170,6 +174,7 @@ impl<C: Signer> Config<C> {
             allow_private_ips: true,
             max_message_size,
             mailbox_size: 1_000,
+            ping_frequency: Duration::from_secs(5),
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
@@ -204,6 +209,7 @@ impl<C: Signer> Config<C> {
             allow_private_ips: true,
             max_message_size,
             mailbox_size: 1_000,
+            ping_frequency: Duration::from_secs(1),
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),

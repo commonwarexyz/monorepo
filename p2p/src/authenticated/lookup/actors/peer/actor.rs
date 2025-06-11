@@ -16,12 +16,13 @@ use futures::{channel::mpsc, SinkExt, StreamExt};
 use governor::{clock::ReasonablyRealtime, RateLimiter};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::{CryptoRng, Rng};
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::{debug, info};
 
 pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey> {
     context: E,
 
+    ping_frequency: Duration,
     mailbox: Mailbox,
     control: mpsc::Receiver<Message>,
     high: mpsc::Receiver<types::Data>,
@@ -46,6 +47,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         (
             Self {
                 context,
+                ping_frequency: cfg.ping_frequency,
                 mailbox: Mailbox::new(control_sender),
                 control: control_receiver,
                 high: high_receiver,
@@ -79,7 +81,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         sender: &mut Sender<Si>,
         sent_messages: &Family<metrics::Message, Counter>,
         metric: metrics::Message,
-        payload: types::Data,
+        payload: types::Message,
     ) -> Result<(), Error> {
         let msg = payload.encode();
         sender.send(&msg).await.map_err(Error::SendFailed)?;
@@ -111,24 +113,28 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
             let mut tracker = tracker.clone();
             let mailbox = self.mailbox.clone();
             let rate_limits = rate_limits.clone();
-            move |_context| async move {
+            move |context| async move {
                 // Allow tracker to initialize the peer
                 tracker.connect(peer.clone(), mailbox.clone()).await;
 
                 // Set the initial deadline to now to start gossiping immediately
-                // let mut deadline = context.current();
+                let mut deadline = context.current();
 
                 // Enter into the main loop
                 loop {
                     select! {
-                        // TODO danlaine: do we need to replace this code with a ping?
-                        // _ = context.sleep_until(deadline) => {
-                        //     // Get latest bitset from tracker (also used as ping)
-                        //     tracker.construct(peer.clone(), mailbox.clone()).await;
+                        _ = context.sleep_until(deadline) => {
+                            // Periodically send a ping to the peer
+                            Self::send(
+                                &mut conn_sender,
+                                &self.sent_messages,
+                                metrics::Message::new_ping(&peer),
+                                types::Message::Ping,
+                            ).await?;
 
-                        //     // Reset ticker
-                        //     deadline = context.current() + self.gossip_bit_vec_frequency;
-                        // },
+                            // Reset ticker
+                            deadline = context.current() + self.ping_frequency;
+                        },
                         msg_control = self.control.next() => {
                             let msg = match msg_control {
                                 Some(msg_control) => msg_control,
@@ -142,12 +148,12 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                         },
                         msg_high = self.high.next() => {
                             let msg = Self::validate_msg(msg_high, &rate_limits)?;
-                            Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), msg)
+                            Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), msg.into())
                                 .await?;
                         },
                         msg_low = self.low.next() => {
                             let msg = Self::validate_msg(msg_low, &rate_limits)?;
-                            Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), msg)
+                            Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), msg.into())
                                 .await?;
                         }
                     }
@@ -163,8 +169,14 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                         .receive()
                         .await
                         .map_err(Error::ReceiveFailed)?;
-                    let data = match types::Data::decode_cfg(msg, &(..).into()) {
-                        Ok(data) => data,
+                    let data = match types::Message::decode_cfg(msg, &(..).into()) {
+                        Ok(types::Message::Ping) => {
+                            self.received_messages
+                                .get_or_create(&metrics::Message::new_ping(&peer))
+                                .inc();
+                            continue; // Ignore ping messages
+                        }
+                        Ok(types::Message::Data(data)) => data,
                         Err(err) => {
                             info!(?err, ?peer, "failed to decode message");
                             self.received_messages

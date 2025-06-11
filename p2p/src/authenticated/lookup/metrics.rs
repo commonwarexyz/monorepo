@@ -20,6 +20,7 @@ impl Peer {
 pub enum MessageType {
     Data(u32),
     Invalid,
+    Ping,
 }
 
 impl EncodeLabelValue for MessageType {
@@ -27,6 +28,7 @@ impl EncodeLabelValue for MessageType {
         match self {
             MessageType::Data(channel) => encoder.write_str(&format!("data_{}", channel)),
             MessageType::Invalid => encoder.write_str("invalid"),
+            MessageType::Ping => encoder.write_str("ping"),
         }
     }
 }
@@ -48,6 +50,12 @@ impl Message {
         Self {
             peer: peer.to_string(),
             message: MessageType::Invalid,
+        }
+    }
+    pub fn new_ping(peer: &impl Array) -> Self {
+        Self {
+            peer: peer.to_string(),
+            message: MessageType::Ping,
         }
     }
 }

@@ -20,6 +20,7 @@ pub struct Actor<
     context: E,
 
     mailbox_size: usize,
+    ping_frequency: std::time::Duration,
 
     receiver: mpsc::Receiver<Message<E, Si, St, C>>,
 
@@ -63,6 +64,7 @@ impl<
             Self {
                 context,
                 mailbox_size: cfg.mailbox_size,
+                ping_frequency: cfg.ping_frequency,
                 receiver,
                 connections,
                 sent_messages,
@@ -109,6 +111,7 @@ impl<
                             let (actor, messenger) = peer::Actor::new(
                                 context,
                                 peer::Config {
+                                    ping_frequency: self.ping_frequency,
                                     sent_messages,
                                     received_messages,
                                     rate_limited,
