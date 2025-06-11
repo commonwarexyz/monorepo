@@ -1,26 +1,15 @@
-//! Aggregation module for threshold signature consensus.
+//! Threshold signature aggregation across validators.
 //!
 //! This module provides a consensus mechanism where validators aggregate their partial signatures
 //! to form threshold signatures. The system allows validators to propose and verify digests
 //! while ensuring Byzantine fault tolerance through cryptographic proofs.
 //!
-//! # Key Components
-//!
-//! - [`Engine`]: The main aggregation engine that coordinates consensus
-//! - [`Config`]: Configuration for the aggregation engine
-//! - [`types`]: Core types for aggregation including activities and acks
-//!
-//! # Example Usage
-//!
-//! ```rust,ignore
-//! use commonware_consensus::aggregation::{Config, Engine};
-//!
-//! // Create and configure the aggregation engine
-//! let engine = Engine::new(context, config);
-//!
-//! // Start the engine with network channels
-//! let handle = engine.start((sender, receiver));
-//! ```
+//! The core of the module is the [`Engine`]. It is responsible for:
+//! - Proposing digests for consensus (if a validator)
+//! - Signing digests with partial signatures (if a validator)
+//! - Aggregating partial signatures into threshold signatures
+//! - Tracking consensus progress across all validators
+//! - Notifying other actors of consensus decisions
 
 pub mod types;
 pub mod wire;
@@ -73,7 +62,7 @@ mod tests {
 
     type Registrations<P> = BTreeMap<P, (Sender<P>, Receiver<P>)>;
 
-    /// Registers all participants with the network oracle for testing.
+    /// Register all participants with the network oracle.
     async fn register_participants(
         oracle: &mut Oracle<PublicKey>,
         participants: &[PublicKey],
@@ -86,7 +75,7 @@ mod tests {
         registrations
     }
 
-    /// Establishes network links between all participants for testing.
+    /// Establish network links between all participants.
     async fn link_participants(
         oracle: &mut Oracle<PublicKey>,
         participants: &[PublicKey],
@@ -143,9 +132,7 @@ mod tests {
         (oracle, validators, pks, registrations)
     }
 
-    /// Initializes a simulated network environment for testing.
-    ///
-    /// Creates validators, network oracle, and establishes connections between all participants.
+    /// Initialize a simulated network environment.
     async fn initialize_simulation(
         context: Context,
         num_validators: u32,
@@ -188,9 +175,7 @@ mod tests {
         (oracle, validators, pks, registrations)
     }
 
-    /// Spawns aggregation engines for all validators in the test environment.
-    ///
-    /// Creates and starts an aggregation engine for each validator with the provided configuration.
+    /// Spawn aggregation engines for all validators.
     #[allow(clippy::too_many_arguments)]
     fn spawn_validator_engines<V: Variant>(
         context: Context,
@@ -259,9 +244,7 @@ mod tests {
         monitors
     }
 
-    /// Waits for all reporters to reach the specified consensus threshold.
-    ///
-    /// Monitors all reporters until they reach the target index and epoch values.
+    /// Wait for all reporters to reach the specified consensus threshold.
     async fn await_reporters<V: Variant>(
         context: Context,
         reporters: &BTreeMap<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>,
@@ -313,7 +296,7 @@ mod tests {
         }
     }
 
-    /// Tests aggregation consensus with all validators online and fully connected.
+    /// Test aggregation consensus with all validators online.
     fn all_online<V: Variant>() {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
@@ -543,7 +526,7 @@ mod tests {
         unclean_shutdown::<MinSig>();
     }
 
-    /// Tests that consensus can be reached starting from index 0.
+    /// Test that consensus can be reached starting from index 0.
     fn consensus_from_index_zero<V: Variant>() {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
@@ -587,7 +570,7 @@ mod tests {
         consensus_from_index_zero::<MinSig>();
     }
 
-    /// Tests consensus recovery after a network partition and healing.
+    /// Test consensus recovery after a network partition.
     fn network_partition<V: Variant>() {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
@@ -658,7 +641,7 @@ mod tests {
         network_partition::<MinSig>();
     }
 
-    /// Tests consensus resilience to Byzantine validators producing invalid signatures.
+    /// Test consensus resilience to Byzantine behavior.
     fn invalid_signature_injection<V: Variant>() {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;

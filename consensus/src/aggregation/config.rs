@@ -4,21 +4,7 @@ use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
 use commonware_utils::Array;
 use std::time::Duration;
 
-/// Configuration for the aggregation [`Engine`](super::Engine).
-///
-/// This structure contains all the required components and parameters needed to create
-/// and run an aggregation engine. It defines the behavior, performance characteristics,
-/// and integration points for the consensus system.
-///
-/// # Type Parameters
-///
-/// - `P`: Public key type for validator identification
-/// - `V`: BLS signature variant (MinPk or MinSig)  
-/// - `D`: Digest type for message hashing
-/// - `A`: Automaton for proposing and verifying digests
-/// - `Z`: Reporter for receiving consensus notifications
-/// - `M`: Monitor for tracking epochs
-/// - `TSu`: Threshold supervisor managing validators and cryptographic shares
+/// Configuration for the [`Engine`](super::Engine).
 pub struct Config<
     P: Array,
     V: Variant,
@@ -93,25 +79,7 @@ impl<
         TSu: ThresholdSupervisor<Index = Epoch, PublicKey = P>,
     > Config<P, V, D, A, Z, M, TSu>
 {
-    /// Validates that all configuration values are within acceptable ranges.
-    ///
-    /// This method performs runtime validation of configuration parameters to ensure
-    /// they will not cause the engine to behave incorrectly or panic during operation.
-    ///
-    /// # Panics
-    ///
-    /// This method will panic if any of the following conditions are met:
-    /// - `journal_heights_per_section` is zero
-    /// - `journal_replay_concurrency` is zero  
-    /// - `window` is zero
-    /// - `rebroadcast_timeout` is zero or negative
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let config = Config { /* ... */ };
-    /// config.assert(); // Validates all fields
-    /// ```
+    /// Assert that all configuration values are valid.
     pub fn assert(&self) {
         assert!(
             self.journal_heights_per_section != 0,
