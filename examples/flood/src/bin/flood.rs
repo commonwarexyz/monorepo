@@ -6,7 +6,7 @@ use commonware_cryptography::{
 };
 use commonware_deployer::ec2::{Hosts, METRICS_PORT};
 use commonware_flood::Config;
-use commonware_p2p::{authenticated, Receiver, Recipients, Sender};
+use commonware_p2p::{authenticated::discovery, Receiver, Recipients, Sender};
 use commonware_runtime::{tokio, Metrics, Runner, Spawner};
 use commonware_utils::{from_hex_formatted, union, NZU32};
 use futures::future::try_join_all;
@@ -109,7 +109,7 @@ fn main() {
         }
 
         // Configure network
-        let mut p2p_cfg = authenticated::Config::aggressive(
+        let mut p2p_cfg = discovery::Config::aggressive(
             key.clone(),
             &union(FLOOD_NAMESPACE, b"_P2P"),
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
@@ -121,7 +121,7 @@ fn main() {
 
         // Start p2p
         let (mut network, mut oracle) =
-            authenticated::Network::new(context.with_label("network"), p2p_cfg);
+            discovery::Network::new(context.with_label("network"), p2p_cfg);
 
         // Provide authorized peers
         oracle.register(0, peer_keys.clone()).await;
