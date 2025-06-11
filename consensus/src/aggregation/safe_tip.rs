@@ -360,4 +360,169 @@ mod tests {
         safe_tip.init(&vec![key(1), key(2), key(3), key(4)]);
         safe_tip.reconcile(&vec![key(1), key(1), key(2), key(3)]);
     }
+
+    #[test]
+    fn test_reconcile_identical() {
+        let mut safe_tip = SafeTip::<PublicKey>::default();
+        let validators = vec![key(1), key(2), key(3), key(4)];
+        safe_tip.init(&validators);
+
+        // Set some initial tips
+        safe_tip.update(key(1), 10);
+        safe_tip.update(key(2), 20);
+        safe_tip.update(key(3), 30);
+
+        let initial_safe_tip = safe_tip.get();
+        let initial_tips = safe_tip.tips.clone();
+        let initial_hi = safe_tip.hi.clone();
+        let initial_lo = safe_tip.lo.clone();
+
+        // Reconcile with identical validator set - should be a no-op
+        safe_tip.reconcile(&validators);
+
+        // Verify nothing changed
+        assert_eq!(safe_tip.get(), initial_safe_tip);
+        assert_eq!(safe_tip.tips, initial_tips);
+        assert_eq!(safe_tip.hi, initial_hi);
+        assert_eq!(safe_tip.lo, initial_lo);
+    }
+
+    #[test]
+    fn test_update_nonexistent_validator_focused() {
+        let mut safe_tip = SafeTip::<PublicKey>::default();
+        let validators = vec![key(1), key(2), key(3), key(4)];
+        safe_tip.init(&validators);
+
+        // Set some initial state
+        safe_tip.update(key(1), 10);
+        safe_tip.update(key(2), 20);
+
+        let initial_safe_tip = safe_tip.get();
+        let initial_tips = safe_tip.tips.clone();
+
+        // Try to update a validator not in the set
+        let result = safe_tip.update(key(100), 50);
+
+        // Should return None and not change any state
+        assert_eq!(result, None);
+        assert_eq!(safe_tip.get(), initial_safe_tip);
+        assert_eq!(safe_tip.tips, initial_tips);
+
+        // Try multiple non-existent validators
+        assert_eq!(safe_tip.update(key(200), 100), None);
+        assert_eq!(safe_tip.update(key(300), 200), None);
+
+        // State should remain unchanged
+        assert_eq!(safe_tip.get(), initial_safe_tip);
+        assert_eq!(safe_tip.tips, initial_tips);
+    }
+
+    #[test]
+    fn test_edge_cases_for_f() {
+        // Test case: n=1, f=0 (single validator, no faults possible)
+        let mut safe_tip_single = SafeTip::<PublicKey>::default();
+        let single_validator = vec![key(1)];
+        safe_tip_single.init(&single_validator);
+
+        assert_eq!(safe_tip_single.get(), 0);
+        assert_eq!(safe_tip_single.hi.len(), 0); // f=0, so hi should be empty
+        assert_eq!(safe_tip_single.lo.len(), 1); // All validators in lo
+
+        // Update should immediately change safe tip since f=0
+        safe_tip_single.update(key(1), 10);
+        assert_eq!(safe_tip_single.get(), 10);
+
+        // Test case: n=2, f=0 (two validators, no faults possible)
+        let mut safe_tip_two = SafeTip::<PublicKey>::default();
+        let two_validators = vec![key(1), key(2)];
+        safe_tip_two.init(&two_validators);
+
+        assert_eq!(safe_tip_two.get(), 0);
+        assert_eq!(safe_tip_two.hi.len(), 0); // f=0, so hi should be empty
+        assert_eq!(safe_tip_two.lo.len(), 1); // All validators in lo
+
+        // Any update should immediately change safe tip since f=0
+        safe_tip_two.update(key(1), 15);
+        assert_eq!(safe_tip_two.get(), 15);
+        safe_tip_two.update(key(2), 25);
+        assert_eq!(safe_tip_two.get(), 25);
+
+        // Test case: n=3, f=0 (three validators, no faults possible)
+        let mut safe_tip_three = SafeTip::<PublicKey>::default();
+        let three_validators = vec![key(1), key(2), key(3)];
+        safe_tip_three.init(&three_validators);
+
+        assert_eq!(safe_tip_three.get(), 0);
+        assert_eq!(safe_tip_three.hi.len(), 0); // f=0, so hi should be empty
+        assert_eq!(safe_tip_three.lo.len(), 1); // All validators in lo
+
+        // Test case: n=4, f=1 (four validators, 1 fault possible)
+        let mut safe_tip_four = SafeTip::<PublicKey>::default();
+        let four_validators = vec![key(1), key(2), key(3), key(4)];
+        safe_tip_four.init(&four_validators);
+
+        assert_eq!(safe_tip_four.get(), 0);
+        assert_eq!(safe_tip_four.hi.len(), 1); // f=1, so hi has entries
+        assert_eq!(safe_tip_four.lo.len(), 1); // n-f=3 validators in lo
+
+        // Test case: n=7, f=2 (seven validators, 2 faults possible)
+        let mut safe_tip_seven = SafeTip::<PublicKey>::default();
+        let seven_validators = vec![key(1), key(2), key(3), key(4), key(5), key(6), key(7)];
+        safe_tip_seven.init(&seven_validators);
+
+        assert_eq!(safe_tip_seven.get(), 0);
+        assert_eq!(safe_tip_seven.hi.len(), 1); // f=2, so hi has entries
+        assert_eq!(safe_tip_seven.lo.len(), 1); // n-f=5 validators in lo
+        assert_eq!(safe_tip_seven.hi.get(&0), Some(&2)); // f=2 validators in hi
+        assert_eq!(safe_tip_seven.lo.get(&0), Some(&5)); // n-f=5 validators in lo
+    }
+
+    #[test]
+    fn test_dec_inc_internal() {
+        // Test inc function
+        let mut map = BTreeMap::new();
+
+        // Test inc on non-existent entry
+        inc(map.entry(10));
+        assert_eq!(map.get(&10), Some(&1));
+
+        // Test inc on existing entry
+        inc(map.entry(10));
+        assert_eq!(map.get(&10), Some(&2));
+
+        // Test inc on different keys
+        inc(map.entry(20));
+        inc(map.entry(30));
+        assert_eq!(map.get(&20), Some(&1));
+        assert_eq!(map.get(&30), Some(&1));
+        assert_eq!(map.len(), 3);
+
+        // Test dec function
+        // Test dec on existing entry
+        dec(map.entry(10));
+        assert_eq!(map.get(&10), Some(&1));
+
+        // Test dec that removes entry (value becomes 0)
+        dec(map.entry(10));
+        assert_eq!(map.get(&10), None);
+        assert_eq!(map.len(), 2);
+
+        // Test dec on other entries
+        dec(map.entry(20));
+        assert_eq!(map.get(&20), None);
+        assert_eq!(map.len(), 1);
+
+        dec(map.entry(30));
+        assert_eq!(map.get(&30), None);
+        assert_eq!(map.len(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot decrement a non-existent entry")]
+    fn test_dec_panic_on_vacant() {
+        let mut map = BTreeMap::new();
+
+        // This should panic since the entry doesn't exist
+        dec(map.entry(42));
+    }
 }
