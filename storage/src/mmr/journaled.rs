@@ -255,7 +255,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     ///
     /// Panics if there are unprocessed updates.
     pub async fn add(&mut self, h: &mut impl Hasher<H>, element: &[u8]) -> Result<u64, Error> {
-        self.mem_mmr.add(h, element).await
+        Ok(self.mem_mmr.add(h, element))
     }
 
     /// Add an element to the MMR, delaying the computation of ancestor digests
@@ -265,7 +265,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         h: &mut impl Hasher<H>,
         element: &[u8],
     ) -> Result<u64, Error> {
-        self.mem_mmr.add_batched(h, element).await
+        Ok(self.mem_mmr.add_batched(h, element))
     }
 
     /// Pop the given number of elements from the tip of the MMR assuming they exist, and otherwise
@@ -545,14 +545,9 @@ mod tests {
                 items_per_blob: 7,
                 write_buffer: 1024,
             };
-            let mut hasher = Sha256::new();
-            let mut mmr = Mmr::init(
-                context.clone(),
-                &mut Standard::new(&mut hasher),
-                cfg.clone(),
-            )
-            .await
-            .unwrap();
+            let mut mmr = Mmr::init(context.clone(), &mut Standard::new(), cfg.clone())
+                .await
+                .unwrap();
             build_and_check_test_roots_mmr(&mut mmr).await;
         });
     }
@@ -569,8 +564,7 @@ mod tests {
                 items_per_blob: 7,
                 write_buffer: 1024,
             };
-            let mut hasher = Sha256::new();
-            let mut std_hasher = Standard::new(&mut hasher);
+            let mut std_hasher = Standard::new();
             let mut mmr = Mmr::init(context.clone(), &mut std_hasher, cfg.clone())
                 .await
                 .unwrap();
@@ -588,8 +582,7 @@ mod tests {
                 items_per_blob: 7,
                 write_buffer: 1024,
             };
-            let mut hasher = Sha256::new();
-            let mut hasher = Standard::new(&mut hasher);
+            let mut hasher: Standard<Sha256> = Standard::new();
             let mut mmr = Mmr::init(context.clone(), &mut hasher, cfg.clone())
                 .await
                 .unwrap();
@@ -615,8 +608,7 @@ mod tests {
                 write_buffer: 1024,
             };
 
-            let mut hasher = Sha256::new();
-            let mut hasher = Standard::new(&mut hasher);
+            let mut hasher: Standard<Sha256> = Standard::new();
             let mut mmr = Mmr::init(context.clone(), &mut hasher, cfg.clone())
                 .await
                 .unwrap();
@@ -685,8 +677,7 @@ mod tests {
                 items_per_blob: 7,
                 write_buffer: 1024,
             };
-            let mut hasher = Sha256::new();
-            let mut hasher = Standard::new(&mut hasher);
+            let mut hasher: Standard<Sha256> = Standard::new();
             let mut mmr = Mmr::init(context.clone(), &mut hasher, cfg.clone())
                 .await
                 .unwrap();
@@ -761,8 +752,7 @@ mod tests {
                 items_per_blob: 7,
                 write_buffer: 1024,
             };
-            let mut hasher = Sha256::new();
-            let mut hasher = Standard::new(&mut hasher);
+            let mut hasher: Standard<Sha256> = Standard::new();
             let mut mmr = Mmr::init(context.clone(), &mut hasher, cfg.clone())
                 .await
                 .unwrap();
@@ -853,8 +843,7 @@ mod tests {
                 write_buffer: 1024,
             };
 
-            let mut hasher = Sha256::new();
-            let mut hasher = Standard::new(&mut hasher);
+            let mut hasher: Standard<Sha256> = Standard::new();
             // make sure pruning doesn't break root computation, adding of new nodes, etc.
             const LEAF_COUNT: usize = 2000;
             let mut pruned_mmr = Mmr::init(context.clone(), &mut hasher, cfg.clone())
@@ -961,10 +950,8 @@ mod tests {
                 items_per_blob: 7,
                 write_buffer: 1024,
             };
-            let mut hasher = Sha256::new();
-            let mut hasher = Standard::new(&mut hasher);
-
             // Build MMR with 2000 leaves.
+            let mut hasher: Standard<Sha256> = Standard::new();
             const LEAF_COUNT: usize = 2000;
             let mut mmr = Mmr::init(context.clone(), &mut hasher, cfg.clone())
                 .await

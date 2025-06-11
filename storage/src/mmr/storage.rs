@@ -77,13 +77,12 @@ impl<'a, H: CHasher, S1: Storage<H::Digest>, S2: Storage<H::Digest>> Grafting<'a
         }
     }
 
-    pub async fn root(&self, hasher: &mut H) -> Result<H::Digest, Error> {
+    pub async fn root(&self, hasher: &mut Standard<H>) -> Result<H::Digest, Error> {
         let size = self.size();
         let peak_futures = PeakIterator::new(size).map(|(peak_pos, _)| self.get_node(peak_pos));
         let peaks = try_join_all(peak_futures).await?;
         let unwrapped_peaks = peaks.iter().map(|p| p.as_ref().unwrap());
-        let mut standard = Standard::new(hasher);
-        let digest = standard.root_digest(self.base_mmr.size(), unwrapped_peaks);
+        let digest = hasher.root_digest(self.base_mmr.size(), unwrapped_peaks);
 
         Ok(digest)
     }

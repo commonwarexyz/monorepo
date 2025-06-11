@@ -11,8 +11,7 @@ use commonware_utils::hex;
 /// Build the MMR corresponding to the stability test `ROOTS` and confirm the
 /// roots match that from the builder's root computation
 pub async fn build_and_check_test_roots_mmr(mmr: &mut impl Builder<Sha256>) {
-    let mut hasher = Sha256::new();
-    let mut hasher = Standard::new(&mut hasher);
+    let mut hasher: Standard<Sha256> = Standard::new();
     for i in 0u64..199 {
         hasher.inner().update(&i.to_be_bytes());
         let element = hasher.inner().finalize();
@@ -38,12 +37,11 @@ pub async fn build_test_mmr<H: CHasher>(hasher: &mut impl Hasher<H>, mmr: &mut i
 }
 
 pub async fn build_batched_and_check_test_roots(mem_mmr: &mut MemMmr<Sha256>) {
-    let mut hasher = Sha256::new();
-    let mut hasher = Standard::new(&mut hasher);
+    let mut hasher: Standard<Sha256> = Standard::new();
     for i in 0u64..199 {
         hasher.inner().update(&i.to_be_bytes());
         let element = hasher.inner().finalize();
-        mem_mmr.add_batched(&mut hasher, &element).await.unwrap();
+        mem_mmr.add_batched(&mut hasher, &element);
     }
     mem_mmr.sync(&mut hasher);
     assert_eq!(
@@ -56,8 +54,7 @@ pub async fn build_batched_and_check_test_roots(mem_mmr: &mut MemMmr<Sha256>) {
 pub async fn build_batched_and_check_test_roots_journaled<E: RStorage + Clock + Metrics>(
     journaled_mmr: &mut JournaledMmr<E, Sha256>,
 ) {
-    let mut hasher = Sha256::new();
-    let mut hasher = Standard::new(&mut hasher);
+    let mut hasher: Standard<Sha256> = Standard::new();
     for i in 0u64..199 {
         hasher.inner().update(&i.to_be_bytes());
         let element = hasher.inner().finalize();
