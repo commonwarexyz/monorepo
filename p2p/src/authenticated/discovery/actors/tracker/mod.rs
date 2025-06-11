@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use thiserror::Error;
 
-pub mod actor;
+mod actor;
 mod directory;
 mod ingress;
 mod metadata;

@@ -1,8 +1,7 @@
+use crate::authenticated::discovery::types::PeerInfo;
 use commonware_cryptography::PublicKey;
 use std::net::SocketAddr;
 use tracing::trace;
-
-use crate::authenticated::discovery::types::PeerInfo;
 
 /// Represents information known about a peer's address.
 #[derive(Clone, Debug)]
