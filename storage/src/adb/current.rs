@@ -1,7 +1,8 @@
 //! An authenticated database (ADB) that provides succinct proofs of _any_ value ever associated
 //! with a key, and also whether that value is the _current_ value associated with it. Its
 //! implementation is based on an [Any] authenticated database combined with an authenticated
-//! [Bitmap] over the activity status of each operation.
+//! [Bitmap] over the activity status of each operation. The two structures are "grafted" together
+//! to minimize proof sizes.
 
 use crate::{
     adb::{
@@ -21,7 +22,7 @@ use crate::{
 };
 use commonware_codec::FixedSize;
 use commonware_cryptography::Hasher as CHasher;
-use commonware_runtime::{Clock, Metrics, Storage as RStorage};
+use commonware_runtime::{Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::Array;
 use futures::future::try_join_all;
 use tracing::{debug, warn};
@@ -118,8 +119,14 @@ impl<
     const _CHUNK_SIZE_IS_POW_OF_2_ASSERT: () =
         assert!(N.is_power_of_two(), "chunk size must be a power of 2");
 
-    /// Initializes a [Current] authenticated database from the given `config`.
-    pub async fn init(context: E, config: Config, translator: T) -> Result<Self, Error> {
+    /// Initializes a [Current] authenticated database from the given `config`. Leverages parallel
+    /// Merkleization to initialize the bitmap MMR if a thread pool is provided.
+    pub async fn init(
+        context: E,
+        config: Config,
+        translator: T,
+        pool: Option<ThreadPool>,
+    ) -> Result<Self, Error> {
         // Initialize the MMR journal and metadata.
         let cfg = AConfig {
             mmr_journal_partition: config.mmr_journal_partition,
@@ -132,16 +139,18 @@ impl<
         };
 
         let context = context.with_label("adb::current");
+        let cloned_pool = pool.clone();
         let mut status = Bitmap::restore_pruned(
             context.with_label("bitmap"),
             &config.bitmap_metadata_partition,
+            cloned_pool,
         )
         .await?;
 
         // Initialize the db's mmr/log.
         let mut hasher = Standard::<H>::new();
         let (mut mmr, log) =
-            Any::<_, _, _, _, T>::init_mmr_and_log(context.clone(), &mut hasher, cfg).await?;
+            Any::<_, _, _, _, T>::init_mmr_and_log(context.clone(), &mut hasher, cfg, pool).await?;
 
         // Ensure consistency between the bitmap and the db's MMR.
         let mmr_pruned_pos = mmr.pruned_to_pos();
@@ -278,7 +287,8 @@ impl<
         Ok(())
     }
 
-    /// Commit pending operations to the adb::any and sync it to disk.
+    /// Commit pending operations to the adb::any and sync it to disk. Leverages parallel
+    /// Merkleization of the any-db if a thread pool is provided.
     async fn commit_ops(&mut self) -> Result<(), Error> {
         // Raise the inactivity floor by the # of uncommitted operations, plus 1 to account for the
         // commit op that will be appended.
@@ -322,7 +332,8 @@ impl<
 
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
     /// upon return from this function. Also raises the inactivity floor according to the schedule,
-    /// and prunes those operations below it.
+    /// and prunes those operations below it. Leverages parallel Merkleization of the MMR structures
+    /// if a thread pool is provided.
     pub async fn commit(&mut self) -> Result<(), Error> {
         // Failure recovery relies on this specific order of these three disk-based operations:
         //  (1) commit/sync the any db to disk (which raises the inactivity floor).
@@ -335,6 +346,7 @@ impl<
             .load_grafted_digests(&self.status.dirty_chunks(), &self.any.ops)
             .await?;
         self.status.sync(&mut grafter).await?;
+
         self.status.prune_to_bit(self.any.inactivity_floor_loc);
         self.status
             .write_pruned(
@@ -760,6 +772,7 @@ pub mod test {
             context,
             current_db_config(partition_prefix),
             TwoCap,
+            None,
         )
         .await
         .unwrap()

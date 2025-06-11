@@ -16,7 +16,8 @@ use crate::mmr::{
     Hasher,
 };
 use commonware_cryptography::Hasher as CHasher;
-use rayon::{prelude::*, ThreadPool};
+use commonware_runtime::ThreadPool;
+use rayon::{prelude::*, ThreadPool as RThreadPool};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Implementation of `Mmr`.
@@ -26,25 +27,28 @@ use std::collections::{HashMap, HashSet, VecDeque};
 /// The maximum number of elements that can be stored is usize::MAX
 /// (u32::MAX on 32-bit architectures).
 pub struct Mmr<H: CHasher> {
-    // The nodes of the MMR, laid out according to a post-order traversal of the MMR trees, starting
-    // from the from tallest tree to shortest.
+    /// The nodes of the MMR, laid out according to a post-order traversal of the MMR trees,
+    /// starting from the from tallest tree to shortest.
     nodes: VecDeque<H::Digest>,
 
-    // The highest position for which this MMR has been pruned, or 0 if this MMR has never been
-    // pruned.
+    /// The highest position for which this MMR has been pruned, or 0 if this MMR has never been
+    /// pruned.
     pruned_to_pos: u64,
 
-    // The auxiliary map from node position to the digest of any pinned node.
+    /// The auxiliary map from node position to the digest of any pinned node.
     pub(super) pinned_nodes: HashMap<u64, H::Digest>,
 
-    // Non-leaf nodes that need to have their digests recomputed due to a batched update operation.
-    //
-    // This is a set of tuples of the form (node_pos, height).
+    /// Non-leaf nodes that need to have their digests recomputed due to a batched update operation.
+    ///
+    /// This is a set of tuples of the form (node_pos, height).
     dirty_nodes: HashSet<(u64, u32)>,
 
-    // Dummy digest used as a placeholder for nodes whose digests will be updated with the next
-    // `sync`.
+    /// Dummy digest used as a placeholder for nodes whose digests will be updated with the next
+    /// `sync`.
     dirty_digest: H::Digest,
+
+    /// Thread pool to use for parallelizing updates.
+    pub(super) pool: Option<ThreadPool>,
 }
 
 impl<H: CHasher> Default for Mmr<H> {
@@ -63,6 +67,9 @@ impl<H: CHasher> Builder<H> for Mmr<H> {
     }
 }
 
+/// Minimum number of digest computations required during batch updates to trigger parallelization.
+const MIN_TO_PARALLELIZE: usize = 20;
+
 impl<H: CHasher> Mmr<H> {
     /// Return a new (empty) `Mmr`.
     pub fn new() -> Self {
@@ -72,6 +79,7 @@ impl<H: CHasher> Mmr<H> {
             pinned_nodes: HashMap::new(),
             dirty_nodes: HashSet::new(),
             dirty_digest: Self::dirty_digest(),
+            pool: None,
         }
     }
 
@@ -83,13 +91,19 @@ impl<H: CHasher> Mmr<H> {
 
     /// Return an [Mmr] initialized with the given nodes, oldest retained position, and digests of
     /// pinned nodes.
-    pub fn init(nodes: Vec<H::Digest>, pruned_to_pos: u64, pinned_nodes: Vec<H::Digest>) -> Self {
+    pub fn init(
+        nodes: Vec<H::Digest>,
+        pruned_to_pos: u64,
+        pinned_nodes: Vec<H::Digest>,
+        pool: Option<ThreadPool>,
+    ) -> Self {
         let mut mmr = Self {
             nodes: VecDeque::from(nodes),
             pruned_to_pos,
             pinned_nodes: HashMap::new(),
             dirty_nodes: HashSet::new(),
             dirty_digest: Self::dirty_digest(),
+            pool,
         };
         if mmr.size() == 0 {
             return mmr;
@@ -314,21 +328,27 @@ impl<H: CHasher> Mmr<H> {
     /// # Warning
     ///
     /// Panics if any of the updated leaves has been pruned.
-    pub fn update_leaf_batched(
+    pub fn update_leaf_batched<T: AsRef<[u8]> + Sync>(
         &mut self,
         hasher: &mut impl Hasher<H>,
-        updates: impl Iterator<Item = (u64, impl AsRef<[u8]>)>,
+        updates: &[(u64, T)],
     ) {
+        if updates.len() >= MIN_TO_PARALLELIZE && self.pool.is_some() {
+            let rayon_pool = self.pool.as_ref().unwrap().clone();
+            self.update_leaf_parallel(hasher, &rayon_pool, updates);
+            return;
+        }
+
         for (pos, element) in updates {
-            if pos < self.pruned_to_pos {
+            if *pos < self.pruned_to_pos {
                 panic!("element pruned: pos={}", pos);
             }
 
             // Update the digest of the leaf node and mark its ancestors as dirty.
-            let digest = hasher.leaf_digest(pos, element.as_ref());
-            let index = self.pos_to_index(pos);
+            let digest = hasher.leaf_digest(*pos, element.as_ref());
+            let index = self.pos_to_index(*pos);
             self.nodes[index] = digest;
-            self.mark_dirty(pos);
+            self.mark_dirty(*pos);
         }
     }
 
@@ -360,17 +380,12 @@ impl<H: CHasher> Mmr<H> {
     }
 
     /// Batch update the digests of multiple retained leaves using multiple threads.
-    pub fn update_leaf_parallel<T: AsRef<[u8]> + Sync>(
+    fn update_leaf_parallel<T: AsRef<[u8]> + Sync>(
         &mut self,
         hasher: &mut impl Hasher<H>,
-        pool: &mut ThreadPool,
-        min_to_parallelize: usize,
-        updates: Vec<(u64, T)>,
+        pool: &RThreadPool,
+        updates: &[(u64, T)],
     ) {
-        if updates.len() < min_to_parallelize {
-            return self.update_leaf_batched(hasher, updates.into_iter());
-        }
-
         pool.install(|| {
             let digests: Vec<(u64, H::Digest)> = updates
                 .par_iter()
@@ -401,6 +416,16 @@ impl<H: CHasher> Mmr<H> {
         if self.dirty_nodes.is_empty() {
             return;
         }
+        if self.dirty_nodes.len() >= MIN_TO_PARALLELIZE && self.pool.is_some() {
+            let rayon_pool = self.pool.as_ref().unwrap().clone();
+            self.sync_parallel(hasher, &rayon_pool, MIN_TO_PARALLELIZE);
+            return;
+        }
+
+        self.sync_serial(hasher);
+    }
+
+    fn sync_serial(&mut self, hasher: &mut impl Hasher<H>) {
         let mut nodes: Vec<(u64, u32)> = self.dirty_nodes.iter().copied().collect();
         self.dirty_nodes.clear();
         nodes.sort_by(|a, b| a.1.cmp(&b.1));
@@ -425,16 +450,12 @@ impl<H: CHasher> Mmr<H> {
     /// starting from the bottom and working up to the peaks. If ever the number of remaining digest
     /// computations is less than the `min_to_parallelize`, it switches to the serial
     /// implementation.
-    pub fn sync_parallel(
+    fn sync_parallel(
         &mut self,
         hasher: &mut impl Hasher<H>,
-        pool: &mut ThreadPool,
+        pool: &RThreadPool,
         min_to_parallelize: usize,
     ) {
-        if self.dirty_nodes.len() < min_to_parallelize {
-            self.sync(hasher);
-            return;
-        }
         let mut nodes: Vec<(u64, u32)> = self.dirty_nodes.iter().copied().collect();
         self.dirty_nodes.clear();
         // Sort by increasing height.
@@ -449,7 +470,7 @@ impl<H: CHasher> Mmr<H> {
             }
             if same_height.len() < min_to_parallelize {
                 self.dirty_nodes = nodes[i - same_height.len()..].iter().copied().collect();
-                self.sync(hasher);
+                self.sync_serial(hasher);
                 return;
             }
             self.update_node_digests(hasher, pool, &same_height, current_height);
@@ -463,7 +484,7 @@ impl<H: CHasher> Mmr<H> {
                 .iter()
                 .copied()
                 .collect();
-            self.sync(hasher);
+            self.sync_serial(hasher);
             return;
         }
 
@@ -475,7 +496,7 @@ impl<H: CHasher> Mmr<H> {
     fn update_node_digests(
         &mut self,
         hasher: &mut impl Hasher<H>,
-        pool: &mut ThreadPool,
+        pool: &RThreadPool,
         same_height: &[u64],
         height: u32,
     ) {
@@ -609,7 +630,7 @@ impl<H: CHasher> Mmr<H> {
 
     /// A lightweight cloning operation that "clones" only the fully pruned state of this MMR. The
     /// output is exactly the same as the result of mmr.prune_all(), only you get a copy without
-    /// mutating the original.
+    /// mutating the original, and the thread pool if any is not cloned.
     ///
     /// Runtime is Log_2(n) in the number of elements even if the original MMR is never pruned.
     ///
@@ -628,7 +649,7 @@ impl<H: CHasher> Mmr<H> {
         // Create the "old_nodes" of the MMR in the fully pruned state.
         let old_nodes = self.node_digests_to_pin(self.size());
 
-        Self::init(vec![], self.size(), old_nodes)
+        Self::init(vec![], self.size(), old_nodes, None)
     }
 }
 
@@ -638,15 +659,11 @@ mod tests {
     use crate::mmr::{
         hasher::Standard,
         iterator::leaf_num_to_pos,
-        tests::{
-            build_and_check_test_roots_mmr, build_batched_and_check_test_roots,
-            build_parallel_and_check_test_roots, ROOTS,
-        },
+        tests::{build_and_check_test_roots_mmr, build_batched_and_check_test_roots, ROOTS},
     };
     use commonware_cryptography::Sha256;
-    use commonware_runtime::{deterministic, tokio, Runner};
+    use commonware_runtime::{create_pool, deterministic, tokio, Runner};
     use commonware_utils::hex;
-    use rayon::ThreadPoolBuilder;
 
     /// Test empty MMR behavior.
     #[test]
@@ -785,7 +802,12 @@ mod tests {
             // Test that we can initialize a new MMR from another's elements.
             let oldest_pos = mmr.oldest_retained_pos().unwrap();
             let digests = mmr.node_digests_to_pin(oldest_pos);
-            let mmr_copy = Mmr::init(mmr.nodes.iter().copied().collect(), oldest_pos, digests);
+            let mmr_copy = Mmr::init(
+                mmr.nodes.iter().copied().collect(),
+                oldest_pos,
+                digests,
+                None,
+            );
             assert_eq!(mmr_copy.size(), 19);
             assert_eq!(mmr_copy.oldest_retained_pos(), mmr.oldest_retained_pos());
             assert_eq!(mmr_copy.root(&mut hasher), root);
@@ -867,9 +889,10 @@ mod tests {
     fn test_mem_mmr_root_stability_parallel() {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
-            let mut mmr = Mmr::new();
-            let mut pool = commonware_runtime::create_pool(context, 4).unwrap();
-            build_parallel_and_check_test_roots(&mut pool, &mut mmr).await;
+            let pool = commonware_runtime::create_pool(context, 4).unwrap();
+
+            let mut mmr = Mmr::init(vec![], 0, vec![], Some(pool));
+            build_batched_and_check_test_roots(&mut mmr).await;
         });
     }
 
@@ -893,10 +916,7 @@ mod tests {
         });
     }
 
-    async fn compute_big_mmr(
-        hasher: &mut impl Hasher<Sha256>,
-    ) -> Result<(Mmr<Sha256>, Vec<u64>), Error> {
-        let mut mmr = Mmr::new();
+    fn compute_big_mmr(hasher: &mut impl Hasher<Sha256>, mmr: &mut Mmr<Sha256>) -> Vec<u64> {
         let mut leaves = Vec::new();
         let mut c_hasher = Sha256::default();
         for i in 0u64..199 {
@@ -906,7 +926,7 @@ mod tests {
         }
         mmr.sync(hasher);
 
-        Ok((mmr, leaves))
+        leaves
     }
 
     #[test]
@@ -914,7 +934,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
-            let (mut mmr, _) = compute_big_mmr(&mut hasher).await.unwrap();
+            let mut mmr = Mmr::new();
+            compute_big_mmr(&mut hasher, &mut mmr);
             let root = mmr.root(&mut hasher);
             let expected_root = ROOTS[199];
             assert_eq!(hex(&root), expected_root);
@@ -956,7 +977,9 @@ mod tests {
         let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let (mut mmr, leaves) = compute_big_mmr(&mut hasher).await.unwrap();
+            let mut mmr = Mmr::new();
+            compute_big_mmr(&mut hasher, &mut mmr);
+            let leaves = compute_big_mmr(&mut hasher, &mut mmr);
             let root = mmr.root(&mut hasher);
 
             // For a few leaves, update the leaf and ensure the root changes, and the root reverts
@@ -992,7 +1015,8 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let (mut mmr, _) = compute_big_mmr(&mut hasher).await.unwrap();
+            let mut mmr = Mmr::new();
+            compute_big_mmr(&mut hasher, &mut mmr);
             let not_a_leaf_pos = 2;
             mmr.update_leaf(&mut hasher, not_a_leaf_pos, &element);
         });
@@ -1006,7 +1030,8 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let (mut mmr, _) = compute_big_mmr(&mut hasher).await.unwrap();
+            let mut mmr = Mmr::new();
+            compute_big_mmr(&mut hasher, &mut mmr);
             mmr.prune_all();
             mmr.update_leaf(&mut hasher, 0, &element);
         });
@@ -1015,54 +1040,57 @@ mod tests {
     #[test]
     fn test_mem_mmr_batch_update_leaf() {
         let mut hasher: Standard<Sha256> = Standard::new();
-        let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let (mut mmr, leaves) = compute_big_mmr(&mut hasher).await.unwrap();
-            let root = mmr.root(&mut hasher);
-
-            // Change a handful of leaves using a batch update.
-            let mut updates = Vec::new();
-            for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
-                updates.push((leaves[leaf], &element));
-            }
-            mmr.update_leaf_batched(&mut hasher, updates.into_iter());
-
-            mmr.sync(&mut hasher);
-            let updated_root = mmr.root(&mut hasher);
-            assert_eq!(
-                "af3acad6aad59c1a880de643b1200a0962a95d06c087ebf677f29eb93fc359a4",
-                hex(&updated_root)
-            );
-
-            // Batch-restore the changed leaves to their original values.
-            let mut updates = Vec::new();
-            for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
-                hasher.inner().update(&leaf.to_be_bytes());
-                let element = hasher.inner().finalize();
-                updates.push((leaves[leaf], element));
-            }
-            mmr.update_leaf_batched(&mut hasher, updates.into_iter());
-
-            mmr.sync(&mut hasher);
-            let restored_root = mmr.root(&mut hasher);
-            assert_eq!(root, restored_root);
-
-            // Repeat the batch update only using parallel sync.
-            let mut updates = Vec::new();
-            for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
-                updates.push((leaves[leaf], &element));
-            }
-            // let mut pool = commonware_runtime::create_pool(context, 4).unwrap();
-            let mut pool = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
-            mmr.update_leaf_parallel(&mut hasher, &mut pool, 1, updates);
-
-            mmr.sync_parallel(&mut hasher, &mut pool, 1);
-            let updated_root = mmr.root(&mut hasher);
-            assert_eq!(
-                "af3acad6aad59c1a880de643b1200a0962a95d06c087ebf677f29eb93fc359a4",
-                hex(&updated_root)
-            );
+            let mut mmr = Mmr::new();
+            let leaves = compute_big_mmr(&mut hasher, &mut mmr);
+            do_batch_update(&mut hasher, &mut mmr, &leaves);
         });
+    }
+
+    #[test]
+    /// Same test as above only using a thread pool to trigger parallelization. This requires we use
+    /// tokio runtime instead of the deterministic one.
+    fn test_mem_mmr_batch_parallel_update_leaf() {
+        let mut hasher: Standard<Sha256> = Standard::new();
+        let executor = tokio::Runner::default();
+        executor.start(|ctx| async move {
+            let pool = create_pool(ctx, 4).unwrap();
+            let mut mmr = Mmr::init(Vec::new(), 0, Vec::new(), Some(pool));
+            let leaves = compute_big_mmr(&mut hasher, &mut mmr);
+            do_batch_update(&mut hasher, &mut mmr, &leaves);
+        });
+    }
+
+    fn do_batch_update(hasher: &mut Standard<Sha256>, mmr: &mut Mmr<Sha256>, leaves: &[u64]) {
+        let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
+        let root = mmr.root(hasher);
+
+        // Change a handful of leaves using a batch update.
+        let mut updates = Vec::new();
+        for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
+            updates.push((leaves[leaf], &element));
+        }
+        mmr.update_leaf_batched(hasher, &updates);
+
+        mmr.sync(hasher);
+        let updated_root = mmr.root(hasher);
+        assert_eq!(
+            "af3acad6aad59c1a880de643b1200a0962a95d06c087ebf677f29eb93fc359a4",
+            hex(&updated_root)
+        );
+
+        // Batch-restore the changed leaves to their original values.
+        let mut updates = Vec::new();
+        for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
+            hasher.inner().update(&leaf.to_be_bytes());
+            let element = hasher.inner().finalize();
+            updates.push((leaves[leaf], element));
+        }
+        mmr.update_leaf_batched(hasher, &updates);
+
+        mmr.sync(hasher);
+        let restored_root = mmr.root(hasher);
+        assert_eq!(root, restored_root);
     }
 }

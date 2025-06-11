@@ -15,10 +15,6 @@ enum SyncType {
     BatchedParallel,
 }
 
-/// Minimum number of computations required to trigger parallelization. This value doesn't appear to
-/// impact performance all that much so we use just this fixed value for all benchmarks.
-const MIN_TO_PARALLELIZE: usize = 100;
-
 /// Threads (cores) to use for parallelization. We pick 8 since our benchmarking pipeline is
 /// configured to provide 8 cores. More threads may be faster on machines with more cores, but
 /// returns start diminishing.
@@ -45,7 +41,16 @@ fn bench_update(c: &mut Criterion) {
                     ),
                     |b| {
                         b.to_async(&runner).iter_custom(|_iters| async move {
-                            let mut mmr = Mmr::<Sha256>::new();
+                            let mut mmr = match sync_type {
+                                SyncType::BatchedParallel => {
+                                    let ctx = context::get::<commonware_runtime::tokio::Context>();
+                                    let pool =
+                                        commonware_runtime::create_pool(ctx.clone(), THREADS)
+                                            .unwrap();
+                                    Mmr::<Sha256>::init(vec![], 0, vec![], Some(pool))
+                                }
+                                _ => Mmr::<Sha256>::new(),
+                            };
                             let mut elements = Vec::with_capacity(leaves as usize);
                             let mut sampler = StdRng::seed_from_u64(0);
                             let mut leaf_positions = Vec::with_capacity(leaves as usize);
@@ -58,9 +63,6 @@ fn bench_update(c: &mut Criterion) {
                                 let pos = mmr.add(&mut h, &digest);
                                 leaf_positions.push(pos);
                             }
-                            let ctx = context::get::<commonware_runtime::tokio::Context>();
-                            let mut pool =
-                                commonware_runtime::create_pool(ctx.clone(), THREADS).unwrap();
 
                             // Randomly update leaves -- this is what we are benchmarking.
                             let start = Instant::now();
@@ -81,27 +83,16 @@ fn bench_update(c: &mut Criterion) {
                                         mmr.update_leaf(&mut h, pos, &element);
                                     }
                                 }
-                                SyncType::BatchedSerial => {
-                                    mmr.update_leaf_batched(&mut h, leaf_map.into_iter());
-                                }
-                                SyncType::BatchedParallel => {
-                                    let update_vec = leaf_map
-                                        .into_iter()
-                                        .collect::<Vec<(u64, sha256::Digest)>>();
-                                    mmr.update_leaf_parallel(
-                                        &mut h,
-                                        &mut pool,
-                                        MIN_TO_PARALLELIZE,
-                                        update_vec,
-                                    );
+                                _ => {
+                                    // Collect the map into a Vec of (position, element) pairs for batched updates
+                                    let updates: Vec<(
+                                        u64,
+                                        commonware_cryptography::sha256::Digest,
+                                    )> = leaf_map.into_iter().collect();
+                                    mmr.update_leaf_batched(&mut h, &updates);
                                 }
                             }
-
-                            if sync_type == SyncType::BatchedParallel {
-                                mmr.sync_parallel(&mut h, &mut pool, MIN_TO_PARALLELIZE);
-                            } else {
-                                mmr.sync(&mut h);
-                            }
+                            mmr.sync(&mut h);
 
                             start.elapsed()
                         });

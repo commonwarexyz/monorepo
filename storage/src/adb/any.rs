@@ -21,7 +21,7 @@ use crate::{
 };
 use commonware_codec::Encode as _;
 use commonware_cryptography::Hasher as CHasher;
-use commonware_runtime::{Clock, Metrics, Storage as RStorage};
+use commonware_runtime::{Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::Array;
 use futures::{
     future::{try_join_all, TryFutureExt},
@@ -111,10 +111,15 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 {
     /// Returns any `Any` adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(context: E, cfg: Config, translator: T) -> Result<Self, Error> {
+    pub async fn init(
+        context: E,
+        cfg: Config,
+        translator: T,
+        pool: Option<ThreadPool>,
+    ) -> Result<Self, Error> {
         let mut snapshot: Index<T, u64> = Index::init(context.with_label("snapshot"), translator);
         let mut hasher = Standard::<H>::new();
-        let (mmr, log) = Self::init_mmr_and_log(context, &mut hasher, cfg).await?;
+        let (mmr, log) = Self::init_mmr_and_log(context, &mut hasher, cfg, pool).await?;
 
         let start_leaf_num = leaf_pos_to_num(mmr.pruned_to_pos()).unwrap();
         let inactivity_floor_loc = Self::build_snapshot_from_log(
@@ -144,6 +149,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         context: E,
         hasher: &mut Standard<H>,
         cfg: Config,
+        pool: Option<ThreadPool>,
     ) -> Result<(Mmr<E, H>, Journal<E, Operation<K, V>>), Error> {
         let mut mmr = Mmr::init(
             context.with_label("mmr"),
@@ -154,6 +160,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 items_per_blob: cfg.mmr_items_per_blob,
                 write_buffer: cfg.mmr_write_buffer,
             },
+            pool,
         )
         .await?;
 
@@ -537,7 +544,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
     /// upon return from this function. Also raises the inactivity floor according to the schedule,
-    /// and prunes those operations below it.
+    /// and prunes those operations below it. Batch operations will be parallelized if a thread pool
+    /// is provided.
     pub async fn commit(&mut self) -> Result<(), Error> {
         // Raise the inactivity floor by the # of uncommitted operations, plus 1 to account for the
         // commit op that will be appended.
@@ -552,7 +560,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         self.prune_inactive().await
     }
 
-    /// Sync the db to disk ensuring the current state is persisted.
+    /// Sync the db to disk ensuring the current state is persisted. Batch operations will be
+    /// parallelized if a thread pool is provided.
     pub(super) async fn sync(&mut self) -> Result<(), Error> {
         try_join!(
             self.log.sync().map_err(Error::JournalError),
@@ -731,6 +740,7 @@ mod test {
             context,
             any_db_config("partition"),
             EightCap,
+            None,
         )
         .await
         .unwrap()
@@ -1074,6 +1084,7 @@ mod test {
                 context,
                 any_db_config("new_partition"),
                 EightCap,
+                None,
             )
             .await
             .unwrap();
@@ -1222,6 +1233,7 @@ mod test {
                 context.clone(),
                 &mut hasher,
                 cfg,
+                None,
             )
             .await
             .unwrap();
