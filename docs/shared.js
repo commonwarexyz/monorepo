@@ -115,6 +115,13 @@ function setExternalLinksToOpenInNewTab() {
 }
 
 function insertFooter() {
+    // If the footer placeholder doesn't exist, skip footer insertion.
+    const footerPlaceholder = document.getElementById('footer-placeholder');
+    if (!footerPlaceholder) {
+        return;
+    }
+
+    // Insert the footer.
     const currentYear = new Date().getFullYear();
     const footerHTML = `
     <div class="footer">
@@ -128,7 +135,7 @@ function insertFooter() {
         &copy; ${currentYear} Commonware, Inc. All rights reserved.
     </div>
     `;
-    document.getElementById('footer-placeholder').innerHTML = footerHTML;
+    footerPlaceholder.innerHTML = footerHTML;
 }
 
 // Load the logo when the DOM content is loaded
