@@ -389,6 +389,38 @@ mod tests {
     }
 
     #[test]
+    fn test_nonce_increments_on_decryption_failure() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
+            let (mut sink, stream) = mocks::Channel::init();
+            let mut receiver = Receiver {
+                cipher,
+                stream,
+                max_message_size: 1024,
+                nonce: nonce::Info::default(),
+            };
+
+            // Store initial nonce encoded value
+            let initial_encoded = receiver.nonce.encode();
+
+            // Send invalid ciphertext
+            send_frame(&mut sink, b"invalid data", receiver.max_message_size)
+                .await
+                .unwrap();
+
+            // Attempt to receive (should fail)
+            let result = receiver.receive().await;
+            assert!(matches!(result, Err(Error::DecryptionFailed)));
+
+            // Verify nonce was incremented despite decryption failure
+            // The encoded nonce should be different from the initial value
+            let final_encoded = receiver.nonce.encode();
+            assert_ne!(initial_encoded, final_encoded);
+        });
+    }
+
+    #[test]
     fn test_send_too_large() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
