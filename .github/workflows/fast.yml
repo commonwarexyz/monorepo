@@ -1,4 +1,4 @@
-name: Tests (Fast)
+name: Fast
 
 on:
   push:
@@ -36,7 +36,7 @@ jobs:
       env:
         RUSTDOCFLAGS: "-D warnings"
 
-  Fast:
+  Tests:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:

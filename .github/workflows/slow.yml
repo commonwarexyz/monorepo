@@ -1,4 +1,4 @@
-name: Tests (Slow)
+name: Slow
 
 on:
   push:
@@ -16,7 +16,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  Slow:
+  Tests:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
