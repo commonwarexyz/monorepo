@@ -337,14 +337,19 @@ impl<St: Stream> crate::Receiver for Receiver<St> {
         )
         .await?;
 
-        // Decrypt data
-        let msg = self
-            .cipher
-            .decrypt(&self.nonce.encode(), msg.as_ref())
-            .map_err(|_| Error::DecryptionFailed)?;
+        // Encode the nonce before incrementing to get the proper value
+        let nonce = self.nonce.encode();
+
+        // Increment nonce before decrypting so that even if decryption fails, the nonce is still
+        // incremented. Typically, a user of this receiver would want to terminate the connection
+        // anyway on decryption failure, but we do it here in case they don't.
         self.nonce.inc()?;
 
-        Ok(Bytes::from(msg))
+        // Decrypt data
+        self.cipher
+            .decrypt(&nonce, msg.as_ref())
+            .map(Bytes::from)
+            .map_err(|_| Error::DecryptionFailed)
     }
 }
 
