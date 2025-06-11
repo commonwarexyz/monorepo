@@ -383,7 +383,7 @@ impl BatchVerifier<PublicKey> for Batch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{bls12381, BatchVerifier as _, Signer as _, Verifier as _};
+    use crate::{bls12381, Verifier as _};
     use commonware_codec::{DecodeExt, Encode};
 
     #[test]
