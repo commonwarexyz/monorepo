@@ -1,4 +1,26 @@
-//! Aggregation module
+//! Aggregation module for threshold signature consensus.
+//!
+//! This module provides a consensus mechanism where validators aggregate their partial signatures
+//! to form threshold signatures. The system allows validators to propose and verify digests
+//! while ensuring Byzantine fault tolerance through cryptographic proofs.
+//!
+//! # Key Components
+//!
+//! - [`Engine`]: The main aggregation engine that coordinates consensus
+//! - [`Config`]: Configuration for the aggregation engine
+//! - [`types`]: Core types for aggregation including activities and acks
+//!
+//! # Example Usage
+//!
+//! ```rust,ignore
+//! use commonware_consensus::aggregation::{Config, Engine};
+//!
+//! // Create and configure the aggregation engine
+//! let engine = Engine::new(context, config);
+//!
+//! // Start the engine with network channels
+//! let handle = engine.start((sender, receiver));
+//! ```
 
 pub mod types;
 pub mod wire;
@@ -51,6 +73,7 @@ mod tests {
 
     type Registrations<P> = BTreeMap<P, (Sender<P>, Receiver<P>)>;
 
+    /// Registers all participants with the network oracle for testing.
     async fn register_participants(
         oracle: &mut Oracle<PublicKey>,
         participants: &[PublicKey],
@@ -63,6 +86,7 @@ mod tests {
         registrations
     }
 
+    /// Establishes network links between all participants for testing.
     async fn link_participants(
         oracle: &mut Oracle<PublicKey>,
         participants: &[PublicKey],
@@ -119,6 +143,9 @@ mod tests {
         (oracle, validators, pks, registrations)
     }
 
+    /// Initializes a simulated network environment for testing.
+    ///
+    /// Creates validators, network oracle, and establishes connections between all participants.
     async fn initialize_simulation(
         context: Context,
         num_validators: u32,
@@ -161,6 +188,9 @@ mod tests {
         (oracle, validators, pks, registrations)
     }
 
+    /// Spawns aggregation engines for all validators in the test environment.
+    ///
+    /// Creates and starts an aggregation engine for each validator with the provided configuration.
     #[allow(clippy::too_many_arguments)]
     fn spawn_validator_engines<V: Variant>(
         context: Context,
@@ -229,6 +259,9 @@ mod tests {
         monitors
     }
 
+    /// Waits for all reporters to reach the specified consensus threshold.
+    ///
+    /// Monitors all reporters until they reach the target index and epoch values.
     async fn await_reporters<V: Variant>(
         context: Context,
         reporters: &BTreeMap<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>,
@@ -280,6 +313,7 @@ mod tests {
         }
     }
 
+    /// Tests aggregation consensus with all validators online and fully connected.
     fn all_online<V: Variant>() {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
@@ -507,5 +541,164 @@ mod tests {
     fn test_unclean_shutdown() {
         unclean_shutdown::<MinPk>();
         unclean_shutdown::<MinSig>();
+    }
+
+    /// Tests that consensus can be reached starting from index 0.
+    fn consensus_from_index_zero<V: Variant>() {
+        let num_validators: u32 = 4;
+        let quorum: u32 = 3;
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+
+        runner.start(|mut context| async move {
+            let (polynomial, mut shares_vec) =
+                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+            shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+
+            let (_oracle, validators, pks, mut registrations) = initialize_simulation(
+                context.with_label("simulation"),
+                num_validators,
+                &mut shares_vec,
+            )
+            .await;
+            let automatons = Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
+            let mut reporters =
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>::new();
+
+            spawn_validator_engines::<V>(
+                context.with_label("validator"),
+                polynomial.clone(),
+                &pks,
+                &validators,
+                &mut registrations,
+                &mut automatons.lock().unwrap(),
+                &mut reporters,
+                Duration::from_secs(5),
+                |_| false,
+                None,
+            );
+
+            await_reporters(context.with_label("reporter"), &reporters, (0, 111)).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_consensus_from_index_zero() {
+        consensus_from_index_zero::<MinPk>();
+        consensus_from_index_zero::<MinSig>();
+    }
+
+    /// Tests consensus recovery after a network partition and healing.
+    fn network_partition<V: Variant>() {
+        let num_validators: u32 = 4;
+        let quorum: u32 = 3;
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+
+        runner.start(|mut context| async move {
+            let (polynomial, mut shares_vec) =
+                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+            shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+
+            let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
+                context.with_label("simulation"),
+                num_validators,
+                &mut shares_vec,
+            )
+            .await;
+            let automatons = Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
+            let mut reporters =
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>::new();
+
+            spawn_validator_engines::<V>(
+                context.with_label("validator"),
+                polynomial.clone(),
+                &pks,
+                &validators,
+                &mut registrations,
+                &mut automatons.lock().unwrap(),
+                &mut reporters,
+                Duration::from_secs(5),
+                |_| false,
+                None,
+            );
+
+            for v1 in pks.iter() {
+                for v2 in pks.iter() {
+                    if v2 == v1 {
+                        continue;
+                    }
+                    oracle.remove_link(v1.clone(), v2.clone()).await.unwrap();
+                }
+            }
+            context.sleep(Duration::from_secs(20)).await;
+
+            let link = Link {
+                latency: 10.0,
+                jitter: 1.0,
+                success_rate: 1.0,
+            };
+            for v1 in pks.iter() {
+                for v2 in pks.iter() {
+                    if v2 == v1 {
+                        continue;
+                    }
+                    oracle
+                        .add_link(v1.clone(), v2.clone(), link.clone())
+                        .await
+                        .unwrap();
+                }
+            }
+
+            await_reporters(context.with_label("reporter"), &reporters, (1, 111)).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_network_partition() {
+        network_partition::<MinPk>();
+        network_partition::<MinSig>();
+    }
+
+    /// Tests consensus resilience to Byzantine validators producing invalid signatures.
+    fn invalid_signature_injection<V: Variant>() {
+        let num_validators: u32 = 4;
+        let quorum: u32 = 3;
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+
+        runner.start(|mut context| async move {
+            let (polynomial, mut shares_vec) =
+                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+            shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+
+            let (_oracle, validators, pks, mut registrations) = initialize_simulation(
+                context.with_label("simulation"),
+                num_validators,
+                &mut shares_vec,
+            )
+            .await;
+            let automatons = Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
+            let mut reporters =
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>::new();
+
+            spawn_validator_engines::<V>(
+                context.with_label("validator"),
+                polynomial.clone(),
+                &pks,
+                &validators,
+                &mut registrations,
+                &mut automatons.lock().unwrap(),
+                &mut reporters,
+                Duration::from_secs(5),
+                |i| i % 10 == 0,
+                None,
+            );
+
+            await_reporters(context.with_label("reporter"), &reporters, (1, 111)).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_invalid_signature_injection() {
+        invalid_signature_injection::<MinPk>();
+        invalid_signature_injection::<MinSig>();
     }
 }
