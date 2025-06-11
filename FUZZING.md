@@ -1,7 +1,5 @@
 # Fuzzing
 
-_All of the following commands are run from the crate specific `*/fuzz` (e.g. `codec/fuzz`) directory._
-
 ### Getting Started
 
 The following docs outline how to run the `cargo-fuzz` fuzzer setup in the `codec` crate, but apply to all crates where fuzzing is enabled.
@@ -12,13 +10,14 @@ A fuzz target can then be run with:
 
 ```bash
 # Run with empty starting corpus and default libfuzzer options
-$ cargo fuzz run codec
+$ cd codec/fuzz
+$ cargo +nightly fuzz run codec
 
 # Run 25 workers with a custom timeout, max input len and pre-specified corpus
-$ nohup cargo fuzz run codec fuzz/corpus/codec_roundtrip/ -j 25 -a -- -max_len=5000 -timeout=1 -workers=25 & 
+$ nohup cargo +nightly fuzz run codec corpus/codec/ -j 25 -a -- -max_len=5000 -timeout=1 -workers=25 & 
 
 # Print available fuzzer options
-$ cargo fuzz run codec --help 
+$ cargo +nightly fuzz run codec --help 
 ```
 
 ### Coverage
@@ -35,7 +34,7 @@ The coverage report can then be generated with:
 
 ```bash
 # Run the fuzzer with the given corpus to generate coverage data
-$ cargo fuzz coverage codec corpus/codec/ 
+$ cargo +nightly fuzz coverage codec corpus/codec/ 
 
 # Generate a text version output of the coverage data
 $ llvm-cov show ../target/<ARCH>/coverage/<ARCH>/release/codec -instr-profile=coverage/codec/coverage.profdata > coverage.txt 
@@ -56,6 +55,6 @@ For more information on the available report outputs see:
 The following commands are exposed directly by `cargo-fuzz`:
 
 ```bash
-$ cargo fuzz cmin codec corpus/codec/ # Minimize the corpus discovered so far in `corpus/codec`
-$ cargo fuzz tmin mycrashfile # Attempt to minimize a specific crash case for debugging root causes
+$ cargo +nightly fuzz cmin codec corpus/codec/ # Minimize the corpus discovered so far in `corpus/codec`
+$ cargo +nightly fuzz tmin mycrashfile # Attempt to minimize a specific crash case called `mycrashfile` for debugging root causes
 ```
