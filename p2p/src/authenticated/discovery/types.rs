@@ -1,11 +1,10 @@
-use std::net::SocketAddr;
-
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
-    varint::UInt, Encode as _, EncodeSize, Error, RangeCfg, Read, ReadExt, ReadRangeExt, Write,
+    varint::UInt, Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, ReadRangeExt, Write,
 };
 use commonware_cryptography::{PublicKey, Signer};
 use commonware_utils::BitVec as UtilsBitVec;
+use std::net::SocketAddr;
 
 /// The maximum overhead (in bytes) when encoding a `message` into a [`Payload::Data`].
 ///
@@ -258,11 +257,9 @@ impl Read for Data {
 
 #[cfg(test)]
 mod tests {
-    use std::net::SocketAddr;
-
     use super::*;
     use bytes::BytesMut;
-    use commonware_codec::Decode;
+    use commonware_codec::{Decode, DecodeRangeExt};
     use commonware_cryptography::{secp256r1, PrivateKeyExt as _};
 
     fn signed_peer_info() -> PeerInfo<secp256r1::PublicKey> {
@@ -287,6 +284,25 @@ mod tests {
 
         let too_short = BitVec::decode_cfg(original.encode(), &70);
         assert!(matches!(too_short, Err(Error::InvalidLength(71))));
+    }
+
+    #[test]
+    fn test_signed_peer_info_codec() {
+        let original = vec![signed_peer_info(), signed_peer_info(), signed_peer_info()];
+        let encoded = original.encode();
+        let decoded = Vec::<PeerInfo<secp256r1::PublicKey>>::decode_range(encoded, 3..=3).unwrap();
+        for (original, decoded) in original.iter().zip(decoded.iter()) {
+            assert_eq!(original.socket, decoded.socket);
+            assert_eq!(original.timestamp, decoded.timestamp);
+            assert_eq!(original.public_key, decoded.public_key);
+            assert_eq!(original.signature, decoded.signature);
+        }
+
+        let too_short = Vec::<PeerInfo<secp256r1::PublicKey>>::decode_range(original.encode(), ..3);
+        assert!(matches!(too_short, Err(Error::InvalidLength(3))));
+
+        let too_long = Vec::<PeerInfo<secp256r1::PublicKey>>::decode_range(original.encode(), 4..);
+        assert!(matches!(too_long, Err(Error::InvalidLength(3))));
     }
 
     #[test]
