@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 10
     strategy:
       matrix:
-        features:
+        flags:
           - "--features commonware-runtime/iouring-storage"
           - "--features commonware-runtime/iouring-network"
           - ""
@@ -28,11 +28,11 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
     - name: Lint
-      run: cargo clippy --all-targets ${{ matrix.features }} -- -D warnings
+      run: cargo clippy --all-targets ${{ matrix.flags }} -- -D warnings
     - name: Fmt
       run: cargo fmt --all -- --check
     - name: Check docs
-      run: cargo doc ${{ matrix.features }} --no-deps --document-private-items
+      run: cargo doc ${{ matrix.flags }} --no-deps --document-private-items
       env:
         RUSTDOCFLAGS: "-D warnings"
 
@@ -41,7 +41,7 @@ jobs:
     timeout-minutes: 20
     strategy:
       matrix:
-        features:
+        flags:
           - "--features commonware-runtime/iouring-storage"
           - "--features commonware-runtime/iouring-network"
           - ""
@@ -51,7 +51,7 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
     - name: Run tests
-      run: cargo test ${{ matrix.features }} --verbose
+      run: cargo test ${{ matrix.flags }} --verbose
 
   Dependencies:
     runs-on: ubuntu-latest

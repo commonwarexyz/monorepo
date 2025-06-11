@@ -21,7 +21,7 @@ jobs:
     timeout-minutes: 120
     strategy:
       matrix:
-        features:
+        flags:
           - "--features commonware-runtime/iouring-storage"
           - "--features commonware-runtime/iouring-network"
           - ""
@@ -31,4 +31,4 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
     - name: Run ignored tests
-      run: cargo test ${{ matrix.features }} --verbose -- --ignored
+      run: cargo test ${{ matrix.flags }} --verbose -- --ignored
