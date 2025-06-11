@@ -85,8 +85,13 @@ impl Record {
 
     // ---------- Setters ----------
 
+    /// Update the address of the peer.
+    /// If the address is [Address::Myself], it will not be updated.
     pub fn update_address(&mut self, address: SocketAddr) {
         // TODO: what should we do if this peer is blocked?
+        if matches!(self.address, Address::Myself(_)) {
+            return;
+        }
         self.address = Address::Known(address);
     }
 
