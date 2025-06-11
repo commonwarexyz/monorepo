@@ -17,31 +17,9 @@ use commonware_utils::union;
 use futures::channel::oneshot;
 use std::hash::Hash;
 
-/// Error that may be encountered when interacting with `ordered-broadcast`.
-///
-/// These errors are categorized into several groups:
-/// - Parser errors (missing parent, etc.)
-/// - Application verification errors
-/// - P2P errors
-/// - Broadcast errors (threshold-related issues)
-/// - Epoch errors (unknown validators or sequencers)
-/// - Peer errors
-/// - Signature errors
-/// - Ignorable message errors (outside epoch/height bounds)
-/// - Attributable faults (conflicting chunks)
+/// Error that may be encountered when interacting with `aggregation`.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    // Parser Errors
-    /// The parent is missing for a non-genesis chunk
-    #[error("Missing parent")]
-    ParentMissing,
-    /// The parent was provided for a genesis chunk (height 0)
-    #[error("Parent on genesis chunk")]
-    ParentOnGenesis,
-    /// Verification failed because no public key was provided
-    #[error("Public key required")]
-    PublicKeyRequired,
-
     // Proposal Errors
     /// The proposal was canceled by the application
     #[error("Application verify error: {0}")]
@@ -53,15 +31,6 @@ pub enum Error {
     UnableToSendMessage,
 
     // Epoch Errors
-    /// Epoch is not in the accepted bounds
-    #[error("Epoch {0} not in bounds {1} - {2}")]
-    EpochNotInBounds(u64, u64, u64),
-    /// No identity is known for the specified epoch
-    #[error("Unknown identity at epoch {0}")]
-    UnknownIdentity(u64),
-    /// No validators are known for the specified epoch
-    #[error("Unknown validators at epoch {0}")]
-    UnknownValidators(u64),
     /// The specified validator is not a participant in the epoch
     #[error("Epoch {0} has no validator {1}")]
     UnknownValidator(u64, String),
@@ -75,15 +44,6 @@ pub enum Error {
     PeerMismatch,
 
     // Signature Errors
-    /// The sequencer's signature is invalid
-    #[error("Invalid sequencer signature")]
-    InvalidSequencerSignature,
-    /// The threshold signature is invalid
-    #[error("Invalid threshold signature")]
-    InvalidThresholdSignature,
-    /// The node signature is invalid
-    #[error("Invalid node signature")]
-    InvalidNodeSignature,
     /// The acknowledgment signature is invalid
     #[error("Invalid ack signature")]
     InvalidAckSignature,
@@ -101,14 +61,6 @@ pub enum Error {
     /// The acknowledgement is for an index that already has a threshold
     #[error("Ack for index {0} already has a threshold")]
     AckThresholded(u64),
-    /// The chunk's height is lower than the current tip height
-    #[error("Chunk height {0} lower than tip height {1}")]
-    ChunkHeightTooLow(u64, u64),
-
-    // Attributable Faults
-    /// The chunk conflicts with an existing chunk at the same height
-    #[error("Chunk mismatch from sender {0} with height {1}")]
-    ChunkMismatch(String, u64),
 }
 
 pub type Epoch = u64;
@@ -125,6 +77,109 @@ const ACK_SUFFIX: &[u8] = b"_AGG_ACK";
 #[inline]
 fn ack_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, ACK_SUFFIX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_codec::{DecodeExt, Encode};
+    use commonware_cryptography::{
+        bls12381::primitives::{group, ops, poly, variant::MinSig},
+        sha256,
+    };
+
+    #[test]
+    fn test_ack_namespace() {
+        let namespace = b"test_namespace";
+        let expected = [namespace, ACK_SUFFIX].concat();
+        assert_eq!(ack_namespace(namespace), expected);
+    }
+
+    fn generate_keys(n: u32, t: u32) -> (poly::Public<MinSig>, Vec<group::Share>) {
+        let private = poly::new_from(t - 1, &mut rand::thread_rng());
+        let public = poly::Public::<MinSig>::commit(private.clone());
+        let shares = (0..n)
+            .map(|i| {
+                let eval = private.evaluate(i);
+                group::Share {
+                    index: eval.index,
+                    private: eval.value,
+                }
+            })
+            .collect();
+        (public, shares)
+    }
+
+    #[test]
+    fn test_item_codec() {
+        let item = Item {
+            index: 42,
+            digest: sha256::hash(b"hello"),
+        };
+        let restored = Item::decode(item.encode()).unwrap();
+        assert_eq!(item, restored);
+    }
+
+    #[test]
+    fn test_ack_sign_verify() {
+        let namespace = b"test";
+        let (public, shares) = generate_keys(4, 3);
+
+        let item = Item {
+            index: 100,
+            digest: sha256::hash(b"test_item"),
+        };
+
+        let ack: Ack<MinSig, _> = Ack::sign(namespace, 1, &shares[0], item.clone());
+
+        assert!(ack.verify(namespace, &public));
+
+        // verify fails with wrong namespace
+        assert!(!ack.verify(b"wrong", &public));
+    }
+
+    #[test]
+    fn test_ack_codec() {
+        let namespace = b"test";
+        let (_, shares) = generate_keys(4, 3);
+        let item = Item {
+            index: 100,
+            digest: sha256::hash(b"test_item"),
+        };
+        let ack = Ack::sign(namespace, 1, &shares[0], item.clone());
+
+        let restored: Ack<MinSig, sha256::Digest> = Ack::decode(ack.encode()).unwrap();
+        assert_eq!(ack, restored);
+    }
+
+    #[test]
+    fn test_activity_codec() {
+        let namespace = b"test";
+        let (_, shares) = generate_keys(4, 3);
+        let item = Item {
+            index: 100,
+            digest: sha256::hash(b"test_item"),
+        };
+
+        // Test Ack variant
+        let activity_ack = Activity::Ack(Ack::sign(namespace, 1, &shares[0], item.clone()));
+        let restored_ack: Activity<MinSig, sha256::Digest> =
+            Activity::decode(activity_ack.encode()).unwrap();
+        assert_eq!(activity_ack, restored_ack);
+
+        // Test Lock variant
+        let signature = ops::sign_message::<MinSig>(&shares[0].private, Some(b"test"), b"message");
+        let activity_lock = Activity::Lock(item, signature);
+        let restored_lock: Activity<MinSig, sha256::Digest> =
+            Activity::decode(activity_lock.encode()).unwrap();
+        assert_eq!(activity_lock, restored_lock);
+
+        // Test Tip variant
+        let activity_tip = Activity::Tip(123);
+        let restored_tip: Activity<MinSig, sha256::Digest> =
+            Activity::decode(activity_tip.encode()).unwrap();
+        assert_eq!(activity_tip, restored_tip);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
