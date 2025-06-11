@@ -19,9 +19,9 @@
 
 use commonware_utils::StableBuf;
 use prometheus_client::registry::Metric;
-use std::io::Error as IoError;
 use std::{
     future::Future,
+    io::Error as IoError,
     net::SocketAddr,
     time::{Duration, SystemTime},
 };
@@ -395,13 +395,18 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use commonware_macros::select;
-    use futures::channel::oneshot;
-    use futures::{channel::mpsc, future::ready, join, SinkExt, StreamExt};
+    use futures::{
+        channel::{mpsc, oneshot},
+        future::ready,
+        join, SinkExt, StreamExt,
+    };
     use prometheus_client::metrics::counter::Counter;
-    use std::collections::HashMap;
-    use std::panic::{catch_unwind, AssertUnwindSafe};
-    use std::str::FromStr;
-    use std::sync::Mutex;
+    use std::{
+        collections::HashMap,
+        panic::{catch_unwind, AssertUnwindSafe},
+        str::FromStr,
+        sync::Mutex,
+    };
     use tracing::{error, Level};
     use utils::reschedule;
 

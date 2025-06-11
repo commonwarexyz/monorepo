@@ -10,11 +10,13 @@ use futures::{
 };
 use io_uring::{opcode, types};
 use prometheus_client::registry::Registry;
-use std::fs::{self, File};
-use std::io::Error as IoError;
-use std::os::fd::AsRawFd;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::{
+    fs::{self, File},
+    io::Error as IoError,
+    os::fd::AsRawFd,
+    path::PathBuf,
+    sync::Arc,
+};
 
 #[derive(Clone, Debug)]
 /// Configuration for a [Storage].

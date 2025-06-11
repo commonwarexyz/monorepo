@@ -327,9 +327,8 @@ impl Display for Signature {
 /// https://csrc.nist.gov/projects/cryptographic-algorithm-validation-program/digital-signatures.
 #[cfg(test)]
 mod tests {
-    use crate::{Signer as _, Verifier as _};
-
     use super::*;
+    use crate::{Signer as _, Verifier as _};
     use bytes::Bytes;
     use commonware_codec::{DecodeExt, Encode};
 

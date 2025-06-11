@@ -56,17 +56,16 @@ mod handler;
 mod logger;
 
 use clap::{value_parser, Arg, Command};
-use commonware_cryptography::PrivateKeyExt as _;
-use commonware_cryptography::{ed25519, Signer as _};
+use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
 use commonware_p2p::authenticated::{self, Network};
-use commonware_runtime::tokio;
-use commonware_runtime::Metrics;
-use commonware_runtime::Runner as _;
+use commonware_runtime::{tokio, Metrics, Runner as _};
 use commonware_utils::NZU32;
 use governor::Quota;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    str::FromStr,
+    sync::{Arc, Mutex},
+};
 use tracing::info;
 
 /// Unique namespace to avoid message replay attacks.

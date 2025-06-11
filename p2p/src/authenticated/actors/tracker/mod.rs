@@ -3,9 +3,10 @@
 use crate::authenticated::config::Bootstrapper;
 use commonware_cryptography::Signer;
 use governor::Quota;
-use std::net::IpAddr;
-use std::net::SocketAddr;
-use std::time::Duration;
+use std::{
+    net::{IpAddr, SocketAddr},
+    time::Duration,
+};
 use thiserror::Error;
 
 mod actor;
