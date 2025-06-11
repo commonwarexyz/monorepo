@@ -9,7 +9,6 @@ use commonware_cryptography::PublicKey;
 /// The byte overhead is calculated as the sum of the following:
 /// - 5: Channel varint
 /// - 5: Message length varint (lengths longer than 32 bits are forbidden by the codec)
-// TODO danlaine: is this correct?
 pub const MAX_PAYLOAD_DATA_OVERHEAD: usize = 5 + 5;
 
 /// A signed message from a peer attesting to its own socket address and public key at a given time.
@@ -123,39 +122,24 @@ mod tests {
         assert!(matches!(too_long, Err(Error::InvalidLength(13))));
     }
 
-    // #[test]
-    // fn test_payload_codec() {
-    //     // Test Data
-    //     let original = Data {
-    //         channel: 12345,
-    //         message: Bytes::from("Hello, world!"),
-    //     };
-    //     let encoded = Payload::Data(original.clone()).encode();
-    //     let decoded = match Payload::decode_cfg(encoded, &()) {
-    //         Ok(Payload::Data(d)) => d,
-    //         _ => panic!(),
-    //     };
-    //     assert_eq!(original, decoded);
-    // }
+    #[test]
+    fn test_decode_invalid() {
+        let invalid_payload = [3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+        let result = Data::decode_cfg(&invalid_payload[..], &(..).into());
+        assert!(result.is_err());
+    }
 
-    // #[test]
-    // fn test_payload_decode_invalid_type() {
-    //     let invalid_payload = [3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
-    //     let result = Payload::decode_cfg(&invalid_payload[..], &());
-    //     assert!(result.is_err());
-    // }
-
-    // #[test]
-    // fn test_max_payload_data_overhead() {
-    //     let message = Bytes::from(vec![0; 1 << 29]);
-    //     let message_len = message.len();
-    //     let payload = Payload::Data(Data {
-    //         channel: u32::MAX,
-    //         message,
-    //     });
-    //     assert_eq!(
-    //         payload.encode_size(),
-    //         message_len + MAX_PAYLOAD_DATA_OVERHEAD
-    //     );
-    // }
+    #[test]
+    fn test_max_data_overhead() {
+        let message = Bytes::from(vec![0; 1 << 29]);
+        let message_len = message.len();
+        let payload = Data {
+            channel: u32::MAX,
+            message,
+        };
+        assert_eq!(
+            payload.encode_size(),
+            message_len + MAX_PAYLOAD_DATA_OVERHEAD
+        );
+    }
 }
