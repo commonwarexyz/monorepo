@@ -245,3 +245,119 @@ fn dec(entry: btree_map::Entry<'_, Index, usize>) {
         value.remove();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::{
+        ed25519::{PrivateKey, PublicKey},
+        PrivateKeyExt, Signer,
+    };
+
+    fn key(i: u64) -> PublicKey {
+        PrivateKey::from_seed(i).public_key()
+    }
+
+    #[test]
+    fn test_init() {
+        let mut safe_tip = SafeTip::<PublicKey>::default();
+        let validators = vec![key(1), key(2), key(3), key(4)];
+        safe_tip.init(&validators);
+
+        assert_eq!(safe_tip.tips.len(), 4);
+        assert_eq!(safe_tip.get(), 0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_init_empty() {
+        let mut safe_tip = SafeTip::<PublicKey>::default();
+        safe_tip.init(&vec![]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_init_not_unique() {
+        let mut safe_tip = SafeTip::<PublicKey>::default();
+        safe_tip.init(&vec![key(1), key(1), key(2), key(3)]);
+    }
+
+    #[test]
+    fn test_update_and_get() {
+        let mut safe_tip = SafeTip::<PublicKey>::default();
+        let validators = vec![key(1), key(2), key(3), key(4)];
+        safe_tip.init(&validators);
+
+        // Valid update
+        assert_eq!(safe_tip.update(key(1), 10), Some(0));
+        assert_eq!(safe_tip.get(), 0);
+
+        // Update with lower tip - no-op
+        assert_eq!(safe_tip.update(key(1), 5), None);
+        assert_eq!(safe_tip.get(), 0);
+
+        // Update with same tip - no-op
+        assert_eq!(safe_tip.update(key(1), 10), None);
+        assert_eq!(safe_tip.get(), 0);
+
+        // Update another validator
+        assert_eq!(safe_tip.update(key(2), 20), Some(0));
+        assert_eq!(safe_tip.get(), 10);
+
+        // Update another validator
+        assert_eq!(safe_tip.update(key(3), 30), Some(0));
+        assert_eq!(safe_tip.get(), 20);
+
+        // Update another validator
+        assert_eq!(safe_tip.update(key(4), 40), Some(0));
+        assert_eq!(safe_tip.get(), 30);
+
+        // Update for non-existent validator
+        assert_eq!(safe_tip.update(key(5), 50), None);
+    }
+
+    #[test]
+    fn test_reconcile() {
+        let mut safe_tip = SafeTip::<PublicKey>::default();
+        let old_validators = vec![key(1), key(2), key(3), key(4)];
+        safe_tip.init(&old_validators);
+
+        safe_tip.update(key(1), 10);
+        safe_tip.update(key(2), 20);
+        safe_tip.update(key(3), 30);
+        safe_tip.update(key(4), 40);
+
+        assert_eq!(safe_tip.get(), 30);
+
+        // Reconcile with a new set of validators
+        let new_validators = vec![key(3), key(4), key(5), key(6)];
+        safe_tip.reconcile(&new_validators);
+
+        assert_eq!(safe_tip.tips.len(), 4);
+        assert!(safe_tip.tips.contains_key(&key(3)));
+        assert!(safe_tip.tips.contains_key(&key(4)));
+        assert!(safe_tip.tips.contains_key(&key(5)));
+        assert!(safe_tip.tips.contains_key(&key(6)));
+        assert_eq!(*safe_tip.tips.get(&key(3)).unwrap(), 30);
+        assert_eq!(*safe_tip.tips.get(&key(4)).unwrap(), 40);
+        assert_eq!(*safe_tip.tips.get(&key(5)).unwrap(), 0);
+        assert_eq!(*safe_tip.tips.get(&key(6)).unwrap(), 0);
+        assert_eq!(safe_tip.get(), 30);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_reconcile_size_mismatch() {
+        let mut safe_tip = SafeTip::<PublicKey>::default();
+        safe_tip.init(&vec![key(1), key(2), key(3), key(4)]);
+        safe_tip.reconcile(&vec![key(1), key(2), key(3)]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_reconcile_not_unique() {
+        let mut safe_tip = SafeTip::<PublicKey>::default();
+        safe_tip.init(&vec![key(1), key(2), key(3), key(4)]);
+        safe_tip.reconcile(&vec![key(1), key(1), key(2), key(3)]);
+    }
+}

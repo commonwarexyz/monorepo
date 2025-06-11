@@ -38,3 +38,49 @@ impl<V: Variant, D: Digest> EncodeSize for PeerAck<V, D> {
         self.ack.encode_size() + UInt(self.tip).encode_size()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_codec::{DecodeExt, Encode};
+    use commonware_cryptography::{
+        bls12381::primitives::{
+            group,
+            poly::{self},
+            variant::MinSig,
+        },
+        sha256,
+    };
+
+    use crate::aggregation::types::Item;
+
+    fn generate_keys(n: u32, t: u32) -> (poly::Public<MinSig>, Vec<group::Share>) {
+        let private = poly::new_from(t - 1, &mut rand::thread_rng());
+        let public = poly::Public::<MinSig>::commit(private.clone());
+        let shares = (0..n)
+            .map(|i| {
+                let eval = private.evaluate(i);
+                group::Share {
+                    index: eval.index,
+                    private: eval.value,
+                }
+            })
+            .collect();
+        (public, shares)
+    }
+
+    #[test]
+    fn test_peer_ack_codec() {
+        let namespace = b"test";
+        let (_, shares) = generate_keys(4, 3);
+        let item = Item {
+            index: 100,
+            digest: sha256::hash(b"test_item"),
+        };
+        let ack = Ack::sign(namespace, 1, &shares[0], item.clone());
+        let peer_ack = PeerAck { ack, tip: 42 };
+
+        let restored: PeerAck<MinSig, sha256::Digest> = PeerAck::decode(peer_ack.encode()).unwrap();
+        assert_eq!(peer_ack, restored);
+    }
+}
