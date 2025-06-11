@@ -218,8 +218,8 @@ mod tests {
     use commonware_utils::NZU32;
     use governor::{clock::ReasonablyRealtime, Quota};
     use rand::{CryptoRng, Rng};
-    use std::collections::HashSet;
     use std::{
+        collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},
         time::Duration,
     };

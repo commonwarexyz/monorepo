@@ -1,6 +1,8 @@
 use commonware_utils::{hex, StableBuf};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, RwLock},
+};
 
 /// In-memory storage implementation for the commonware runtime.
 #[derive(Clone)]

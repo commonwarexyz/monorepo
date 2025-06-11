@@ -520,7 +520,6 @@ mod tests {
         iterator::leaf_num_to_pos,
         tests::{build_and_check_test_roots_mmr, build_batched_and_check_test_roots, ROOTS},
     };
-
     use commonware_cryptography::Sha256;
     use commonware_runtime::{deterministic, Runner};
     use commonware_utils::hex;

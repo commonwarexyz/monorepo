@@ -58,8 +58,7 @@ use commonware_runtime::{
 use commonware_utils::hex;
 use futures::stream::{self, Stream, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use std::collections::BTreeMap;
-use std::marker::PhantomData;
+use std::{collections::BTreeMap, marker::PhantomData};
 use tracing::{debug, trace, warn};
 
 /// Configuration for `Journal` storage.

@@ -17,8 +17,11 @@ use commonware_runtime::{tokio, Metrics, Network, Runner};
 use commonware_stream::public_key::{self, Connection};
 use commonware_utils::{from_hex, quorum, union, NZU32};
 use governor::Quota;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::{str::FromStr, time::Duration};
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    str::FromStr,
+    time::Duration,
+};
 
 fn main() {
     // Parse arguments

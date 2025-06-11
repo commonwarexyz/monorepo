@@ -54,8 +54,11 @@ use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{tokio, Metrics, Runner};
 use commonware_utils::{union, NZU32};
 use governor::Quota;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::{str::FromStr, time::Duration};
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    str::FromStr,
+    time::Duration,
+};
 
 /// Unique namespace to avoid message replay attacks.
 const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_LOG";

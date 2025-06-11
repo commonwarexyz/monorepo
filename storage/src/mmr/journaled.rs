@@ -4,13 +4,15 @@
 //! used to preserve digests required for root and proof generation that would have otherwise been
 //! pruned.
 
-use crate::journal::{
-    fixed::{Config as JConfig, Journal},
-    Error as JError,
-};
-use crate::metadata::{Config as MConfig, Metadata};
-use crate::mmr::{
-    iterator::PeakIterator, mem::Mmr as MemMmr, verification::Proof, Builder, Error, Hasher,
+use crate::{
+    journal::{
+        fixed::{Config as JConfig, Journal},
+        Error as JError,
+    },
+    metadata::{Config as MConfig, Metadata},
+    mmr::{
+        iterator::PeakIterator, mem::Mmr as MemMmr, verification::Proof, Builder, Error, Hasher,
+    },
 };
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Hasher as CHasher;
