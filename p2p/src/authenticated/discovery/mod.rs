@@ -99,7 +99,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_p2p::{authenticated::{self, Network}, Sender, Recipients};
+//! use commonware_p2p::{authenticated::discovery::{self, Network}, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, PrivateKeyExt as _};
 //! use commonware_runtime::{tokio, Spawner, Runner, Metrics};
 //! use commonware_utils::NZU32;
@@ -137,7 +137,7 @@
 //! //
 //! // In production, use a more conservative configuration like `Config::recommended`.
 //! const MAX_MESSAGE_SIZE: usize = 1_024; // 1KB
-//! let p2p_cfg = authenticated::Config::aggressive(
+//! let p2p_cfg = discovery::Config::aggressive(
 //!     signer.clone(),
 //!     application_namespace,
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 3000),

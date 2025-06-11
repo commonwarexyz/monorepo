@@ -38,7 +38,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_p2p::{authenticated::{self, Network}, Sender, Recipients};
+//! use commonware_p2p::{authenticated::lookup::{self, Network}, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, PrivateKeyExt as _};
 //! use commonware_runtime::{tokio, Spawner, Runner, Metrics};
 //! use commonware_utils::NZU32;
@@ -76,7 +76,7 @@
 //! //
 //! // In production, use a more conservative configuration like `Config::recommended`.
 //! const MAX_MESSAGE_SIZE: usize = 1_024; // 1KB
-//! let p2p_cfg = authenticated::Config::aggressive(
+//! let p2p_cfg = lookup::Config::aggressive(
 //!     signer.clone(),
 //!     application_namespace,
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 3000),
@@ -94,7 +94,7 @@
 //!     //
 //!     // In production, this would be updated as new peer sets are created (like when
 //!     // the composition of a validator set changes).
-//!     oracle.register(0, vec![signer.public_key(), peer1, peer2, peer3]).await;
+//!     oracle.register(0, vec![signer.public_key(), peer1, peer2.clone(), peer3.clone()]).await;
 //!
 //!     // Register some channel
 //!     const MAX_MESSAGE_BACKLOG: usize = 128;

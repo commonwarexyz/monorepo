@@ -206,6 +206,10 @@ mod tests {
         SocketAddr::from(([127, 0, 0, 1], 8080))
     }
 
+    fn test_socket2() -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], 8081))
+    }
+
     #[test]
     fn test_unknown_initial_state() {
         let record = Record::unknown();
@@ -279,6 +283,18 @@ mod tests {
         let mut record = Record::myself(socket);
         record.block();
         assert!(!record.blocked(), "Can't block myself");
+    }
+
+    #[test]
+    /// Test that update_address doesn't change the address if it is Myself.
+    fn test_update_address_myself() {
+        let socket = test_socket();
+        let mut record = Record::myself(socket);
+
+        let socket2 = test_socket2();
+        record.update_address(socket2);
+        assert!(matches!(&record.address, Address::Myself(s) if *s == socket));
+        assert_eq!(record.socket(), Some(socket));
     }
 
     #[test]
