@@ -11,13 +11,13 @@ A fuzz target can then be run with:
 ```bash
 # Run with empty starting corpus and default libfuzzer options
 $ cd codec/fuzz
-$ cargo +nightly fuzz run codec
+$ cargo +nightly fuzz run roundtrip
 
 # Run 25 workers with a custom timeout, max input len and pre-specified corpus
-$ nohup cargo +nightly fuzz run codec corpus/codec/ -j 25 -a -- -max_len=5000 -timeout=1 -workers=25 & 
+$ nohup cargo +nightly fuzz run roundtrip corpus/roundtrip/ -j 25 -a -- -max_len=5000 -timeout=1 -workers=25 & 
 
 # Print available fuzzer options
-$ cargo +nightly fuzz run codec --help 
+$ cargo +nightly fuzz run roundtrip --help 
 ```
 
 ### Coverage
@@ -34,15 +34,15 @@ The coverage report can then be generated with:
 
 ```bash
 # Run the fuzzer with the given corpus to generate coverage data
-$ cargo +nightly fuzz coverage codec corpus/codec/ 
+$ cargo +nightly fuzz coverage roundtrip corpus/roundtrip/ 
 
 # Generate a text version output of the coverage data
-$ llvm-cov show ../target/<ARCH>/coverage/<ARCH>/release/codec -instr-profile=coverage/codec/coverage.profdata > coverage.txt 
-$ llvm-cov show ../target/x86_64-unknown-linux-gnu/coverage/x86_64-unknown-linux-gnu/release/codec -instr-profile=coverage/codec/coverage.profdata > coverage.txt # Example on Ubuntu
+$ llvm-cov show -instr-profile=coverage/<BIN>/coverage.profdata target/<ARCH>/coverage/<ARCH>/release/<BIN> > coverage.txt 
+$ llvm-cov show -instr-profile=coverage/roundtrip/coverage.profdata target/x86_64-unknown-linux-gnu/coverage/x86_64-unknown-linux-gnu/release/roundtrip > coverage.txt # Codec roundtrip bin example on ubuntu
 
 # Prints a CLI readable coverage report
-$ llvm-cov report -instr-profile=coverage/codec/coverage.profdata ../target/<ARCH>/coverage/<ARCH>/release/codec 
-$ llvm-cov report -instr-profile=coverage/codec/coverage.profdata ../target/x86_64-unknown-linux-gnu/coverage/x86_64-unknown-linux-gnu/release/codec # Example on Ubuntu
+$ llvm-cov report -instr-profile=coverage/<BIN>/coverage.profdata ../target/<ARCH>/coverage/<ARCH>/release/<BIN> 
+$ llvm-cov report -instr-profile=coverage/roundtrip/coverage.profdata target/x86_64-unknown-linux-gnu/coverage/x86_64-unknown-linux-gnu/release/roundtrip # Codec roundtrip bin example on ubuntu
 ```
 
 For more information on the available report outputs see:
@@ -55,6 +55,6 @@ For more information on the available report outputs see:
 The following commands are exposed directly by `cargo-fuzz`:
 
 ```bash
-$ cargo +nightly fuzz cmin codec corpus/codec/ # Minimize the corpus discovered so far in `corpus/codec`
+$ cargo +nightly fuzz cmin roundtrip corpus/roundtrip/ # Minimize the corpus discovered so far in `corpus/roundtrip`
 $ cargo +nightly fuzz tmin mycrashfile # Attempt to minimize a specific crash case called `mycrashfile` for debugging root causes
 ```

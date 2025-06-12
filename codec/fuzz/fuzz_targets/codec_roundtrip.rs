@@ -4,9 +4,7 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use bytes::Bytes;
-use commonware_codec::{
-    Decode, DecodeExt, DecodeRangeExt, Encode, EncodeSize, Error, RangeCfg, Read, Write,
-};
+use commonware_codec::{Decode, DecodeExt, Encode, EncodeSize, Error, RangeCfg, Read, Write};
 use std::net::SocketAddr;
 use std::{collections::HashMap, hash::Hash};
 
@@ -48,7 +46,7 @@ fn roundtrip_bytes(input_data_bytes: Bytes) {
 
     // Decode with full length
     let decoded_bytes = Bytes::decode_cfg(encoded_bytes, &(input_len..=input_len).into())
-        .expect("Decoding failed when it should have succeeded!!");
+        .expect("Failed to decode bytes!");
 
     // Check matching
     assert_eq!(input_data_bytes, decoded_bytes);
@@ -60,6 +58,7 @@ where
     T: Encode + Decode + PartialEq + DecodeExt<X> + std::fmt::Debug,
 {
     let encoded = v.encode();
+    assert_eq!(v.encode_size(), encoded.len());
     let decoded = T::decode(&mut &*encoded).expect("Failed to decode primitive!");
     assert_eq!(v, decoded);
 }
@@ -98,6 +97,7 @@ where
         Read<Cfg = (RangeCfg, (K::Cfg, V::Cfg))> + std::fmt::Debug + PartialEq + Write + EncodeSize,
 {
     let encoded = map.encode();
+    assert_eq!(encoded.len(), map.encode_size());
     let config_tuple = (range_cfg, (k_cfg, v_cfg));
     // TODO could also assert encoded size here with type info
     let decoded =
@@ -105,15 +105,29 @@ where
     assert_eq!(map, &decoded);
 }
 
-fn roundtrip_vec<T, X>(vec: Vec<T>)
+fn roundtrip_vec<T>(vec: Vec<T>)
 where
-    X: std::default::Default,
-    T: Encode + Decode + PartialEq + DecodeExt<X> + std::fmt::Debug,
+    T: Encode + Decode + PartialEq + DecodeExt<()> + std::fmt::Debug,
 {
     let input_len = vec.len();
-    let encoded = vec.encode();
-    let decoded =
-        Vec::<T>::decode_range(encoded, input_len..=input_len).expect("Failed to decode Vec<T>!");
+    let encoded_vec = vec.encode();
+    assert_eq!(encoded_vec.len(), vec.encode_size());
+
+    // Decode with too long length
+    assert!(matches!(
+        Vec::<T>::decode_cfg(encoded_vec.clone(), &((0..input_len).into(), ())),
+        Err(Error::InvalidLength(_))
+    ));
+
+    // Decode with too short length
+    assert!(matches!(
+        Vec::<T>::decode_cfg(encoded_vec.clone(), &((input_len + 1..).into(), ())),
+        Err(Error::InvalidLength(_))
+    ));
+
+    let decoded = Vec::<T>::decode_cfg(encoded_vec, &((input_len..=input_len).into(), ()))
+        .expect("Failed to decode Vec<T>!");
+
     assert_eq!(vec, decoded);
 }
 

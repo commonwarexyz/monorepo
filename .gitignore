@@ -3,3 +3,7 @@
 target
 *.vscode
 examples/flood/assets
+*/fuzz/artifacts
+*/fuzz/corpus
+*/fuzz/coverage
+*/fuzz/target
