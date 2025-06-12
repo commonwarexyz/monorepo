@@ -29,7 +29,7 @@ use tracing::{debug, warn};
 
 /// Configuration for a [Current] authenticated db.
 #[derive(Clone)]
-pub struct Config {
+pub struct Config<T: Translator> {
     /// The name of the [RStorage] partition used for the MMR's backing journal.
     pub mmr_journal_partition: String,
 
@@ -53,6 +53,12 @@ pub struct Config {
 
     /// The name of the [RStorage] partition used for the bitmap metadata.
     pub bitmap_metadata_partition: String,
+
+    /// The translator used by the compressed index.
+    pub translator: T,
+
+    /// An optional thread pool to use for parallelizing batch operations.
+    pub pool: Option<ThreadPool>,
 }
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of whether
@@ -121,12 +127,7 @@ impl<
 
     /// Initializes a [Current] authenticated database from the given `config`. Leverages parallel
     /// Merkleization to initialize the bitmap MMR if a thread pool is provided.
-    pub async fn init(
-        context: E,
-        config: Config,
-        translator: T,
-        pool: Option<ThreadPool>,
-    ) -> Result<Self, Error> {
+    pub async fn init(context: E, config: Config<T>) -> Result<Self, Error> {
         // Initialize the MMR journal and metadata.
         let cfg = AConfig {
             mmr_journal_partition: config.mmr_journal_partition,
@@ -136,10 +137,12 @@ impl<
             log_journal_partition: config.log_journal_partition,
             log_items_per_blob: config.log_items_per_blob,
             log_write_buffer: config.log_write_buffer,
+            translator: config.translator.clone(),
+            pool: config.pool,
         };
 
         let context = context.with_label("adb::current");
-        let cloned_pool = pool.clone();
+        let cloned_pool = cfg.pool.clone();
         let mut status = Bitmap::restore_pruned(
             context.with_label("bitmap"),
             &config.bitmap_metadata_partition,
@@ -150,7 +153,7 @@ impl<
         // Initialize the db's mmr/log.
         let mut hasher = Standard::<H>::new();
         let (mut mmr, log) =
-            Any::<_, _, _, _, T>::init_mmr_and_log(context.clone(), &mut hasher, cfg, pool).await?;
+            Any::<_, _, _, _, T>::init_mmr_and_log(context.clone(), &mut hasher, cfg).await?;
 
         // Ensure consistency between the bitmap and the db's MMR.
         let mmr_pruned_pos = mmr.pruned_to_pos();
@@ -191,7 +194,7 @@ impl<
         }
 
         // Replay the log to generate the snapshot & populate the retained portion of the bitmap.
-        let mut snapshot = Index::init(context.with_label("snapshot"), translator);
+        let mut snapshot = Index::init(context.with_label("snapshot"), config.translator);
         let inactivity_floor_loc =
             Any::build_snapshot_from_log(start_leaf_num, &log, &mut snapshot, Some(&mut status))
                 .await
@@ -750,7 +753,7 @@ pub mod test {
     use commonware_runtime::{deterministic, Runner as _};
     use rand::{rngs::StdRng, RngCore, SeedableRng};
 
-    fn current_db_config(partition_prefix: &str) -> Config {
+    fn current_db_config(partition_prefix: &str) -> Config<TwoCap> {
         Config {
             mmr_journal_partition: format!("{}_journal_partition", partition_prefix),
             mmr_metadata_partition: format!("{}_metadata_partition", partition_prefix),
@@ -760,6 +763,8 @@ pub mod test {
             log_items_per_blob: 7,
             log_write_buffer: 1024,
             bitmap_metadata_partition: format!("{}_bitmap_metadata_partition", partition_prefix),
+            translator: TwoCap,
+            pool: None,
         }
     }
 
@@ -771,8 +776,6 @@ pub mod test {
         Current::<E, Digest, Digest, Sha256, TwoCap, 32>::init(
             context,
             current_db_config(partition_prefix),
-            TwoCap,
-            None,
         )
         .await
         .unwrap()

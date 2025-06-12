@@ -3,7 +3,10 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Config,
 };
-use commonware_storage::mmr::{hasher::Standard, mem::Mmr};
+use commonware_storage::mmr::{
+    hasher::Standard,
+    mem::{Config as MemConfig, Mmr},
+};
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{collections::HashMap, time::Instant};
@@ -47,7 +50,12 @@ fn bench_update(c: &mut Criterion) {
                                     let pool =
                                         commonware_runtime::create_pool(ctx.clone(), THREADS)
                                             .unwrap();
-                                    Mmr::<Sha256>::init(vec![], 0, vec![], Some(pool))
+                                    Mmr::<Sha256>::init(MemConfig {
+                                        nodes: vec![],
+                                        pruned_to_pos: 0,
+                                        pinned_nodes: vec![],
+                                        pool: Some(pool),
+                                    })
                                 }
                                 _ => Mmr::<Sha256>::new(),
                             };

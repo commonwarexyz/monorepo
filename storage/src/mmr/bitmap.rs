@@ -12,7 +12,14 @@
 
 use crate::{
     metadata::{Config as MConfig, Metadata},
-    mmr::{iterator::leaf_num_to_pos, mem::Mmr, verification::Proof, Error, Error::*, Hasher},
+    mmr::{
+        iterator::leaf_num_to_pos,
+        mem::{Config as MemConfig, Mmr},
+        verification::Proof,
+        Error,
+        Error::*,
+        Hasher,
+    },
 };
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Hasher as CHasher;
@@ -162,7 +169,12 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 
         metadata.close().await?;
 
-        let mmr = Mmr::init(Vec::new(), mmr_size, pinned_nodes, pool);
+        let mmr = Mmr::init(MemConfig {
+            nodes: Vec::new(),
+            pruned_to_pos: mmr_size,
+            pinned_nodes,
+            pool,
+        });
 
         Ok(Self {
             bitmap: VecDeque::from([[0u8; N]]),

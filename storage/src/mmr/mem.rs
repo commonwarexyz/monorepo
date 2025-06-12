@@ -20,6 +20,13 @@ use commonware_runtime::ThreadPool;
 use rayon::{prelude::*, ThreadPool as RThreadPool};
 use std::collections::{HashMap, HashSet, VecDeque};
 
+pub struct Config<H: CHasher> {
+    pub nodes: Vec<H::Digest>,
+    pub pruned_to_pos: u64,
+    pub pinned_nodes: Vec<H::Digest>,
+    pub pool: Option<ThreadPool>,
+}
+
 /// Implementation of `Mmr`.
 ///
 /// # Max Capacity
@@ -89,28 +96,22 @@ impl<H: CHasher> Mmr<H> {
         H::new().finalize()
     }
 
-    /// Return an [Mmr] initialized with the given nodes, oldest retained position, and digests of
-    /// pinned nodes.
-    pub fn init(
-        nodes: Vec<H::Digest>,
-        pruned_to_pos: u64,
-        pinned_nodes: Vec<H::Digest>,
-        pool: Option<ThreadPool>,
-    ) -> Self {
+    /// Return an [Mmr] initialized with the given `config`.
+    pub fn init(config: Config<H>) -> Self {
         let mut mmr = Self {
-            nodes: VecDeque::from(nodes),
-            pruned_to_pos,
+            nodes: VecDeque::from(config.nodes),
+            pruned_to_pos: config.pruned_to_pos,
             pinned_nodes: HashMap::new(),
             dirty_nodes: HashSet::new(),
             dirty_digest: Self::dirty_digest(),
-            pool,
+            pool: config.pool,
         };
         if mmr.size() == 0 {
             return mmr;
         }
 
-        for (i, pos) in Proof::<H>::nodes_to_pin(pruned_to_pos).enumerate() {
-            mmr.pinned_nodes.insert(pos, pinned_nodes[i]);
+        for (i, pos) in Proof::<H>::nodes_to_pin(config.pruned_to_pos).enumerate() {
+            mmr.pinned_nodes.insert(pos, config.pinned_nodes[i]);
         }
 
         mmr
@@ -649,7 +650,12 @@ impl<H: CHasher> Mmr<H> {
         // Create the "old_nodes" of the MMR in the fully pruned state.
         let old_nodes = self.node_digests_to_pin(self.size());
 
-        Self::init(vec![], self.size(), old_nodes, None)
+        Self::init(Config {
+            nodes: vec![],
+            pruned_to_pos: self.size(),
+            pinned_nodes: old_nodes,
+            pool: None,
+        })
     }
 }
 
@@ -802,12 +808,12 @@ mod tests {
             // Test that we can initialize a new MMR from another's elements.
             let oldest_pos = mmr.oldest_retained_pos().unwrap();
             let digests = mmr.node_digests_to_pin(oldest_pos);
-            let mmr_copy = Mmr::init(
-                mmr.nodes.iter().copied().collect(),
-                oldest_pos,
-                digests,
-                None,
-            );
+            let mmr_copy = Mmr::init(Config {
+                nodes: mmr.nodes.iter().copied().collect(),
+                pruned_to_pos: oldest_pos,
+                pinned_nodes: digests,
+                pool: None,
+            });
             assert_eq!(mmr_copy.size(), 19);
             assert_eq!(mmr_copy.oldest_retained_pos(), mmr.oldest_retained_pos());
             assert_eq!(mmr_copy.root(&mut hasher), root);
@@ -891,7 +897,12 @@ mod tests {
         executor.start(|context| async move {
             let pool = commonware_runtime::create_pool(context, 4).unwrap();
 
-            let mut mmr = Mmr::init(vec![], 0, vec![], Some(pool));
+            let mut mmr = Mmr::init(Config {
+                nodes: vec![],
+                pruned_to_pos: 0,
+                pinned_nodes: vec![],
+                pool: Some(pool),
+            });
             build_batched_and_check_test_roots(&mut mmr).await;
         });
     }
@@ -1056,7 +1067,12 @@ mod tests {
         let executor = tokio::Runner::default();
         executor.start(|ctx| async move {
             let pool = create_pool(ctx, 4).unwrap();
-            let mut mmr = Mmr::init(Vec::new(), 0, Vec::new(), Some(pool));
+            let mut mmr = Mmr::init(Config {
+                nodes: Vec::new(),
+                pruned_to_pos: 0,
+                pinned_nodes: Vec::new(),
+                pool: Some(pool),
+            });
             let leaves = compute_big_mmr(&mut hasher, &mut mmr);
             do_batch_update(&mut hasher, &mut mmr, &leaves);
         });
