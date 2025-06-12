@@ -391,7 +391,7 @@ impl<H: CHasher> Mmr<H> {
             let digests: Vec<(u64, H::Digest)> = updates
                 .par_iter()
                 .map_init(
-                    || hasher.clone(),
+                    || hasher.duplicate(),
                     |hasher, (pos, elem)| {
                         let digest = hasher.leaf_digest(*pos, elem.as_ref());
                         (*pos, digest)
@@ -506,7 +506,7 @@ impl<H: CHasher> Mmr<H> {
             let computed_digests: Vec<(usize, H::Digest)> = same_height
                 .par_iter()
                 .map_init(
-                    || hasher.clone(),
+                    || hasher.duplicate(),
                     |hasher, &pos| {
                         let left = pos - two_h;
                         let right = pos - 1;
