@@ -117,7 +117,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         let mut hasher = Standard::<H>::new();
         let (mmr, log) = Self::init_mmr_and_log(
             context,
-            &mut hasher,
             Config {
                 mmr_journal_partition: cfg.mmr_journal_partition,
                 mmr_metadata_partition: cfg.mmr_metadata_partition,
@@ -129,6 +128,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 translator: cfg.translator,
                 pool: cfg.pool,
             },
+            &mut hasher,
         )
         .await?;
 
@@ -158,8 +158,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// db will be as of the last committed operation.
     pub(super) async fn init_mmr_and_log(
         context: E,
-        hasher: &mut Standard<H>,
         cfg: Config<T>,
+        hasher: &mut Standard<H>,
     ) -> Result<(Mmr<E, H>, Journal<E, Operation<K, V>>), Error> {
         let mut mmr = Mmr::init(
             context.with_label("mmr"),
@@ -1239,8 +1239,8 @@ mod test {
             let cfg = any_db_config("partition", TwoCap);
             let (mmr, log) = Any::<_, Digest, Digest, _, TwoCap>::init_mmr_and_log(
                 context.clone(),
-                &mut hasher,
                 cfg,
+                &mut hasher,
             )
             .await
             .unwrap();

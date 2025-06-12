@@ -32,8 +32,10 @@ pub trait Hasher<H: CHasher>: Send + Sync {
     /// Access the inner [CHasher] hasher.
     fn inner(&mut self) -> &mut H;
 
-    /// Duplicate the hasher to provide equivalent functionality in another thread.
-    fn duplicate(&self) -> impl Hasher<H>;
+    /// Fork the hasher to provide equivalent functionality in another thread. This is different
+    /// than [Clone::clone] because the forked hasher need not be a deep copy, and may share non-mutable
+    /// state with the hasher from which it was forked.
+    fn fork(&self) -> impl Hasher<H>;
 }
 
 /// The standard hasher to use with an MMR for computing leaf, node and root digests. Leverages no
@@ -76,7 +78,7 @@ impl<H: CHasher> Hasher<H> for Standard<H> {
         &mut self.hasher
     }
 
-    fn duplicate(&self) -> impl Hasher<H> {
+    fn fork(&self) -> impl Hasher<H> {
         Standard { hasher: H::new() }
     }
 
@@ -230,8 +232,9 @@ impl<'a, H: CHasher> Grafting<'a, H> {
     }
 }
 
-/// A lightweight, short-lived duplicate of a Grafting hasher that can be used in parallel computations.
-pub struct GraftingDuplicate<'a, H: CHasher> {
+/// A lightweight, short-lived shallow copy of a Grafting hasher that can be used in parallel
+/// computations.
+pub struct GraftingFork<'a, H: CHasher> {
     hasher: Standard<H>,
     height: u32,
     grafted_digests: &'a HashMap<u64, H::Digest>,
@@ -326,8 +329,8 @@ impl<H: CHasher> Hasher<H> for Grafting<'_, H> {
         self.hasher.finalize()
     }
 
-    fn duplicate(&self) -> impl Hasher<H> {
-        GraftingDuplicate {
+    fn fork(&self) -> impl Hasher<H> {
+        GraftingFork {
             hasher: Standard::new(),
             height: self.height,
             grafted_digests: &self.grafted_digests,
@@ -362,7 +365,7 @@ impl<H: CHasher> Hasher<H> for Grafting<'_, H> {
     }
 }
 
-impl<H: CHasher> Hasher<H> for GraftingDuplicate<'_, H> {
+impl<H: CHasher> Hasher<H> for GraftingFork<'_, H> {
     fn leaf_digest(&mut self, pos: u64, element: &[u8]) -> H::Digest {
         let grafted_digest = self.grafted_digests.get(&pos);
         let Some(grafted_digest) = grafted_digest else {
@@ -377,8 +380,8 @@ impl<H: CHasher> Hasher<H> for GraftingDuplicate<'_, H> {
         self.hasher.finalize()
     }
 
-    fn duplicate(&self) -> impl Hasher<H> {
-        GraftingDuplicate {
+    fn fork(&self) -> impl Hasher<H> {
+        GraftingFork {
             hasher: Standard::new(),
             height: self.height,
             grafted_digests: self.grafted_digests,
@@ -445,7 +448,7 @@ impl<H: CHasher> Hasher<H> for GraftingVerifier<'_, H> {
         self.hasher.leaf_digest(pos, element)
     }
 
-    fn duplicate(&self) -> impl Hasher<H> {
+    fn fork(&self) -> impl Hasher<H> {
         GraftingVerifier {
             hasher: Standard::new(),
             height: self.height,

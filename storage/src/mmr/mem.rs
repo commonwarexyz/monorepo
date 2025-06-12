@@ -21,9 +21,17 @@ use rayon::prelude::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 pub struct Config<H: CHasher> {
+    /// The retained nodes of the MMR.
     pub nodes: Vec<H::Digest>,
+
+    /// The highest position for which this MMR has been pruned, or 0 if this MMR has never been
+    /// pruned.
     pub pruned_to_pos: u64,
+
+    /// The pinned nodes of the MMR, in the order expected by [Proof::nodes_to_pin].
     pub pinned_nodes: Vec<H::Digest>,
+
+    /// Optional thread pool to use for parallelizing batch updates.
     pub pool: Option<ThreadPool>,
 }
 
@@ -394,7 +402,7 @@ impl<H: CHasher> Mmr<H> {
             let digests: Vec<(u64, H::Digest)> = updates
                 .par_iter()
                 .map_init(
-                    || hasher.duplicate(),
+                    || hasher.fork(),
                     |hasher, (pos, elem)| {
                         let digest = hasher.leaf_digest(*pos, elem.as_ref());
                         (*pos, digest)
@@ -511,7 +519,7 @@ impl<H: CHasher> Mmr<H> {
             let computed_digests: Vec<(usize, H::Digest)> = same_height
                 .par_iter()
                 .map_init(
-                    || hasher.duplicate(),
+                    || hasher.fork(),
                     |hasher, &pos| {
                         let left = pos - two_h;
                         let right = pos - 1;
