@@ -17,7 +17,7 @@ use crate::mmr::{
 };
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::ThreadPool;
-use rayon::{prelude::*, ThreadPool as RThreadPool};
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 pub struct Config<H: CHasher> {
@@ -335,8 +335,7 @@ impl<H: CHasher> Mmr<H> {
         updates: &[(u64, T)],
     ) {
         if updates.len() >= MIN_TO_PARALLELIZE && self.pool.is_some() {
-            let rayon_pool = self.pool.as_ref().unwrap().clone();
-            self.update_leaf_parallel(hasher, &rayon_pool, updates);
+            self.update_leaf_parallel(hasher, updates);
             return;
         }
 
@@ -381,12 +380,16 @@ impl<H: CHasher> Mmr<H> {
     }
 
     /// Batch update the digests of multiple retained leaves using multiple threads.
+    ///
+    /// # Warning
+    ///
+    /// Assumes `self.pool` is non-None and panics otherwise.
     fn update_leaf_parallel<T: AsRef<[u8]> + Sync>(
         &mut self,
         hasher: &mut impl Hasher<H>,
-        pool: &RThreadPool,
         updates: &[(u64, T)],
     ) {
+        let pool = self.pool.as_ref().unwrap().clone();
         pool.install(|| {
             let digests: Vec<(u64, H::Digest)> = updates
                 .par_iter()
@@ -418,8 +421,7 @@ impl<H: CHasher> Mmr<H> {
             return;
         }
         if self.dirty_nodes.len() >= MIN_TO_PARALLELIZE && self.pool.is_some() {
-            let rayon_pool = self.pool.as_ref().unwrap().clone();
-            self.sync_parallel(hasher, &rayon_pool, MIN_TO_PARALLELIZE);
+            self.sync_parallel(hasher, MIN_TO_PARALLELIZE);
             return;
         }
 
@@ -451,12 +453,11 @@ impl<H: CHasher> Mmr<H> {
     /// starting from the bottom and working up to the peaks. If ever the number of remaining digest
     /// computations is less than the `min_to_parallelize`, it switches to the serial
     /// implementation.
-    fn sync_parallel(
-        &mut self,
-        hasher: &mut impl Hasher<H>,
-        pool: &RThreadPool,
-        min_to_parallelize: usize,
-    ) {
+    ///
+    /// # Warning
+    ///
+    /// Assumes `self.pool` is non-None and panics otherwise.
+    fn sync_parallel(&mut self, hasher: &mut impl Hasher<H>, min_to_parallelize: usize) {
         let mut nodes: Vec<(u64, u32)> = self.dirty_nodes.iter().copied().collect();
         self.dirty_nodes.clear();
         // Sort by increasing height.
@@ -474,7 +475,7 @@ impl<H: CHasher> Mmr<H> {
                 self.sync_serial(hasher);
                 return;
             }
-            self.update_node_digests(hasher, pool, &same_height, current_height);
+            self.update_node_digests(hasher, &same_height, current_height);
             same_height.clear();
             current_height += 1;
             same_height.push(*pos);
@@ -489,19 +490,23 @@ impl<H: CHasher> Mmr<H> {
             return;
         }
 
-        self.update_node_digests(hasher, pool, &same_height, current_height);
+        self.update_node_digests(hasher, &same_height, current_height);
     }
 
     /// Update digests of the given set of nodes of equal height in the MMR. Since they are all at
     /// the same height, this can be done in parallel without synchronization.
+    ///
+    /// # Warning
+    ///
+    /// Assumes `self.pool` is non-None and panics otherwise.
     fn update_node_digests(
         &mut self,
         hasher: &mut impl Hasher<H>,
-        pool: &RThreadPool,
         same_height: &[u64],
         height: u32,
     ) {
         let two_h = 1 << height;
+        let pool = self.pool.as_ref().unwrap().clone();
         pool.install(|| {
             let computed_digests: Vec<(usize, H::Digest)> = same_height
                 .par_iter()
