@@ -303,11 +303,11 @@ pub struct Sender<Si: Sink> {
 impl<Si: Sink> crate::Sender for Sender<Si> {
     async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
         // Encrypt data
+        let nonce = self.nonce.next()?;
         let msg = self
             .cipher
-            .encrypt(&self.nonce.encode(), msg.as_ref())
+            .encrypt(&nonce, msg.as_ref())
             .map_err(|_| Error::EncryptionFailed)?;
-        self.nonce.inc()?;
 
         // Send data
         send_frame(
@@ -337,15 +337,8 @@ impl<St: Stream> crate::Receiver for Receiver<St> {
         )
         .await?;
 
-        // Encode the nonce before incrementing to get the proper value
-        let nonce = self.nonce.encode();
-
-        // Increment nonce before decrypting so that even if decryption fails, the nonce is still
-        // incremented. Typically, a user of this receiver would want to terminate the connection
-        // anyway on decryption failure, but we do it here in case they don't.
-        self.nonce.inc()?;
-
         // Decrypt data
+        let nonce = self.nonce.next()?;
         self.cipher
             .decrypt(&nonce, msg.as_ref())
             .map(Bytes::from)
@@ -402,7 +395,7 @@ mod tests {
             };
 
             // Store initial nonce encoded value
-            let initial_encoded = receiver.nonce.encode();
+            let initial_encoded = receiver.nonce.encode().unwrap();
 
             // Send invalid ciphertext
             send_frame(&mut sink, b"invalid data", receiver.max_message_size)
@@ -415,7 +408,7 @@ mod tests {
 
             // Verify nonce was incremented despite decryption failure
             // The encoded nonce should be different from the initial value
-            let final_encoded = receiver.nonce.encode();
+            let final_encoded = receiver.nonce.encode().unwrap();
             assert_ne!(initial_encoded, final_encoded);
         });
     }
