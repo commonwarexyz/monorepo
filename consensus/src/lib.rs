@@ -125,7 +125,7 @@ cfg_if::cfg_if! {
         ///
         /// ## Synchronization
         ///
-        /// The same considerations for [`Supervisor`](crate::Supervisor) apply here.
+        /// The same considerations for [Supervisor](crate::Supervisor) apply here.
         pub trait ThresholdSupervisor: Supervisor {
             /// Identity is the type against which threshold signatures are verified.
             type Identity;
@@ -163,7 +163,7 @@ cfg_if::cfg_if! {
         /// Monitor is used to implement mechanisms that share the same set of active participants as consensus and/or
         /// perform some activity that requires some synchronization with the progress of consensus.
         ///
-        /// Monitor can be implemented using [`Reporter`](crate::Reporter) to avoid introducing complexity
+        /// Monitor can be implemented using [Reporter](crate::Reporter) to avoid introducing complexity
         /// into any particular consensus implementation.
         pub trait Monitor: Clone + Send + 'static {
             /// Index is the type used to indicate the in-progress consensus decision.

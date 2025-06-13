@@ -31,15 +31,15 @@ pub enum Address<C: PublicKey> {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Status {
     /// Initial state. The peer is not yet connected.
-    /// Will be upgraded to [`Status::Reserved`] when a reservation is made.
+    /// Will be upgraded to [Status::Reserved] when a reservation is made.
     Inert,
 
     /// The peer connection is reserved by an actor that is attempting to establish a connection.
-    /// Will either be upgraded to [`Status::Active`] or downgraded to [`Status::Inert`].
+    /// Will either be upgraded to [Status::Active] or downgraded to [Status::Inert].
     Reserved,
 
     /// The peer is connected.
-    /// Must return to [`Status::Inert`] after the connection is closed.
+    /// Must return to [Status::Inert] after the connection is closed.
     Active,
 }
 
@@ -94,7 +94,7 @@ impl<C: PublicKey> Record<C> {
 
     // ---------- Setters ----------
 
-    /// Attempt to update the [`PeerInfo`] of a discovered peer.
+    /// Attempt to update the [PeerInfo] of a discovered peer.
     ///
     /// Returns true if the update was successful.
     pub fn update(&mut self, info: PeerInfo<C>) -> bool {
@@ -168,7 +168,7 @@ impl<C: PublicKey> Record<C> {
 
     /// Marks the peer as connected.
     ///
-    /// The peer must have the status [`Status::Reserved`].
+    /// The peer must have the status [Status::Reserved].
     pub fn connect(&mut self) {
         assert!(matches!(self.status, Status::Reserved));
         self.status = Status::Active;

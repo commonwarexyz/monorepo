@@ -24,7 +24,7 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
     /// For signing and verifying messages.
     crypto: C,
 
-    /// The namespace used to sign and verify [`types::PeerInfo`] messages.
+    /// The namespace used to sign and verify [types::PeerInfo] messages.
     ip_namespace: Vec<u8>,
 
     /// Whether to allow private IPs.
@@ -37,7 +37,7 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
     /// The maximum number of peers in a set.
     max_peer_set_size: usize,
 
-    /// The maximum number of [`types::PeerInfo`] allowable in a single message.
+    /// The maximum number of [types::PeerInfo] allowable in a single message.
     peer_gossip_max_count: usize,
 
     // ---------- Message-Passing ----------
@@ -50,7 +50,7 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
 }
 
 impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> {
-    /// Create a new tracker [`Actor`] from the given `context` and `cfg`.
+    /// Create a new tracker [Actor] from the given `context` and `cfg`.
     #[allow(clippy::type_complexity)]
     pub fn new(
         context: E,

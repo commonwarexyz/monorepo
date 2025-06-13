@@ -25,7 +25,7 @@ impl SequencerLabel {
     }
 }
 
-/// Metrics for the [`Engine`](super::Engine)
+/// Metrics for the [Engine](super::Engine)
 pub struct Metrics<E: RuntimeMetrics + Clock> {
     /// Height per sequencer
     pub sequencer_heights: Family<SequencerLabel, Gauge>,

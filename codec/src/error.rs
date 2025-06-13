@@ -6,13 +6,13 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum Error {
     /// Indicates that the input buffer (`Buf`) did not contain enough bytes to read
-    /// the next piece of data required by a [`Read`](crate::Read) implementation.
+    /// the next piece of data required by a [Read](crate::Read) implementation.
     /// This suggests the input data is truncated or incomplete.
     #[error("Unexpected End-of-Buffer: Not enough bytes remaining to read data")]
     EndOfBuffer,
 
     /// Indicates that after successfully decoding a value using a method like
-    /// [`Decode::decode_cfg`](crate::Decode::decode_cfg), there were still
+    /// [Decode::decode_cfg](crate::Decode::decode_cfg), there were still
     /// unconsumed bytes remaining in the input buffer.
     ///
     /// This usually means the input data contained more than just the expected encoded value.
@@ -25,7 +25,7 @@ pub enum Error {
     /// - The varint encoding itself is malformed (e.g., too long).
     /// - The decoded varint value exceeds the capacity of the target integer type.
     ///
-    /// See the [`varint`](crate::varint) module for encoding details.
+    /// See the [varint](crate::varint) module for encoding details.
     #[error("Invalid {0}-byte varint")]
     InvalidVarint(usize),
 
@@ -46,8 +46,8 @@ pub enum Error {
     /// A length prefix (e.g., for `Vec<T>`, `Bytes`, `HashMap<K, V>`) was decoded,
     /// but its value fell outside the permitted range.
     ///
-    /// This range is typically configured via a [`RangeCfg`](crate::RangeCfg)
-    /// passed within the `Cfg` parameter to [`Read::read_cfg`](crate::Read::read_cfg).
+    /// This range is typically configured via a [RangeCfg](crate::RangeCfg)
+    /// passed within the `Cfg` parameter to [Read::read_cfg](crate::Read::read_cfg).
     /// The contained `usize` is the invalid length that was decoded.
     #[error("Invalid Length: Decoded length {0} is outside the allowed range")]
     InvalidLength(usize),
@@ -63,10 +63,10 @@ pub enum Error {
     Invalid(&'static str, &'static str),
 
     /// An error occurred in underlying code (e.g., external library call, complex validation)
-    /// and has been wrapped into a codec [`enum@Error`].
+    /// and has been wrapped into a codec [enum@Error].
     ///
     /// - The `&'static str` provides context about the operation being performed.
-    /// - The boxed [`std::error::Error`] is the original source error.
+    /// - The boxed [std::error::Error] is the original source error.
     ///
     /// Allows propagating custom errors through the codec reading process.
     #[error("Wrapped Error: Context({0}), Source({1})")]

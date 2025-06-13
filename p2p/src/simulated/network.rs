@@ -382,7 +382,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     }
 }
 
-/// Implementation of a [`crate::Sender`] for the simulated network.
+/// Implementation of a [crate::Sender] for the simulated network.
 #[derive(Clone, Debug)]
 pub struct Sender<P: PublicKey> {
     me: P,
@@ -469,7 +469,7 @@ impl<P: PublicKey> crate::Sender for Sender<P> {
 type MessageReceiver<P> = mpsc::UnboundedReceiver<Message<P>>;
 type MessageReceiverResult<P> = Result<MessageReceiver<P>, Error>;
 
-/// Implementation of a [`crate::Receiver`] for the simulated network.
+/// Implementation of a [crate::Receiver] for the simulated network.
 #[derive(Debug)]
 pub struct Receiver<P: PublicKey> {
     receiver: MessageReceiver<P>,

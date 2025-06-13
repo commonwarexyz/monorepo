@@ -1,13 +1,13 @@
 //! Bit-vector implementation
 //!
-//! The bit-vector is a compact representation of a sequence of bits, using [`u8`] "blocks" for a
+//! The bit-vector is a compact representation of a sequence of bits, using [u8] "blocks" for a
 //! more-efficient memory layout than doing a [`Vec<bool>`]. Thus, if the length of the bit-vector
 //! is not a multiple of 8, the last block will contain some bits that are not part of the vector.
 //! An invariant of the implementation is that any bits in the last block that are not part of the
 //! vector are set to 0.
 //!
-//! The implementation is focused on being compact when encoding small bit vectors, so [`u8`] is
-//! used over more performant types like [`usize`] or [`u64`]. Such types would result in more
+//! The implementation is focused on being compact when encoding small bit vectors, so [u8] is
+//! used over more performant types like [usize] or [u64]. Such types would result in more
 //! complex encoding and decoding logic.
 
 use bytes::{Buf, BufMut};
@@ -22,7 +22,7 @@ use std::{
 /// Type alias for the underlying block type.
 type Block = u8;
 
-/// Number of bits in a [`Block`].
+/// Number of bits in a [Block].
 const BITS_PER_BLOCK: usize = std::mem::size_of::<Block>() * 8;
 
 /// Empty block of bits (all bits set to 0).
@@ -33,7 +33,7 @@ const FULL_BLOCK: Block = Block::MAX;
 
 /// Represents a vector of bits.
 ///
-/// Stores bits using [`u8`] blocks for efficient storage.
+/// Stores bits using [u8] blocks for efficient storage.
 #[derive(Clone, PartialEq, Eq)]
 pub struct BitVec {
     /// The underlying storage for the bits.

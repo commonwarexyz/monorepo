@@ -1,7 +1,7 @@
 //! Codec implementations for various map types.
 //!
 //! For portability and consistency between architectures,
-//! the size of the map must fit within a [`u32`].
+//! the size of the map must fit within a [u32].
 
 use crate::{
     codec::{EncodeSize, Read, Write},
