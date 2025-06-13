@@ -154,4 +154,27 @@ mod tests {
         };
         assert!(matches!(way_over_nonce.encode(), Err(Error::NonceOverflow)));
     }
+
+    #[test]
+    fn test_inc_stops_at_overflow() {
+        // Test that inc() stops incrementing once at OVERFLOW_VALUE
+        let mut nonce = Info {
+            counter: OVERFLOW_VALUE,
+        };
+
+        // Call inc() multiple times - counter should remain unchanged
+        nonce.inc();
+        assert_eq!(nonce.counter, OVERFLOW_VALUE);
+
+        nonce.inc();
+        assert_eq!(nonce.counter, OVERFLOW_VALUE);
+
+        // Test with counter above OVERFLOW_VALUE
+        let mut way_over_nonce = Info {
+            counter: OVERFLOW_VALUE + 100,
+        };
+
+        way_over_nonce.inc();
+        assert_eq!(way_over_nonce.counter, OVERFLOW_VALUE + 100);
+    }
 }
