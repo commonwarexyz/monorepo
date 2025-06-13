@@ -12,7 +12,7 @@ use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{collections::HashMap, time::Instant};
 
 #[derive(PartialEq, Debug, Clone, Copy)]
-enum SyncType {
+enum Strategy {
     NoBatching,
     BatchedSerial,
     BatchedParallel,
@@ -29,23 +29,23 @@ fn bench_update(c: &mut Criterion) {
     let runner = tokio::Runner::new(cfg);
     for updates in [1_000_000, 100_000] {
         for leaves in [100_000, 1_000_000, 5_000_000, 10_000_000] {
-            for sync_type in [
-                SyncType::NoBatching,
-                SyncType::BatchedSerial,
-                SyncType::BatchedParallel,
+            for strategy in [
+                Strategy::NoBatching,
+                Strategy::BatchedSerial,
+                Strategy::BatchedParallel,
             ] {
                 c.bench_function(
                     &format!(
-                        "{}/updates={} leaves={} sync_type={:?}",
+                        "{}/updates={} leaves={} strategy={:?}",
                         module_path!(),
                         updates,
                         leaves,
-                        sync_type,
+                        strategy,
                     ),
                     |b| {
                         b.to_async(&runner).iter_custom(|_iters| async move {
-                            let mut mmr = match sync_type {
-                                SyncType::BatchedParallel => {
+                            let mut mmr = match strategy {
+                                Strategy::BatchedParallel => {
                                     let ctx = context::get::<commonware_runtime::tokio::Context>();
                                     let pool =
                                         commonware_runtime::create_pool(ctx.clone(), THREADS)
@@ -85,8 +85,8 @@ fn bench_update(c: &mut Criterion) {
                                 leaf_map.insert(rand_leaf_pos, *new_element);
                             }
 
-                            match sync_type {
-                                SyncType::NoBatching => {
+                            match strategy {
+                                Strategy::NoBatching => {
                                     for (pos, element) in leaf_map {
                                         mmr.update_leaf(&mut h, pos, &element);
                                     }
