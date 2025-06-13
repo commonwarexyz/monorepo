@@ -59,10 +59,10 @@ pub struct Directory<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Publ
 
     // ---------- Released Reservations Queue ----------
     /// Sender for releasing reservations.
-    sender: mpsc::Sender<Metadata<C>>,
+    tx: mpsc::Sender<Metadata<C>>,
 
     /// Receiver for releasing reservations.
-    receiver: mpsc::Receiver<Metadata<C>>,
+    rx: mpsc::Receiver<Metadata<C>>,
 
     // ---------- Metrics ----------
     /// The metrics for the records.
@@ -100,8 +100,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
             peers,
             sets: BTreeMap::new(),
             rate_limiter,
-            sender,
-            receiver,
+            tx: sender,
+            rx: receiver,
             metrics,
         }
     }
@@ -109,7 +109,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     /// Process all messages in the release queue.
     pub fn process_releases(&mut self) {
         // For each message in the queue...
-        while let Ok(Some(metadata)) = self.receiver.try_next() {
+        while let Ok(Some(metadata)) = self.rx.try_next() {
             let peer = metadata.public_key();
             let Some(record) = self.peers.get_mut(peer) else {
                 continue;
@@ -354,7 +354,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
             return Some(Reservation::new(
                 self.context.clone(),
                 metadata,
-                self.sender.clone(),
+                self.tx.clone(),
             ));
         }
         None
