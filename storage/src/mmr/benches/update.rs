@@ -29,7 +29,7 @@ fn bench_update(c: &mut Criterion) {
     let runner = tokio::Runner::new(cfg);
     for updates in [1_000_000, 100_000] {
         for leaves in [100_000, 1_000_000, 5_000_000, 10_000_000] {
-            for sync_type in [
+            for strategy in [
                 Strategy::NoBatching,
                 Strategy::BatchedSerial,
                 Strategy::BatchedParallel,
@@ -40,11 +40,11 @@ fn bench_update(c: &mut Criterion) {
                         module_path!(),
                         updates,
                         leaves,
-                        sync_type,
+                        strategy,
                     ),
                     |b| {
                         b.to_async(&runner).iter_custom(|_iters| async move {
-                            let mut mmr = match sync_type {
+                            let mut mmr = match strategy {
                                 Strategy::BatchedParallel => {
                                     let ctx = context::get::<commonware_runtime::tokio::Context>();
                                     let pool =
@@ -85,7 +85,7 @@ fn bench_update(c: &mut Criterion) {
                                 leaf_map.insert(rand_leaf_pos, *new_element);
                             }
 
-                            match sync_type {
+                            match strategy {
                                 Strategy::NoBatching => {
                                     for (pos, element) in leaf_map {
                                         mmr.update_leaf(&mut h, pos, &element);
