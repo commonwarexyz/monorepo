@@ -27,7 +27,7 @@ async fn bench_run(
 ) {
     let concurrency = std::cmp::max(1, (items_to_read / ITEMS_PER_BLOB) as usize);
     let stream = journal
-        .replay(concurrency, buffer)
+        .replay(concurrency, buffer, 0)
         .await
         .expect("failed to replay journal");
     pin_mut!(stream);
