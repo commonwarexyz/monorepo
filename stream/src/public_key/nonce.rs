@@ -95,41 +95,61 @@ mod tests {
     }
 
     #[test]
-    fn test_inc() {
+    fn test_next() {
         let mut nonce = Info::default();
 
-        // Incrementing should succeed
-        nonce.inc();
+        // First next() should succeed and increment counter
+        let result = nonce.next();
+        assert!(result.is_ok());
         assert_eq!(nonce.counter, 1);
 
-        // Incrementing again should succeed
-        nonce.inc();
+        // Second next() should succeed and increment counter
+        let result = nonce.next();
+        assert!(result.is_ok());
         assert_eq!(nonce.counter, 2);
     }
 
     #[test]
     fn test_inc_overflow() {
-        let initial = OVERFLOW_VALUE - 2;
+        let initial = OVERFLOW_VALUE - 1;
         let mut nonce = Info { counter: initial };
 
-        // Encoding should succeed before the boundary
-        assert!(nonce.encode().is_ok());
+        // next() should succeed at the boundary (encode works, then inc increments to OVERFLOW_VALUE)
+        let result = nonce.next();
+        assert!(result.is_ok());
+        assert_eq!(nonce.counter, OVERFLOW_VALUE); // inc() incremented successfully
 
-        // Incrementing should succeed
-        nonce.inc();
-        assert_eq!(nonce.counter, OVERFLOW_VALUE - 1);
-
-        // Encoding should succeed at exactly OVERFLOW_VALUE - 1 (the last valid value)
-        assert!(nonce.encode().is_ok());
-
-        // Incrementing again should silently fail (no change to counter)
-        nonce.inc();
-        assert_eq!(nonce.counter, OVERFLOW_VALUE - 1);
+        // next() should now fail because we can't encode at OVERFLOW_VALUE
+        let result = nonce.next();
+        assert!(matches!(result, Err(Error::NonceOverflow)));
+        assert_eq!(nonce.counter, OVERFLOW_VALUE); // inc() silently failed to increment
 
         // Create a nonce that's at overflow to test encode failure
         let overflow_nonce = Info {
             counter: OVERFLOW_VALUE,
         };
         assert!(matches!(overflow_nonce.encode(), Err(Error::NonceOverflow)));
+    }
+
+    #[test]
+    fn test_can_use_final_nonce_value() {
+        // This test verifies the fix for the original issue - that we can successfully
+        // use the final possible nonce value (2^96 - 1)
+        let mut nonce = Info {
+            counter: OVERFLOW_VALUE - 1,
+        };
+
+        // Should be able to use the final nonce value
+        let result = nonce.next();
+        assert!(result.is_ok());
+
+        // Verify the nonce was encoded correctly (should be the max 96-bit value)
+        let encoded = result.unwrap();
+        let expected = [0xFF; 12]; // All bits set in 12 bytes
+        assert_eq!(encoded[..], expected[..]);
+
+        // After using the final nonce, we should be at overflow and can't use next() again
+        assert_eq!(nonce.counter, OVERFLOW_VALUE);
+        assert!(matches!(nonce.next(), Err(Error::NonceOverflow)));
     }
 }
