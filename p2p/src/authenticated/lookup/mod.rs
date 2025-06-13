@@ -209,12 +209,7 @@ mod tests {
             let context = context.with_label(&format!("peer-{}", i));
 
             // Create network
-            let config = Config::test(
-                private_key.clone(),
-                *address,
-                vec![], // No bootstrappers given; we update peer --> pub key mapping with oracle later
-                max_message_size,
-            );
+            let config = Config::test(private_key.clone(), *address, max_message_size);
             let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
 
             // Register peers
@@ -462,7 +457,6 @@ mod tests {
                 let config = Config::test(
                     signer.clone(),
                     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
-                    bootstrappers,
                     1_024 * 1_024, // 1MB
                 );
                 let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
@@ -475,6 +469,10 @@ mod tests {
                 oracle
                     .register(2, addresses.iter().skip(2).cloned().collect())
                     .await;
+
+                for (peer_pk, peer_addr) in bootstrappers {
+                    oracle.update_address(peer_pk, peer_addr).await;
+                }
 
                 // Register basic application
                 let (mut sender, mut receiver) = network.register(
@@ -546,7 +544,6 @@ mod tests {
             let config = Config::test(
                 signer.clone(),
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
-                Vec::new(),
                 1_024 * 1_024, // 1MB
             );
             let (mut network, mut oracle) = Network::new(context.with_label("network"), config);

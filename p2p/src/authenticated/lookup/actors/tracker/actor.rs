@@ -43,7 +43,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
             max_sets: cfg.tracked_peer_sets,
             rate_limit: cfg.allowed_connection_rate_per_peer,
         };
-        let directory = Directory::init(context.clone(), cfg.bootstrappers, myself, directory_cfg);
+        let directory = Directory::init(context.clone(), myself, directory_cfg);
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
 
         (
@@ -127,7 +127,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 mod tests {
     use super::*;
     use crate::{
-        authenticated::lookup::{actors::peer, config::Bootstrapper},
+        authenticated::lookup::actors::peer,
         Blocker,
         // Blocker is implicitly available via oracle.block() due to Oracle implementing crate::Blocker
     };
@@ -146,14 +146,10 @@ mod tests {
     use std::time::Duration;
 
     // Test Configuration Setup
-    fn default_test_config<C: Signer>(
-        crypto: C,
-        bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
-    ) -> Config<C> {
+    fn default_test_config<C: Signer>(crypto: C) -> Config<C> {
         Config {
             crypto,
             address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-            bootstrappers,
             mailbox_size: 32,
             tracked_peer_sets: 2,
             allowed_connection_rate_per_peer: Quota::per_second(NZU32!(5)),
@@ -251,7 +247,7 @@ mod tests {
     fn test_register_peer_set_too_large() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg_initial = default_test_config(PrivateKey::from_seed(0), Vec::new());
+            let cfg_initial = default_test_config(PrivateKey::from_seed(0));
             let TestHarness {
                 mut oracle,
                 cfg,
@@ -271,7 +267,7 @@ mod tests {
     fn test_connect_unauthorized_peer_is_killed() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = default_test_config(PrivateKey::from_seed(0), Vec::new());
+            let cfg = default_test_config(PrivateKey::from_seed(0));
             let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg);
 
             let (_unauth_signer, unauth_pk) = new_signer_and_pk(1);
@@ -402,7 +398,7 @@ mod tests {
     fn test_block_peer_non_existent_is_noop() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg_initial = default_test_config(PrivateKey::from_seed(0), Vec::new());
+            let cfg_initial = default_test_config(PrivateKey::from_seed(0));
             let TestHarness { mut oracle, .. } = setup_actor(context.clone(), cfg_initial);
 
             let (_s1_signer, pk_non_existent) = new_signer_and_pk(100);
@@ -416,7 +412,7 @@ mod tests {
     fn test_listen() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg_initial = default_test_config(PrivateKey::from_seed(0), Vec::new());
+            let cfg_initial = default_test_config(PrivateKey::from_seed(0));
             let TestHarness {
                 mut mailbox,
                 mut oracle,
@@ -451,9 +447,14 @@ mod tests {
         executor.start(|context| async move {
             let (_boot_signer, boot_pk) = new_signer_and_pk(99);
             let boot_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9000);
-            let cfg_initial =
-                default_test_config(PrivateKey::from_seed(0), vec![(boot_pk.clone(), boot_addr)]);
-            let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg_initial);
+            let cfg_initial = default_test_config(PrivateKey::from_seed(0));
+            let TestHarness {
+                mut mailbox,
+                mut oracle,
+                ..
+            } = setup_actor(context.clone(), cfg_initial);
+
+            oracle.update_address(boot_pk.clone(), boot_addr).await;
 
             let dialable_peers = mailbox.dialable().await;
             assert_eq!(dialable_peers.len(), 1);
@@ -467,10 +468,15 @@ mod tests {
         executor.start(|context| async move {
             let (_boot_signer, boot_pk) = new_signer_and_pk(99);
             let boot_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9000);
-            let cfg_initial =
-                default_test_config(PrivateKey::from_seed(0), vec![(boot_pk.clone(), boot_addr)]);
+            let cfg_initial = default_test_config(PrivateKey::from_seed(0));
 
-            let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg_initial);
+            let TestHarness {
+                mut mailbox,
+                mut oracle,
+                ..
+            } = setup_actor(context.clone(), cfg_initial);
+
+            oracle.update_address(boot_pk.clone(), boot_addr).await;
 
             let reservation = mailbox.dial(boot_pk.clone()).await;
             assert!(reservation.is_some());

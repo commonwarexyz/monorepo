@@ -1,6 +1,5 @@
 //! Tracker
 
-use crate::authenticated::lookup::config::Bootstrapper;
 use commonware_cryptography::Signer;
 use governor::Quota;
 use std::net::SocketAddr;
@@ -22,7 +21,6 @@ pub use reservation::Reservation;
 pub struct Config<C: Signer> {
     pub crypto: C,
     pub address: SocketAddr,
-    pub bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
     pub mailbox_size: usize,
     pub tracked_peer_sets: usize,
     pub max_peer_set_size: usize,

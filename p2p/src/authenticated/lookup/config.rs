@@ -27,9 +27,6 @@ pub struct Config<C: Signer> {
     /// Dialable address of the peer.
     pub dialable: SocketAddr,
 
-    /// Peers dialed on startup.
-    pub bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
-
     /// Whether or not to allow connections with private IP addresses.
     pub allow_private_ips: bool,
 
@@ -120,7 +117,6 @@ impl<C: Signer> Config<C> {
         namespace: &[u8],
         listen: SocketAddr,
         dialable: SocketAddr,
-        bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
         max_message_size: usize,
     ) -> Self {
         Self {
@@ -128,7 +124,6 @@ impl<C: Signer> Config<C> {
             namespace: namespace.to_vec(),
             listen,
             dialable,
-            bootstrappers,
 
             allow_private_ips: false,
             max_message_size,
@@ -161,7 +156,6 @@ impl<C: Signer> Config<C> {
         namespace: &[u8],
         listen: SocketAddr,
         dialable: SocketAddr,
-        bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
         max_message_size: usize,
     ) -> Self {
         Self {
@@ -169,7 +163,6 @@ impl<C: Signer> Config<C> {
             namespace: namespace.to_vec(),
             listen,
             dialable,
-            bootstrappers,
 
             allow_private_ips: true,
             max_message_size,
@@ -193,18 +186,12 @@ impl<C: Signer> Config<C> {
     }
 
     #[cfg(test)]
-    pub fn test(
-        crypto: C,
-        listen: SocketAddr,
-        bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
-        max_message_size: usize,
-    ) -> Self {
+    pub fn test(crypto: C, listen: SocketAddr, max_message_size: usize) -> Self {
         Self {
             crypto,
             namespace: b"test_namespace".to_vec(),
             listen,
             dialable: listen,
-            bootstrappers,
 
             allow_private_ips: true,
             max_message_size,

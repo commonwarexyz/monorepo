@@ -58,25 +58,14 @@ pub struct Directory<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Publ
 }
 
 impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
-    /// Create a new set of records using the given bootstrappers and local node information.
-    pub fn init(
-        context: E,
-        bootstrappers: Vec<(C, SocketAddr)>,
-        myself: (C, SocketAddr),
-        cfg: Config,
-    ) -> Self {
-        // Create the list of peers and add the bootstrappers.
+    /// Create a new set of records using the given local node information.
+    pub fn init(context: E, myself: (C, SocketAddr), cfg: Config) -> Self {
+        // Create the list of peers and add myself.
         let mut peers = HashMap::new();
-        for (peer, socket) in bootstrappers {
-            peers.insert(peer, Record::bootstrapper(socket));
-        }
-
-        // Add myself to the list of peers.
-        // Overwrites the entry if myself is also a bootstrapper.
         peers.insert(myself.0, Record::myself(myself.1));
-        let rate_limiter = RateLimiter::hashmap_with_clock(cfg.rate_limit, &context);
 
         // Other initialization.
+        let rate_limiter = RateLimiter::hashmap_with_clock(cfg.rate_limit, &context);
         let metrics = Metrics::init(context.clone());
         metrics.tracked.set((peers.len() - 1) as i64); // Exclude self
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
