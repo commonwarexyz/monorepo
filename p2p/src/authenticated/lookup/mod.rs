@@ -152,7 +152,6 @@ pub use network::Network;
 mod tests {
     use super::*;
     use crate::{Receiver, Recipients, Sender};
-    use bytes::Bytes;
     use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -162,7 +161,6 @@ mod tests {
     use governor::{clock::ReasonablyRealtime, Quota};
     use rand::{CryptoRng, Rng};
     use std::collections::HashSet;
-    use std::thread::sleep;
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
         time::Duration,
@@ -586,169 +584,5 @@ mod tests {
     #[test_traced]
     fn test_message_too_large_compression() {
         test_message_too_large(Some(3));
-    }
-
-    #[test_traced]
-    fn test_update_address() {
-        const MAX_MESSAGE_SIZE: usize = 1_024 * 1_024; // 1MB
-
-        let peer1_sk = ed25519::PrivateKey::from_seed(1);
-        let peer1_pk = peer1_sk.public_key();
-        let peer1_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3001);
-
-        let peer2_sk = ed25519::PrivateKey::from_seed(2);
-        let peer2_pk = peer2_sk.public_key();
-        let peer2_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3002);
-
-        let executor = deterministic::Runner::seeded(1337);
-        executor.start(|context| async move {
-            let config = Config::test(
-                peer1_sk.clone(),
-                peer1_addr,
-                vec![
-                    (peer1_pk.clone(), peer1_addr),
-                    (peer2_pk.clone(), peer2_addr),
-                ],
-                MAX_MESSAGE_SIZE,
-            );
-
-            let (mut network1, mut oracle1) = Network::new(context.with_label("network1"), config);
-            oracle1
-                .register(0, vec![peer1_pk.clone(), peer2_pk.clone()])
-                .await;
-            // Register application
-            let (mut network1_sender, mut network1_receiver) = network1.register(
-                0,
-                Quota::per_second(NZU32!(5)),
-                DEFAULT_MESSAGE_BACKLOG,
-                None,
-            );
-
-            let config = Config::test(
-                peer2_sk.clone(),
-                peer2_addr,
-                vec![
-                    (peer1_pk.clone(), peer1_addr),
-                    (peer2_pk.clone(), peer2_addr),
-                ],
-                MAX_MESSAGE_SIZE,
-            );
-
-            let (mut network2, mut oracle2) = Network::new(context.with_label("network2"), config);
-            oracle2
-                .register(0, vec![peer1_pk.clone(), peer2_pk.clone()])
-                .await;
-            // Register application
-            let (_network2_sender, mut network2_receiver) = network2.register(
-                0,
-                Quota::per_second(NZU32!(5)),
-                DEFAULT_MESSAGE_BACKLOG,
-                None,
-            );
-
-            // Start the peers
-            let network1 = network1.start();
-            let network2 = network2.start();
-
-            // Send a message from peer1 to peer2
-            let msg: Bytes = peer1_pk.to_vec().into();
-            let (_network1_sender, peer2_pk) = context
-                .clone()
-                .spawn(|context| async move {
-                    // Keep trying to send until we succeed
-                    loop {
-                        match network1_sender
-                            .send(Recipients::One(peer2_pk.clone()), msg.clone(), true)
-                            .await
-                        {
-                            Ok(sent) if sent.len() == 1 => break,
-                            _ => context.sleep(Duration::from_millis(100)).await,
-                        }
-                    }
-                    (network1_sender, peer2_pk)
-                })
-                .await
-                .unwrap();
-
-            // Receive the message on peer2
-            let peer1_pk = context
-                .clone()
-                .spawn(|_| async move {
-                    // Wait for the message to be received by peer2
-                    let (sender, message) = network2_receiver.recv().await.unwrap();
-                    assert_eq!(sender, peer1_pk.clone());
-                    assert_eq!(message, peer1_pk.to_vec());
-                    peer1_pk
-                })
-                .await
-                .unwrap();
-
-            // Stop network 2
-            network2.abort();
-            let _ = network2.await;
-
-            // Restart network 2 with a new address for peer2
-            let peer2_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3003);
-            // Note we leave bootstrappers empty, as we will update the address in oracle1
-            let config = Config::test(peer2_sk.clone(), peer2_addr, vec![], MAX_MESSAGE_SIZE);
-            let (mut network2, mut oracle2) = Network::new(context.with_label("network2"), config);
-            oracle2
-                .register(0, vec![peer1_pk.clone(), peer2_pk.clone()])
-                .await;
-            // Register application
-            let (mut network2_sender, _network2_receiver) = network2.register(
-                0,
-                Quota::per_second(NZU32!(5)),
-                DEFAULT_MESSAGE_BACKLOG,
-                None,
-            );
-            // Start the new network
-            let network2 = network2.start();
-
-            sleep(Duration::from_millis(5_000)); // Give some time for the network to start
-
-            // Update the address of peer2 in oracle1
-            oracle1.update_address(peer2_pk.clone(), peer2_addr).await;
-
-            // Send a message from peer2 to peer1.
-            let msg: Bytes = peer1_pk.to_vec().into();
-            let peer1_pk_clone = peer1_pk.clone();
-            let send_handle = context.clone().spawn(|context| async move {
-                // Keep trying to send until we succeed
-                loop {
-                    match network2_sender
-                        .send(Recipients::One(peer1_pk_clone.clone()), msg.clone(), true)
-                        .await
-                    {
-                        Ok(sent) if sent.len() == 1 => break,
-                        _ => context.sleep(Duration::from_millis(100)).await,
-                    }
-                }
-            });
-
-            // Receive the message on peer1
-            let receive_handle = context.spawn(|context| async move {
-                loop {
-                    // Wait for the message to be received by peer1
-                    if let Ok((sender, message)) = network1_receiver.recv().await {
-                        assert_eq!(sender, peer2_pk);
-                        assert_eq!(message, peer1_pk.to_vec());
-                        break;
-                    } else {
-                        // Sleep and try again
-                        context.sleep(Duration::from_millis(100)).await;
-                    }
-                }
-            });
-
-            // Wait for both send and receive to complete
-            send_handle.await.unwrap();
-            receive_handle.await.unwrap();
-
-            // Stop both networks
-            println!("TODO delete me");
-            network1.abort();
-            network2.abort();
-        });
     }
 }
