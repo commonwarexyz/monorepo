@@ -9,7 +9,7 @@
 
 use crate::{
     adb::{operation::Operation, Error},
-    index::{translator::EightCap, Index, Translator},
+    index::{Index, Translator},
     journal::fixed::{Config as JConfig, Journal},
     mmr::{
         bitmap::Bitmap,
@@ -21,7 +21,7 @@ use crate::{
 };
 use commonware_codec::Encode as _;
 use commonware_cryptography::Hasher as CHasher;
-use commonware_runtime::{Clock, Metrics, Storage as RStorage};
+use commonware_runtime::{Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::Array;
 use futures::{
     future::{try_join_all, TryFutureExt},
@@ -35,7 +35,7 @@ const UNUSED_N: usize = 0;
 
 /// Configuration for an `Any` authenticated db.
 #[derive(Clone)]
-pub struct Config {
+pub struct Config<T: Translator> {
     /// The name of the [RStorage] partition used for the MMR's backing journal.
     pub mmr_journal_partition: String,
 
@@ -56,17 +56,17 @@ pub struct Config {
 
     /// The size of the write buffer to use for each blob in the log journal.
     pub log_write_buffer: usize,
+
+    /// The translator used by the compressed index.
+    pub translator: T,
+
+    /// An optional thread pool to use for parallelizing batch operations.
+    pub pool: Option<ThreadPool>,
 }
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub struct Any<
-    E: RStorage + Clock + Metrics,
-    K: Array,
-    V: Array,
-    H: CHasher,
-    T: Translator = EightCap,
-> {
+pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translator> {
     /// An MMR over digests of the operations applied to the db. The number of leaves in this MMR
     /// always equals the number of operations in the unpruned `log`.
     pub(super) ops: Mmr<E, H>,
@@ -111,10 +111,26 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 {
     /// Returns any `Any` adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(context: E, cfg: Config, translator: T) -> Result<Self, Error> {
-        let mut snapshot: Index<T, u64> = Index::init(context.with_label("snapshot"), translator);
+    pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
+        let mut snapshot: Index<T, u64> =
+            Index::init(context.with_label("snapshot"), cfg.translator.clone());
         let mut hasher = Standard::<H>::new();
-        let (mmr, log) = Self::init_mmr_and_log(context, &mut hasher, cfg).await?;
+        let (mmr, log) = Self::init_mmr_and_log(
+            context,
+            Config {
+                mmr_journal_partition: cfg.mmr_journal_partition,
+                mmr_metadata_partition: cfg.mmr_metadata_partition,
+                mmr_items_per_blob: cfg.mmr_items_per_blob,
+                mmr_write_buffer: cfg.mmr_write_buffer,
+                log_journal_partition: cfg.log_journal_partition,
+                log_items_per_blob: cfg.log_items_per_blob,
+                log_write_buffer: cfg.log_write_buffer,
+                translator: cfg.translator,
+                pool: cfg.pool,
+            },
+            &mut hasher,
+        )
+        .await?;
 
         let start_leaf_num = leaf_pos_to_num(mmr.pruned_to_pos()).unwrap();
         let inactivity_floor_loc = Self::build_snapshot_from_log(
@@ -142,8 +158,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// db will be as of the last committed operation.
     pub(super) async fn init_mmr_and_log(
         context: E,
+        cfg: Config<T>,
         hasher: &mut Standard<H>,
-        cfg: Config,
     ) -> Result<(Mmr<E, H>, Journal<E, Operation<K, V>>), Error> {
         let mut mmr = Mmr::init(
             context.with_label("mmr"),
@@ -153,6 +169,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 metadata_partition: cfg.mmr_metadata_partition,
                 items_per_blob: cfg.mmr_items_per_blob,
                 write_buffer: cfg.mmr_write_buffer,
+                pool: cfg.pool,
             },
         )
         .await?;
@@ -216,11 +233,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         Ok((mmr, log))
     }
 
-    /// Builds the database's snapshot by replaying the log starting at `start_leaf_num`. If a bitmap is
-    /// provided, then a bit is appended for each operation in the operation log, with its value
-    /// reflecting its activity status. The bitmap is expected to already have a number of bits
-    /// corresponding to the portion of the database below the inactivity floor, and this method
-    /// will panic otherwise.
+    /// Builds the database's snapshot by replaying the log starting at `start_leaf_num`.
+    ///
+    /// If a bitmap is provided, then a bit is appended for each operation in the operation log,
+    /// with its value reflecting its activity status. The bitmap is expected to already have a
+    /// number of bits corresponding to the portion of the database below the inactivity floor, and
+    /// this method will panic otherwise. The caller is responsible for syncing any changes made to
+    /// the bitmap.
     pub(super) async fn build_snapshot_from_log<const N: usize>(
         start_leaf_num: u64,
         log: &Journal<E, Operation<K, V>>,
@@ -535,7 +554,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
     /// upon return from this function. Also raises the inactivity floor according to the schedule,
-    /// and prunes those operations below it.
+    /// and prunes those operations below it. Batch operations will be parallelized if a thread pool
+    /// is provided.
     pub async fn commit(&mut self) -> Result<(), Error> {
         // Raise the inactivity floor by the # of uncommitted operations, plus 1 to account for the
         // commit op that will be appended.
@@ -550,7 +570,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         self.prune_inactive().await
     }
 
-    /// Sync the db to disk ensuring the current state is persisted.
+    /// Sync the db to disk ensuring the current state is persisted. Batch operations will be
+    /// parallelized if a thread pool is provided.
     pub(super) async fn sync(&mut self) -> Result<(), Error> {
         try_join!(
             self.log.sync().map_err(Error::JournalError),
@@ -709,7 +730,7 @@ mod test {
 
     const SHA256_SIZE: usize = <Sha256 as CHasher>::Digest::SIZE;
 
-    fn any_db_config(suffix: &str) -> Config {
+    fn any_db_config<T: Translator>(suffix: &str, translator: T) -> Config<T> {
         Config {
             mmr_journal_partition: format!("journal_{}", suffix),
             mmr_metadata_partition: format!("metadata_{}", suffix),
@@ -718,6 +739,8 @@ mod test {
             log_journal_partition: format!("log_journal_{}", suffix),
             log_items_per_blob: 7,
             log_write_buffer: 1024,
+            translator,
+            pool: None,
         }
     }
 
@@ -727,8 +750,7 @@ mod test {
     ) -> Any<E, Digest, Digest, Sha256, EightCap> {
         Any::<E, Digest, Digest, Sha256, EightCap>::init(
             context,
-            any_db_config("partition"),
-            EightCap,
+            any_db_config("partition", EightCap),
         )
         .await
         .unwrap()
@@ -1070,8 +1092,7 @@ mod test {
             // Recreate the database without any failures and make sure the roots match.
             let mut new_db = Any::<_, Digest, Digest, Sha256, EightCap>::init(
                 context,
-                any_db_config("new_partition"),
-                EightCap,
+                any_db_config("new_partition", EightCap),
             )
             .await
             .unwrap();
@@ -1215,18 +1236,17 @@ mod test {
             db.close().await.unwrap();
 
             // Initialize the db's mmr/log.
-            let cfg = any_db_config("partition");
+            let cfg = any_db_config("partition", TwoCap);
             let (mmr, log) = Any::<_, Digest, Digest, _, TwoCap>::init_mmr_and_log(
                 context.clone(),
-                &mut hasher,
                 cfg,
+                &mut hasher,
             )
             .await
             .unwrap();
             let start_leaf_num = leaf_pos_to_num(mmr.pruned_to_pos()).unwrap();
 
-            // Replay log to populate the bitmap.  Use a TwoCap instead of
-            // EightCap here so we exercise some collisions.
+            // Replay log to populate the bitmap. Use a TwoCap instead of EightCap here so we exercise some collisions.
             let mut snapshot: Index<TwoCap, u64> =
                 Index::init(context.with_label("snapshot"), TwoCap);
             let inactivity_floor_loc = Any::<_, _, _, Sha256, TwoCap>::build_snapshot_from_log::<

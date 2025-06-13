@@ -20,10 +20,10 @@ pub trait Hasher<H: CHasher>: Send + Sync {
 
     /// Computes the root for an MMR given its size and an iterator over the digests of its peaks in
     /// decreasing order of height.
-    fn root_digest<'b>(
+    fn root_digest<'a>(
         &mut self,
         size: u64,
-        peak_digests: impl Iterator<Item = &'b H::Digest>,
+        peak_digests: impl Iterator<Item = &'a H::Digest>,
     ) -> H::Digest;
 
     /// Compute the digest of a byte slice.
@@ -31,6 +31,11 @@ pub trait Hasher<H: CHasher>: Send + Sync {
 
     /// Access the inner [CHasher] hasher.
     fn inner(&mut self) -> &mut H;
+
+    /// Fork the hasher to provide equivalent functionality in another thread. This is different
+    /// than [Clone::clone] because the forked hasher need not be a deep copy, and may share non-mutable
+    /// state with the hasher from which it was forked.
+    fn fork(&self) -> impl Hasher<H>;
 }
 
 /// The standard hasher to use with an MMR for computing leaf, node and root digests. Leverages no
@@ -71,6 +76,10 @@ impl<H: CHasher> Default for Standard<H> {
 impl<H: CHasher> Hasher<H> for Standard<H> {
     fn inner(&mut self) -> &mut H {
         &mut self.hasher
+    }
+
+    fn fork(&self) -> impl Hasher<H> {
+        Standard { hasher: H::new() }
     }
 
     fn leaf_digest(&mut self, pos: u64, element: &[u8]) -> H::Digest {
@@ -187,7 +196,8 @@ impl<'a, H: CHasher> Grafting<'a, H> {
     }
 
     /// Loads the grafted digests for the specified leaves into the internal map. Does not clear out
-    /// any previously loaded digests.
+    /// any previously loaded digests. This method must be used to provide grafted digests for any
+    /// leaf whose `leaf_digest` needs to be computed.
     ///
     /// # Warning
     ///
@@ -220,6 +230,14 @@ impl<'a, H: CHasher> Grafting<'a, H> {
     fn destination_pos(&self, pos: u64) -> u64 {
         destination_pos(pos, self.height)
     }
+}
+
+/// A lightweight, short-lived shallow copy of a Grafting hasher that can be used in parallel
+/// computations.
+pub struct GraftingFork<'a, H: CHasher> {
+    hasher: Standard<H>,
+    height: u32,
+    grafted_digests: &'a HashMap<u64, H::Digest>,
 }
 
 /// Compute the position of the node in the base tree onto which we should graft the node at
@@ -292,8 +310,14 @@ pub(super) fn source_pos(base_node_pos: u64, height: u32) -> Option<u64> {
 }
 
 impl<H: CHasher> Hasher<H> for Grafting<'_, H> {
+    /// Computes the digest of a leaf in the peak_tree of a grafted MMR.
+    ///
+    /// # Warning
+    ///
+    /// Panics if the grafted_digest was not previously loaded for the leaf.
     fn leaf_digest(&mut self, pos: u64, element: &[u8]) -> H::Digest {
-        let Some(grafted_digest) = self.grafted_digests.get(&pos) else {
+        let grafted_digest = self.grafted_digests.get(&pos);
+        let Some(grafted_digest) = grafted_digest else {
             panic!("missing grafted digest for leaf_pos {}", pos);
         };
 
@@ -303,6 +327,14 @@ impl<H: CHasher> Hasher<H> for Grafting<'_, H> {
         self.hasher.update_with_digest(grafted_digest);
 
         self.hasher.finalize()
+    }
+
+    fn fork(&self) -> impl Hasher<H> {
+        GraftingFork {
+            hasher: Standard::new(),
+            height: self.height,
+            grafted_digests: &self.grafted_digests,
+        }
     }
 
     fn node_digest(
@@ -322,6 +354,57 @@ impl<H: CHasher> Hasher<H> for Grafting<'_, H> {
     ) -> H::Digest {
         self.hasher
             .root_digest(self.destination_pos(size), peak_digests)
+    }
+
+    fn digest(&mut self, data: &[u8]) -> H::Digest {
+        self.hasher.digest(data)
+    }
+
+    fn inner(&mut self) -> &mut H {
+        self.hasher.inner()
+    }
+}
+
+impl<H: CHasher> Hasher<H> for GraftingFork<'_, H> {
+    fn leaf_digest(&mut self, pos: u64, element: &[u8]) -> H::Digest {
+        let grafted_digest = self.grafted_digests.get(&pos);
+        let Some(grafted_digest) = grafted_digest else {
+            panic!("missing grafted digest for leaf_pos {}", pos);
+        };
+
+        // We do not include position in the digest material here since the position information is
+        // already captured in the base_node_digest.
+        self.hasher.update_with_element(element);
+        self.hasher.update_with_digest(grafted_digest);
+
+        self.hasher.finalize()
+    }
+
+    fn fork(&self) -> impl Hasher<H> {
+        GraftingFork {
+            hasher: Standard::new(),
+            height: self.height,
+            grafted_digests: self.grafted_digests,
+        }
+    }
+
+    fn node_digest(
+        &mut self,
+        pos: u64,
+        left_digest: &H::Digest,
+        right_digest: &H::Digest,
+    ) -> H::Digest {
+        self.hasher
+            .node_digest(destination_pos(pos, self.height), left_digest, right_digest)
+    }
+
+    fn root_digest<'a>(
+        &mut self,
+        size: u64,
+        peak_digests: impl Iterator<Item = &'a H::Digest>,
+    ) -> H::Digest {
+        self.hasher
+            .root_digest(destination_pos(size, self.height), peak_digests)
     }
 
     fn digest(&mut self, data: &[u8]) -> H::Digest {
@@ -363,6 +446,15 @@ impl<'a, H: CHasher> GraftingVerifier<'a, H> {
 impl<H: CHasher> Hasher<H> for GraftingVerifier<'_, H> {
     fn leaf_digest(&mut self, pos: u64, element: &[u8]) -> H::Digest {
         self.hasher.leaf_digest(pos, element)
+    }
+
+    fn fork(&self) -> impl Hasher<H> {
+        GraftingVerifier {
+            hasher: Standard::new(),
+            height: self.height,
+            elements: self.elements.clone(),
+            num: self.num,
+        }
     }
 
     fn node_digest(

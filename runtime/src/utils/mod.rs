@@ -6,11 +6,12 @@ use crate::{Metrics, Spawner};
 #[cfg(test)]
 use futures::stream::{FuturesUnordered, StreamExt};
 use futures::{channel::oneshot, future::Shared, FutureExt};
-use rayon::{ThreadPool, ThreadPoolBuildError, ThreadPoolBuilder};
+use rayon::{ThreadPool as RThreadPool, ThreadPoolBuildError, ThreadPoolBuilder};
 use std::{
     any::Any,
     future::Future,
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
 };
 
@@ -145,7 +146,10 @@ impl Signaler {
     }
 }
 
-/// Creates a [rayon]-compatible thread pool with [Spawner::spawn_blocking].
+/// A clone-able wrapper around a [rayon]-compatible thread pool.
+pub type ThreadPool = Arc<RThreadPool>;
+
+/// Creates a clone-able [rayon]-compatible thread pool with [Spawner::spawn_blocking].
 ///
 /// # Arguments
 /// - `context`: The runtime context implementing the [Spawner] trait.
@@ -157,7 +161,7 @@ pub fn create_pool<S: Spawner + Metrics>(
     context: S,
     concurrency: usize,
 ) -> Result<ThreadPool, ThreadPoolBuildError> {
-    ThreadPoolBuilder::new()
+    let pool = ThreadPoolBuilder::new()
         .num_threads(concurrency)
         .spawn_handler(move |thread| {
             // Tasks spawned in a thread pool are expected to run longer than any single
@@ -167,7 +171,9 @@ pub fn create_pool<S: Spawner + Metrics>(
                 .spawn_blocking(true, move |_| thread.run());
             Ok(())
         })
-        .build()
+        .build()?;
+
+    Ok(Arc::new(pool))
 }
 
 /// Async reader–writer lock.

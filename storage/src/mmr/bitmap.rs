@@ -12,11 +12,18 @@
 
 use crate::{
     metadata::{Config as MConfig, Metadata},
-    mmr::{iterator::leaf_num_to_pos, mem::Mmr, verification::Proof, Error, Error::*, Hasher},
+    mmr::{
+        iterator::leaf_num_to_pos,
+        mem::{Config as MemConfig, Mmr},
+        verification::Proof,
+        Error,
+        Error::*,
+        Hasher,
+    },
 };
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Hasher as CHasher;
-use commonware_runtime::{Clock, Metrics, Storage as RStorage};
+use commonware_runtime::{Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::array::prefixed_u64::U64;
 use std::collections::{HashSet, VecDeque};
 use tracing::{debug, error, warn};
@@ -118,6 +125,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     pub async fn restore_pruned<C: RStorage + Metrics + Clock>(
         context: C,
         partition: &str,
+        pool: Option<ThreadPool>,
     ) -> Result<Self, Error> {
         let metadata_cfg = MConfig {
             partition: partition.to_string(),
@@ -161,7 +169,12 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 
         metadata.close().await?;
 
-        let mmr = Mmr::init(Vec::new(), mmr_size, pinned_nodes);
+        let mmr = Mmr::init(MemConfig {
+            nodes: Vec::new(),
+            pruned_to_pos: mmr_size,
+            pinned_nodes,
+            pool,
+        });
 
         Ok(Self {
             bitmap: VecDeque::from([[0u8; N]]),
@@ -447,11 +460,15 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         self.authenticated_len = end;
 
         // Inform the MMR of modified chunks.
-        let updates = self.dirty_chunks.iter().map(|chunk_index| {
-            let pos = leaf_num_to_pos((*chunk_index + self.pruned_chunks) as u64);
-            (pos, &self.bitmap[*chunk_index])
-        });
-        self.mmr.update_leaf_batched(hasher, updates);
+        let updates = self
+            .dirty_chunks
+            .iter()
+            .map(|chunk_index| {
+                let pos = leaf_num_to_pos((*chunk_index + self.pruned_chunks) as u64);
+                (pos, &self.bitmap[*chunk_index])
+            })
+            .collect::<Vec<_>>();
+        self.mmr.update_leaf_batched(hasher, &updates);
         self.dirty_chunks.clear();
         self.mmr.sync(hasher);
 
@@ -1029,7 +1046,7 @@ mod tests {
         executor.start(|context| async move {
             // Initializing from an empty partition should result in an empty bitmap.
             let mut bitmap =
-                Bitmap::<Sha256, SHA256_SIZE>::restore_pruned(context.clone(), PARTITION)
+                Bitmap::<Sha256, SHA256_SIZE>::restore_pruned(context.clone(), PARTITION, None)
                     .await
                     .unwrap();
             assert_eq!(bitmap.bit_count(), 0);
@@ -1057,7 +1074,7 @@ mod tests {
                     .write_pruned(context.clone(), PARTITION)
                     .await
                     .unwrap();
-                bitmap = Bitmap::<_, SHA256_SIZE>::restore_pruned(context.clone(), PARTITION)
+                bitmap = Bitmap::<_, SHA256_SIZE>::restore_pruned(context.clone(), PARTITION, None)
                     .await
                     .unwrap();
                 let _ = bitmap.root(&mut hasher).await.unwrap();
