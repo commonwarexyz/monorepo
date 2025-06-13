@@ -40,7 +40,7 @@ impl Info {
     /// Encodes the nonce information into a 12-byte array.
     ///
     /// An error is returned if-and-only-if the nonce has overflowed 12 bytes.
-    pub fn encode(&self) -> Result<Nonce, Error> {
+    fn encode(&self) -> Result<Nonce, Error> {
         // Check for overflow over 96 bits (12 bytes)
         if self.counter >= OVERFLOW_VALUE {
             return Err(Error::NonceOverflow);
@@ -95,51 +95,31 @@ mod tests {
     }
 
     #[test]
-    fn test_next() {
+    fn test_next_sequence() {
         let mut nonce = Info::default();
 
-        // First next() should succeed and increment counter
-        let result = nonce.next();
-        assert!(result.is_ok());
-        assert_eq!(nonce.counter, 1);
+        // Test a sequence of next() calls
+        for i in 1..=5 {
+            let result = nonce.next();
+            assert!(result.is_ok());
+            assert_eq!(nonce.counter, i);
 
-        // Second next() should succeed and increment counter
-        let result = nonce.next();
-        assert!(result.is_ok());
-        assert_eq!(nonce.counter, 2);
+            // Verify the encoded nonce corresponds to the previous counter value
+            let encoded = result.unwrap();
+            let expected_counter = i - 1;
+            let expected_bytes = expected_counter.to_be_bytes();
+            assert_eq!(encoded[..], expected_bytes[4..16]);
+        }
     }
 
     #[test]
-    fn test_inc_overflow() {
-        let initial = OVERFLOW_VALUE - 1;
-        let mut nonce = Info { counter: initial };
-
-        // next() should succeed at the boundary (encode works, then inc increments to OVERFLOW_VALUE)
-        let result = nonce.next();
-        assert!(result.is_ok());
-        assert_eq!(nonce.counter, OVERFLOW_VALUE); // inc() incremented successfully
-
-        // next() should now fail because we can't encode at OVERFLOW_VALUE
-        let result = nonce.next();
-        assert!(matches!(result, Err(Error::NonceOverflow)));
-        assert_eq!(nonce.counter, OVERFLOW_VALUE); // inc() silently failed to increment
-
-        // Create a nonce that's at overflow to test encode failure
-        let overflow_nonce = Info {
-            counter: OVERFLOW_VALUE,
-        };
-        assert!(matches!(overflow_nonce.encode(), Err(Error::NonceOverflow)));
-    }
-
-    #[test]
-    fn test_can_use_final_nonce_value() {
-        // This test verifies the fix for the original issue - that we can successfully
-        // use the final possible nonce value (2^96 - 1)
+    fn test_overflow_boundary() {
+        // Test the final valid nonce value (2^96 - 1)
         let mut nonce = Info {
             counter: OVERFLOW_VALUE - 1,
         };
 
-        // Should be able to use the final nonce value
+        // Should successfully encode and use the final nonce value
         let result = nonce.next();
         assert!(result.is_ok());
 
@@ -148,8 +128,30 @@ mod tests {
         let expected = [0xFF; 12]; // All bits set in 12 bytes
         assert_eq!(encoded[..], expected[..]);
 
-        // After using the final nonce, we should be at overflow and can't use next() again
+        // After using the final nonce, counter should be at OVERFLOW_VALUE
         assert_eq!(nonce.counter, OVERFLOW_VALUE);
+
+        // next() should now fail because we can't encode at OVERFLOW_VALUE
         assert!(matches!(nonce.next(), Err(Error::NonceOverflow)));
+        assert_eq!(nonce.counter, OVERFLOW_VALUE); // Counter unchanged
+    }
+
+    #[test]
+    fn test_encode_overflow_conditions() {
+        // Test encode() at boundary conditions
+        let valid_nonce = Info {
+            counter: OVERFLOW_VALUE - 1,
+        };
+        assert!(valid_nonce.encode().is_ok());
+
+        let overflow_nonce = Info {
+            counter: OVERFLOW_VALUE,
+        };
+        assert!(matches!(overflow_nonce.encode(), Err(Error::NonceOverflow)));
+
+        let way_over_nonce = Info {
+            counter: OVERFLOW_VALUE + 1000,
+        };
+        assert!(matches!(way_over_nonce.encode(), Err(Error::NonceOverflow)));
     }
 }
