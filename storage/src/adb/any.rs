@@ -259,25 +259,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             let op: Operation<K, V> = log.read(i).await?;
             match op {
                 Operation::Deleted(key) => {
-                    // If the translated key is in the snapshot, get a cursor to look for the key.
-                    if let Some(mut cursor) = snapshot.get_mut(&key) {
-                        while let Some(loc) = cursor.next() {
-                            let op = log.read(*loc).await?;
-                            let Some(op_key) = op.to_key() else {
-                                // This is a commit
-                                continue;
-                            };
-                            if *op_key != key {
-                                // This operation is not for the key we're looking for.
-                                continue;
-                            }
-
-                            // The mapped key is the same; delete it from the snapshot.
-                            if let Some(ref mut bitmap) = bitmap {
-                                bitmap.set_bit(*loc, false);
-                            }
-                            cursor.delete();
-                            break;
+                    let delete_result =
+                        Any::<E, K, V, H, T>::delete_key(snapshot, log, &key).await?;
+                    if let Some(ref mut bitmap) = bitmap {
+                        if let Some(old_loc) = delete_result {
+                            // If the key was previously in the snapshot, then we need to mark its
+                            // previous location as inactive.
+                            bitmap.set_bit(old_loc, false);
                         }
                     }
                 }
@@ -328,27 +316,30 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
         // Iterate over conflicts in the snapshot.
         while let Some(loc) = cursor.next() {
-            let op = log.read(*loc).await?;
-            let Some(op_key) = op.to_key() else {
-                // This is a commit
-                continue;
-            };
-            if *op_key != key {
-                // This operation is not for the key we're looking for.
-                continue;
-            }
+            match log.read(*loc).await? {
+                Operation::Update(k, v) => {
+                    if k == key {
+                        // Found the key in the snapshot.
+                        if let Some(value) = value {
+                            if v == *value {
+                                // The key value is the same as the previous one: treat as a no-op.
+                                return Ok(UpdateResult::NoOp);
+                            }
+                        }
 
-            if let Some(v) = value {
-                if op.to_value().unwrap() == v {
-                    // The key value is the same as the previous one: treat as a no-op.
-                    return Ok(UpdateResult::NoOp);
+                        // Update its location to the given one.
+                        let old_loc = *loc;
+                        cursor.update(new_loc);
+                        return Ok(UpdateResult::Updated(old_loc, new_loc));
+                    }
+                }
+                _ => {
+                    unreachable!(
+                        "snapshot should only reference update operations. key={}",
+                        key
+                    );
                 }
             }
-
-            // Update the location of the matching operation in the snapshot.
-            let old_loc = *loc;
-            cursor.update(new_loc);
-            return Ok(UpdateResult::Updated(old_loc, new_loc));
         }
 
         // The key wasn't in the snapshot, so add it to the cursor.
@@ -434,25 +425,36 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// The operation is reflected in the snapshot, but will be subject to rollback until the next
     /// successful `commit`. Returns the location of the deleted value for the key (if any).
     pub async fn delete(&mut self, key: K) -> Result<Option<u64>, Error> {
-        // If the translated key is in the snapshot, get a cursor to look for the key.
-        let Some(mut cursor) = self.snapshot.get_mut(&key) else {
-            return Ok(None);
+        let r = Self::delete_key(&mut self.snapshot, &self.log, &key).await?;
+        if r.is_some() {
+            self.apply_op(Operation::Deleted(key)).await?;
         };
 
+        Ok(r)
+    }
+
+    /// Delete `key` from the snapshot if it exists, returning the location that was previously
+    /// associated with it.
+    async fn delete_key(
+        snapshot: &mut Index<T, u64>,
+        log: &Journal<E, Operation<K, V>>,
+        key: &K,
+    ) -> Result<Option<u64>, Error> {
+        // If the translated key is in the snapshot, get a cursor to look for the key.
+        let Some(mut cursor) = snapshot.get_mut(key) else {
+            return Ok(None);
+        };
         // Iterate over all conflicting keys in the snapshot.
         while let Some(loc) = cursor.next() {
-            let op = self.log.read(*loc).await?;
-            match op {
+            match log.read(*loc).await? {
                 Operation::Update(k, _) => {
-                    if k == key {
+                    if k == *key {
                         // The key is in the snapshot, so delete it.
                         //
                         // If there are no longer any conflicting keys in the cursor, it will
                         // automatically be removed from the snapshot.
                         let old_loc = *loc;
                         cursor.delete();
-                        drop(cursor);
-                        self.apply_op(Operation::Deleted(key)).await?;
                         return Ok(Some(old_loc));
                     }
                 }
