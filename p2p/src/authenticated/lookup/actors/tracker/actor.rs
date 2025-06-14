@@ -254,8 +254,14 @@ mod tests {
                 mut mailbox,
                 ..
             } = setup_actor(context.clone(), cfg_initial);
-            let too_many_peers: Vec<PublicKey> = (1..=(cfg.max_peer_set_size + 1) as u64)
-                .map(|i| new_signer_and_pk(i).1)
+            let too_many_peers: Vec<(PublicKey, SocketAddr)> = (1..=(cfg.max_peer_set_size + 1)
+                as u64)
+                .map(|i| {
+                    (
+                        new_signer_and_pk(i).1,
+                        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                    )
+                })
                 .collect();
             oracle.register(0, too_many_peers).await;
             // Ensure the message is processed causing the panic
@@ -420,11 +426,12 @@ mod tests {
             } = setup_actor(context.clone(), cfg_initial);
 
             let (_peer_signer, peer_pk) = new_signer_and_pk(1);
+            let peer_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8080);
 
             let reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(reservation.is_none());
 
-            oracle.register(0, vec![peer_pk.clone()]).await;
+            oracle.register(0, vec![(peer_pk.clone(), peer_addr)]).await;
             context.sleep(Duration::from_millis(10)).await; // Allow register to process
 
             let reservation = mailbox.listen(peer_pk.clone()).await;
@@ -453,8 +460,7 @@ mod tests {
                 mut oracle,
                 ..
             } = setup_actor(context.clone(), cfg_initial);
-
-            oracle.update_address(boot_pk.clone(), boot_addr).await;
+            oracle.register(0, vec![(boot_pk.clone(), boot_addr)]).await;
 
             let dialable_peers = mailbox.dialable().await;
             assert_eq!(dialable_peers.len(), 1);
@@ -476,7 +482,7 @@ mod tests {
                 ..
             } = setup_actor(context.clone(), cfg_initial);
 
-            oracle.update_address(boot_pk.clone(), boot_addr).await;
+            oracle.register(0, vec![(boot_pk.clone(), boot_addr)]).await;
 
             let reservation = mailbox.dial(boot_pk.clone()).await;
             assert!(reservation.is_some());

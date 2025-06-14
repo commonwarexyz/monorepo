@@ -63,6 +63,15 @@ impl Record {
         }
     }
 
+    pub fn known(socket: SocketAddr) -> Self {
+        Record {
+            address: Address::Known(socket),
+            status: Status::Inert,
+            sets: 0,
+            persistent: false,
+        }
+    }
+
     /// Create a new record with the local node's information.
     pub fn myself(socket: SocketAddr) -> Self {
         Record {

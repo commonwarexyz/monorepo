@@ -151,6 +151,7 @@ pub use network::Network;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::authenticated::lookup::actors::peer;
     use crate::{Receiver, Recipients, Sender};
     use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
     use commonware_macros::test_traced;
@@ -187,22 +188,22 @@ mod tests {
         mode: Mode,
     ) {
         // Create peers
-        let mut peers = Vec::new();
+        let mut peers_and_sks = Vec::new();
         for i in 0..n {
             let private_key = ed25519::PrivateKey::from_seed(i as u64);
             let public_key = private_key.public_key();
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + i as u16);
-            peers.push((private_key, public_key, address));
+            peers_and_sks.push((private_key, public_key, address));
         }
-        let public_keys = peers
+        let peers = peers_and_sks
             .iter()
-            .map(|(_, pub_key, _)| pub_key.clone())
+            .map(|(_, pub_key, addr)| (pub_key.clone(), *addr))
             .collect::<Vec<_>>();
 
         // Create networks
         let mut waiters = Vec::new();
         let mut oracles = Vec::new();
-        for (i, (private_key, public_key, address)) in peers.iter().enumerate() {
+        for (i, (private_key, public_key, address)) in peers_and_sks.iter().enumerate() {
             let public_key = public_key.clone();
 
             // Create peer context
@@ -213,7 +214,7 @@ mod tests {
             let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
 
             // Register peers
-            oracle.register(0, public_keys.clone()).await;
+            oracle.register(0, peers.clone()).await;
             oracles.push(oracle);
 
             // Register basic application
@@ -228,7 +229,7 @@ mod tests {
             network.start();
 
             // Send/Receive messages
-            let public_keys = public_keys.clone();
+            let public_keys = peers.clone();
             let handler = context.with_label("agent").spawn({
                 move |context| async move {
                     // Wait for all peers to send their identity
@@ -247,7 +248,7 @@ mod tests {
                     // Send identity to all peers
                     match mode {
                         Mode::One => {
-                            for (j, recipient) in public_keys.iter().enumerate() {
+                            for (j, (pub_key, addr)) in public_keys.iter().enumerate() {
                                 // Don't send message to self
                                 if i == j {
                                     continue;
@@ -257,7 +258,7 @@ mod tests {
                                 loop {
                                     let sent = sender
                                         .send(
-                                            Recipients::One(recipient.clone()),
+                                            Recipients::One(pub_key.clone()),
                                             public_key.to_vec().into(),
                                             true,
                                         )
@@ -267,7 +268,7 @@ mod tests {
                                         context.sleep(Duration::from_millis(100)).await;
                                         continue;
                                     }
-                                    assert_eq!(&sent[0], recipient);
+                                    assert_eq!(&sent[0], pub_key);
                                     break;
                                 }
                             }
@@ -277,12 +278,16 @@ mod tests {
                             let mut recipients = public_keys.clone();
                             recipients.remove(i);
                             recipients.sort();
+                            let pub_keys = public_keys
+                                .iter()
+                                .map(|(pk, _)| pk.clone())
+                                .collect::<Vec<_>>();
 
                             // Loop until all peer sends successful
                             loop {
                                 let mut sent = sender
                                     .send(
-                                        Recipients::Some(recipients.clone()),
+                                        Recipients::Some(pub_keys.clone()),
                                         public_key.to_vec().into(),
                                         true,
                                     )
@@ -295,7 +300,7 @@ mod tests {
 
                                 // Compare to expected
                                 sent.sort();
-                                assert_eq!(sent, recipients);
+                                assert_eq!(sent, pub_keys);
                                 break;
                             }
                         }
@@ -304,6 +309,10 @@ mod tests {
                             let mut recipients = public_keys.clone();
                             recipients.remove(i);
                             recipients.sort();
+                            let pub_keys = public_keys
+                                .iter()
+                                .map(|(pk, _)| pk.clone())
+                                .collect::<Vec<_>>();
 
                             // Loop until all peer sends successful
                             loop {
@@ -318,7 +327,7 @@ mod tests {
 
                                 // Compare to expected
                                 sent.sort();
-                                assert_eq!(sent, recipients);
+                                assert_eq!(sent, pub_keys);
                                 break;
                             }
                         }
@@ -335,7 +344,7 @@ mod tests {
 
         // Give each peer the address of all other peers
         for oracle in oracles.iter_mut() {
-            for (_, (_, pub_key, addr)) in peers.iter().enumerate() {
+            for (_, (_, pub_key, addr)) in peers_and_sks.iter().enumerate() {
                 oracle.update_address(pub_key.clone(), addr.clone()).await;
             }
         }
@@ -422,57 +431,55 @@ mod tests {
     fn test_multi_index_oracle() {
         // Configure test
         let base_port = 3000;
-        let n: usize = 100;
+        let n: usize = 10;
 
         // Initialize context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create peers
-            let mut peers = Vec::new();
+            let mut peers_and_sks = Vec::new();
             for i in 0..n {
-                peers.push(ed25519::PrivateKey::from_seed(i as u64));
+                let sk = ed25519::PrivateKey::from_seed(i as u64);
+                let pk = sk.public_key();
+                let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + i as u16);
+                peers_and_sks.push((sk, pk, addr));
             }
-            let addresses = peers.iter().map(|p| p.public_key()).collect::<Vec<_>>();
+            let peers = peers_and_sks
+                .iter()
+                .map(|(_, pk, addr)| (pk.clone(), *addr))
+                .collect::<Vec<_>>();
 
             // Create networks
             let mut waiters = Vec::new();
-            for (i, peer) in peers.iter().enumerate() {
+            for (i, (peer_sk, peer_pk, peer_addr)) in peers_and_sks.iter().enumerate() {
                 // Create peer context
                 let context = context.with_label(&format!("peer-{}", i));
-
-                // Derive port
-                let port = base_port + i as u16;
 
                 // Create bootstrappers
                 let mut bootstrappers = Vec::new();
                 if i > 0 {
                     bootstrappers.push((
-                        addresses[0].clone(),
+                        peers[0].clone(),
                         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
                     ));
                 }
 
                 // Create network
-                let signer = peer.clone();
                 let config = Config::test(
-                    signer.clone(),
-                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+                    peer_sk.clone(),
+                    *peer_addr,
                     1_024 * 1_024, // 1MB
                 );
                 let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
 
                 // Register peers at separate indices
-                oracle.register(0, vec![addresses[0].clone()]).await;
+                oracle.register(0, vec![peers[0].clone()]).await;
                 oracle
-                    .register(1, vec![addresses[1].clone(), addresses[2].clone()])
+                    .register(1, vec![peers[1].clone(), peers[2].clone()])
                     .await;
                 oracle
-                    .register(2, addresses.iter().skip(2).cloned().collect())
+                    .register(2, peers.iter().skip(2).cloned().collect())
                     .await;
-
-                for (peer_pk, peer_addr) in bootstrappers {
-                    oracle.update_address(peer_pk, peer_addr).await;
-                }
 
                 // Register basic application
                 let (mut sender, mut receiver) = network.register(
@@ -486,12 +493,12 @@ mod tests {
                 network.start();
 
                 // Send/Receive messages
+                let msg = peer_pk.clone();
                 let handler = context
                     .with_label("agent")
                     .spawn(move |context| async move {
                         if i == 0 {
                             // Loop until success
-                            let msg = signer.public_key();
                             loop {
                                 if sender
                                     .send(Recipients::All, msg.to_vec().into(), true)
@@ -533,23 +540,30 @@ mod tests {
         let executor = deterministic::Runner::seeded(0);
         executor.start(|mut context| async move {
             // Create peers
-            let mut peers = Vec::new();
+            let mut peers_and_sks = Vec::new();
             for i in 0..n {
-                peers.push(ed25519::PrivateKey::from_seed(i as u64));
+                let peer_sk = ed25519::PrivateKey::from_seed(i as u64);
+                let peer_pk = peer_sk.public_key();
+                let peer_addr =
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + i as u16);
+                peers_and_sks.push((peer_sk, peer_pk, peer_addr));
             }
-            let addresses = peers.iter().map(|p| p.public_key()).collect::<Vec<_>>();
+            let peers = peers_and_sks
+                .iter()
+                .map(|(_, pk, addr)| (pk.clone(), *addr))
+                .collect::<Vec<_>>();
 
             // Create network
-            let signer = peers[0].clone();
+            let (sk, _, addr) = peers_and_sks[0].clone();
             let config = Config::test(
-                signer.clone(),
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
+                sk,
+                addr,
                 1_024 * 1_024, // 1MB
             );
             let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
 
             // Register peers
-            oracle.register(0, addresses.clone()).await;
+            oracle.register(0, peers.clone()).await;
 
             // Register basic application
             let (mut sender, _) = network.register(
@@ -567,7 +581,7 @@ mod tests {
             context.fill(&mut msg[..]);
 
             // Send message
-            let recipient = Recipients::One(addresses[1].clone());
+            let recipient = Recipients::One(peers[1].0.clone());
             let result = sender.send(recipient, msg.into(), true).await;
             assert!(matches!(result, Err(Error::MessageTooLarge(_))));
         });

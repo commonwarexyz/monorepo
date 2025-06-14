@@ -124,7 +124,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     }
 
     /// Stores a new peer set.
-    pub fn add_set(&mut self, index: u64, peers: Vec<C>) {
+    pub fn add_set(&mut self, index: u64, peers: Vec<(C, SocketAddr)>) {
         // Check if peer set already exists
         if self.sets.contains_key(&index) {
             debug!(index, "peer set already exists");
@@ -140,13 +140,14 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         }
 
         // Create and store new peer set
-        for peer in &peers {
+        for (peer, addr) in &peers {
             let record = self.peers.entry(peer.clone()).or_insert_with(|| {
                 self.metrics.tracked.inc();
-                Record::unknown()
+                Record::known(*addr)
             });
             record.increment();
         }
+        let peers: Vec<_> = peers.into_iter().map(|(peer, _)| peer).collect();
         self.sets.insert(index, peers);
 
         // Remove oldest entries if necessary

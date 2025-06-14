@@ -15,7 +15,10 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
     /// Register a peer set at a given index.
     ///
     /// The vector of peers must be sorted in ascending order by public key.
-    Register { index: u64, peers: Vec<C> },
+    Register {
+        index: u64,
+        peers: Vec<(C, SocketAddr)>,
+    },
 
     UpdateAddress {
         /// The public key of the peer to update.
@@ -150,16 +153,13 @@ impl<E: Spawner + Metrics, C: PublicKey> Oracle<E, C> {
 
     /// Register a set of authorized peers at a given index.
     ///
-    /// These peer sets are used to construct a bit vector (sorted by public key)
-    /// to share knowledge about dialable IPs. If a peer does not yet have an index
-    /// associated with a bit vector, the discovery message will be dropped.
-    ///
     /// # Parameters
     ///
     /// * `index` - Index of the set of authorized peers (like a blockchain height).
     ///   Should be monotonically increasing.
     /// * `peers` - Vector of authorized peers at an `index` (does not need to be sorted).
-    pub async fn register(&mut self, index: u64, peers: Vec<C>) {
+    ///   Each element is a tuple containing the public key and the socket address of the peer.
+    pub async fn register(&mut self, index: u64, peers: Vec<(C, SocketAddr)>) {
         let _ = self.sender.send(Message::Register { index, peers }).await;
     }
 
