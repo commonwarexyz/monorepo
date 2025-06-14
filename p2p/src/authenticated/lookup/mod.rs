@@ -151,7 +151,6 @@ pub use network::Network;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::lookup::actors::peer;
     use crate::{Receiver, Recipients, Sender};
     use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
     use commonware_macros::test_traced;
@@ -229,7 +228,8 @@ mod tests {
             network.start();
 
             // Send/Receive messages
-            let public_keys = peers.clone();
+            let peers = peers.clone();
+            let public_keys = peers.iter().map(|(pk, _)| pk.clone()).collect::<Vec<_>>();
             let handler = context.with_label("agent").spawn({
                 move |context| async move {
                     // Wait for all peers to send their identity
@@ -248,7 +248,7 @@ mod tests {
                     // Send identity to all peers
                     match mode {
                         Mode::One => {
-                            for (j, (pub_key, addr)) in public_keys.iter().enumerate() {
+                            for (j, (pub_key, _)) in peers.iter().enumerate() {
                                 // Don't send message to self
                                 if i == j {
                                     continue;
@@ -275,19 +275,15 @@ mod tests {
                         }
                         Mode::Some => {
                             // Get all peers not including self
-                            let mut recipients = public_keys.clone();
+                            let mut recipients = peers.clone();
                             recipients.remove(i);
                             recipients.sort();
-                            let pub_keys = public_keys
-                                .iter()
-                                .map(|(pk, _)| pk.clone())
-                                .collect::<Vec<_>>();
 
                             // Loop until all peer sends successful
                             loop {
                                 let mut sent = sender
                                     .send(
-                                        Recipients::Some(pub_keys.clone()),
+                                        Recipients::Some(public_keys.clone()),
                                         public_key.to_vec().into(),
                                         true,
                                     )
@@ -300,19 +296,15 @@ mod tests {
 
                                 // Compare to expected
                                 sent.sort();
-                                assert_eq!(sent, pub_keys);
+                                assert_eq!(sent, public_keys);
                                 break;
                             }
                         }
                         Mode::All => {
                             // Get all peers not including self
-                            let mut recipients = public_keys.clone();
+                            let mut recipients = peers.clone();
                             recipients.remove(i);
                             recipients.sort();
-                            let pub_keys = public_keys
-                                .iter()
-                                .map(|(pk, _)| pk.clone())
-                                .collect::<Vec<_>>();
 
                             // Loop until all peer sends successful
                             loop {
@@ -327,7 +319,7 @@ mod tests {
 
                                 // Compare to expected
                                 sent.sort();
-                                assert_eq!(sent, pub_keys);
+                                assert_eq!(sent, public_keys);
                                 break;
                             }
                         }
@@ -340,13 +332,6 @@ mod tests {
 
             // Add to waiters
             waiters.push(handler);
-        }
-
-        // Give each peer the address of all other peers
-        for oracle in oracles.iter_mut() {
-            for (_, (_, pub_key, addr)) in peers_and_sks.iter().enumerate() {
-                oracle.update_address(pub_key.clone(), addr.clone()).await;
-            }
         }
 
         // Wait for all peers to finish

@@ -3,10 +3,6 @@ use std::net::SocketAddr;
 /// Represents information known about a peer's address.
 #[derive(Clone, Debug)]
 pub enum Address {
-    /// Peer address is not yet known.
-    /// Can be upgraded to `Known`.
-    Unknown,
-
     /// Peer is the local node.
     Myself(SocketAddr),
 
@@ -53,16 +49,6 @@ pub struct Record {
 impl Record {
     // ---------- Constructors ----------
 
-    /// Create a new record with an unknown address.
-    pub fn unknown() -> Self {
-        Record {
-            address: Address::Unknown,
-            status: Status::Inert,
-            sets: 0,
-            persistent: false,
-        }
-    }
-
     pub fn known(socket: SocketAddr) -> Self {
         Record {
             address: Address::Known(socket),
@@ -94,16 +80,6 @@ impl Record {
     }
 
     // ---------- Setters ----------
-
-    /// Update the address of the peer.
-    /// If the address is [Address::Myself], it will not be updated.
-    pub fn update_address(&mut self, address: SocketAddr) {
-        // TODO: what should we do if this peer is blocked?
-        if matches!(self.address, Address::Myself(_)) {
-            return;
-        }
-        self.address = Address::Known(address);
-    }
 
     /// Attempt to mark the peer as blocked.
     ///
@@ -180,7 +156,6 @@ impl Record {
     /// Return the socket of the peer, if known.
     pub fn socket(&self) -> Option<SocketAddr> {
         match &self.address {
-            Address::Unknown => None,
             Address::Myself(addr) => Some(*addr),
             Address::Known(addr) => Some(*addr),
             Address::Blocked => None,
@@ -202,7 +177,7 @@ impl Record {
     pub fn allowed(&self) -> bool {
         match self.address {
             Address::Blocked | Address::Myself(_) => false,
-            Address::Known(_) | Address::Unknown => self.sets > 0 || self.persistent,
+            Address::Known(_) => self.sets > 0 || self.persistent,
         }
     }
 }
@@ -214,24 +189,6 @@ mod tests {
     // Common test sockets
     fn test_socket() -> SocketAddr {
         SocketAddr::from(([127, 0, 0, 1], 8080))
-    }
-
-    fn test_socket2() -> SocketAddr {
-        SocketAddr::from(([127, 0, 0, 1], 8081))
-    }
-
-    #[test]
-    fn test_unknown_initial_state() {
-        let record = Record::unknown();
-        assert!(matches!(record.address, Address::Unknown));
-        assert_eq!(record.status, Status::Inert);
-        assert_eq!(record.sets, 0);
-        assert!(!record.persistent);
-        assert_eq!(record.socket(), None);
-        assert!(!record.blocked());
-        assert!(!record.reserved());
-        assert!(record.deletable());
-        assert!(!record.allowed());
     }
 
     #[test]
@@ -265,29 +222,6 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_to_known() {
-        let socket = test_socket();
-        let mut record = Record::unknown();
-
-        record.update_address(socket);
-        assert_eq!(record.socket(), Some(socket));
-        assert!(matches!(&record.address, Address::Known(got_socket) if *got_socket == socket));
-        assert!(!record.persistent);
-    }
-
-    #[test]
-    fn test_bootstrapper_to_known() {
-        let socket = test_socket();
-        let mut record = Record::_bootstrapper(socket);
-
-        assert!(record.persistent, "Should start as persistent");
-        record.update_address(socket);
-        assert_eq!(record.socket(), Some(socket));
-        assert!(matches!(&record.address, Address::Known(got_socket) if *got_socket == socket));
-        assert!(record.persistent, "Should remain persistent after update");
-    }
-
-    #[test]
     fn test_myself_blocked_to_known() {
         let socket = test_socket();
         let mut record = Record::myself(socket);
@@ -296,49 +230,10 @@ mod tests {
     }
 
     #[test]
-    /// Test that update_address doesn't change the address if it is Myself.
-    fn test_update_address_myself() {
-        let socket = test_socket();
-        let mut record = Record::myself(socket);
-
-        let socket2 = test_socket2();
-        record.update_address(socket2);
-        assert!(matches!(&record.address, Address::Myself(s) if *s == socket));
-        assert_eq!(record.socket(), Some(socket));
-    }
-
-    #[test]
-    fn test_other_blocked_to_known() {
-        let socket = test_socket();
-        let mut record = Record::unknown();
-        record.update_address(socket);
-        assert!(matches!(&record.address, Address::Known(s) if *s == socket));
-
-        // Block the record
-        assert!(record.block());
-        assert!(record.blocked());
-        assert!(matches!(record.address, Address::Blocked));
-
-        // Unblock and check it goes back to Known
-        record.update_address(socket);
-        assert_eq!(record.socket(), Some(socket));
-        assert!(matches!(&record.address, Address::Known(s) if *s == socket));
-    }
-
-    #[test]
     fn test_increment_decrement_and_deletable() {
-        // Test Unknown (not persistent)
-        let mut record_unknown = Record::unknown();
-        assert!(record_unknown.deletable());
-        record_unknown.increment(); // sets = 1
-        assert!(!record_unknown.deletable());
-        record_unknown.decrement(); // sets = 0
-        assert!(record_unknown.deletable());
-
         // Test Known (not persistent)
         let socket = test_socket();
-        let mut record_known = Record::unknown();
-        record_known.update_address(socket);
+        let mut record_known = Record::known(socket);
         assert!(record_known.deletable());
         record_known.increment(); // sets = 1
         assert!(!record_known.deletable());
@@ -365,7 +260,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_decrement_panics_at_zero() {
-        let mut record = Record::unknown();
+        let mut record = Record::known(test_socket());
         assert_eq!(record.sets, 0);
         record.decrement(); // Panics
     }
@@ -373,16 +268,6 @@ mod tests {
     #[test]
     fn test_block_behavior_and_persistence() {
         let socket = test_socket();
-
-        // Block an Unknown record
-        let mut record_unknown = Record::unknown();
-        assert!(!record_unknown.persistent);
-        assert!(record_unknown.block()); // Newly blocked
-        assert!(record_unknown.blocked());
-        assert!(matches!(record_unknown.address, Address::Blocked));
-        assert_eq!(record_unknown.status, Status::Inert);
-        assert!(!record_unknown.persistent, "Blocking sets persistent=false");
-        assert!(!record_unknown.block()); // Already blocked
 
         // Block a Bootstrapper record (initially persistent)
         let mut record_boot = Record::_bootstrapper(test_socket());
@@ -393,8 +278,7 @@ mod tests {
         assert!(!record_boot.persistent, "Blocking sets persistent=false");
 
         // Block a Known record (initially not persistent)
-        let mut record_known = Record::unknown();
-        record_known.update_address(socket);
+        let mut record_known = Record::known(socket);
         assert!(!record_known.persistent);
         assert!(record_known.block());
         assert!(record_known.blocked());
@@ -403,7 +287,6 @@ mod tests {
 
         // Block a Known record that came from a Bootstrapper (initially persistent)
         let mut record_known_from_boot = Record::_bootstrapper(socket);
-        record_known_from_boot.update_address(socket);
         assert!(record_known_from_boot.persistent);
         assert!(record_known_from_boot.block());
         assert!(record_known_from_boot.blocked());
@@ -414,14 +297,12 @@ mod tests {
         );
 
         // Check status remains unchanged when blocking
-        let mut record_reserved = Record::unknown();
-        record_reserved.update_address(socket);
+        let mut record_reserved = Record::known(socket);
         assert!(record_reserved.reserve());
         assert!(record_reserved.block());
         assert_eq!(record_reserved.status, Status::Reserved);
 
-        let mut record_active = Record::unknown();
-        record_active.update_address(socket);
+        let mut record_active = Record::known(socket);
         assert!(record_active.reserve());
         record_active.connect();
         assert!(record_active.block());
@@ -437,7 +318,7 @@ mod tests {
             matches!(&record_myself.address, Address::Myself(got_socket) if *got_socket == socket)
         );
 
-        let mut record_to_be_blocked = Record::unknown();
+        let mut record_to_be_blocked = Record::known(socket);
         assert!(record_to_be_blocked.block());
         assert!(
             !record_to_be_blocked.block(),
@@ -448,7 +329,7 @@ mod tests {
 
     #[test]
     fn test_status_transitions_reserve_connect_release() {
-        let mut record = Record::unknown();
+        let mut record = Record::known(test_socket());
 
         assert_eq!(record.status, Status::Inert);
         assert!(record.reserve());
@@ -478,14 +359,14 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_connect_when_not_reserved_panics_from_inert() {
-        let mut record = Record::unknown();
+        let mut record = Record::known(test_socket());
         record.connect(); // Should panic
     }
 
     #[test]
     #[should_panic]
     fn test_connect_when_active_panics() {
-        let mut record = Record::unknown();
+        let mut record = Record::known(test_socket());
         assert!(record.reserve());
         record.connect();
         record.connect(); // Should panic
@@ -494,13 +375,13 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_release_when_inert_panics() {
-        let mut record = Record::unknown();
+        let mut record = Record::known(test_socket());
         record.release(); // Should panic
     }
 
     #[test]
     fn test_reserved_status_check() {
-        let mut record = Record::unknown();
+        let mut record = Record::known(test_socket());
         assert!(!record.reserved()); // Inert
         assert!(record.reserve());
         assert!(record.reserved()); // Reserved
@@ -516,13 +397,12 @@ mod tests {
 
         // Persistent records are never deletable regardless of sets count
         assert!(!Record::myself(socket).deletable());
-        assert!(!Record::_bootstrapper(test_socket()).deletable());
-        let mut record_pers = Record::_bootstrapper(test_socket());
-        record_pers.update_address(socket);
+        assert!(!Record::_bootstrapper(socket).deletable());
+        let record_pers = Record::_bootstrapper(socket);
         assert!(!record_pers.deletable());
 
         // Non-persistent records depend on sets count and status
-        let mut record = Record::unknown(); // Not persistent
+        let mut record = Record::known(socket); // Not persistent
         assert_eq!(record.sets, 0);
         assert_eq!(record.status, Status::Inert);
         assert!(record.deletable()); // sets = 0, !persistent, Inert
@@ -558,27 +438,25 @@ mod tests {
         let socket = test_socket();
 
         // Blocked and Myself are never allowed
-        let mut record_blocked = Record::unknown();
+        let mut record_blocked = Record::known(socket);
         record_blocked.block();
         assert!(!record_blocked.allowed());
         assert!(!Record::myself(socket).allowed());
 
         // Persistent records (Bootstrapper, Myself before blocking) are allowed even with sets=0
         assert!(Record::_bootstrapper(socket).allowed());
-        let mut record_pers = Record::_bootstrapper(socket);
-        record_pers.update_address(socket);
+        let record_pers = Record::_bootstrapper(socket);
         assert!(record_pers.allowed());
 
         // Non-persistent records (Unknown, Known) require sets > 0
-        let mut record_unknown = Record::unknown();
+        let mut record_unknown = Record::known(socket);
         assert!(!record_unknown.allowed()); // sets = 0, !persistent
         record_unknown.increment(); // sets = 1
         assert!(record_unknown.allowed()); // sets > 0
         record_unknown.decrement(); // sets = 0
         assert!(!record_unknown.allowed());
 
-        let mut record_known = Record::unknown();
-        record_known.update_address(socket);
+        let mut record_known = Record::known(socket);
         assert!(!record_known.allowed()); // sets = 0, !persistent
         record_known.increment(); // sets = 1
         assert!(record_known.allowed()); // sets > 0

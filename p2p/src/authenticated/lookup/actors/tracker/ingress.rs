@@ -20,14 +20,6 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
         peers: Vec<(C, SocketAddr)>,
     },
 
-    UpdateAddress {
-        /// The public key of the peer to update.
-        peer: C,
-
-        /// The new address of the peer.
-        address: SocketAddr,
-    },
-
     // ---------- Used by blocker ----------
     /// Block a peer, disconnecting them if currently connected and preventing future connections
     /// for as long as the peer remains in at least one active peer set.
@@ -161,14 +153,6 @@ impl<E: Spawner + Metrics, C: PublicKey> Oracle<E, C> {
     ///   Each element is a tuple containing the public key and the socket address of the peer.
     pub async fn register(&mut self, index: u64, peers: Vec<(C, SocketAddr)>) {
         let _ = self.sender.send(Message::Register { index, peers }).await;
-    }
-
-    /// Update a peer's address.
-    pub async fn update_address(&mut self, peer: C, address: SocketAddr) {
-        let _ = self
-            .sender
-            .send(Message::UpdateAddress { peer, address })
-            .await;
     }
 }
 

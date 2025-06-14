@@ -110,19 +110,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         record.connect();
     }
 
-    /// Sets the peer's address. No-op if the peer is not tracked.
-    pub fn update_address(&mut self, peer: &C, address: SocketAddr) {
-        let Some(record) = self.peers.get_mut(peer) else {
-            debug!(?peer, "peer not tracked");
-            return;
-        };
-        record.update_address(address);
-        self.metrics
-            .updates
-            .get_or_create(&metrics::Peer::new(peer))
-            .inc();
-    }
-
     /// Stores a new peer set.
     pub fn add_set(&mut self, index: u64, peers: Vec<(C, SocketAddr)>) {
         // Check if peer set already exists
