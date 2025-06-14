@@ -195,10 +195,10 @@ mod tests {
     fn test_max_data_overhead() {
         let message = Bytes::from(vec![0; 1 << 29]);
         let message_len = message.len();
-        let payload = Data {
+        let payload = Message::Data(Data {
             channel: u32::MAX,
             message,
-        };
+        });
         assert_eq!(
             payload.encode_size(),
             message_len + MAX_PAYLOAD_DATA_OVERHEAD
