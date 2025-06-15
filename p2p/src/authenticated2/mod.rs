@@ -1,18 +1,26 @@
+use crate::authenticated2::{
+    message::{Message, PeerInfo},
+    set::Set,
+};
 use bytes::Bytes;
+use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Sink, Stream};
+use commonware_runtime::{Clock, Sink, Stream};
 use commonware_stream::public_key::Connection;
-use std::{collections::HashMap, os::unix::net::SocketAddr};
+use commonware_utils::SystemTimeExt as _;
+use std::{collections::HashMap, net::SocketAddr};
 
 mod message;
+mod set;
 
 pub struct Config {}
 
 enum Peer<P: PublicKey, Si: Sink, St: Stream> {
+    Myself(PeerInfo<P>),
     AddressUnknown(P),
-    Disconnected(P, SocketAddr),
-    Connecting(P, SocketAddr),
-    Connected(P, SocketAddr, Connection<Si, St>),
+    Disconnected(PeerInfo<P>),
+    Connecting(PeerInfo<P>),
+    Connected(PeerInfo<P>, Connection<Si, St>),
 }
 
 enum PeerStatus {}
@@ -23,15 +31,21 @@ struct Spawner {}
 
 struct Tracker {}
 
-pub struct Network<P: PublicKey, Si: Sink, St: Stream> {
+struct Directory {}
+
+pub struct Network<Cl: Clock, P: PublicKey, Si: Sink, St: Stream> {
+    clock: Cl,
+    codec_cfg: message::Config,
+    peer_set: Set<P>,
     peers: HashMap<P, Peer<P, Si, St>>,
+    directory: Directory,
 }
 
-impl<P: PublicKey, Si: Sink, St: Stream> Network<P, Si, St> {
+impl<Cl: Clock, P: PublicKey, Si: Sink, St: Stream> Network<Cl, P, Si, St> {
     fn process_event(&mut self, event: Event<P, Si, St>) -> Result<(), Error> {
         match event {
-            Event::PeerConnected(peer_id, peer_addr, connection) => {
-                self.handle_peer_connected(peer_id, peer_addr, connection)
+            Event::PeerConnected(peer_info, connection) => {
+                self.handle_peer_connected(peer_info, connection)
             }
             Event::PeerDisconnected(peer_id) => self.handle_peer_disconnected(peer_id),
             Event::MessageReceived(peer_id, message) => {
@@ -43,36 +57,108 @@ impl<P: PublicKey, Si: Sink, St: Stream> Network<P, Si, St> {
 
     fn handle_peer_connected(
         &mut self,
-        peer_id: P,
-        peer_addr: SocketAddr,
+        peer: PeerInfo<P>,
         connection: Connection<Si, St>,
     ) -> Result<(), Error> {
-        let peer = self
+        let existing_peer = self
             .peers
-            .entry(peer_id.clone())
-            .or_insert(Peer::AddressUnknown(peer_id.clone()));
-        match peer {
-            Peer::Connected(..) => Err(Error::AlreadyConnected),
-            _ => {
-                *peer = Peer::Connected(peer_id, peer_addr, connection);
-                Ok(())
-            }
-        }
+            .get_mut(&peer.public_key)
+            .ok_or(Error::PeerNotFound)?;
+        *existing_peer = Peer::Connected(peer.clone(), connection);
+        Ok(())
     }
 
     fn handle_peer_disconnected(&mut self, peer_id: P) -> Result<(), Error> {
-        // Error if peer doesn't exist
-        let peer = self.peers.get_mut(&peer_id).ok_or(Error::PeerNotFound)?;
-        match peer {
-            Peer::Connected(_, addr, _) => {
-                *peer = Peer::Disconnected(peer_id, addr.clone());
-                Ok(())
+        let peer = self.peers.remove(&peer_id).ok_or(Error::PeerNotFound)?;
+        let peer = match peer {
+            Peer::Connected(peer_info, ..) => Peer::Disconnected(peer_info),
+            _ => {
+                return Err(Error::PeerNotConnected);
             }
-            _ => Err(Error::PeerNotFound),
+        };
+        self.peers.insert(peer_id, peer);
+        Ok(())
+    }
+
+    fn handle_message_received(&mut self, peer_id: P, message: Bytes) -> Result<(), Error> {
+        // Parse message
+        let Ok(msg): Result<message::Message<P>, _> = Message::decode_cfg(message, &self.codec_cfg)
+        else {
+            // TODO handle
+            return Ok(());
+        };
+        match msg {
+            Message::BitVec(bit_vec) => self.handle_bit_vec_message(peer_id, bit_vec),
+            Message::Peers(peers) => self.handle_peers_message(peer_id, peers),
+            Message::Data(data) => self.handle_data_message(peer_id, data),
         }
     }
 
-    fn handle_message_received(&mut self, _peer_id: P, _message: Bytes) -> Result<(), Error> {
+    fn handle_bit_vec_message(
+        &mut self,
+        peer_id: P,
+        bit_vec: message::BitVec,
+    ) -> Result<(), Error> {
+        let now = self.clock.current().epoch_millis();
+        let peers: Vec<_> = bit_vec
+            .bits
+            .iter()
+            .enumerate()
+            .filter_map(|(i, b)| {
+                // We may have information signed over a timestamp greater than the current time,
+                // but within our synchrony bound. Avoid sharing this information as it could get us
+                // blocked by other peers due to clock skew. Consider timestamps earlier than the
+                // current time to be safe enough to share.
+                let peer = (!b).then_some(&self.peer_set[i])?;
+                let peer = self.peers.get(peer)?;
+                match peer {
+                    Peer::Myself(peer_info) => {
+                        if peer_info.timestamp <= now {
+                            Some(peer_info.clone())
+                        } else {
+                            None
+                        }
+                    }
+                    Peer::AddressUnknown(_) => todo!(),
+                    Peer::Disconnected(peer_info) => {
+                        if peer_info.timestamp <= now {
+                            Some(peer_info.clone())
+                        } else {
+                            None
+                        }
+                    }
+                    Peer::Connecting(peer_info) => {
+                        if peer_info.timestamp <= now {
+                            Some(peer_info.clone())
+                        } else {
+                            None
+                        }
+                    }
+                    Peer::Connected(peer_info, _) => {
+                        if peer_info.timestamp <= now {
+                            Some(peer_info.clone())
+                        } else {
+                            // We could also consider the connection timestamp, but for simplicity,
+                            // we just use the peer info timestamp.
+                            None
+                        }
+                    }
+                }
+            })
+            .collect();
+        // TODO send peers to the peer
+        Ok(())
+    }
+
+    fn handle_peers_message(
+        &mut self,
+        _peer_id: P,
+        _peers: Vec<message::PeerInfo<P>>,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn handle_data_message(&mut self, _peer_id: P, _data: message::Data) -> Result<(), Error> {
         Ok(())
     }
 
@@ -82,7 +168,7 @@ impl<P: PublicKey, Si: Sink, St: Stream> Network<P, Si, St> {
 }
 
 enum Event<P: PublicKey, Si: Sink, St: Stream> {
-    PeerConnected(P, SocketAddr, Connection<Si, St>),
+    PeerConnected(PeerInfo<P>, Connection<Si, St>),
     PeerDisconnected(P),
     MessageReceived(P, Bytes),
     SendMessage(P),
@@ -90,7 +176,9 @@ enum Event<P: PublicKey, Si: Sink, St: Stream> {
 
 #[derive(Debug, Clone)]
 enum Error {
+    PeerMyself,
     PeerNotFound,
+    PeerNotConnected,
     AlreadyConnected,
     ConnectionError,
     MessageError,
