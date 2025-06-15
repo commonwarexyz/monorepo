@@ -56,8 +56,7 @@ mod handler;
 mod logger;
 
 use clap::{value_parser, Arg, Command};
-use commonware_cryptography::PrivateKeyExt as _;
-use commonware_cryptography::{ed25519, Signer as _};
+use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
 use commonware_p2p::authenticated::discovery;
 use commonware_runtime::{tokio, Metrics, Runner as _};
 use commonware_utils::NZU32;
