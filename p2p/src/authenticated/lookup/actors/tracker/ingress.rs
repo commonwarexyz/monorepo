@@ -25,9 +25,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
     Block { public_key: C },
 
     // ---------- Used by peer ----------
-    /// Notify the tracker that a peer has been successfully connected, and that a
-    /// [`types::Payload::Peers`] message (containing solely the local node's information) should be
-    /// sent to the peer.
+    /// Notify the tracker that a peer has been successfully connected.
     Connect {
         /// The public key of the peer.
         public_key: C,
