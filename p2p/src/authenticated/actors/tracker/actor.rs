@@ -248,10 +248,9 @@ mod tests {
         // Blocker is implicitly available via oracle.block() due to Oracle implementing crate::Blocker
     };
     use commonware_codec::{DecodeExt, Encode};
-    use commonware_cryptography::PrivateKeyExt as _;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey, Signature},
-        Signer,
+        PrivateKeyExt as _, Signer,
     };
     use commonware_runtime::{
         deterministic::{self, Context},
@@ -260,10 +259,10 @@ mod tests {
     use commonware_utils::{BitVec as UtilsBitVec, NZU32};
     use futures::future::Either;
     use governor::Quota;
-    use std::time::Duration;
     use std::{
         collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},
+        time::Duration,
     };
     use types::PeerInfo;
 

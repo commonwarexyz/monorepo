@@ -220,8 +220,7 @@ impl crate::Network for Network {
 
 #[cfg(test)]
 mod tests {
-    use crate::network::tests;
-    use crate::network::tokio as TokioNetwork;
+    use crate::network::{tests, tokio as TokioNetwork};
     use std::time::Duration;
 
     #[tokio::test]

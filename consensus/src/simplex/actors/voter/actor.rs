@@ -31,10 +31,10 @@ use prometheus_client::metrics::{
 use rand::Rng;
 use std::{
     cmp::max,
-    collections::{btree_map::Entry, BTreeMap, HashMap},
+    collections::{btree_map::Entry, BTreeMap, BTreeSet, HashMap},
+    sync::atomic::AtomicI64,
     time::{Duration, SystemTime},
 };
-use std::{collections::BTreeSet, sync::atomic::AtomicI64};
 use tracing::{debug, trace, warn};
 
 type Notarizable<'a, V, D> = Option<(

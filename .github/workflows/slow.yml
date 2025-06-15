@@ -1,0 +1,34 @@
+name: Slow
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-slow-${{ github.head_ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  Tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      matrix:
+        flags:
+          - "--features commonware-runtime/iouring-storage"
+          - "--features commonware-runtime/iouring-network"
+          - ""
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Run setup
+      uses: ./.github/actions/setup
+    - name: Run ignored tests
+      run: cargo test ${{ matrix.flags }} --verbose -- --ignored

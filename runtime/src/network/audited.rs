@@ -182,13 +182,15 @@ impl<N: crate::Network> crate::Network for Network<N> {
 
 #[cfg(test)]
 mod tests {
-    use crate::deterministic::Auditor;
-    use crate::network::audited::Network as AuditedNetwork;
-    use crate::network::deterministic::Network as DeterministicNetwork;
-    use crate::network::tests;
-    use crate::{Listener as _, Network as _, Sink as _, Stream as _};
-    use std::net::SocketAddr;
-    use std::sync::Arc;
+    use crate::{
+        deterministic::Auditor,
+        network::{
+            audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
+            tests,
+        },
+        Listener as _, Network as _, Sink as _, Stream as _,
+    };
+    use std::{net::SocketAddr, sync::Arc};
 
     #[tokio::test]
     async fn test_trait() {

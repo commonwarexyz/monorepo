@@ -303,11 +303,11 @@ pub struct Sender<Si: Sink> {
 impl<Si: Sink> crate::Sender for Sender<Si> {
     async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
         // Encrypt data
+        let nonce = self.nonce.next()?;
         let msg = self
             .cipher
-            .encrypt(&self.nonce.encode(), msg.as_ref())
+            .encrypt(&nonce, msg.as_ref())
             .map_err(|_| Error::EncryptionFailed)?;
-        self.nonce.inc()?;
 
         // Send data
         send_frame(
@@ -338,13 +338,11 @@ impl<St: Stream> crate::Receiver for Receiver<St> {
         .await?;
 
         // Decrypt data
-        let msg = self
-            .cipher
-            .decrypt(&self.nonce.encode(), msg.as_ref())
-            .map_err(|_| Error::DecryptionFailed)?;
-        self.nonce.inc()?;
-
-        Ok(Bytes::from(msg))
+        let nonce = self.nonce.next()?;
+        self.cipher
+            .decrypt(&nonce, msg.as_ref())
+            .map(Bytes::from)
+            .map_err(|_| Error::DecryptionFailed)
     }
 }
 
@@ -373,13 +371,21 @@ mod tests {
                 nonce: nonce::Info::default(),
             };
 
+            // Store initial nonce value
+            let initial_nonce = receiver.nonce;
+
             // Send invalid ciphertext
             send_frame(&mut sink, b"invalid data", receiver.max_message_size)
                 .await
                 .unwrap();
 
+            // Attempt to receive (should fail)
             let result = receiver.receive().await;
             assert!(matches!(result, Err(Error::DecryptionFailed)));
+
+            // Verify nonce was incremented despite decryption failure
+            let final_nonce = receiver.nonce;
+            assert_ne!(initial_nonce, final_nonce);
         });
     }
 

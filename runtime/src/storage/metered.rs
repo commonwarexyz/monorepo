@@ -1,7 +1,9 @@
 use crate::Error;
 use commonware_utils::StableBuf;
-use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use prometheus_client::registry::Registry;
+use prometheus_client::{
+    metrics::{counter::Counter, gauge::Gauge},
+    registry::Registry,
+};
 use std::sync::Arc;
 
 pub struct Metrics {
@@ -142,9 +144,10 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::memory::Storage as MemoryStorage;
-    use crate::storage::tests::run_storage_tests;
-    use crate::{Blob, Storage as _};
+    use crate::{
+        storage::{memory::Storage as MemoryStorage, tests::run_storage_tests},
+        Blob, Storage as _,
+    };
     use prometheus_client::registry::Registry;
 
     #[tokio::test]

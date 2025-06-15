@@ -14,8 +14,10 @@ use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
 use futures::{channel::mpsc, StreamExt};
-use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 use tracing::{debug, info, warn};
 
 const VRF_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_VRF_";

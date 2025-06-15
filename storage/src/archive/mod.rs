@@ -143,9 +143,8 @@
 //! ```
 
 mod storage;
-pub use storage::{Archive, Identifier};
-
 pub use crate::index::Translator;
+pub use storage::{Archive, Identifier};
 use thiserror::Error;
 
 /// Errors that can occur when interacting with the archive.
@@ -202,10 +201,11 @@ pub struct Config<T: Translator, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::translator::{FourCap, TwoCap};
-    use crate::journal::Error as JournalError;
-    use commonware_codec::varint::UInt;
-    use commonware_codec::{DecodeExt, EncodeSize, Error as CodecError};
+    use crate::{
+        index::translator::{FourCap, TwoCap},
+        journal::Error as JournalError,
+    };
+    use commonware_codec::{varint::UInt, DecodeExt, EncodeSize, Error as CodecError};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
     use commonware_utils::array::FixedBytes;

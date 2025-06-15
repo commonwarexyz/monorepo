@@ -1,4 +1,4 @@
-use commonware_cryptography::{sha256, Digest as _, Hasher, Sha256};
+use commonware_cryptography::{sha256, Digest as _, Sha256};
 use commonware_storage::mmr::{hasher::Standard, mem::Mmr};
 use criterion::{criterion_group, Criterion};
 use futures::executor::block_on;
@@ -24,22 +24,20 @@ fn bench_append_additional(c: &mut Criterion) {
             c.bench_function(&format!("{}/start={} add={}", module_path!(), n, a), |b| {
                 b.iter_batched(
                     || {
-                        let mut h = Sha256::new();
-                        let mut h = Standard::new(&mut h);
+                        let mut h = Standard::new();
                         let mut mmr = Mmr::<Sha256>::new();
                         block_on(async {
                             for digest in &elements {
-                                mmr.add(&mut h, digest).await.unwrap();
+                                mmr.add(&mut h, digest);
                             }
                         });
                         mmr
                     },
                     |mut mmr| {
-                        let mut h = Sha256::new();
-                        let mut h = Standard::new(&mut h);
+                        let mut h = Standard::new();
                         block_on(async {
                             for digest in &additional {
-                                mmr.add(&mut h, digest).await.unwrap();
+                                mmr.add(&mut h, digest);
                             }
                         });
                     },
