@@ -3,7 +3,7 @@ use super::{
     ingress::{Mailbox, Message, Oracle},
     Config, Error,
 };
-use crate::authenticated::{ip, types};
+use crate::authenticated::{actors::tracker::ingress::Releaser, ip, types};
 use commonware_cryptography::Signer;
 use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::{union, SystemTimeExt};
@@ -64,13 +64,25 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
         // General initialization
         let directory_cfg = directory::Config {
-            mailbox_size: cfg.mailbox_size,
             max_sets: cfg.tracked_peer_sets,
             dial_fail_limit: cfg.dial_fail_limit,
             rate_limit: cfg.allowed_connection_rate_per_peer,
         };
-        let directory = Directory::init(context.clone(), cfg.bootstrappers, myself, directory_cfg);
+
+        // Create the mailboxes
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
+        let mailbox = Mailbox::new(sender.clone());
+        let releaser = Releaser::new(sender.clone());
+        let oracle = Oracle::new(sender);
+
+        // Create the directory
+        let directory = Directory::init(
+            context.clone(),
+            cfg.bootstrappers,
+            myself,
+            directory_cfg,
+            releaser,
+        );
 
         (
             Self {
@@ -84,8 +96,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 receiver,
                 directory,
             },
-            Mailbox::new(sender.clone()),
-            Oracle::new(sender),
+            mailbox,
+            oracle,
         )
     }
 
@@ -136,7 +148,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
     async fn run(mut self) {
         while let Some(msg) = self.receiver.next().await {
-            self.directory.process_releases();
             match msg {
                 Message::Register { index, peers } => {
                     // Ensure that peer set is not too large.
@@ -228,6 +239,10 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
                     // We don't have to kill the peer now. It will be sent a `Kill` message the next
                     // time it sends the `Connect` or `Construct` message to the tracker.
+                }
+                Message::Release { metadata } => {
+                    // Release the peer
+                    self.directory.release(metadata);
                 }
             }
         }
