@@ -87,19 +87,15 @@ impl<P: PublicKey> crate::Sender for Sender<P> {
 pub struct Receiver<P: PublicKey> {
     max_size: usize,
     compression: bool,
-    receiver: mpsc::Receiver<Message<P>>,
+    rx: mpsc::Receiver<Message<P>>,
 }
 
 impl<P: PublicKey> Receiver<P> {
-    pub(super) fn new(
-        max_size: usize,
-        compression: bool,
-        receiver: mpsc::Receiver<Message<P>>,
-    ) -> Self {
+    pub(super) fn new(max_size: usize, compression: bool, rx: mpsc::Receiver<Message<P>>) -> Self {
         Self {
             max_size,
             compression,
-            receiver,
+            rx,
         }
     }
 }
@@ -113,7 +109,7 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
     /// This method will block until a message is received or the underlying
     /// network shuts down.
     async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Error> {
-        let (sender, mut message) = self.receiver.next().await.ok_or(Error::NetworkClosed)?;
+        let (sender, mut message) = self.rx.next().await.ok_or(Error::NetworkClosed)?;
 
         // If compression is enabled, decompress the message before returning.
         if self.compression {
@@ -132,7 +128,7 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
 pub struct Channels<P: PublicKey> {
     messenger: Messenger<P>,
     max_size: usize,
-    receivers: BTreeMap<Channel, (Quota, mpsc::Sender<Message<P>>)>,
+    senders: BTreeMap<Channel, (Quota, mpsc::Sender<Message<P>>)>,
 }
 
 impl<P: PublicKey> Channels<P> {
@@ -140,7 +136,7 @@ impl<P: PublicKey> Channels<P> {
         Self {
             messenger,
             max_size,
-            receivers: BTreeMap::new(),
+            senders: BTreeMap::new(),
         }
     }
 
@@ -152,7 +148,7 @@ impl<P: PublicKey> Channels<P> {
         compression: Option<i32>,
     ) -> (Sender<P>, Receiver<P>) {
         let (sender, receiver) = mpsc::channel(backlog);
-        if self.receivers.insert(channel, (rate, sender)).is_some() {
+        if self.senders.insert(channel, (rate, sender)).is_some() {
             panic!("duplicate channel registration: {}", channel);
         }
         (
@@ -161,8 +157,8 @@ impl<P: PublicKey> Channels<P> {
         )
     }
 
-    pub fn collect(self) -> BTreeMap<u32, (Quota, mpsc::Sender<Message<P>>)> {
-        self.receivers
+    pub fn senders(self) -> BTreeMap<u32, (Quota, mpsc::Sender<Message<P>>)> {
+        self.senders
     }
 }
 

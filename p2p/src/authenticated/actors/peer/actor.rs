@@ -28,10 +28,15 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey
 
     codec_config: types::Config,
 
-    mailbox: Mailbox<C>,
-    control: mpsc::Receiver<Message<C>>,
-    high: mpsc::Receiver<types::Data>,
-    low: mpsc::Receiver<types::Data>,
+    // We pass this to the tracker so it can send back messages
+    // to us that we receive on `control_rx`.
+    control_tx: Mailbox<C>,
+    // Receives messages from the tracker.
+    control_rx: mpsc::Receiver<Message<C>>,
+    // Receives high priority messages to send to the peer.
+    high_priority_rx: mpsc::Receiver<types::Data>,
+    // Receives low priority messages to send to the peer.
+    low_priority_rx: mpsc::Receiver<types::Data>,
 
     sent_messages: Family<metrics::Message, Counter>,
     received_messages: Family<metrics::Message, Counter>,
@@ -45,14 +50,14 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
     Actor<E, C>
 {
     pub fn new(context: E, cfg: Config, reservation: Reservation<E, C>) -> (Self, Relay) {
-        let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
-        let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
-        let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
+        let (control_tx, control_rx) = mpsc::channel(cfg.mailbox_size);
+        let (high_priority_tx, high_priority_rx) = mpsc::channel(cfg.mailbox_size);
+        let (low_priority_tx, low_priority_rx) = mpsc::channel(cfg.mailbox_size);
 
         (
             Self {
                 context,
-                mailbox: Mailbox::new(control_sender),
+                control_tx: Mailbox::new(control_tx),
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
                 allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
                 allowed_peers_rate: cfg.allowed_peers_rate,
@@ -60,15 +65,15 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                     max_bit_vec: cfg.max_peer_set_size,
                     max_peers: cfg.peer_gossip_max_count,
                 },
-                control: control_receiver,
-                high: high_receiver,
-                low: low_receiver,
+                control_rx,
+                high_priority_rx,
+                low_priority_rx,
                 sent_messages: cfg.sent_messages,
                 received_messages: cfg.received_messages,
                 rate_limited: cfg.rate_limited,
                 reservation,
             },
-            Relay::new(low_sender, high_sender),
+            Relay::new(low_priority_tx, high_priority_tx),
         )
     }
 
@@ -107,10 +112,11 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         mut tracker: tracker::Mailbox<E, C>,
         channels: Channels<C>,
     ) -> Error {
-        // Instantiate rate limiters for each message type
+        // Maps a channel to its rate limiter
         let mut rate_limits = HashMap::new();
+        // Maps a channel to the sender we use to send messages on that channel
         let mut senders = HashMap::new();
-        for (channel, (rate, sender)) in channels.collect() {
+        for (channel, (rate, sender)) in channels.senders() {
             let rate_limiter = RateLimiter::direct_with_clock(rate, &self.context);
             rate_limits.insert(channel, rate_limiter);
             senders.insert(channel, sender);
@@ -122,11 +128,11 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         let mut send_handler: Handle<Result<(), Error>> = self.context.with_label("sender").spawn( {
             let peer = peer.clone();
             let mut tracker = tracker.clone();
-            let mailbox = self.mailbox.clone();
+            let mailbox = self.control_tx.clone();
             let rate_limits = rate_limits.clone();
             let dialer = matches!(self.reservation.metadata(), Metadata::Dialer(..));
             move |context| async move {
-                // Allow tracker to initialize the peer
+                // Notify the tracker that we are connected to this peer
                 tracker.connect(peer.clone(), dialer, mailbox.clone()).await;
 
                 // Set the initial deadline to now to start gossiping immediately
@@ -136,13 +142,13 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                 loop {
                     select! {
                         _ = context.sleep_until(deadline) => {
-                            // Get latest bitset from tracker (also used as ping)
-                            tracker.construct(peer.clone(), mailbox.clone()).await;
+                            // Send bit vector to peer
+                            tracker.construct_bit_vec(peer.clone(), mailbox.clone()).await;
 
                             // Reset ticker
                             deadline = context.current() + self.gossip_bit_vec_frequency;
                         },
-                        msg_control = self.control.next() => {
+                        msg_control = self.control_rx.next() => {
                             let msg = match msg_control {
                                 Some(msg_control) => msg_control,
                                 None => return Err(Error::PeerDisconnected),
@@ -159,12 +165,12 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                             Self::send(&mut conn_sender, &self.sent_messages, metric, payload)
                                 .await?;
                         },
-                        msg_high = self.high.next() => {
+                        msg_high = self.high_priority_rx.next() => {
                             let msg = Self::validate_msg(msg_high, &rate_limits)?;
                             Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), types::Payload::Data(msg))
                                 .await?;
                         },
-                        msg_low = self.low.next() => {
+                        msg_low = self.low_priority_rx.next() => {
                             let msg = Self::validate_msg(msg_low, &rate_limits)?;
                             Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), types::Payload::Data(msg))
                                 .await?;
@@ -212,7 +218,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                             }
 
                             // Gather useful peers
-                            tracker.bit_vec(bit_vec, self.mailbox.clone()).await;
+                            tracker.bit_vec(bit_vec, self.control_tx.clone()).await;
                         }
                         types::Payload::Peers(peers) => {
                             self.received_messages
@@ -229,7 +235,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                             }
 
                             // Send peers to tracker
-                            tracker.peers(peers, self.mailbox.clone()).await;
+                            tracker.peers(peers, self.control_tx.clone()).await;
                         }
                         types::Payload::Data(data) => {
                             self.received_messages
