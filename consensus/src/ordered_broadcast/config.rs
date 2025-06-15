@@ -3,7 +3,7 @@ use crate::{Automaton, Monitor, Relay, Reporter, Supervisor, ThresholdSupervisor
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, Signer};
 use std::time::Duration;
 
-/// Configuration for the [Engine](super::Engine).
+/// Configuration for the [super::Engine].
 pub struct Config<
     C: Signer,
     V: Variant,

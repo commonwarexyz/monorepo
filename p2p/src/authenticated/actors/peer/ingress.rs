@@ -4,7 +4,7 @@ use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use futures::{channel::mpsc, SinkExt};
 
-/// Messages that can be sent to the peer [Actor](super::Actor).
+/// Messages that can be sent to the peer [super::Actor].
 #[derive(Clone, Debug)]
 pub enum Message<C: PublicKey> {
     /// Send a bit vector to the peer.

@@ -39,7 +39,7 @@ pub enum Message<P: PublicKey, M: Committable + Digestible> {
     },
 }
 
-/// Ingress mailbox for [Engine](super::Engine).
+/// Ingress mailbox for [super::Engine].
 #[derive(Clone)]
 pub struct Mailbox<P: PublicKey, M: Committable + Digestible + Codec> {
     sender: mpsc::Sender<Message<P, M>>,
