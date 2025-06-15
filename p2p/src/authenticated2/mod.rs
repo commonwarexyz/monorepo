@@ -4,11 +4,11 @@ use crate::authenticated2::{
 };
 use bytes::Bytes;
 use commonware_codec::Decode;
-use commonware_cryptography::PublicKey;
+use commonware_cryptography::{PublicKey, Signer};
 use commonware_runtime::{Clock, Sink, Stream};
 use commonware_stream::public_key::Connection;
 use commonware_utils::SystemTimeExt as _;
-use std::{collections::HashMap, net::SocketAddr};
+use std::{collections::HashMap, net::SocketAddr, time::Duration};
 
 mod message;
 mod set;
@@ -33,16 +33,20 @@ struct Tracker {}
 
 struct Directory {}
 
-pub struct Network<Cl: Clock, P: PublicKey, Si: Sink, St: Stream> {
+pub struct Network<Cl: Clock, Sk: Signer, Si: Sink, St: Stream> {
+    ip_namespace: Vec<u8>,
+    my_sk: Sk,
+    synchrony_bound: Duration,
+    peer_gossip_max_count: usize,
     clock: Cl,
     codec_cfg: message::Config,
-    peer_set: Set<P>,
-    peers: HashMap<P, Peer<P, Si, St>>,
+    peer_set: Set<Sk::PublicKey>,
+    peers: HashMap<Sk::PublicKey, Peer<Sk::PublicKey, Si, St>>,
     directory: Directory,
 }
 
-impl<Cl: Clock, P: PublicKey, Si: Sink, St: Stream> Network<Cl, P, Si, St> {
-    fn process_event(&mut self, event: Event<P, Si, St>) -> Result<(), Error> {
+impl<Cl: Clock, Sk: Signer, Si: Sink, St: Stream> Network<Cl, Sk, Si, St> {
+    fn process_event(&mut self, event: Event<Sk::PublicKey, Si, St>) -> Result<(), Error> {
         match event {
             Event::PeerConnected(peer_info, connection) => {
                 self.handle_peer_connected(peer_info, connection)
@@ -57,7 +61,7 @@ impl<Cl: Clock, P: PublicKey, Si: Sink, St: Stream> Network<Cl, P, Si, St> {
 
     fn handle_peer_connected(
         &mut self,
-        peer: PeerInfo<P>,
+        peer: PeerInfo<Sk::PublicKey>,
         connection: Connection<Si, St>,
     ) -> Result<(), Error> {
         let existing_peer = self
@@ -68,7 +72,7 @@ impl<Cl: Clock, P: PublicKey, Si: Sink, St: Stream> Network<Cl, P, Si, St> {
         Ok(())
     }
 
-    fn handle_peer_disconnected(&mut self, peer_id: P) -> Result<(), Error> {
+    fn handle_peer_disconnected(&mut self, peer_id: Sk::PublicKey) -> Result<(), Error> {
         let peer = self.peers.remove(&peer_id).ok_or(Error::PeerNotFound)?;
         let peer = match peer {
             Peer::Connected(peer_info, ..) => Peer::Disconnected(peer_info),
@@ -80,9 +84,14 @@ impl<Cl: Clock, P: PublicKey, Si: Sink, St: Stream> Network<Cl, P, Si, St> {
         Ok(())
     }
 
-    fn handle_message_received(&mut self, peer_id: P, message: Bytes) -> Result<(), Error> {
+    fn handle_message_received(
+        &mut self,
+        peer_id: Sk::PublicKey,
+        message: Bytes,
+    ) -> Result<(), Error> {
         // Parse message
-        let Ok(msg): Result<message::Message<P>, _> = Message::decode_cfg(message, &self.codec_cfg)
+        let Ok(msg): Result<message::Message<Sk::PublicKey>, _> =
+            Message::decode_cfg(message, &self.codec_cfg)
         else {
             // TODO handle
             return Ok(());
@@ -96,7 +105,7 @@ impl<Cl: Clock, P: PublicKey, Si: Sink, St: Stream> Network<Cl, P, Si, St> {
 
     fn handle_bit_vec_message(
         &mut self,
-        peer_id: P,
+        peer_id: Sk::PublicKey,
         bit_vec: message::BitVec,
     ) -> Result<(), Error> {
         let now = self.clock.current().epoch_millis();
@@ -152,17 +161,103 @@ impl<Cl: Clock, P: PublicKey, Si: Sink, St: Stream> Network<Cl, P, Si, St> {
 
     fn handle_peers_message(
         &mut self,
-        _peer_id: P,
-        _peers: Vec<message::PeerInfo<P>>,
+        _peer_id: Sk::PublicKey,
+        peers: Vec<message::PeerInfo<Sk::PublicKey>>,
+    ) -> Result<(), Error> {
+        // Ensure there aren't too many peers sent
+        if peers.len() > self.peer_gossip_max_count {
+            // TODO disconnect from the peer
+            return Err(Error::TooManyPeers(peers.len()));
+        }
+
+        // We allow peers to be sent in any order when responding to a bit vector (allows
+        // for selecting a random subset of peers when there are too many) and allow
+        // for duplicates (no need to create an additional set to check this)
+        let my_public_key = self.my_sk.public_key();
+        let now = self.clock.current().epoch();
+        for peer in &peers {
+            // Check if IP is allowed
+            // if !self.allow_private_ips && !ip::is_global(peer.socket.ip()) {
+            //     return Err(Error::PrivateIPsNotAllowed(peer.socket.ip()));
+            // }
+
+            // Check if peer is us
+            if peer.public_key == my_public_key {
+                // TODO disconnect from the peer
+                return Err(Error::PeersContainsMyself);
+            }
+
+            // If any timestamp is too far into the future, disconnect from the peer
+            if Duration::from_millis(peer.timestamp) > now + self.synchrony_bound {
+                // TODO disconnect from the peer
+                return Err(Error::SynchronyBoundViolated);
+            }
+
+            // If any signature is invalid, disconnect from the peer
+            if !peer.verify(&self.ip_namespace) {
+                // TODO disconnect from the peer
+                return Err(Error::InvalidSignature);
+            }
+        }
+
+        for peer in peers {
+            let peer_id = peer.public_key.clone();
+            let Some(existing_peer) = self.peers.remove(&peer_id) else {
+                // TODO disconnect from the peer
+                return Err(Error::PeerNotFound);
+            };
+
+            match existing_peer {
+                Peer::Myself(_) => {
+                    // We should never receive a peer info for ourselves
+                    // TODO disconnect from the peer
+                    return Err(Error::PeerMyself);
+                }
+                Peer::AddressUnknown(_) => {
+                    // If the peer was unknown, we can now add it as connected
+                    self.peers.insert(peer_id, Peer::Disconnected(peer));
+                }
+                Peer::Disconnected(existing_peer) => {
+                    // Only update the peer if the new peer info is more recent
+                    let peer = if existing_peer.timestamp >= peer.timestamp {
+                        Peer::Disconnected(existing_peer)
+                    } else {
+                        Peer::Disconnected(peer)
+                    };
+                    self.peers.insert(peer_id, peer);
+                }
+                Peer::Connecting(existing_peer) => {
+                    let peer = if existing_peer.timestamp >= peer.timestamp {
+                        Peer::Connecting(existing_peer)
+                    } else {
+                        // TODO notify connecting routine that address changed?
+                        Peer::Connecting(peer)
+                    };
+                    self.peers.insert(peer_id, peer);
+                }
+                Peer::Connected(existing_peer, conn) => {
+                    let peer = if existing_peer.timestamp >= peer.timestamp {
+                        Peer::Connected(existing_peer, conn)
+                    } else {
+                        Peer::Connected(peer, conn)
+                    };
+                    self.peers.insert(peer_id, peer);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn handle_data_message(
+        &mut self,
+        _peer_id: Sk::PublicKey,
+        _data: message::Data,
     ) -> Result<(), Error> {
         Ok(())
     }
 
-    fn handle_data_message(&mut self, _peer_id: P, _data: message::Data) -> Result<(), Error> {
-        Ok(())
-    }
-
-    fn handle_send_message(&mut self, _peer_id: P) -> Result<(), Error> {
+    fn handle_send_message(&mut self, _peer_id: Sk::PublicKey) -> Result<(), Error> {
         Ok(())
     }
 }
@@ -179,8 +274,12 @@ enum Error {
     PeerMyself,
     PeerNotFound,
     PeerNotConnected,
+    PeersContainsMyself,
+    InvalidSignature,
+    SynchronyBoundViolated,
     AlreadyConnected,
     ConnectionError,
     MessageError,
     TimeoutError,
+    TooManyPeers(usize),
 }
