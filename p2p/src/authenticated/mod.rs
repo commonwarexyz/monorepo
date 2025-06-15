@@ -50,10 +50,10 @@
 //! and sends them back in a `Payload::Peers` message. To save bandwidth, peers will only gossip
 //! `PeerInfo` for peers that they currently have a connection with. This prevents them from
 //! repeatedly sending `PeerInfo` that they cannot verify is still valid. Each `PeerInfo` contains:
-//! - `socket`: The [`SocketAddr`](std::net::SocketAddr) of the peer.
+//! - `address`: The [`SocketAddr`](std::net::SocketAddr) of the peer.
 //! - `timestamp`: A `u64` timestamp indicating when the address was attested.
 //! - `public_key`: The peer's public key.
-//! - `signature`: The peer's cryptographic signature over the `socket` and `timestamp`.
+//! - `signature`: The peer's cryptographic signature over the `address` and `timestamp`.
 //!
 //! If the receiver doesn't know any addresses the sender is unaware of, it sends no
 //! `Payload::Peers` response; the received `BitVec` implicitly acts as a "pong".
@@ -66,7 +66,7 @@
 //! record, it will be corrected promptly by the peer being dialed.
 //!
 //! To initiate the discovery process, a peer needs a list of `bootstrappers` (defined in
-//! [`Config`]) - known peer public keys and their corresponding socket addresses. The peer
+//! [`Config`]) - known peer public keys and their corresponding addresses. The peer
 //! attempts to dial these bootstrappers, performs the handshake, sends its own `PeerInfo`, and
 //! then sends a `BitVec` for the relevant peer set(s) (initially only knowing its own address,
 //! marked as '1'). It then waits for responses, learning about other peers through the
