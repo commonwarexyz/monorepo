@@ -1,6 +1,6 @@
 use commonware_cryptography::PublicKey;
 
-/// Configuration for the [`Engine`](super::Engine).
+/// Configuration for the [super::Engine].
 pub struct Config<P: PublicKey, MCfg> {
     /// The public key of the participant.
     pub public_key: P,

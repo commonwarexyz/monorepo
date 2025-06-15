@@ -70,7 +70,7 @@ pub trait Point: Element {
     fn msm(points: &[Self], scalars: &[Scalar]) -> Self;
 }
 
-/// Wrapper around [`blst_fr`] that represents an element of the BLS12‑381
+/// Wrapper around [blst_fr] that represents an element of the BLS12‑381
 /// scalar field `F_r`.
 ///
 /// The new‑type is marked `#[repr(transparent)]`, so it has exactly the same

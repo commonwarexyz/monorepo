@@ -1,4 +1,4 @@
-//! Types used in [`threshold_simplex`](crate::threshold_simplex).
+//! Types used in [threshold_simplex](crate::threshold_simplex).
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{
