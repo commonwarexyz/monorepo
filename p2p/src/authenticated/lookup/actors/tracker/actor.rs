@@ -88,8 +88,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
                     // Mark the record as connected
                     self.directory.connect(&public_key);
-
-                    // TODO danlaine: do we need to send the peer anything here?
                 }
                 Message::Dialable { responder } => {
                     let _ = responder.send(self.directory.dialable());
@@ -127,10 +125,9 @@ mod tests {
         Blocker,
         // Blocker is implicitly available via oracle.block() due to Oracle implementing crate::Blocker
     };
-    use commonware_cryptography::PrivateKeyExt as _;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
-        Signer,
+        PrivateKeyExt as _, Signer,
     };
     use commonware_runtime::{
         deterministic::{self},
@@ -284,117 +281,62 @@ mod tests {
         });
     }
 
-    // #[test]
-    // fn test_handle_peers_received_self() {
-    //     let executor = deterministic::Runner::default();
-    //     executor.start(|context| async move {
-    //         let cfg_initial = default_test_config(PrivateKey::from_seed(0), Vec::new());
-    //         let TestHarness {
-    //             mut mailbox,
-    //             mut oracle,
-    //             ip_namespace,
-    //             tracker_pk,
-    //             mut tracker_signer,
-    //             cfg,
-    //             ..
-    //         } = setup_actor(context.clone(), cfg_initial);
+    #[test]
+    fn test_block_peer_standard_behavior() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg_initial = default_test_config(PrivateKey::from_seed(0));
+            let TestHarness {
+                mut mailbox,
+                mut oracle,
+                ..
+            } = setup_actor(context.clone(), cfg_initial);
 
-    //         let (_, pk1) = new_signer_and_pk(1);
-    //         oracle
-    //             .register(0, vec![tracker_pk.clone(), pk1.clone()])
-    //             .await;
-    //         context.sleep(Duration::from_millis(10)).await;
+            let (_, pk) = new_signer_and_pk(1);
+            let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
+            oracle.register(0, vec![(pk.clone(), addr)]).await;
+            context.sleep(Duration::from_millis(10)).await;
 
-    //         let self_info = new_peer_info(
-    //             &mut tracker_signer,
-    //             &ip_namespace,
-    //             cfg.address,
-    //             context.current().epoch_millis(),
-    //             Some(tracker_pk.clone()),
-    //             false,
-    //         );
+            let dialable_peers = mailbox.dialable().await;
+            assert!(dialable_peers.iter().any(|peer| peer == &pk));
 
-    //         let (peer_mailbox_s1, mut peer_receiver_s1) = authenticated::Mailbox::test();
-    //         mailbox
-    //             .peers(vec![self_info], peer_mailbox_s1.clone())
-    //             .await;
+            oracle.block(pk.clone()).await;
+            context.sleep(Duration::from_millis(10)).await;
 
-    //         assert!(
-    //             matches!(peer_receiver_s1.next().await, Some(peer::Message::Kill)),
-    //             "Peer should be killed for sending tracker's own info"
-    //         );
-    //     });
-    // }
+            let dialable_peers = mailbox.dialable().await;
+            assert!(!dialable_peers.iter().any(|peer| peer == &pk));
+        });
+    }
 
-    // #[test]
-    // fn test_block_peer_standard_behavior() {
-    //     let executor = deterministic::Runner::default();
-    //     executor.start(|context| async move {
-    //         let cfg_initial = default_test_config(PrivateKey::from_seed(0), Vec::new());
-    //         let TestHarness {
-    //             mut mailbox,
-    //             mut oracle,
-    //             tracker_pk,
-    //             ..
-    //         } = setup_actor(context.clone(), cfg_initial);
+    #[test]
+    fn test_block_peer_already_blocked_is_noop() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg_initial = default_test_config(PrivateKey::from_seed(0));
+            let TestHarness {
+                mut mailbox,
+                mut oracle,
+                ..
+            } = setup_actor(context.clone(), cfg_initial);
 
-    //         let (_s1_signer, pk1) = new_signer_and_pk(1);
-    //         oracle
-    //             .register(0, vec![tracker_pk.clone(), pk1.clone()])
-    //             .await;
-    //         context.sleep(Duration::from_millis(10)).await;
+            let (_, pk1) = new_signer_and_pk(1);
+            let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
+            oracle.register(0, vec![(pk1.clone(), addr)]).await;
+            context.sleep(Duration::from_millis(10)).await;
 
-    //         oracle.block(pk1.clone()).await;
-    //         context.sleep(Duration::from_millis(10)).await;
+            oracle.block(pk1.clone()).await;
+            context.sleep(Duration::from_millis(10)).await;
 
-    //         let (peer_mailbox_pk1, mut peer_receiver_pk1) = authenticated::Mailbox::test();
-    //         mailbox
-    //             .construct(pk1.clone(), peer_mailbox_pk1.clone())
-    //             .await;
+            let dialable_peers = mailbox.dialable().await;
+            assert!(!dialable_peers.iter().any(|peer| peer == &pk1));
 
-    //         assert!(matches!(
-    //             peer_receiver_pk1.next().await,
-    //             Some(peer::Message::Kill)
-    //         ));
+            oracle.block(pk1.clone()).await;
+            context.sleep(Duration::from_millis(10)).await;
 
-    //         let dialable_peers = mailbox.dialable().await;
-    //         assert!(!dialable_peers.iter().any(|peer| peer == &pk1));
-    //     });
-    // }
-
-    // #[test]
-    // fn test_block_peer_already_blocked_is_noop() {
-    //     let executor = deterministic::Runner::default();
-    //     executor.start(|context| async move {
-    //         let cfg_initial = default_test_config(PrivateKey::from_seed(0), Vec::new());
-    //         let TestHarness {
-    //             mut mailbox,
-    //             mut oracle,
-    //             tracker_pk,
-    //             ..
-    //         } = setup_actor(context.clone(), cfg_initial);
-
-    //         let (_s1_signer, pk1) = new_signer_and_pk(1);
-    //         oracle
-    //             .register(0, vec![tracker_pk.clone(), pk1.clone()])
-    //             .await;
-    //         context.sleep(Duration::from_millis(10)).await;
-
-    //         oracle.block(pk1.clone()).await;
-    //         context.sleep(Duration::from_millis(10)).await;
-    //         oracle.block(pk1.clone()).await;
-    //         context.sleep(Duration::from_millis(10)).await;
-
-    //         let (peer_mailbox_pk1, mut peer_receiver_pk1) = authenticated::Mailbox::test();
-    //         mailbox
-    //             .construct(pk1.clone(), peer_mailbox_pk1.clone())
-    //             .await;
-    //         assert!(matches!(
-    //             peer_receiver_pk1.next().await,
-    //             Some(peer::Message::Kill)
-    //         ));
-    //     });
-    // }
+            let dialable_peers = mailbox.dialable().await;
+            assert!(!dialable_peers.iter().any(|peer| peer == &pk1));
+        });
+    }
 
     #[test]
     fn test_block_peer_non_existent_is_noop() {
@@ -517,39 +459,6 @@ mod tests {
     //             &ip_namespace,
     //             private_socket,
     //             context.current().epoch_millis(),
-    //             Some(pk2),
-    //             false,
-    //         );
-
-    //         let (peer_mailbox, mut peer_receiver) = authenticated::Mailbox::test();
-    //         mailbox.peers(vec![info], peer_mailbox.clone()).await;
-    //         assert!(matches!(
-    //             peer_receiver.next().await,
-    //             Some(peer::Message::Kill)
-    //         ));
-    //     });
-    // }
-
-    // #[test]
-    // fn test_validate_kill_on_synchrony_bound() {
-    //     let executor = deterministic::Runner::default();
-    //     executor.start(|context| async move {
-    //         let cfg_initial = default_test_config(PrivateKey::from_seed(0), Vec::new());
-    //         let TestHarness {
-    //             mut mailbox,
-    //             ip_namespace,
-    //             cfg,
-    //             ..
-    //         } = setup_actor(context.clone(), cfg_initial);
-
-    //         let (mut s2, pk2) = new_signer_and_pk(2);
-    //         let far_future_ts =
-    //             context.current().epoch_millis() + cfg.synchrony_bound.as_millis() as u64 + 1000;
-    //         let info = new_peer_info(
-    //             &mut s2,
-    //             &ip_namespace,
-    //             SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1002),
-    //             far_future_ts,
     //             Some(pk2),
     //             false,
     //         );

@@ -1,5 +1,5 @@
-use super::{actors::Messenger, Error};
-use crate::{Channel, Message, Recipients};
+use super::Error;
+use crate::{authenticated::lookup::actors::router, Channel, Message, Recipients};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use futures::{channel::mpsc, StreamExt};
@@ -14,7 +14,7 @@ pub struct Sender<P: PublicKey> {
     channel: Channel,
     max_size: usize,
     compression: Option<i32>,
-    messenger: Messenger<P>,
+    messenger: router::Messenger<P>,
 }
 
 impl<P: PublicKey> Sender<P> {
@@ -22,7 +22,7 @@ impl<P: PublicKey> Sender<P> {
         channel: Channel,
         max_size: usize,
         compression: Option<i32>,
-        messenger: Messenger<P>,
+        messenger: router::Messenger<P>,
     ) -> Self {
         Self {
             channel,
@@ -130,13 +130,13 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
 
 #[derive(Clone)]
 pub struct Channels<P: PublicKey> {
-    messenger: Messenger<P>,
+    messenger: router::Messenger<P>,
     max_size: usize,
     receivers: BTreeMap<Channel, (Quota, mpsc::Sender<Message<P>>)>,
 }
 
 impl<P: PublicKey> Channels<P> {
-    pub fn new(messenger: Messenger<P>, max_size: usize) -> Self {
+    pub fn new(messenger: router::Messenger<P>, max_size: usize) -> Self {
         Self {
             messenger,
             max_size,
