@@ -139,7 +139,7 @@ pub enum Error {
 
 pub use actors::tracker::Oracle;
 pub use channels::{Receiver, Sender};
-pub use config::{Bootstrapper, Config};
+pub use config::Config;
 pub use network::Network;
 
 #[cfg(test)]
@@ -433,15 +433,6 @@ mod tests {
             for (i, (peer_sk, peer_pk, peer_addr)) in peers_and_sks.iter().enumerate() {
                 // Create peer context
                 let context = context.with_label(&format!("peer-{}", i));
-
-                // Create bootstrappers
-                let mut bootstrappers = Vec::new();
-                if i > 0 {
-                    bootstrappers.push((
-                        peers[0].clone(),
-                        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
-                    ));
-                }
 
                 // Create network
                 let config = Config::test(

@@ -3,14 +3,11 @@ use commonware_utils::NZU32;
 use governor::Quota;
 use std::{net::SocketAddr, time::Duration};
 
-/// Known peer and its accompanying address that will be dialed on startup.
-pub type Bootstrapper<P> = (P, SocketAddr);
-
 /// Configuration for the peer-to-peer instance.
 ///
 /// # Warning
 /// It is recommended to synchronize this configuration across peers in the network (with the
-/// exception of `crypto`, `listen`, `bootstrappers`, `allow_private_ips`, and `mailbox_size`).
+/// exception of `crypto`, `listen`, `allow_private_ips`, and `mailbox_size`).
 /// If this is not synchronized, connections could be unnecessarily dropped, messages could be parsed incorrectly,
 /// and/or peers will rate limit each other during normal operation.
 #[derive(Clone)]

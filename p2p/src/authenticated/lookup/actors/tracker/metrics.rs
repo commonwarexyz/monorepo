@@ -6,7 +6,6 @@ use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge}
 #[derive(Default)]
 pub struct Metrics {
     /// The total number of unique peers in all peer sets being tracked.
-    /// Includes bootstrappers, even if they are not in any peer set.
     /// Does not include self, despite having a record for it.
     pub tracked: Gauge,
 

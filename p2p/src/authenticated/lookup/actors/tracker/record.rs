@@ -92,7 +92,7 @@ impl Record {
     ///
     /// Returns `true` if the record can be deleted. That is:
     /// - The count reaches zero
-    /// - The peer is not a bootstrapper or the local node
+    /// - The peer is not the local node
     pub fn decrement(&mut self) {
         self.sets = self.sets.checked_sub(1).unwrap();
     }
