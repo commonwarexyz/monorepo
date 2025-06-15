@@ -135,8 +135,10 @@ mod tests {
     };
     use commonware_utils::NZU32;
     use governor::Quota;
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-    use std::time::Duration;
+    use std::{
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        time::Duration,
+    };
 
     // Test Configuration Setup
     fn default_test_config<C: Signer>(crypto: C) -> Config<C> {

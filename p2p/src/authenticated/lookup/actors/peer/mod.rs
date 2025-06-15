@@ -9,10 +9,9 @@ pub mod actor;
 pub use actor::Actor;
 
 mod ingress;
-pub use ingress::{Mailbox, Relay};
-
 #[cfg(test)]
 pub(super) use ingress::Message;
+pub use ingress::{Mailbox, Relay};
 
 pub struct Config {
     pub mailbox_size: usize,

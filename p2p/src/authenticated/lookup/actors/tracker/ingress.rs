@@ -1,5 +1,3 @@
-use std::net::SocketAddr;
-
 use super::Reservation;
 use crate::authenticated::lookup::actors::peer;
 use commonware_cryptography::PublicKey;
@@ -8,6 +6,7 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
+use std::net::SocketAddr;
 
 /// Messages that can be sent to the tracker actor.
 pub enum Message<E: Spawner + Metrics, C: PublicKey> {
