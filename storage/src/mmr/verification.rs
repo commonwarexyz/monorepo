@@ -355,7 +355,7 @@ where
     if two_h == 1 {
         // we are at a leaf
         match elements.next() {
-            Some(element) => return hasher.leaf_digest(pos, element.as_ref()).await,
+            Some(element) => return Ok(hasher.leaf_digest(pos, element.as_ref())),
             None => return Err(MissingDigests),
         }
     }
@@ -410,9 +410,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::Proof;
+    use super::*;
     use crate::mmr::{hasher::Standard, mem::Mmr};
-    use commonware_cryptography::{hash, sha256::Digest, Hasher, Sha256};
+    use commonware_cryptography::{hash, sha256::Digest, Sha256};
     use commonware_runtime::{deterministic, Runner};
 
     fn test_digest(v: u8) -> Digest {
@@ -427,10 +427,9 @@ mod tests {
             let mut mmr = Mmr::new();
             let element = Digest::from(*b"01234567012345670123456701234567");
             let mut leaves: Vec<u64> = Vec::new();
-            let mut hasher = Sha256::new();
-            let mut hasher = Standard::new(&mut hasher);
+            let mut hasher: Standard<Sha256> = Standard::new();
             for _ in 0..11 {
-                leaves.push(mmr.add(&mut hasher, &element).await.unwrap());
+                leaves.push(mmr.add(&mut hasher, &element));
             }
 
             let root_digest = mmr.root(&mut hasher);
@@ -552,15 +551,10 @@ mod tests {
             let mut mmr = Mmr::default();
             let mut elements = Vec::new();
             let mut element_positions = Vec::new();
-            let mut hasher = Sha256::new();
-            let mut hasher = Standard::new(&mut hasher);
+            let mut hasher: Standard<Sha256> = Standard::new();
             for i in 0..49 {
                 elements.push(test_digest(i));
-                element_positions.push(
-                    mmr.add(&mut hasher, elements.last().unwrap())
-                        .await
-                        .unwrap(),
-                );
+                element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
             }
             // test range proofs over all possible ranges of at least 2 elements
             let root_digest = mmr.root(&mut hasher);
@@ -753,15 +747,10 @@ mod tests {
             let mut mmr = Mmr::default();
             let mut elements = Vec::new();
             let mut element_positions = Vec::new();
-            let mut hasher = Sha256::new();
-            let mut hasher = Standard::new(&mut hasher);
+            let mut hasher: Standard<Sha256> = Standard::new();
             for i in 0..49 {
                 elements.push(test_digest(i));
-                element_positions.push(
-                    mmr.add(&mut hasher, elements.last().unwrap())
-                        .await
-                        .unwrap(),
-                );
+                element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
             }
 
             // Confirm we can successfully prove all retained elements in the MMR after pruning.
@@ -795,11 +784,10 @@ mod tests {
             let mut mmr = Mmr::default();
             let mut elements = Vec::new();
             let mut element_positions = Vec::new();
-            let mut hasher = Sha256::new();
-            let mut hasher = Standard::new(&mut hasher);
+            let mut hasher: Standard<Sha256> = Standard::new();
             for i in 0..49 {
                 elements.push(test_digest(i));
-                element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()).await.unwrap());
+                element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
             }
 
             // prune up to the first peak
@@ -815,8 +803,7 @@ mod tests {
 
             // test range proofs over all possible ranges of at least 2 elements
             let root_digest = mmr.root(&mut hasher);
-            let mut hasher = Sha256::new();
-            let mut hasher = Standard::new(&mut hasher);
+                        let mut hasher: Standard<Sha256> = Standard::new();
             for i in 0..elements.len() {
                 for j in i + 1..elements.len() {
                     let start_pos = element_positions[i];
@@ -838,7 +825,7 @@ mod tests {
             // add a few more nodes, prune again, and test again to make sure repeated pruning works
             for i in 0..37 {
                 elements.push(test_digest(i));
-                element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()).await.unwrap());
+                element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
             }
             mmr.prune_to_pos(130); // a bit after the new highest peak
             assert_eq!(mmr.oldest_retained_pos().unwrap(), 130);
@@ -880,15 +867,10 @@ mod tests {
             let mut mmr = Mmr::default();
             let mut elements = Vec::new();
             let mut element_positions = Vec::new();
-            let mut hasher = Sha256::new();
-            let mut hasher = Standard::new(&mut hasher);
+            let mut hasher: Standard<Sha256> = Standard::new();
             for i in 0..25 {
                 elements.push(test_digest(i));
-                element_positions.push(
-                    mmr.add(&mut hasher, elements.last().unwrap())
-                        .await
-                        .unwrap(),
-                );
+                element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
             }
 
             // Generate proofs over all possible ranges of elements and confirm each

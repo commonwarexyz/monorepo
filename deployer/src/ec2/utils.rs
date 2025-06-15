@@ -1,8 +1,10 @@
 //! Utility functions for interacting with EC2 instances
 
 use crate::ec2::Error;
-use tokio::process::Command;
-use tokio::time::{sleep, Duration};
+use tokio::{
+    process::Command,
+    time::{sleep, Duration},
+};
 use tracing::warn;
 
 /// Maximum number of SSH connection attempts before failing

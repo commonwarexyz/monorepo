@@ -17,13 +17,13 @@ This repository uses the default cargo and clippy formatting rules for `.rs` fil
 
 ```bash
 $ cargo clippy --all-targets --all-features -- -D warnings
-$ cargo fmt --all -- --check
+$ cargo +nightly fmt --all -- --check
 ```
 
 To fix linting automatically, run:
 
 ```bash
-$ cargo fmt --all
+$ cargo +nightly fmt --all
 ```
 
 # Releases

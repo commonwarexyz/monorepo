@@ -1,7 +1,8 @@
 //! An authenticated database (ADB) that provides succinct proofs of _any_ value ever associated
 //! with a key, and also whether that value is the _current_ value associated with it. Its
 //! implementation is based on an [Any] authenticated database combined with an authenticated
-//! [Bitmap] over the activity status of each operation.
+//! [Bitmap] over the activity status of each operation. The two structures are "grafted" together
+//! to minimize proof sizes.
 
 use crate::{
     adb::{
@@ -14,7 +15,6 @@ use crate::{
         bitmap::Bitmap,
         hasher::{Grafting, GraftingVerifier, Hasher, Standard},
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
-        journaled::Mmr,
         storage::Grafting as GStorage,
         verification::Proof,
         Error::*,
@@ -22,14 +22,14 @@ use crate::{
 };
 use commonware_codec::FixedSize;
 use commonware_cryptography::Hasher as CHasher;
-use commonware_runtime::{Clock, Metrics, Storage as RStorage};
+use commonware_runtime::{Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::Array;
 use futures::future::try_join_all;
 use tracing::{debug, warn};
 
 /// Configuration for a [Current] authenticated db.
 #[derive(Clone)]
-pub struct Config {
+pub struct Config<T: Translator> {
     /// The name of the [RStorage] partition used for the MMR's backing journal.
     pub mmr_journal_partition: String,
 
@@ -53,10 +53,13 @@ pub struct Config {
 
     /// The name of the [RStorage] partition used for the bitmap metadata.
     pub bitmap_metadata_partition: String,
-}
 
-/// A hasher type used with the status bitmap of the [Current] database.
-type Grafter<'a, E, H> = Grafting<'a, H, Mmr<E, H>>;
+    /// The translator used by the compressed index.
+    pub translator: T,
+
+    /// An optional thread pool to use for parallelizing batch operations.
+    pub pool: Option<ThreadPool>,
+}
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of whether
 /// a key ever had a specific value, and whether the key currently has that value.
@@ -122,8 +125,9 @@ impl<
     const _CHUNK_SIZE_IS_POW_OF_2_ASSERT: () =
         assert!(N.is_power_of_two(), "chunk size must be a power of 2");
 
-    /// Initializes a [Current] authenticated database from the given `config`.
-    pub async fn init(context: E, config: Config, translator: T) -> Result<Self, Error> {
+    /// Initializes a [Current] authenticated database from the given `config`. Leverages parallel
+    /// Merkleization to initialize the bitmap MMR if a thread pool is provided.
+    pub async fn init(context: E, config: Config<T>) -> Result<Self, Error> {
         // Initialize the MMR journal and metadata.
         let cfg = AConfig {
             mmr_journal_partition: config.mmr_journal_partition,
@@ -133,19 +137,23 @@ impl<
             log_journal_partition: config.log_journal_partition,
             log_items_per_blob: config.log_items_per_blob,
             log_write_buffer: config.log_write_buffer,
+            translator: config.translator.clone(),
+            pool: config.pool,
         };
 
         let context = context.with_label("adb::current");
+        let cloned_pool = cfg.pool.clone();
         let mut status = Bitmap::restore_pruned(
             context.with_label("bitmap"),
             &config.bitmap_metadata_partition,
+            cloned_pool,
         )
         .await?;
 
         // Initialize the db's mmr/log.
-        let mut hasher = H::new();
+        let mut hasher = Standard::<H>::new();
         let (mut mmr, log) =
-            Any::<_, _, _, _, T>::init_mmr_and_log(context.clone(), &mut hasher, cfg).await?;
+            Any::<_, _, _, _, T>::init_mmr_and_log(context.clone(), cfg, &mut hasher).await?;
 
         // Ensure consistency between the bitmap and the db's MMR.
         let mmr_pruned_pos = mmr.pruned_to_pos();
@@ -163,8 +171,8 @@ impl<
         let pruned_bits = status.pruned_bits();
         let bitmap_pruned_pos = leaf_num_to_pos(pruned_bits);
         let mmr_pruned_leaves = leaf_pos_to_num(mmr_pruned_pos).unwrap();
-        let mut grafter = Grafter::new(&mut hasher, Self::grafting_height(), &mmr);
 
+        let mut grafter = Grafting::new(&mut hasher, Self::grafting_height());
         if bitmap_pruned_pos < mmr_pruned_pos {
             // The bitmap should never be behind the mmr more than one chunk's worth of bits, since
             // the mmr is always pruned after it.
@@ -177,19 +185,24 @@ impl<
             for _ in pruned_bits..mmr_pruned_leaves {
                 status.append(false);
             }
+            // Load the digests of the grafting destination nodes from `mmr` into the grafting
+            // hasher so the new leaf digests can be computed during sync.
+            grafter
+                .load_grafted_digests(&status.dirty_chunks(), &mmr)
+                .await?;
             status.sync(&mut grafter).await?;
         }
 
         // Replay the log to generate the snapshot & populate the retained portion of the bitmap.
-        let mut snapshot = Index::init(context.with_label("snapshot"), translator);
-        let inactivity_floor_loc = Any::build_snapshot_from_log(
-            start_leaf_num,
-            &log,
-            &mut snapshot,
-            Some((&mut grafter, &mut status)),
-        )
-        .await
-        .unwrap();
+        let mut snapshot = Index::init(context.with_label("snapshot"), config.translator);
+        let inactivity_floor_loc =
+            Any::build_snapshot_from_log(start_leaf_num, &log, &mut snapshot, Some(&mut status))
+                .await
+                .unwrap();
+        grafter
+            .load_grafted_digests(&status.dirty_chunks(), &mmr)
+            .await?;
+        status.sync(&mut grafter).await?;
         assert!(
             pruned_bits <= inactivity_floor_loc,
             "bitmap is pruned beyond where bits should be retained"
@@ -201,8 +214,7 @@ impl<
                 inactivity_floor_loc,
                 "pruning any db to the current inactivity floor"
             );
-            let mut hasher = Standard::new(&mut hasher);
-            mmr.prune_to_pos(&mut hasher, leaf_num_to_pos(inactivity_floor_loc))
+            mmr.prune_to_pos(grafter.standard(), leaf_num_to_pos(inactivity_floor_loc))
                 .await?;
         }
 
@@ -212,7 +224,7 @@ impl<
             snapshot,
             inactivity_floor_loc,
             uncommitted_ops: 0,
-            hasher,
+            hasher: Standard::<H>::new(),
         };
 
         Ok(Self {
@@ -278,7 +290,8 @@ impl<
         Ok(())
     }
 
-    /// Commit pending operations to the adb::any and sync it to disk.
+    /// Commit pending operations to the adb::any and sync it to disk. Leverages parallel
+    /// Merkleization of the any-db if a thread pool is provided.
     async fn commit_ops(&mut self) -> Result<(), Error> {
         // Raise the inactivity floor by the # of uncommitted operations, plus 1 to account for the
         // commit op that will be appended.
@@ -322,7 +335,8 @@ impl<
 
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
     /// upon return from this function. Also raises the inactivity floor according to the schedule,
-    /// and prunes those operations below it.
+    /// and prunes those operations below it. Leverages parallel Merkleization of the MMR structures
+    /// if a thread pool is provided.
     pub async fn commit(&mut self) -> Result<(), Error> {
         // Failure recovery relies on this specific order of these three disk-based operations:
         //  (1) commit/sync the any db to disk (which raises the inactivity floor).
@@ -330,9 +344,12 @@ impl<
         //  (3) prune the any db of inactive operations.
         self.commit_ops().await?; // (1)
 
-        let mut grafter =
-            Grafter::new(&mut self.any.hasher, Self::grafting_height(), &self.any.ops);
+        let mut grafter = Grafting::new(&mut self.any.hasher, Self::grafting_height());
+        grafter
+            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.ops)
+            .await?;
         self.status.sync(&mut grafter).await?;
+
         self.status.prune_to_bit(self.any.inactivity_floor_loc);
         self.status
             .write_pruned(
@@ -353,7 +370,7 @@ impl<
     /// # Warning
     ///
     /// Panics if there are uncommitted operations.
-    pub async fn root(&self, hasher: &mut H) -> Result<H::Digest, Error> {
+    pub async fn root(&self, hasher: &mut Standard<H>) -> Result<H::Digest, Error> {
         assert!(
             !self.status.is_dirty(),
             "must process updates before computing root"
@@ -375,11 +392,11 @@ impl<
         // information into the root digest. We do so by computing a root in the same format as an
         // unaligned [Bitmap] root, which involves additionally hashing in the number of bits within
         // the last chunk and the digest of the last chunk.
-        hasher.update(last_chunk.0);
-        let last_chunk_digest = hasher.finalize();
+        hasher.inner().update(last_chunk.0);
+        let last_chunk_digest = hasher.inner().finalize();
 
         Ok(Bitmap::<H, N>::partial_chunk_root(
-            hasher,
+            hasher.inner(),
             &mmr_root,
             last_chunk.1,
             &last_chunk_digest,
@@ -452,7 +469,7 @@ impl<
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
     /// the log with the provided root.
     pub async fn verify_range_proof(
-        hasher: &mut H,
+        hasher: &mut Standard<H>,
         proof: &Proof<H>,
         start_loc: u64,
         ops: &[Operation<K, V>],
@@ -476,15 +493,13 @@ impl<
         let start_pos = leaf_num_to_pos(start_loc);
         let end_pos = leaf_num_to_pos(end_loc);
 
-        let mut hasher = Standard::new(hasher);
         let digests = ops
             .iter()
-            .map(|op| Any::<E, _, _, _, T>::op_digest(&mut hasher, op))
+            .map(|op| Any::<E, _, _, _, T>::op_digest(hasher, op))
             .collect::<Vec<_>>();
 
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
         let mut verifier = GraftingVerifier::new(
-            hasher.inner(),
             Self::grafting_height(),
             start_loc / Bitmap::<H, N>::CHUNK_SIZE_BITS,
             chunk_vec,
@@ -602,8 +617,7 @@ impl<
 
         let pos = leaf_num_to_pos(info.loc);
         let num = info.loc / Bitmap::<H, N>::CHUNK_SIZE_BITS;
-        let mut verifier =
-            GraftingVerifier::new(hasher, Self::grafting_height(), num, vec![&info.chunk]);
+        let mut verifier = GraftingVerifier::new(Self::grafting_height(), num, vec![&info.chunk]);
         let digest = Any::<E, _, _, _, T>::op_digest(
             verifier.standard(),
             &Operation::Update(info.key.clone(), info.value.clone()),
@@ -713,8 +727,10 @@ impl<
         // Only successfully complete operations (1) and (2) of the commit process.
         self.commit_ops().await?; // (1)
 
-        let mut grafter =
-            Grafter::new(&mut self.any.hasher, Self::grafting_height(), &self.any.ops);
+        let mut grafter = Grafting::new(&mut self.any.hasher, Self::grafting_height());
+        grafter
+            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.ops)
+            .await?;
         self.status.sync(&mut grafter).await?;
         self.status.prune_to_bit(self.any.inactivity_floor_loc);
         self.status
@@ -737,7 +753,7 @@ pub mod test {
     use commonware_runtime::{deterministic, Runner as _};
     use rand::{rngs::StdRng, RngCore, SeedableRng};
 
-    fn current_db_config(partition_prefix: &str) -> Config {
+    fn current_db_config(partition_prefix: &str) -> Config<TwoCap> {
         Config {
             mmr_journal_partition: format!("{}_journal_partition", partition_prefix),
             mmr_metadata_partition: format!("{}_metadata_partition", partition_prefix),
@@ -747,6 +763,8 @@ pub mod test {
             log_items_per_blob: 7,
             log_write_buffer: 1024,
             bitmap_metadata_partition: format!("{}_bitmap_metadata_partition", partition_prefix),
+            translator: TwoCap,
+            pool: None,
         }
     }
 
@@ -758,7 +776,6 @@ pub mod test {
         Current::<E, Digest, Digest, Sha256, TwoCap, 32>::init(
             context,
             current_db_config(partition_prefix),
-            TwoCap,
         )
         .await
         .unwrap()
@@ -769,7 +786,7 @@ pub mod test {
     pub fn test_current_db_build_small_close_reopen() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Sha256::new();
+            let mut hasher = Standard::<Sha256>::new();
             let partition = "build_small";
             let mut db = open_db(context.clone(), partition).await;
             assert_eq!(db.op_count(), 0);
@@ -826,7 +843,7 @@ pub mod test {
     pub fn test_current_db_verify_proof_over_bits_in_uncommitted_chunk() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Sha256::new();
+            let mut hasher = Standard::<Sha256>::new();
             let partition = "build_small";
             let mut db = open_db(context.clone(), partition).await;
 
@@ -838,7 +855,7 @@ pub mod test {
 
             let op = db.any.get_with_loc(&k).await.unwrap().unwrap();
             let proof = db
-                .operation_inclusion_proof(&mut hasher, op.1)
+                .operation_inclusion_proof(hasher.inner(), op.1)
                 .await
                 .unwrap();
             let info = KeyValueProofInfo {
@@ -851,7 +868,7 @@ pub mod test {
             // Proof should be verifiable against current root.
             assert!(
                 Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
-                    &mut hasher,
+                    hasher.inner(),
                     &proof.0,
                     &info,
                     &root,
@@ -866,7 +883,7 @@ pub mod test {
             bad_info.value = v2;
             assert!(
                 !Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
-                    &mut hasher,
+                    hasher.inner(),
                     &proof.0,
                     &bad_info,
                     &root,
@@ -883,7 +900,7 @@ pub mod test {
             let root = db.root(&mut hasher).await.unwrap();
             assert!(
                 !Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
-                    &mut hasher,
+                    hasher.inner(),
                     &proof.0,
                     &info,
                     &root,
@@ -894,7 +911,7 @@ pub mod test {
 
             // Create a proof of the now-inactive operation.
             let proof_inactive = db
-                .operation_inclusion_proof(&mut hasher, op.1)
+                .operation_inclusion_proof(hasher.inner(), op.1)
                 .await
                 .unwrap();
             // This proof should not verify, but only because verification will see that the
@@ -907,7 +924,7 @@ pub mod test {
             };
             assert!(
                 !Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
-                    &mut hasher,
+                    hasher.inner(),
                     &proof_inactive.0,
                     &proof_inactive_info,
                     &root,
@@ -930,7 +947,7 @@ pub mod test {
             info_with_modified_loc.loc = active_loc;
             assert!(
                 !Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
-                    &mut hasher,
+                    hasher.inner(),
                     &proof_inactive.0,
                     &proof_inactive_info,
                     &root,
@@ -953,7 +970,7 @@ pub mod test {
             info_with_modified_chunk.chunk = modified_chunk;
             assert!(
                 !Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
-                    &mut hasher,
+                    hasher.inner(),
                     &proof_inactive.0,
                     &info_with_modified_chunk,
                     &root,
@@ -1009,7 +1026,7 @@ pub mod test {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let partition = "range_proofs";
-            let mut hasher = Sha256::new();
+            let mut hasher = Standard::<Sha256>::new();
             let mut db = open_db(context.clone(), partition).await;
             apply_random_ops(200, true, context.next_u64(), &mut db)
                 .await
@@ -1024,7 +1041,8 @@ pub mod test {
             let start_loc = leaf_pos_to_num(start_pos).unwrap();
 
             for i in start_loc..end_loc {
-                let (proof, ops, chunks) = db.range_proof(&mut hasher, i, max_ops).await.unwrap();
+                let (proof, ops, chunks) =
+                    db.range_proof(hasher.inner(), i, max_ops).await.unwrap();
                 assert!(
                     Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_range_proof(
                         &mut hasher,
@@ -1047,7 +1065,7 @@ pub mod test {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let partition = "range_proofs";
-            let mut hasher = Sha256::new();
+            let mut hasher = Standard::<Sha256>::new();
             let mut db = open_db(context.clone(), partition).await;
             apply_random_ops(500, true, context.next_u64(), &mut db)
                 .await
@@ -1056,7 +1074,7 @@ pub mod test {
 
             // Confirm bad keys produce the expected error.
             let bad_key = Sha256::fill(0xAA);
-            let res = db.key_value_proof(&mut hasher, bad_key).await;
+            let res = db.key_value_proof(hasher.inner(), bad_key).await;
             assert!(matches!(res, Err(Error::KeyNotFound())));
 
             let start = db.oldest_retained_loc().unwrap();
@@ -1067,12 +1085,12 @@ pub mod test {
                 // Found an active operation! Create a proof for its active current key/value.
                 let op = db.any.log.read(i).await.unwrap();
                 let key = op.to_key().unwrap();
-                let (proof, info) = db.key_value_proof(&mut hasher, *key).await.unwrap();
+                let (proof, info) = db.key_value_proof(hasher.inner(), *key).await.unwrap();
                 assert_eq!(info.value, *op.to_value().unwrap());
                 // Proof should validate against the current value and correct root.
                 assert!(
                     Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
-                        &mut hasher,
+                        hasher.inner(),
                         &proof,
                         &info,
                         &root
@@ -1086,7 +1104,7 @@ pub mod test {
                 bad_info.value = wrong_val;
                 assert!(
                     !Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
-                        &mut hasher,
+                        hasher.inner(),
                         &proof,
                         &bad_info,
                         &root
@@ -1100,7 +1118,7 @@ pub mod test {
                 bad_info.key = wrong_key;
                 assert!(
                     !Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
-                        &mut hasher,
+                        hasher.inner(),
                         &proof,
                         &bad_info,
                         &root
@@ -1112,7 +1130,7 @@ pub mod test {
                 let wrong_root = Sha256::fill(0xDD);
                 assert!(
                     !Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
-                        &mut hasher,
+                        hasher.inner(),
                         &proof,
                         &info,
                         &wrong_root,
@@ -1135,7 +1153,7 @@ pub mod test {
         executor.start(|mut context| async move {
             let partition = "build_random";
             let rng_seed = context.next_u64();
-            let mut hasher = Sha256::new();
+            let mut hasher = Standard::<Sha256>::new();
             let mut db = open_db(context.clone(), partition).await;
             apply_random_ops(ELEMENTS, true, rng_seed, &mut db)
                 .await
@@ -1157,7 +1175,7 @@ pub mod test {
     pub fn test_current_db_proving_repeated_updates() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Sha256::new();
+            let mut hasher = Standard::<Sha256>::new();
             let partition = "build_small";
             let mut db = open_db(context.clone(), partition).await;
 
@@ -1177,11 +1195,11 @@ pub mod test {
                 let root = db.root(&mut hasher).await.unwrap();
 
                 // Create a proof for the current value of k.
-                let (proof, info) = db.key_value_proof(&mut hasher, k).await.unwrap();
+                let (proof, info) = db.key_value_proof(hasher.inner(), k).await.unwrap();
                 assert_eq!(info.value, v);
                 assert!(
                     Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
-                        &mut hasher,
+                        hasher.inner(),
                         &proof,
                         &info,
                         &root
@@ -1193,7 +1211,7 @@ pub mod test {
                 // Ensure the proof does NOT verify if we use the previous value.
                 assert!(
                     !Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
-                        &mut hasher,
+                        hasher.inner(),
                         &proof,
                         &old_info,
                         &root
@@ -1218,7 +1236,7 @@ pub mod test {
         executor.start(|mut context| async move {
             let partition = "build_random_fail_commit";
             let rng_seed = context.next_u64();
-            let mut hasher = Sha256::new();
+            let mut hasher = Standard::<Sha256>::new();
             let mut db = open_db(context.clone(), partition).await;
             apply_random_ops(ELEMENTS, true, rng_seed, &mut db)
                 .await

@@ -381,11 +381,10 @@ pub fn public<V: Variant>(public: &Public<V>) -> &V::Public {
 
 #[cfg(test)]
 pub mod tests {
-    use commonware_codec::{Decode, Encode};
-
     // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/b0ef82ff79769d085a5a7d3f4fe690b1c8fe6dc9/crates/threshold-bls/src/poly.rs#L355-L604
     use super::*;
     use crate::bls12381::primitives::group::{Scalar, G2};
+    use commonware_codec::{Decode, Encode};
 
     #[test]
     fn poly_degree() {

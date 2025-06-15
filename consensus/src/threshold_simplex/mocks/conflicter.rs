@@ -5,10 +5,9 @@ use crate::{
     ThresholdSupervisor,
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::Digest;
 use commonware_cryptography::{
     bls12381::primitives::{group, variant::Variant},
-    Hasher,
+    Digest, Hasher,
 };
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};

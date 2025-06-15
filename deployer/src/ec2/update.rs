@@ -6,9 +6,7 @@ use crate::ec2::{
 };
 use aws_sdk_ec2::types::Filter;
 use futures::future::try_join_all;
-use std::collections::HashMap;
-use std::fs::File;
-use std::path::PathBuf;
+use std::{collections::HashMap, fs::File, path::PathBuf};
 use tracing::{error, info};
 
 /// Updates the binary and configuration on all binary nodes

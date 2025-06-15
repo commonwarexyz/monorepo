@@ -2,9 +2,8 @@
 //!
 //! This code is inspired by [tokio-uring](https://github.com/tokio-rs/tokio-uring>) at commit 7761222.
 
-use std::ops::Index;
-
 use bytes::Bytes;
+use std::ops::Index;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// A buffer whose memory is stable as long as its not reallocated.

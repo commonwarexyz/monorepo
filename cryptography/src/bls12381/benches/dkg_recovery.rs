@@ -1,12 +1,14 @@
-use commonware_cryptography::bls12381::dkg::{Dealer, Player};
-use commonware_cryptography::bls12381::primitives::variant::MinSig;
-use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
+use commonware_cryptography::{
+    bls12381::{
+        dkg::{Dealer, Player},
+        primitives::variant::MinSig,
+    },
+    ed25519, PrivateKeyExt as _, Signer as _,
+};
 use commonware_utils::quorum;
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::rngs::StdRng;
-use rand::SeedableRng;
-use std::collections::HashMap;
-use std::hint::black_box;
+use rand::{rngs::StdRng, SeedableRng};
+use std::{collections::HashMap, hint::black_box};
 
 /// Concurrency isn't used in DKG recovery, so we set it to 1.
 const CONCURRENCY: usize = 1;
