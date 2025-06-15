@@ -1,9 +1,10 @@
-use std::{collections::HashMap, os::unix::net::SocketAddr};
-
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Sink, Stream};
 use commonware_stream::public_key::Connection;
+use std::{collections::HashMap, os::unix::net::SocketAddr};
+
+mod message;
 
 pub struct Config {}
 
