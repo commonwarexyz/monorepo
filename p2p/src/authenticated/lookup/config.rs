@@ -71,10 +71,6 @@ pub struct Config<C: Signer> {
     /// This value also limits the rate at which we attempt to re-dial any single peer.
     pub query_frequency: Duration,
 
-    /// Times that dialing a given peer should fail before asking for updated peer information for
-    /// that peer.
-    pub dial_fail_limit: usize,
-
     /// Number of peer sets to track.
     ///
     /// We will attempt to maintain connections to peers stored
@@ -86,9 +82,7 @@ pub struct Config<C: Signer> {
     pub tracked_peer_sets: usize,
 
     /// Maximum number of peers to track in a single peer set.
-    ///
-    /// This is used to limit the size of the bit vec messages, which will take one bit per peer in
-    /// the set. This number can be set to a reasonably high value that we never expect to reach.
+    /// This number can be set to a reasonably high value that we never expect to reach.
     pub max_peer_set_size: usize,
 }
 
@@ -118,7 +112,6 @@ impl<C: Signer> Config<C> {
             allowed_incoming_connection_rate: Quota::per_second(NZU32!(256)),
             dial_frequency: Duration::from_millis(1_000),
             query_frequency: Duration::from_secs(60),
-            dial_fail_limit: 2,
             tracked_peer_sets: 4,
             max_peer_set_size: 1 << 16, // 2^16
         }
@@ -153,7 +146,6 @@ impl<C: Signer> Config<C> {
             allowed_incoming_connection_rate: Quota::per_second(NZU32!(256)),
             dial_frequency: Duration::from_millis(500),
             query_frequency: Duration::from_secs(30),
-            dial_fail_limit: 1,
             tracked_peer_sets: 4,
             max_peer_set_size: 1 << 16, // 2^16
         }
@@ -178,7 +170,6 @@ impl<C: Signer> Config<C> {
             allowed_incoming_connection_rate: Quota::per_second(NZU32!(1_024)),
             dial_frequency: Duration::from_millis(200),
             query_frequency: Duration::from_millis(5_000),
-            dial_fail_limit: 1,
             tracked_peer_sets: 4,
             max_peer_set_size: 1 << 8, // 2^8
         }
