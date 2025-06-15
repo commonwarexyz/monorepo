@@ -90,24 +90,6 @@ pub struct Config<C: Signer> {
     /// This is used to limit the size of the bit vec messages, which will take one bit per peer in
     /// the set. This number can be set to a reasonably high value that we never expect to reach.
     pub max_peer_set_size: usize,
-
-    /// Frequency we gossip about known peers.
-    ///
-    /// If there is no other network activity, this message is used as a ping
-    /// and should be sent more often than the read_timeout.
-    pub gossip_bit_vec_frequency: Duration,
-
-    /// Quota for bit vector messages a peer can send us.
-    pub allowed_bit_vec_rate: Quota,
-
-    /// Maximum number of peers we will send or consider valid when receiving in a single message.
-    ///
-    /// This is used to prevent malicious peers from sending us a large number of peers at one time (each
-    /// of which requires a signature verification).
-    pub peer_gossip_max_count: usize,
-
-    /// Quota for peers messages a peer can send us.
-    pub allowed_peers_rate: Quota,
 }
 
 impl<C: Signer> Config<C> {
@@ -139,10 +121,6 @@ impl<C: Signer> Config<C> {
             dial_fail_limit: 2,
             tracked_peer_sets: 4,
             max_peer_set_size: 1 << 16, // 2^16
-            gossip_bit_vec_frequency: Duration::from_secs(50),
-            allowed_bit_vec_rate: Quota::per_second(NZU32!(2)),
-            peer_gossip_max_count: 32,
-            allowed_peers_rate: Quota::per_second(NZU32!(2)),
         }
     }
 
@@ -178,10 +156,6 @@ impl<C: Signer> Config<C> {
             dial_fail_limit: 1,
             tracked_peer_sets: 4,
             max_peer_set_size: 1 << 16, // 2^16
-            gossip_bit_vec_frequency: Duration::from_secs(5),
-            allowed_bit_vec_rate: Quota::per_second(NZU32!(5)),
-            peer_gossip_max_count: 32,
-            allowed_peers_rate: Quota::per_second(NZU32!(5)),
         }
     }
 
@@ -207,10 +181,6 @@ impl<C: Signer> Config<C> {
             dial_fail_limit: 1,
             tracked_peer_sets: 4,
             max_peer_set_size: 1 << 8, // 2^8
-            gossip_bit_vec_frequency: Duration::from_secs(1),
-            allowed_bit_vec_rate: Quota::per_second(NZU32!(5)),
-            peer_gossip_max_count: 32,
-            allowed_peers_rate: Quota::per_second(NZU32!(5)),
         }
     }
 }
