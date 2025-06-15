@@ -19,6 +19,9 @@ pub struct Config {
     /// The maximum number of peer sets to track.
     pub mailbox_size: usize,
 
+    /// Whether private IPs are connectable.
+    pub allow_private_ips: bool,
+
     /// The maximum number of peer sets to track.
     pub max_sets: usize,
 
@@ -33,6 +36,9 @@ pub struct Directory<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Publ
     // ---------- Configuration ----------
     /// The maximum number of peer sets to track.
     max_sets: usize,
+
+    /// Whether private IPs are connectable.
+    pub allow_private_ips: bool,
 
     // ---------- State ----------
     /// The records of all peers.
@@ -73,6 +79,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         Self {
             context,
             max_sets: cfg.max_sets,
+            allow_private_ips: cfg.allow_private_ips,
             peers,
             sets: BTreeMap::new(),
             rate_limiter,
@@ -158,7 +165,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         let mut result: Vec<_> = self
             .peers
             .iter()
-            .filter(|&(_, r)| r.dialable())
+            .filter(|&(_, r)| r.dialable(self.allow_private_ips))
             .map(|(peer, _)| peer.clone())
             .collect();
         result.sort();
@@ -191,7 +198,9 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
 
     /// Returns true if the peer is able to be connected to.
     pub fn allowed(&self, peer: &C) -> bool {
-        self.peers.get(peer).is_some_and(|r| r.allowed())
+        self.peers
+            .get(peer)
+            .is_some_and(|r| r.allowed(self.allow_private_ips))
     }
 
     // --------- Helpers ----------

@@ -57,6 +57,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 allowed_connection_rate_per_peer: cfg.allowed_connection_rate_per_peer,
                 max_peer_set_size: cfg.max_peer_set_size,
+                allow_private_ips: cfg.allow_private_ips,
             },
         );
         let (router, router_mailbox, messenger) = router::Actor::new(

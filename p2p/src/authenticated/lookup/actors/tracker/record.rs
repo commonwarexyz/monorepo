@@ -1,5 +1,7 @@
 use std::net::SocketAddr;
 
+use crate::authenticated::lookup::ip;
+
 /// Represents information known about a peer's address.
 #[derive(Clone, Debug)]
 pub enum Address {
@@ -138,8 +140,13 @@ impl Record {
     /// - We have the socket address of the peer
     /// - It is not ourselves
     /// - We are not already connected
-    pub fn dialable(&self) -> bool {
-        self.status == Status::Inert && matches!(self.address, Address::Known(_))
+    pub fn dialable(&self, allow_private_ips: bool) -> bool {
+        match self.address {
+            Address::Known(addr) => {
+                self.status == Status::Inert && (allow_private_ips || ip::is_global(addr.ip()))
+            }
+            _ => false,
+        }
     }
 
     /// Return the socket of the peer, if known.
@@ -163,10 +170,13 @@ impl Record {
     }
 
     /// Returns `true` if the record is allowed to be used for connection.
-    pub fn allowed(&self) -> bool {
+    pub fn allowed(&self, allow_private_ips: bool) -> bool {
         match self.address {
             Address::Blocked | Address::Myself(_) => false,
-            Address::Known(_) => self.sets > 0 || self.persistent,
+            Address::Known(addr) => {
+                (self.sets > 0 || self.persistent)
+                    && (allow_private_ips || ip::is_global(addr.ip()))
+            }
         }
     }
 }
@@ -177,7 +187,7 @@ mod tests {
 
     // Common test sockets
     fn test_socket() -> SocketAddr {
-        SocketAddr::from(([127, 0, 0, 1], 8080))
+        SocketAddr::from(([54, 12, 1, 9], 8080))
     }
 
     #[test]
@@ -192,7 +202,7 @@ mod tests {
         assert!(!record.blocked());
         assert!(!record.reserved());
         assert!(!record.deletable());
-        assert!(!record.allowed());
+        assert!(!record.allowed(false));
     }
 
     #[test]
@@ -374,20 +384,38 @@ mod tests {
         // Blocked and Myself are never allowed
         let mut record_blocked = Record::known(socket);
         record_blocked.block();
-        assert!(!record_blocked.allowed());
-        assert!(!Record::myself(socket).allowed());
+        assert!(!record_blocked.allowed(false));
+        assert!(!Record::myself(socket).allowed(false));
 
         // Non-persistent records (Unknown, Known) require sets > 0
         let mut record_unknown = Record::known(socket);
-        assert!(!record_unknown.allowed()); // sets = 0, !persistent
+        assert!(!record_unknown.allowed(false)); // sets = 0, !persistent
+        assert!(!record_unknown.allowed(true)); // sets = 0, !persistent
         record_unknown.increment(); // sets = 1
-        assert!(record_unknown.allowed()); // sets > 0
+        assert!(record_unknown.allowed(false)); // sets > 0
+        assert!(record_unknown.allowed(true)); // sets > 0, allow_private_ips doesn't matter
         record_unknown.decrement(); // sets = 0
-        assert!(!record_unknown.allowed());
+        assert!(!record_unknown.allowed(false));
+        assert!(!record_unknown.allowed(true));
 
         let mut record_known = Record::known(socket);
-        assert!(!record_known.allowed()); // sets = 0, !persistent
+        assert!(!record_known.allowed(false)); // sets = 0, !persistent
+        assert!(!record_known.allowed(true)); // sets = 0, !persistent
         record_known.increment(); // sets = 1
-        assert!(record_known.allowed()); // sets > 0
+        assert!(record_known.allowed(false)); // sets > 0
+        assert!(record_known.allowed(true)); // sets > 0, allow_private_ips doesn't matter
+
+        // Test private IPs only allowed if allow_private_ips is true
+        let private_socket = SocketAddr::from(([10, 0, 0, 1], 8080));
+        let mut record_private = Record::known(private_socket);
+        record_private.increment(); // sets = 1
+        assert!(
+            !record_private.allowed(false),
+            "Private IPs not allowed by default"
+        );
+        assert!(
+            record_private.allowed(true),
+            "Private IPs allowed when flag is true"
+        );
     }
 }

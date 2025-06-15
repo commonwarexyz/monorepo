@@ -42,6 +42,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
             mailbox_size: cfg.mailbox_size,
             max_sets: cfg.tracked_peer_sets,
             rate_limit: cfg.allowed_connection_rate_per_peer,
+            allow_private_ips: cfg.allow_private_ips,
         };
         let directory = Directory::init(context.clone(), myself, directory_cfg);
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
@@ -149,6 +150,7 @@ mod tests {
             tracked_peer_sets: 2,
             allowed_connection_rate_per_peer: Quota::per_second(NZU32!(5)),
             max_peer_set_size: 128,
+            allow_private_ips: true,
         }
     }
 

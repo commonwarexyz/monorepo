@@ -118,6 +118,7 @@
 mod actors;
 mod channels;
 mod config;
+mod ip;
 mod metrics;
 mod network;
 mod types;
