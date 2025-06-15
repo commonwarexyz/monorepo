@@ -1,8 +1,5 @@
-use std::net::SocketAddr;
-
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{varint::UInt, EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
-use commonware_cryptography::PublicKey;
 
 /// The maximum overhead (in bytes) when encoding a [Data].
 ///
@@ -17,60 +14,6 @@ pub const PING_MESSAGE_PREFIX: u8 = 0;
 
 /// Prefix that identifies the message as a Data message.
 pub const DATA_MESSAGE_PREFIX: u8 = 1;
-
-/// A signed message from a peer attesting to its own socket address and public key at a given time.
-///
-/// This is used to share the peer's socket address and public key with other peers in a verified
-/// manner.
-#[derive(Clone, Debug)]
-pub struct PeerInfo<C: PublicKey> {
-    /// The socket address of the peer.
-    pub socket: SocketAddr,
-
-    /// The timestamp (epoch milliseconds) at which the socket was signed over.
-    pub timestamp: u64,
-
-    /// The public key of the peer.
-    pub public_key: C,
-
-    /// The peer's signature over the socket and timestamp.
-    pub signature: C::Signature,
-}
-
-impl<C: PublicKey> EncodeSize for PeerInfo<C> {
-    fn encode_size(&self) -> usize {
-        self.socket.encode_size()
-            + UInt(self.timestamp).encode_size()
-            + self.public_key.encode_size()
-            + self.signature.encode_size()
-    }
-}
-
-impl<C: PublicKey> Write for PeerInfo<C> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.socket.write(buf);
-        UInt(self.timestamp).write(buf);
-        self.public_key.write(buf);
-        self.signature.write(buf);
-    }
-}
-
-impl<C: PublicKey> Read for PeerInfo<C> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let socket = SocketAddr::read(buf)?;
-        let timestamp = UInt::read(buf)?.into();
-        let public_key = C::read(buf)?;
-        let signature = C::Signature::read(buf)?;
-        Ok(PeerInfo {
-            socket,
-            timestamp,
-            public_key,
-            signature,
-        })
-    }
-}
 
 /// The messages that can be sent between peers.
 #[derive(Clone, Debug)]
