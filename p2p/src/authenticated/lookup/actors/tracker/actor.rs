@@ -157,57 +157,6 @@ mod tests {
         (signer, pk)
     }
 
-    // // Helper to create PeerInfo
-    // fn new_peer_info(
-    //     signer: &mut PrivateKey,
-    //     ip_namespace: &[u8],
-    //     socket: SocketAddr,
-    //     timestamp: u64,
-    //     target_pk_override: Option<PublicKey>,
-    //     make_sig_invalid: bool,
-    // ) -> PeerInfo<PublicKey> {
-    //     let peer_info_pk = target_pk_override.unwrap_or_else(|| signer.public_key());
-    //     let mut signature = signer.sign(Some(ip_namespace), &(socket, timestamp).encode());
-
-    //     if make_sig_invalid && !signature.as_ref().is_empty() {
-    //         let mut sig_bytes = signature.encode();
-    //         sig_bytes[0] = sig_bytes[0].wrapping_add(1);
-    //         signature = Signature::decode(sig_bytes).unwrap();
-    //     }
-
-    //     PeerInfo {
-    //         socket,
-    //         timestamp,
-    //         public_key: peer_info_pk,
-    //         signature,
-    //     }
-    // }
-
-    // // Mock a connection to a peer by reserving it as if it had dialed us and the `peer` actor had
-    // // sent an initialization.
-    // async fn connect_to_peer(
-    //     mailbox: &mut tracker::Mailbox<Context, PublicKey>,
-    //     peer: &PublicKey,
-    //     peer_mailbox: &authenticated::Mailbox,
-    //     peer_receiver: &mut mpsc::Receiver<peer::Message>,
-    // ) -> tracker::Reservation<Context, PublicKey> {
-    //     let res = mailbox
-    //         .listen(peer.clone())
-    //         .await
-    //         .expect("reservation failed");
-    //     let dialer = false;
-    //     mailbox
-    //         .connect(peer.clone(), dialer, peer_mailbox.clone())
-    //         .await;
-    //     let response = peer_receiver
-    //         .next()
-    //         .await
-    //         .expect("no response after initialization");
-    //     // TODO danlaine: what response do we expect here?
-    //     // assert!(matches!(response, peer::Message::Peers(_)));
-    //     res
-    // }
-
     // Test Harness
     struct TestHarness {
         #[allow(dead_code)]
