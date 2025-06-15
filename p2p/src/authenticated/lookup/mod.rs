@@ -52,20 +52,19 @@
 //! // Generate identity
 //! //
 //! // In production, the signer should be generated from a secure source of entropy.
-//! let signer = ed25519::PrivateKey::from_seed(0);
+//! let my_sk = ed25519::PrivateKey::from_seed(0);
+//! let my_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000);
 //!
 //! // Generate peers
 //! //
 //! // In production, peer identities will be provided by some external source of truth
 //! // (like the staking set of a blockchain).
 //! let peer1 = ed25519::PrivateKey::from_seed(1).public_key();
+//! let peer1_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3001);
 //! let peer2 = ed25519::PrivateKey::from_seed(2).public_key();
+//! let peer2_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3002);
 //! let peer3 = ed25519::PrivateKey::from_seed(3).public_key();
-//!
-//! // Configure bootstrappers
-//! //
-//! // In production, it is likely that the address of bootstrappers will be some public address.
-//! let bootstrappers = vec![(peer1.clone(), SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3001))];
+//! let peer3_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3003);
 //!
 //! // Configure namespace
 //! //
@@ -77,11 +76,10 @@
 //! // In production, use a more conservative configuration like `Config::recommended`.
 //! const MAX_MESSAGE_SIZE: usize = 1_024; // 1KB
 //! let p2p_cfg = lookup::Config::aggressive(
-//!     signer.clone(),
+//!     my_sk.clone(),
 //!     application_namespace,
-//!     SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 3000),
-//!     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000), // Use a specific dialable addr
-//!     bootstrappers,
+//!     my_addr,
+//!     my_addr,
 //!     MAX_MESSAGE_SIZE,
 //! );
 //!
@@ -94,7 +92,7 @@
 //!     //
 //!     // In production, this would be updated as new peer sets are created (like when
 //!     // the composition of a validator set changes).
-//!     oracle.register(0, vec![signer.public_key(), peer1, peer2.clone(), peer3.clone()]).await;
+//!     oracle.register(0, vec![(my_sk.public_key(), my_addr), (peer1, peer1_addr), (peer2, peer2_addr), (peer3, peer3_addr)]).await;
 //!
 //!     // Register some channel
 //!     const MAX_MESSAGE_BACKLOG: usize = 128;
@@ -108,10 +106,6 @@
 //!
 //!     // Run network
 //!     let network_handler = network.start();
-//!
-//!     // Update peer --> address mapping
-//!     oracle.update_address(peer2, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3002)).await;
-//!     oracle.update_address(peer3, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3003)).await;
 //!
 //!     // Example: Use sender
 //!     let _ = sender.send(Recipients::All, bytes::Bytes::from_static(b"hello"), false).await;
