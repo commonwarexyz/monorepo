@@ -43,14 +43,15 @@ impl<E: Spawner + Metrics, P: PublicKey> Drop for Reservation<E, P> {
             .take()
             .expect("Reservation::drop called twice");
 
-        // If the mailbox is not full, we can release the reservation immediately without spawning a task.
+        // If the mailbox is not full, release the reservation immediately without spawning a task.
         if releaser.try_release(self.metadata.clone()) {
             // Sent successfully, nothing to do.
             return;
         };
 
-        // If the mailbox is full, we need to spawn a task to handle the release. If we used `block_on` here,
-        // it could cause a deadlock.
+        // If the mailbox is full, we avoid blocking by spawning a task to handle the release.
+        // While it may not be immediately obvious how a deadlock could occur, we take the
+        // conservative approach of avoiding it.
         let metadata = self.metadata.clone();
         self.context.spawn_ref()(async move {
             releaser.release(metadata).await;
