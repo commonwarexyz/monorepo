@@ -6,7 +6,7 @@ use crate::authenticated::lookup::{
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
 use futures::{channel::mpsc, StreamExt};
-use governor::clock::ReasonablyRealtime;
+use governor::{clock::ReasonablyRealtime, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
 use rand::{CryptoRng, Rng};
 use tracing::debug;
@@ -21,6 +21,7 @@ pub struct Actor<
 
     mailbox_size: usize,
     ping_frequency: std::time::Duration,
+    allowed_ping_rate: Quota,
 
     receiver: mpsc::Receiver<Message<E, Si, St, C>>,
 
@@ -65,6 +66,7 @@ impl<
                 context,
                 mailbox_size: cfg.mailbox_size,
                 ping_frequency: cfg.ping_frequency,
+                allowed_ping_rate: cfg.allowed_ping_rate,
                 receiver,
                 connections,
                 sent_messages,
@@ -112,6 +114,7 @@ impl<
                                 context,
                                 peer::Config {
                                     ping_frequency: self.ping_frequency,
+                                    allowed_ping_rate: self.allowed_ping_rate,
                                     sent_messages,
                                     received_messages,
                                     rate_limited,

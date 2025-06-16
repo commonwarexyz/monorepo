@@ -13,7 +13,7 @@ use commonware_stream::{
     Receiver as _, Sender as _,
 };
 use futures::{channel::mpsc, SinkExt, StreamExt};
-use governor::{clock::ReasonablyRealtime, RateLimiter};
+use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::{CryptoRng, Rng};
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -23,6 +23,8 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey
     context: E,
 
     ping_frequency: Duration,
+    allowed_ping_rate: Quota,
+
     mailbox: Mailbox,
     control: mpsc::Receiver<Message>,
     high: mpsc::Receiver<types::Data>,
@@ -48,6 +50,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
             Self {
                 context,
                 ping_frequency: cfg.ping_frequency,
+                allowed_ping_rate: cfg.allowed_ping_rate,
                 mailbox: Mailbox::new(control_sender),
                 control: control_receiver,
                 high: high_receiver,
@@ -105,6 +108,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
             senders.insert(channel, sender);
         }
         let rate_limits = Arc::new(rate_limits);
+        let ping_rate_limiter =
+            RateLimiter::direct_with_clock(self.allowed_ping_rate, &self.context);
 
         // Send/Receive messages from the peer
         let (mut conn_sender, mut conn_receiver) = connection.split();
@@ -174,6 +179,15 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                             self.received_messages
                                 .get_or_create(&metrics::Message::new_ping(&peer))
                                 .inc();
+
+                            if let Err(wait_until) = ping_rate_limiter.check() {
+                                self.rate_limited
+                                    .get_or_create(&metrics::Message::new_ping(&peer))
+                                    .inc();
+                                let wait_duration = wait_until.wait_time_from(context.now());
+                                context.sleep(wait_duration).await;
+                            }
+
                             continue; // Ignore ping messages
                         }
                         Ok(types::Message::Data(data)) => data,
