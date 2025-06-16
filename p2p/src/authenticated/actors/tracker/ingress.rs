@@ -1,5 +1,8 @@
 use super::Reservation;
-use crate::authenticated::{actors::peer, types};
+use crate::authenticated::{
+    actors::{peer, tracker::Metadata},
+    types,
+};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Metrics, Spawner};
 use futures::{
@@ -100,6 +103,13 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
         /// The sender to respond with the reservation.
         reservation: oneshot::Sender<Option<Reservation<E, C>>>,
     },
+
+    // ---------- Used by reservation ----------
+    /// Release a reservation.
+    Release {
+        /// The metadata of the reservation to release.
+        metadata: Metadata<C>,
+    },
 }
 
 /// Mailbox for sending messages to the tracker actor.
@@ -184,6 +194,44 @@ impl<E: Spawner + Metrics, C: PublicKey> Mailbox<E, C> {
             .await
             .unwrap();
         rx.await.unwrap()
+    }
+}
+
+/// Allows releasing reservations
+#[derive(Clone)]
+pub struct Releaser<E: Spawner + Metrics, C: PublicKey> {
+    sender: mpsc::Sender<Message<E, C>>,
+}
+
+impl<E: Spawner + Metrics, C: PublicKey> Releaser<E, C> {
+    /// Create a new releaser.
+    pub(super) fn new(sender: mpsc::Sender<Message<E, C>>) -> Self {
+        Self { sender }
+    }
+
+    /// Try to release a reservation.
+    ///
+    /// Returns `true` if the reservation was released, `false` if the mailbox is full.
+    pub fn try_release(&mut self, metadata: Metadata<C>) -> bool {
+        let Err(e) = self.sender.try_send(Message::Release { metadata }) else {
+            return true;
+        };
+        assert!(
+            e.is_full(),
+            "Unexpected error trying to release reservation {:?}",
+            e
+        );
+        false
+    }
+
+    /// Release a reservation.
+    ///
+    /// This method will block if the mailbox is full.
+    pub async fn release(&mut self, metadata: Metadata<C>) {
+        self.sender
+            .send(Message::Release { metadata })
+            .await
+            .unwrap();
     }
 }
 
