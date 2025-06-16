@@ -30,9 +30,8 @@ impl Mailbox {
 
 #[cfg(test)]
 mod tests {
-    use crate::authenticated::{data::Data, relay::Relay};
-
     use super::*;
+    use crate::authenticated::{data::Data, relay::Relay};
     use bytes::Bytes;
     use commonware_runtime::{deterministic, Runner};
 
