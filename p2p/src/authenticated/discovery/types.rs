@@ -306,23 +306,6 @@ mod tests {
     }
 
     #[test]
-    fn test_data_codec() {
-        let original = Data {
-            channel: 12345,
-            message: Bytes::from("Hello, world!"),
-        };
-        let encoded = original.encode();
-        let decoded = Data::decode_cfg(encoded, &(13..=13).into()).unwrap();
-        assert_eq!(original, decoded);
-
-        let too_short = Data::decode_cfg(original.encode(), &(0..13).into());
-        assert!(matches!(too_short, Err(Error::InvalidLength(13))));
-
-        let too_long = Data::decode_cfg(original.encode(), &(14..).into());
-        assert!(matches!(too_long, Err(Error::InvalidLength(13))));
-    }
-
-    #[test]
     fn test_payload_codec() {
         // Config for the codec
         let cfg = Config {

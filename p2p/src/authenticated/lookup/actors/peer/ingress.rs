@@ -30,10 +30,7 @@ impl Mailbox {
 
 #[cfg(test)]
 mod tests {
-    use crate::authenticated::{
-        lookup::types::{self, Data},
-        relay::Relay,
-    };
+    use crate::authenticated::{data::Data, relay::Relay};
 
     use super::*;
     use bytes::Bytes;
@@ -48,7 +45,7 @@ mod tests {
             let mut relay = Relay::new(low_sender, high_sender);
 
             // Send a high priority message
-            let data = types::Data {
+            let data = Data {
                 channel: 1,
                 message: Bytes::from("test high prio message"),
             };
@@ -72,7 +69,7 @@ mod tests {
             assert!(low_receiver.try_next().is_err());
 
             // Send a low priority message
-            let data = types::Data {
+            let data = Data {
                 channel: 1,
                 message: Bytes::from("test low prio message"),
             };

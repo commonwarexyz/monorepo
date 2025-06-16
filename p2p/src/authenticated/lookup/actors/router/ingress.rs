@@ -1,8 +1,5 @@
 use crate::{
-    authenticated::{
-        lookup::{channels::Channels, types::Data},
-        relay::Relay,
-    },
+    authenticated::{data::Data, lookup::channels::Channels, relay::Relay},
     Channel, Recipients,
 };
 use bytes::Bytes;

@@ -4,7 +4,8 @@ use super::{
 };
 use crate::{
     authenticated::{
-        lookup::{channels::Channels, metrics, types::Data},
+        data::Data,
+        lookup::{channels::Channels, metrics},
         relay::Relay,
     },
     Channel, Recipients,
