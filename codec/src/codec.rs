@@ -60,7 +60,7 @@ pub trait Read: Sized {
 
 /// Trait combining [Write] and [EncodeSize] for types that can be fully encoded.
 ///
-/// This trait provides the convenience [encode](Encode::encode) method which handles
+/// This trait provides the convenience [Encode::encode] method which handles
 /// buffer allocation, writing, and size assertion in one go.
 pub trait Encode: Write + EncodeSize {
     /// Encodes `self` into a new [BytesMut] buffer.

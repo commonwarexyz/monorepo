@@ -35,7 +35,7 @@ pub trait Signer: Send + Sync + Clone + 'static {
     /// in a different context). It must be prepended to the message so that a signature meant for
     /// one context cannot be used unexpectedly in another (i.e. signing a message on the network
     /// layer can't accidentally spend funds on the execution layer). See
-    /// [union_unique](commonware_utils::union_unique) for details.
+    /// [commonware_utils::union_unique] for details.
     fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Self::Signature;
 }
 
@@ -93,7 +93,7 @@ pub trait BatchVerifier<K: PublicKey> {
     /// A namespace should be used to prevent replay attacks. It will be prepended to the message so
     /// that a signature meant for one context cannot be used unexpectedly in another (i.e. signing
     /// a message on the network layer can't accidentally spend funds on the execution layer). See
-    /// [union_unique](commonware_utils::union_unique) for details.
+    /// [commonware_utils::union_unique] for details.
     fn add(
         &mut self,
         namespace: Option<&[u8]>,

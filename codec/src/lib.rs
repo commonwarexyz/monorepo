@@ -43,11 +43,11 @@
 //! - Collections: [`Vec<T>`], [`Option<T>`]
 //! - Tuples: `(T1, T2, ...)` (up to 12 elements)
 //! - Networking:
-//!   [Ipv4Addr](std::net::Ipv4Addr),
-//!   [Ipv6Addr](std::net::Ipv6Addr),
-//!   [SocketAddrV4](std::net::SocketAddrV4),
-//!   [SocketAddrV6](std::net::SocketAddrV6),
-//!   [SocketAddr](std::net::SocketAddr)
+//!   [std::net::Ipv4Addr],
+//!   [std::net::Ipv6Addr],
+//!   [std::net::SocketAddrV4],
+//!   [std::net::SocketAddrV6],
+//!   [std::net::SocketAddr]
 //! - Common External Types: [::bytes::Bytes]
 //!
 //! # Implementing for Custom Types

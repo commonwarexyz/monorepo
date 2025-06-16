@@ -20,7 +20,7 @@
 //! the composition of peer sets at specific, user-provided indices (`u64`). Each index maps to a
 //! list of authorized `PublicKey`s (`(u64, Vec<PublicKey>)`). Based on this shared knowledge, each
 //! peer can construct a sorted bit vector message (`BitVec`) representing its knowledge of the
-//! dialable addresses [SocketAddr](std::net::SocketAddr) for the peers in that set.
+//! dialable addresses [std::net::SocketAddr] for the peers in that set.
 //! The `BitVec` message contains:
 //! - `index`: The `u64` index the bit vector applies to.
 //! - `bits`: The bit vector itself, where a '1' signifies knowledge of the corresponding
@@ -50,7 +50,7 @@
 //! and sends them back in a `Payload::Peers` message. To save bandwidth, peers will only gossip
 //! `PeerInfo` for peers that they currently have a connection with. This prevents them from
 //! repeatedly sending `PeerInfo` that they cannot verify is still valid. Each `PeerInfo` contains:
-//! - `socket`: The [SocketAddr](std::net::SocketAddr) of the peer.
+//! - `socket`: The [std::net::SocketAddr] of the peer.
 //! - `timestamp`: A `u64` timestamp indicating when the address was attested.
 //! - `public_key`: The peer's public key.
 //! - `signature`: The peer's cryptographic signature over the `socket` and `timestamp`.
