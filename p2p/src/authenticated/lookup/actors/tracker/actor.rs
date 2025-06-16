@@ -403,36 +403,4 @@ mod tests {
             assert!(no_reservation.is_none());
         });
     }
-
-    // #[test]
-    // fn test_validate_kill_on_private_ip_disallowed() {
-    //     let executor = deterministic::Runner::default();
-    //     executor.start(|context| async move {
-    //         let mut cfg = default_test_config(PrivateKey::from_seed(0), Vec::new());
-    //         cfg.allow_private_ips = false;
-    //         let TestHarness {
-    //             mut mailbox,
-    //             ip_namespace,
-    //             ..
-    //         } = setup_actor(context.clone(), cfg);
-
-    //         let (mut s2, pk2) = new_signer_and_pk(2);
-    //         let private_socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080);
-    //         let info = new_peer_info(
-    //             &mut s2,
-    //             &ip_namespace,
-    //             private_socket,
-    //             context.current().epoch_millis(),
-    //             Some(pk2),
-    //             false,
-    //         );
-
-    //         let (peer_mailbox, mut peer_receiver) = authenticated::Mailbox::test();
-    //         mailbox.peers(vec![info], peer_mailbox.clone()).await;
-    //         assert!(matches!(
-    //             peer_receiver.next().await,
-    //             Some(peer::Message::Kill)
-    //         ));
-    //     });
-    // }
 }

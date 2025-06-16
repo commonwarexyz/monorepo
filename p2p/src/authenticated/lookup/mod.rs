@@ -1,4 +1,4 @@
-//! Communicate with a fixed set of authenticated peers over encrypted connections.
+//! Communicate with a fixed set of authenticated peers with known addresses over encrypted connections.
 //!
 //! `lookup` provides multiplexed communication between fully-connected peers
 //! identified by a developer-specified cryptographic identity (i.e. BLS, ed25519, etc.).
@@ -17,7 +17,7 @@
 //!
 //! This module operates under the assumption that all peers are aware of and synchronized on
 //! the composition of peer sets at specific, user-provided indices (`u64`). Each index maps to a
-//! list of authorized `PublicKey`s (`(u64, Vec<PublicKey>)`).
+//! list of authorized `PublicKey`s (`(u64, Vec<(PublicKey, SocketAddr)>)`).
 //!
 //! On startup, the application supplies the initial set of peers. The `Oracle` actor allows
 //! the application to update peer --> address mappings so that peers can find each other.

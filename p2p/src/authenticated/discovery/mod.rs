@@ -1,4 +1,4 @@
-//! Communicate with a fixed set of authenticated peers over encrypted connections.
+//! Communicate with a fixed set of authenticated peers without known addresses over encrypted connections.
 //!
 //! `discovery` provides multiplexed communication between fully-connected peers
 //! identified by a developer-specified cryptographic identity (i.e. BLS, ed25519, etc.).

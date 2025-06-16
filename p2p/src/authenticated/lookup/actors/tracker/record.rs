@@ -7,7 +7,7 @@ pub enum Address {
     /// Peer is the local node.
     Myself(SocketAddr),
 
-    /// Address is provided during initialization.
+    /// Address is provided when peer is registered.
     Known(SocketAddr),
 
     /// Peer is blocked.
