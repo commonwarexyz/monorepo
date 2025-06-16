@@ -111,7 +111,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
                 debug!("dialed peer");
 
                 // Upgrade connection
-                let instance =
+                let connection =
                     match Connection::upgrade_dialer(context, config, sink, stream, peer.clone())
                         .instrument(debug_span!("upgrade"))
                         .await
@@ -129,7 +129,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
                 drop(guard);
 
                 // Start peer to handle messages
-                supervisor.spawn(instance, reservation).await;
+                supervisor.spawn(connection, reservation).await;
             }
         });
     }
