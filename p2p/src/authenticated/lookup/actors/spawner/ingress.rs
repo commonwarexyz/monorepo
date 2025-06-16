@@ -44,6 +44,10 @@ impl<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKey> Mailbox<E
 impl<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKey> Clone
     for Mailbox<E, Si, St, P>
 {
+    /// Clone the mailbox.
+    ///
+    /// We manually implement `clone` because the auto-generated `derive` would
+    /// require the `E`, `C`, `Si`, and `St` types to be `Clone`.
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
