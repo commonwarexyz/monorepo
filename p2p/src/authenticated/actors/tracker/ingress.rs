@@ -226,7 +226,7 @@ impl<E: Spawner + Metrics, C: PublicKey> Releaser<E, C> {
 
     /// Release a reservation.
     ///
-    /// This method will panic if the mailbox is full.
+    /// This method will block if the mailbox is full.
     pub async fn release(&mut self, metadata: Metadata<C>) {
         self.sender
             .send(Message::Release { metadata })
