@@ -3,49 +3,87 @@ use crate::authenticated2::{
     set::Set,
 };
 use bytes::Bytes;
-use commonware_codec::Decode;
+use commonware_codec::{Decode, Encode as _};
 use commonware_cryptography::{PublicKey, Signer};
-use commonware_runtime::{Clock, Sink, Stream};
-use commonware_stream::public_key::Connection;
+use commonware_runtime::{Clock, Sink, Spawner, Stream};
+use commonware_stream::{
+    public_key::{Connection, Receiver, Sender},
+    Receiver as _, Sender as _,
+};
 use commonware_utils::SystemTimeExt as _;
-use std::{collections::HashMap, net::SocketAddr, time::Duration};
+use futures::{channel::mpsc, SinkExt as _, StreamExt};
+use std::{collections::HashMap, time::Duration};
 
 mod message;
 mod set;
 
 pub struct Config {}
 
-enum Peer<P: PublicKey, Si: Sink, St: Stream> {
+enum Peer<P: PublicKey> {
     Myself(PeerInfo<P>),
     AddressUnknown(P),
     Disconnected(PeerInfo<P>),
     Connecting(PeerInfo<P>),
-    Connected(PeerInfo<P>, Connection<Si, St>),
+    Connected(PeerInfo<P>, mpsc::Sender<Bytes>, mpsc::Receiver<(P, Bytes)>),
 }
 
 enum PeerStatus {}
 
 struct Router {}
 
-struct Spawner {}
-
 struct Tracker {}
 
 struct Directory {}
 
-pub struct Network<Cl: Clock, Sk: Signer, Si: Sink, St: Stream> {
+async fn peer_receive_loop<P: PublicKey, St: Stream>(
+    mut receiver: Receiver<St>,
+    peer_id: P,
+    mut tx: mpsc::Sender<(P, Bytes)>,
+) -> Result<(), Error> {
+    loop {
+        // Read message
+        let msg = receiver.receive().await.map_err(|_| Error::ReceiveError)?;
+
+        // Send message to handler
+        if tx.send((peer_id.clone(), msg)).await.is_err() {
+            // TODO should this error?
+            return Ok(());
+        }
+    }
+}
+
+async fn peer_send_loop<Si: Sink>(
+    mut sender: Sender<Si>,
+    mut rx: mpsc::Receiver<Bytes>,
+) -> Result<(), Error> {
+    loop {
+        // Read message
+        let Some(msg) = rx.next().await else {
+            // If the receiver is closed, we stop sending messages
+            // TODO should this error?
+            return Ok(());
+        };
+
+        // Send message to handler
+        sender.send(&msg).await.map_err(|_| Error::SendError)?;
+    }
+}
+
+pub struct Network<C: Clock + Spawner, Sk: Signer, Si: Sink, St: Stream> {
+    context: C,
     ip_namespace: Vec<u8>,
     my_sk: Sk,
     synchrony_bound: Duration,
     peer_gossip_max_count: usize,
-    clock: Cl,
     codec_cfg: message::Config,
     peer_set: Set<Sk::PublicKey>,
-    peers: HashMap<Sk::PublicKey, Peer<Sk::PublicKey, Si, St>>,
+    peers: HashMap<Sk::PublicKey, Peer<Sk::PublicKey>>,
     directory: Directory,
+    _phantom_si: std::marker::PhantomData<Si>,
+    _phantom_st: std::marker::PhantomData<St>,
 }
 
-impl<Cl: Clock, Sk: Signer, Si: Sink, St: Stream> Network<Cl, Sk, Si, St> {
+impl<C: Clock + Spawner, Sk: Signer, Si: Sink, St: Stream> Network<C, Sk, Si, St> {
     fn process_event(&mut self, event: Event<Sk::PublicKey, Si, St>) -> Result<(), Error> {
         match event {
             Event::PeerConnected(peer_info, connection) => {
@@ -68,7 +106,20 @@ impl<Cl: Clock, Sk: Signer, Si: Sink, St: Stream> Network<Cl, Sk, Si, St> {
             .peers
             .get_mut(&peer.public_key)
             .ok_or(Error::PeerNotFound)?;
-        *existing_peer = Peer::Connected(peer.clone(), connection);
+        let (sender, receiver) = connection.split();
+
+        let (receive_tx, receive_rx) = mpsc::channel(100);
+        let peer_pub_key = peer.public_key.clone();
+        self.context
+            .clone()
+            .spawn(move |_| peer_receive_loop(receiver, peer_pub_key, receive_tx));
+
+        let (send_tx, send_rx) = mpsc::channel(100);
+        self.context
+            .clone()
+            .spawn(move |_| peer_send_loop(sender, send_rx));
+
+        *existing_peer = Peer::Connected(peer, send_tx, receive_rx);
         Ok(())
     }
 
@@ -94,11 +145,15 @@ impl<Cl: Clock, Sk: Signer, Si: Sink, St: Stream> Network<Cl, Sk, Si, St> {
             Message::decode_cfg(message, &self.codec_cfg)
         else {
             // TODO handle
+            self.handle_peer_disconnected(peer_id);
             return Ok(());
         };
         match msg {
             Message::BitVec(bit_vec) => self.handle_bit_vec_message(peer_id, bit_vec),
-            Message::Peers(peers) => self.handle_peers_message(peer_id, peers),
+            Message::Peers(peers) => {
+                self.handle_peers_message(peer_id, peers);
+                Ok(())
+            }
             Message::Data(data) => self.handle_data_message(peer_id, data),
         }
     }
@@ -108,7 +163,7 @@ impl<Cl: Clock, Sk: Signer, Si: Sink, St: Stream> Network<Cl, Sk, Si, St> {
         peer_id: Sk::PublicKey,
         bit_vec: message::BitVec,
     ) -> Result<(), Error> {
-        let now = self.clock.current().epoch_millis();
+        let now = self.context.current().epoch_millis();
         let peers: Vec<_> = bit_vec
             .bits
             .iter()
@@ -143,7 +198,7 @@ impl<Cl: Clock, Sk: Signer, Si: Sink, St: Stream> Network<Cl, Sk, Si, St> {
                             None
                         }
                     }
-                    Peer::Connected(peer_info, _) => {
+                    Peer::Connected(peer_info, _, _) => {
                         if peer_info.timestamp <= now {
                             Some(peer_info.clone())
                         } else {
@@ -161,20 +216,20 @@ impl<Cl: Clock, Sk: Signer, Si: Sink, St: Stream> Network<Cl, Sk, Si, St> {
 
     fn handle_peers_message(
         &mut self,
-        _peer_id: Sk::PublicKey,
+        peer_id: Sk::PublicKey,
         peers: Vec<message::PeerInfo<Sk::PublicKey>>,
-    ) -> Result<(), Error> {
+    ) {
         // Ensure there aren't too many peers sent
         if peers.len() > self.peer_gossip_max_count {
-            // TODO disconnect from the peer
-            return Err(Error::TooManyPeers(peers.len()));
+            self.handle_peer_disconnected(peer_id);
+            return;
         }
 
         // We allow peers to be sent in any order when responding to a bit vector (allows
         // for selecting a random subset of peers when there are too many) and allow
         // for duplicates (no need to create an additional set to check this)
         let my_public_key = self.my_sk.public_key();
-        let now = self.clock.current().epoch();
+        let now = self.context.current().epoch();
         for peer in &peers {
             // Check if IP is allowed
             // if !self.allow_private_ips && !ip::is_global(peer.socket.ip()) {
@@ -183,20 +238,22 @@ impl<Cl: Clock, Sk: Signer, Si: Sink, St: Stream> Network<Cl, Sk, Si, St> {
 
             // Check if peer is us
             if peer.public_key == my_public_key {
-                // TODO disconnect from the peer
-                return Err(Error::PeersContainsMyself);
+                self.handle_peer_disconnected(peer_id);
+                return;
             }
 
             // If any timestamp is too far into the future, disconnect from the peer
             if Duration::from_millis(peer.timestamp) > now + self.synchrony_bound {
                 // TODO disconnect from the peer
-                return Err(Error::SynchronyBoundViolated);
+                self.handle_peer_disconnected(peer_id);
+                return;
             }
 
             // If any signature is invalid, disconnect from the peer
             if !peer.verify(&self.ip_namespace) {
                 // TODO disconnect from the peer
-                return Err(Error::InvalidSignature);
+                self.handle_peer_disconnected(peer_id);
+                return;
             }
         }
 
@@ -204,14 +261,16 @@ impl<Cl: Clock, Sk: Signer, Si: Sink, St: Stream> Network<Cl, Sk, Si, St> {
             let peer_id = peer.public_key.clone();
             let Some(existing_peer) = self.peers.remove(&peer_id) else {
                 // TODO disconnect from the peer
-                return Err(Error::PeerNotFound);
+                self.handle_peer_disconnected(peer_id);
+                return;
             };
 
             match existing_peer {
                 Peer::Myself(_) => {
                     // We should never receive a peer info for ourselves
                     // TODO disconnect from the peer
-                    return Err(Error::PeerMyself);
+                    self.handle_peer_disconnected(peer_id);
+                    return;
                 }
                 Peer::AddressUnknown(_) => {
                     // If the peer was unknown, we can now add it as connected
@@ -235,19 +294,50 @@ impl<Cl: Clock, Sk: Signer, Si: Sink, St: Stream> Network<Cl, Sk, Si, St> {
                     };
                     self.peers.insert(peer_id, peer);
                 }
-                Peer::Connected(existing_peer, conn) => {
+                Peer::Connected(existing_peer, sender, receiver) => {
                     let peer = if existing_peer.timestamp >= peer.timestamp {
-                        Peer::Connected(existing_peer, conn)
+                        Peer::Connected(existing_peer, sender, receiver)
                     } else {
-                        Peer::Connected(peer, conn)
+                        Peer::Connected(peer, sender, receiver)
                     };
                     self.peers.insert(peer_id, peer);
                 }
             }
         }
-
-        Ok(())
     }
+
+    fn close_peer(&mut self, peer_id: Sk::PublicKey) {
+        let peer = self.peers.remove(&peer_id).ok_or(Error::PeerNotFound)?;
+        match peer {
+            Peer::Connected(_, mut sender, mut receiver) => {
+                // Close the sender and receiver
+                sender.close();
+                receiver.close();
+            }
+            _ => {}
+        }
+    }
+
+    // async fn send_peers_message(
+    //     &mut self,
+    //     peer_id: Sk::PublicKey,
+    //     peers: Vec<message::PeerInfo<Sk::PublicKey>>,
+    // ) -> Result<(), Error> {
+    //     let peer = self.peers.get(&peer_id).ok_or(Error::PeerNotFound)?;
+    //     match peer {
+    //         Peer::Connected(_, sender, _) => {
+    //             let msg = Message::Peers(peers);
+    //             let msg = msg.encode();
+    //             sender
+    //                 .send(&msg)
+    //                 .await
+    //                 .map_err(|_| Error::ConnectionError)?;
+
+    //             Ok(())
+    //         }
+    //         _ => Err(Error::PeerNotConnected),
+    //     }
+    // }
 
     fn handle_data_message(
         &mut self,
@@ -278,8 +368,10 @@ enum Error {
     InvalidSignature,
     SynchronyBoundViolated,
     AlreadyConnected,
+    ReceiveError,
     ConnectionError,
     MessageError,
+    SendError,
     TimeoutError,
     TooManyPeers(usize),
 }
