@@ -526,7 +526,10 @@ mod tests {
     use super::*;
     use commonware_cryptography::{hash, sha256::Digest};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Blob, Runner, Storage};
+    use commonware_runtime::{
+        deterministic::{self, Context},
+        Blob, Runner, Storage,
+    };
     use futures::{pin_mut, StreamExt};
 
     /// Generate a SHA-256 digest for the given value.
@@ -670,22 +673,26 @@ mod tests {
             // will be empty, and there will be no retained items.
             assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
 
-            let stream = journal
-                .replay(1, 1024, 0)
-                .await
-                .expect("failed to replay journal");
-            pin_mut!(stream);
-            let mut items = Vec::new();
-            while let Some(result) = stream.next().await {
-                match result {
-                    Ok((pos, item)) => {
-                        assert_eq!(test_digest(pos), item);
-                        items.push(pos);
+            {
+                let stream = journal
+                    .replay(1, 1024, 0)
+                    .await
+                    .expect("failed to replay journal");
+                pin_mut!(stream);
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    match result {
+                        Ok((pos, item)) => {
+                            assert_eq!(test_digest(pos), item);
+                            items.push(pos);
+                        }
+                        Err(err) => panic!("Failed to read item: {}", err),
                     }
-                    Err(err) => panic!("Failed to read item: {}", err),
                 }
+                assert_eq!(items, Vec::<u64>::new());
             }
-            assert_eq!(items, Vec::<u64>::new());
+
+            journal.destroy().await.unwrap();
         });
     }
 
@@ -857,6 +864,9 @@ mod tests {
             // Re-initialize the journal to simulate a restart
             let result = Journal::<_, Digest>::init(context.clone(), cfg.clone()).await;
             assert!(matches!(result.err().unwrap(), Error::MissingBlob(n) if n == 40));
+
+            // destroy() will error out because of the missing blob
+            assert!(journal.destroy().await.is_err());
         });
     }
 
@@ -923,7 +933,8 @@ mod tests {
                     assert_eq!(i as u64, *pos - START_POS);
                 }
             }
-            journal.close().await.expect("Failed to close journal");
+
+            journal.destroy().await.unwrap();
         });
     }
 
@@ -987,6 +998,8 @@ mod tests {
             assert_eq!(journal.size().await.unwrap(), 3);
             let buffer = context.encode();
             assert!(buffer.contains("tracked 2"));
+
+            journal.destroy().await.unwrap();
         });
     }
 
@@ -1037,6 +1050,8 @@ mod tests {
                 .await
                 .expect("failed to append data");
             assert_eq!(journal.size().await.unwrap(), 1);
+
+            journal.destroy().await.unwrap();
         });
     }
 
@@ -1097,6 +1112,8 @@ mod tests {
             // Get the value of new item
             let item = journal.read(1).await.unwrap();
             assert_eq!(item, test_digest(1));
+
+            journal.destroy().await.unwrap();
         });
     }
 
@@ -1215,6 +1232,8 @@ mod tests {
             assert!(matches!(journal.rewind(300).await, Ok(())));
             assert_eq!(journal.size().await.unwrap(), 300);
             assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
+
+            journal.destroy().await.unwrap();
         });
     }
 
@@ -1280,6 +1299,11 @@ mod tests {
                 "cc7efd4fc999aff36b9fd4213ba8da5810dc1849f92ae2ddf7c6dc40545f9aff",
             );
             blob.close().await.expect("Failed to close blob");
+
+            let journal = Journal::<Context, Digest>::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+            journal.destroy().await.unwrap();
         });
     }
 }
