@@ -1,10 +1,9 @@
-use crate::authenticated::lookup::actors::tracker::ingress::Releaser;
-
 use super::{
     directory::{self, Directory},
     ingress::{Mailbox, Message, Oracle},
     Config,
 };
+use crate::authenticated::lookup::actors::tracker::ingress::Releaser;
 use commonware_cryptography::Signer;
 use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
 use futures::{channel::mpsc, StreamExt};
