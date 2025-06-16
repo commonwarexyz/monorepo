@@ -1,4 +1,4 @@
-//! Types used in [simplex](crate::simplex).
+//! Types used in [crate::simplex].
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{

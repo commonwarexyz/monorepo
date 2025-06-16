@@ -9,7 +9,7 @@ use futures::{
 
 /// Message types that can be sent to the `Mailbox`
 pub enum Message<P: PublicKey, M: Committable + Digestible> {
-    /// Broadcast a [Message](crate::Broadcaster::Message) to the network.
+    /// Broadcast a [crate::Broadcaster::Message] to the network.
     ///
     /// The responder will be sent a list of peers that received the message.
     Broadcast {

@@ -1,4 +1,4 @@
-//! Types used in [ordered_broadcast](crate::ordered_broadcast).
+//! Types used in [crate::ordered_broadcast].
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -163,7 +163,7 @@ pub fn ack_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, ACK_SUFFIX)
 }
 
-/// Used as the [Index](crate::Supervisor::Index) type for monitoring epochs.
+/// Used as the [crate::Supervisor::Index] type for monitoring epochs.
 /// Defines the current set of sequencers and validators.
 ///
 /// This is not a single "View" in the sense of a consensus protocol, but rather a continuous
@@ -171,7 +171,7 @@ pub fn ack_namespace(namespace: &[u8]) -> Vec<u8> {
 /// of participants changes, the epoch increments.
 pub type Epoch = u64;
 
-/// Used as the [Automaton::Context](crate::Automaton::Context) type.
+/// Used as the [crate::Automaton::Context] type.
 ///
 /// Carries the necessary context for the automaton to verify a payload, including
 /// the sequencer's public key and its sequencer-specific height.
@@ -591,7 +591,7 @@ impl<P: PublicKey, V: Variant, D: Digest> EncodeSize for Ack<P, V, D> {
     }
 }
 
-/// Activity is the type associated with the [Reporter](crate::Reporter) trait.
+/// Activity is the type associated with the [crate::Reporter] trait.
 ///
 /// This enum represents the two main types of activities that are reported:
 /// 1. Tips - when a new chunk at the latest tip is verified for some sequencer

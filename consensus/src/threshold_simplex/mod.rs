@@ -9,7 +9,7 @@
 //! with zero message overhead (natively integrated).
 //!
 //! _If you wish to deploy Simplex Consensus but can't employ threshold signatures, see
-//! [Simplex](crate::simplex)._
+//! [crate::simplex]._
 //!
 //! # Features
 //!

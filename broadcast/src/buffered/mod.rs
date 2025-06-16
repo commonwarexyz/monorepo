@@ -14,7 +14,7 @@
 //! new one.
 //!
 //! The [Mailbox] is used to make requests to the [Engine]. It implements the
-//! [Broadcaster](crate::Broadcaster) trait. This is used to have the engine send a message to all
+//! [crate::Broadcaster] trait. This is used to have the engine send a message to all
 //! other peers in the network in a best-effort manner. It also has a method to request a message by
 //! digest. The engine will return the message immediately if it is in the cache, or wait for it to
 //! be received over the network if it is not.

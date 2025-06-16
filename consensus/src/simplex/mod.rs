@@ -5,7 +5,7 @@
 //! finalization latency in a partially synchronous setting.
 //!
 //! _If your application would benefit from succinct consensus certificates or a bias-resistant
-//! VRF, see [Threshold Simplex](crate::threshold_simplex)._
+//! VRF, see [crate::threshold_simplex]._
 //!
 //! # Features
 //!
