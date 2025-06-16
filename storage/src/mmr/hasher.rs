@@ -124,6 +124,7 @@ impl<H: CHasher> Hasher<H> for Standard<H> {
 /// Grafting involves mapping the leaves of the peak tree to corresponding nodes in the base MMR. It
 /// allows for shorter inclusion proofs over the combined trees compared to treating them as
 /// independent.
+///
 /// One example use case is the [crate::adb::current::Current] authenticated database,
 /// where a MMR is built over a log of operations, and a merkle tree over a bitmap indicating the
 /// activity state of each operation. If we were to treat the two trees as independent, then an
