@@ -224,7 +224,18 @@ mod tests {
 
             // Send/Receive messages
             let peers = peers.clone();
-            let public_keys = peers.iter().map(|(pk, _)| pk.clone()).collect::<Vec<_>>();
+            // All public keys (except self) sorted
+            let mut public_keys = peers
+                .iter()
+                .filter_map(|(pk, _)| {
+                    if pk != &public_key {
+                        Some(pk.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            public_keys.sort();
             let handler = context.with_label("agent").spawn({
                 move |context| async move {
                     // Wait for all peers to send their identity
