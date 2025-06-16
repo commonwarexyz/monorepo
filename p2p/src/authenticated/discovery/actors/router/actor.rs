@@ -4,7 +4,8 @@ use super::{
 };
 use crate::{
     authenticated::{
-        discovery::{channels::Channels, metrics, types},
+        data::Data,
+        discovery::{channels::Channels, metrics},
         relay::Relay,
     },
     Channel, Recipients,
@@ -21,7 +22,7 @@ pub struct Actor<E: Spawner + Metrics, P: PublicKey> {
     context: E,
 
     control: mpsc::Receiver<Message<P>>,
-    connections: BTreeMap<P, Relay<types::Data>>,
+    connections: BTreeMap<P, Relay<Data>>,
 
     messages_dropped: Family<metrics::Message, Counter>,
 }
@@ -62,7 +63,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
     ) {
         if let Some(messenger) = self.connections.get_mut(recipient) {
             if messenger
-                .send(types::Data { channel, message }, priority)
+                .send(Data { channel, message }, priority)
                 .await
                 .is_ok()
             {
@@ -129,7 +130,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
                             for (recipient, messenger) in self.connections.iter_mut() {
                                 if messenger
                                     .send(
-                                        types::Data {
+                                        Data {
                                             channel,
                                             message: message.clone(),
                                         },

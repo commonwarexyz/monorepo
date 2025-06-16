@@ -1,10 +1,12 @@
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{Buf, BufMut};
 use commonware_codec::{
-    varint::UInt, Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, ReadRangeExt, Write,
+    varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write,
 };
 use commonware_cryptography::{PublicKey, Signer};
 use commonware_utils::BitVec as UtilsBitVec;
 use std::net::SocketAddr;
+
+use crate::authenticated::data::Data;
 
 /// The maximum overhead (in bytes) when encoding a `message` into a [`Payload::Data`].
 ///
@@ -220,45 +222,10 @@ impl<C: PublicKey> Read for PeerInfo<C> {
     }
 }
 
-/// Data is an arbitrary message sent between peers.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Data {
-    /// A unique identifier for the channel the message is sent on.
-    ///
-    /// This is used to route the message to the correct handler.
-    pub channel: u32,
-
-    /// The payload of the message.
-    pub message: Bytes,
-}
-
-impl EncodeSize for Data {
-    fn encode_size(&self) -> usize {
-        UInt(self.channel).encode_size() + self.message.encode_size()
-    }
-}
-
-impl Write for Data {
-    fn write(&self, buf: &mut impl BufMut) {
-        UInt(self.channel).write(buf);
-        self.message.write(buf);
-    }
-}
-
-impl Read for Data {
-    type Cfg = RangeCfg;
-
-    fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
-        let channel = UInt::read(buf)?.into();
-        let message = Bytes::read_cfg(buf, range)?;
-        Ok(Data { channel, message })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::BytesMut;
+    use bytes::{Bytes, BytesMut};
     use commonware_codec::{Decode, DecodeRangeExt};
     use commonware_cryptography::{secp256r1, PrivateKeyExt as _};
 
