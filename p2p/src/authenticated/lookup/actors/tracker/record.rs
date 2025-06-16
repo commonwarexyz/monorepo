@@ -1,5 +1,6 @@
-use crate::authenticated::lookup::ip;
 use std::net::SocketAddr;
+
+use crate::authenticated::ip;
 
 /// Represents information known about a peer's address.
 #[derive(Clone, Debug)]
