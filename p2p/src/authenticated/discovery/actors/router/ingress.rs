@@ -1,5 +1,8 @@
 use crate::{
-    authenticated::discovery::{actors::peer, channels::Channels},
+    authenticated::{
+        discovery::{channels::Channels, types},
+        relay::Relay,
+    },
     Channel, Recipients,
 };
 use bytes::Bytes;
@@ -12,7 +15,7 @@ use futures::{
 pub enum Message<P: PublicKey> {
     Ready {
         peer: P,
-        relay: peer::Relay,
+        relay: Relay<types::Data>,
         channels: oneshot::Sender<Channels<P>>,
     },
     Release {
@@ -40,7 +43,7 @@ impl<P: PublicKey> Mailbox<P> {
         Self { sender }
     }
 
-    pub async fn ready(&mut self, peer: P, relay: peer::Relay) -> Channels<P> {
+    pub async fn ready(&mut self, peer: P, relay: Relay<types::Data>) -> Channels<P> {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(Message::Ready {

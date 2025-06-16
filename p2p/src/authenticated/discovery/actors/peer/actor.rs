@@ -1,8 +1,11 @@
-use super::{Config, Error, Mailbox, Message, Relay};
-use crate::authenticated::discovery::{
-    actors::tracker::{self, Metadata, Reservation},
-    channels::Channels,
-    metrics, types,
+use super::{Config, Error, Mailbox, Message};
+use crate::authenticated::{
+    discovery::{
+        actors::tracker::{self, Metadata, Reservation},
+        channels::Channels,
+        metrics, types,
+    },
+    relay::Relay,
 };
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
@@ -44,7 +47,11 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey
 impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: PublicKey>
     Actor<E, C>
 {
-    pub fn new(context: E, cfg: Config, reservation: Reservation<E, C>) -> (Self, Relay) {
+    pub fn new(
+        context: E,
+        cfg: Config,
+        reservation: Reservation<E, C>,
+    ) -> (Self, Relay<types::Data>) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);

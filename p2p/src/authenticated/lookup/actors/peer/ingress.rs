@@ -1,6 +1,3 @@
-use super::Error;
-use crate::{authenticated::lookup::types, Channel};
-use bytes::Bytes;
 use futures::{channel::mpsc, SinkExt};
 
 /// Messages that can be sent to the peer [`Actor`](`super::Actor`).
@@ -31,43 +28,15 @@ impl Mailbox {
     }
 }
 
-#[derive(Clone)]
-pub struct Relay {
-    low: mpsc::Sender<types::Data>,
-    high: mpsc::Sender<types::Data>,
-}
-
-impl Relay {
-    pub fn new(low: mpsc::Sender<types::Data>, high: mpsc::Sender<types::Data>) -> Self {
-        Self { low, high }
-    }
-
-    /// content sends a message to the peer.
-    ///
-    /// We return a Result here instead of unwrapping the send
-    /// because the peer may have disconnected in the normal course of
-    /// business.
-    pub async fn content(
-        &mut self,
-        channel: Channel,
-        message: Bytes,
-        priority: bool,
-    ) -> Result<(), Error> {
-        let sender = if priority {
-            &mut self.high
-        } else {
-            &mut self.low
-        };
-        sender
-            .send(types::Data { channel, message })
-            .await
-            .map_err(|_| Error::MessageDropped)
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use crate::authenticated::{
+        lookup::types::{self, Data},
+        relay::Relay,
+    };
+
     use super::*;
+    use bytes::Bytes;
     use commonware_runtime::{deterministic, Runner};
 
     #[test]
@@ -84,7 +53,13 @@ mod tests {
                 message: Bytes::from("test high prio message"),
             };
             relay
-                .content(data.channel, data.message.clone(), true)
+                .send(
+                    Data {
+                        channel: data.channel,
+                        message: data.message.clone(),
+                    },
+                    true,
+                )
                 .await
                 .unwrap();
             match high_receiver.try_next() {
@@ -102,7 +77,13 @@ mod tests {
                 message: Bytes::from("test low prio message"),
             };
             relay
-                .content(data.channel, data.message.clone(), false)
+                .send(
+                    Data {
+                        channel: data.channel,
+                        message: data.message.clone(),
+                    },
+                    false,
+                )
                 .await
                 .unwrap();
             match low_receiver.try_next() {
