@@ -56,7 +56,7 @@ use commonware_runtime::{
     Blob, Error as RError, Metrics, Storage,
 };
 use commonware_utils::hex;
-use futures::stream::{self, Stream, StreamExt};
+use futures::stream::{self, Stream};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{collections::BTreeMap, marker::PhantomData};
 use tracing::{debug, trace, warn};
@@ -398,18 +398,21 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             .range(start_blob..)
             .map(|(_, blob)| blob.clone())
             .collect::<Vec<_>>();
-        let blobs_len = blobs.len();
         let items_per_blob = self.cfg.items_per_blob;
         let start_offset = (start_pos % items_per_blob) * Self::CHUNK_SIZE_U64;
 
+        let blobs_len = blobs.len();
+        // There should always be at least one blob to replay unless the user provided an invalid `start_pos`.
+        assert_ne!(blobs_len, 0);
         let blob = blobs[0].clone();
         let blob_size = blob.size().await;
         let mut reader = Read::new(blob, blob_size, buffer);
         reader.seek_to(start_offset)?;
 
+        let buf = vec![0u8; Self::CHUNK_SIZE];
         let stream = stream::unfold(
-            (blobs, 0, reader, start_offset),
-            move |(blobs, mut blob_num, mut reader, mut offset)| async move {
+            (buf, blobs, 0, reader, start_offset),
+            move |(mut buf, blobs, mut blob_num, mut reader, mut offset)| async move {
                 // Check if we are at the end of the blob
                 if offset >= reader.blob_size() {
                     blob_num += 1;
@@ -429,101 +432,28 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
 
                 let blob_index = start_blob + blob_num as u64;
                 let item_pos = items_per_blob * blob_index + offset / Self::CHUNK_SIZE_U64;
-                let mut buf = vec![0u8; Self::CHUNK_SIZE];
                 match reader.read_exact(&mut buf, Self::CHUNK_SIZE).await {
                     Ok(()) => {
                         let next_offset = offset + Self::CHUNK_SIZE_U64;
                         match Self::verify_integrity(&buf) {
-                            Ok(item) => {
-                                Some((Ok((item_pos, item)), (blobs, blob_num, reader, next_offset)))
+                            Ok(item) => Some((
+                                Ok((item_pos, item)),
+                                (buf, blobs, blob_num, reader, next_offset),
+                            )),
+                            Err(err) => {
+                                Some((Err(err), (buf, blobs, blob_num, reader, next_offset)))
                             }
-                            Err(err) => Some((Err(err), (blobs, blob_num, reader, next_offset))),
                         }
                     }
                     Err(err) => {
                         let sz = reader.blob_size();
-                        Some((Err(Error::Runtime(err)), (blobs, blob_num, reader, sz)))
+                        Some((Err(Error::Runtime(err)), (buf, blobs, blob_num, reader, sz)))
                     }
                 }
             },
         );
 
         Ok(stream)
-    }
-
-    /// Returns an unordered stream of all items in the journal with position >= `start_pos`.
-    ///
-    /// # Integrity
-    ///
-    /// If any corrupted data is found, the stream will return an error.
-    ///
-    /// # Concurrency
-    ///
-    /// The `concurrency` parameter controls how many blobs are replayed concurrently. This can
-    /// dramatically speed up the replay process if the underlying storage supports concurrent reads
-    /// across different blobs.
-    pub async fn unordered_replay(
-        &self,
-        concurrency: usize,
-        buffer: usize,
-        start_pos: u64,
-    ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + '_, Error> {
-        assert!(concurrency > 0);
-        // Collect all blobs to replay
-        let start_blob = start_pos / self.cfg.items_per_blob;
-        let blobs = self
-            .blobs
-            .range(start_blob..)
-            .map(|(index, blob)| (index, blob.clone()))
-            .collect::<Vec<_>>();
-
-        // Replay all blobs concurrently and stream items as they are read (to avoid occupying too
-        // much memory with buffered data)
-        let items_per_blob = self.cfg.items_per_blob;
-        Ok(stream::iter(blobs)
-            .map(move |(index, blob)| async move {
-                // Create buffered reader
-                let size = blob.size().await;
-                let reader = Read::new(blob, size, buffer);
-
-                // Read over the blob in chunks of `CHUNK_SIZE` bytes
-                stream::unfold(
-                    (index, reader, 0u64),
-                    move |(index, mut reader, mut offset)| async move {
-                        // Check if we are at the end of the blob
-                        if offset >= size {
-                            return None;
-                        }
-
-                        // Seek past any items that precede `start_pos`.
-                        let mut item_pos = items_per_blob * *index + offset / Self::CHUNK_SIZE_U64;
-                        if item_pos < start_pos {
-                            offset += Self::CHUNK_SIZE_U64 * (start_pos - item_pos);
-                            item_pos = start_pos;
-                            if let Err(err) = reader.seek_to(offset) {
-                                return Some((Err(Error::Runtime(err)), (index, reader, offset)));
-                            }
-                        }
-
-                        // Try to read the full item (data + checksum)
-                        let mut buf = vec![0u8; Self::CHUNK_SIZE];
-                        match reader.read_exact(&mut buf, Self::CHUNK_SIZE).await {
-                            Ok(()) => {
-                                let next_offset = offset + Self::CHUNK_SIZE_U64;
-                                match Self::verify_integrity(&buf) {
-                                    Ok(item) => {
-                                        Some((Ok((item_pos, item)), (index, reader, next_offset)))
-                                    }
-                                    Err(err) => Some((Err(err), (index, reader, next_offset))),
-                                }
-                            }
-                            Err(err) => Some((Err(Error::Runtime(err)), (index, reader, size))),
-                        }
-                    },
-                )
-            })
-            .buffer_unordered(concurrency)
-            .flatten())
     }
 
     /// Return the blob containing the most recently appended items and its index.
