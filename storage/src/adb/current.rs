@@ -680,6 +680,11 @@ impl<
         self.any.close().await
     }
 
+    /// Destroy the db, removing all data from disk.
+    pub async fn destroy(self) -> Result<(), Error> {
+        self.any.destroy().await
+    }
+
     #[cfg(test)]
     /// Generate an inclusion proof for any operation regardless of its activity state.
     async fn operation_inclusion_proof(
@@ -833,6 +838,8 @@ pub mod test {
             for i in 0..db.op_count() {
                 assert!(!db.status.get_bit(i));
             }
+
+            db.destroy().await.unwrap();
         });
     }
 
@@ -978,6 +985,8 @@ pub mod test {
                 .await
                 .unwrap()
             );
+
+            db.destroy().await.unwrap();
         });
     }
 
@@ -1057,6 +1066,8 @@ pub mod test {
                     "failed to verify range at start_loc {start_loc}",
                 );
             }
+
+            db.destroy().await.unwrap();
         });
     }
 
@@ -1139,6 +1150,8 @@ pub mod test {
                     .unwrap()
                 )
             }
+
+            db.destroy().await.unwrap();
         });
     }
 
@@ -1166,6 +1179,8 @@ pub mod test {
 
             let db = open_db(context, partition).await;
             assert_eq!(db.root(&mut hasher).await.unwrap(), root);
+
+            db.destroy().await.unwrap();
         });
     }
 
@@ -1222,6 +1237,8 @@ pub mod test {
                 );
                 old_info = info.clone();
             }
+
+            db.destroy().await.unwrap();
         });
     }
 
@@ -1311,6 +1328,8 @@ pub mod test {
                 db.any.oldest_retained_loc().unwrap(),
                 successful_pruning_loc
             );
+
+            db.destroy().await.unwrap();
         });
     }
 }
