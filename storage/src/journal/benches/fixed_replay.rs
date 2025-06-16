@@ -25,9 +25,9 @@ async fn bench_run(
     buffer: usize,
     items_to_read: u64,
 ) {
-    let concurrency = std::cmp::max(1, (items_to_read / ITEMS_PER_BLOB) as usize);
+    let concurrency = 1; /*std::cmp::max(1, (items_to_read / ITEMS_PER_BLOB) as usize);*/
     let stream = journal
-        .replay(concurrency, buffer, 0)
+        .replay(/*concurrency, */ buffer, 0)
         .await
         .expect("failed to replay journal");
     pin_mut!(stream);
@@ -60,7 +60,7 @@ fn bench_fixed_replay(c: &mut Criterion) {
 
         // Run the benchmarks
         let runner = tokio::Runner::new(cfg.clone());
-        for buffer in [128, 16_384, 65_536, 1_048_576] {
+        for buffer in [/*128, 16_384, 65_536, */ 1_048_576] {
             c.bench_function(
                 &format!(
                     "{}/items={} buffer={} size={}",
