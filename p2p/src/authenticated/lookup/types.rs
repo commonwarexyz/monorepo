@@ -1,7 +1,6 @@
+use crate::authenticated::data::Data;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
-
-use crate::authenticated::data::Data;
 
 /// The maximum overhead (in bytes) when encoding a [Data].
 ///

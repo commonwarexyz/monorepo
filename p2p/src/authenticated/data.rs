@@ -38,10 +38,9 @@ impl Read for Data {
 
 #[cfg(test)]
 mod tests {
+    use crate::authenticated::data::Data;
     use bytes::Bytes;
     use commonware_codec::{Decode as _, Encode as _, Error};
-
-    use crate::authenticated::data::Data;
 
     #[test]
     fn test_data_codec() {

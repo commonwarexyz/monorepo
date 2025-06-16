@@ -1,3 +1,4 @@
+use crate::authenticated::data::Data;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write,
@@ -5,8 +6,6 @@ use commonware_codec::{
 use commonware_cryptography::{PublicKey, Signer};
 use commonware_utils::BitVec as UtilsBitVec;
 use std::net::SocketAddr;
-
-use crate::authenticated::data::Data;
 
 /// The maximum overhead (in bytes) when encoding a `message` into a [`Payload::Data`].
 ///
