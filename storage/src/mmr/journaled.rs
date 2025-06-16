@@ -411,13 +411,6 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         Ok(pinned_nodes)
     }
 
-    /// Close the MMR, syncing any cached elements to disk and closing the journal.
-    pub async fn close(mut self, h: &mut impl Hasher<H>) -> Result<(), Error> {
-        self.sync(h).await?;
-        self.journal.close().await?;
-        self.metadata.close().await.map_err(Error::MetadataError)
-    }
-
     /// Return an inclusion proof for the specified element, or ElementPruned error if some element
     /// needed to generate the proof has been pruned.
     ///
@@ -490,6 +483,21 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         }
 
         Some(self.pruned_to_pos)
+    }
+
+    /// Close the MMR, syncing any cached elements to disk and closing the journal.
+    pub async fn close(mut self, h: &mut impl Hasher<H>) -> Result<(), Error> {
+        self.sync(h).await?;
+        self.journal.close().await?;
+        self.metadata.close().await.map_err(Error::MetadataError)
+    }
+
+    /// Close and permanently remove any disk resources.
+    pub async fn destroy(self) -> Result<(), Error> {
+        self.journal.destroy().await?;
+        self.metadata.destroy().await?;
+
+        Ok(())
     }
 
     #[cfg(test)]
@@ -579,6 +587,7 @@ mod tests {
                 .await
                 .unwrap();
             build_and_check_test_roots_mmr(&mut mmr).await;
+            mmr.destroy().await.unwrap();
         });
     }
 
@@ -593,6 +602,7 @@ mod tests {
                 .await
                 .unwrap();
             build_batched_and_check_test_roots_journaled(&mut mmr).await;
+            mmr.destroy().await.unwrap();
         });
     }
 
@@ -612,6 +622,7 @@ mod tests {
             assert!(mmr.prune_to_pos(&mut hasher, 0).await.is_ok());
             assert!(mmr.sync(&mut hasher).await.is_ok());
             assert!(matches!(mmr.pop(1).await, Err(Error::Empty)));
+            mmr.destroy().await.unwrap();
         });
     }
 
@@ -675,6 +686,7 @@ mod tests {
                 assert!(mmr.pop(1).await.is_ok());
             }
             assert!(matches!(mmr.pop(1).await, Err(Error::ElementPruned(_))));
+            mmr.destroy().await.unwrap();
         });
     }
 
@@ -742,6 +754,8 @@ mod tests {
                 )
                 .await
                 .unwrap());
+
+            mmr.destroy().await.unwrap();
         });
     }
 
@@ -828,6 +842,8 @@ mod tests {
             // Since the leaf was corrupted, it should not have been recovered, and the journal's
             // size will be the last-valid size.
             assert_eq!(mmr.size(), 495);
+
+            mmr.destroy().await.unwrap();
         });
     }
 
@@ -930,6 +946,9 @@ mod tests {
             }
             pruned_mmr.prune_all(&mut hasher).await.unwrap();
             assert_eq!(pruned_mmr.oldest_retained_pos(), None);
+
+            pruned_mmr.destroy().await.unwrap();
+            mmr.destroy().await.unwrap();
         });
     }
 
@@ -994,6 +1013,11 @@ mod tests {
                     .await
                     .unwrap();
             }
+
+            let mmr = Mmr::init(context.clone(), &mut hasher, test_config())
+                .await
+                .unwrap();
+            mmr.destroy().await.unwrap();
         });
     }
 }

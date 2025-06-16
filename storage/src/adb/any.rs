@@ -573,23 +573,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         Ok(())
     }
 
-    /// Close the db. Operations that have not been committed will be lost.
-    pub async fn close(mut self) -> Result<(), Error> {
-        if self.uncommitted_ops > 0 {
-            warn!(
-                op_count = self.uncommitted_ops,
-                "closing db with uncommitted operations"
-            );
-        }
-
-        try_join!(
-            self.log.close().map_err(Error::JournalError),
-            self.ops.close(&mut self.hasher).map_err(Error::MmrError),
-        )?;
-
-        Ok(())
-    }
-
     // Moves the given operation to the tip of the log if it is active, rendering its old location
     // inactive. If the operation was not active, then this is a no-op. Returns the old location
     // of the operation if it was active.
@@ -670,6 +653,31 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         // Because the log's pruning boundary will be blob-size aligned, we cannot use it as a
         // source of truth for the min provable element.
         self.log.prune(self.inactivity_floor_loc).await?;
+
+        Ok(())
+    }
+
+    /// Close the db. Operations that have not been committed will be lost.
+    pub async fn close(mut self) -> Result<(), Error> {
+        if self.uncommitted_ops > 0 {
+            warn!(
+                op_count = self.uncommitted_ops,
+                "closing db with uncommitted operations"
+            );
+        }
+
+        try_join!(
+            self.log.close().map_err(Error::JournalError),
+            self.ops.close(&mut self.hasher).map_err(Error::MmrError),
+        )?;
+
+        Ok(())
+    }
+
+    /// Destroy the db, removing all data from disk.
+    pub async fn destroy(self) -> Result<(), Error> {
+        self.log.destroy().await?;
+        self.ops.destroy().await?;
 
         Ok(())
     }
@@ -782,6 +790,8 @@ mod test {
                 db.commit().await.unwrap();
                 assert_eq!(db.op_count() - 1, db.inactivity_floor_loc);
             }
+
+            db.destroy().await.unwrap();
         });
     }
 
@@ -920,6 +930,8 @@ mod test {
             assert_eq!(db.snapshot.keys(), 2);
             assert_eq!(db.root(&mut hasher), root);
             assert_eq!(db.inactivity_floor_loc, db.oldest_retained_loc().unwrap());
+
+            db.destroy().await.unwrap();
         });
     }
 
@@ -1031,6 +1043,8 @@ mod test {
                     .unwrap()
                 );
             }
+
+            db.destroy().await.unwrap();
         });
     }
 
@@ -1079,7 +1093,8 @@ mod test {
             let db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 2001);
             assert_eq!(db.root(&mut hasher), root);
-            db.close().await.unwrap();
+
+            db.destroy().await.unwrap();
 
             // Recreate the database without any failures and make sure the roots match.
             let mut new_db = Any::<_, Digest, Digest, Sha256, EightCap>::init(
@@ -1108,6 +1123,8 @@ mod test {
             new_db.sync().await.unwrap();
             assert_eq!(new_db.op_count(), 2001);
             assert_eq!(new_db.root(&mut hasher), root);
+
+            new_db.destroy().await.unwrap();
         });
     }
 
@@ -1136,6 +1153,8 @@ mod test {
             let iter = db.snapshot.get(&k);
             assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
             assert_eq!(db.root(&mut hasher), root);
+
+            db.destroy().await.unwrap();
         });
     }
 
@@ -1172,6 +1191,8 @@ mod test {
             let db = open_db(context.clone()).await;
             assert_eq!(root_digest, db.root(&mut hasher));
             assert!(db.get(&k).await.unwrap().is_none());
+
+            db.destroy().await.unwrap();
         });
     }
 
@@ -1287,6 +1308,8 @@ mod test {
                     assert!(!bitmap.get_bit(pos));
                 }
             }
+
+            db.destroy().await.unwrap();
         });
     }
 }

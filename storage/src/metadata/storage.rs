@@ -8,7 +8,7 @@ use std::{
     collections::BTreeMap,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tracing::{trace, warn};
+use tracing::{debug, trace, warn};
 
 const BLOB_NAMES: [&[u8]; 2] = [b"left", b"right"];
 const SECONDS_IN_NANOSECONDS: u128 = 1_000_000_000;
@@ -20,6 +20,7 @@ pub struct Metadata<E: Clock + Storage + Metrics, K: Array> {
     // Data is stored in a BTreeMap to enable deterministic serialization.
     data: BTreeMap<K, Vec<u8>>,
     cursor: usize,
+    partition: String,
     blobs: [(E::Blob, u64, u128); 2],
 
     syncs: Counter,
@@ -72,6 +73,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
 
             data,
             cursor,
+            partition: cfg.partition,
             blobs: [
                 (left_blob, left_len, left_timestamp),
                 (right_blob, right_len, right_timestamp),
@@ -260,6 +262,18 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         self.sync().await?;
         for (blob, _, _) in self.blobs.into_iter() {
             blob.close().await?;
+        }
+        Ok(())
+    }
+
+    /// Close and remove the underlying blobs.
+    pub async fn destroy(self) -> Result<(), Error<K>> {
+        for (i, (blob, _, _)) in self.blobs.into_iter().enumerate() {
+            blob.close().await?;
+            self.context
+                .remove(&self.partition, Some(BLOB_NAMES[i]))
+                .await?;
+            debug!(blob = i, "destroyed blob");
         }
         Ok(())
     }
