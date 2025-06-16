@@ -47,7 +47,7 @@ impl<S: Signature> EncodeSize for Dkg<S> {
 
 /// Defines the different types of messages exchanged during the DKG protocol.
 ///
-/// This enum is used as the `payload` field within the [`Dkg`] message struct.
+/// This enum is used as the `payload` field within the [Dkg] message struct.
 /// The generic parameter `Sig` represents the type used for signatures in acknowledgments.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Payload<S: Signature> {
@@ -72,7 +72,7 @@ pub enum Payload<S: Signature> {
 
     /// Message sent by a player node back to the dealer node.
     ///
-    /// Acknowledges the receipt and verification of a [`Payload::Share`] message.
+    /// Acknowledges the receipt and verification of a [Payload::Share] message.
     /// Includes a signature to authenticate the acknowledgment.
     Ack {
         /// The public key identifier of the player sending the acknowledgment.
@@ -84,7 +84,7 @@ pub enum Payload<S: Signature> {
 
     /// Message sent by a dealer node to the arbiter.
     ///
-    /// Sent after the dealer has collected a sufficient number of [`Payload::Ack`] messages
+    /// Sent after the dealer has collected a sufficient number of [Payload::Ack] messages
     /// from players. Contains the dealer's commitment, the collected acknowledgments,
     /// and potentially revealed shares (e.g., for handling unresponsive players).
     Commitment {
@@ -103,7 +103,7 @@ pub enum Payload<S: Signature> {
         /// A map of dealer public key identifiers to their final public commitments.
         commitments: HashMap<u32, poly::Public<MinSig>>,
         /// A map of player public key identifiers to their corresponding revealed shares,
-        /// aggregated from all dealers' [`Payload::Commitment`] messages.
+        /// aggregated from all dealers' [Payload::Commitment] messages.
         reveals: HashMap<u32, group::Share>,
     },
 

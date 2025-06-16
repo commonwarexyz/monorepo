@@ -1,7 +1,7 @@
 //! Codec implementations for various set types.
 //!
 //! For portability and consistency between architectures,
-//! the size of the set must fit within a [`u32`].
+//! the size of the set must fit within a [u32].
 
 use crate::{
     codec::{EncodeSize, Read, Write},

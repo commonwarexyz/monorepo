@@ -1,4 +1,4 @@
-//! Types for use as [`crate::Read::Cfg`].
+//! Types for use as [crate::Read::Cfg].
 
 use std::ops::{Bound, RangeBounds};
 

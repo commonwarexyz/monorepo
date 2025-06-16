@@ -1,5 +1,8 @@
 use super::Reservation;
-use crate::authenticated::discovery::{actors::peer, types};
+use crate::authenticated::discovery::{
+    actors::{peer, tracker::Metadata},
+    types,
+};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Metrics, Spawner};
 use futures::{
@@ -22,7 +25,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
 
     // ---------- Used by peer ----------
     /// Notify the tracker that a peer has been successfully connected, and that a
-    /// [`types::Payload::Peers`] message (containing solely the local node's information) should be
+    /// [types::Payload::Peers] message (containing solely the local node's information) should be
     /// sent to the peer.
     Connect {
         /// The public key of the peer.
@@ -35,7 +38,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
         peer: peer::Mailbox<C>,
     },
 
-    /// Ready to send a [`types::Payload::BitVec`] message to a peer. This message doubles as a
+    /// Ready to send a [types::Payload::BitVec] message to a peer. This message doubles as a
     /// keep-alive signal to the peer.
     ///
     /// This request is formed on a recurring interval.
@@ -47,9 +50,9 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
         peer: peer::Mailbox<C>,
     },
 
-    /// Notify the tracker that a [`types::Payload::BitVec`] message has been received from a peer.
+    /// Notify the tracker that a [types::Payload::BitVec] message has been received from a peer.
     ///
-    /// The tracker will construct a [`types::Payload::Peers`] message in response.
+    /// The tracker will construct a [types::Payload::Peers] message in response.
     BitVec {
         /// The bit vector received.
         bit_vec: types::BitVec,
@@ -58,7 +61,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
         peer: peer::Mailbox<C>,
     },
 
-    /// Notify the tracker that a [`types::Payload::Peers`] message has been received from a peer.
+    /// Notify the tracker that a [types::Payload::Peers] message has been received from a peer.
     Peers {
         /// The list of peers received.
         peers: Vec<types::PeerInfo<C>>,
@@ -76,7 +79,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
 
     /// Request a reservation for a particular peer to dial.
     ///
-    /// The tracker will respond with an [`Option<Reservation<E, C>>`], which will be `None` if the
+    /// The tracker will respond with an [Option<Reservation<E, C>>], which will be `None` if the
     /// reservation cannot be granted (e.g., if the peer is already connected, blocked or already
     /// has an active reservation).
     Dial {
@@ -90,7 +93,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
     // ---------- Used by listener ----------
     /// Request a reservation for a particular peer.
     ///
-    /// The tracker will respond with an [`Option<Reservation<E, C>>`], which will be `None` if  the
+    /// The tracker will respond with an [Option<Reservation<E, C>>], which will be `None` if  the
     /// reservation cannot be granted (e.g., if the peer is already connected, blocked or already
     /// has an active reservation).
     Listen {
@@ -99,6 +102,13 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
 
         /// The sender to respond with the reservation.
         reservation: oneshot::Sender<Option<Reservation<E, C>>>,
+    },
+
+    // ---------- Used by reservation ----------
+    /// Release a reservation.
+    Release {
+        /// The metadata of the reservation to release.
+        metadata: Metadata<C>,
     },
 }
 
@@ -184,6 +194,44 @@ impl<E: Spawner + Metrics, C: PublicKey> Mailbox<E, C> {
             .await
             .unwrap();
         rx.await.unwrap()
+    }
+}
+
+/// Allows releasing reservations
+#[derive(Clone)]
+pub struct Releaser<E: Spawner + Metrics, C: PublicKey> {
+    sender: mpsc::Sender<Message<E, C>>,
+}
+
+impl<E: Spawner + Metrics, C: PublicKey> Releaser<E, C> {
+    /// Create a new releaser.
+    pub(super) fn new(sender: mpsc::Sender<Message<E, C>>) -> Self {
+        Self { sender }
+    }
+
+    /// Try to release a reservation.
+    ///
+    /// Returns `true` if the reservation was released, `false` if the mailbox is full.
+    pub fn try_release(&mut self, metadata: Metadata<C>) -> bool {
+        let Err(e) = self.sender.try_send(Message::Release { metadata }) else {
+            return true;
+        };
+        assert!(
+            e.is_full(),
+            "Unexpected error trying to release reservation {:?}",
+            e
+        );
+        false
+    }
+
+    /// Release a reservation.
+    ///
+    /// This method will block if the mailbox is full.
+    pub async fn release(&mut self, metadata: Metadata<C>) {
+        self.sender
+            .send(Message::Release { metadata })
+            .await
+            .unwrap();
     }
 }
 

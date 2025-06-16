@@ -125,7 +125,7 @@ impl<H: CHasher> Hasher<H> for Standard<H> {
 /// allows for shorter inclusion proofs over the combined trees compared to treating them as
 /// independent.
 ///
-/// One example use case is the [Current](crate::adb::current::Current) authenticated database,
+/// One example use case is the [crate::adb::current::Current] authenticated database,
 /// where a MMR is built over a log of operations, and a merkle tree over a bitmap indicating the
 /// activity state of each operation. If we were to treat the two trees as independent, then an
 /// inclusion proof for an operation and its activity state would involve a full branch from each

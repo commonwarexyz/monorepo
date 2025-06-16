@@ -1,8 +1,7 @@
 use super::{metrics::Metrics, record::Record, Metadata, Reservation};
-use crate::authenticated::lookup::metrics;
+use crate::authenticated::lookup::{actors::tracker::ingress::Releaser, metrics};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner};
-use futures::channel::mpsc;
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,
@@ -16,9 +15,6 @@ use tracing::debug;
 
 /// Configuration for the [`Directory`].
 pub struct Config {
-    /// The maximum number of peer sets to track.
-    pub mailbox_size: usize,
-
     /// Whether private IPs are connectable.
     pub allow_private_ips: bool,
 
@@ -51,12 +47,9 @@ pub struct Directory<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Publ
     #[allow(clippy::type_complexity)]
     rate_limiter: RateLimiter<C, HashMapStateStore<C>, E, NoOpMiddleware<E::Instant>>,
 
-    // ---------- Released Reservations Queue ----------
-    /// Sender for releasing reservations.
-    sender: mpsc::Sender<Metadata<C>>,
-
-    /// Receiver for releasing reservations.
-    receiver: mpsc::Receiver<Metadata<C>>,
+    // ---------- Message-Passing ----------
+    /// The releaser for the tracker actor.
+    releaser: Releaser<E, C>,
 
     // ---------- Metrics ----------
     /// The metrics for the records.
@@ -65,7 +58,12 @@ pub struct Directory<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Publ
 
 impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Create a new set of records using the given local node information.
-    pub fn init(context: E, myself: (C, SocketAddr), cfg: Config) -> Self {
+    pub fn init(
+        context: E,
+        myself: (C, SocketAddr),
+        cfg: Config,
+        releaser: Releaser<E, C>,
+    ) -> Self {
         // Create the list of peers and add myself.
         let mut peers = HashMap::new();
         peers.insert(myself.0, Record::myself(myself.1));
@@ -74,7 +72,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         let rate_limiter = RateLimiter::hashmap_with_clock(cfg.rate_limit, &context);
         let metrics = Metrics::init(context.clone());
         metrics.tracked.set((peers.len() - 1) as i64); // Exclude self
-        let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
 
         Self {
             context,
@@ -83,28 +80,23 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
             peers,
             sets: BTreeMap::new(),
             rate_limiter,
-            sender,
-            receiver,
+            releaser,
             metrics,
         }
     }
 
-    /// Process all messages in the release queue.
-    pub fn process_releases(&mut self) {
-        // For each message in the queue...
-        while let Ok(Some(metadata)) = self.receiver.try_next() {
-            let peer = metadata.public_key();
-            let Some(record) = self.peers.get_mut(peer) else {
-                continue;
-            };
-            record.release();
-            self.metrics.reserved.dec();
-
-            self.delete_if_needed(peer);
-        }
-    }
-
     // ---------- Setters ----------
+
+    /// Releases a peer.
+    pub fn release(&mut self, metadata: Metadata<C>) {
+        let peer = metadata.public_key();
+        let Some(record) = self.peers.get_mut(peer) else {
+            return;
+        };
+        record.release();
+        self.metrics.reserved.dec();
+        self.delete_if_needed(peer);
+    }
 
     /// Sets the status of a peer to `connected`.
     ///
@@ -237,7 +229,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
             return Some(Reservation::new(
                 self.context.clone(),
                 metadata,
-                self.sender.clone(),
+                self.releaser.clone(),
             ));
         }
         None

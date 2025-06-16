@@ -1,7 +1,7 @@
 //! Implementations of Codec for byte types.
 //!
 //! For portability and consistency between architectures,
-//! the length of the [`Bytes`] must fit within a [`u32`].
+//! the length of the [Bytes] must fit within a [u32].
 
 use crate::{util::at_least, EncodeSize, Error, RangeCfg, Read, Write};
 use bytes::{Buf, BufMut, Bytes};
