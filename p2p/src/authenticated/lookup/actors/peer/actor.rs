@@ -117,7 +117,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                 // Allow tracker to initialize the peer
                 tracker.connect(peer.clone(), mailbox.clone()).await;
 
-                // Set the initial deadline to now to start gossiping immediately
+                // Set the initial deadline to now to start pinging immediately
                 let mut deadline = context.current();
 
                 // Enter into the main loop
