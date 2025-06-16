@@ -14,6 +14,7 @@ use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::collections::BTreeMap;
 use tracing::debug;
 
+/// Router actor that manages peer connections and routing messages.
 pub struct Actor<E: Spawner + Metrics, P: PublicKey> {
     context: E,
 
@@ -24,6 +25,8 @@ pub struct Actor<E: Spawner + Metrics, P: PublicKey> {
 }
 
 impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
+    /// Returns a new [Actor] along with a [Mailbox] and [Messenger]
+    /// that can be used to send messages to the router.
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<P>, Messenger<P>) {
         // Create mailbox
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
@@ -49,6 +52,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
         )
     }
 
+    /// Sends a message to the given `recipient`.
     async fn send(
         &mut self,
         recipient: &P,
@@ -72,10 +76,16 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
         }
     }
 
+    /// Starts a new task that runs the router [Actor].
+    /// Returns a [Handle] that can be used to await the completion of the task,
+    /// which will run until its `control` receiver is closed.
     pub fn start(mut self, routing: Channels<P>) -> Handle<()> {
         self.context.spawn_ref()(self.run(routing))
     }
 
+    /// Runs the [Actor] event loop, processing incoming messages control messages
+    /// ([Message::Ready], [Message::Release]) and content messages ([Message::Content]).
+    /// Returns when the `control` channel is closed.
     async fn run(mut self, routing: Channels<P>) {
         while let Some(msg) = self.control.next().await {
             match msg {
