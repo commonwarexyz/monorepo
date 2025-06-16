@@ -17,7 +17,7 @@
 //!
 //! This module operates under the assumption that all peers are aware of and synchronized on
 //! the composition of peer sets at specific, user-provided indices (`u64`). Each index maps to a
-//! list of authorized `PublicKey`s (`(u64, Vec<(PublicKey, SocketAddr)>)`).
+//! list of peer `PublicKey`/`SocketAddr` pairs (`(u64, Vec<(PublicKey, SocketAddr)>)`).
 //!
 //! On startup, the application supplies the initial set of peers. The `Oracle` actor allows
 //! the application to update peer --> address mappings so that peers can find each other.
