@@ -18,7 +18,7 @@ use std::{
 };
 use tracing::debug;
 
-/// Configuration for the [`Directory`].
+/// Configuration for the [Directory].
 pub struct Config {
     /// The maximum number of peer sets to track.
     pub max_sets: usize,
@@ -242,7 +242,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         self.reserve(Metadata::Listener(peer.clone()))
     }
 
-    /// Returns a [`types::BitVec`] for a random peer set.
+    /// Returns a [types::BitVec] for a random peer set.
     pub fn get_random_bit_vec(&mut self) -> Option<types::BitVec> {
         let (&index, set) = self.sets.iter().choose(&mut self.context)?;
         Some(types::BitVec {

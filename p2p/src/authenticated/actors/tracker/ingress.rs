@@ -25,7 +25,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
 
     // ---------- Used by peer ----------
     /// Notify the tracker that a peer has been successfully connected, and that a
-    /// [`types::Payload::Peers`] message (containing solely the local node's information) should be
+    /// [types::Payload::Peers] message (containing solely the local node's information) should be
     /// sent to the peer.
     Connect {
         /// The public key of the peer.
@@ -38,7 +38,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
         peer: peer::Mailbox<C>,
     },
 
-    /// Ready to send a [`types::Payload::BitVec`] message to a peer. This message doubles as a
+    /// Ready to send a [types::Payload::BitVec] message to a peer. This message doubles as a
     /// keep-alive signal to the peer.
     ///
     /// This request is formed on a recurring interval.
@@ -50,9 +50,9 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
         peer: peer::Mailbox<C>,
     },
 
-    /// Notify the tracker that a [`types::Payload::BitVec`] message has been received from a peer.
+    /// Notify the tracker that a [types::Payload::BitVec] message has been received from a peer.
     ///
-    /// The tracker will construct a [`types::Payload::Peers`] message in response.
+    /// The tracker will construct a [types::Payload::Peers] message in response.
     BitVec {
         /// The bit vector received.
         bit_vec: types::BitVec,
@@ -61,7 +61,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
         peer: peer::Mailbox<C>,
     },
 
-    /// Notify the tracker that a [`types::Payload::Peers`] message has been received from a peer.
+    /// Notify the tracker that a [types::Payload::Peers] message has been received from a peer.
     Peers {
         /// The list of peers received.
         peers: Vec<types::PeerInfo<C>>,
@@ -79,7 +79,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
 
     /// Request a reservation for a particular peer to dial.
     ///
-    /// The tracker will respond with an [`Option<Reservation<E, C>>`], which will be `None` if the
+    /// The tracker will respond with an [Option<Reservation<E, C>>], which will be `None` if the
     /// reservation cannot be granted (e.g., if the peer is already connected, blocked or already
     /// has an active reservation).
     Dial {
@@ -93,7 +93,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
     // ---------- Used by listener ----------
     /// Request a reservation for a particular peer.
     ///
-    /// The tracker will respond with an [`Option<Reservation<E, C>>`], which will be `None` if  the
+    /// The tracker will respond with an [Option<Reservation<E, C>>], which will be `None` if  the
     /// reservation cannot be granted (e.g., if the peer is already connected, blocked or already
     /// has an active reservation).
     Listen {

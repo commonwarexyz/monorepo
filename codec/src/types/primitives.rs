@@ -8,8 +8,8 @@
 //! `usize` is the lone exception: since most values refer to a length or size
 //! of an object in memory, values are biased towards smaller values. Therefore,
 //! it uses variable-length (varint) encoding to save space.  This means that
-//! it **does not implement [`FixedSize`]**.  When decoding a `usize`, callers
-//! must supply a [`RangeCfg`] to bound the allowable value — this protects
+//! it **does not implement [FixedSize]**.  When decoding a `usize`, callers
+//! must supply a [RangeCfg] to bound the allowable value — this protects
 //! against denial-of-service attacks that would allocate oversized buffers.
 //!
 //! ## Safety & portability
