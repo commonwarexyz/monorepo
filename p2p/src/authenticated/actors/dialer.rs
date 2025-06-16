@@ -15,8 +15,7 @@ use commonware_runtime::{
 use commonware_stream::public_key::{Config as StreamConfig, Connection};
 use commonware_utils::SystemTimeExt;
 use governor::clock::Clock as GClock;
-use prometheus_client::metrics::counter::Counter;
-use prometheus_client::metrics::family::Family;
+use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::{seq::SliceRandom, CryptoRng, Rng};
 use std::time::Duration;
 use tracing::{debug, debug_span, Instrument};

@@ -1,17 +1,18 @@
 mod actor;
 mod ingress;
 
-use std::time::Duration;
-
 use crate::{
     threshold_simplex::types::{Activity, Context, View},
     Automaton, Relay, Reporter, ThresholdSupervisor,
 };
 pub use actor::Actor;
-use commonware_cryptography::{bls12381::primitives::group, Digest};
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Signer};
+use commonware_cryptography::{
+    bls12381::primitives::{group, variant::Variant},
+    Digest, Signer,
+};
 use commonware_p2p::Blocker;
 pub use ingress::{Mailbox, Message};
+use std::time::Duration;
 
 pub struct Config<
     C: Signer,
@@ -67,8 +68,7 @@ mod tests {
     use commonware_runtime::{deterministic, Metrics, Runner, Spawner};
     use commonware_utils::quorum;
     use futures::{channel::mpsc, StreamExt};
-    use std::time::Duration;
-    use std::{collections::BTreeMap, sync::Arc};
+    use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
     /// Trigger processing of an uninteresting view from the resolver after
     /// jumping ahead to a new finalize view:

@@ -382,9 +382,8 @@ impl BatchVerifier<PublicKey> for Batch {
 /// Test vectors sourced from https://github.com/ethereum/bls12-381-tests/releases/tag/v0.1.2.
 #[cfg(test)]
 mod tests {
-    use crate::{bls12381, BatchVerifier as _, Signer as _, Verifier as _};
-
     use super::*;
+    use crate::{bls12381, Verifier as _};
     use commonware_codec::{DecodeExt, Encode};
 
     #[test]

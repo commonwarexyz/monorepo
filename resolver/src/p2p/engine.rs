@@ -2,9 +2,8 @@ use super::{
     config::Config,
     fetcher::Fetcher,
     ingress::{Mailbox, Message},
-    metrics,
+    metrics, wire, Coordinator, Producer,
 };
-use super::{wire, Coordinator, Producer};
 use crate::Consumer;
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;

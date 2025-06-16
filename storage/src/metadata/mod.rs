@@ -66,9 +66,8 @@
 //! ```
 
 mod storage;
-pub use storage::Metadata;
-
 use commonware_utils::Array;
+pub use storage::Metadata;
 use thiserror::Error;
 
 /// Errors that can occur when interacting with `Metadata`.

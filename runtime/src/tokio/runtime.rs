@@ -1,23 +1,19 @@
+#[cfg(not(feature = "iouring-network"))]
+use crate::network::tokio::{Config as TokioNetworkConfig, Network as TokioNetwork};
 #[cfg(feature = "iouring-storage")]
 use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage};
-
+#[cfg(not(feature = "iouring-storage"))]
+use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 #[cfg(feature = "iouring-network")]
 use crate::{
     iouring,
     network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork},
 };
-
-#[cfg(not(feature = "iouring-network"))]
-use crate::network::tokio::{Config as TokioNetworkConfig, Network as TokioNetwork};
-
-#[cfg(not(feature = "iouring-storage"))]
-use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
-
-use crate::network::metered::Network as MeteredNetwork;
-use crate::storage::metered::Storage as MeteredStorage;
-use crate::telemetry::metrics::task::Label;
-use crate::{utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
-use crate::{SinkOf, StreamOf};
+use crate::{
+    network::metered::Network as MeteredNetwork, storage::metered::Storage as MeteredStorage,
+    telemetry::metrics::task::Label, utils::Signaler, Clock, Error, Handle, Signal, SinkOf,
+    StreamOf, METRICS_PREFIX,
+};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
     encoding::text::encode,

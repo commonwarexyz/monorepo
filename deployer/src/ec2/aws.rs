@@ -7,16 +7,20 @@ use crate::ec2::{
 };
 use aws_config::BehaviorVersion;
 pub use aws_config::Region;
-use aws_sdk_ec2::error::BuildError;
-use aws_sdk_ec2::primitives::Blob;
-use aws_sdk_ec2::types::{
-    BlockDeviceMapping, EbsBlockDevice, Filter, InstanceStateName, ResourceType, SecurityGroup,
-    SummaryStatus, Tag, TagSpecification, VpcPeeringConnectionStateReasonCode,
-};
 pub use aws_sdk_ec2::types::{InstanceType, IpPermission, IpRange, UserIdGroupPair, VolumeType};
-use aws_sdk_ec2::{Client as Ec2Client, Error as Ec2Error};
-use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use aws_sdk_ec2::{
+    error::BuildError,
+    primitives::Blob,
+    types::{
+        BlockDeviceMapping, EbsBlockDevice, Filter, InstanceStateName, ResourceType, SecurityGroup,
+        SummaryStatus, Tag, TagSpecification, VpcPeeringConnectionStateReasonCode,
+    },
+    Client as Ec2Client, Error as Ec2Error,
+};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 use tokio::time::sleep;
 
 /// Creates an EC2 client for the specified AWS region

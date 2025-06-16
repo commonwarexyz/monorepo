@@ -72,19 +72,14 @@ mod tests {
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{
         deterministic::{self, Context},
-        Metrics,
+        Clock, Metrics, Runner, Spawner,
     };
-    use commonware_runtime::{Clock, Runner, Spawner};
     use commonware_utils::quorum;
-    use futures::channel::oneshot;
-    use futures::future::join_all;
+    use futures::{channel::oneshot, future::join_all};
     use rand::{rngs::StdRng, SeedableRng as _};
     use std::{
-        collections::HashMap,
+        collections::{BTreeMap, HashMap, HashSet},
         sync::{Arc, Mutex},
-    };
-    use std::{
-        collections::{BTreeMap, HashSet},
         time::Duration,
     };
     use tracing::debug;

@@ -1,9 +1,12 @@
-name: Tests
+name: Fast
 
 on:
   push:
     branches: [ "main" ]
   pull_request:
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,30 +18,32 @@ jobs:
     timeout-minutes: 10
     strategy:
       matrix:
-        features:
+        flags:
           - "--features commonware-runtime/iouring-storage"
           - "--features commonware-runtime/iouring-network"
           - ""
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
+    - name: Install nightly Rust toolchain
+      run: rustup toolchain install nightly && rustup component add --toolchain nightly rustfmt
     - name: Run setup
       uses: ./.github/actions/setup
     - name: Lint
-      run: cargo clippy --all-targets ${{ matrix.features }} -- -D warnings
+      run: cargo clippy --all-targets ${{ matrix.flags }} -- -D warnings
     - name: Fmt
-      run: cargo fmt --all -- --check
+      run: cargo +nightly fmt --all -- --check
     - name: Check docs
-      run: cargo doc ${{ matrix.features }} --no-deps --document-private-items
+      run: cargo doc ${{ matrix.flags }} --no-deps --document-private-items
       env:
         RUSTDOCFLAGS: "-D warnings"
 
-  Fast:
+  Tests:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       matrix:
-        features:
+        flags:
           - "--features commonware-runtime/iouring-storage"
           - "--features commonware-runtime/iouring-network"
           - ""
@@ -48,24 +53,7 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
     - name: Run tests
-      run: cargo test ${{ matrix.features }} --verbose
-
-  Slow:
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    strategy:
-      matrix:
-        features:
-          - "--features commonware-runtime/iouring-storage"
-          - "--features commonware-runtime/iouring-network"
-          - ""
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-    - name: Run setup
-      uses: ./.github/actions/setup
-    - name: Run ignored tests
-      run: cargo test ${{ matrix.features }} --verbose -- --ignored
+      run: cargo test ${{ matrix.flags }} --verbose
 
   Dependencies:
     runs-on: ubuntu-latest

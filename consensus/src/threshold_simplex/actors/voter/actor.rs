@@ -41,9 +41,9 @@ use prometheus_client::metrics::{
     counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
 };
 use rand::Rng;
-use std::sync::{atomic::AtomicI64, Arc};
 use std::{
     collections::BTreeMap,
+    sync::{atomic::AtomicI64, Arc},
     time::{Duration, SystemTime},
 };
 use tracing::{debug, info, trace, warn};

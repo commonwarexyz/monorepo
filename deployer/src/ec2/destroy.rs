@@ -5,9 +5,7 @@ use crate::ec2::{
     PROFILES_PORT, TRACES_PORT,
 };
 use futures::future::try_join_all;
-use std::collections::HashSet;
-use std::fs::File;
-use std::path::PathBuf;
+use std::{collections::HashSet, fs::File, path::PathBuf};
 use tracing::{info, warn};
 
 /// Tears down all resources associated with the deployment tag

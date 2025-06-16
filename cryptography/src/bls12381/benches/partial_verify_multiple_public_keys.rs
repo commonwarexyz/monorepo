@@ -1,5 +1,3 @@
-use std::hint::black_box;
-
 use commonware_cryptography::bls12381::{
     dkg,
     primitives::{self, variant::MinSig},
@@ -7,6 +5,7 @@ use commonware_cryptography::bls12381::{
 use commonware_utils::quorum;
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
+use std::hint::black_box;
 
 fn benchmark_partial_verify_multiple_public_keys(c: &mut Criterion) {
     let namespace = b"benchmark";
