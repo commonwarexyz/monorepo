@@ -6,7 +6,8 @@ use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, Read
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
 use std::hash::Hash;
 
-/// Message exchanged between peers.
+/// Message exchanged between peers containing an acknowledgment and tip information.
+/// This combines a validator's partial signature with their view of consensus progress.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PeerAck<V: Variant, D: Digest> {
     /// The peer's acknowledgement (partial signature) for an item.
