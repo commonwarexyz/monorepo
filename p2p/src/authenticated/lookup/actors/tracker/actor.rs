@@ -3,12 +3,13 @@ use super::{
     ingress::{Mailbox, Message, Oracle},
     Config,
 };
-use crate::authenticated::lookup::actors::tracker::ingress::Releaser;
+use crate::authenticated::lookup::actors::{peer, tracker::ingress::Releaser};
 use commonware_cryptography::Signer;
 use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
 use futures::{channel::mpsc, StreamExt};
 use governor::clock::Clock as GClock;
 use rand::Rng;
+use std::collections::HashMap;
 use tracing::debug;
 
 /// The tracker actor that manages peer discovery and connection reservations.
@@ -26,6 +27,10 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
     // ---------- State ----------
     /// Tracks peer sets and peer connectivity information.
     directory: Directory<E, C::PublicKey>,
+
+    /// Maps a peer's public key to its mailbox.
+    /// Set when a peer connects and cleared when it is blocked or released.
+    peer_mailboxes: HashMap<C::PublicKey, peer::Mailbox>,
 }
 
 impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> {
@@ -60,6 +65,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 max_peer_set_size: cfg.max_peer_set_size,
                 receiver,
                 directory,
+                peer_mailboxes: HashMap::new(),
             },
             mailbox,
             oracle,
@@ -95,6 +101,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
                     // Mark the record as connected
                     self.directory.connect(&public_key);
+                    self.peer_mailboxes.insert(public_key, peer);
                 }
                 Message::Dialable { responder } => {
                     let _ = responder.send(self.directory.dialable());
@@ -115,10 +122,15 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                     // Block the peer
                     self.directory.block(&public_key);
 
-                    // We don't have to kill the peer now. It will be sent a `Kill` message the next
-                    // time it sends the `Connect` or `Construct` message to the tracker.
+                    // Kill the peer if we're connected to it.
+                    if let Some(mut peer) = self.peer_mailboxes.remove(&public_key) {
+                        peer.kill().await;
+                    }
                 }
                 Message::Release { metadata } => {
+                    // Clear the peer handle if it exists
+                    self.peer_mailboxes.remove(metadata.public_key());
+
                     // Release the peer
                     self.directory.release(metadata);
                 }
@@ -400,6 +412,49 @@ mod tests {
             let (_unknown_signer, unknown_pk) = new_signer_and_pk(100);
             let no_reservation = mailbox.dial(unknown_pk).await;
             assert!(no_reservation.is_none());
+        });
+    }
+
+    #[test]
+    fn test_block_clears_peer_mailbox_and_only_kills_once() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // 1) Setup actor
+            let cfg = default_test_config(PrivateKey::from_seed(0));
+            let TestHarness {
+                mut mailbox,
+                mut oracle,
+                ..
+            } = setup_actor(context.clone(), cfg);
+
+            // 2) Register & connect an authorized peer
+            let (_peer_signer, peer_pk) = new_signer_and_pk(1);
+            let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
+            oracle.register(0, vec![(peer_pk.clone(), peer_addr)]).await;
+            // let the register take effect
+            context.sleep(Duration::from_millis(10)).await;
+
+            let reservation = mailbox.listen(peer_pk.clone()).await;
+            assert!(reservation.is_some());
+
+            let (peer_mailbox, mut peer_rx) = peer::Mailbox::test();
+            mailbox.connect(peer_pk.clone(), peer_mailbox).await;
+
+            // 3) Block it → should see exactly one Kill
+            oracle.block(peer_pk.clone()).await;
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(
+                matches!(peer_rx.next().await, Some(peer::Message::Kill)),
+                "connected peer must be killed on first Block"
+            );
+
+            // 4) Block again → mailbox was removed, so no new Kill
+            oracle.block(peer_pk.clone()).await;
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(
+                matches!(peer_rx.next().await, None),
+                "no kill after handle has been cleared"
+            );
         });
     }
 }
