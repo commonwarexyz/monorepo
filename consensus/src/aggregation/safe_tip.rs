@@ -235,7 +235,7 @@ fn inc(entry: btree_map::Entry<'_, Index, usize>) {
 ///
 /// # Panics
 ///
-/// Panics if the entry is [`btree_map::Entry::Vacant`].
+/// Panics if the entry is [btree_map::Entry::Vacant].
 fn dec(entry: btree_map::Entry<'_, Index, usize>) {
     let btree_map::Entry::Occupied(mut value) = entry else {
         panic!("Cannot decrement a non-existent entry");
