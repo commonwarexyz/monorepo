@@ -138,7 +138,6 @@ pub struct Engine<
     journal_write_buffer: usize,
     journal_replay_buffer: usize,
     journal_heights_per_section: u64,
-    journal_replay_concurrency: usize,
     journal_compression: Option<u8>,
 
     // ---------- Network ----------
@@ -197,7 +196,6 @@ impl<
             journal_write_buffer: cfg.journal_write_buffer,
             journal_replay_buffer: cfg.journal_replay_buffer,
             journal_heights_per_section: cfg.journal_heights_per_section,
-            journal_replay_concurrency: cfg.journal_replay_concurrency,
             journal_compression: cfg.journal_compression,
             priority_acks: cfg.priority_acks,
             _phantom: PhantomData,
@@ -708,7 +706,7 @@ impl<
         let mut locks = Vec::new();
         let mut acks = Vec::new();
         let stream = journal
-            .replay(self.journal_replay_concurrency, self.journal_replay_buffer)
+            .replay(self.journal_replay_buffer)
             .await
             .expect("replay failed");
         pin_mut!(stream);
