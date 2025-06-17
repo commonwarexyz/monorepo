@@ -20,14 +20,9 @@ const ITEMS_PER_BLOB: u64 = 100_000;
 const ITEM_SIZE: usize = 32;
 
 /// Replay all items in the given `journal`.
-async fn bench_run(
-    journal: &Journal<Context, FixedBytes<ITEM_SIZE>>,
-    buffer: usize,
-    items_to_read: u64,
-) {
-    let concurrency = std::cmp::max(1, (items_to_read / ITEMS_PER_BLOB) as usize);
+async fn bench_run(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, buffer: usize) {
     let stream = journal
-        .replay(concurrency, buffer, 0)
+        .replay(buffer, 0)
         .await
         .expect("failed to replay journal");
     pin_mut!(stream);
@@ -76,7 +71,7 @@ fn bench_fixed_replay(c: &mut Criterion) {
                         let mut duration = Duration::ZERO;
                         for _ in 0..iters {
                             let start = Instant::now();
-                            bench_run(&j, buffer, items).await;
+                            bench_run(&j, buffer).await;
                             duration += start.elapsed();
                         }
 

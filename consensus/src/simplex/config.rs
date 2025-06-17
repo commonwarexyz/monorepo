@@ -41,9 +41,6 @@ pub struct Config<
     /// Prefix for all signed messages to prevent replay attacks.
     pub namespace: Vec<u8>,
 
-    /// Number of views to replay concurrently during startup.
-    pub replay_concurrency: usize,
-
     /// Number of bytes to buffer when replaying during startup.
     pub replay_buffer: usize,
 
@@ -145,10 +142,6 @@ impl<
         assert!(
             self.fetch_concurrent > 0,
             "it must be possible to fetch from at least one peer at a time"
-        );
-        assert!(
-            self.replay_concurrency > 0,
-            "it must be possible to replay at least one view at a time"
         );
     }
 }

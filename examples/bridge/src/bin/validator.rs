@@ -239,7 +239,6 @@ fn main() {
                 compression: Some(3),
                 namespace: consensus_namespace,
                 mailbox_size: 1024,
-                replay_concurrency: 1,
                 replay_buffer: 1024 * 1024,
                 write_buffer: 1024 * 1024,
                 leader_timeout: Duration::from_secs(1),
