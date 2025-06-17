@@ -7,5 +7,8 @@
 //! [lookup] operates under the assumption that peer addresses are known in advance,
 //! and that they can be looked up by their identifiers.
 
+mod data;
 pub mod discovery;
+mod ip;
 pub mod lookup;
+mod relay;

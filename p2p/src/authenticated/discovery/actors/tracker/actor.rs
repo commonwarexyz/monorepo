@@ -3,7 +3,10 @@ use super::{
     ingress::{Mailbox, Message, Oracle},
     Config, Error,
 };
-use crate::authenticated::discovery::{actors::tracker::ingress::Releaser, ip, types};
+use crate::authenticated::{
+    discovery::{actors::tracker::ingress::Releaser, types},
+    ip,
+};
 use commonware_cryptography::Signer;
 use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::{union, SystemTimeExt};

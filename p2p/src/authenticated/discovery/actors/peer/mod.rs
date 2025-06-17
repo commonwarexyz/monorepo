@@ -11,7 +11,7 @@ mod actor;
 pub use actor::Actor;
 
 mod ingress;
-pub use ingress::{Mailbox, Message, Relay};
+pub use ingress::{Mailbox, Message};
 
 pub struct Config {
     pub mailbox_size: usize,
@@ -40,8 +40,6 @@ pub enum Error {
     DecodeFailed(CodecError),
     #[error("unexpected failure: {0}")]
     UnexpectedFailure(commonware_runtime::Error),
-    #[error("message dropped")]
-    MessageDropped,
     #[error("invalid channel")]
     InvalidChannel,
 }

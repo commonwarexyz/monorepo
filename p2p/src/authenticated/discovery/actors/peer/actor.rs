@@ -1,8 +1,12 @@
-use super::{Config, Error, Mailbox, Message, Relay};
-use crate::authenticated::discovery::{
-    actors::tracker::{self, Metadata, Reservation},
-    channels::Channels,
-    metrics, types,
+use super::{Config, Error, Mailbox, Message};
+use crate::authenticated::{
+    data::Data,
+    discovery::{
+        actors::tracker::{self, Metadata, Reservation},
+        channels::Channels,
+        metrics, types,
+    },
+    relay::Relay,
 };
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
@@ -30,8 +34,8 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey
 
     mailbox: Mailbox<C>,
     control: mpsc::Receiver<Message<C>>,
-    high: mpsc::Receiver<types::Data>,
-    low: mpsc::Receiver<types::Data>,
+    high: mpsc::Receiver<Data>,
+    low: mpsc::Receiver<Data>,
 
     sent_messages: Family<metrics::Message, Counter>,
     received_messages: Family<metrics::Message, Counter>,
@@ -44,7 +48,7 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey
 impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: PublicKey>
     Actor<E, C>
 {
-    pub fn new(context: E, cfg: Config, reservation: Reservation<E, C>) -> (Self, Relay) {
+    pub fn new(context: E, cfg: Config, reservation: Reservation<E, C>) -> (Self, Relay<Data>) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
@@ -73,10 +77,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
     }
 
     /// Unpack `msg` and verify the underlying `channel` is registered.
-    fn validate_msg<V>(
-        msg: Option<types::Data>,
-        rate_limits: &HashMap<u32, V>,
-    ) -> Result<types::Data, Error> {
+    fn validate_msg<V>(msg: Option<Data>, rate_limits: &HashMap<u32, V>) -> Result<Data, Error> {
         let data = match msg {
             Some(data) => data,
             None => return Err(Error::PeerDisconnected),

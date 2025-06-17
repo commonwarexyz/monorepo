@@ -3,7 +3,11 @@ use super::{
     Config, Mailbox,
 };
 use crate::{
-    authenticated::lookup::{actors::peer::Relay, channels::Channels, metrics},
+    authenticated::{
+        data::Data,
+        lookup::{channels::Channels, metrics},
+        relay::Relay,
+    },
     Channel, Recipients,
 };
 use bytes::Bytes;
@@ -19,7 +23,7 @@ pub struct Actor<E: Spawner + Metrics, P: PublicKey> {
     context: E,
 
     control: mpsc::Receiver<Message<P>>,
-    connections: BTreeMap<P, Relay>,
+    connections: BTreeMap<P, Relay<Data>>,
 
     messages_dropped: Family<metrics::Message, Counter>,
 }
@@ -63,7 +67,13 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
     ) {
         if let Some(messenger) = self.connections.get_mut(recipient) {
             if messenger
-                .content(channel, message.clone(), priority)
+                .send(
+                    Data {
+                        channel,
+                        message: message.clone(),
+                    },
+                    priority,
+                )
                 .await
                 .is_ok()
             {
@@ -135,7 +145,13 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
                             // Send to all connected peers
                             for (recipient, messenger) in self.connections.iter_mut() {
                                 if messenger
-                                    .content(channel, message.clone(), priority)
+                                    .send(
+                                        Data {
+                                            channel,
+                                            message: message.clone(),
+                                        },
+                                        priority,
+                                    )
                                     .await
                                     .is_ok()
                                 {
