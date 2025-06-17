@@ -452,7 +452,7 @@ mod tests {
             oracle.block(peer_pk.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
             assert!(
-                matches!(peer_rx.next().await, None),
+                peer_rx.next().await.is_none(),
                 "no kill after handle has been cleared"
             );
         });
