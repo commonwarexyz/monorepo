@@ -18,6 +18,19 @@
 //! - [Reporter](crate::Reporter): Receives agreement confirmations
 //! - [Monitor](crate::Monitor): Tracks epoch transitions
 //! - [ThresholdSupervisor](crate::ThresholdSupervisor): Manages validator sets and network identities
+//!
+//! # Design Decisions
+//!
+//! ## Missing Signature Resolution
+//!
+//! The engine does not try to "fill gaps" when missing threshold signatures. When validators
+//! fall behind or miss signatures for certain indices, the tip may skip ahead and those
+//! signatures may never be emitted by the local engine. This design is intentional to prioritize
+//! the creation of threshold signatures as fast as possible. By advancing the tip, honest validators
+//! can continue producing threshold signatures for new indices rather than getting stuck trying to
+//! backfill missing signatures. Validators who are online and honest can maintain consensus even
+//! when others fall behind or go offline. Backfilling missing signatures is left to other parts of
+//! the application that can implement appropriate recovery strategies.
 
 pub mod types;
 pub mod wire;
