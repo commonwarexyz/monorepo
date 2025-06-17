@@ -1,11 +1,7 @@
 use super::{ingress::Message, Config, Error, Mailbox};
 use crate::authenticated::{
     data::Data,
-    lookup::{
-        actors::tracker::{self, Reservation},
-        channels::Channels,
-        metrics, types,
-    },
+    lookup::{actors::tracker, channels::Channels, metrics, types},
     relay::Relay,
 };
 use commonware_codec::{Decode, Encode};
@@ -37,15 +33,13 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey
     sent_messages: Family<metrics::Message, Counter>,
     received_messages: Family<metrics::Message, Counter>,
     rate_limited: Family<metrics::Message, Counter>,
-
-    // When reservation goes out-of-scope, the tracker will be notified.
-    _reservation: Reservation<E, C>,
+    _phantom: std::marker::PhantomData<C>,
 }
 
 impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: PublicKey>
     Actor<E, C>
 {
-    pub fn new(context: E, cfg: Config, reservation: Reservation<E, C>) -> (Self, Relay<Data>) {
+    pub fn new(context: E, cfg: Config) -> (Self, Relay<Data>) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
@@ -62,7 +56,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                 sent_messages: cfg.sent_messages,
                 received_messages: cfg.received_messages,
                 rate_limited: cfg.rate_limited,
-                _reservation: reservation,
+                _phantom: std::marker::PhantomData,
             },
             Relay::new(low_sender, high_sender),
         )

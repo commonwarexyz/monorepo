@@ -120,7 +120,6 @@ impl<
                                     rate_limited,
                                     mailbox_size: self.mailbox_size,
                                 },
-                                reservation,
                             );
 
                             // Register peer with the router
@@ -139,7 +138,8 @@ impl<
                             // Let the router know the peer has exited
                             debug!(error = ?e, ?peer, "peer shutdown");
                             router.release(peer).await;
-                            // `reservation` is dropped here, releasing it.
+                            // Notify tracker about the peer disconnection
+                            drop(reservation);
                         });
                 }
             }
