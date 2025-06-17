@@ -192,6 +192,7 @@ mod tests {
         registrations: &mut Registrations<PublicKey>,
         automatons: &mut BTreeMap<PublicKey, mocks::Application>,
         reporters: &mut BTreeMap<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>,
+        oracle: &mut Oracle<PublicKey>,
         rebroadcast_timeout: Duration,
         invalid_when: fn(u64) -> bool,
         misses_allowed: Option<usize>,
@@ -213,6 +214,8 @@ mod tests {
                 s
             };
 
+            let blocker = oracle.control(validator.clone());
+
             let automaton = mocks::Application::new(invalid_when);
             automatons.insert(validator.clone(), automaton.clone());
 
@@ -231,6 +234,7 @@ mod tests {
                     validators: supervisor,
                     automaton: automaton.clone(),
                     reporter: reporters.get(validator).unwrap().clone(),
+                    blocker,
                     namespace: namespace.to_vec(),
                     priority_acks: false,
                     rebroadcast_timeout,
@@ -313,7 +317,7 @@ mod tests {
                 ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
-            let (_oracle, validators, pks, mut registrations) = initialize_simulation(
+            let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
                 context.with_label("simulation"),
                 num_validators,
                 &mut shares_vec,
@@ -330,6 +334,7 @@ mod tests {
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
                 &mut reporters,
+                &mut oracle,
                 Duration::from_secs(5),
                 |_| false,
                 None,
@@ -348,7 +353,7 @@ mod tests {
                 ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
-            let (_oracle, validators, pks, mut registrations) = initialize_simulation(
+            let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
                 context.with_label("simulation"),
                 num_validators,
                 &mut shares_vec,
@@ -367,6 +372,7 @@ mod tests {
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
                 &mut reporters,
+                &mut oracle,
                 Duration::from_secs(5),
                 |_| false,
                 None,
@@ -396,7 +402,7 @@ mod tests {
                 success_rate: 0.5, // Realistic 50% success rate for stress testing
             };
 
-            let (_oracle, validators, pks, mut registrations) = initialize_simulation_with_link(
+            let (mut oracle, validators, pks, mut registrations) = initialize_simulation_with_link(
                 context.with_label("simulation"),
                 num_validators,
                 &mut shares_vec,
@@ -415,6 +421,7 @@ mod tests {
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
                 &mut reporters,
+                &mut oracle,
                 Duration::from_secs(5),
                 |_| false,
                 None,
@@ -434,7 +441,7 @@ mod tests {
                 ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
-            let (_oracle, validators, pks, mut registrations) = initialize_simulation(
+            let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
                 context.with_label("simulation"),
                 num_validators,
                 &mut shares_vec,
@@ -453,6 +460,7 @@ mod tests {
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
                 &mut reporters,
+                &mut oracle,
                 Duration::from_secs(15), // Slower rebroadcast timeout
                 |_| false,
                 None,
@@ -472,7 +480,7 @@ mod tests {
                 ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
-            let (_oracle, validators, pks, mut registrations) = initialize_simulation(
+            let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
                 context.with_label("simulation"),
                 num_validators,
                 &mut shares_vec,
@@ -494,6 +502,7 @@ mod tests {
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
                 &mut reporters,
+                &mut oracle,
                 Duration::from_secs(5),
                 |_| false,
                 None,
@@ -543,7 +552,7 @@ mod tests {
                 ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
-            let (_oracle, validators, pks, mut registrations) = initialize_simulation(
+            let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
                 context.with_label("simulation"),
                 num_validators,
                 &mut shares_vec,
@@ -561,6 +570,7 @@ mod tests {
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
                 &mut reporters,
+                &mut oracle,
                 Duration::from_secs(5),
                 |_| false,
                 None,
@@ -605,6 +615,7 @@ mod tests {
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
                 &mut reporters,
+                &mut oracle,
                 Duration::from_secs(5),
                 |_| false,
                 None,
@@ -658,7 +669,7 @@ mod tests {
                 ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
-            let (_oracle, validators, pks, mut registrations) = initialize_simulation(
+            let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
                 context.with_label("simulation"),
                 num_validators,
                 &mut shares_vec,
@@ -693,6 +704,7 @@ mod tests {
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
                 &mut reporters,
+                &mut oracle,
                 Duration::from_secs(5),
                 byzantine_fault_fn,
                 None,
@@ -719,7 +731,7 @@ mod tests {
                 ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
-            let (_oracle, validators, pks, mut registrations) = initialize_simulation(
+            let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
                 context.with_label("simulation"),
                 num_validators,
                 &mut shares_vec,
@@ -737,6 +749,7 @@ mod tests {
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
                 &mut reporters,
+                &mut oracle,
                 Duration::from_secs(5),
                 |_| false,
                 None,
@@ -796,7 +809,7 @@ mod tests {
                 ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
-            let (_oracle, validators, pks, mut registrations) = initialize_simulation(
+            let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
                 context.with_label("simulation"),
                 num_validators,
                 &mut shares_vec,
@@ -837,6 +850,7 @@ mod tests {
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
                 &mut reporters,
+                &mut oracle,
                 Duration::from_secs(8), // Longer timeout for more complex scenarios
                 advanced_byzantine_fn,
                 Some(10), // Allow more missed acks due to advanced Byzantine behavior
@@ -870,7 +884,7 @@ mod tests {
                 success_rate: 0.1,  // Only 10% success rate
             };
 
-            let (_oracle, validators, pks, mut registrations) = initialize_simulation_with_link(
+            let (mut oracle, validators, pks, mut registrations) = initialize_simulation_with_link(
                 context.with_label("simulation"),
                 num_validators,
                 &mut shares_vec,
@@ -889,6 +903,7 @@ mod tests {
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
                 &mut reporters,
+                &mut oracle,
                 Duration::from_secs(2), // Short timeout to stress test
                 |_| false,
                 None,
@@ -929,7 +944,7 @@ mod tests {
                 ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
-            let (_oracle, validators, pks, mut registrations) = initialize_simulation(
+            let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
                 context.with_label("simulation"),
                 num_validators,
                 &mut shares_vec,
@@ -951,6 +966,7 @@ mod tests {
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
                 &mut reporters,
+                &mut oracle,
                 Duration::from_secs(3),
                 |_| false,
                 None,
@@ -1006,7 +1022,7 @@ mod tests {
                 ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
-            let (_oracle, validators, pks, mut registrations) = initialize_simulation(
+            let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
                 context.with_label("simulation"),
                 num_validators,
                 &mut shares_vec,
@@ -1024,6 +1040,7 @@ mod tests {
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
                 &mut reporters,
+                &mut oracle,
                 Duration::from_secs(5),
                 |_| false, // No Byzantine faults for this test
                 None,
