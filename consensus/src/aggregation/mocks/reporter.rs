@@ -98,8 +98,24 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
                         current_epoch = self.current_epoch,
                         "Reporter received Lock activity"
                     );
-                    // Skip signature verification in mock for simplicity
-                    // In production, this would verify the threshold signature
+                    // Verify threshold signature (this was previously skipped)
+                    use commonware_cryptography::bls12381::primitives::{ops, poly};
+                    let mut ack_namespace = self.namespace.clone();
+                    ack_namespace.extend_from_slice(b"_AGG_ACK");
+                    let threshold_public = poly::public::<V>(&self.public);
+                    let verification_result = ops::verify_message::<V>(
+                        threshold_public,
+                        Some(&ack_namespace),
+                        &item.encode(),
+                        &signature,
+                    );
+                    if verification_result.is_err() {
+                        panic!(
+                            "Invalid threshold signature for item at index {}: {:?}",
+                            item.index,
+                            verification_result.err()
+                        );
+                    }
 
                     // Test encoding/decoding
                     let encoded = item.encode();
