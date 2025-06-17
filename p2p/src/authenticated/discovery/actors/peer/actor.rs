@@ -41,6 +41,7 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey
     received_messages: Family<metrics::Message, Counter>,
     rate_limited: Family<metrics::Message, Counter>,
 
+    // When reservation goes out-of-scope, the tracker will be notified.
     _reservation: Reservation<E, C>,
 }
 
