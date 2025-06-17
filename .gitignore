@@ -1,5 +1,9 @@
 *.swp
 *.DS_Store
-/target
+target
 *.vscode
 examples/flood/assets
+*/fuzz/artifacts
+*/fuzz/corpus
+*/fuzz/coverage
+*/fuzz/target
