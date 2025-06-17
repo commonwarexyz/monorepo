@@ -137,7 +137,6 @@ impl<
                                     allowed_peers_rate: self.allowed_peers_rate,
                                     peer_gossip_max_count: self.peer_gossip_max_count,
                                 },
-                                reservation,
                             );
 
                             // Register peer with the router
@@ -156,6 +155,8 @@ impl<
                             // Let the router know the peer has exited
                             debug!(error = ?e, ?peer, "peer shutdown");
                             router.release(peer).await;
+                            // Release the reservation
+                            drop(reservation);
                         });
                 }
             }
