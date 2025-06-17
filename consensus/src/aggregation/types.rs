@@ -264,7 +264,7 @@ mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
-        bls12381::primitives::{group, ops, poly, variant::MinSig},
+        bls12381::primitives::{ops::sign_message, variant::MinSig},
         sha256,
     };
 
@@ -275,89 +275,48 @@ mod tests {
         assert_eq!(ack_namespace(namespace), expected);
     }
 
-    fn generate_keys(n: u32, t: u32) -> (poly::Public<MinSig>, Vec<group::Share>) {
-        let private = poly::new_from(t - 1, &mut rand::thread_rng());
-        let public = poly::Public::<MinSig>::commit(private.clone());
-        let shares = (0..n)
-            .map(|i| {
-                let eval = private.evaluate(i);
-                group::Share {
-                    index: eval.index,
-                    private: eval.value,
-                }
-            })
-            .collect();
-        (public, shares)
-    }
-
     #[test]
-    fn test_item_codec() {
-        let item = Item {
-            index: 42,
-            digest: sha256::hash(b"hello"),
-        };
-        let restored = Item::decode(item.encode()).unwrap();
-        assert_eq!(item, restored);
-    }
+    fn test_codec_serialization() {
+        use commonware_cryptography::bls12381::dkg::ops;
+        use commonware_runtime::deterministic;
 
-    #[test]
-    fn test_ack_sign_verify() {
         let namespace = b"test";
-        let (public, shares) = generate_keys(4, 3);
-
+        let mut context = deterministic::Context::default();
+        let (public, shares) = ops::generate_shares::<_, MinSig>(&mut context, None, 4, 3);
         let item = Item {
             index: 100,
             digest: sha256::hash(b"test_item"),
         };
 
+        // Test Item codec
+        let restored_item = Item::decode(item.encode()).unwrap();
+        assert_eq!(item, restored_item);
+
+        // Test Ack creation, signing, verification, and codec
         let ack: Ack<MinSig, _> = Ack::sign(namespace, 1, &shares[0], item.clone());
-
         assert!(ack.verify(namespace, &public));
-
-        // verify fails with wrong namespace
         assert!(!ack.verify(b"wrong", &public));
-    }
 
-    #[test]
-    fn test_ack_codec() {
-        let namespace = b"test";
-        let (_, shares) = generate_keys(4, 3);
-        let item = Item {
-            index: 100,
-            digest: sha256::hash(b"test_item"),
-        };
-        let ack = Ack::sign(namespace, 1, &shares[0], item.clone());
+        let restored_ack: Ack<MinSig, sha256::Digest> = Ack::decode(ack.encode()).unwrap();
+        assert_eq!(ack, restored_ack);
 
-        let restored: Ack<MinSig, sha256::Digest> = Ack::decode(ack.encode()).unwrap();
-        assert_eq!(ack, restored);
-    }
-
-    #[test]
-    fn test_activity_codec() {
-        let namespace = b"test";
-        let (_, shares) = generate_keys(4, 3);
-        let item = Item {
-            index: 100,
-            digest: sha256::hash(b"test_item"),
-        };
-
-        // Test Ack variant
+        // Test Activity codec - Ack variant
         let activity_ack = Activity::Ack(Ack::sign(namespace, 1, &shares[0], item.clone()));
-        let restored_ack: Activity<MinSig, sha256::Digest> =
+        let restored_activity_ack: Activity<MinSig, sha256::Digest> =
             Activity::decode(activity_ack.encode()).unwrap();
-        assert_eq!(activity_ack, restored_ack);
+        assert_eq!(activity_ack, restored_activity_ack);
 
-        // Test Lock variant
-        let signature = ops::sign_message::<MinSig>(&shares[0].private, Some(b"test"), b"message");
+        // Test Activity codec - Lock variant
+        let signature = sign_message::<MinSig>(&shares[0].private, Some(b"test"), b"message");
         let activity_lock = Activity::Lock(item, signature);
-        let restored_lock: Activity<MinSig, sha256::Digest> =
+        let restored_activity_lock: Activity<MinSig, sha256::Digest> =
             Activity::decode(activity_lock.encode()).unwrap();
-        assert_eq!(activity_lock, restored_lock);
+        assert_eq!(activity_lock, restored_activity_lock);
 
-        // Test Tip variant
+        // Test Activity codec - Tip variant
         let activity_tip = Activity::Tip(123);
-        let restored_tip: Activity<MinSig, sha256::Digest> =
+        let restored_activity_tip: Activity<MinSig, sha256::Digest> =
             Activity::decode(activity_tip.encode()).unwrap();
-        assert_eq!(activity_tip, restored_tip);
+        assert_eq!(activity_tip, restored_activity_tip);
     }
 }
