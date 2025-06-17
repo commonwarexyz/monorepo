@@ -45,34 +45,16 @@ mod tests {
     use super::*;
     use crate::aggregation::types::Item;
     use commonware_codec::{DecodeExt, Encode};
-    use commonware_cryptography::{
-        bls12381::primitives::{
-            group,
-            poly::{self},
-            variant::MinSig,
-        },
-        sha256,
-    };
-
-    fn generate_keys(n: u32, t: u32) -> (poly::Public<MinSig>, Vec<group::Share>) {
-        let private = poly::new_from(t - 1, &mut rand::thread_rng());
-        let public = poly::Public::<MinSig>::commit(private.clone());
-        let shares = (0..n)
-            .map(|i| {
-                let eval = private.evaluate(i);
-                group::Share {
-                    index: eval.index,
-                    private: eval.value,
-                }
-            })
-            .collect();
-        (public, shares)
-    }
+    use commonware_cryptography::{bls12381::primitives::variant::MinSig, sha256};
 
     #[test]
     fn test_peer_ack_codec() {
+        use commonware_cryptography::bls12381::dkg::ops;
+        use commonware_runtime::deterministic;
+
         let namespace = b"test";
-        let (_, shares) = generate_keys(4, 3);
+        let mut context = deterministic::Context::default();
+        let (_, shares) = ops::generate_shares::<_, MinSig>(&mut context, None, 4, 3);
         let item = Item {
             index: 100,
             digest: sha256::hash(b"test_item"),

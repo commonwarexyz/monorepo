@@ -269,17 +269,43 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn test_init_empty() {
+    fn test_validation_failures() {
+        // Test init with empty validator set
         let mut safe_tip = SafeTip::<PublicKey>::default();
-        safe_tip.init(&vec![]);
-    }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            safe_tip.init(&vec![]);
+        }));
+        assert!(result.is_err());
 
-    #[test]
-    #[should_panic]
-    fn test_init_not_unique() {
+        // Test init with duplicate validators
         let mut safe_tip = SafeTip::<PublicKey>::default();
-        safe_tip.init(&vec![key(1), key(1), key(2), key(3)]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            safe_tip.init(&vec![key(1), key(1), key(2), key(3)]);
+        }));
+        assert!(result.is_err());
+
+        // Test reconcile with size mismatch
+        let mut safe_tip = SafeTip::<PublicKey>::default();
+        safe_tip.init(&vec![key(1), key(2), key(3), key(4)]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            safe_tip.reconcile(&vec![key(1), key(2), key(3)]);
+        }));
+        assert!(result.is_err());
+
+        // Test reconcile with duplicate validators
+        let mut safe_tip = SafeTip::<PublicKey>::default();
+        safe_tip.init(&vec![key(1), key(2), key(3), key(4)]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            safe_tip.reconcile(&vec![key(1), key(1), key(2), key(3)]);
+        }));
+        assert!(result.is_err());
+
+        // Test dec function with non-existent entry
+        let mut map = BTreeMap::new();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            dec(map.entry(42));
+        }));
+        assert!(result.is_err());
     }
 
     #[test]
@@ -343,22 +369,6 @@ mod tests {
         assert_eq!(*safe_tip.tips.get(&key(5)).unwrap(), 0);
         assert_eq!(*safe_tip.tips.get(&key(6)).unwrap(), 0);
         assert_eq!(safe_tip.get(), 30);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_reconcile_size_mismatch() {
-        let mut safe_tip = SafeTip::<PublicKey>::default();
-        safe_tip.init(&vec![key(1), key(2), key(3), key(4)]);
-        safe_tip.reconcile(&vec![key(1), key(2), key(3)]);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_reconcile_not_unique() {
-        let mut safe_tip = SafeTip::<PublicKey>::default();
-        safe_tip.init(&vec![key(1), key(2), key(3), key(4)]);
-        safe_tip.reconcile(&vec![key(1), key(1), key(2), key(3)]);
     }
 
     #[test]
@@ -515,14 +525,5 @@ mod tests {
         dec(map.entry(30));
         assert_eq!(map.get(&30), None);
         assert_eq!(map.len(), 0);
-    }
-
-    #[test]
-    #[should_panic(expected = "Cannot decrement a non-existent entry")]
-    fn test_dec_panic_on_vacant() {
-        let mut map = BTreeMap::new();
-
-        // This should panic since the entry doesn't exist
-        dec(map.entry(42));
     }
 }
