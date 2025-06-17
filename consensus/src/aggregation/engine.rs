@@ -193,7 +193,7 @@ impl<
             digest_requests: FuturesPool::default(),
             pending: BTreeMap::new(),
             confirmed: BTreeMap::new(),
-            rebroadcast_timeout: cfg.rebroadcast_timeout,
+            rebroadcast_timeout: cfg.rebroadcast_timeout.into(),
             rebroadcast_deadlines: PrioritySet::new(),
             journal: None,
             partition: cfg.partition,

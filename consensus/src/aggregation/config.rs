@@ -2,11 +2,8 @@ use super::types::{Activity, Epoch, Index};
 use crate::{Automaton, Monitor, Reporter, ThresholdSupervisor};
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
 use commonware_p2p::Blocker;
-use commonware_utils::Array;
-use std::{
-    num::{NonZeroU64, NonZeroUsize},
-    time::Duration,
-};
+use commonware_utils::{Array, NonZeroDuration};
+use std::num::{NonZeroU64, NonZeroUsize};
 
 /// Configuration for the [Engine](super::Engine).
 pub struct Config<
@@ -46,7 +43,7 @@ pub struct Config<
     pub priority_acks: bool,
 
     /// How often an ack is rebroadcast to all validators if no threshold is reached.
-    pub rebroadcast_timeout: Duration,
+    pub rebroadcast_timeout: NonZeroDuration,
 
     /// A tuple representing the epochs to keep in memory.
     /// The first element is the number of old epochs to keep.
@@ -74,25 +71,4 @@ pub struct Config<
 
     /// Compression level for the journal.
     pub journal_compression: Option<u8>,
-}
-
-impl<
-        P: Array,
-        V: Variant,
-        D: Digest,
-        A: Automaton<Context = Index, Digest = D>,
-        Z: Reporter<Activity = Activity<V, D>>,
-        M: Monitor<Index = Epoch>,
-        B: Blocker<PublicKey = P>,
-        TSu: ThresholdSupervisor<Index = Epoch, PublicKey = P>,
-    > Config<P, V, D, A, Z, M, B, TSu>
-{
-    /// Assert that all configuration values are valid.
-    pub fn assert(&self) {
-        assert_ne!(
-            self.rebroadcast_timeout,
-            Duration::from_secs(0),
-            "rebroadcast_timeout must be greater than 0"
-        );
-    }
 }
