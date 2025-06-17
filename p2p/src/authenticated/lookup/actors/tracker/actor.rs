@@ -185,8 +185,6 @@ mod tests {
 
     // Test Harness
     struct TestHarness {
-        #[allow(dead_code)]
-        actor_handle: Handle<()>,
         mailbox: Mailbox<deterministic::Context, PublicKey>,
         oracle: Oracle<deterministic::Context, PublicKey>,
         cfg: Config<PrivateKey>, // Store cloned config for access to its values
@@ -200,10 +198,9 @@ mod tests {
 
         // Actor::new takes ownership, so clone again if cfg_to_clone is needed later
         let (actor, mailbox, oracle) = Actor::new(runner_context.clone(), cfg_to_clone);
-        let actor_handle = runner_context.spawn(|_| actor.run());
+        runner_context.spawn(|_| actor.run());
 
         TestHarness {
-            actor_handle,
             mailbox,
             oracle,
             cfg: stored_cfg,

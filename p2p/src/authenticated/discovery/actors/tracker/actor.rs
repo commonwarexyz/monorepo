@@ -364,8 +364,6 @@ mod tests {
 
     // Test Harness
     struct TestHarness {
-        #[allow(dead_code)]
-        actor_handle: Handle<()>,
         mailbox: Mailbox<deterministic::Context, PublicKey>,
         oracle: Oracle<deterministic::Context, PublicKey>,
         ip_namespace: Vec<u8>,
@@ -386,10 +384,9 @@ mod tests {
         // Actor::new takes ownership, so clone again if cfg_to_clone is needed later
         let (actor, mailbox, oracle) = Actor::new(runner_context.clone(), cfg_to_clone);
         let ip_namespace = union(&ip_namespace_base, super::NAMESPACE_SUFFIX_IP);
-        let actor_handle = runner_context.spawn(|_| actor.run());
+        runner_context.spawn(|_| actor.run());
 
         TestHarness {
-            actor_handle,
             mailbox,
             oracle,
             ip_namespace,
