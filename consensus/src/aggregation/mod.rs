@@ -1,15 +1,23 @@
-//! Threshold signature aggregation across validators.
+//! Threshold signature aggregation for agreeing on externally-finalized hashes.
 //!
-//! This module provides a consensus mechanism where validators aggregate their partial signatures
-//! to form threshold signatures. The system allows validators to propose and verify digests
-//! while ensuring Byzantine fault tolerance through cryptographic proofs.
+//! Validators use this module to agree on a chain of externally-finalized hashes by aggregating
+//! their partial signatures into threshold signatures. For example, validators can agree on the
+//! state hash of blocks as the contents of them are finalized by an external consensus mechanism.
 //!
-//! The core of the module is the [`Engine`]. It is responsible for:
-//! - Proposing digests for consensus (if a validator)
-//! - Signing digests with partial signatures (if a validator)
-//! - Aggregating partial signatures into threshold signatures
-//! - Tracking consensus progress across all validators
-//! - Notifying other actors of consensus decisions
+//! # Architecture
+//!
+//! The core of the module is the [`Engine`]. It manages the agreement process by:
+//! - Requesting external hashes
+//! - Signing hashes with partial BLS signatures
+//! - Multicasting partial signatures to other validators
+//! - Aggregating sufficient partial signatures into threshold signatures
+//! - Tracking agreement progress and notifying the application layer
+//!
+//! The engine interacts with four main components:
+//! - [Automaton](crate::Automaton): Provides external hashes
+//! - [Reporter](crate::Reporter): Receives agreement confirmations
+//! - [Monitor](crate::Monitor): Tracks epoch transitions
+//! - [ThresholdSupervisor](crate::ThresholdSupervisor): Manages validator sets and network identities
 
 pub mod types;
 pub mod wire;
