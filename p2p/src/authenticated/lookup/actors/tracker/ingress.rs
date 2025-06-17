@@ -12,8 +12,6 @@ use std::net::SocketAddr;
 pub enum Message<E: Spawner + Metrics, C: PublicKey> {
     // ---------- Used by oracle ----------
     /// Register a peer set at a given index.
-    ///
-    /// The vector of peers must be sorted in ascending order by public key.
     Register {
         index: u64,
         peers: Vec<(C, SocketAddr)>,
