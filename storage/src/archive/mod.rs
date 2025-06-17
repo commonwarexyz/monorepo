@@ -129,7 +129,6 @@
 //!         section_mask: 0xffff_ffff_ffff_0000u64,
 //!         pending_writes: 10,
 //!         write_buffer: 1024 * 1024,
-//!         replay_concurrency: 4,
 //!         replay_buffer: 4096,
 //!     };
 //!     let mut archive = Archive::init(context, cfg).await.unwrap();
@@ -191,9 +190,6 @@ pub struct Config<T: Translator, C> {
     /// The amount of bytes that can be buffered in a section before being written to disk.
     pub write_buffer: usize,
 
-    /// The number of blobs to replay concurrently on initialization.
-    pub replay_concurrency: usize,
-
     /// The buffer size to use when replaying a blob.
     pub replay_buffer: usize,
 }
@@ -215,7 +211,6 @@ mod tests {
     const DEFAULT_SECTION_MASK: u64 = 0xffff_ffff_ffff_0000u64;
     const DEFAULT_PENDING_WRITES: usize = 10;
     const DEFAULT_WRITE_BUFFER: usize = 1024;
-    const DEFAULT_REPLAY_CONCURRENCY: usize = 4;
     const DEFAULT_REPLAY_BUFFER: usize = 4096;
 
     fn test_key(key: &str) -> FixedBytes<64> {
@@ -238,7 +233,6 @@ mod tests {
                 codec_config: (),
                 pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
             };
@@ -338,7 +332,6 @@ mod tests {
                 compression: Some(3),
                 pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
             };
@@ -366,7 +359,6 @@ mod tests {
                 compression: None,
                 pending_writes: 10,
                 write_buffer: 1024,
-                replay_concurrency: 4,
                 replay_buffer: 4096,
                 section_mask: DEFAULT_SECTION_MASK,
             };
@@ -391,7 +383,6 @@ mod tests {
                 compression: None,
                 pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
             };
@@ -432,7 +423,6 @@ mod tests {
                     compression: None,
                     pending_writes: DEFAULT_PENDING_WRITES,
                     write_buffer: DEFAULT_WRITE_BUFFER,
-                    replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
                     replay_buffer: DEFAULT_REPLAY_BUFFER,
                     section_mask: DEFAULT_SECTION_MASK,
                 },
@@ -461,7 +451,6 @@ mod tests {
                 compression: None,
                 pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
             };
@@ -521,7 +510,6 @@ mod tests {
                 compression: None,
                 pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
             };
@@ -566,7 +554,6 @@ mod tests {
                 compression: None,
                 pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
             };
@@ -630,7 +617,6 @@ mod tests {
                 compression: None,
                 pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
             };
@@ -688,7 +674,6 @@ mod tests {
                 compression: None,
                 pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: 0xffff_ffff_ffff_ffffu64, // no mask
             };
@@ -775,7 +760,6 @@ mod tests {
                 compression: None,
                 pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask,
             };
@@ -834,7 +818,6 @@ mod tests {
                 compression: None,
                 pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask,
             };
@@ -933,7 +916,6 @@ mod tests {
                 compression: None,
                 pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
             };

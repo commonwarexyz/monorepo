@@ -435,15 +435,8 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                 match reader.read_exact(&mut buf, Self::CHUNK_SIZE).await {
                     Ok(()) => {
                         let next_offset = offset + Self::CHUNK_SIZE_U64;
-                        match Self::verify_integrity(&buf) {
-                            Ok(item) => Some((
-                                Ok((item_pos, item)),
-                                (buf, blobs, blob_num, reader, next_offset),
-                            )),
-                            Err(err) => {
-                                Some((Err(err), (buf, blobs, blob_num, reader, next_offset)))
-                            }
-                        }
+                        let result = Self::verify_integrity(&buf).map(|item| (item_pos, item));
+                        Some((result, (buf, blobs, blob_num, reader, next_offset)))
                     }
                     Err(err) => {
                         let sz = reader.blob_size();
