@@ -59,6 +59,7 @@ mod tests {
         deterministic::{self, Context},
         Clock, Metrics, Runner, Spawner,
     };
+    use commonware_utils::NonZeroDuration;
     use futures::{channel::oneshot, future::join_all};
     use std::{
         collections::{BTreeMap, HashMap},
@@ -237,7 +238,7 @@ mod tests {
                     blocker,
                     namespace: namespace.to_vec(),
                     priority_acks: false,
-                    rebroadcast_timeout,
+                    rebroadcast_timeout: NonZeroDuration::new_panic(rebroadcast_timeout),
                     epoch_bounds: (1, 1),
                     window: std::num::NonZeroU64::new(10).unwrap(),
                     partition: format!("aggregation/{}/", validator),
