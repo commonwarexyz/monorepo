@@ -62,9 +62,6 @@ pub struct Config<
     /// The number of entries to keep per journal section.
     pub journal_heights_per_section: u64,
 
-    /// Upon replaying a journal, the number of entries to replay concurrently.
-    pub journal_replay_concurrency: usize,
-
     /// Compression level for the journal.
     pub journal_compression: Option<u8>,
 }
@@ -84,10 +81,6 @@ impl<
         assert_ne!(
             self.journal_heights_per_section, 0,
             "journal_heights_per_section must be non-zero"
-        );
-        assert_ne!(
-            self.journal_replay_concurrency, 0,
-            "journal_replay_concurrency must be non-zero"
         );
         assert_ne!(self.window, 0, "window must be non-zero");
         assert_ne!(
