@@ -67,9 +67,7 @@ where
 // TODO should combine these functions with better generics
 fn roundtrip_primitive_f32(v: f32) {
     let encoded = v.encode();
-    let decoded: f32 = f32::decode(&mut &*encoded)
-        .expect("Failed to decode f32!")
-        .into();
+    let decoded: f32 = f32::decode(&mut &*encoded).expect("Failed to decode f32!");
     if v.is_nan() && decoded.is_nan() {
         // Ignore the NaN case
         return;
@@ -79,9 +77,7 @@ fn roundtrip_primitive_f32(v: f32) {
 
 fn roundtrip_primitive_f64(v: f64) {
     let encoded = v.encode();
-    let decoded: f64 = f64::decode(&mut &*encoded)
-        .expect("Failed to decode f64!")
-        .into();
+    let decoded: f64 = f64::decode(&mut &*encoded).expect("Failed to decode f64!");
     if v.is_nan() && decoded.is_nan() {
         // Ignore the NaN case
         return;
