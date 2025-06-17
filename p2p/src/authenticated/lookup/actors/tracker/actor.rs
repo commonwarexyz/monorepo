@@ -87,7 +87,13 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                     let max = self.max_peer_set_size;
                     assert!(len <= max, "peer set too large: {} > {}", len, max);
 
-                    self.directory.add_set(index, peers);
+                    let deleted_peers = self.directory.add_set(index, peers);
+                    // If we deleted peers, release them.
+                    for peer in deleted_peers {
+                        if let Some(mut mailbox) = self.mailboxes.remove(&peer) {
+                            mailbox.kill().await;
+                        }
+                    }
                 }
                 Message::Connect {
                     public_key,
@@ -452,6 +458,51 @@ mod tests {
                 peer_rx.next().await.is_none(),
                 "no kill after handle has been cleared"
             );
+        });
+    }
+
+    #[test]
+    fn test_register_disconnects_removed_peers() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (my_sk, my_pk) = new_signer_and_pk(0);
+            let my_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9000);
+
+            let pk_1 = new_signer_and_pk(1).1;
+            let addr_1 = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9001);
+            let pk_2 = new_signer_and_pk(2).1;
+            let addr_2 = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9002);
+
+            let mut cfg = default_test_config(my_sk);
+            cfg.tracked_peer_sets = 1;
+
+            let TestHarness {
+                mut mailbox,
+                mut oracle,
+                ..
+            } = setup_actor(context.clone(), cfg);
+
+            // Register set with myself and one other peer
+            oracle
+                .register(0, vec![(my_pk.clone(), my_addr), (pk_1.clone(), addr_1)])
+                .await;
+            // let the register take effect
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Mark peer as connected
+            let reservation = mailbox.listen(pk_1.clone()).await;
+            assert!(reservation.is_some());
+
+            let (peer_mailbox, mut peer_rx) = peer::Mailbox::test();
+            mailbox.connect(my_pk.clone(), peer_mailbox).await;
+
+            // Register another set which doesn't include first peer
+            oracle.register(1, vec![(pk_2.clone(), addr_2)]).await;
+            // let the register take effect
+
+            // The first peer should be have received a kill message because its
+            // peer set was removed because `tracked_peer_sets` is 1.
+            assert!(matches!(peer_rx.next().await, Some(peer::Message::Kill)),)
         });
     }
 }

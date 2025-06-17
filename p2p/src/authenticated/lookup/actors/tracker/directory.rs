@@ -110,18 +110,18 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     }
 
     /// Stores a new peer set.
-    pub fn add_set(&mut self, index: u64, peers: Vec<(C, SocketAddr)>) {
+    pub fn add_set(&mut self, index: u64, peers: Vec<(C, SocketAddr)>) -> Vec<C> {
         // Check if peer set already exists
         if self.sets.contains_key(&index) {
             debug!(index, "peer set already exists");
-            return;
+            return Vec::new();
         }
 
         // Ensure that peer set is monotonically increasing
         if let Some((last, _)) = self.sets.last_key_value() {
             if index <= *last {
                 debug!(?index, ?last, "index must monotonically increase",);
-                return;
+                return Vec::new();
             }
         }
 
@@ -137,18 +137,23 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         self.sets.insert(index, peers);
 
         // Remove oldest entries if necessary
+        let mut deleted_peers = Vec::new();
         while self.sets.len() > self.max_sets {
             let (index, set) = self.sets.pop_first().unwrap();
             debug!(index, "removed oldest peer set");
             set.into_iter().for_each(|peer| {
                 self.peers.get_mut(&peer).unwrap().decrement();
-                self.delete_if_needed(&peer);
+                let deleted = self.delete_if_needed(&peer);
+                if deleted {
+                    deleted_peers.push(peer);
+                }
             });
         }
 
         // Attempt to remove any old records from the rate limiter.
         // This is a best-effort attempt to prevent memory usage from growing indefinitely.
         self.rate_limiter.shrink_to_fit();
+        deleted_peers
     }
 
     /// Returns a vector of dialable peers. That is, unconnected peers for which we have a socket.
@@ -251,5 +256,60 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         self.peers.remove(peer);
         self.metrics.tracked.dec();
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    use crate::authenticated::lookup::actors::tracker::directory::Directory;
+    use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
+    use commonware_runtime::{deterministic, Runner};
+    use commonware_utils::NZU32;
+    use futures::channel::mpsc;
+
+    #[test]
+    fn test_add_set_return_value() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let my_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234);
+        let (tx, _rx) = mpsc::channel(1);
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            max_sets: 1,
+            rate_limit: governor::Quota::per_second(NZU32!(10)),
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1235);
+        let pk_2 = ed25519::PrivateKey::from_seed(2).public_key();
+        let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1236);
+        let pk_3 = ed25519::PrivateKey::from_seed(3).public_key();
+        let addr_3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1237);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, (my_pk, my_addr), config, releaser);
+
+            let deleted =
+                directory.add_set(0, vec![(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]);
+            assert!(
+                deleted.is_empty(),
+                "No peers should be deleted on first set"
+            );
+
+            let deleted =
+                directory.add_set(1, vec![(pk_2.clone(), addr_2), (pk_3.clone(), addr_3)]);
+            assert_eq!(deleted.len(), 1, "One peer should be deleted");
+            assert!(deleted.contains(&pk_1), "Deleted peer should be pk_1");
+
+            let deleted = directory.add_set(2, vec![(pk_3.clone(), addr_3)]);
+            assert_eq!(deleted.len(), 1, "One peer should be deleted");
+            assert!(deleted.contains(&pk_2), "Deleted peer should be pk_2");
+
+            let deleted = directory.add_set(3, vec![(pk_3.clone(), addr_3)]);
+            assert!(deleted.is_empty(), "No peers should be deleted");
+        });
     }
 }
