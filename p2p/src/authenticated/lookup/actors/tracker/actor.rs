@@ -87,9 +87,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                     let max = self.max_peer_set_size;
                     assert!(len <= max, "peer set too large: {} > {}", len, max);
 
-                    let deleted_peers = self.directory.add_set(index, peers);
                     // If we deleted peers, release them.
-                    for peer in deleted_peers {
+                    for peer in self.directory.add_set(index, peers) {
                         if let Some(mut mailbox) = self.mailboxes.remove(&peer) {
                             mailbox.kill().await;
                         }
