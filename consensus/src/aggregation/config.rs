@@ -4,7 +4,7 @@ use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
 use commonware_utils::Array;
 use std::time::Duration;
 
-/// Configuration for the [`Engine`](super::Engine).
+/// Configuration for the [Engine](super::Engine).
 pub struct Config<
     P: Array,
     V: Variant,
@@ -50,8 +50,8 @@ pub struct Config<
     /// The concurrent number of chunks to process.
     pub window: u64,
 
-    /// A unique name for the journal.
-    pub journal_name: String,
+    /// Partition for the journal.
+    pub partition: String,
 
     /// The size of the write buffer to use for each blob in the journal.
     pub journal_write_buffer: usize,
@@ -81,17 +81,18 @@ impl<
 {
     /// Assert that all configuration values are valid.
     pub fn assert(&self) {
-        assert!(
-            self.journal_heights_per_section != 0,
+        assert_ne!(
+            self.journal_heights_per_section, 0,
             "journal_heights_per_section must be non-zero"
         );
-        assert!(
-            self.journal_replay_concurrency != 0,
+        assert_ne!(
+            self.journal_replay_concurrency, 0,
             "journal_replay_concurrency must be non-zero"
         );
-        assert!(self.window != 0, "window must be non-zero");
-        assert!(
-            self.rebroadcast_timeout > Duration::from_secs(0),
+        assert_ne!(self.window, 0, "window must be non-zero");
+        assert_ne!(
+            self.rebroadcast_timeout,
+            Duration::from_secs(0),
             "rebroadcast_timeout must be greater than 0"
         );
     }

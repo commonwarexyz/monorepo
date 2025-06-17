@@ -117,8 +117,8 @@ pub struct Engine<
     safe_tip: SafeTip<P>,
 
     /// The keys represent the set of all `Index` values for which we are attempting to form a
-    /// threshold signature, but do not yet have one. Values may be [`Pending::Unverified`] or
-    /// [`Pending::Verified`], depending on whether the automaton has verified the digest or not.
+    /// threshold signature, but do not yet have one. Values may be [Pending::Unverified] or
+    /// [Pending::Verified], depending on whether the automaton has verified the digest or not.
     pending: BTreeMap<Index, Pending<V, D>>,
 
     /// A map of indices with a threshold signature. Cached in memory if needed to send to other peers.
@@ -134,7 +134,7 @@ pub struct Engine<
     // ---------- Journal ----------
     /// Journal for storing acks signed by this node.
     journal: Option<Journal<E, Activity<V, D>>>,
-    journal_name: String,
+    partition: String,
     journal_write_buffer: usize,
     journal_replay_buffer: usize,
     journal_heights_per_section: u64,
@@ -193,7 +193,7 @@ impl<
             rebroadcast_timeout: cfg.rebroadcast_timeout,
             rebroadcast_deadlines: PrioritySet::new(),
             journal: None,
-            journal_name: cfg.journal_name,
+            partition: cfg.partition,
             journal_write_buffer: cfg.journal_write_buffer,
             journal_replay_buffer: cfg.journal_replay_buffer,
             journal_heights_per_section: cfg.journal_heights_per_section,
@@ -229,7 +229,7 @@ impl<
 
         // Initialize Journal
         let journal_cfg = JConfig {
-            partition: self.journal_name.clone(),
+            partition: self.partition.clone(),
             compression: self.journal_compression,
             codec_config: (),
             write_buffer: self.journal_write_buffer,
@@ -306,7 +306,7 @@ impl<
                 // Sign a new ack
                 request = self.digest_requests.next_completed() => {
                     let DigestRequest { index, result, timer } = request;
-                    drop(timer); // Record metric. Explicitly reference timer to avoid lint warning
+                    drop(timer); // Record metric. Explicitly reference timer to avoid lint warning.
                     match result {
                         Err(err) => {
                             warn!(?err, ?index, "automaton returned error");
@@ -784,6 +784,6 @@ impl<
         journal.sync(section).await.expect("unable to sync journal");
 
         // Prune journal, ignoring errors
-        let _ = journal.prune(section).await;
+        let _ = journal.prune(self.tip).await;
     }
 }

@@ -1,4 +1,4 @@
-//! Types used in [`aggregation`](crate::aggregation).
+//! Types used in [aggregation](super).
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -195,7 +195,7 @@ impl<V: Variant, D: Digest> EncodeSize for Ack<V, D> {
     }
 }
 
-/// Used as [`Reporter::Activity`](crate::Reporter::Activity) to report activities that occur during
+/// Used as [Reporter::Activity](crate::Reporter::Activity) to report activities that occur during
 /// aggregation. Also used to journal events that are needed to initialize the aggregation engine
 /// when the node restarts.
 #[derive(Clone, Debug, PartialEq)]

@@ -439,7 +439,7 @@ impl<
                 // Handle completed verification futures.
                 verify = self.pending_verifies.next_completed() => {
                     let Verify { timer, context, payload, result } = verify;
-                    drop(timer); // Record metric. Explicitly reference timer to avoid lint warning
+                    drop(timer); // Record metric. Explicitly reference timer to avoid lint warning.
                     match result {
                         Err(err) => {
                             warn!(?err, ?context, "verified returned error");
