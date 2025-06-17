@@ -3,7 +3,10 @@ use crate::{Automaton, Monitor, Reporter, ThresholdSupervisor};
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
 use commonware_p2p::Blocker;
 use commonware_utils::Array;
-use std::time::Duration;
+use std::{
+    num::{NonZeroU64, NonZeroUsize},
+    time::Duration,
+};
 
 /// Configuration for the [Engine](super::Engine).
 pub struct Config<
@@ -55,19 +58,19 @@ pub struct Config<
     pub epoch_bounds: (u64, u64),
 
     /// The concurrent number of chunks to process.
-    pub window: u64,
+    pub window: NonZeroU64,
 
     /// Partition for the journal.
     pub partition: String,
 
     /// The size of the write buffer to use for each blob in the journal.
-    pub journal_write_buffer: usize,
+    pub journal_write_buffer: NonZeroUsize,
 
     /// Number of bytes to buffer when replaying a journal.
-    pub journal_replay_buffer: usize,
+    pub journal_replay_buffer: NonZeroUsize,
 
     /// The number of entries to keep per journal section.
-    pub journal_heights_per_section: u64,
+    pub journal_heights_per_section: NonZeroU64,
 
     /// Compression level for the journal.
     pub journal_compression: Option<u8>,
@@ -86,11 +89,6 @@ impl<
 {
     /// Assert that all configuration values are valid.
     pub fn assert(&self) {
-        assert_ne!(
-            self.journal_heights_per_section, 0,
-            "journal_heights_per_section must be non-zero"
-        );
-        assert_ne!(self.window, 0, "window must be non-zero");
         assert_ne!(
             self.rebroadcast_timeout,
             Duration::from_secs(0),
