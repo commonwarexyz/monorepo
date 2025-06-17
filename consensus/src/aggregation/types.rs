@@ -63,7 +63,12 @@ pub enum Error {
     AckThresholded(u64),
 }
 
+/// Epoch represents a configuration period in the aggregation protocol.
+/// Validators may change between epochs, requiring new threshold signatures.
 pub type Epoch = u64;
+
+/// Index represents the sequential position of items being aggregated.
+/// Indices are monotonically increasing within each epoch.
 pub type Index = u64;
 
 /// Suffix used to identify an acknowledgment (ack) namespace for domain separation.
@@ -79,112 +84,13 @@ fn ack_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, ACK_SUFFIX)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use commonware_codec::{DecodeExt, Encode};
-    use commonware_cryptography::{
-        bls12381::primitives::{group, ops, poly, variant::MinSig},
-        sha256,
-    };
-
-    #[test]
-    fn test_ack_namespace() {
-        let namespace = b"test_namespace";
-        let expected = [namespace, ACK_SUFFIX].concat();
-        assert_eq!(ack_namespace(namespace), expected);
-    }
-
-    fn generate_keys(n: u32, t: u32) -> (poly::Public<MinSig>, Vec<group::Share>) {
-        let private = poly::new_from(t - 1, &mut rand::thread_rng());
-        let public = poly::Public::<MinSig>::commit(private.clone());
-        let shares = (0..n)
-            .map(|i| {
-                let eval = private.evaluate(i);
-                group::Share {
-                    index: eval.index,
-                    private: eval.value,
-                }
-            })
-            .collect();
-        (public, shares)
-    }
-
-    #[test]
-    fn test_item_codec() {
-        let item = Item {
-            index: 42,
-            digest: sha256::hash(b"hello"),
-        };
-        let restored = Item::decode(item.encode()).unwrap();
-        assert_eq!(item, restored);
-    }
-
-    #[test]
-    fn test_ack_sign_verify() {
-        let namespace = b"test";
-        let (public, shares) = generate_keys(4, 3);
-
-        let item = Item {
-            index: 100,
-            digest: sha256::hash(b"test_item"),
-        };
-
-        let ack: Ack<MinSig, _> = Ack::sign(namespace, 1, &shares[0], item.clone());
-
-        assert!(ack.verify(namespace, &public));
-
-        // verify fails with wrong namespace
-        assert!(!ack.verify(b"wrong", &public));
-    }
-
-    #[test]
-    fn test_ack_codec() {
-        let namespace = b"test";
-        let (_, shares) = generate_keys(4, 3);
-        let item = Item {
-            index: 100,
-            digest: sha256::hash(b"test_item"),
-        };
-        let ack = Ack::sign(namespace, 1, &shares[0], item.clone());
-
-        let restored: Ack<MinSig, sha256::Digest> = Ack::decode(ack.encode()).unwrap();
-        assert_eq!(ack, restored);
-    }
-
-    #[test]
-    fn test_activity_codec() {
-        let namespace = b"test";
-        let (_, shares) = generate_keys(4, 3);
-        let item = Item {
-            index: 100,
-            digest: sha256::hash(b"test_item"),
-        };
-
-        // Test Ack variant
-        let activity_ack = Activity::Ack(Ack::sign(namespace, 1, &shares[0], item.clone()));
-        let restored_ack: Activity<MinSig, sha256::Digest> =
-            Activity::decode(activity_ack.encode()).unwrap();
-        assert_eq!(activity_ack, restored_ack);
-
-        // Test Lock variant
-        let signature = ops::sign_message::<MinSig>(&shares[0].private, Some(b"test"), b"message");
-        let activity_lock = Activity::Lock(item, signature);
-        let restored_lock: Activity<MinSig, sha256::Digest> =
-            Activity::decode(activity_lock.encode()).unwrap();
-        assert_eq!(activity_lock, restored_lock);
-
-        // Test Tip variant
-        let activity_tip = Activity::Tip(123);
-        let restored_tip: Activity<MinSig, sha256::Digest> =
-            Activity::decode(activity_tip.encode()).unwrap();
-        assert_eq!(activity_tip, restored_tip);
-    }
-}
-
+/// Item represents a single element being aggregated in the protocol.
+/// Each item has a unique index and contains a digest that validators sign.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Item<D: Digest> {
+    /// Sequential position of this item within the current epoch
     pub index: Index,
+    /// Cryptographic digest of the data being aggregated
     pub digest: D,
 }
 
@@ -211,14 +117,23 @@ impl<D: Digest> EncodeSize for Item<D> {
     }
 }
 
+/// Acknowledgment (ack) represents a validator's partial signature on an item.
+/// Multiple acks can be aggregated into a threshold signature for consensus.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Ack<V: Variant, D: Digest> {
+    /// The item being acknowledged
     pub item: Item<D>,
+    /// The epoch in which this acknowledgment was created
     pub epoch: Epoch,
+    /// Partial signature on the item using the validator's threshold share
     pub signature: PartialSignature<V>,
 }
 
 impl<V: Variant, D: Digest> Ack<V, D> {
+    /// Verifies the partial signature on this acknowledgment.
+    ///
+    /// Returns `true` if the signature is valid for the given namespace and public key.
+    /// Domain separation is automatically applied to prevent signature reuse.
     pub fn verify(&self, namespace: &[u8], identity: &poly::Public<V>) -> bool {
         ops::partial_verify_message::<V>(
             identity,
@@ -229,6 +144,13 @@ impl<V: Variant, D: Digest> Ack<V, D> {
         .is_ok()
     }
 
+    /// Creates a new acknowledgment by signing an item with a validator's threshold share.
+    ///
+    /// The signature uses domain separation to prevent cross-protocol attacks.
+    ///
+    /// # Determinism
+    ///
+    /// Signatures produced by this function are deterministic and safe for consensus.
     pub fn sign(namespace: &[u8], epoch: Epoch, share: &Share, item: Item<D>) -> Self {
         let ack_namespace = ack_namespace(namespace);
         let signature = ops::partial_sign_message::<V>(
@@ -334,5 +256,108 @@ impl<V: Variant, D: Digest> EncodeSize for Activity<V, D> {
             Activity::Lock(item, signature) => item.encode_size() + signature.encode_size(),
             Activity::Tip(index) => UInt(*index).encode_size(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_codec::{DecodeExt, Encode};
+    use commonware_cryptography::{
+        bls12381::primitives::{group, ops, poly, variant::MinSig},
+        sha256,
+    };
+
+    #[test]
+    fn test_ack_namespace() {
+        let namespace = b"test_namespace";
+        let expected = [namespace, ACK_SUFFIX].concat();
+        assert_eq!(ack_namespace(namespace), expected);
+    }
+
+    fn generate_keys(n: u32, t: u32) -> (poly::Public<MinSig>, Vec<group::Share>) {
+        let private = poly::new_from(t - 1, &mut rand::thread_rng());
+        let public = poly::Public::<MinSig>::commit(private.clone());
+        let shares = (0..n)
+            .map(|i| {
+                let eval = private.evaluate(i);
+                group::Share {
+                    index: eval.index,
+                    private: eval.value,
+                }
+            })
+            .collect();
+        (public, shares)
+    }
+
+    #[test]
+    fn test_item_codec() {
+        let item = Item {
+            index: 42,
+            digest: sha256::hash(b"hello"),
+        };
+        let restored = Item::decode(item.encode()).unwrap();
+        assert_eq!(item, restored);
+    }
+
+    #[test]
+    fn test_ack_sign_verify() {
+        let namespace = b"test";
+        let (public, shares) = generate_keys(4, 3);
+
+        let item = Item {
+            index: 100,
+            digest: sha256::hash(b"test_item"),
+        };
+
+        let ack: Ack<MinSig, _> = Ack::sign(namespace, 1, &shares[0], item.clone());
+
+        assert!(ack.verify(namespace, &public));
+
+        // verify fails with wrong namespace
+        assert!(!ack.verify(b"wrong", &public));
+    }
+
+    #[test]
+    fn test_ack_codec() {
+        let namespace = b"test";
+        let (_, shares) = generate_keys(4, 3);
+        let item = Item {
+            index: 100,
+            digest: sha256::hash(b"test_item"),
+        };
+        let ack = Ack::sign(namespace, 1, &shares[0], item.clone());
+
+        let restored: Ack<MinSig, sha256::Digest> = Ack::decode(ack.encode()).unwrap();
+        assert_eq!(ack, restored);
+    }
+
+    #[test]
+    fn test_activity_codec() {
+        let namespace = b"test";
+        let (_, shares) = generate_keys(4, 3);
+        let item = Item {
+            index: 100,
+            digest: sha256::hash(b"test_item"),
+        };
+
+        // Test Ack variant
+        let activity_ack = Activity::Ack(Ack::sign(namespace, 1, &shares[0], item.clone()));
+        let restored_ack: Activity<MinSig, sha256::Digest> =
+            Activity::decode(activity_ack.encode()).unwrap();
+        assert_eq!(activity_ack, restored_ack);
+
+        // Test Lock variant
+        let signature = ops::sign_message::<MinSig>(&shares[0].private, Some(b"test"), b"message");
+        let activity_lock = Activity::Lock(item, signature);
+        let restored_lock: Activity<MinSig, sha256::Digest> =
+            Activity::decode(activity_lock.encode()).unwrap();
+        assert_eq!(activity_lock, restored_lock);
+
+        // Test Tip variant
+        let activity_tip = Activity::Tip(123);
+        let restored_tip: Activity<MinSig, sha256::Digest> =
+            Activity::decode(activity_tip.encode()).unwrap();
+        assert_eq!(activity_tip, restored_tip);
     }
 }
