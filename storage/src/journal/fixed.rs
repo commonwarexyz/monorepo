@@ -4,8 +4,7 @@
 //! where position is defined as the item's order of insertion starting from 0, unaffected by
 //! pruning.
 //!
-//! _See [crate::journal::variable] for a journal that supports variable length
-//! items._
+//! _See [crate::journal::variable] for a journal that supports variable length items._
 //!
 //! # Format
 //!
@@ -45,8 +44,7 @@
 //!
 //! # Replay
 //!
-//! The `replay` method iterates over multiple blobs concurrently to support fast reading of all
-//! unpruned items into memory.
+//! The `replay` method supports fast reading of all unpruned items into memory.
 
 use super::Error;
 use bytes::BufMut;
@@ -56,7 +54,10 @@ use commonware_runtime::{
     Blob, Error as RError, Metrics, Storage,
 };
 use commonware_utils::hex;
-use futures::stream::{self, Stream};
+use futures::{
+    stream::{self, Stream},
+    StreamExt,
+};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{collections::BTreeMap, marker::PhantomData};
 use tracing::{debug, trace, warn};
@@ -393,58 +394,64 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + '_, Error> {
         // Collect all blobs to replay
         let start_blob = start_pos / self.cfg.items_per_blob;
-        let blobs = self
-            .blobs
-            .range(start_blob..)
-            .map(|(_, blob)| blob.clone())
-            .collect::<Vec<_>>();
+        let blobs = self.blobs.range(start_blob..).collect::<Vec<_>>();
+
+        // We gather the sizes outside the closure since flat_map doesn't allow async. We could
+        // instead gather a Reader per blob here, but that would result in a buffer-per-blob being
+        // allocated up front.
+        let mut sizes = Vec::with_capacity(blobs.len());
+        for b in blobs.iter() {
+            sizes.push(b.1.size().await);
+        }
+
+        // Create an iterator of (iteration, blob_index, blob, size) tuples to stream.
+        let blob_plus = blobs
+            .into_iter()
+            .zip(sizes.into_iter())
+            .enumerate()
+            .map(|(i, ((blob_index, blob), size))| (i, *blob_index, (*blob).clone(), size));
         let items_per_blob = self.cfg.items_per_blob;
         let start_offset = (start_pos % items_per_blob) * Self::CHUNK_SIZE_U64;
 
-        let blobs_len = blobs.len();
-        // There should always be at least one blob to replay unless the user provided an invalid `start_pos`.
-        assert_ne!(blobs_len, 0);
-        let blob = blobs[0].clone();
-        let blob_size = blob.size().await;
-        let mut reader = Read::new(blob, blob_size, buffer);
-        reader.seek_to(start_offset)?;
+        // Replay all blobs in order and stream items as they are read (to avoid occupying too much
+        // memory with buffered data).
+        let stream = stream::iter(blob_plus).flat_map(move |(i, blob_index, blob, size)| {
+            // Create a new reader and buffer for each blob. Preallocating the buffer here to avoid
+            // a per-iteration allocation improves performance by ~20%.
+            let mut reader = Read::new(blob, size, buffer);
+            let buf = vec![0u8; Self::CHUNK_SIZE];
+            let initial_offset = if i == 0 {
+                // If this is the very first blob then we need to seek to the starting position.
+                reader.seek_to(start_offset).expect("invalid start_pos");
+                start_offset
+            } else {
+                0
+            };
 
-        let buf = vec![0u8; Self::CHUNK_SIZE];
-        let stream = stream::unfold(
-            (buf, blobs, 0, reader, start_offset),
-            move |(mut buf, blobs, mut blob_num, mut reader, mut offset)| async move {
-                // Check if we are at the end of the blob
-                if offset >= reader.blob_size() {
-                    blob_num += 1;
-                    if blob_num == blobs_len {
+            stream::unfold(
+                (buf, reader, initial_offset),
+                move |(mut buf, mut reader, offset)| async move {
+                    if offset >= reader.blob_size() {
                         return None;
                     }
-                    let next_blob = blobs[blob_num].clone();
-                    let next_blob_size = next_blob.size().await;
-                    if next_blob_size == 0 {
-                        // Only the final blob should ever be empty.
-                        assert_eq!(blob_num, blobs_len - 1);
-                        return None;
-                    }
-                    reader = Read::new(next_blob, next_blob_size, buffer);
-                    offset = 0;
-                }
 
-                let blob_index = start_blob + blob_num as u64;
-                let item_pos = items_per_blob * blob_index + offset / Self::CHUNK_SIZE_U64;
-                match reader.read_exact(&mut buf, Self::CHUNK_SIZE).await {
-                    Ok(()) => {
-                        let next_offset = offset + Self::CHUNK_SIZE_U64;
-                        let result = Self::verify_integrity(&buf).map(|item| (item_pos, item));
-                        Some((result, (buf, blobs, blob_num, reader, next_offset)))
+                    // Even though we are reusing the buffer, `read_exact` will overwrite any
+                    // previous data, so there's no need to explicitly clear it.
+                    let item_pos = items_per_blob * blob_index + offset / Self::CHUNK_SIZE_U64;
+                    match reader.read_exact(&mut buf, Self::CHUNK_SIZE).await {
+                        Ok(()) => {
+                            let next_offset = offset + Self::CHUNK_SIZE_U64;
+                            let result = Self::verify_integrity(&buf).map(|item| (item_pos, item));
+                            Some((result, (buf, reader, next_offset)))
+                        }
+                        Err(err) => {
+                            let size = reader.blob_size();
+                            Some((Err(Error::Runtime(err)), (buf, reader, size)))
+                        }
                     }
-                    Err(err) => {
-                        let sz = reader.blob_size();
-                        Some((Err(Error::Runtime(err)), (buf, blobs, blob_num, reader, sz)))
-                    }
-                }
-            },
-        );
+                },
+            )
+        });
 
         Ok(stream)
     }
@@ -907,7 +914,7 @@ mod tests {
                 while let Some(result) = stream.next().await {
                     match result {
                         Ok((pos, item)) => {
-                            assert!(pos >= START_POS);
+                            assert!(pos >= START_POS, "pos={}", pos);
                             assert_eq!(
                                 test_digest(pos),
                                 item,
