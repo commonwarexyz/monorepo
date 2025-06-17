@@ -101,7 +101,7 @@ impl<
                     let sent_messages = self.sent_messages.clone();
                     let received_messages = self.received_messages.clone();
                     let rate_limited = self.rate_limited.clone();
-                    let tracker = tracker.clone();
+                    let mut tracker = tracker.clone();
                     let mut router = router.clone();
 
                     // Spawn peer
@@ -110,7 +110,7 @@ impl<
                         .spawn(move |context| async move {
                             // Create peer
                             debug!(?peer, "peer started");
-                            let (actor, messenger) = peer::Actor::new(
+                            let (peer_actor, messenger) = peer::Actor::new(
                                 context,
                                 peer::Config {
                                     ping_frequency: self.ping_frequency,
@@ -126,13 +126,20 @@ impl<
                             // Register peer with the router
                             let channels = router.ready(peer.clone(), messenger).await;
 
+                            // Register peer with tracker
+                            let peer_mailbox = peer_actor.mailbox().clone();
+                            tracker.connect(peer.clone(), peer_mailbox).await;
+
                             // Run peer
-                            let e = actor.run(peer.clone(), connection, tracker, channels).await;
+                            let e = peer_actor
+                                .run(peer.clone(), connection, tracker, channels)
+                                .await;
                             connections.dec();
 
                             // Let the router know the peer has exited
                             debug!(error = ?e, ?peer, "peer shutdown");
                             router.release(peer).await;
+                            // `reservation` is dropped here, releasing it.
                         });
                 }
             }

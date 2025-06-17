@@ -68,6 +68,10 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         )
     }
 
+    pub(crate) fn mailbox(&self) -> &Mailbox {
+        &self.mailbox
+    }
+
     /// Unpack `msg` and verify the underlying `channel` is registered.
     fn validate_msg<V>(msg: Option<Data>, rate_limits: &HashMap<u32, V>) -> Result<Data, Error> {
         let data = match msg {
