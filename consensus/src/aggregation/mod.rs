@@ -6,7 +6,7 @@
 //!
 //! # Architecture
 //!
-//! The core of the module is the [`Engine`]. It manages the agreement process by:
+//! The core of the module is the [Engine]. It manages the agreement process by:
 //! - Requesting external hashes
 //! - Signing hashes with partial BLS signatures
 //! - Multicasting partial signatures to other validators
@@ -236,7 +236,7 @@ mod tests {
                     rebroadcast_timeout,
                     epoch_bounds: (1, 1),
                     window: 10,
-                    journal_name: format!("aggregation/{}/", validator),
+                    partition: format!("aggregation/{}/", validator),
                     journal_write_buffer: 4096,
                     journal_replay_buffer: 4096,
                     journal_heights_per_section: 100,
