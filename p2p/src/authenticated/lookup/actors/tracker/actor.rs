@@ -30,7 +30,7 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
 
     /// Maps a peer's public key to its mailbox.
     /// Set when a peer connects and cleared when it is blocked or released.
-    peer_mailboxes: HashMap<C::PublicKey, peer::Mailbox>,
+    mailboxes: HashMap<C::PublicKey, peer::Mailbox>,
 }
 
 impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> {
@@ -65,7 +65,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 max_peer_set_size: cfg.max_peer_set_size,
                 receiver,
                 directory,
-                peer_mailboxes: HashMap::new(),
+                mailboxes: HashMap::new(),
             },
             mailbox,
             oracle,
@@ -101,7 +101,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
                     // Mark the record as connected
                     self.directory.connect(&public_key);
-                    self.peer_mailboxes.insert(public_key, peer);
+                    self.mailboxes.insert(public_key, peer);
                 }
                 Message::Dialable { responder } => {
                     let _ = responder.send(self.directory.dialable());
@@ -123,13 +123,13 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                     self.directory.block(&public_key);
 
                     // Kill the peer if we're connected to it.
-                    if let Some(mut peer) = self.peer_mailboxes.remove(&public_key) {
+                    if let Some(mut peer) = self.mailboxes.remove(&public_key) {
                         peer.kill().await;
                     }
                 }
                 Message::Release { metadata } => {
                     // Clear the peer handle if it exists
-                    self.peer_mailboxes.remove(metadata.public_key());
+                    self.mailboxes.remove(metadata.public_key());
 
                     // Release the peer
                     self.directory.release(metadata);
