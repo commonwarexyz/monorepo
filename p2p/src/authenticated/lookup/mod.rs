@@ -30,9 +30,9 @@
 //!
 //! The size of the `message` bytes (after potential compression) must not exceed the configured
 //! `max_message_size`. If it does, the sending operation will fail with
-//! [`Error::MessageTooLarge`]. Messages can be sent with `priority`, allowing certain
+//! [Error::MessageTooLarge]. Messages can be sent with `priority`, allowing certain
 //! communications to potentially bypass lower-priority messages waiting in send queues across all
-//! channels. Each registered channel ([`Sender`], [`Receiver`]) handles its own message queuing,
+//! channels. Each registered channel ([Sender], [Receiver]) handles its own message queuing,
 //! rate limiting, and optional `zstd` compression/decompression.
 //!
 //! # Example

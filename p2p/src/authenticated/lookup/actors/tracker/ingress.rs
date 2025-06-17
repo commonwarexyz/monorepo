@@ -41,7 +41,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
 
     /// Request a reservation for a particular peer to dial.
     ///
-    /// The tracker will respond with an [`Option<Reservation<E, C>>`], which will be `None` if the
+    /// The tracker will respond with an [Option<Reservation<E, C>>], which will be `None` if the
     /// reservation cannot be granted (e.g., if the peer is already connected, blocked or already
     /// has an active reservation).
     Dial {
@@ -55,7 +55,7 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
     // ---------- Used by listener ----------
     /// Request a reservation for a particular peer.
     ///
-    /// The tracker will respond with an [`Option<Reservation<E, C>>`], which will be `None` if  the
+    /// The tracker will respond with an [Option<Reservation<E, C>>], which will be `None` if  the
     /// reservation cannot be granted (e.g., if the peer is already connected, blocked or already
     /// has an active reservation).
     Listen {

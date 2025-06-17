@@ -34,7 +34,7 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
 }
 
 impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> {
-    /// Create a new tracker [`Actor`] from the given `context` and `cfg`.
+    /// Create a new tracker [Actor] from the given `context` and `cfg`.
     #[allow(clippy::type_complexity)]
     pub fn new(
         context: E,

@@ -20,7 +20,7 @@
 //! the composition of peer sets at specific, user-provided indices (`u64`). Each index maps to a
 //! list of authorized `PublicKey`s (`(u64, Vec<PublicKey>)`). Based on this shared knowledge, each
 //! peer can construct a sorted bit vector message (`BitVec`) representing its knowledge of the
-//! dialable addresses [`SocketAddr`](std::net::SocketAddr) for the peers in that set.
+//! dialable addresses [std::net::SocketAddr] for the peers in that set.
 //! The `BitVec` message contains:
 //! - `index`: The `u64` index the bit vector applies to.
 //! - `bits`: The bit vector itself, where a '1' signifies knowledge of the corresponding
@@ -37,7 +37,7 @@
 //! application layer is responsible for ensuring peer set synchronization._
 //!
 //! Due to their small size, these `BitVec` messages are exchanged periodically (configured by
-//! `gossip_bit_vec_frequency` in the [`Config`]) between connected peers. This serves as both a
+//! `gossip_bit_vec_frequency` in the [Config]) between connected peers. This serves as both a
 //! peer discovery mechanism and a keep-alive "ping" message to maintain the underlying
 //! connection, especially during periods of low application-level traffic. The protocol supports
 //! tracking multiple peer sets concurrently (up to `tracked_peer_sets`), each identified by its
@@ -50,7 +50,7 @@
 //! and sends them back in a `Payload::Peers` message. To save bandwidth, peers will only gossip
 //! `PeerInfo` for peers that they currently have a connection with. This prevents them from
 //! repeatedly sending `PeerInfo` that they cannot verify is still valid. Each `PeerInfo` contains:
-//! - `socket`: The [`SocketAddr`](std::net::SocketAddr) of the peer.
+//! - `socket`: The [std::net::SocketAddr] of the peer.
 //! - `timestamp`: A `u64` timestamp indicating when the address was attested.
 //! - `public_key`: The peer's public key.
 //! - `signature`: The peer's cryptographic signature over the `socket` and `timestamp`.
@@ -66,7 +66,7 @@
 //! record, it will be corrected promptly by the peer being dialed.
 //!
 //! To initiate the discovery process, a peer needs a list of `bootstrappers` (defined in
-//! [`Config`]) - known peer public keys and their corresponding socket addresses. The peer
+//! [Config]) - known peer public keys and their corresponding socket addresses. The peer
 //! attempts to dial these bootstrappers, performs the handshake, sends its own `PeerInfo`, and
 //! then sends a `BitVec` for the relevant peer set(s) (initially only knowing its own address,
 //! marked as '1'). It then waits for responses, learning about other peers through the
@@ -91,9 +91,9 @@
 //!
 //! The size of the `message` bytes (after potential compression) must not exceed the configured
 //! `max_message_size`. If it does, the sending operation will fail with
-//! [`Error::MessageTooLarge`]. Messages can be sent with `priority`, allowing certain
+//! [Error::MessageTooLarge]. Messages can be sent with `priority`, allowing certain
 //! communications to potentially bypass lower-priority messages waiting in send queues across all
-//! channels. Each registered channel ([`Sender`], [`Receiver`]) handles its own message queuing,
+//! channels. Each registered channel ([Sender], [Receiver]) handles its own message queuing,
 //! rate limiting, and optional `zstd` compression/decompression.
 //!
 //! # Example

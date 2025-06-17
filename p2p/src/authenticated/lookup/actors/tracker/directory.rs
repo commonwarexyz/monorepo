@@ -13,7 +13,7 @@ use std::{
 };
 use tracing::debug;
 
-/// Configuration for the [`Directory`].
+/// Configuration for the [Directory].
 pub struct Config {
     /// Whether private IPs are connectable.
     pub allow_private_ips: bool,
