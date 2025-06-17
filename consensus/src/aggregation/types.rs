@@ -63,6 +63,13 @@ pub enum Error {
     AckThresholded(u64),
 }
 
+impl Error {
+    /// Returns true if the error represents a blockable offense by a peer.
+    pub fn blockable(&self) -> bool {
+        matches!(self, Error::PeerMismatch | Error::InvalidAckSignature)
+    }
+}
+
 /// Epoch represents a configuration period in the aggregation protocol.
 /// Validators may change between epochs, requiring new threshold signatures.
 pub type Epoch = u64;

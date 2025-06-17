@@ -14,7 +14,7 @@ use commonware_cryptography::{
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
-    Receiver, Recipients, Sender,
+    Blocker, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
     telemetry::metrics::{
@@ -69,6 +69,7 @@ pub struct Engine<
     A: Automaton<Context = Index, Digest = D> + Clone,
     Z: Reporter<Activity = Activity<V, D>>,
     M: Monitor<Index = Epoch>,
+    B: Blocker<PublicKey = P>,
     TSu: ThresholdSupervisor<
         Index = Epoch,
         PublicKey = P,
@@ -84,6 +85,7 @@ pub struct Engine<
     monitor: M,
     validators: TSu,
     reporter: Z,
+    blocker: B,
 
     // ---------- Namespace Constants ----------
     /// The namespace signatures.
@@ -160,6 +162,7 @@ impl<
         A: Automaton<Context = Index, Digest = D> + Clone,
         Z: Reporter<Activity = Activity<V, D>>,
         M: Monitor<Index = Epoch>,
+        B: Blocker<PublicKey = P>,
         TSu: ThresholdSupervisor<
             Index = Epoch,
             PublicKey = P,
@@ -168,10 +171,10 @@ impl<
         >,
         NetS: Sender<PublicKey = P>,
         NetR: Receiver<PublicKey = P>,
-    > Engine<E, P, V, D, A, Z, M, TSu, NetS, NetR>
+    > Engine<E, P, V, D, A, Z, M, B, TSu, NetS, NetR>
 {
     /// Creates a new engine with the given context and configuration.
-    pub fn new(context: E, cfg: Config<P, V, D, A, Z, M, TSu>) -> Self {
+    pub fn new(context: E, cfg: Config<P, V, D, A, Z, M, B, TSu>) -> Self {
         let metrics = metrics::Metrics::init(context.clone());
 
         Self {
@@ -180,6 +183,7 @@ impl<
             reporter: cfg.reporter,
             monitor: cfg.monitor,
             validators: cfg.validators,
+            blocker: cfg.blocker,
             namespace: cfg.namespace,
             epoch_bounds: cfg.epoch_bounds,
             window: cfg.window,
@@ -333,7 +337,8 @@ impl<
                     let peer_ack = match msg {
                         Ok(peer_ack) => peer_ack,
                         Err(err) => {
-                            warn!(?err, ?sender, "ack decode failed");
+                            warn!(?err, ?sender, "ack decode failed, blocking peer");
+                            self.blocker.block(sender).await;
                             continue;
                         }
                     };
@@ -350,7 +355,12 @@ impl<
 
                     // Validate that we need to process the ack
                     if let Err(err) = self.validate_ack(&ack, &sender) {
-                        warn!(?err, ?sender, "ack validate failed");
+                        if err.blockable() {
+                            warn!(?sender, ?err, "blocking peer for validation failure");
+                            self.blocker.block(sender).await;
+                        } else {
+                            debug!(?sender, ?err, "ack validate failed");
+                        }
                         continue;
                     };
 

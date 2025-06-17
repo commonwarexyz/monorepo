@@ -1,6 +1,7 @@
 use super::types::{Activity, Epoch, Index};
 use crate::{Automaton, Monitor, Reporter, ThresholdSupervisor};
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
+use commonware_p2p::Blocker;
 use commonware_utils::Array;
 use std::time::Duration;
 
@@ -12,6 +13,7 @@ pub struct Config<
     A: Automaton<Context = Index, Digest = D>,
     Z: Reporter<Activity = Activity<V, D>>,
     M: Monitor<Index = Epoch>,
+    B: Blocker<PublicKey = P>,
     TSu: ThresholdSupervisor<Index = Epoch, PublicKey = P>,
 > {
     /// Tracks the current state of consensus (to determine which participants should
@@ -27,6 +29,11 @@ pub struct Config<
 
     /// Notified when a chunk receives a threshold of acks.
     pub reporter: Z,
+
+    /// Blocker for the network.
+    ///
+    /// Blocking is handled by [commonware_p2p].
+    pub blocker: B,
 
     /// The application namespace used to sign over different types of messages.
     /// Used to prevent replay attacks on other applications.
@@ -73,8 +80,9 @@ impl<
         A: Automaton<Context = Index, Digest = D>,
         Z: Reporter<Activity = Activity<V, D>>,
         M: Monitor<Index = Epoch>,
+        B: Blocker<PublicKey = P>,
         TSu: ThresholdSupervisor<Index = Epoch, PublicKey = P>,
-    > Config<P, V, D, A, Z, M, TSu>
+    > Config<P, V, D, A, Z, M, B, TSu>
 {
     /// Assert that all configuration values are valid.
     pub fn assert(&self) {
