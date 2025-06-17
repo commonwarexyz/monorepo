@@ -1,12 +1,10 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use libfuzzer_sys::fuzz_target;
-
 use bytes::Bytes;
 use commonware_codec::{Decode, DecodeExt, Encode, EncodeSize, Error, RangeCfg, Read, Write};
-use std::net::SocketAddr;
-use std::{collections::HashMap, hash::Hash};
+use libfuzzer_sys::fuzz_target;
+use std::{collections::HashMap, hash::Hash, net::SocketAddr};
 
 fn roundtrip_socket(socket: SocketAddr) {
     let encoded = socket.encode();
