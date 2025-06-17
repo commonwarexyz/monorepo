@@ -240,7 +240,6 @@ mod tests {
                     journal_write_buffer: 4096,
                     journal_replay_buffer: 4096,
                     journal_heights_per_section: 100,
-                    journal_replay_concurrency: 1,
                     journal_compression: Some(3),
                 },
             );
