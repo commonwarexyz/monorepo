@@ -1,11 +1,7 @@
 use super::{ingress::Message, Config, Error, Mailbox};
 use crate::authenticated::{
     data::Data,
-    lookup::{
-        actors::tracker::{self, Reservation},
-        channels::Channels,
-        metrics, types,
-    },
+    lookup::{actors::tracker::Reservation, channels::Channels, metrics, types},
     relay::Relay,
 };
 use commonware_codec::{Decode, Encode};
@@ -101,7 +97,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         mut self,
         peer: C,
         connection: Connection<Si, St>,
-        tracker: tracker::Mailbox<E, C>,
         channels: Channels<C>,
     ) -> Error {
         // Instantiate rate limiters for each message type
@@ -120,13 +115,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         let (mut conn_sender, mut conn_receiver) = connection.split();
         let mut send_handler: Handle<Result<(), Error>> = self.context.with_label("sender").spawn( {
             let peer = peer.clone();
-            let mut tracker = tracker.clone();
-            let mailbox = self.mailbox.clone();
             let rate_limits = rate_limits.clone();
             move |context| async move {
-                // Allow tracker to initialize the peer
-                tracker.connect(peer.clone(), mailbox.clone()).await;
-
                 // Set the initial deadline to now to start pinging immediately
                 let mut deadline = context.current();
 

@@ -131,9 +131,7 @@ impl<
                             tracker.connect(peer.clone(), peer_mailbox).await;
 
                             // Run peer
-                            let e = peer_actor
-                                .run(peer.clone(), connection, tracker, channels)
-                                .await;
+                            let e = peer_actor.run(peer.clone(), connection, channels).await;
                             connections.dec();
 
                             // Let the router know the peer has exited
