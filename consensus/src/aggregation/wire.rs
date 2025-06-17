@@ -42,6 +42,7 @@ impl<V: Variant, D: Digest> EncodeSize for PeerAck<V, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aggregation::types::Item;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::primitives::{
@@ -51,8 +52,6 @@ mod tests {
         },
         sha256,
     };
-
-    use crate::aggregation::types::Item;
 
     fn generate_keys(n: u32, t: u32) -> (poly::Public<MinSig>, Vec<group::Share>) {
         let private = poly::new_from(t - 1, &mut rand::thread_rng());
