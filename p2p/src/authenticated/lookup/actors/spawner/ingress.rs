@@ -3,7 +3,7 @@ use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Metrics, Sink, Spawner, Stream};
 use commonware_stream::public_key::Connection;
 
-/// Messages that can be processed by the spawner [super::Actor].
+/// Messages that can be processed by the spawner actor.
 pub enum Message<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKey> {
     /// Notify the spawner to create a new task for the given peer.
     Spawn {
@@ -19,7 +19,7 @@ pub enum Message<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKe
 impl<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKey>
     Mailbox<Message<E, Si, St, P>>
 {
-    /// Send a message to the [super::Actor] to spawn a new task for the given peer.
+    /// Send a message to the actor to spawn a new task for the given peer.
     pub async fn spawn(&mut self, connection: Connection<Si, St>, reservation: Reservation<E, P>) {
         self.send(Message::Spawn {
             peer: reservation.metadata().public_key().clone(),
