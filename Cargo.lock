@@ -1055,6 +1055,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-cryptography-fuzz"
+version = "0.0.1"
+dependencies = [
+ "arbitrary",
+ "blst",
+ "commonware-codec",
+ "commonware-cryptography",
+ "ed25519-zebra",
+ "libfuzzer-sys",
+ "p256",
+ "sha2 0.10.8",
+]
+
+[[package]]
 name = "commonware-deployer"
 version = "0.0.54"
 dependencies = [
@@ -1496,6 +1510,7 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "curve25519-dalek-derive",
+ "digest 0.10.7",
  "fiat-crypto",
  "rustc_version",
  "subtle",
@@ -1629,6 +1644,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ed25519"
+version = "2.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "115531babc129696a58c64a4fef0a8bf9e9698629fb97e9e40767d235cfbcd53"
+dependencies = [
+ "pkcs8",
+ "serde",
+ "signature",
+]
+
+[[package]]
 name = "ed25519-consensus"
 version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1640,6 +1666,22 @@ dependencies = [
  "serde",
  "sha2 0.9.9",
  "thiserror 1.0.63",
+ "zeroize",
+]
+
+[[package]]
+name = "ed25519-zebra"
+version = "4.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d9ce6874da5d4415896cd45ffbc4d1cfc0c4f9c079427bd870742c30f2f65a9"
+dependencies = [
+ "curve25519-dalek",
+ "ed25519",
+ "hashbrown",
+ "hex",
+ "rand_core",
+ "serde",
+ "sha2 0.10.8",
  "zeroize",
 ]
 
