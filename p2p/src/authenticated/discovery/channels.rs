@@ -5,7 +5,6 @@ use commonware_cryptography::PublicKey;
 use futures::{channel::mpsc, StreamExt};
 use governor::Quota;
 use std::collections::BTreeMap;
-use zstd::bulk::{compress, decompress};
 
 /// Sender is the mechanism used to send arbitrary bytes to
 /// a set of recipients over a pre-defined channel.
@@ -13,21 +12,14 @@ use zstd::bulk::{compress, decompress};
 pub struct Sender<P: PublicKey> {
     channel: Channel,
     max_size: usize,
-    compression: Option<i32>,
     messenger: Messenger<P>,
 }
 
 impl<P: PublicKey> Sender<P> {
-    pub(super) fn new(
-        channel: Channel,
-        max_size: usize,
-        compression: Option<i32>,
-        messenger: Messenger<P>,
-    ) -> Self {
+    pub(super) fn new(channel: Channel, max_size: usize, messenger: Messenger<P>) -> Self {
         Self {
             channel,
             max_size,
-            compression,
             messenger,
         }
     }
@@ -53,21 +45,15 @@ impl<P: PublicKey> crate::Sender for Sender<P> {
     ///
     /// # Returns
     ///
-    /// If the message can be compressed (if enabled) and the message is `< max_size`, The set of recipients
-    /// that the message was sent to. Note, a successful send does not mean that the recipient will
-    /// receive the message (connection may no longer be active and we may not know that yet).
+    /// A vector of recipients that the message was sent to, or an error if the message is too large.
+    ///
+    /// Note: a successful send does not guarantee that the recipient will receive the message.
     async fn send(
         &mut self,
         recipients: Recipients<Self::PublicKey>,
-        mut message: Bytes,
+        message: Bytes,
         priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Error> {
-        // If compression is enabled, compress the message before sending.
-        if let Some(level) = self.compression {
-            let compressed = compress(&message, level).map_err(|_| Error::CompressionFailed)?;
-            message = compressed.into();
-        }
-
         // Ensure message isn't too large
         let message_len = message.len();
         if message_len > self.max_size {
@@ -85,22 +71,12 @@ impl<P: PublicKey> crate::Sender for Sender<P> {
 /// Channel to asynchronously receive messages from a channel.
 #[derive(Debug)]
 pub struct Receiver<P: PublicKey> {
-    max_size: usize,
-    compression: bool,
     receiver: mpsc::Receiver<Message<P>>,
 }
 
 impl<P: PublicKey> Receiver<P> {
-    pub(super) fn new(
-        max_size: usize,
-        compression: bool,
-        receiver: mpsc::Receiver<Message<P>>,
-    ) -> Self {
-        Self {
-            max_size,
-            compression,
-            receiver,
-        }
+    pub(super) fn new(receiver: mpsc::Receiver<Message<P>>) -> Self {
+        Self { receiver }
     }
 }
 
@@ -113,14 +89,7 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
     /// This method will block until a message is received or the underlying
     /// network shuts down.
     async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Error> {
-        let (sender, mut message) = self.receiver.next().await.ok_or(Error::NetworkClosed)?;
-
-        // If compression is enabled, decompress the message before returning.
-        if self.compression {
-            let buf =
-                decompress(&message, self.max_size).map_err(|_| Error::DecompressionFailed)?;
-            message = buf.into();
-        }
+        let (sender, message) = self.receiver.next().await.ok_or(Error::NetworkClosed)?;
 
         // We don't check that the message is too large here because we already enforce
         // that on the network layer.
@@ -149,32 +118,18 @@ impl<P: PublicKey> Channels<P> {
         channel: Channel,
         rate: governor::Quota,
         backlog: usize,
-        compression: Option<i32>,
     ) -> (Sender<P>, Receiver<P>) {
         let (sender, receiver) = mpsc::channel(backlog);
         if self.receivers.insert(channel, (rate, sender)).is_some() {
             panic!("duplicate channel registration: {}", channel);
         }
         (
-            Sender::new(channel, self.max_size, compression, self.messenger.clone()),
-            Receiver::new(self.max_size, compression.is_some(), receiver),
+            Sender::new(channel, self.max_size, self.messenger.clone()),
+            Receiver::new(receiver),
         )
     }
 
     pub fn collect(self) -> BTreeMap<u32, (Quota, mpsc::Sender<Message<P>>)> {
         self.receivers
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_compression() {
-        let message = b"hello world";
-        let compressed = compress(message, 3).unwrap();
-        let buf = decompress(&compressed, message.len()).unwrap();
-        assert_eq!(message, buf.as_slice());
     }
 }

@@ -10,7 +10,6 @@
 //! - Configurable Cryptography Scheme for Peer Identities (BLS, ed25519, etc.)
 //! - Automatic Peer Discovery Using Bit Vectors (Also Used as Ping Messages)
 //! - Multiplexing With Configurable Rate Limiting Per Channel and Send Prioritization
-//! - Optional Message Compression (using `zstd`)
 //!
 //! # Design
 //!
@@ -89,12 +88,23 @@
 //! - `channel`: A `u32` identifier used to route the message to the correct application handler.
 //! - `message`: The arbitrary application payload as `Bytes`.
 //!
-//! The size of the `message` bytes (after potential compression) must not exceed the configured
+//! The size of the `message` bytes must not exceed the configured
 //! `max_message_size`. If it does, the sending operation will fail with
 //! [Error::MessageTooLarge]. Messages can be sent with `priority`, allowing certain
 //! communications to potentially bypass lower-priority messages waiting in send queues across all
-//! channels. Each registered channel ([Sender], [Receiver]) handles its own message queuing,
-//! rate limiting, and optional `zstd` compression/decompression.
+//! channels. Each registered channel ([Sender], [Receiver]) handles its own message queuing
+//! and rate limiting.
+//!
+//! ## Compression
+//!
+//! Stream compression is not provided at the transport layer to avoid inadvertently
+//! enabling known attacks such as BREACH and CRIME. These attacks exploit the interaction
+//! between compression and encryption by analyzing patterns in the resulting data.
+//! By compressing secrets alongside attacker-controlled content, these attacks can infer
+//! sensitive information through compression ratio analysis. Applications that choose
+//! to compress data should do so with full awareness of these risks and implement
+//! appropriate mitigations (such as ensuring no attacker-controlled data is compressed
+//! alongside sensitive information).
 //!
 //! # Example
 //!
@@ -159,12 +169,10 @@
 //!
 //!     // Register some channel
 //!     const MAX_MESSAGE_BACKLOG: usize = 128;
-//!     const COMPRESSION_LEVEL: Option<i32> = Some(3);
 //!     let (mut sender, receiver) = network.register(
 //!         0,
 //!         Quota::per_second(NZU32!(1)),
 //!         MAX_MESSAGE_BACKLOG,
-//!         COMPRESSION_LEVEL,
 //!     );
 //!
 //!     // Run network
@@ -192,10 +200,6 @@ use thiserror::Error;
 pub enum Error {
     #[error("message too large: {0}")]
     MessageTooLarge(usize),
-    #[error("compression failed")]
-    CompressionFailed,
-    #[error("decompression failed")]
-    DecompressionFailed,
     #[error("network closed")]
     NetworkClosed,
 }
@@ -286,7 +290,6 @@ mod tests {
                 0,
                 Quota::per_second(NZU32!(5)), // Ensure we hit the rate limit
                 DEFAULT_MESSAGE_BACKLOG,
-                None,
             );
 
             // Wait to connect to all peers, and then send messages to everyone
@@ -531,12 +534,8 @@ mod tests {
                     .await;
 
                 // Register basic application
-                let (mut sender, mut receiver) = network.register(
-                    0,
-                    Quota::per_second(NZU32!(10)),
-                    DEFAULT_MESSAGE_BACKLOG,
-                    None,
-                );
+                let (mut sender, mut receiver) =
+                    network.register(0, Quota::per_second(NZU32!(10)), DEFAULT_MESSAGE_BACKLOG);
 
                 // Wait to connect to all peers, and then send messages to everyone
                 network.start();
@@ -580,7 +579,8 @@ mod tests {
         });
     }
 
-    fn test_message_too_large(compression: Option<i32>) {
+    #[test_traced]
+    fn test_message_too_large() {
         // Configure test
         let base_port = 3000;
         let n: usize = 2;
@@ -609,12 +609,8 @@ mod tests {
             oracle.register(0, addresses.clone()).await;
 
             // Register basic application
-            let (mut sender, _) = network.register(
-                0,
-                Quota::per_second(NZU32!(10)),
-                DEFAULT_MESSAGE_BACKLOG,
-                compression,
-            );
+            let (mut sender, _) =
+                network.register(0, Quota::per_second(NZU32!(10)), DEFAULT_MESSAGE_BACKLOG);
 
             // Wait to connect to all peers, and then send messages to everyone
             network.start();
@@ -628,15 +624,5 @@ mod tests {
             let result = sender.send(recipient, msg.into(), true).await;
             assert!(matches!(result, Err(Error::MessageTooLarge(_))));
         });
-    }
-
-    #[test_traced]
-    fn test_message_too_large_no_compression() {
-        test_message_too_large(None);
-    }
-
-    #[test_traced]
-    fn test_message_too_large_compression() {
-        test_message_too_large(Some(3));
     }
 }

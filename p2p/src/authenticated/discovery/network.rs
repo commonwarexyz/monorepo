@@ -98,7 +98,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
     /// * `channel` - Unique identifier for the channel.
     /// * `rate` - Rate at which messages can be received over the channel.
     /// * `backlog` - Maximum number of messages that can be queued on the channel before blocking.
-    /// * `compression` - Optional compression level (using `zstd`) to use for messages on the channel.
     ///
     /// # Returns
     ///
@@ -110,12 +109,11 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
         channel: Channel,
         rate: Quota,
         backlog: usize,
-        compression: Option<i32>,
     ) -> (
         channels::Sender<C::PublicKey>,
         channels::Receiver<C::PublicKey>,
     ) {
-        self.channels.register(channel, rate, backlog, compression)
+        self.channels.register(channel, rate, backlog)
     }
 
     /// Starts the network.

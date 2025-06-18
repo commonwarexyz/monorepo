@@ -174,12 +174,10 @@ fn main() {
 
         // Initialize chat
         const MAX_MESSAGE_BACKLOG: usize = 128;
-        const COMPRESSION_LEVEL: Option<i32> = Some(3);
         let (chat_sender, chat_receiver) = network.register(
             handler::CHANNEL,
             Quota::per_second(NZU32!(128)),
             MAX_MESSAGE_BACKLOG,
-            COMPRESSION_LEVEL,
         );
 
         // Start network
