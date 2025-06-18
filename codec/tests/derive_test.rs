@@ -1,7 +1,12 @@
 //! Integration tests for derive macros.
 
 use bytes::BytesMut;
-use commonware_codec::{codec::*, extensions::*, EncodeSize, Read, Write};
+use commonware_codec::{
+    codec::*,
+    extensions::*,
+    varint::{SInt, UInt},
+    EncodeSize, Read, Write,
+};
 
 #[derive(Debug, Clone, PartialEq, Read, Write, EncodeSize)]
 struct SimpleStruct {
@@ -21,6 +26,18 @@ struct NestedStruct {
     simple: SimpleStruct,
     value: u16,
 }
+
+#[derive(Debug, Clone, PartialEq, Read, Write, EncodeSize)]
+struct VarintStruct {
+    #[codec(varint)]
+    a: u32,
+    #[codec(varint)]
+    b: i32,
+    c: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Read, Write, EncodeSize)]
+struct TupleVarintStruct(#[codec(varint)] u64, #[codec(varint)] i64, bool);
 
 #[cfg(test)]
 mod tests {
@@ -129,5 +146,75 @@ mod tests {
         let decoded = SimpleStruct::read_cfg(&mut buf, &()).unwrap();
         assert_eq!(original, decoded);
         assert_eq!(buf.len(), 0); // All bytes should be consumed
+    }
+
+    #[test]
+    fn test_varint_struct_derive() {
+        let original = VarintStruct {
+            a: 300,  // Will be encoded as varint
+            b: -150, // Will be encoded as signed varint
+            c: true,
+        };
+
+        // Compare with manual varint encoding
+        let expected_a_size = UInt(original.a).encode_size();
+        let expected_b_size = SInt(original.b).encode_size();
+        let expected_size = expected_a_size + expected_b_size + 1; // +1 for bool
+
+        assert_eq!(original.encode_size(), expected_size);
+
+        // Test encode/decode
+        let encoded = original.encode();
+        assert_eq!(encoded.len(), expected_size);
+
+        let decoded = VarintStruct::decode(encoded).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_tuple_varint_struct_derive() {
+        let original = TupleVarintStruct(1000000, -500000, false);
+
+        // Compare with manual varint encoding
+        let expected_0_size = UInt(original.0).encode_size();
+        let expected_1_size = SInt(original.1).encode_size();
+        let expected_size = expected_0_size + expected_1_size + 1; // +1 for bool
+
+        assert_eq!(original.encode_size(), expected_size);
+
+        // Test encode/decode
+        let encoded = original.encode();
+        assert_eq!(encoded.len(), expected_size);
+
+        let decoded = TupleVarintStruct::decode(encoded).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_varint_encoding_efficiency() {
+        // Test that varint encoding is actually more efficient for small values
+        let small_varint = VarintStruct {
+            a: 127, // Should fit in 1 byte as varint
+            b: -64, // Should fit in 1 byte as signed varint
+            c: true,
+        };
+
+        let varint_size = small_varint.encode_size();
+        // Should be much smaller than fixed-width encoding (4 + 4 + 1 = 9)
+        assert!(
+            varint_size < 5,
+            "Varint encoding should be efficient for small values"
+        );
+
+        // Test large values still work
+        let large_varint = VarintStruct {
+            a: u32::MAX,
+            b: i32::MIN,
+            c: false,
+        };
+
+        let encoded = large_varint.encode();
+        let decoded = VarintStruct::decode(encoded).unwrap();
+        assert_eq!(large_varint, decoded);
     }
 }

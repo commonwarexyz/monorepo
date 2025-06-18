@@ -3,13 +3,22 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use syn::{parse_macro_input, Data, DeriveInput, Fields, FieldsNamed, FieldsUnnamed, Index};
+use syn::{
+    parse_macro_input, Data, DeriveInput, Field, Fields, FieldsNamed, FieldsUnnamed, Index, Meta,
+};
 
 /// Derive macro for the `Read` trait.
 ///
 /// Automatically implements `Read` for structs where all fields implement `Read`.
 /// The generated implementation will use `()` as the `Cfg` type for simplicity.
 /// If any field requires a different `Cfg`, you'll need to implement `Read` manually.
+///
+/// # Codec Helper Attributes
+///
+/// You can use the `#[codec(varint)]` helper attribute to enable variable-length encoding for integer fields.
+/// The wrapper type (UInt for unsigned, SInt for signed) is automatically inferred from the field type.
+///
+/// Supported types: u16, u32, u64, u128, i16, i32, i64, i128
 ///
 /// # Example
 ///
@@ -23,9 +32,17 @@ use syn::{parse_macro_input, Data, DeriveInput, Fields, FieldsNamed, FieldsUnnam
 ///     y: u32,
 /// }
 ///
-/// // Read is now implemented for Point
+/// #[derive(Read)]
+/// struct EfficientPoint {
+///     #[codec(varint)]
+///     x: u32,  // Encoded as UInt (varint)
+///     #[codec(varint)]
+///     y: i32,  // Encoded as SInt (signed varint)
+/// }
+///
+/// // Read is now implemented for both structs
 /// ```
-#[proc_macro_derive(Read)]
+#[proc_macro_derive(Read, attributes(codec))]
 pub fn derive_read(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     expand_read(&input)
@@ -36,6 +53,13 @@ pub fn derive_read(input: TokenStream) -> TokenStream {
 /// Derive macro for the `Write` trait.
 ///
 /// Automatically implements `Write` for structs where all fields implement `Write`.
+///
+/// # Codec Helper Attributes
+///
+/// You can use the `#[codec(varint)]` helper attribute to enable variable-length encoding for integer fields.
+/// The wrapper type (UInt for unsigned, SInt for signed) is automatically inferred from the field type.
+///
+/// Supported types: u16, u32, u64, u128, i16, i32, i64, i128
 ///
 /// # Example
 ///
@@ -49,9 +73,17 @@ pub fn derive_read(input: TokenStream) -> TokenStream {
 ///     y: u32,
 /// }
 ///
-/// // Write is now implemented for Point
+/// #[derive(Write)]
+/// struct EfficientPoint {
+///     #[codec(varint)]
+///     x: u32,  // Encoded as UInt (varint)
+///     #[codec(varint)]
+///     y: i32,  // Encoded as SInt (signed varint)
+/// }
+///
+/// // Write is now implemented for both structs
 /// ```
-#[proc_macro_derive(Write)]
+#[proc_macro_derive(Write, attributes(codec))]
 pub fn derive_write(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     expand_write(&input)
@@ -62,6 +94,13 @@ pub fn derive_write(input: TokenStream) -> TokenStream {
 /// Derive macro for the `EncodeSize` trait.
 ///
 /// Automatically implements `EncodeSize` for structs where all fields implement `EncodeSize`.
+///
+/// # Codec Helper Attributes
+///
+/// You can use the `#[codec(varint)]` helper attribute to enable variable-length encoding for integer fields.
+/// The wrapper type (UInt for unsigned, SInt for signed) is automatically inferred from the field type.
+///
+/// Supported types: u16, u32, u64, u128, i16, i32, i64, i128
 ///
 /// # Example
 ///
@@ -75,9 +114,17 @@ pub fn derive_write(input: TokenStream) -> TokenStream {
 ///     y: u32,
 /// }
 ///
-/// // EncodeSize is now implemented for Point
+/// #[derive(EncodeSize)]
+/// struct EfficientPoint {
+///     #[codec(varint)]
+///     x: u32,  // Encoded as UInt (varint)
+///     #[codec(varint)]
+///     y: i32,  // Encoded as SInt (signed varint)
+/// }
+///
+/// // EncodeSize is now implemented for both structs
 /// ```
-#[proc_macro_derive(EncodeSize)]
+#[proc_macro_derive(EncodeSize, attributes(codec))]
 pub fn derive_encode_size(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     expand_encode_size(&input)
@@ -191,12 +238,15 @@ fn expand_read_named_fields(fields: &FieldsNamed) -> syn::Result<TokenStream2> {
         return Ok(quote! { Ok(Self) });
     }
 
-    let field_reads = fields.named.iter().map(|field| {
-        let field_name = &field.ident;
-        quote! {
-            let #field_name = ::commonware_codec::Read::read_cfg(buf, &())?;
-        }
-    });
+    let field_reads = fields
+        .named
+        .iter()
+        .map(|field| {
+            let field_name = &field.ident;
+            let wrapper = parse_codec_attributes(field)?;
+            Ok(generate_field_read(field_name.as_ref().unwrap(), &wrapper))
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
 
     let field_names = fields.named.iter().map(|field| &field.ident);
 
@@ -213,12 +263,16 @@ fn expand_read_unnamed_fields(fields: &FieldsUnnamed) -> syn::Result<TokenStream
         return Ok(quote! { Ok(Self) });
     }
 
-    let field_reads = fields.unnamed.iter().enumerate().map(|(i, _)| {
-        let field_name = format_ident!("field_{}", i);
-        quote! {
-            let #field_name = ::commonware_codec::Read::read_cfg(buf, &())?;
-        }
-    });
+    let field_reads = fields
+        .unnamed
+        .iter()
+        .enumerate()
+        .map(|(i, field)| {
+            let field_name = format_ident!("field_{}", i);
+            let wrapper = parse_codec_attributes(field)?;
+            Ok(generate_field_read(&field_name, &wrapper))
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
 
     let field_names = (0..fields.unnamed.len()).map(|i| format_ident!("field_{}", i));
 
@@ -229,12 +283,16 @@ fn expand_read_unnamed_fields(fields: &FieldsUnnamed) -> syn::Result<TokenStream
 }
 
 fn expand_write_named_fields(fields: &FieldsNamed) -> syn::Result<TokenStream2> {
-    let field_writes = fields.named.iter().map(|field| {
-        let field_name = &field.ident;
-        quote! {
-            ::commonware_codec::Write::write(&self.#field_name, buf);
-        }
-    });
+    let field_writes = fields
+        .named
+        .iter()
+        .map(|field| {
+            let field_name = &field.ident;
+            let wrapper = parse_codec_attributes(field)?;
+            let field_access = quote! { self.#field_name };
+            Ok(generate_field_write(field_access, &wrapper))
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
 
     Ok(quote! {
         #(#field_writes)*
@@ -242,12 +300,17 @@ fn expand_write_named_fields(fields: &FieldsNamed) -> syn::Result<TokenStream2> 
 }
 
 fn expand_write_unnamed_fields(fields: &FieldsUnnamed) -> syn::Result<TokenStream2> {
-    let field_writes = fields.unnamed.iter().enumerate().map(|(i, _)| {
-        let index = Index::from(i);
-        quote! {
-            ::commonware_codec::Write::write(&self.#index, buf);
-        }
-    });
+    let field_writes = fields
+        .unnamed
+        .iter()
+        .enumerate()
+        .map(|(i, field)| {
+            let index = Index::from(i);
+            let wrapper = parse_codec_attributes(field)?;
+            let field_access = quote! { self.#index };
+            Ok(generate_field_write(field_access, &wrapper))
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
 
     Ok(quote! {
         #(#field_writes)*
@@ -259,12 +322,16 @@ fn expand_encode_size_named_fields(fields: &FieldsNamed) -> syn::Result<TokenStr
         return Ok(quote! { 0 });
     }
 
-    let field_sizes = fields.named.iter().map(|field| {
-        let field_name = &field.ident;
-        quote! {
-            ::commonware_codec::EncodeSize::encode_size(&self.#field_name)
-        }
-    });
+    let field_sizes = fields
+        .named
+        .iter()
+        .map(|field| {
+            let field_name = &field.ident;
+            let wrapper = parse_codec_attributes(field)?;
+            let field_access = quote! { self.#field_name };
+            Ok(generate_field_encode_size(field_access, &wrapper))
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
 
     Ok(quote! {
         0 #(+ #field_sizes)*
@@ -276,14 +343,123 @@ fn expand_encode_size_unnamed_fields(fields: &FieldsUnnamed) -> syn::Result<Toke
         return Ok(quote! { 0 });
     }
 
-    let field_sizes = fields.unnamed.iter().enumerate().map(|(i, _)| {
-        let index = Index::from(i);
-        quote! {
-            ::commonware_codec::EncodeSize::encode_size(&self.#index)
-        }
-    });
+    let field_sizes = fields
+        .unnamed
+        .iter()
+        .enumerate()
+        .map(|(i, field)| {
+            let index = Index::from(i);
+            let wrapper = parse_codec_attributes(field)?;
+            let field_access = quote! { self.#index };
+            Ok(generate_field_encode_size(field_access, &wrapper))
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
 
     Ok(quote! {
         0 #(+ #field_sizes)*
     })
+}
+
+// ---------- Helper Functions for Codec Attributes ----------
+
+#[derive(Debug, Clone, PartialEq)]
+enum CodecWrapper {
+    None,
+    UInt,
+    SInt,
+}
+
+/// Parse codec attributes on a field to determine if it should be wrapped.
+fn parse_codec_attributes(field: &Field) -> syn::Result<CodecWrapper> {
+    for attr in &field.attrs {
+        if attr.path().is_ident("codec") {
+            match &attr.meta {
+                Meta::List(meta_list) => {
+                    // Parse #[codec(varint)]
+                    let nested = meta_list.parse_args::<syn::Ident>()?;
+                    match nested.to_string().as_str() {
+                        "varint" => return infer_wrapper_from_type(&field.ty),
+                        other => {
+                            return Err(syn::Error::new_spanned(
+                                nested,
+                                format!("Unknown codec attribute: {}. Use 'varint'", other),
+                            ));
+                        }
+                    }
+                }
+                Meta::Path(_) | Meta::NameValue(_) => {
+                    return Err(syn::Error::new_spanned(
+                        attr,
+                        "Use #[codec(varint)] - wrapper type is inferred from field type",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(CodecWrapper::None)
+}
+
+/// Infer the appropriate wrapper type based on the field's type.
+fn infer_wrapper_from_type(ty: &syn::Type) -> syn::Result<CodecWrapper> {
+    if let syn::Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            match segment.ident.to_string().as_str() {
+                // Unsigned types -> UInt
+                "u16" | "u32" | "u64" | "u128" => return Ok(CodecWrapper::UInt),
+                // Signed types -> SInt
+                "i16" | "i32" | "i64" | "i128" => return Ok(CodecWrapper::SInt),
+                _ => {}
+            }
+        }
+    }
+
+    Err(syn::Error::new_spanned(
+        ty,
+        "codec attribute can only be used with integer types: u16, u32, u64, u128, i16, i32, i64, i128",
+    ))
+}
+
+/// Generate appropriate field access for reading, based on codec wrapper.
+fn generate_field_read(field_name: &syn::Ident, wrapper: &CodecWrapper) -> TokenStream2 {
+    match wrapper {
+        CodecWrapper::None => quote! {
+            let #field_name = ::commonware_codec::Read::read_cfg(buf, &())?;
+        },
+        CodecWrapper::UInt => quote! {
+            let #field_name = ::commonware_codec::varint::UInt::read_cfg(buf, &())?.into();
+        },
+        CodecWrapper::SInt => quote! {
+            let #field_name = ::commonware_codec::varint::SInt::read_cfg(buf, &())?.into();
+        },
+    }
+}
+
+/// Generate appropriate field access for writing, based on codec wrapper.
+fn generate_field_write(field_access: TokenStream2, wrapper: &CodecWrapper) -> TokenStream2 {
+    match wrapper {
+        CodecWrapper::None => quote! {
+            ::commonware_codec::Write::write(&#field_access, buf);
+        },
+        CodecWrapper::UInt => quote! {
+            ::commonware_codec::Write::write(&::commonware_codec::varint::UInt(#field_access), buf);
+        },
+        CodecWrapper::SInt => quote! {
+            ::commonware_codec::Write::write(&::commonware_codec::varint::SInt(#field_access), buf);
+        },
+    }
+}
+
+/// Generate appropriate field access for encoding size, based on codec wrapper.
+fn generate_field_encode_size(field_access: TokenStream2, wrapper: &CodecWrapper) -> TokenStream2 {
+    match wrapper {
+        CodecWrapper::None => quote! {
+            ::commonware_codec::EncodeSize::encode_size(&#field_access)
+        },
+        CodecWrapper::UInt => quote! {
+            ::commonware_codec::EncodeSize::encode_size(&::commonware_codec::varint::UInt(#field_access))
+        },
+        CodecWrapper::SInt => quote! {
+            ::commonware_codec::EncodeSize::encode_size(&::commonware_codec::varint::SInt(#field_access))
+        },
+    }
 }
