@@ -157,27 +157,15 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
             .with_label("receiver")
             .spawn(move |context| async move {
                 loop {
+                    // Receive a message from the peer
                     let msg = conn_receiver
                         .receive()
                         .await
                         .map_err(Error::ReceiveFailed)?;
-                    let data = match types::Message::decode_cfg(msg, &(..).into()) {
-                        Ok(types::Message::Ping) => {
-                            self.received_messages
-                                .get_or_create(&metrics::Message::new_ping(&peer))
-                                .inc();
 
-                            if let Err(wait_until) = ping_rate_limiter.check() {
-                                self.rate_limited
-                                    .get_or_create(&metrics::Message::new_ping(&peer))
-                                    .inc();
-                                let wait_duration = wait_until.wait_time_from(context.now());
-                                context.sleep(wait_duration).await;
-                            }
-
-                            continue; // Ignore ping messages
-                        }
-                        Ok(types::Message::Data(data)) => data,
+                    // Parse the message
+                    let msg = match types::Message::decode_cfg(msg, &(..).into()) {
+                        Ok(msg) => msg,
                         Err(err) => {
                             info!(?err, ?peer, "failed to decode message");
                             self.received_messages
@@ -186,32 +174,50 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                             return Err(Error::DecodeFailed(err));
                         }
                     };
-                    self.received_messages
-                        .get_or_create(&metrics::Message::new_data(&peer, data.channel))
-                        .inc();
 
-                    // Ensure peer is not spamming us with content messages
-                    let Some(rate_limiter) = rate_limits.get(&data.channel) else {
-                        // We permit unknown messages to be received in case peers
-                        // are on a newer version than us
-                        continue;
+                    // Update metrics
+                    let metric = match &msg {
+                        types::Message::Data(data) => {
+                            metrics::Message::new_data(&peer, data.channel)
+                        }
+                        types::Message::Ping => metrics::Message::new_ping(&peer),
+                    };
+                    self.received_messages.get_or_create(&metric).inc();
+
+                    // Wait until rate limiter allows us to process the message
+                    let rate_limiter = match &msg {
+                        types::Message::Data(data) => {
+                            let Some(rate_limiter) = rate_limits.get(&data.channel) else {
+                                // We permit unknown messages to be received in case peers
+                                // are on a newer version than us
+                                continue;
+                            };
+                            rate_limiter
+                        }
+                        types::Message::Ping => &ping_rate_limiter,
                     };
                     if let Err(wait_until) = rate_limiter.check() {
-                        self.rate_limited
-                            .get_or_create(&metrics::Message::new_data(&peer, data.channel))
-                            .inc();
+                        self.rate_limited.get_or_create(&metric).inc();
                         let wait_duration = wait_until.wait_time_from(context.now());
                         context.sleep(wait_duration).await;
                     }
 
-                    // Send message to client
-                    //
-                    // If the channel handler is closed, we log an error but don't
-                    // close the peer (as other channels may still be open).
-                    let sender = senders.get_mut(&data.channel).unwrap();
-                    let _ = sender.send((peer.clone(), data.message)).await.inspect_err(
-                        |e| debug!(err=?e, channel=data.channel, "failed to send message to client"),
-                    );
+                    match msg {
+                        types::Message::Ping => {
+                            // We ignore ping messages, they are only used to keep
+                            // the connection alive
+                        }
+                        types::Message::Data(data) => {
+                            // Send message to client
+                            //
+                            // If the channel handler is closed, we log an error but don't
+                            // close the peer (as other channels may still be open).
+                            let sender = senders.get_mut(&data.channel).unwrap();
+                            let _ = sender.send((peer.clone(), data.message)).await.inspect_err(
+                                |e| debug!(err=?e, channel=data.channel, "failed to send message to client"),
+                            );
+                        }
+                    }
                 }
             });
 
