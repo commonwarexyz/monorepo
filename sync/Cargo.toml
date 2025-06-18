@@ -11,6 +11,10 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/sync"
 documentation = "https://docs.rs/commonware-utils"
 
 [dependencies]
+commonware-storage = { workspace = true }
+commonware-runtime = { workspace = true }
+commonware-utils = { workspace = true }
+commonware-cryptography = { workspace = true }
 
 [dev-dependencies]
 

@@ -1254,6 +1254,12 @@ dependencies = [
 [[package]]
 name = "commonware-sync"
 version = "0.0.54"
+dependencies = [
+ "commonware-cryptography",
+ "commonware-runtime",
+ "commonware-storage",
+ "commonware-utils",
+]
 
 [[package]]
 name = "commonware-utils"
