@@ -1,17 +1,18 @@
 mod actor;
 mod ingress;
 
-use std::time::Duration;
-
 use crate::{
     threshold_simplex::types::{Activity, Context, View},
     Automaton, Relay, Reporter, ThresholdSupervisor,
 };
 pub use actor::Actor;
-use commonware_cryptography::{bls12381::primitives::group, Digest};
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Signer};
+use commonware_cryptography::{
+    bls12381::primitives::{group, variant::Variant},
+    Digest, Signer,
+};
 use commonware_p2p::Blocker;
 pub use ingress::{Mailbox, Message};
+use std::time::Duration;
 
 pub struct Config<
     C: Signer,
@@ -38,7 +39,6 @@ pub struct Config<
     pub notarization_timeout: Duration,
     pub nullify_retry: Duration,
     pub activity_timeout: View,
-    pub replay_concurrency: usize,
     pub replay_buffer: usize,
     pub write_buffer: usize,
 }
@@ -67,8 +67,7 @@ mod tests {
     use commonware_runtime::{deterministic, Metrics, Runner, Spawner};
     use commonware_utils::quorum;
     use futures::{channel::mpsc, StreamExt};
-    use std::time::Duration;
-    use std::{collections::BTreeMap, sync::Arc};
+    use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
     /// Trigger processing of an uninteresting view from the resolver after
     /// jumping ahead to a new finalize view:
@@ -149,7 +148,6 @@ mod tests {
                 notarization_timeout: Duration::from_secs(5),
                 nullify_retry: Duration::from_secs(5),
                 activity_timeout: 10,
-                replay_concurrency: 1,
                 replay_buffer: 1024 * 1024,
                 write_buffer: 1024 * 1024,
             };
@@ -458,7 +456,6 @@ mod tests {
                 notarization_timeout: Duration::from_millis(1000),
                 nullify_retry: Duration::from_millis(1000),
                 activity_timeout,
-                replay_concurrency: 1,
                 replay_buffer: 10240,
                 write_buffer: 10240,
             };

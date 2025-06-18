@@ -7,9 +7,7 @@
 
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use std::error::Error as StdError;
-use std::fmt::Debug;
-use std::future::Future;
+use std::{error::Error as StdError, fmt::Debug, future::Future};
 
 pub mod authenticated;
 pub mod simulated;

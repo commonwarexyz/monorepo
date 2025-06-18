@@ -131,7 +131,6 @@ pub use dealer::Dealer;
 pub mod ops;
 pub mod player;
 pub use player::Player;
-
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -187,17 +186,21 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bls12381::primitives::ops::{
-        partial_sign_proof_of_possession, threshold_signature_recover, verify_proof_of_possession,
+    use crate::{
+        bls12381::primitives::{
+            ops::{
+                partial_sign_proof_of_possession, threshold_signature_recover,
+                verify_proof_of_possession,
+            },
+            poly::public,
+            variant::{MinPk, MinSig, Variant},
+        },
+        ed25519::PrivateKey,
+        PrivateKeyExt as _, Signer as _,
     };
-    use crate::bls12381::primitives::poly::public;
-    use crate::bls12381::primitives::variant::{MinPk, MinSig, Variant};
-    use crate::Signer as _;
-    use crate::{ed25519::PrivateKey, PrivateKeyExt as _};
     use arbiter::Output;
     use commonware_utils::quorum;
-    use rand::rngs::StdRng;
-    use rand::SeedableRng;
+    use rand::{rngs::StdRng, SeedableRng};
     use std::collections::HashMap;
 
     fn run_dkg_and_reshare<V: Variant>(

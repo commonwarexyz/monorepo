@@ -50,12 +50,15 @@ mod gui;
 use clap::{value_parser, Arg, Command};
 use commonware_consensus::simplex;
 use commonware_cryptography::{ed25519, PrivateKeyExt as _, Sha256, Signer as _};
-use commonware_p2p::authenticated::{self, Network};
+use commonware_p2p::authenticated::discovery;
 use commonware_runtime::{tokio, Metrics, Runner};
 use commonware_utils::{union, NZU32};
 use governor::Quota;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::{str::FromStr, time::Duration};
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    str::FromStr,
+    time::Duration,
+};
 
 /// Unique namespace to avoid message replay attacks.
 const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_LOG";
@@ -141,7 +144,7 @@ fn main() {
     let executor = tokio::Runner::new(runtime_cfg.clone());
 
     // Configure network
-    let p2p_cfg = authenticated::Config::aggressive(
+    let p2p_cfg = discovery::Config::aggressive(
         signer.clone(),
         &union(APPLICATION_NAMESPACE, b"_P2P"),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
@@ -153,7 +156,8 @@ fn main() {
     // Start context
     executor.start(async |context| {
         // Initialize network
-        let (mut network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
+        let (mut network, mut oracle) =
+            discovery::Network::new(context.with_label("network"), p2p_cfg);
 
         // Provide authorized peers
         //
@@ -169,13 +173,11 @@ fn main() {
             0,
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
-            Some(3),
         );
         let (resolver_sender, resolver_receiver) = network.register(
             1,
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
-            Some(3),
         );
 
         // Initialize application
@@ -200,7 +202,6 @@ fn main() {
             partition: String::from("log"),
             compression: Some(3),
             mailbox_size: 1024,
-            replay_concurrency: 1,
             replay_buffer: 1024 * 1024,
             write_buffer: 1024 * 1024,
             leader_timeout: Duration::from_secs(1),

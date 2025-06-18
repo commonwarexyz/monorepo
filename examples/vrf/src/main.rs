@@ -83,12 +83,15 @@ use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
     PrivateKeyExt as _, Signer as _,
 };
-use commonware_p2p::authenticated::{self, Network};
+use commonware_p2p::authenticated::discovery;
 use commonware_runtime::{tokio, Metrics, Runner};
 use commonware_utils::{quorum, NZU32};
 use governor::Quota;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::{str::FromStr, time::Duration};
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    str::FromStr,
+    time::Duration,
+};
 use tracing::info;
 
 // Unique namespace to avoid message replay attacks.
@@ -207,7 +210,7 @@ fn main() {
 
     // Configure network
     const MAX_MESSAGE_SIZE: usize = 1024 * 1024; // 1 MB
-    let p2p_cfg = authenticated::Config::aggressive(
+    let p2p_cfg = discovery::Config::aggressive(
         signer.clone(),
         APPLICATION_NAMESPACE,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
@@ -218,7 +221,8 @@ fn main() {
 
     // Start context
     executor.start(|context| async move {
-        let (mut network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
+        let (mut network, mut oracle) =
+            discovery::Network::new(context.with_label("network"), p2p_cfg);
 
         // Provide authorized peers
         //
@@ -247,7 +251,6 @@ fn main() {
 
         // Check if I am the arbiter
         const DEFAULT_MESSAGE_BACKLOG: usize = 256;
-        const COMPRESSION_LEVEL: Option<i32> = Some(3);
         const DKG_FREQUENCY: Duration = Duration::from_secs(10);
         const DKG_PHASE_TIMEOUT: Duration = Duration::from_secs(1);
         if let Some(arbiter) = matches.get_one::<u64>("arbiter") {
@@ -259,7 +262,6 @@ fn main() {
                 handlers::DKG_CHANNEL,
                 Quota::per_second(NZU32!(10)),
                 DEFAULT_MESSAGE_BACKLOG,
-                COMPRESSION_LEVEL,
             );
             let arbiter = PrivateKey::from_seed(*arbiter).public_key();
             let (contributor, requests) = handlers::Contributor::new(
@@ -279,7 +281,6 @@ fn main() {
                 handlers::VRF_CHANNEL,
                 Quota::per_second(NZU32!(10)),
                 DEFAULT_MESSAGE_BACKLOG,
-                None,
             );
             let signer = handlers::Vrf::new(
                 context.with_label("signer"),
@@ -294,7 +295,6 @@ fn main() {
                 handlers::DKG_CHANNEL,
                 Quota::per_second(NZU32!(10)),
                 DEFAULT_MESSAGE_BACKLOG,
-                COMPRESSION_LEVEL,
             );
             let arbiter: handlers::Arbiter<_, PublicKey> = handlers::Arbiter::new(
                 context.with_label("arbiter"),

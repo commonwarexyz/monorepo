@@ -1,4 +1,4 @@
-//! Types used in [`threshold_simplex`](crate::threshold_simplex).
+//! Types used in [crate::threshold_simplex].
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -1700,6 +1700,14 @@ impl<V: Variant, D: Digest> Read for Response<V, D> {
 ///
 /// Some activities issued by consensus are not verified. To determine if an activity has been verified,
 /// use the `verified` method.
+///
+/// # Warning
+///
+/// After collecting `t` [PartialSignature]s for the same [Activity], an attacker can derive
+/// the [PartialSignature] for the `n-t` remaining participants.
+///
+/// For this reason, it is not sound to use [PartialSignature]-backed [Activity] to reward participants
+/// for their contributions (as an attacker, for example, could forge contributions from offline participants).
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub enum Activity<V: Variant, D: Digest> {
     /// A single validator notarize over a proposal

@@ -24,6 +24,7 @@ prometheus-client = { workspace = true }
 futures-util = { workspace = true }
 tracing = { workspace = true }
 zstd = { workspace = true }
+rayon = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
@@ -33,6 +34,11 @@ criterion = { workspace = true }
 [lib]
 bench = false
 crate-type = ["rlib", "cdylib"]
+
+[[bench]]
+name = "adb"
+harness = false
+path = "src/adb/benches/bench.rs"
 
 [[bench]]
 name="archive"

@@ -9,7 +9,7 @@
 
 use crate::{
     adb::{operation::Operation, Error},
-    index::{translator::EightCap, Index, Translator},
+    index::{Index, Translator},
     journal::fixed::{Config as JConfig, Journal},
     mmr::{
         bitmap::Bitmap,
@@ -21,11 +21,11 @@ use crate::{
 };
 use commonware_codec::Encode as _;
 use commonware_cryptography::Hasher as CHasher;
-use commonware_runtime::{Clock, Metrics, Storage as RStorage};
+use commonware_runtime::{Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::Array;
 use futures::{
     future::{try_join_all, TryFutureExt},
-    try_join,
+    pin_mut, try_join, StreamExt,
 };
 use tracing::{debug, warn};
 
@@ -33,9 +33,13 @@ use tracing::{debug, warn};
 /// needed if the caller is providing the optional bitmap.
 const UNUSED_N: usize = 0;
 
+/// The size of the read buffer to use for replaying the operations log when rebuilding the
+/// snapshot.
+const SNAPSHOT_READ_BUFFER_SIZE: usize = 1 << 16;
+
 /// Configuration for an `Any` authenticated db.
 #[derive(Clone)]
-pub struct Config {
+pub struct Config<T: Translator> {
     /// The name of the [RStorage] partition used for the MMR's backing journal.
     pub mmr_journal_partition: String,
 
@@ -56,28 +60,34 @@ pub struct Config {
 
     /// The size of the write buffer to use for each blob in the log journal.
     pub log_write_buffer: usize,
+
+    /// The translator used by the compressed index.
+    pub translator: T,
+
+    /// An optional thread pool to use for parallelizing batch operations.
+    pub pool: Option<ThreadPool>,
 }
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub struct Any<
-    E: RStorage + Clock + Metrics,
-    K: Array,
-    V: Array,
-    H: CHasher,
-    T: Translator = EightCap,
-> {
-    /// An MMR over digests of the operations applied to the db. The number of leaves in this MMR
-    /// always equals the number of operations in the unpruned `log`.
+pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translator> {
+    /// An MMR over digests of the operations applied to the db.
+    ///
+    /// # Invariant
+    ///
+    /// The number of leaves in this MMR always equals the number of operations in the unpruned
+    /// `log`.
     pub(super) ops: Mmr<E, H>,
 
-    /// A (pruned) log of all operations applied to the db in order of occurrence. The position
-    /// of each operation in the log is called its _location_, which is a stable identifier. Pruning
-    /// is indicated by a non-zero value for `pruned_loc`, which provides the location of the first
+    /// A (pruned) log of all operations applied to the db in order of occurrence. The position of
+    /// each operation in the log is called its _location_, which is a stable identifier. Pruning is
+    /// indicated by a non-zero value for `pruned_loc`, which provides the location of the first
     /// operation in the log.
     ///
-    /// Invariant: An operation's location is always equal to the number of the MMR leaf storing the
-    /// digest of the operation.
+    /// # Invariant
+    ///
+    /// An operation's location is always equal to the number of the MMR leaf storing the digest of
+    /// the operation.
     pub(super) log: Journal<E, Operation<K, V>>,
 
     /// A location before which all operations are "inactive" (that is, operations before this point
@@ -85,15 +95,18 @@ pub struct Any<
     pub(super) inactivity_floor_loc: u64,
 
     /// A snapshot of all currently active operations in the form of a map from each key to the
-    /// location in the log containing its most recent update. Only contains the keys that currently
-    /// have a value (that is, deleted keys are not in the map).
+    /// location in the log containing its most recent update.
+    ///
+    /// # Invariant
+    ///
+    /// Only references operations of type Operation::Update.
     pub(super) snapshot: Index<T, u64>,
 
     /// The number of operations that are pending commit.
     pub(super) uncommitted_ops: u64,
 
     /// Cryptographic hasher to re-use within mutable operations requiring digest computation.
-    pub(super) hasher: H,
+    pub(super) hasher: Standard<H>,
 }
 
 /// The result of a database `update` operation.
@@ -111,17 +124,33 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 {
     /// Returns any `Any` adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(context: E, cfg: Config, translator: T) -> Result<Self, Error> {
-        let mut hasher = H::new();
-        let mut snapshot: Index<T, u64> = Index::init(context.with_label("snapshot"), translator);
-        let (mmr, log) = Self::init_mmr_and_log(context, &mut hasher, cfg).await?;
+    pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
+        let mut snapshot: Index<T, u64> =
+            Index::init(context.with_label("snapshot"), cfg.translator.clone());
+        let mut hasher = Standard::<H>::new();
+        let (mmr, log) = Self::init_mmr_and_log(
+            context,
+            Config {
+                mmr_journal_partition: cfg.mmr_journal_partition,
+                mmr_metadata_partition: cfg.mmr_metadata_partition,
+                mmr_items_per_blob: cfg.mmr_items_per_blob,
+                mmr_write_buffer: cfg.mmr_write_buffer,
+                log_journal_partition: cfg.log_journal_partition,
+                log_items_per_blob: cfg.log_items_per_blob,
+                log_write_buffer: cfg.log_write_buffer,
+                translator: cfg.translator,
+                pool: cfg.pool,
+            },
+            &mut hasher,
+        )
+        .await?;
 
         let start_leaf_num = leaf_pos_to_num(mmr.pruned_to_pos()).unwrap();
         let inactivity_floor_loc = Self::build_snapshot_from_log(
             start_leaf_num,
             &log,
             &mut snapshot,
-            None::<(&mut Standard<'_, H>, &mut Bitmap<H, UNUSED_N>)>,
+            None::<&mut Bitmap<H, UNUSED_N>>,
         )
         .await?;
 
@@ -142,18 +171,18 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// db will be as of the last committed operation.
     pub(super) async fn init_mmr_and_log(
         context: E,
-        hasher: &mut H,
-        cfg: Config,
+        cfg: Config<T>,
+        hasher: &mut Standard<H>,
     ) -> Result<(Mmr<E, H>, Journal<E, Operation<K, V>>), Error> {
-        let mut hasher = Standard::new(hasher);
         let mut mmr = Mmr::init(
             context.with_label("mmr"),
-            &mut hasher,
+            hasher,
             MmrConfig {
                 journal_partition: cfg.mmr_journal_partition,
                 metadata_partition: cfg.mmr_metadata_partition,
                 items_per_blob: cfg.mmr_items_per_blob,
                 write_buffer: cfg.mmr_write_buffer,
+                pool: cfg.pool,
             },
         )
         .await?;
@@ -172,15 +201,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         let mut log_size = log.size().await?;
         let mut rewind_leaf_num = log_size;
         while rewind_leaf_num > 0 {
-            let op: Operation<K, V> = log.read(rewind_leaf_num - 1).await?;
-            match op {
-                Operation::Commit(_) => {
-                    break; // floor is our commit indicator
-                }
-                _ => {
-                    rewind_leaf_num -= 1;
-                }
+            if let Operation::Commit(_) = log.read(rewind_leaf_num - 1).await? {
+                break;
             }
+            rewind_leaf_num -= 1;
         }
         if rewind_leaf_num != log_size {
             let op_count = log_size - rewind_leaf_num;
@@ -204,11 +228,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             warn!(op_count, "MMR lags behind log, replaying log to catch up");
             while next_mmr_leaf_num < log_size {
                 let op = log.read(next_mmr_leaf_num).await?;
-                let digest = Self::op_digest(&mut hasher, &op);
-                mmr.add_batched(&mut hasher, &digest).await?;
+                let digest = Self::op_digest(hasher, &op);
+                mmr.add_batched(hasher, &digest).await?;
                 next_mmr_leaf_num += 1;
             }
-            mmr.sync(&mut hasher).await.map_err(Error::MmrError)?;
+            mmr.sync(hasher).await.map_err(Error::MmrError)?;
         }
 
         // At this point the MMR and log should be consistent.
@@ -217,78 +241,71 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         Ok((mmr, log))
     }
 
-    /// Builds the database's snapshot by replaying the log starting at `start_leaf_num`. If a bitmap is
-    /// provided, then a bit is appended for each operation in the operation log, with its value
-    /// reflecting its activity status. The bitmap is expected to already have a number of bits
-    /// corresponding to the portion of the database below the inactivity floor, and this method
-    /// will panic otherwise.
+    /// Builds the database's snapshot by replaying the log starting at `start_leaf_num`.
+    ///
+    /// If a bitmap is provided, then a bit is appended for each operation in the operation log,
+    /// with its value reflecting its activity status. The bitmap is expected to already have a
+    /// number of bits corresponding to the portion of the database below the inactivity floor, and
+    /// this method will panic otherwise. The caller is responsible for syncing any changes made to
+    /// the bitmap.
     pub(super) async fn build_snapshot_from_log<const N: usize>(
         start_leaf_num: u64,
         log: &Journal<E, Operation<K, V>>,
         snapshot: &mut Index<T, u64>,
-        mut bitmap: Option<(&mut impl Hasher<H>, &mut Bitmap<H, N>)>,
+        mut bitmap: Option<&mut Bitmap<H, N>>,
     ) -> Result<u64, Error> {
         let mut inactivity_floor_loc = start_leaf_num;
-        let log_size = log.size().await?;
-        if let Some((_, ref bitmap)) = bitmap {
+        if let Some(ref bitmap) = bitmap {
             assert_eq!(start_leaf_num, bitmap.bit_count());
         }
 
-        // TODO: Because all operations are idempotent, we could potentially parallelize this via
-        // replay_all by keeping track of the location of each operation and only applying it if it
-        // is more recent than the last operation for the same key.
-        for i in start_leaf_num..log_size {
-            let op: Operation<K, V> = log.read(i).await?;
-            match op {
-                Operation::Deleted(key) => {
-                    // If the translated key is in the snapshot, get a cursor to look for the key.
-                    if let Some(mut cursor) = snapshot.get_mut(&key) {
-                        while let Some(loc) = cursor.next() {
-                            let op = log.read(*loc).await?;
-                            let Some(op_key) = op.to_key() else {
-                                // This is a commit
-                                continue;
-                            };
-                            if *op_key != key {
-                                // This operation is not for the key we're looking for.
-                                continue;
+        let stream = log
+            .replay(SNAPSHOT_READ_BUFFER_SIZE, start_leaf_num)
+            .await?;
+        pin_mut!(stream);
+        while let Some(result) = stream.next().await {
+            match result {
+                Err(e) => {
+                    return Err(Error::JournalError(e));
+                }
+                Ok((i, op)) => {
+                    match op {
+                        Operation::Deleted(key) => {
+                            let result =
+                                Any::<E, K, V, H, T>::delete_key(snapshot, log, &key, i).await?;
+                            if let Some(ref mut bitmap) = bitmap {
+                                // Mark previous location (if any) of the deleted key as inactive.
+                                if let Some(old_loc) = result {
+                                    bitmap.set_bit(old_loc, false);
+                                }
                             }
-
-                            // The mapped key is the same; delete it from the snapshot.
-                            if let Some((_, ref mut bitmap)) = bitmap {
-                                bitmap.set_bit(*loc, false);
+                        }
+                        Operation::Update(key, _) => {
+                            let result =
+                                Any::<E, K, V, H, T>::update_loc(snapshot, log, key, None, i)
+                                    .await?;
+                            if let Some(ref mut bitmap) = bitmap {
+                                match result {
+                                    UpdateResult::NoOp => unreachable!("unexpected no-op update"),
+                                    UpdateResult::Inserted(_) => bitmap.append(true),
+                                    UpdateResult::Updated(old_loc, _) => {
+                                        bitmap.set_bit(old_loc, false);
+                                        bitmap.append(true);
+                                    }
+                                }
                             }
-                            cursor.delete();
-                            break;
+                        }
+                        Operation::Commit(loc) => inactivity_floor_loc = loc,
+                    }
+                    if let Some(ref mut bitmap) = bitmap {
+                        // If we reach this point and a bit hasn't been added for the operation, then it's
+                        // an inactive operation and we need to tag it as such in the bitmap.
+                        if bitmap.bit_count() == i {
+                            bitmap.append(false);
                         }
                     }
                 }
-                Operation::Update(key, _) => {
-                    let update_result =
-                        Any::<E, K, V, H, T>::update_loc(snapshot, log, key, None, i).await?;
-                    if let Some((_, ref mut bitmap)) = bitmap {
-                        match update_result {
-                            UpdateResult::NoOp => unreachable!("unexpected no-op update"),
-                            UpdateResult::Inserted(_) => bitmap.append(true),
-                            UpdateResult::Updated(old_loc, _) => {
-                                bitmap.set_bit(old_loc, false);
-                                bitmap.append(true);
-                            }
-                        }
-                    }
-                }
-                Operation::Commit(loc) => inactivity_floor_loc = loc,
             }
-            if let Some((_, ref mut bitmap)) = bitmap {
-                // If we reach this point and a bit hasn't been added for the operation, then it's
-                // an inactive operation and we need to tag it as such in the bitmap.
-                if bitmap.bit_count() == i {
-                    bitmap.append(false);
-                }
-            }
-        }
-        if let Some((ref mut hasher, ref mut bitmap)) = bitmap {
-            bitmap.sync(*hasher).await?;
         }
 
         Ok(inactivity_floor_loc)
@@ -296,8 +313,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
     /// Update the location of `key` to `new_loc` in the snapshot and return its old location, or
     /// insert it if the key isn't already present. If a `value` is provided, then it is used to see
-    /// if the key is already assigned that value, in which case this is a no-op, and `None` is
-    /// returned.
+    /// if the key is already assigned that value, in which case there is no update and
+    /// UpdateResult::NoOp is returned.
     async fn update_loc(
         snapshot: &mut Index<T, u64>,
         log: &Journal<E, Operation<K, V>>,
@@ -312,33 +329,42 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         };
 
         // Iterate over conflicts in the snapshot.
-        while let Some(loc) = cursor.next() {
-            let op = log.read(*loc).await?;
-            let Some(op_key) = op.to_key() else {
-                // This is a commit
-                continue;
-            };
-            if *op_key != key {
-                // This operation is not for the key we're looking for.
-                continue;
-            }
-
-            if let Some(v) = value {
-                if op.to_value().unwrap() == v {
-                    // The key value is the same as the previous one: treat as a no-op.
-                    return Ok(UpdateResult::NoOp);
+        while let Some(&loc) = cursor.next() {
+            let (k, v) = Self::get_update_op(log, loc).await?;
+            if k == key {
+                // Found the key in the snapshot.
+                if let Some(value) = value {
+                    if v == *value {
+                        // The key value is the same as the previous one: treat as a no-op.
+                        return Ok(UpdateResult::NoOp);
+                    }
                 }
-            }
 
-            // Update the location of the matching operation in the snapshot.
-            let old_loc = *loc;
-            cursor.update(new_loc);
-            return Ok(UpdateResult::Updated(old_loc, new_loc));
+                // Update its location to the given one.
+                assert!(new_loc > loc);
+                cursor.update(new_loc);
+                return Ok(UpdateResult::Updated(loc, new_loc));
+            }
         }
 
         // The key wasn't in the snapshot, so add it to the cursor.
         cursor.insert(new_loc);
         Ok(UpdateResult::Inserted(new_loc))
+    }
+
+    /// Get the update operation corresponding to a location from the snapshot.
+    ///
+    /// # Warning
+    ///
+    /// Panics if the location does not reference an update operation. This should never happen
+    /// unless the snapshot is buggy, or this method is being used to look up an operation
+    /// independent of the snapshot contents.
+    async fn get_update_op(log: &Journal<E, Operation<K, V>>, loc: u64) -> Result<(K, V), Error> {
+        let Operation::Update(k, v) = log.read(loc).await? else {
+            panic!("location does not reference update operation. loc={}", loc);
+        };
+
+        Ok((k, v))
     }
 
     /// Return a digest of the operation.
@@ -354,20 +380,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// Get the value & location of the active operation for `key` in the db, or None if it has no
     /// value.
     pub(super) async fn get_with_loc(&self, key: &K) -> Result<Option<(V, u64)>, Error> {
-        for loc in self.snapshot.get(key) {
-            let op = self.log.read(*loc).await?;
-            match op {
-                Operation::Update(k, v) => {
-                    if k == *key {
-                        return Ok(Some((v, *loc)));
-                    }
-                }
-                _ => {
-                    unreachable!(
-                        "snapshot should only reference update operations. key={}",
-                        key
-                    );
-                }
+        for &loc in self.snapshot.get(key) {
+            let (k, v) = Self::get_update_op(&self.log, loc).await?;
+            if k == *key {
+                return Ok(Some((v, loc)));
             }
         }
 
@@ -419,34 +435,38 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// The operation is reflected in the snapshot, but will be subject to rollback until the next
     /// successful `commit`. Returns the location of the deleted value for the key (if any).
     pub async fn delete(&mut self, key: K) -> Result<Option<u64>, Error> {
-        // If the translated key is in the snapshot, get a cursor to look for the key.
-        let Some(mut cursor) = self.snapshot.get_mut(&key) else {
-            return Ok(None);
+        let loc = self.op_count();
+        let r = Self::delete_key(&mut self.snapshot, &self.log, &key, loc).await?;
+        if r.is_some() {
+            self.apply_op(Operation::Deleted(key)).await?;
         };
 
+        Ok(r)
+    }
+
+    /// Delete `key` from the snapshot if it exists, returning the location that was previously
+    /// associated with it.
+    async fn delete_key(
+        snapshot: &mut Index<T, u64>,
+        log: &Journal<E, Operation<K, V>>,
+        key: &K,
+        delete_loc: u64,
+    ) -> Result<Option<u64>, Error> {
+        // If the translated key is in the snapshot, get a cursor to look for the key.
+        let Some(mut cursor) = snapshot.get_mut(key) else {
+            return Ok(None);
+        };
         // Iterate over all conflicting keys in the snapshot.
-        while let Some(loc) = cursor.next() {
-            let op = self.log.read(*loc).await?;
-            match op {
-                Operation::Update(k, _) => {
-                    if k == key {
-                        // The key is in the snapshot, so delete it.
-                        //
-                        // If there are no longer any conflicting keys in the cursor, it will
-                        // automatically be removed from the snapshot.
-                        let old_loc = *loc;
-                        cursor.delete();
-                        drop(cursor);
-                        self.apply_op(Operation::Deleted(key)).await?;
-                        return Ok(Some(old_loc));
-                    }
-                }
-                _ => {
-                    unreachable!(
-                        "snapshot should only reference update operations. key={}",
-                        key
-                    );
-                }
+        while let Some(&loc) = cursor.next() {
+            let (k, _) = Self::get_update_op(log, loc).await?;
+            if k == *key {
+                // The key is in the snapshot, so delete it.
+                //
+                // If there are no longer any conflicting keys in the cursor, it will
+                // automatically be removed from the snapshot.
+                assert!(loc < delete_loc);
+                cursor.delete();
+                return Ok(Some(loc));
             }
         }
 
@@ -467,9 +487,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// `commit` method must be called to make any applied operation persistent & recoverable.
     pub(super) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<u64, Error> {
         // Update the ops MMR.
-        let mut hasher = Standard::new(&mut self.hasher);
-        let digest = Self::op_digest(&mut hasher, &op);
-        self.ops.add_batched(&mut hasher, &digest).await?;
+        let digest = Self::op_digest(&mut self.hasher, &op);
+        self.ops.add_batched(&mut self.hasher, &digest).await?;
         self.uncommitted_ops += 1;
 
         // Append the operation to the log.
@@ -517,7 +536,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
     /// the log with the provided root.
     pub async fn verify_proof(
-        hasher: &mut H,
+        hasher: &mut Standard<H>,
         proof: &Proof<H>,
         start_loc: u64,
         ops: &[Operation<K, V>],
@@ -527,21 +546,21 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         let end_loc = start_loc + ops.len() as u64 - 1;
         let end_pos = leaf_num_to_pos(end_loc);
 
-        let mut hasher = Standard::new(hasher);
         let digests = ops
             .iter()
-            .map(|op| Any::<E, _, _, _, T>::op_digest(&mut hasher, op))
+            .map(|op| Any::<E, _, _, _, T>::op_digest(hasher, op))
             .collect::<Vec<_>>();
 
         proof
-            .verify_range_inclusion(&mut hasher, digests, start_pos, end_pos, root_digest)
+            .verify_range_inclusion(hasher, digests, start_pos, end_pos, root_digest)
             .await
             .map_err(Error::MmrError)
     }
 
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
     /// upon return from this function. Also raises the inactivity floor according to the schedule,
-    /// and prunes those operations below it.
+    /// and prunes those operations below it. Batch operations will be parallelized if a thread pool
+    /// is provided.
     pub async fn commit(&mut self) -> Result<(), Error> {
         // Raise the inactivity floor by the # of uncommitted operations, plus 1 to account for the
         // commit op that will be appended.
@@ -556,30 +575,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         self.prune_inactive().await
     }
 
-    /// Sync the db to disk ensuring the current state is persisted.
+    /// Sync the db to disk ensuring the current state is persisted. Batch operations will be
+    /// parallelized if a thread pool is provided.
     pub(super) async fn sync(&mut self) -> Result<(), Error> {
-        let mut hasher = Standard::new(&mut self.hasher);
         try_join!(
             self.log.sync().map_err(Error::JournalError),
-            self.ops.sync(&mut hasher).map_err(Error::MmrError),
-        )?;
-
-        Ok(())
-    }
-
-    /// Close the db. Operations that have not been committed will be lost.
-    pub async fn close(mut self) -> Result<(), Error> {
-        if self.uncommitted_ops > 0 {
-            warn!(
-                op_count = self.uncommitted_ops,
-                "closing db with uncommitted operations"
-            );
-        }
-
-        let mut hasher = Standard::new(&mut self.hasher);
-        try_join!(
-            self.log.close().map_err(Error::JournalError),
-            self.ops.close(&mut hasher).map_err(Error::MmrError),
+            self.ops.sync(&mut self.hasher).map_err(Error::MmrError),
         )?;
 
         Ok(())
@@ -604,8 +605,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         };
 
         // Iterate over all conflicting keys in the snapshot.
-        while let Some(loc) = cursor.next() {
-            if *loc == old_loc {
+        while let Some(&loc) = cursor.next() {
+            if loc == old_loc {
                 // Update the location of the operation in the snapshot.
                 cursor.update(new_loc);
                 drop(cursor);
@@ -658,12 +659,38 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
         // Prune the MMR, whose pruning boundary serves as the "source of truth" for proving.
         let prune_to_pos = leaf_num_to_pos(self.inactivity_floor_loc);
-        let mut hasher = Standard::new(&mut self.hasher);
-        self.ops.prune_to_pos(&mut hasher, prune_to_pos).await?;
+        self.ops
+            .prune_to_pos(&mut self.hasher, prune_to_pos)
+            .await?;
 
         // Because the log's pruning boundary will be blob-size aligned, we cannot use it as a
         // source of truth for the min provable element.
         self.log.prune(self.inactivity_floor_loc).await?;
+
+        Ok(())
+    }
+
+    /// Close the db. Operations that have not been committed will be lost.
+    pub async fn close(mut self) -> Result<(), Error> {
+        if self.uncommitted_ops > 0 {
+            warn!(
+                op_count = self.uncommitted_ops,
+                "closing db with uncommitted operations"
+            );
+        }
+
+        try_join!(
+            self.log.close().map_err(Error::JournalError),
+            self.ops.close(&mut self.hasher).map_err(Error::MmrError),
+        )?;
+
+        Ok(())
+    }
+
+    /// Destroy the db, removing all data from disk.
+    pub async fn destroy(self) -> Result<(), Error> {
+        self.log.destroy().await?;
+        self.ops.destroy().await?;
 
         Ok(())
     }
@@ -675,9 +702,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         self.apply_op(Operation::Commit(self.inactivity_floor_loc))
             .await?;
         self.log.close().await?;
-        let mut hasher = Standard::new(&mut self.hasher);
         self.ops
-            .simulate_partial_sync(&mut hasher, write_limit)
+            .simulate_partial_sync(&mut self.hasher, write_limit)
             .await?;
 
         Ok(())
@@ -689,8 +715,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     pub async fn simulate_failed_commit_log(mut self) -> Result<(), Error> {
         self.apply_op(Operation::Commit(self.inactivity_floor_loc))
             .await?;
-        let mut hasher = Standard::new(&mut self.hasher);
-        self.ops.close(&mut hasher).await?;
+        self.ops.close(&mut self.hasher).await?;
         // Rewind the operation log over the commit op to force rollback to the previous commit.
         self.log.rewind(self.log.size().await? - 1).await?;
         self.log.close().await?;
@@ -718,7 +743,7 @@ mod test {
 
     const SHA256_SIZE: usize = <Sha256 as CHasher>::Digest::SIZE;
 
-    fn any_db_config(suffix: &str) -> Config {
+    fn any_db_config<T: Translator>(suffix: &str, translator: T) -> Config<T> {
         Config {
             mmr_journal_partition: format!("journal_{}", suffix),
             mmr_metadata_partition: format!("metadata_{}", suffix),
@@ -727,6 +752,8 @@ mod test {
             log_journal_partition: format!("log_journal_{}", suffix),
             log_items_per_blob: 7,
             log_write_buffer: 1024,
+            translator,
+            pool: None,
         }
     }
 
@@ -736,8 +763,7 @@ mod test {
     ) -> Any<E, Digest, Digest, Sha256, EightCap> {
         Any::<E, Digest, Digest, Sha256, EightCap>::init(
             context,
-            any_db_config("partition"),
-            EightCap,
+            any_db_config("partition", EightCap),
         )
         .await
         .unwrap()
@@ -748,8 +774,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = open_db(context.clone()).await;
-            let mut hasher = Sha256::new();
-            let mut hasher = Standard::new(&mut hasher);
+            let mut hasher = Standard::<Sha256>::new();
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.oldest_retained_loc(), None);
             assert!(matches!(db.prune_inactive().await, Ok(())));
@@ -778,6 +803,8 @@ mod test {
                 db.commit().await.unwrap();
                 assert_eq!(db.op_count() - 1, db.inactivity_floor_loc);
             }
+
+            db.destroy().await.unwrap();
         });
     }
 
@@ -787,8 +814,7 @@ mod test {
         executor.start(|context| async move {
             // Build a db with 2 keys and make sure updates and deletions of those keys work as
             // expected.
-            let mut hasher = Sha256::new();
-            let mut hasher = Standard::new(&mut hasher);
+            let mut hasher = Standard::<Sha256>::new();
             let mut db = open_db(context.clone()).await;
 
             let d1 = Sha256::fill(1u8);
@@ -917,6 +943,8 @@ mod test {
             assert_eq!(db.snapshot.keys(), 2);
             assert_eq!(db.root(&mut hasher), root);
             assert_eq!(db.inactivity_floor_loc, db.oldest_retained_loc().unwrap());
+
+            db.destroy().await.unwrap();
         });
     }
 
@@ -927,8 +955,7 @@ mod test {
         // confirm that the end state of the db matches that of an identically updated hashmap.
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
-            let mut hasher = Sha256::new();
-            let mut hasher = Standard::new(&mut hasher);
+            let mut hasher = Standard::<Sha256>::new();
             let mut db = open_db(context.clone()).await;
 
             let mut map = HashMap::<Digest, Digest>::default();
@@ -1015,12 +1042,11 @@ mod test {
             let root = db.root(&mut hasher);
             assert!(start_loc < db.inactivity_floor_loc);
 
-            let mut c_hasher = Sha256::new();
             for i in start_loc..end_loc {
                 let (proof, log) = db.proof(i, max_ops).await.unwrap();
                 assert!(
                     Any::<deterministic::Context, _, _, _, EightCap>::verify_proof(
-                        &mut c_hasher,
+                        &mut hasher,
                         &proof,
                         i,
                         &log,
@@ -1030,6 +1056,8 @@ mod test {
                     .unwrap()
                 );
             }
+
+            db.destroy().await.unwrap();
         });
     }
 
@@ -1037,8 +1065,7 @@ mod test {
     pub fn test_any_db_recovery() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Sha256::new();
-            let mut hasher = Standard::new(&mut hasher);
+            let mut hasher = Standard::<Sha256>::new();
             let mut db = open_db(context.clone()).await;
 
             // Insert 1000 keys then sync.
@@ -1079,13 +1106,13 @@ mod test {
             let db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 2001);
             assert_eq!(db.root(&mut hasher), root);
-            db.close().await.unwrap();
+
+            db.destroy().await.unwrap();
 
             // Recreate the database without any failures and make sure the roots match.
             let mut new_db = Any::<_, Digest, Digest, Sha256, EightCap>::init(
                 context,
-                any_db_config("new_partition"),
-                EightCap,
+                any_db_config("new_partition", EightCap),
             )
             .await
             .unwrap();
@@ -1109,6 +1136,8 @@ mod test {
             new_db.sync().await.unwrap();
             assert_eq!(new_db.op_count(), 2001);
             assert_eq!(new_db.root(&mut hasher), root);
+
+            new_db.destroy().await.unwrap();
         });
     }
 
@@ -1118,8 +1147,7 @@ mod test {
     pub fn test_any_db_log_replay() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Sha256::new();
-            let mut hasher = Standard::new(&mut hasher);
+            let mut hasher = Standard::<Sha256>::new();
             let mut db = open_db(context.clone()).await;
 
             // Update the same key many times.
@@ -1138,6 +1166,8 @@ mod test {
             let iter = db.snapshot.get(&k);
             assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
             assert_eq!(db.root(&mut hasher), root);
+
+            db.destroy().await.unwrap();
         });
     }
 
@@ -1145,8 +1175,7 @@ mod test {
     pub fn test_any_db_multiple_commits_delete_gets_replayed() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Sha256::new();
-            let mut hasher = Standard::new(&mut hasher);
+            let mut hasher = Standard::<Sha256>::new();
             let mut db = open_db(context.clone()).await;
 
             let mut map = HashMap::<Digest, Digest>::default();
@@ -1175,6 +1204,8 @@ mod test {
             let db = open_db(context.clone()).await;
             assert_eq!(root_digest, db.root(&mut hasher));
             assert!(db.get(&k).await.unwrap().is_none());
+
+            db.destroy().await.unwrap();
         });
     }
 
@@ -1193,8 +1224,7 @@ mod test {
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Sha256::new();
-            let mut hasher = Standard::new(&mut hasher);
+            let mut hasher = Standard::<Sha256>::new();
             let mut db = open_db(context.clone()).await;
 
             for i in 0u64..ELEMENTS {
@@ -1232,29 +1262,26 @@ mod test {
             db.close().await.unwrap();
 
             // Initialize the db's mmr/log.
-            let cfg = any_db_config("partition");
+            let cfg = any_db_config("partition", TwoCap);
             let (mmr, log) = Any::<_, Digest, Digest, _, TwoCap>::init_mmr_and_log(
                 context.clone(),
-                hasher.inner(),
                 cfg,
+                &mut hasher,
             )
             .await
             .unwrap();
             let start_leaf_num = leaf_pos_to_num(mmr.pruned_to_pos()).unwrap();
 
-            // Replay log to populate the bitmap.  Use a TwoCap instead of
-            // EightCap here so we exercise some collisions.
+            // Replay log to populate the bitmap. Use a TwoCap instead of EightCap here so we exercise some collisions.
             let mut snapshot: Index<TwoCap, u64> =
                 Index::init(context.with_label("snapshot"), TwoCap);
-            let inactivity_floor_loc =
-                Any::<_, _, _, Sha256, TwoCap>::build_snapshot_from_log::<SHA256_SIZE>(
-                    start_leaf_num,
-                    &log,
-                    &mut snapshot,
-                    Some((&mut hasher, &mut bitmap)),
-                )
-                .await
-                .unwrap();
+            let inactivity_floor_loc = Any::<_, _, _, Sha256, TwoCap>::build_snapshot_from_log::<
+                SHA256_SIZE,
+            >(
+                start_leaf_num, &log, &mut snapshot, Some(&mut bitmap)
+            )
+            .await
+            .unwrap();
 
             // Check the recovered state is correct.
             let db = Any::<_, _, _, _, TwoCap> {
@@ -1263,7 +1290,7 @@ mod test {
                 snapshot,
                 inactivity_floor_loc,
                 uncommitted_ops: 0,
-                hasher: Sha256::new(),
+                hasher: Standard::<Sha256>::new(),
             };
             assert_eq!(db.root(&mut hasher), root);
 
@@ -1294,6 +1321,8 @@ mod test {
                     assert!(!bitmap.get_bit(pos));
                 }
             }
+
+            db.destroy().await.unwrap();
         });
     }
 }
