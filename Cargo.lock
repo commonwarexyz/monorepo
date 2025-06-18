@@ -996,8 +996,18 @@ name = "commonware-codec"
 version = "0.0.54"
 dependencies = [
  "bytes",
+ "commonware-codec-derive",
  "paste",
  "thiserror 2.0.12",
+]
+
+[[package]]
+name = "commonware-codec-derive"
+version = "0.0.54"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.98",
 ]
 
 [[package]]

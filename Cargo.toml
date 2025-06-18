@@ -2,6 +2,7 @@
 members = [
     "broadcast",
     "codec",
+    "codec-derive",
     "consensus",
     "cryptography",
     "deployer",
