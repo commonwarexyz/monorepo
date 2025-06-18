@@ -101,7 +101,7 @@ impl<
                     let sent_messages = self.sent_messages.clone();
                     let received_messages = self.received_messages.clone();
                     let rate_limited = self.rate_limited.clone();
-                    let tracker = tracker.clone();
+                    let mut tracker = tracker.clone();
                     let mut router = router.clone();
 
                     // Spawn peer
@@ -110,7 +110,7 @@ impl<
                         .spawn(move |context| async move {
                             // Create peer
                             debug!(?peer, "peer started");
-                            let (actor, messenger) = peer::Actor::new(
+                            let (peer_actor, peer_mailbox, messenger) = peer::Actor::new(
                                 context,
                                 peer::Config {
                                     ping_frequency: self.ping_frequency,
@@ -120,19 +120,23 @@ impl<
                                     rate_limited,
                                     mailbox_size: self.mailbox_size,
                                 },
-                                reservation,
                             );
 
                             // Register peer with the router
                             let channels = router.ready(peer.clone(), messenger).await;
 
+                            // Register peer with tracker
+                            tracker.connect(peer.clone(), peer_mailbox).await;
+
                             // Run peer
-                            let e = actor.run(peer.clone(), connection, tracker, channels).await;
+                            let e = peer_actor.run(peer.clone(), connection, channels).await;
                             connections.dec();
 
                             // Let the router know the peer has exited
                             debug!(error = ?e, ?peer, "peer shutdown");
                             router.release(peer).await;
+                            // Release the reservation
+                            drop(reservation)
                         });
                 }
             }
