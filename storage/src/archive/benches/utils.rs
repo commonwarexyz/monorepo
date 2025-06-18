@@ -20,9 +20,6 @@ const WRITE_BUFFER: usize = 1024;
 /// Section-mask that yields reasonably small blobs for local testing.
 const SECTION_MASK: u64 = 0xffff_ffff_ffff_ff00u64;
 
-/// Number of blobs to read concurrently during replay.
-const REPLAY_CONCURRENCY: usize = 1;
-
 /// Number of bytes to buffer when replaying.
 const REPLAY_BUFFER: usize = 1024 * 1024; // 1MB
 
@@ -45,7 +42,6 @@ pub async fn get_archive(ctx: Context, compression: Option<u8>) -> ArchiveType {
         section_mask: SECTION_MASK,
         pending_writes: PENDING_WRITES,
         write_buffer: WRITE_BUFFER,
-        replay_concurrency: REPLAY_CONCURRENCY,
         replay_buffer: REPLAY_BUFFER,
     };
     Archive::init(ctx, cfg).await.unwrap()

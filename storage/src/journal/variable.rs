@@ -57,7 +57,8 @@
 //!
 //! During application initialization, it is very common to replay data from `Journal` to recover
 //! some in-memory state. `Journal` is heavily optimized for this pattern and provides a `replay`
-//! method that iterates over multiple `sections` concurrently in a single stream.
+//! method to produce a stream of all items in the `Journal` in order of their `section` and
+//! `offset`.
 //!
 //! # Exact Reads
 //!
@@ -68,10 +69,10 @@
 //!
 //! # Compression
 //!
-//! `Journal` supports optional compression using `zstd`. This can be enabled by setting
-//! the `compression` field in the `Config` struct to a valid `zstd` compression level. This setting
-//! can be changed between initializations of `Journal`, however, it must remain populated if any
-//! data was written with compression enabled.
+//! `Journal` supports optional compression using `zstd`. This can be enabled by setting the
+//! `compression` field in the `Config` struct to a valid `zstd` compression level. This setting can
+//! be changed between initializations of `Journal`, however, it must remain populated if any data
+//! was written with compression enabled.
 //!
 //! # Example
 //!
@@ -375,7 +376,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         Ok(item)
     }
 
-    /// Returns an unordered stream of all items in the journal.
+    /// Returns an ordered stream of all items in the journal.
     ///
     /// # Repair
     ///
@@ -383,15 +384,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// and [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
     /// the first invalid data read will be considered the new end of the journal (and the underlying [Blob] will be truncated to the last
     /// valid item).
-    ///
-    /// # Concurrency
-    ///
-    /// The `concurrency` parameter controls how many blobs are replayed concurrently. This can dramatically
-    /// speed up the replay process if the underlying storage supports concurrent reads across different
-    /// blobs.
     pub async fn replay(
         &self,
-        concurrency: usize,
         buffer: usize,
     ) -> Result<impl Stream<Item = Result<(u64, u32, u32, V), Error>> + '_, Error> {
         // Collect all blobs to replay
@@ -411,11 +405,11 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             ));
         }
 
-        // Replay all blobs concurrently and stream items as they are read (to avoid
-        // occupying too much memory with buffered data)
-        Ok(stream::iter(blobs)
-            .map(
-                move |(section, blob, max_offset, blob_size, codec_config, compressed)| async move {
+        // Replay all blobs in order and stream items as they are read (to avoid occupying too much
+        // memory with buffered data)
+        Ok(
+            stream::iter(blobs).flat_map(
+                move |(section, blob, max_offset, blob_size, codec_config, compressed)| {
                     // Created buffered reader
                     let reader = Read::new(blob, blob_size, buffer);
 
@@ -511,9 +505,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                         },
                     )
                 },
-            )
-            .buffer_unordered(concurrency)
-            .flatten())
+            ),
+        )
     }
 
     /// Appends an item to `Journal` in a given `section`, returning the offset
@@ -745,10 +738,7 @@ mod tests {
 
             // Replay the journal and collect items
             let mut items = Vec::new();
-            let stream = journal
-                .replay(1, 1024)
-                .await
-                .expect("unable to setup replay");
+            let stream = journal.replay(1024).await.expect("unable to setup replay");
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 match result {
@@ -814,10 +804,7 @@ mod tests {
             // Replay the journal and collect items
             let mut items = Vec::<(u64, u32)>::new();
             {
-                let stream = journal
-                    .replay(2, 1024)
-                    .await
-                    .expect("unable to setup replay");
+                let stream = journal.replay(1024).await.expect("unable to setup replay");
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
@@ -901,10 +888,7 @@ mod tests {
             // Replay the journal and collect items
             let mut items = Vec::<(u64, u64)>::new();
             {
-                let stream = journal
-                    .replay(1, 1024)
-                    .await
-                    .expect("unable to setup replay");
+                let stream = journal.replay(1024).await.expect("unable to setup replay");
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
@@ -1006,10 +990,7 @@ mod tests {
                 .expect("Failed to initialize journal");
 
             // Attempt to replay the journal
-            let stream = journal
-                .replay(1, 1024)
-                .await
-                .expect("unable to setup replay");
+            let stream = journal.replay(1024).await.expect("unable to setup replay");
             pin_mut!(stream);
             let mut items = Vec::<(u64, u64)>::new();
             while let Some(result) = stream.next().await {
@@ -1062,10 +1043,7 @@ mod tests {
                 .expect("Failed to initialize journal");
 
             // Attempt to replay the journal
-            let stream = journal
-                .replay(1, 1024)
-                .await
-                .expect("unable to setup replay");
+            let stream = journal.replay(1024).await.expect("unable to setup replay");
             pin_mut!(stream);
             let mut items = Vec::<(u64, u64)>::new();
             while let Some(result) = stream.next().await {
@@ -1128,10 +1106,7 @@ mod tests {
             // Attempt to replay the journal
             //
             // This will truncate the leftover bytes from our manual write.
-            let stream = journal
-                .replay(1, 1024)
-                .await
-                .expect("unable to setup replay");
+            let stream = journal.replay(1024).await.expect("unable to setup replay");
             pin_mut!(stream);
             let mut items = Vec::<(u64, u64)>::new();
             while let Some(result) = stream.next().await {
@@ -1199,10 +1174,7 @@ mod tests {
 
             // Attempt to replay the journal
             {
-                let stream = journal
-                    .replay(1, 1024)
-                    .await
-                    .expect("unable to setup replay");
+                let stream = journal.replay(1024).await.expect("unable to setup replay");
                 pin_mut!(stream);
                 let mut items = Vec::<(u64, u64)>::new();
                 while let Some(result) = stream.next().await {
@@ -1278,10 +1250,7 @@ mod tests {
             // Attempt to replay the journal
             let mut items = Vec::<(u64, u32)>::new();
             {
-                let stream = journal
-                    .replay(1, 1024)
-                    .await
-                    .expect("unable to setup replay");
+                let stream = journal.replay(1024).await.expect("unable to setup replay");
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
@@ -1316,10 +1285,7 @@ mod tests {
             // Attempt to replay the journal
             let mut items = Vec::<(u64, u32)>::new();
             {
-                let stream = journal
-                    .replay(1, 1024)
-                    .await
-                    .expect("unable to setup replay");
+                let stream = journal.replay(1024).await.expect("unable to setup replay");
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
@@ -1368,10 +1334,7 @@ mod tests {
             // Attempt to replay the journal
             let mut items = Vec::<(u64, u32)>::new();
             {
-                let stream = journal
-                    .replay(1, 1024)
-                    .await
-                    .expect("unable to setup replay");
+                let stream = journal.replay(1024).await.expect("unable to setup replay");
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
@@ -1448,10 +1411,7 @@ mod tests {
             // Attempt to replay the journal
             let mut items = Vec::<(u64, u64)>::new();
             {
-                let stream = journal
-                    .replay(1, 1024)
-                    .await
-                    .expect("unable to setup replay");
+                let stream = journal.replay(1024).await.expect("unable to setup replay");
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
@@ -1500,10 +1460,7 @@ mod tests {
             // Attempt to replay the journal
             let mut items = Vec::<(u64, u64)>::new();
             {
-                let stream = journal
-                    .replay(1, 1024)
-                    .await
-                    .expect("unable to setup replay");
+                let stream = journal.replay(1024).await.expect("unable to setup replay");
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
@@ -1580,10 +1537,7 @@ mod tests {
 
             // Attempt to replay the journal
             let mut items = Vec::<(u64, i32)>::new();
-            let stream = journal
-                .replay(1, 1024)
-                .await
-                .expect("unable to setup replay");
+            let stream = journal.replay(1024).await.expect("unable to setup replay");
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 match result {
