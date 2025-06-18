@@ -1,13 +1,13 @@
-use super::{
-    ingress::{Mailbox, Message},
-    Config,
-};
-use crate::authenticated::discovery::{
-    actors::{
-        peer, router,
-        tracker::{self, Metadata},
+use super::{ingress::Message, Config};
+use crate::authenticated::{
+    discovery::{
+        actors::{
+            peer, router,
+            tracker::{self, Metadata},
+        },
+        metrics,
     },
-    metrics,
+    Mailbox,
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
@@ -48,7 +48,8 @@ impl<
         C: PublicKey,
     > Actor<E, Si, St, C>
 {
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<E, Si, St, C>) {
+    #[allow(clippy::type_complexity)]
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<E, Si, St, C>>) {
         let connections = Gauge::default();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
@@ -92,13 +93,17 @@ impl<
 
     pub fn start(
         mut self,
-        tracker: tracker::Mailbox<E, C>,
-        router: router::Mailbox<C>,
+        tracker: Mailbox<tracker::Message<E, C>>,
+        router: Mailbox<router::Message<C>>,
     ) -> Handle<()> {
         self.context.spawn_ref()(self.run(tracker, router))
     }
 
-    async fn run(mut self, tracker: tracker::Mailbox<E, C>, router: router::Mailbox<C>) {
+    async fn run(
+        mut self,
+        tracker: Mailbox<tracker::Message<E, C>>,
+        router: Mailbox<router::Message<C>>,
+    ) {
         while let Some(msg) = self.receiver.next().await {
             match msg {
                 Message::Spawn {

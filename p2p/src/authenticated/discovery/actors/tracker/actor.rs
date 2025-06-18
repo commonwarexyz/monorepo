@@ -1,11 +1,11 @@
 use super::{
     directory::{self, Directory},
-    ingress::{Mailbox, Message, Oracle},
+    ingress::{Message, Oracle},
     Config, Error,
 };
 use crate::authenticated::{
     discovery::{actors::tracker::ingress::Releaser, types},
-    ip,
+    ip, Mailbox,
 };
 use commonware_cryptography::Signer;
 use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
@@ -58,7 +58,11 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
     pub fn new(
         context: E,
         cfg: Config<C>,
-    ) -> (Self, Mailbox<E, C::PublicKey>, Oracle<E, C::PublicKey>) {
+    ) -> (
+        Self,
+        Mailbox<Message<E, C::PublicKey>>,
+        Oracle<E, C::PublicKey>,
+    ) {
         // Sign my own information
         let socket = cfg.address;
         let timestamp = context.current().epoch_millis();
@@ -341,9 +345,9 @@ mod tests {
     // Mock a connection to a peer by reserving it as if it had dialed us and the `peer` actor had
     // sent an initialization.
     async fn connect_to_peer(
-        mailbox: &mut tracker::Mailbox<Context, PublicKey>,
+        mailbox: &mut Mailbox<Message<Context, PublicKey>>,
         peer: &PublicKey,
-        peer_mailbox: &peer::Mailbox<PublicKey>,
+        peer_mailbox: &Mailbox<peer::Message<PublicKey>>,
         peer_receiver: &mut mpsc::Receiver<peer::Message<PublicKey>>,
     ) -> tracker::Reservation<Context, PublicKey> {
         let res = mailbox
@@ -364,7 +368,7 @@ mod tests {
 
     // Test Harness
     struct TestHarness {
-        mailbox: Mailbox<deterministic::Context, PublicKey>,
+        mailbox: Mailbox<Message<deterministic::Context, PublicKey>>,
         oracle: Oracle<deterministic::Context, PublicKey>,
         ip_namespace: Vec<u8>,
         tracker_pk: PublicKey,
@@ -425,7 +429,7 @@ mod tests {
             let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg);
 
             let (_unauth_signer, unauth_pk) = new_signer_and_pk(1);
-            let (peer_mailbox, mut peer_receiver) = peer::Mailbox::test();
+            let (peer_mailbox, mut peer_receiver) = Mailbox::test();
 
             // Connect as listener
             mailbox
@@ -465,7 +469,7 @@ mod tests {
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
-            let (peer_mailbox, mut peer_receiver) = peer::Mailbox::test();
+            let (peer_mailbox, mut peer_receiver) = Mailbox::test();
 
             let _res = mailbox.listen(auth_pk.clone()).await.unwrap();
             mailbox
@@ -498,7 +502,7 @@ mod tests {
                 ..
             } = setup_actor(context.clone(), cfg_with_boot);
 
-            let (peer_mailbox, mut peer_receiver) = peer::Mailbox::test();
+            let (peer_mailbox, mut peer_receiver) = Mailbox::test();
             new_mailbox
                 .construct(boot_pk.clone(), peer_mailbox.clone())
                 .await;
@@ -548,7 +552,7 @@ mod tests {
                 false,
             );
 
-            let (peer_mailbox_s1, mut peer_receiver_s1) = peer::Mailbox::test();
+            let (peer_mailbox_s1, mut peer_receiver_s1) = Mailbox::test();
             mailbox
                 .peers(vec![self_info], peer_mailbox_s1.clone())
                 .await;
@@ -576,7 +580,7 @@ mod tests {
             oracle.register(0, vec![tracker_pk, pk1.clone()]).await;
             context.sleep(Duration::from_millis(10)).await;
 
-            let (peer_mailbox_pk1, mut peer_receiver_pk1) = peer::Mailbox::test();
+            let (peer_mailbox_pk1, mut peer_receiver_pk1) = Mailbox::test();
             let bit_vec_unknown_idx = types::BitVec {
                 index: 99,
                 bits: UtilsBitVec::ones(1),
@@ -621,7 +625,7 @@ mod tests {
             oracle.block(pk1.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
-            let (peer_mailbox_pk1, mut peer_receiver_pk1) = peer::Mailbox::test();
+            let (peer_mailbox_pk1, mut peer_receiver_pk1) = Mailbox::test();
             mailbox
                 .construct(pk1.clone(), peer_mailbox_pk1.clone())
                 .await;
@@ -659,7 +663,7 @@ mod tests {
             oracle.block(pk1.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
-            let (peer_mailbox_pk1, mut peer_receiver_pk1) = peer::Mailbox::test();
+            let (peer_mailbox_pk1, mut peer_receiver_pk1) = Mailbox::test();
             mailbox
                 .construct(pk1.clone(), peer_mailbox_pk1.clone())
                 .await;
@@ -721,8 +725,8 @@ mod tests {
             oracle.register(1, set1.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
-            let (peer_mailbox_s1, mut peer_receiver_s1) = peer::Mailbox::test();
-            let (peer_mailbox_s2, mut peer_receiver_s2) = peer::Mailbox::test();
+            let (peer_mailbox_s1, mut peer_receiver_s1) = Mailbox::test();
+            let (peer_mailbox_s2, mut peer_receiver_s2) = Mailbox::test();
             mailbox
                 .peers(vec![pk2_info.clone()], peer_mailbox_s1.clone())
                 .await;
@@ -792,12 +796,12 @@ mod tests {
                 false,
             );
 
-            let (peer_mailbox_s1, mut peer_receiver_s1) = peer::Mailbox::test();
+            let (peer_mailbox_s1, mut peer_receiver_s1) = Mailbox::test();
             let _r1 =
                 connect_to_peer(&mut mailbox, &pk1, &peer_mailbox_s1, &mut peer_receiver_s1).await;
 
             // Connect to pk2
-            let (peer_mailbox_s2, mut peer_receiver_s2) = peer::Mailbox::test();
+            let (peer_mailbox_s2, mut peer_receiver_s2) = Mailbox::test();
             let _r2 =
                 connect_to_peer(&mut mailbox, &pk2, &peer_mailbox_s2, &mut peer_receiver_s2).await;
 
@@ -949,7 +953,7 @@ mod tests {
             let (_s3, pk3) = new_signer_and_pk(3);
             let (_s4, pk4) = new_signer_and_pk(4);
 
-            let (peer_mailbox, mut peer_receiver) = peer::Mailbox::test();
+            let (peer_mailbox, mut peer_receiver) = Mailbox::test();
             let infos = vec![
                 new_peer_info(
                     &mut s1,
@@ -1008,7 +1012,7 @@ mod tests {
                 false,
             );
 
-            let (peer_mailbox, mut peer_receiver) = peer::Mailbox::test();
+            let (peer_mailbox, mut peer_receiver) = Mailbox::test();
             mailbox.peers(vec![info], peer_mailbox.clone()).await;
             assert!(matches!(
                 peer_receiver.next().await,
@@ -1041,7 +1045,7 @@ mod tests {
                 false,
             );
 
-            let (peer_mailbox, mut peer_receiver) = peer::Mailbox::test();
+            let (peer_mailbox, mut peer_receiver) = Mailbox::test();
             mailbox.peers(vec![info], peer_mailbox.clone()).await;
             assert!(matches!(
                 peer_receiver.next().await,
@@ -1077,7 +1081,7 @@ mod tests {
                 true,
             );
 
-            let (peer_mailbox, mut peer_receiver) = peer::Mailbox::test();
+            let (peer_mailbox, mut peer_receiver) = Mailbox::test();
             mailbox.peers(vec![info], peer_mailbox.clone()).await;
             assert!(matches!(
                 peer_receiver.next().await,
@@ -1105,7 +1109,7 @@ mod tests {
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
-            let (peer_mailbox, mut peer_receiver) = peer::Mailbox::test();
+            let (peer_mailbox, mut peer_receiver) = Mailbox::test();
             let invalid_bit_vec = types::BitVec {
                 index: 0,
                 bits: UtilsBitVec::ones(2),
@@ -1136,7 +1140,7 @@ mod tests {
             let (_peer2_s, peer2_pk) = new_signer_and_pk(2);
 
             // --- Initial Construct for unauthorized peer ---
-            let (peer_mailbox1, mut peer_receiver1) = peer::Mailbox::test();
+            let (peer_mailbox1, mut peer_receiver1) = Mailbox::test();
             mailbox
                 .construct(peer1_pk.clone(), peer_mailbox1.clone())
                 .await;
@@ -1243,7 +1247,7 @@ mod tests {
             );
 
             // Peer2 is in set1 (still active)
-            let (peer_mailbox2, mut peer_receiver2) = peer::Mailbox::test();
+            let (peer_mailbox2, mut peer_receiver2) = Mailbox::test();
             let _r2 =
                 connect_to_peer(&mut mailbox, &peer2_pk, &peer_mailbox2, &mut peer_receiver2).await;
 

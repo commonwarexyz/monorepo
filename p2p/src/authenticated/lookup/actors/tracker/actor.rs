@@ -1,9 +1,12 @@
 use super::{
     directory::{self, Directory},
-    ingress::{Mailbox, Message, Oracle},
+    ingress::{Message, Oracle},
     Config,
 };
-use crate::authenticated::lookup::actors::{peer, tracker::ingress::Releaser};
+use crate::authenticated::{
+    lookup::actors::{peer, tracker::ingress::Releaser},
+    Mailbox,
+};
 use commonware_cryptography::Signer;
 use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
 use futures::{channel::mpsc, StreamExt};
@@ -30,7 +33,7 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
 
     /// Maps a peer's public key to its mailbox.
     /// Set when a peer connects and cleared when it is blocked or released.
-    mailboxes: HashMap<C::PublicKey, peer::Mailbox>,
+    mailboxes: HashMap<C::PublicKey, Mailbox<peer::Message>>,
 }
 
 impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> {
@@ -39,7 +42,11 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
     pub fn new(
         context: E,
         cfg: Config<C>,
-    ) -> (Self, Mailbox<E, C::PublicKey>, Oracle<E, C::PublicKey>) {
+    ) -> (
+        Self,
+        Mailbox<Message<E, C::PublicKey>>,
+        Oracle<E, C::PublicKey>,
+    ) {
         // General initialization
         let directory_cfg = directory::Config {
             max_sets: cfg.tracked_peer_sets,
@@ -188,7 +195,7 @@ mod tests {
 
     // Test Harness
     struct TestHarness {
-        mailbox: Mailbox<deterministic::Context, PublicKey>,
+        mailbox: Mailbox<Message<deterministic::Context, PublicKey>>,
         oracle: Oracle<deterministic::Context, PublicKey>,
         cfg: Config<PrivateKey>, // Store cloned config for access to its values
     }
@@ -245,7 +252,7 @@ mod tests {
             let TestHarness { mut mailbox, .. } = setup_actor(context.clone(), cfg);
 
             let (_unauth_signer, unauth_pk) = new_signer_and_pk(1);
-            let (peer_mailbox, mut peer_receiver) = peer::Mailbox::test();
+            let (peer_mailbox, mut peer_receiver) = Mailbox::test();
 
             // Connect as listener
             mailbox.connect(unauth_pk.clone(), peer_mailbox).await;
@@ -437,7 +444,7 @@ mod tests {
             let reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(reservation.is_some());
 
-            let (peer_mailbox, mut peer_rx) = peer::Mailbox::test();
+            let (peer_mailbox, mut peer_rx) = Mailbox::test();
             mailbox.connect(peer_pk.clone(), peer_mailbox).await;
 
             // 3) Block it → should see exactly one Kill
@@ -490,7 +497,7 @@ mod tests {
             let reservation = mailbox.listen(pk_1.clone()).await;
             assert!(reservation.is_some());
 
-            let (peer_mailbox, mut peer_rx) = peer::Mailbox::test();
+            let (peer_mailbox, mut peer_rx) = Mailbox::test();
             mailbox.connect(my_pk.clone(), peer_mailbox).await;
 
             // Register another set which doesn't include first peer

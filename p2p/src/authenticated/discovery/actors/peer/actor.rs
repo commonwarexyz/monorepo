@@ -1,8 +1,9 @@
-use super::{Config, Error, Mailbox, Message};
+use super::{Config, Error, Message};
 use crate::authenticated::{
     data::Data,
     discovery::{actors::tracker, channels::Channels, metrics, types},
     relay::Relay,
+    Mailbox,
 };
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
@@ -28,7 +29,7 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey
 
     codec_config: types::Config,
 
-    mailbox: Mailbox<C>,
+    mailbox: Mailbox<Message<C>>,
     control: mpsc::Receiver<Message<C>>,
     high: mpsc::Receiver<Data>,
     low: mpsc::Receiver<Data>,
@@ -41,7 +42,7 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey
 impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: PublicKey>
     Actor<E, C>
 {
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<C>, Relay<Data>) {
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<C>>, Relay<Data>) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
@@ -98,7 +99,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         mut self,
         peer: C,
         connection: Connection<Si, St>,
-        mut tracker: tracker::Mailbox<E, C>,
+        mut tracker: Mailbox<tracker::Message<E, C>>,
         channels: Channels<C>,
     ) -> Error {
         // Instantiate rate limiters for each message type

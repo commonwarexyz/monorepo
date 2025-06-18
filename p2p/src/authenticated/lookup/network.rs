@@ -6,7 +6,7 @@ use super::{
     config::Config,
     types,
 };
-use crate::Channel;
+use crate::{authenticated::Mailbox, Channel};
 use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics, Network as RNetwork, Spawner};
@@ -29,9 +29,9 @@ pub struct Network<
 
     channels: Channels<C::PublicKey>,
     tracker: tracker::Actor<E, C>,
-    tracker_mailbox: tracker::Mailbox<E, C::PublicKey>,
+    tracker_mailbox: Mailbox<tracker::Message<E, C::PublicKey>>,
     router: router::Actor<E, C::PublicKey>,
-    router_mailbox: router::Mailbox<C::PublicKey>,
+    router_mailbox: Mailbox<router::Message<C::PublicKey>>,
 }
 
 impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics, C: Signer>

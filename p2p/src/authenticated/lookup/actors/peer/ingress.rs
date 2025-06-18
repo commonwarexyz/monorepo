@@ -1,4 +1,4 @@
-use futures::{channel::mpsc, SinkExt};
+use crate::authenticated::Mailbox;
 
 /// Messages that can be sent to the peer [super::Actor].
 #[derive(Clone, Debug)]
@@ -7,23 +7,8 @@ pub enum Message {
     Kill,
 }
 
-#[derive(Clone)]
-pub struct Mailbox {
-    sender: mpsc::Sender<Message>,
-}
-
-impl Mailbox {
-    pub(super) fn new(sender: mpsc::Sender<Message>) -> Self {
-        Self { sender }
-    }
-
-    #[cfg(test)]
-    pub fn test() -> (Self, mpsc::Receiver<Message>) {
-        let (sender, receiver) = mpsc::channel(1);
-        (Self { sender }, receiver)
-    }
-
+impl Mailbox<Message> {
     pub async fn kill(&mut self) {
-        let _ = self.sender.send(Message::Kill).await;
+        let _ = self.send(Message::Kill).await;
     }
 }
