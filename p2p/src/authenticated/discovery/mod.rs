@@ -568,6 +568,7 @@ mod tests {
         });
     }
 
+    #[test_traced]
     fn test_message_too_large() {
         // Configure test
         let base_port = 3000;
@@ -612,10 +613,5 @@ mod tests {
             let result = sender.send(recipient, msg.into(), true).await;
             assert!(matches!(result, Err(Error::MessageTooLarge(_))));
         });
-    }
-
-    #[test_traced]
-    fn test_message_too_large_no_compression() {
-        test_message_too_large();
     }
 }

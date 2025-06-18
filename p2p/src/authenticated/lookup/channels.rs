@@ -46,7 +46,7 @@ impl<P: PublicKey> crate::Sender for Sender<P> {
     /// # Returns
     ///
     /// A vector of recipients that the message was sent to, or an error if the message is too large.
-    /// 
+    ///
     /// Note: a successful send does not guarantee that the recipient will receive the message.
     async fn send(
         &mut self,
