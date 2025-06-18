@@ -59,7 +59,7 @@ fn test_signature_decode_encode(data: &[u8]) {
     if let Ok(sig) = Signature::decode(data) {
         let data_round_trip = sig.encode().to_vec();
         assert_eq!(data.to_vec(), data_round_trip.to_vec());
-    }
+    }g
 }
 
 fn fuzz(input: FuzzInput) {
@@ -69,7 +69,7 @@ fn fuzz(input: FuzzInput) {
         2 => test_pubkey_diff_validate(&input.variable_data), // Variable length pubkey
         3 => test_signature_diff_validate(&input.variable_data), // Variable length signature
         4 => test_pubkey_decode_encode(&input.variable_data), // Pubkey encode/encode roundtrip
-        5 => test_pubkey_decode_encode(&input.variable_data), // Signature decode/encode roundtrip
+        5 => test_signature_decode_encode(&input.variable_data), // Signature decode/encode roundtrip
         _ => unreachable!(),
     }
 }
