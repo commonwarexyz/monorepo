@@ -5,7 +5,7 @@ use commonware_codec::{
     codec::*,
     extensions::*,
     varint::{SInt, UInt},
-    EncodeSize, RangeCfg, Read, Write,
+    EncodeSize, Read, Write,
 };
 
 #[derive(Debug, Clone, PartialEq, Read, Write, EncodeSize)]
@@ -40,9 +40,23 @@ struct VarintStruct {
 struct TupleVarintStruct(#[codec(varint)] u64, #[codec(varint)] i64, bool);
 
 #[derive(Debug, Clone, PartialEq, Read, Write, EncodeSize)]
-struct VecStruct {
-    data: Vec<u8>,  // Should auto-infer RangeCfg
+struct SimpleTest {
+    count: u32,
 }
+
+#[derive(Debug, Clone, PartialEq, Read, Write, EncodeSize)]
+struct ExplicitVecStruct {
+    #[config(default)] // Uses Default::default() for Vec<u8>::Cfg = (RangeCfg, ())
+    data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Read, Write, EncodeSize)]
+struct DefaultConfigStruct {
+    #[config(default)]
+    default_data: Vec<u8>, // Uses Default::default() for (RangeCfg, ())
+    count: u32, // Uses () (no config needed)
+}
+// Cfg type should be () since default_data is excluded and count needs no config
 
 #[cfg(test)]
 mod tests {
@@ -224,16 +238,46 @@ mod tests {
     }
 
     #[test]
-    fn test_vec_struct() {
-        let original = VecStruct {
+    fn test_explicit_vec_struct() {
+        let original = ExplicitVecStruct {
             data: vec![1, 2, 3, 4],
         };
 
-        // VecStruct should have Cfg = RangeCfg (single config type, not tuple)
-        let cfg = RangeCfg::from(0..=100);
+        // ExplicitVecStruct uses #[config(default)] so cfg type is ()
+        let cfg = ();
 
         let encoded = original.encode();
-        let decoded = VecStruct::read_cfg(&mut encoded.as_ref(), &cfg).unwrap();
+        let decoded = ExplicitVecStruct::read_cfg(&mut encoded.as_ref(), &cfg).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_default_config_struct() {
+        let original = DefaultConfigStruct {
+            default_data: vec![4, 5, 6, 7],
+            count: 42,
+        };
+
+        // DefaultConfigStruct should have Cfg = () since all fields either use default or need no config
+        let cfg = ();
+
+        let encoded = original.encode();
+        let decoded = DefaultConfigStruct::read_cfg(&mut encoded.as_ref(), &cfg).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_default_config_struct_default_field_uses_default() {
+        let original = DefaultConfigStruct {
+            default_data: vec![4; 1000], // Large vector that uses default config (unbounded)
+            count: 42,
+        };
+
+        // Since default_data uses Default::default(), it should allow any size
+        let cfg = ();
+
+        let encoded = original.encode();
+        let decoded = DefaultConfigStruct::read_cfg(&mut encoded.as_ref(), &cfg).unwrap();
         assert_eq!(original, decoded);
     }
 }

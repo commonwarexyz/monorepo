@@ -22,8 +22,10 @@ use syn::{
 ///
 /// ## Config Attributes  
 /// You can use the `#[config(ConfigType)]` helper attribute to specify custom configuration types for fields.
+/// You can also use `#[config(default)]` to use the `Default::default()` value for that field's config type.
 /// The overall `Cfg` type is built as an ordered tuple of field configs, with optimizations:
 /// - Unit type `()` fields are ignored
+/// - Fields with `#[config(default)]` are ignored (they use `Default::default()` at runtime)
 /// - Single config field uses the type directly (not wrapped in tuple)
 /// - Fields without explicit `#[config]` use inferred defaults (e.g., `RangeCfg` for `Vec`, `String`)
 ///
@@ -50,10 +52,13 @@ use syn::{
 /// #[derive(Read)]
 /// struct ConfigurableStruct {
 ///     #[config(RangeCfg)]
-///     data: Vec<u8>,  // Uses RangeCfg for length limits
-///     count: u32,     // Uses () (no config needed)
+///     data: Vec<u8>,      // Uses RangeCfg for length limits
+///     #[config(default)]
+///     more_data: Vec<u8>, // Uses Default::default() for RangeCfg
+///     count: u32,         // Uses () (no config needed)
 /// }
 /// // Cfg type is RangeCfg - single config type, not wrapped in tuple
+/// // The `more_data` field is excluded from cfg tuple since it uses default
 ///
 /// // Read is now implemented for all structs
 /// ```
@@ -281,24 +286,45 @@ fn expand_read_named_fields_with_cfg(
                 });
             }
 
-            let read_code = match &cfg_type {
-                syn::Type::Tuple(_) => {
-                    let index = syn::Index::from(cfg_index);
-                    cfg_index += 1;
-                    generate_field_read_with_cfg(
-                        field_name,
-                        &config.wrapper,
-                        quote! { &cfg.#index },
-                    )
+            // If this field uses default, read with Default::default() config
+            if config.use_default {
+                return Ok(generate_field_read_with_cfg(
+                    field_name,
+                    &config.wrapper,
+                    quote! { &::std::default::Default::default() },
+                ));
+            }
+
+            // Determine if this field has a config in the cfg tuple
+            let has_cfg = config
+                .cfg_type
+                .clone()
+                .or_else(|| infer_default_cfg_type(&field.ty))
+                .is_some();
+
+            let read_code = if has_cfg {
+                match &cfg_type {
+                    syn::Type::Tuple(_) => {
+                        let index = syn::Index::from(cfg_index);
+                        cfg_index += 1;
+                        generate_field_read_with_cfg(
+                            field_name,
+                            &config.wrapper,
+                            quote! { &cfg.#index },
+                        )
+                    }
+                    _ if cfg_index == 0 => {
+                        cfg_index += 1;
+                        generate_field_read_with_cfg(field_name, &config.wrapper, quote! { cfg })
+                    }
+                    _ => {
+                        // This shouldn't happen in well-formed code, but fallback to unit config
+                        generate_field_read_with_cfg(field_name, &config.wrapper, quote! { &() })
+                    }
                 }
-                _ if cfg_index == 0 => {
-                    cfg_index += 1;
-                    generate_field_read_with_cfg(field_name, &config.wrapper, quote! { cfg })
-                }
-                _ => {
-                    cfg_index += 1;
-                    generate_field_read_with_cfg(field_name, &config.wrapper, quote! { &() })
-                }
+            } else {
+                // No config needed, use unit config
+                generate_field_read_with_cfg(field_name, &config.wrapper, quote! { &() })
             };
             Ok(read_code)
         })
@@ -314,11 +340,6 @@ fn expand_read_named_fields_with_cfg(
     };
 
     Ok((read_impl, cfg_type))
-}
-
-fn expand_read_named_fields(fields: &FieldsNamed) -> syn::Result<TokenStream2> {
-    let (read_impl, _) = expand_read_named_fields_with_cfg(fields)?;
-    Ok(read_impl)
 }
 
 fn expand_read_unnamed_fields_with_cfg(
@@ -355,24 +376,45 @@ fn expand_read_unnamed_fields_with_cfg(
                 });
             }
 
-            let read_code = match &cfg_type {
-                syn::Type::Tuple(_) => {
-                    let index = syn::Index::from(cfg_index);
-                    cfg_index += 1;
-                    generate_field_read_with_cfg(
-                        &field_name,
-                        &config.wrapper,
-                        quote! { &cfg.#index },
-                    )
+            // If this field uses default, read with Default::default() config
+            if config.use_default {
+                return Ok(generate_field_read_with_cfg(
+                    &field_name,
+                    &config.wrapper,
+                    quote! { &::std::default::Default::default() },
+                ));
+            }
+
+            // Determine if this field has a config in the cfg tuple
+            let has_cfg = config
+                .cfg_type
+                .clone()
+                .or_else(|| infer_default_cfg_type(&field.ty))
+                .is_some();
+
+            let read_code = if has_cfg {
+                match &cfg_type {
+                    syn::Type::Tuple(_) => {
+                        let index = syn::Index::from(cfg_index);
+                        cfg_index += 1;
+                        generate_field_read_with_cfg(
+                            &field_name,
+                            &config.wrapper,
+                            quote! { &cfg.#index },
+                        )
+                    }
+                    _ if cfg_index == 0 => {
+                        cfg_index += 1;
+                        generate_field_read_with_cfg(&field_name, &config.wrapper, quote! { cfg })
+                    }
+                    _ => {
+                        // This shouldn't happen in well-formed code, but fallback to unit config
+                        generate_field_read_with_cfg(&field_name, &config.wrapper, quote! { &() })
+                    }
                 }
-                _ if cfg_index == 0 => {
-                    cfg_index += 1;
-                    generate_field_read_with_cfg(&field_name, &config.wrapper, quote! { cfg })
-                }
-                _ => {
-                    cfg_index += 1;
-                    generate_field_read_with_cfg(&field_name, &config.wrapper, quote! { &() })
-                }
+            } else {
+                // No config needed, use unit config
+                generate_field_read_with_cfg(&field_name, &config.wrapper, quote! { &() })
             };
             Ok(read_code)
         })
@@ -386,11 +428,6 @@ fn expand_read_unnamed_fields_with_cfg(
     };
 
     Ok((read_impl, cfg_type))
-}
-
-fn expand_read_unnamed_fields(fields: &FieldsUnnamed) -> syn::Result<TokenStream2> {
-    let (read_impl, _) = expand_read_unnamed_fields_with_cfg(fields)?;
-    Ok(read_impl)
 }
 
 fn expand_write_named_fields(fields: &FieldsNamed) -> syn::Result<TokenStream2> {
@@ -485,12 +522,14 @@ enum CodecWrapper {
 struct FieldConfig {
     wrapper: CodecWrapper,
     cfg_type: Option<syn::Type>,
+    use_default: bool, // If true, use Default::default() for this field's config
 }
 
 /// Parse all relevant attributes on a field to determine configuration.
 fn parse_field_attributes(field: &Field) -> syn::Result<FieldConfig> {
     let mut wrapper = CodecWrapper::None;
     let mut cfg_type = None;
+    let mut use_default = false;
 
     for attr in &field.attrs {
         if attr.path().is_ident("codec") {
@@ -518,20 +557,36 @@ fn parse_field_attributes(field: &Field) -> syn::Result<FieldConfig> {
         } else if attr.path().is_ident("config") {
             match &attr.meta {
                 Meta::List(meta_list) => {
-                    // Parse #[config(RangeCfg)] or #[config(CustomType)]
-                    cfg_type = Some(meta_list.parse_args::<syn::Type>()?);
+                    // Parse the content inside config(...)
+                    // First try to parse as syn::Type, then check if it's the "default" identifier
+                    let content = meta_list.tokens.clone();
+                    if let Ok(ident) = syn::parse2::<syn::Ident>(content.clone()) {
+                        if ident == "default" {
+                            use_default = true;
+                        } else {
+                            // It's an identifier but not "default", treat as a path type
+                            cfg_type = Some(syn::parse2::<syn::Type>(content)?);
+                        }
+                    } else {
+                        // Parse as a general type (Path, Tuple, etc.)
+                        cfg_type = Some(syn::parse2::<syn::Type>(content)?);
+                    }
                 }
                 Meta::Path(_) | Meta::NameValue(_) => {
                     return Err(syn::Error::new_spanned(
                         attr,
-                        "Use #[config(ConfigType)] to specify the config type for this field",
+                        "Use #[config(ConfigType)] or #[config(default)] to specify the config for this field",
                     ));
                 }
             }
         }
     }
 
-    Ok(FieldConfig { wrapper, cfg_type })
+    Ok(FieldConfig {
+        wrapper,
+        cfg_type,
+        use_default,
+    })
 }
 
 /// Parse codec attributes on a field to determine if it should be wrapped.
@@ -558,11 +613,6 @@ fn infer_wrapper_from_type(ty: &syn::Type) -> syn::Result<CodecWrapper> {
         ty,
         "codec attribute can only be used with integer types: u16, u32, u64, u128, i16, i32, i64, i128",
     ))
-}
-
-/// Generate appropriate field access for reading, based on codec wrapper.
-fn generate_field_read(field_name: &syn::Ident, wrapper: &CodecWrapper) -> TokenStream2 {
-    generate_field_read_with_cfg(field_name, wrapper, quote! { &() })
 }
 
 /// Generate appropriate field access for reading with custom cfg, based on codec wrapper.
@@ -629,8 +679,23 @@ fn infer_default_cfg_type(ty: &syn::Type) -> Option<syn::Type> {
     if let syn::Type::Path(type_path) = ty {
         if let Some(segment) = type_path.path.segments.last() {
             match segment.ident.to_string().as_str() {
-                "Vec" | "String" | "Bytes" => {
-                    // These types typically need RangeCfg for length limits
+                "Vec" => {
+                    // Vec<T> has Cfg = (RangeCfg, T::Cfg)
+                    // For Vec<u8>, this becomes (RangeCfg, ())
+                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                        if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
+                            let inner_cfg = infer_default_cfg_type(inner_ty)
+                                .unwrap_or_else(|| syn::parse_quote!(()));
+                            return Some(
+                                syn::parse_quote!((::commonware_codec::RangeCfg, #inner_cfg)),
+                            );
+                        }
+                    }
+                    // Fallback for Vec without type args (shouldn't happen in valid code)
+                    return Some(syn::parse_quote!((::commonware_codec::RangeCfg, ())));
+                }
+                "String" | "Bytes" => {
+                    // These types use RangeCfg directly
                     return Some(syn::parse_quote!(::commonware_codec::RangeCfg));
                 }
                 "HashMap" | "BTreeMap" | "HashSet" | "BTreeSet" => {
@@ -646,9 +711,8 @@ fn infer_default_cfg_type(ty: &syn::Type) -> Option<syn::Type> {
                     }
                 }
                 // Primitive types don't need config
-                "u8" | "u16" | "u32" | "u64" | "u128" | "usize" |
-                "i8" | "i16" | "i32" | "i64" | "i128" | "isize" |
-                "f32" | "f64" | "bool" => {
+                "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32" | "i64"
+                | "i128" | "isize" | "f32" | "f64" | "bool" => {
                     return None;
                 }
                 _ => {}
@@ -667,6 +731,11 @@ fn build_cfg_type(field_configs: &[FieldConfig], field_types: &[&syn::Type]) -> 
     for (config, field_type) in field_configs.iter().zip(field_types.iter()) {
         // Skip unit types
         if is_unit_type(field_type) {
+            continue;
+        }
+
+        // Skip fields that use default (they don't contribute to the cfg tuple)
+        if config.use_default {
             continue;
         }
 
