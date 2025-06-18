@@ -40,9 +40,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         context: E,
         cfg: Config<C>,
     ) -> (Self, Mailbox<E, C::PublicKey>, Oracle<E, C::PublicKey>) {
-        // Sign my own information
-        let myself = (cfg.crypto.public_key(), cfg.address);
-
         // General initialization
         let directory_cfg = directory::Config {
             max_sets: cfg.tracked_peer_sets,
@@ -57,6 +54,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         let oracle = Oracle::new(sender);
 
         // Create the directory
+        let myself = (cfg.crypto.public_key(), cfg.address);
         let directory = Directory::init(context.clone(), myself, directory_cfg, releaser);
 
         (
