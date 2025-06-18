@@ -5,7 +5,7 @@ use commonware_codec::{
     codec::*,
     extensions::*,
     varint::{SInt, UInt},
-    EncodeSize, Read, Write,
+    EncodeSize, RangeCfg, Read, Write,
 };
 
 #[derive(Debug, Clone, PartialEq, Read, Write, EncodeSize)]
@@ -38,6 +38,11 @@ struct VarintStruct {
 
 #[derive(Debug, Clone, PartialEq, Read, Write, EncodeSize)]
 struct TupleVarintStruct(#[codec(varint)] u64, #[codec(varint)] i64, bool);
+
+#[derive(Debug, Clone, PartialEq, Read, Write, EncodeSize)]
+struct VecStruct {
+    data: Vec<u8>,  // Should auto-infer RangeCfg
+}
 
 #[cfg(test)]
 mod tests {
@@ -216,5 +221,19 @@ mod tests {
         let encoded = large_varint.encode();
         let decoded = VarintStruct::decode(encoded).unwrap();
         assert_eq!(large_varint, decoded);
+    }
+
+    #[test]
+    fn test_vec_struct() {
+        let original = VecStruct {
+            data: vec![1, 2, 3, 4],
+        };
+
+        // VecStruct should have Cfg = RangeCfg (single config type, not tuple)
+        let cfg = RangeCfg::from(0..=100);
+
+        let encoded = original.encode();
+        let decoded = VecStruct::read_cfg(&mut encoded.as_ref(), &cfg).unwrap();
+        assert_eq!(original, decoded);
     }
 }
