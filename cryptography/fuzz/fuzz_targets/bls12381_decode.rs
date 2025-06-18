@@ -59,7 +59,7 @@ fn test_signature_decode_encode(data: &[u8]) {
     if let Ok(sig) = Signature::decode(data) {
         let data_round_trip = sig.encode().to_vec();
         assert_eq!(data.to_vec(), data_round_trip.to_vec());
-    }g
+    }
 }
 
 fn fuzz(input: FuzzInput) {
