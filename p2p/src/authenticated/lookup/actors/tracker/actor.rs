@@ -95,7 +95,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                     // If we deleted peers, release them.
                     for peer in self.directory.add_set(index, peers) {
                         if let Some(mut mailbox) = self.mailboxes.remove(&peer) {
-                            let _ = mailbox.send(peer::Message::Kill).await;
+                            mailbox.kill().await;
                         }
                     }
                 }
@@ -105,7 +105,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 } => {
                     // Kill if peer is not authorized
                     if !self.directory.allowed(&public_key) {
-                        let _ = peer.send(peer::Message::Kill).await;
+                        peer.kill().await;
                         continue;
                     }
 
@@ -134,7 +134,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
                     // Kill the peer if we're connected to it.
                     if let Some(mut peer) = self.mailboxes.remove(&public_key) {
-                        let _ = peer.send(peer::Message::Kill).await;
+                        peer.kill().await;
                     }
                 }
                 Message::Release { metadata } => {
