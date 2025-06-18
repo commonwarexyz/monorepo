@@ -4,10 +4,12 @@ use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_utils::{hex, union_unique};
 use ed25519_consensus::{self, VerificationKey};
 use rand::{CryptoRng, Rng, RngCore};
-use std::borrow::Cow;
-use std::fmt::{Debug, Display};
-use std::hash::{Hash, Hasher};
-use std::ops::Deref;
+use std::{
+    borrow::Cow,
+    fmt::{Debug, Display},
+    hash::{Hash, Hasher},
+    ops::Deref,
+};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const CURVE_NAME: &str = "ed25519";

@@ -41,9 +41,9 @@ use prometheus_client::metrics::{
     counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
 };
 use rand::Rng;
-use std::sync::{atomic::AtomicI64, Arc};
 use std::{
     collections::BTreeMap,
+    sync::{atomic::AtomicI64, Arc},
     time::{Duration, SystemTime},
 };
 use tracing::{debug, info, trace, warn};
@@ -449,7 +449,6 @@ pub struct Actor<
 
     partition: String,
     compression: Option<u8>,
-    replay_concurrency: usize,
     replay_buffer: usize,
     write_buffer: usize,
     journal: Option<Journal<E, Voter<V, D>>>,
@@ -557,7 +556,6 @@ impl<
 
                 partition: cfg.partition,
                 compression: cfg.compression,
-                replay_concurrency: cfg.replay_concurrency,
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,
                 journal: None,
@@ -1684,7 +1682,7 @@ impl<
         let start = self.context.current();
         {
             let stream = journal
-                .replay(self.replay_concurrency, self.replay_buffer)
+                .replay(self.replay_buffer)
                 .await
                 .expect("unable to replay journal");
             pin_mut!(stream);

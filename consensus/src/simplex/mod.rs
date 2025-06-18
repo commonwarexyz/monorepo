@@ -5,7 +5,7 @@
 //! finalization latency in a partially synchronous setting.
 //!
 //! _If your application would benefit from succinct consensus certificates or a bias-resistant
-//! VRF, see [Threshold Simplex](crate::threshold_simplex)._
+//! VRF, see [crate::threshold_simplex]._
 //!
 //! # Features
 //!
@@ -58,7 +58,7 @@
 //!
 //! The `Voter` caches all data required to participate in consensus to avoid any disk reads on
 //! on the critical path. To enable recovery, the `Voter` writes valid messages it receives from
-//! consensus and messages it generates to a write-ahead log (WAL) implemented by [`Journal`](https://docs.rs/commonware-storage/latest/commonware_storage/journal/index.html).
+//! consensus and messages it generates to a write-ahead log (WAL) implemented by [commonware_storage::journal::variable::Journal].
 //! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
 //! on restart (especially in the case of unclean shutdown).
 //!
@@ -326,7 +326,6 @@ mod tests {
                     max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
                     write_buffer: 1024 * 1024,
                 };
@@ -571,7 +570,6 @@ mod tests {
                         max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
-                        replay_concurrency: 1,
                         replay_buffer: 1024 * 1024,
                         write_buffer: 1024 * 1024,
                     };
@@ -741,7 +739,6 @@ mod tests {
                     max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
                     write_buffer: 1024 * 1024,
                 };
@@ -860,7 +857,6 @@ mod tests {
                 max_participants: n as usize,
                 fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                 fetch_concurrent: 1,
-                replay_concurrency: 1,
                 replay_buffer: 1024 * 1024,
                 write_buffer: 1024 * 1024,
             };
@@ -983,7 +979,6 @@ mod tests {
                     max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
                     write_buffer: 1024 * 1024,
                 };
@@ -1210,7 +1205,6 @@ mod tests {
                     max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
                     write_buffer: 1024 * 1024,
                 };
@@ -1369,7 +1363,6 @@ mod tests {
                     max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
                     write_buffer: 1024 * 1024,
                 };
@@ -1553,7 +1546,6 @@ mod tests {
                     max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
                     write_buffer: 1024 * 1024,
                 };
@@ -1733,7 +1725,6 @@ mod tests {
                     max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
                     write_buffer: 1024 * 1024,
                 };
@@ -1901,7 +1892,6 @@ mod tests {
                         max_participants: n as usize,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
-                        replay_concurrency: 1,
                         replay_buffer: 1024 * 1024,
                         write_buffer: 1024 * 1024,
                     };
@@ -2070,7 +2060,6 @@ mod tests {
                         max_participants: n as usize,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
-                        replay_concurrency: 1,
                         replay_buffer: 1024 * 1024,
                         write_buffer: 1024 * 1024,
                     };
@@ -2235,7 +2224,6 @@ mod tests {
                         max_participants: n as usize,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
-                        replay_concurrency: 1,
                         replay_buffer: 1024 * 1024,
                         write_buffer: 1024 * 1024,
                     };
@@ -2372,7 +2360,6 @@ mod tests {
                     max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
                     write_buffer: 1024 * 1024,
                 };

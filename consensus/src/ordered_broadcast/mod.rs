@@ -21,7 +21,7 @@
 //!
 //! # Design
 //!
-//! The core of the module is the [`Engine`]. It is responsible for:
+//! The core of the module is the [Engine]. It is responsible for:
 //! - Broadcasting nodes (if a sequencer)
 //! - Signing chunks (if a validator)
 //! - Tracking the latest chunk in each sequencer’s chain
@@ -72,19 +72,14 @@ mod tests {
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{
         deterministic::{self, Context},
-        Metrics,
+        Clock, Metrics, Runner, Spawner,
     };
-    use commonware_runtime::{Clock, Runner, Spawner};
     use commonware_utils::quorum;
-    use futures::channel::oneshot;
-    use futures::future::join_all;
+    use futures::{channel::oneshot, future::join_all};
     use rand::{rngs::StdRng, SeedableRng as _};
     use std::{
-        collections::HashMap,
+        collections::{BTreeMap, HashMap, HashSet},
         sync::{Arc, Mutex},
-    };
-    use std::{
-        collections::{BTreeMap, HashSet},
         time::Duration,
     };
     use tracing::debug;
@@ -237,7 +232,6 @@ mod tests {
                     priority_acks: false,
                     priority_proposals: false,
                     journal_heights_per_section: 10,
-                    journal_replay_concurrency: 1,
                     journal_replay_buffer: 4096,
                     journal_write_buffer: 4096,
                     journal_name_prefix: format!("ordered-broadcast-seq/{}/", validator),
@@ -868,7 +862,6 @@ mod tests {
                         priority_acks: false,
                         priority_proposals: false,
                         journal_heights_per_section: 10,
-                        journal_replay_concurrency: 1,
                         journal_replay_buffer: 4096,
                         journal_write_buffer: 4096,
                         journal_name_prefix: format!("ordered-broadcast-seq/{}/", validator),
@@ -919,7 +912,6 @@ mod tests {
                         priority_acks: false,
                         priority_proposals: false,
                         journal_heights_per_section: 10,
-                        journal_replay_concurrency: 1,
                         journal_replay_buffer: 4096,
                         journal_write_buffer: 4096,
                         journal_name_prefix: format!(

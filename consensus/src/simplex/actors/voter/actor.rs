@@ -31,10 +31,10 @@ use prometheus_client::metrics::{
 use rand::Rng;
 use std::{
     cmp::max,
-    collections::{btree_map::Entry, BTreeMap, HashMap},
+    collections::{btree_map::Entry, BTreeMap, BTreeSet, HashMap},
+    sync::atomic::AtomicI64,
     time::{Duration, SystemTime},
 };
-use std::{collections::BTreeSet, sync::atomic::AtomicI64};
 use tracing::{debug, trace, warn};
 
 type Notarizable<'a, V, D> = Option<(
@@ -326,7 +326,6 @@ pub struct Actor<
 
     partition: String,
     compression: Option<u8>,
-    replay_concurrency: usize,
     replay_buffer: usize,
     write_buffer: usize,
     journal: Option<Journal<E, Voter<C::Signature, D>>>,
@@ -419,7 +418,6 @@ impl<
 
                 partition: cfg.partition,
                 compression: cfg.compression,
-                replay_concurrency: cfg.replay_concurrency,
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,
                 journal: None,
@@ -1714,7 +1712,7 @@ impl<
         let start = self.context.current();
         {
             let stream = journal
-                .replay(self.replay_concurrency, self.replay_buffer)
+                .replay(self.replay_buffer)
                 .await
                 .expect("unable to replay journal");
             pin_mut!(stream);

@@ -84,15 +84,23 @@ pub fn union_unique(namespace: &[u8], msg: &[u8]) -> Vec<u8> {
 
 /// Compute the modulo of bytes interpreted as a big-endian integer.
 ///
-/// This function is used to select a random entry from an array
-/// when the bytes are a random seed.
+/// This function is used to select a random entry from an array when the bytes are a random seed.
+///
+/// # Panics
+///
+/// Panics if `n` is zero.
 pub fn modulo(bytes: &[u8], n: u64) -> u64 {
-    let mut result = 0;
+    assert_ne!(n, 0, "modulus must be non-zero");
+
+    let n = n as u128;
+    let mut result = 0u128;
     for &byte in bytes {
-        result = (result << 8) | (byte as u64);
+        result = (result << 8) | (byte as u128);
         result %= n;
     }
-    result
+
+    // Result is either 0 or modulo `n`, so we can safely cast to u64
+    result as u64
 }
 
 /// A macro to create a `NonZeroUsize` from a value, panicking if the value is zero.
@@ -322,14 +330,34 @@ mod tests {
         assert_eq!(modulo(&[0x01, 0x02, 0x03], 10), 1);
 
         // Test case 3: check equivalence with BigUint
-        let n = 11u64;
         for i in 0..100 {
             let mut rng = StdRng::seed_from_u64(i);
             let bytes: [u8; 32] = rng.gen();
+
+            // 1-byte modulus
+            let n = 11u64;
+            let big_modulo = BigUint::from_bytes_be(&bytes) % n;
+            let utils_modulo = modulo(&bytes, n);
+            assert_eq!(big_modulo, BigUint::from(utils_modulo));
+
+            // 2-byte modulus
+            let n = 11_111u64;
+            let big_modulo = BigUint::from_bytes_be(&bytes) % n;
+            let utils_modulo = modulo(&bytes, n);
+            assert_eq!(big_modulo, BigUint::from(utils_modulo));
+
+            // 8-byte modulus
+            let n = 0xDFFFFFFFFFFFFFFD;
             let big_modulo = BigUint::from_bytes_be(&bytes) % n;
             let utils_modulo = modulo(&bytes, n);
             assert_eq!(big_modulo, BigUint::from(utils_modulo));
         }
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_modulo_zero_panics() {
+        modulo(&[0x01, 0x02, 0x03], 0);
     }
 
     #[test]

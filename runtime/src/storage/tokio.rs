@@ -1,7 +1,6 @@
 use crate::Error;
 use commonware_utils::{from_hex, hex, StableBuf};
-use std::sync::Arc;
-use std::{io::SeekFrom, path::PathBuf};
+use std::{io::SeekFrom, path::PathBuf, sync::Arc};
 use tokio::{
     fs,
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},

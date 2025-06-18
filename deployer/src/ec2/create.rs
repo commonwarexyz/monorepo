@@ -5,10 +5,12 @@ use crate::ec2::{
     CREATED_FILE_NAME, LOGS_PORT, MONITORING_NAME, MONITORING_REGION, PROFILES_PORT, TRACES_PORT,
 };
 use futures::future::try_join_all;
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::fs::File;
-use std::net::IpAddr;
-use std::path::PathBuf;
+use std::{
+    collections::{BTreeSet, HashMap, HashSet},
+    fs::File,
+    net::IpAddr,
+    path::PathBuf,
+};
 use tokio::process::Command;
 use tracing::info;
 

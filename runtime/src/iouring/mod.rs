@@ -358,10 +358,10 @@ mod tests {
         types::{Fd, Timespec},
     };
     use prometheus_client::registry::Registry;
-    use std::time::Duration;
     use std::{
         os::{fd::AsRawFd, unix::net::UnixStream},
         sync::Arc,
+        time::Duration,
     };
 
     async fn recv_then_send(cfg: Config, should_succeed: bool) {

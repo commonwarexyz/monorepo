@@ -16,6 +16,9 @@ members = [
     "examples/flood",
     "examples/log",
     "examples/vrf",
+
+    # Fuzz builds
+    "codec/fuzz",
 ]
 resolver = "2"
 
@@ -71,6 +74,10 @@ rayon = "1.10.0"
 async-lock = "3.4.0"
 libc = "0.2.172"
 zeroize = "1.5.7"
+
+# Fuzz deps
+libfuzzer-sys = "0.4.9"
+arbitrary = "1.4.1"
 
 [profile.bench]
 # Because we enable overflow checks in "release," we should benchmark with them.

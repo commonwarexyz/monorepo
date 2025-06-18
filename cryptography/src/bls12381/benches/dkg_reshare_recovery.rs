@@ -8,8 +8,7 @@ use commonware_cryptography::{
 use commonware_utils::quorum;
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
-use std::collections::HashMap;
-use std::hint::black_box;
+use std::{collections::HashMap, hint::black_box};
 
 fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
     let mut rng = StdRng::seed_from_u64(0);

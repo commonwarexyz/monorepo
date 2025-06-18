@@ -1,7 +1,7 @@
 //! Codec implementations for various set types.
 //!
 //! For portability and consistency between architectures,
-//! the size of the set must fit within a [`u32`].
+//! the size of the set must fit within a [u32].
 
 use crate::{
     codec::{EncodeSize, Read, Write},
@@ -147,8 +147,10 @@ mod tests {
         FixedSize,
     };
     use bytes::{Bytes, BytesMut};
-    use std::collections::{BTreeSet, HashSet};
-    use std::fmt::Debug;
+    use std::{
+        collections::{BTreeSet, HashSet},
+        fmt::Debug,
+    };
 
     // Generic round trip test function for BTreeSet
     fn round_trip_btree<K>(set: &BTreeSet<K>, range_cfg: RangeCfg, item_cfg: K::Cfg)

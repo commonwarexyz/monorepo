@@ -66,9 +66,8 @@
 //! ```
 
 mod storage;
-pub use storage::Metadata;
-
 use commonware_utils::Array;
+pub use storage::Metadata;
 use thiserror::Error;
 
 /// Errors that can occur when interacting with `Metadata`.
@@ -175,6 +174,8 @@ mod tests {
             let buffer = context.encode();
             assert!(buffer.contains("syncs_total 0"));
             assert!(buffer.contains("keys 0"));
+
+            metadata.destroy().await.unwrap();
         });
     }
 
@@ -274,6 +275,8 @@ mod tests {
             assert!(value.is_none());
             let value = metadata.get(&key2).unwrap();
             assert_eq!(value, &foo);
+
+            metadata.destroy().await.unwrap();
         });
     }
 
@@ -320,6 +323,8 @@ mod tests {
             // Get the key (falls back to non-corrupt)
             let value = metadata.get(&key).unwrap();
             assert_eq!(value, &hello);
+
+            metadata.destroy().await.unwrap();
         });
     }
 
@@ -374,6 +379,8 @@ mod tests {
             let buffer = context.encode();
             assert!(buffer.contains("syncs_total 0"));
             assert!(buffer.contains("keys 0"));
+
+            metadata.destroy().await.unwrap();
         });
     }
 
@@ -420,6 +427,8 @@ mod tests {
             // Get the key (falls back to non-corrupt)
             let value = metadata.get(&key).unwrap();
             assert_eq!(value, &hello);
+
+            metadata.destroy().await.unwrap();
         });
     }
 
@@ -466,6 +475,8 @@ mod tests {
             // Get the key (falls back to non-corrupt)
             let value = metadata.get(&key).unwrap();
             assert_eq!(value, &hello);
+
+            metadata.destroy().await.unwrap();
         });
     }
 
@@ -503,6 +514,8 @@ mod tests {
             let buffer = context.encode();
             assert!(buffer.contains("syncs_total 0"));
             assert!(buffer.contains("keys 0"));
+
+            metadata.destroy().await.unwrap();
         });
     }
 
@@ -524,6 +537,8 @@ mod tests {
             // Assert
             let result = metadata.sync().await;
             assert!(matches!(result, Err(Error::ValueTooBig(_))));
+
+            metadata.destroy().await.unwrap();
         });
     }
 }

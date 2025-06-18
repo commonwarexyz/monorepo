@@ -17,8 +17,11 @@ use commonware_runtime::{tokio, Metrics, Network, Runner};
 use commonware_stream::public_key::{self, Connection};
 use commonware_utils::{from_hex, quorum, union, NZU32};
 use governor::Quota;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::{str::FromStr, time::Duration};
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    str::FromStr,
+    time::Duration,
+};
 
 fn main() {
     // Parse arguments
@@ -152,7 +155,7 @@ fn main() {
     };
 
     // Configure network
-    let p2p_cfg = authenticated::Config::aggressive(
+    let p2p_cfg = authenticated::discovery::Config::aggressive(
         signer.clone(),
         &union(APPLICATION_NAMESPACE, P2P_SUFFIX),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
@@ -175,7 +178,7 @@ fn main() {
 
         // Setup p2p
         let (mut network, mut oracle) =
-            authenticated::Network::new(context.with_label("network"), p2p_cfg);
+            authenticated::discovery::Network::new(context.with_label("network"), p2p_cfg);
 
         // Provide authorized peers
         //
@@ -191,19 +194,16 @@ fn main() {
             0,
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
-            Some(3),
         );
         let (recovered_sender, recovered_receiver) = network.register(
             1,
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
-            Some(3),
         );
         let (resolver_sender, resolver_receiver) = network.register(
             2,
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
-            Some(3),
         );
 
         // Initialize application
@@ -236,7 +236,6 @@ fn main() {
                 compression: Some(3),
                 namespace: consensus_namespace,
                 mailbox_size: 1024,
-                replay_concurrency: 1,
                 replay_buffer: 1024 * 1024,
                 write_buffer: 1024 * 1024,
                 leader_timeout: Duration::from_secs(1),
