@@ -41,15 +41,15 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey
 impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: PublicKey>
     Actor<E, C>
 {
-    pub fn new(context: E, cfg: Config) -> (Self, Relay<Data>) {
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<C>, Relay<Data>) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
-
+        let mailbox = Mailbox::new(control_sender);
         (
             Self {
                 context,
-                mailbox: Mailbox::new(control_sender),
+                mailbox: mailbox.clone(),
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
                 allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
                 allowed_peers_rate: cfg.allowed_peers_rate,
@@ -64,12 +64,9 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                 received_messages: cfg.received_messages,
                 rate_limited: cfg.rate_limited,
             },
+            mailbox,
             Relay::new(low_sender, high_sender),
         )
-    }
-
-    pub(crate) fn mailbox(&self) -> &Mailbox<C> {
-        &self.mailbox
     }
 
     /// Unpack `msg` and verify the underlying `channel` is registered.

@@ -124,7 +124,7 @@ impl<
                         .spawn(move |context| async move {
                             // Create peer
                             debug!(?peer, "peer started");
-                            let (peer_actor, messenger) = peer::Actor::new(
+                            let (peer_actor, peer_mailbox, messenger) = peer::Actor::new(
                                 context,
                                 peer::Config {
                                     sent_messages,
@@ -143,7 +143,6 @@ impl<
                             let channels = router.ready(peer.clone(), messenger).await;
 
                             // Register peer with tracker
-                            let peer_mailbox = peer_actor.mailbox().clone();
                             tracker.connect(peer.clone(), is_dialer, peer_mailbox).await;
 
                             // Run peer

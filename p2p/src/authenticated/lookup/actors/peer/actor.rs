@@ -25,7 +25,6 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey
     ping_frequency: Duration,
     allowed_ping_rate: Quota,
 
-    mailbox: Mailbox,
     control: mpsc::Receiver<Message>,
     high: mpsc::Receiver<Data>,
     low: mpsc::Receiver<Data>,
@@ -39,17 +38,15 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey
 impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: PublicKey>
     Actor<E, C>
 {
-    pub fn new(context: E, cfg: Config) -> (Self, Relay<Data>) {
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox, Relay<Data>) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
-
         (
             Self {
                 context,
                 ping_frequency: cfg.ping_frequency,
                 allowed_ping_rate: cfg.allowed_ping_rate,
-                mailbox: Mailbox::new(control_sender),
                 control: control_receiver,
                 high: high_receiver,
                 low: low_receiver,
@@ -58,12 +55,9 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                 rate_limited: cfg.rate_limited,
                 _phantom: std::marker::PhantomData,
             },
+            Mailbox::new(control_sender),
             Relay::new(low_sender, high_sender),
         )
-    }
-
-    pub(crate) fn mailbox(&self) -> &Mailbox {
-        &self.mailbox
     }
 
     /// Unpack `msg` and verify the underlying `channel` is registered.
