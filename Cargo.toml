@@ -75,8 +75,8 @@ rayon = "1.10.0"
 async-lock = "3.4.0"
 libc = "0.2.172"
 zeroize = "1.5.7"
-blst = { version = "0.3.13"}
-p256 = { version = "0.13.2"}
+blst = "0.3.13"
+p256 = "0.13.2"
 
 # Fuzz deps
 libfuzzer-sys = "0.4.9"
