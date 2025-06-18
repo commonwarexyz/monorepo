@@ -90,12 +90,19 @@ pub fn union_unique(namespace: &[u8], msg: &[u8]) -> Vec<u8> {
 ///
 /// Panics if `n` is zero.
 pub fn modulo(bytes: &[u8], n: u64) -> u64 {
-    let mut result = 0;
+    if n == 0 {
+        panic!("modulus must be non-zero");
+    }
+
+    let n = n as u128;
+    let mut result = 0u128;
     for &byte in bytes {
-        result = (result << 8) | (byte as u64);
+        result = (result << 8) | (byte as u128);
         result %= n;
     }
-    result
+
+    // Result is either 0 or modulo `n`, so we can safely cast to u64
+    result as u64
 }
 
 /// A macro to create a `NonZeroUsize` from a value, panicking if the value is zero.
