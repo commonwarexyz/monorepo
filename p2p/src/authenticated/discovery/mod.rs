@@ -97,10 +97,14 @@
 //!
 //! ## Compression
 //!
-//! Stream compression is purposely avoided in this implementation to prevent known
-//! attacks on compression and encoding such as BREACH and CRIME. These attacks can
-//! reveal sensitive information by analyzing compressed data patterns. Applications
-//! should handle their own compression before sending data to the p2p layer if needed.
+//! Stream compression is not provided at the transport layer to avoid inadvertently
+//! enabling known attacks such as BREACH and CRIME. These attacks exploit the interaction
+//! between compression and encryption by analyzing patterns in the resulting data.
+//! By compressing secrets alongside attacker-controlled content, these attacks can infer
+//! sensitive information through compression ratio analysis. Applications that choose
+//! to compress data should do so with full awareness of these risks and implement
+//! appropriate mitigations (such as ensuring no attacker-controlled data is compressed
+//! alongside sensitive information).
 //!
 //! # Example
 //!
