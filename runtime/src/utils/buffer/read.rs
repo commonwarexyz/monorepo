@@ -77,6 +77,11 @@ impl<B: Blob> Read<B> {
             .saturating_sub(self.blob_position + self.buffer_position as u64)
     }
 
+    /// Returns the number of bytes in the blob, as provided at construction.
+    pub fn blob_size(&self) -> u64 {
+        self.blob_size
+    }
+
     /// Refills the buffer from the blob starting at the current blob position.
     /// Returns the number of bytes read or an error if the read failed.
     async fn refill(&mut self) -> Result<usize, Error> {

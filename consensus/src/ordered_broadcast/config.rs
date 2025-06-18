@@ -74,9 +74,6 @@ pub struct Config<
     /// The number of entries to keep per journal section.
     pub journal_heights_per_section: u64,
 
-    /// Upon replaying a journal, the number of entries to replay concurrently.
-    pub journal_replay_concurrency: usize,
-
     /// The number of bytes to buffer when replaying a journal.
     pub journal_replay_buffer: usize,
 

@@ -25,13 +25,17 @@ use commonware_runtime::{Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::Array;
 use futures::{
     future::{try_join_all, TryFutureExt},
-    try_join,
+    pin_mut, try_join, StreamExt,
 };
 use tracing::{debug, warn};
 
 /// Indicator that the generic parameter N is unused by the call. N is only
 /// needed if the caller is providing the optional bitmap.
 const UNUSED_N: usize = 0;
+
+/// The size of the read buffer to use for replaying the operations log when rebuilding the
+/// snapshot.
+const SNAPSHOT_READ_BUFFER_SIZE: usize = 1 << 16;
 
 /// Configuration for an `Any` authenticated db.
 #[derive(Clone)]
@@ -251,46 +255,55 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         mut bitmap: Option<&mut Bitmap<H, N>>,
     ) -> Result<u64, Error> {
         let mut inactivity_floor_loc = start_leaf_num;
-        let log_size = log.size().await?;
         if let Some(ref bitmap) = bitmap {
             assert_eq!(start_leaf_num, bitmap.bit_count());
         }
 
-        // TODO: Because all operations are idempotent, we could potentially parallelize this via
-        // replay_all by keeping track of the location of each operation and only applying it if it
-        // is more recent than the last operation for the same key.
-        for i in start_leaf_num..log_size {
-            match log.read(i).await? {
-                Operation::Deleted(key) => {
-                    let result = Any::<E, K, V, H, T>::delete_key(snapshot, log, &key, i).await?;
-                    if let Some(ref mut bitmap) = bitmap {
-                        // Mark previous location (if any) of the deleted key as inactive.
-                        if let Some(old_loc) = result {
-                            bitmap.set_bit(old_loc, false);
-                        }
-                    }
+        let stream = log
+            .replay(SNAPSHOT_READ_BUFFER_SIZE, start_leaf_num)
+            .await?;
+        pin_mut!(stream);
+        while let Some(result) = stream.next().await {
+            match result {
+                Err(e) => {
+                    return Err(Error::JournalError(e));
                 }
-                Operation::Update(key, _) => {
-                    let result =
-                        Any::<E, K, V, H, T>::update_loc(snapshot, log, key, None, i).await?;
-                    if let Some(ref mut bitmap) = bitmap {
-                        match result {
-                            UpdateResult::NoOp => unreachable!("unexpected no-op update"),
-                            UpdateResult::Inserted(_) => bitmap.append(true),
-                            UpdateResult::Updated(old_loc, _) => {
-                                bitmap.set_bit(old_loc, false);
-                                bitmap.append(true);
+                Ok((i, op)) => {
+                    match op {
+                        Operation::Deleted(key) => {
+                            let result =
+                                Any::<E, K, V, H, T>::delete_key(snapshot, log, &key, i).await?;
+                            if let Some(ref mut bitmap) = bitmap {
+                                // Mark previous location (if any) of the deleted key as inactive.
+                                if let Some(old_loc) = result {
+                                    bitmap.set_bit(old_loc, false);
+                                }
                             }
                         }
+                        Operation::Update(key, _) => {
+                            let result =
+                                Any::<E, K, V, H, T>::update_loc(snapshot, log, key, None, i)
+                                    .await?;
+                            if let Some(ref mut bitmap) = bitmap {
+                                match result {
+                                    UpdateResult::NoOp => unreachable!("unexpected no-op update"),
+                                    UpdateResult::Inserted(_) => bitmap.append(true),
+                                    UpdateResult::Updated(old_loc, _) => {
+                                        bitmap.set_bit(old_loc, false);
+                                        bitmap.append(true);
+                                    }
+                                }
+                            }
+                        }
+                        Operation::Commit(loc) => inactivity_floor_loc = loc,
                     }
-                }
-                Operation::Commit(loc) => inactivity_floor_loc = loc,
-            }
-            if let Some(ref mut bitmap) = bitmap {
-                // If we reach this point and a bit hasn't been added for the operation, then it's
-                // an inactive operation and we need to tag it as such in the bitmap.
-                if bitmap.bit_count() == i {
-                    bitmap.append(false);
+                    if let Some(ref mut bitmap) = bitmap {
+                        // If we reach this point and a bit hasn't been added for the operation, then it's
+                        // an inactive operation and we need to tag it as such in the bitmap.
+                        if bitmap.bit_count() == i {
+                            bitmap.append(false);
+                        }
+                    }
                 }
             }
         }

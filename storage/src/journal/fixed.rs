@@ -4,8 +4,7 @@
 //! where position is defined as the item's order of insertion starting from 0, unaffected by
 //! pruning.
 //!
-//! _See [crate::journal::variable] for a journal that supports variable length
-//! items._
+//! _See [crate::journal::variable] for a journal that supports variable length items._
 //!
 //! # Format
 //!
@@ -45,8 +44,7 @@
 //!
 //! # Replay
 //!
-//! The `replay` method iterates over multiple blobs concurrently to support fast reading of all
-//! unpruned items into memory.
+//! The `replay` method supports fast reading of all unpruned items into memory.
 
 use super::Error;
 use bytes::BufMut;
@@ -56,7 +54,10 @@ use commonware_runtime::{
     Blob, Error as RError, Metrics, Storage,
 };
 use commonware_utils::hex;
-use futures::stream::{self, Stream, StreamExt};
+use futures::{
+    stream::{self, Stream},
+    StreamExt,
+};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{collections::BTreeMap, marker::PhantomData};
 use tracing::{debug, trace, warn};
@@ -381,79 +382,78 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         Ok(A::decode(&buf[..A::SIZE]).unwrap())
     }
 
-    /// Returns an unordered stream of all items in the journal with position >= `start_pos`.
+    /// Returns an ordered stream of all items in the journal with position >= `start_pos`.
     ///
     /// # Integrity
     ///
     /// If any corrupted data is found, the stream will return an error.
-    ///
-    /// # Concurrency
-    ///
-    /// The `concurrency` parameter controls how many blobs are replayed concurrently. This can
-    /// dramatically speed up the replay process if the underlying storage supports concurrent reads
-    /// across different blobs.
     pub async fn replay(
         &self,
-        concurrency: usize,
         buffer: usize,
         start_pos: u64,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + '_, Error> {
-        assert!(concurrency > 0);
         // Collect all blobs to replay
         let start_blob = start_pos / self.cfg.items_per_blob;
-        let blobs = self
-            .blobs
-            .range(start_blob..)
-            .map(|(index, blob)| (index, blob.clone()))
-            .collect::<Vec<_>>();
+        let blobs = self.blobs.range(start_blob..).collect::<Vec<_>>();
 
-        // Replay all blobs concurrently and stream items as they are read (to avoid occupying too
-        // much memory with buffered data)
+        // We gather the sizes outside the closure since flat_map doesn't allow async. We could
+        // instead gather a Reader per blob here, but that would result in a buffer-per-blob being
+        // allocated up front.
+        let mut sizes = Vec::with_capacity(blobs.len());
+        for b in blobs.iter() {
+            sizes.push(b.1.size().await);
+        }
+
+        // Create an iterator of (iteration, blob_index, blob, size) tuples to stream.
+        let blob_plus = blobs
+            .into_iter()
+            .zip(sizes.into_iter())
+            .enumerate()
+            .map(|(i, ((blob_index, blob), size))| (i, *blob_index, (*blob).clone(), size));
         let items_per_blob = self.cfg.items_per_blob;
-        Ok(stream::iter(blobs)
-            .map(move |(index, blob)| async move {
-                // Create buffered reader
-                let size = blob.size().await;
-                let reader = Read::new(blob, size, buffer);
+        let start_offset = (start_pos % items_per_blob) * Self::CHUNK_SIZE_U64;
 
-                // Read over the blob in chunks of `CHUNK_SIZE` bytes
-                stream::unfold(
-                    (index, reader, 0u64),
-                    move |(index, mut reader, mut offset)| async move {
-                        // Check if we are at the end of the blob
-                        if offset >= size {
-                            return None;
-                        }
+        // Replay all blobs in order and stream items as they are read (to avoid occupying too much
+        // memory with buffered data).
+        let stream = stream::iter(blob_plus).flat_map(move |(i, blob_index, blob, size)| {
+            // Create a new reader and buffer for each blob. Preallocating the buffer here to avoid
+            // a per-iteration allocation improves performance by ~20%.
+            let mut reader = Read::new(blob, size, buffer);
+            let buf = vec![0u8; Self::CHUNK_SIZE];
+            let initial_offset = if i == 0 {
+                // If this is the very first blob then we need to seek to the starting position.
+                reader.seek_to(start_offset).expect("invalid start_pos");
+                start_offset
+            } else {
+                0
+            };
 
-                        // Seek past any items that precede `start_pos`.
-                        let mut item_pos = items_per_blob * *index + offset / Self::CHUNK_SIZE_U64;
-                        if item_pos < start_pos {
-                            offset += Self::CHUNK_SIZE_U64 * (start_pos - item_pos);
-                            item_pos = start_pos;
-                            if let Err(err) = reader.seek_to(offset) {
-                                return Some((Err(Error::Runtime(err)), (index, reader, offset)));
-                            }
-                        }
+            stream::unfold(
+                (buf, reader, initial_offset),
+                move |(mut buf, mut reader, offset)| async move {
+                    if offset >= reader.blob_size() {
+                        return None;
+                    }
 
-                        // Try to read the full item (data + checksum)
-                        let mut buf = vec![0u8; Self::CHUNK_SIZE];
-                        match reader.read_exact(&mut buf, Self::CHUNK_SIZE).await {
-                            Ok(()) => {
-                                let next_offset = offset + Self::CHUNK_SIZE_U64;
-                                match Self::verify_integrity(&buf) {
-                                    Ok(item) => {
-                                        Some((Ok((item_pos, item)), (index, reader, next_offset)))
-                                    }
-                                    Err(err) => Some((Err(err), (index, reader, next_offset))),
-                                }
-                            }
-                            Err(err) => Some((Err(Error::Runtime(err)), (index, reader, size))),
+                    // Even though we are reusing the buffer, `read_exact` will overwrite any
+                    // previous data, so there's no need to explicitly clear it.
+                    let item_pos = items_per_blob * blob_index + offset / Self::CHUNK_SIZE_U64;
+                    match reader.read_exact(&mut buf, Self::CHUNK_SIZE).await {
+                        Ok(()) => {
+                            let next_offset = offset + Self::CHUNK_SIZE_U64;
+                            let result = Self::verify_integrity(&buf).map(|item| (item_pos, item));
+                            Some((result, (buf, reader, next_offset)))
                         }
-                    },
-                )
-            })
-            .buffer_unordered(concurrency)
-            .flatten())
+                        Err(err) => {
+                            let size = reader.blob_size();
+                            Some((Err(Error::Runtime(err)), (buf, reader, size)))
+                        }
+                    }
+                },
+            )
+        });
+
+        Ok(stream)
     }
 
     /// Return the blob containing the most recently appended items and its index.
@@ -675,7 +675,7 @@ mod tests {
 
             {
                 let stream = journal
-                    .replay(1, 1024, 0)
+                    .replay(1024, 0)
                     .await
                     .expect("failed to replay journal");
                 pin_mut!(stream);
@@ -729,7 +729,7 @@ mod tests {
             // Replay should return all items
             {
                 let stream = journal
-                    .replay(10, 1024, 0)
+                    .replay(1024, 0)
                     .await
                     .expect("failed to replay journal");
                 let mut items = Vec::new();
@@ -781,7 +781,7 @@ mod tests {
             // Replay all items, making sure the checksum mismatch error is handled correctly
             {
                 let stream = journal
-                    .replay(10, 1024, 0)
+                    .replay(1024, 0)
                     .await
                     .expect("failed to replay journal");
                 let mut items = Vec::new();
@@ -830,7 +830,7 @@ mod tests {
             // Replay all items, making sure the partial read error is handled correctly
             {
                 let stream = journal
-                    .replay(10, 1024, 0)
+                    .replay(1024, 0)
                     .await
                     .expect("failed to replay journal");
                 let mut items = Vec::new();
@@ -906,7 +906,7 @@ mod tests {
             // Replay should return all items except the first `START_POS`.
             {
                 let stream = journal
-                    .replay(10, 1024, START_POS)
+                    .replay(1024, START_POS)
                     .await
                     .expect("failed to replay journal");
                 let mut items = Vec::new();
@@ -914,8 +914,13 @@ mod tests {
                 while let Some(result) = stream.next().await {
                     match result {
                         Ok((pos, item)) => {
-                            assert!(pos >= START_POS);
-                            assert_eq!(test_digest(pos), item);
+                            assert!(pos >= START_POS, "pos={}", pos);
+                            assert_eq!(
+                                test_digest(pos),
+                                item,
+                                "Item at position {} did not match expected digest",
+                                pos
+                            );
                             items.push(pos);
                         }
                         Err(err) => panic!("Failed to read item: {}", err),

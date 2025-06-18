@@ -34,7 +34,6 @@ pub struct Config<
     pub max_participants: usize,
     pub activity_timeout: View,
     pub skip_timeout: View,
-    pub replay_concurrency: usize,
     pub replay_buffer: usize,
     pub write_buffer: usize,
 }
@@ -132,7 +131,6 @@ mod tests {
                 max_participants: n as usize,
                 activity_timeout: 10,
                 skip_timeout: 10,
-                replay_concurrency: 1,
                 replay_buffer: 1024 * 1024,
                 write_buffer: 1024 * 1024,
             };
@@ -329,7 +327,6 @@ mod tests {
                 max_participants: n as usize,
                 activity_timeout,
                 skip_timeout: 10,
-                replay_concurrency: 1,
                 replay_buffer: 1024 * 1024,
                 write_buffer: 1024 * 1024,
             };

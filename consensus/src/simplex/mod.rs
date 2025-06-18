@@ -326,7 +326,6 @@ mod tests {
                     max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
                     write_buffer: 1024 * 1024,
                 };
@@ -571,7 +570,6 @@ mod tests {
                         max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
-                        replay_concurrency: 1,
                         replay_buffer: 1024 * 1024,
                         write_buffer: 1024 * 1024,
                     };
@@ -741,7 +739,6 @@ mod tests {
                     max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
                     write_buffer: 1024 * 1024,
                 };
@@ -860,7 +857,6 @@ mod tests {
                 max_participants: n as usize,
                 fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                 fetch_concurrent: 1,
-                replay_concurrency: 1,
                 replay_buffer: 1024 * 1024,
                 write_buffer: 1024 * 1024,
             };
@@ -983,7 +979,6 @@ mod tests {
                     max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
                     write_buffer: 1024 * 1024,
                 };
@@ -1210,7 +1205,6 @@ mod tests {
                     max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
                     write_buffer: 1024 * 1024,
                 };
@@ -1369,7 +1363,6 @@ mod tests {
                     max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
                     write_buffer: 1024 * 1024,
                 };
@@ -1553,7 +1546,6 @@ mod tests {
                     max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
                     write_buffer: 1024 * 1024,
                 };
@@ -1733,7 +1725,6 @@ mod tests {
                     max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
                     write_buffer: 1024 * 1024,
                 };
@@ -1901,7 +1892,6 @@ mod tests {
                         max_participants: n as usize,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
-                        replay_concurrency: 1,
                         replay_buffer: 1024 * 1024,
                         write_buffer: 1024 * 1024,
                     };
@@ -2070,7 +2060,6 @@ mod tests {
                         max_participants: n as usize,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
-                        replay_concurrency: 1,
                         replay_buffer: 1024 * 1024,
                         write_buffer: 1024 * 1024,
                     };
@@ -2235,7 +2224,6 @@ mod tests {
                         max_participants: n as usize,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
-                        replay_concurrency: 1,
                         replay_buffer: 1024 * 1024,
                         write_buffer: 1024 * 1024,
                     };
@@ -2372,7 +2360,6 @@ mod tests {
                     max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
                     write_buffer: 1024 * 1024,
                 };

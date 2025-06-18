@@ -1,0 +1,25 @@
+[package]
+name = "commonware-codec-fuzz"
+version = "0.0.1"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = { workspace = true }
+bytes = { workspace = true }
+arbitrary = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+paste = { workspace = true }
+
+[dependencies.commonware-codec]
+path = ".."
+
+[[bin]]
+name = "roundtrip"
+path = "fuzz_targets/codec_roundtrip.rs"
+test = false
+doc = false
+bench = false
