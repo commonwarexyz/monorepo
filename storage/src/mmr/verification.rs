@@ -895,7 +895,13 @@ mod tests {
                     let end_pos = element_positions[j];
                     let proof = mmr.range_proof(start_pos, end_pos).await.unwrap();
 
+                    let expected_size = proof.encode_size();
                     let serialized_proof = proof.encode().freeze();
+                    assert_eq!(
+                        serialized_proof.len(),
+                        expected_size,
+                        "serialized proof should have expected size"
+                    );
                     let deserialized_proof = Proof::decode_cfg(
                         serialized_proof,
                         &ProofReadCfg {
