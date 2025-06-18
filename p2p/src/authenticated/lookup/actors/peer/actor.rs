@@ -1,11 +1,7 @@
 use super::{ingress::Message, Config, Error, Mailbox};
 use crate::authenticated::{
     data::Data,
-    lookup::{
-        actors::tracker::{self, Reservation},
-        channels::Channels,
-        metrics, types,
-    },
+    lookup::{channels::Channels, metrics, types},
     relay::Relay,
 };
 use commonware_codec::{Decode, Encode};
@@ -29,7 +25,6 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey
     ping_frequency: Duration,
     allowed_ping_rate: Quota,
 
-    mailbox: Mailbox,
     control: mpsc::Receiver<Message>,
     high: mpsc::Receiver<Data>,
     low: mpsc::Receiver<Data>,
@@ -37,33 +32,30 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey
     sent_messages: Family<metrics::Message, Counter>,
     received_messages: Family<metrics::Message, Counter>,
     rate_limited: Family<metrics::Message, Counter>,
-
-    // When reservation goes out-of-scope, the tracker will be notified.
-    _reservation: Reservation<E, C>,
+    _phantom: std::marker::PhantomData<C>,
 }
 
 impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: PublicKey>
     Actor<E, C>
 {
-    pub fn new(context: E, cfg: Config, reservation: Reservation<E, C>) -> (Self, Relay<Data>) {
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox, Relay<Data>) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
-
         (
             Self {
                 context,
                 ping_frequency: cfg.ping_frequency,
                 allowed_ping_rate: cfg.allowed_ping_rate,
-                mailbox: Mailbox::new(control_sender),
                 control: control_receiver,
                 high: high_receiver,
                 low: low_receiver,
                 sent_messages: cfg.sent_messages,
                 received_messages: cfg.received_messages,
                 rate_limited: cfg.rate_limited,
-                _reservation: reservation,
+                _phantom: std::marker::PhantomData,
             },
+            Mailbox::new(control_sender),
             Relay::new(low_sender, high_sender),
         )
     }
@@ -97,7 +89,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         mut self,
         peer: C,
         connection: Connection<Si, St>,
-        tracker: tracker::Mailbox<E, C>,
         channels: Channels<C>,
     ) -> Error {
         // Instantiate rate limiters for each message type
@@ -116,13 +107,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         let (mut conn_sender, mut conn_receiver) = connection.split();
         let mut send_handler: Handle<Result<(), Error>> = self.context.with_label("sender").spawn( {
             let peer = peer.clone();
-            let mut tracker = tracker.clone();
-            let mailbox = self.mailbox.clone();
             let rate_limits = rate_limits.clone();
             move |context| async move {
-                // Allow tracker to initialize the peer
-                tracker.connect(peer.clone(), mailbox.clone()).await;
-
                 // Set the initial deadline to now to start pinging immediately
                 let mut deadline = context.current();
 

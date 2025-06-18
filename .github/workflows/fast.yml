@@ -11,6 +11,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   UDEPS_VERSION: 0.1.50
+  FUZZ_VERSION: 0.12.0
 
 jobs:
   Lint:
@@ -79,6 +80,31 @@ jobs:
       run: cargo +nightly install cargo-udeps --version ${{ env.UDEPS_VERSION }}
     - name: Check for unused dependencies
       run: cargo +nightly udeps --all-targets
+
+  Fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Install nightly Rust toolchain
+      run: rustup toolchain install nightly
+    - name: Get Rust version
+      id: rust-version
+      run: echo "rust_version=$(rustc +nightly --version)" >> "$GITHUB_OUTPUT"
+    - name: Run setup
+      uses: ./.github/actions/setup
+    - name: Cache cargo-fuzz
+      id: cargo-fuzz-cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/bin/cargo-fuzz
+        key: ${{ runner.os }}-${{ env.FUZZ_VERSION }}-cargo-fuzz-${{ steps.rust-version.outputs.rust_version }}
+    - name: Install cargo-fuzz
+      if: steps.cargo-fuzz-cache.outputs.cache-hit != 'true'
+      run: cargo +nightly install cargo-fuzz --version ${{ env.FUZZ_VERSION }}
+    - name: Build codec
+      run: cargo +nightly fuzz build --fuzz-dir codec/fuzz
 
   WASM:
     runs-on: ubuntu-latest

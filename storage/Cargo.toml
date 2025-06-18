@@ -36,6 +36,11 @@ bench = false
 crate-type = ["rlib", "cdylib"]
 
 [[bench]]
+name = "adb"
+harness = false
+path = "src/adb/benches/bench.rs"
+
+[[bench]]
 name="archive"
 harness = false
 path = "src/archive/benches/bench.rs"
