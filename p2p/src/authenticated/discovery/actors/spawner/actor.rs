@@ -10,7 +10,7 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Clock, Handle, Metrics, Network, Sink, Spawner, Stream};
+use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
@@ -19,7 +19,7 @@ use std::time::Duration;
 use tracing::debug;
 
 pub struct Actor<
-    E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics + Network,
+    E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
     Si: Sink,
     St: Stream,
     C: PublicKey,
@@ -42,7 +42,7 @@ pub struct Actor<
 }
 
 impl<
-        E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics + Network,
+        E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
         Si: Sink,
         St: Stream,
         C: PublicKey,
