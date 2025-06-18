@@ -95,6 +95,13 @@
 //! channels. Each registered channel ([Sender], [Receiver]) handles its own message queuing
 //! and rate limiting.
 //!
+//! ## Compression
+//!
+//! Stream compression is purposely avoided in this implementation to prevent known
+//! attacks on compression and encoding such as BREACH and CRIME. These attacks can
+//! reveal sensitive information by analyzing compressed data patterns. Applications
+//! should handle their own compression before sending data to the p2p layer if needed.
+//!
 //! # Example
 //!
 //! ```rust
