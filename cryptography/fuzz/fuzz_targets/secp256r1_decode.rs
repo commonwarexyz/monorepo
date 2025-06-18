@@ -75,18 +75,15 @@ fn test_public_key(data: &[u8]) {
 }
 
 fn test_public_key_roundtrip(data: &[u8]) {
-    match PublicKey::decode(data) {
-        Ok(public_key) => {
-            let encoded = public_key.encode();
-            assert_eq!(
-                data,
-                encoded.as_ref(),
-                "Public key roundtrip failed: original {:?} != encoded {:?}",
-                data,
-                encoded.as_ref()
-            );
-        }
-        Err(_) => return,
+    if let Ok(public_key) = PublicKey::decode(data) {
+        let encoded = public_key.encode();
+        assert_eq!(
+            data,
+            encoded.as_ref(),
+            "Public key roundtrip failed: original {:?} != encoded {:?}",
+            data,
+            encoded.as_ref()
+        );
     }
 }
 
@@ -137,7 +134,7 @@ fn test_sign_verify(private_key_data: &[u8; 32], message: &[u8]) {
 
 // Test public key derivation
 fn test_public_key_derivation(private_key_data: &[u8]) {
-    if let Ok(private_key) = PrivateKey::decode(private_key_data.as_ref()) {
+    if let Ok(private_key) = PrivateKey::decode(private_key_data) {
         let public_key1 = private_key.public_key();
         let public_key2 = PublicKey::from(private_key.clone());
         assert_eq!(public_key1.encode(), public_key2.encode());
