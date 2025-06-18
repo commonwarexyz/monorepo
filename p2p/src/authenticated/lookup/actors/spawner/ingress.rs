@@ -16,6 +16,7 @@ pub enum Message<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKe
         reservation: Reservation<E, P>,
     },
 }
+
 /// Sends messages to the spawner [super::Actor].
 pub struct Mailbox<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKey> {
     sender: mpsc::Sender<Message<E, Si, St, P>>,
