@@ -1,5 +1,5 @@
 use criterion::criterion_main;
 
-mod anydb_init;
+mod any_init;
 
-criterion_main!(anydb_init::benches);
+criterion_main!(any_init::benches);

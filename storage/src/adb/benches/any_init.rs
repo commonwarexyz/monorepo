@@ -19,7 +19,7 @@ const NUM_OPERATIONS: u64 = 1_000_000;
 const COMMIT_FREQUENCY: u32 = 10_000;
 const DELETE_FREQUENCY: u32 = 10; // 1/10th of the updates will be deletes.
 const ITEMS_PER_BLOB: u64 = 500_000;
-const PARTITION_SUFFIX: &str = "anydb_bench_partition";
+const PARTITION_SUFFIX: &str = "any_bench_partition";
 
 /// Threads (cores) to use for parallelization. We pick 8 since our benchmarking pipeline is
 /// configured to provide 8 cores. This speeds up benchmark setup, but doesn't affect the benchmark
@@ -51,7 +51,7 @@ fn gen_random_any(cfg: Config, num_elements: u64, num_operations: u64) {
         info!("Starting DB generation...");
         let pool = create_pool(ctx.clone(), THREADS).unwrap();
         let any_cfg = any_cfg(pool);
-        let mut anydb = Any::<_, _, _, Sha256, EightCap>::init(ctx, any_cfg)
+        let mut db = Any::<_, _, _, Sha256, EightCap>::init(ctx, any_cfg)
             .await
             .unwrap();
 
@@ -60,43 +60,40 @@ fn gen_random_any(cfg: Config, num_elements: u64, num_operations: u64) {
         for i in 0u64..num_elements {
             let k = hash(&i.to_be_bytes());
             let v = hash(&rng.next_u32().to_be_bytes());
-            anydb.update(k, v).await.unwrap();
+            db.update(k, v).await.unwrap();
         }
 
         // Randomly update / delete them.
         for _ in 0u64..num_operations {
             let rand_key = hash(&(rng.next_u64() % num_elements).to_be_bytes());
             if rng.next_u32() % DELETE_FREQUENCY == 0 {
-                anydb.delete(rand_key).await.unwrap();
+                db.delete(rand_key).await.unwrap();
                 continue;
             }
             let v = hash(&rng.next_u32().to_be_bytes());
-            anydb.update(rand_key, v).await.unwrap();
+            db.update(rand_key, v).await.unwrap();
             if rng.next_u32() % COMMIT_FREQUENCY == 0 {
-                anydb.commit().await.unwrap();
+                db.commit().await.unwrap();
             }
         }
-        anydb.commit().await.unwrap();
+        db.commit().await.unwrap();
         info!(
-            "DB generated. op_count={}, oldest_retained_loc={}",
-            anydb.op_count(),
-            anydb.oldest_retained_loc().unwrap()
+            op_count = db.op_count(),
+            oldest_retained_loc = db.oldest_retained_loc().unwrap(),
+            "DB generated.",
         );
-        anydb.close().await.unwrap();
+        db.close().await.unwrap();
     });
 }
 
 /// Benchmark the initialization of a large randomly generated any db.
-fn bench_anydb_init(c: &mut Criterion) {
+fn bench_any_init(c: &mut Criterion) {
     tracing_subscriber::fmt().try_init().ok();
     let cfg = Config::default();
     let runner = tokio::Runner::new(cfg.clone());
     for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 2] {
         for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 2] {
-            info!(
-                "Benchmarking anydb init with elements={} operations={}",
-                elements, operations
-            );
+            info!(elements, operations, "Benchmarking any init.",);
             gen_random_any(cfg.clone(), elements, operations);
 
             c.bench_function(
@@ -113,7 +110,7 @@ fn bench_anydb_init(c: &mut Criterion) {
                         let any_cfg = any_cfg(pool);
                         let start = Instant::now();
                         for _ in 0..iters {
-                            let anydb = Any::<
+                            let db = Any::<
                                 Context,
                                 <Sha256 as Hasher>::Digest,
                                 <Sha256 as Hasher>::Digest,
@@ -124,8 +121,8 @@ fn bench_anydb_init(c: &mut Criterion) {
                             )
                             .await
                             .unwrap();
-                            assert_ne!(anydb.op_count(), 0);
-                            anydb.close().await.unwrap();
+                            assert_ne!(db.op_count(), 0);
+                            db.close().await.unwrap();
                         }
 
                         start.elapsed()
@@ -139,7 +136,7 @@ fn bench_anydb_init(c: &mut Criterion) {
                 let pool = commonware_runtime::create_pool(ctx.clone(), THREADS).unwrap();
                 let any_cfg = any_cfg(pool);
                 // Clean up the database after the benchmark.
-                let anydb = Any::<
+                let db = Any::<
                     Context,
                     <Sha256 as Hasher>::Digest,
                     <Sha256 as Hasher>::Digest,
@@ -148,7 +145,7 @@ fn bench_anydb_init(c: &mut Criterion) {
                 >::init(ctx.clone(), any_cfg.clone())
                 .await
                 .unwrap();
-                anydb.destroy().await.unwrap();
+                db.destroy().await.unwrap();
             });
         }
     }
@@ -157,5 +154,5 @@ fn bench_anydb_init(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_anydb_init
+    targets = bench_any_init
 }
