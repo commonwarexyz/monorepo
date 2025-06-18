@@ -105,6 +105,8 @@ jobs:
       run: cargo +nightly install cargo-fuzz --version ${{ env.FUZZ_VERSION }}
     - name: Build codec
       run: cargo +nightly fuzz build --fuzz-dir codec/fuzz
+    - name: Build cryptography
+      run: cargo +nightly fuzz build --fuzz-dir cryptography/fuzz
 
   WASM:
     runs-on: ubuntu-latest
