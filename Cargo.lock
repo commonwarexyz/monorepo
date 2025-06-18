@@ -1153,7 +1153,6 @@ dependencies = [
  "thiserror 2.0.12",
  "tracing",
  "tracing-subscriber",
- "zstd",
 ]
 
 [[package]]
