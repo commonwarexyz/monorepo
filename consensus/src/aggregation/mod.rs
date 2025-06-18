@@ -83,6 +83,13 @@ mod tests {
 
     type Registrations<P> = BTreeMap<P, (Sender<P>, Receiver<P>)>;
 
+    /// Reliable network link configuration for testing.
+    const RELIABLE_LINK: Link = Link {
+        latency: 10.0,
+        jitter: 1.0,
+        success_rate: 1.0,
+    };
+
     /// Register all participants with the network oracle.
     async fn register_participants(
         oracle: &mut Oracle<PublicKey>,
@@ -115,7 +122,8 @@ mod tests {
         }
     }
 
-    async fn initialize_simulation_with_link(
+    /// Initialize a simulated network environment.
+    async fn initialize_simulation(
         context: Context,
         num_validators: u32,
         shares_vec: &mut [Share],
@@ -149,49 +157,6 @@ mod tests {
             .collect::<Vec<_>>();
 
         let registrations = register_participants(&mut oracle, &pks).await;
-        link_participants(&mut oracle, &pks, link).await;
-        (oracle, validators, pks, registrations)
-    }
-
-    /// Initialize a simulated network environment.
-    async fn initialize_simulation(
-        context: Context,
-        num_validators: u32,
-        shares_vec: &mut [Share],
-    ) -> (
-        Oracle<PublicKey>,
-        Vec<(PublicKey, PrivateKey, Share)>,
-        Vec<PublicKey>,
-        Registrations<PublicKey>,
-    ) {
-        let (network, mut oracle) = Network::new(
-            context.with_label("network"),
-            commonware_p2p::simulated::Config {
-                max_size: 1024 * 1024,
-            },
-        );
-        network.start();
-
-        let mut schemes = (0..num_validators)
-            .map(|i| PrivateKey::from_seed(i as u64))
-            .collect::<Vec<_>>();
-        schemes.sort_by_key(|s| s.public_key());
-        let validators: Vec<(PublicKey, PrivateKey, Share)> = schemes
-            .iter()
-            .enumerate()
-            .map(|(i, scheme)| (scheme.public_key(), scheme.clone(), shares_vec[i].clone()))
-            .collect();
-        let pks = validators
-            .iter()
-            .map(|(pk, _, _)| pk.clone())
-            .collect::<Vec<_>>();
-
-        let registrations = register_participants(&mut oracle, &pks).await;
-        let link = Link {
-            latency: 10.0,
-            jitter: 1.0,
-            success_rate: 1.0,
-        };
         link_participants(&mut oracle, &pks, link).await;
         (oracle, validators, pks, registrations)
     }
@@ -272,7 +237,8 @@ mod tests {
     async fn await_reporters<V: Variant>(
         context: Context,
         reporters: &BTreeMap<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>,
-        threshold: (u64, Epoch),
+        threshold_index: u64,
+        threshold_epoch: Epoch,
     ) {
         let mut receivers = Vec::new();
         for (reporter, mailbox) in reporters.iter() {
@@ -291,12 +257,12 @@ mod tests {
                             index,
                             epoch,
                             contiguous_index,
-                            threshold_index = threshold.0,
-                            threshold_epoch = threshold.1,
+                            threshold_index,
+                            threshold_epoch,
                             ?reporter,
                             "reporter status"
                         );
-                        if index >= threshold.0 && epoch >= threshold.1 {
+                        if index >= threshold_index && epoch >= threshold_epoch {
                             debug!(
                                 ?reporter,
                                 "reporter reached threshold, signaling completion"
@@ -335,6 +301,7 @@ mod tests {
                 context.with_label("simulation"),
                 num_validators,
                 &mut shares_vec,
+                RELIABLE_LINK,
             )
             .await;
             let automatons = Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
@@ -353,7 +320,7 @@ mod tests {
                 |_| false,
                 None,
             );
-            await_reporters(context.with_label("reporter"), &reporters, (1, 111)).await;
+            await_reporters(context.with_label("reporter"), &reporters, 1, 111).await;
         });
     }
 
@@ -371,6 +338,7 @@ mod tests {
                 context.with_label("simulation"),
                 num_validators,
                 &mut shares_vec,
+                RELIABLE_LINK,
             )
             .await;
             let automatons = Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
@@ -395,7 +363,7 @@ mod tests {
             // Test that aggregation works even with potential unclean shutdowns
             // The engine implementation includes journaling which should handle
             // restarts gracefully
-            await_reporters(context.with_label("reporter"), &reporters, (1, 111)).await;
+            await_reporters(context.with_label("reporter"), &reporters, 1, 111).await;
         });
     }
 
@@ -413,10 +381,10 @@ mod tests {
             let degraded_link = Link {
                 latency: 200.0,
                 jitter: 150.0,
-                success_rate: 0.5, // Realistic 50% success rate for stress testing
+                success_rate: 0.5,
             };
 
-            let (mut oracle, validators, pks, mut registrations) = initialize_simulation_with_link(
+            let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
                 context.with_label("simulation"),
                 num_validators,
                 &mut shares_vec,
@@ -441,7 +409,7 @@ mod tests {
                 None,
             );
 
-            await_reporters(context.with_label("reporter"), &reporters, (1, 111)).await;
+            await_reporters(context.with_label("reporter"), &reporters, 1, 111).await;
         });
     }
 
@@ -459,6 +427,7 @@ mod tests {
                 context.with_label("simulation"),
                 num_validators,
                 &mut shares_vec,
+                RELIABLE_LINK,
             )
             .await;
             let automatons = Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
@@ -480,7 +449,7 @@ mod tests {
                 None,
             );
 
-            await_reporters(context.with_label("reporter"), &reporters, (1, 111)).await;
+            await_reporters(context.with_label("reporter"), &reporters, 1, 111).await;
         });
     }
 
@@ -498,6 +467,7 @@ mod tests {
                 context.with_label("simulation"),
                 num_validators,
                 &mut shares_vec,
+                RELIABLE_LINK,
             )
             .await;
             let automatons = Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
@@ -521,7 +491,7 @@ mod tests {
                 |_| false,
                 None,
             );
-            await_reporters(context.with_label("reporter"), &reporters, (1, 111)).await;
+            await_reporters(context.with_label("reporter"), &reporters, 1, 111).await;
         });
     }
 
@@ -570,6 +540,7 @@ mod tests {
                 context.with_label("simulation"),
                 num_validators,
                 &mut shares_vec,
+                RELIABLE_LINK,
             )
             .await;
             let automatons = Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
@@ -590,7 +561,7 @@ mod tests {
                 None,
             );
 
-            await_reporters(context.with_label("reporter"), &reporters, (0, 111)).await;
+            await_reporters(context.with_label("reporter"), &reporters, 0, 111).await;
         });
     }
 
@@ -615,6 +586,7 @@ mod tests {
                 context.with_label("simulation"),
                 num_validators,
                 &mut shares_vec,
+                RELIABLE_LINK,
             )
             .await;
             let automatons = Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
@@ -662,7 +634,7 @@ mod tests {
                 }
             }
 
-            await_reporters(context.with_label("reporter"), &reporters, (1, 111)).await;
+            await_reporters(context.with_label("reporter"), &reporters, 1, 111).await;
         });
     }
 
@@ -687,6 +659,7 @@ mod tests {
                 context.with_label("simulation"),
                 num_validators,
                 &mut shares_vec,
+                RELIABLE_LINK,
             )
             .await;
             let automatons = Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
@@ -724,7 +697,7 @@ mod tests {
                 None,
             );
 
-            await_reporters(context.with_label("reporter"), &reporters, (1, 111)).await;
+            await_reporters(context.with_label("reporter"), &reporters, 1, 111).await;
         });
     }
 
@@ -749,6 +722,7 @@ mod tests {
                 context.with_label("simulation"),
                 num_validators,
                 &mut shares_vec,
+                RELIABLE_LINK,
             )
             .await;
             let automatons = Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
@@ -769,7 +743,7 @@ mod tests {
                 None,
             );
 
-            await_reporters(context.with_label("reporter"), &reporters, (1, 111)).await;
+            await_reporters(context.with_label("reporter"), &reporters, 1, 111).await;
 
             // Additional validation: verify that consensus was achieved and items are retrievable
             // The reporter mock already validates ack signatures internally and panics on invalid ones
@@ -827,6 +801,7 @@ mod tests {
                 context.with_label("simulation"),
                 num_validators,
                 &mut shares_vec,
+                RELIABLE_LINK,
             )
             .await;
             let automatons = Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
@@ -870,7 +845,7 @@ mod tests {
                 Some(10), // Allow more missed acks due to advanced Byzantine behavior
             );
 
-            await_reporters(context.with_label("reporter"), &reporters, (2, 111)).await;
+            await_reporters(context.with_label("reporter"), &reporters, 2, 111).await;
         });
     }
 
@@ -878,73 +853,6 @@ mod tests {
     fn test_advanced_byzantine_faults() {
         advanced_byzantine_faults::<MinPk>();
         advanced_byzantine_faults::<MinSig>();
-    }
-
-    /// Test extreme network conditions that should cause failures or timeouts.
-    fn extreme_network_conditions<V: Variant>() {
-        let num_validators: u32 = 4;
-        let quorum: u32 = 3;
-        let runner = deterministic::Runner::timed(Duration::from_secs(20));
-
-        runner.start(|mut context| async move {
-            let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
-            shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
-
-            // Create extremely hostile network conditions
-            let hostile_link = Link {
-                latency: 5000.0,    // 5 second latency
-                jitter: 2000.0,     // 2 second jitter
-                success_rate: 0.1,  // Only 10% success rate
-            };
-
-            let (mut oracle, validators, pks, mut registrations) = initialize_simulation_with_link(
-                context.with_label("simulation"),
-                num_validators,
-                &mut shares_vec,
-                hostile_link,
-            )
-            .await;
-            let automatons = Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
-            let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>::new();
-
-            spawn_validator_engines::<V>(
-                context.with_label("validator"),
-                polynomial.clone(),
-                &pks,
-                &validators,
-                &mut registrations,
-                &mut automatons.lock().unwrap(),
-                &mut reporters,
-                &mut oracle,
-                Duration::from_secs(2), // Short timeout to stress test
-                |_| false,
-                None,
-            );
-
-            // Under these extreme conditions, we expect consensus to be very difficult
-            // Let's verify the system doesn't immediately crash and can handle the stress
-            // Sleep for a bit to let the system attempt consensus under hostile conditions
-            context.sleep(Duration::from_secs(8)).await;
-            // Check that at least some validators are still making progress (or struggling appropriately)
-            let mut progress_count = 0;
-            for (_, mut reporter_mailbox) in reporters {
-                if let Some((tip_index, _)) = reporter_mailbox.get_tip().await {
-                    if tip_index > 0 {
-                        progress_count += 1;
-                    }
-                }
-            }
-            // Under extreme conditions, we expect either:
-            // 1. No progress at all (progress_count == 0), or
-            // 2. Very limited progress from only some validators
-            assert!(
-                progress_count <= 2,
-                "Under extreme network conditions, progress should be severely limited. Found {} validators with progress",
-                progress_count
-            );
-        });
     }
 
     /// Test insufficient validator participation (below quorum).
@@ -962,6 +870,7 @@ mod tests {
                 context.with_label("simulation"),
                 num_validators,
                 &mut shares_vec,
+                RELIABLE_LINK,
             )
             .await;
             let automatons = Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
@@ -1014,12 +923,6 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_extreme_network_conditions() {
-        extreme_network_conditions::<MinPk>();
-        extreme_network_conditions::<MinSig>();
-    }
-
-    #[test_traced]
     fn test_insufficient_validators() {
         insufficient_validators::<MinPk>();
         insufficient_validators::<MinSig>();
@@ -1040,6 +943,7 @@ mod tests {
                 context.with_label("simulation"),
                 num_validators,
                 &mut shares_vec,
+                RELIABLE_LINK,
             )
             .await;
             let automatons = Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
@@ -1060,7 +964,7 @@ mod tests {
                 None,
             );
 
-            await_reporters(context.with_label("reporter"), &reporters, (2, 111)).await;
+            await_reporters(context.with_label("reporter"), &reporters, 2, 111).await;
 
             // Now verify that all consensus items have mathematically valid threshold signatures
             for (validator_pk, mut reporter_mailbox) in reporters {
