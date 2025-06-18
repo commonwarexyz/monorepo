@@ -98,7 +98,7 @@ impl<H: CHasher> Read for Proof<H> {
             ));
         }
 
-        // 4) Read the digests:
+        // Read the digests
         let mut digests = Vec::with_capacity(count);
         for _ in 0..count {
             digests.push(H::Digest::read(buf)?);
