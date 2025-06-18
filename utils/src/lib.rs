@@ -90,9 +90,7 @@ pub fn union_unique(namespace: &[u8], msg: &[u8]) -> Vec<u8> {
 ///
 /// Panics if `n` is zero.
 pub fn modulo(bytes: &[u8], n: u64) -> u64 {
-    if n == 0 {
-        panic!("modulus must be non-zero");
-    }
+    assert_ne!(n, 0, "modulus must be non-zero");
 
     let n = n as u128;
     let mut result = 0u128;
