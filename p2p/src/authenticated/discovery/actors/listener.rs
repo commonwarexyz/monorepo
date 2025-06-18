@@ -66,6 +66,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         }
     }
 
+    #[allow(clippy::type_complexity)]
     async fn handshake(
         context: E,
         address: SocketAddr,
@@ -129,6 +130,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         supervisor.spawn(stream, reservation).await;
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn start(
         self,
         tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
@@ -139,6 +141,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
             .spawn(|_| self.run(tracker, supervisor))
     }
 
+    #[allow(clippy::type_complexity)]
     async fn run(
         self,
         tracker: Mailbox<tracker::Message<E, C::PublicKey>>,

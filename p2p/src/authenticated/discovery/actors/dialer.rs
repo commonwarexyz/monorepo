@@ -78,6 +78,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
     }
 
     /// Dial a peer for which we have a reservation.
+    #[allow(clippy::type_complexity)]
     async fn dial_peer(
         &mut self,
         reservation: Reservation<E, C::PublicKey>,
@@ -138,6 +139,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
     }
 
     /// Start the dialer actor.
+    #[allow(clippy::type_complexity)]
     pub fn start(
         self,
         tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
@@ -148,6 +150,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
             .spawn(|_| self.run(tracker, supervisor))
     }
 
+    #[allow(clippy::type_complexity)]
     async fn run(
         mut self,
         mut tracker: Mailbox<tracker::Message<E, C::PublicKey>>,

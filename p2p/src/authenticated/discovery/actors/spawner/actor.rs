@@ -44,6 +44,7 @@ impl<
         C: PublicKey,
     > Actor<E, C>
 {
+    #[allow(clippy::type_complexity)]
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<E, SinkOf<E>, StreamOf<E>, C>>) {
         let connections = Gauge::default();
         let sent_messages = Family::<metrics::Message, Counter>::default();
