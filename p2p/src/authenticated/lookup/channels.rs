@@ -45,9 +45,9 @@ impl<P: PublicKey> crate::Sender for Sender<P> {
     ///
     /// # Returns
     ///
-    /// If the message is `< max_size`, The set of recipients
-    /// that the message was sent to. Note, a successful send does not mean that the recipient will
-    /// receive the message (connection may no longer be active and we may not know that yet).
+    /// A vector of recipients that the message was sent to, or an error if the message is too large.
+    /// 
+    /// Note: a successful send does not guarantee that the recipient will receive the message.
     async fn send(
         &mut self,
         recipients: Recipients<Self::PublicKey>,
