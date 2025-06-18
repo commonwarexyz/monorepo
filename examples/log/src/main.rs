@@ -50,7 +50,7 @@ mod gui;
 use clap::{value_parser, Arg, Command};
 use commonware_consensus::simplex;
 use commonware_cryptography::{ed25519, PrivateKeyExt as _, Sha256, Signer as _};
-use commonware_p2p::authenticated::{self, Network};
+use commonware_p2p::authenticated::discovery;
 use commonware_runtime::{tokio, Metrics, Runner};
 use commonware_utils::{union, NZU32};
 use governor::Quota;
@@ -144,7 +144,7 @@ fn main() {
     let executor = tokio::Runner::new(runtime_cfg.clone());
 
     // Configure network
-    let p2p_cfg = authenticated::Config::aggressive(
+    let p2p_cfg = discovery::Config::aggressive(
         signer.clone(),
         &union(APPLICATION_NAMESPACE, b"_P2P"),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
@@ -156,7 +156,8 @@ fn main() {
     // Start context
     executor.start(async |context| {
         // Initialize network
-        let (mut network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
+        let (mut network, mut oracle) =
+            discovery::Network::new(context.with_label("network"), p2p_cfg);
 
         // Provide authorized peers
         //
