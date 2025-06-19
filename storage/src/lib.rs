@@ -7,6 +7,7 @@
 
 pub mod adb;
 pub mod archive;
+pub mod bmap;
 pub mod bmt;
 pub mod index;
 pub mod journal;
