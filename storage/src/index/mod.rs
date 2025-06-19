@@ -2,7 +2,7 @@
 //!
 //! # Multiple Values for a Key
 //!
-//! Keys are translated into a compressed, fixed-size representation using a `Translator`. Depending
+//! Keys are translated into a compressed, fixed-size representation using a [Translator]. Depending
 //! on the size of the representation, this can lead to a non-negligible number of collisions (even
 //! if the original keys are collision-free). To workaround this issue, `get` returns all values
 //! that map to the same translated key. If the same key is inserted multiple times (and old values
@@ -10,7 +10,7 @@
 //!
 //! # Warning
 //!
-//! If the `Translator` maps many keys to the same translated key, the performance of `Index` will
+//! If the [Translator] maps many keys to the same translated key, the performance of an index will
 //! degrade substantially (each conflicting key may contain the desired value).
 
 pub mod journaled;

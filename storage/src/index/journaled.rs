@@ -1,4 +1,4 @@
-//! Disk backed implementation of the [`Translator`] based index.
+//! [Journal]-backed implementation of the [Translator] based index.
 //!
 //! Each translated key maps to a pointer stored in an "index" blob.  The pointer
 //! occupies `size_of::<T::Key>()` bytes and contains the offset of the most
@@ -14,7 +14,7 @@ use commonware_codec::{varint::UInt, Codec, EncodeSize, Read, Write as CodecWrit
 use commonware_runtime::{buffer::Write, Blob, Metrics, Storage};
 use prometheus_client::metrics::gauge::Gauge;
 
-/// Errors that can occur when interacting with [`Disk`].
+/// Errors that can occur when interacting with [Index].
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("journal error: {0}")]
@@ -23,7 +23,7 @@ pub enum Error {
     Runtime(#[from] commonware_runtime::Error),
 }
 
-/// Configuration for [`Disk`].
+/// Configuration for [Index].
 #[derive(Clone)]
 pub struct Config<C> {
     /// Partition used for both the index blob and journal.
