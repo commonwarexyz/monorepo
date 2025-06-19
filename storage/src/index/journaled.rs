@@ -13,6 +13,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Codec, EncodeSize, Read, Write as CodecWrite};
 use commonware_runtime::{buffer::Write, Blob, Metrics, Storage};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
+use std::hash::{Hash, Hasher};
 
 /// Errors that can occur when interacting with [Index].
 #[derive(Debug, thiserror::Error)]
@@ -34,29 +35,34 @@ pub struct Config<C> {
     pub write_buffer: usize,
     /// Codec configuration for stored values.
     pub codec: C,
+    /// Size of the hash table.
+    pub table_size: u64,
 }
 
 const NONE: u128 = 0;
+const PTR_SIZE: u64 = 4;
 
 /// Single entry stored in the [`Journal`].
 ///
 /// `next` stores the previous offset (1 based, so `0` is `None`).  The value is
 /// encoded using the caller supplied [`Codec`].
-struct Node<V: Codec> {
+struct Node<K: Codec, V: Codec> {
     next: Option<u32>,
+    key: K,
     value: V,
 }
 
-impl<V: Codec> CodecWrite for Node<V> {
+impl<K: Codec, V: Codec> CodecWrite for Node<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
         let n = self.next.map(|i| i as u128 + 1).unwrap_or(NONE);
         UInt(n).write(buf);
+        self.key.write(buf);
         self.value.write(buf);
     }
 }
 
-impl<V: Codec> Read for Node<V> {
-    type Cfg = V::Cfg;
+impl<K: Codec, V: Codec> Read for Node<K, V> {
+    type Cfg = (K::Cfg, V::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let n: u128 = UInt::read_cfg(buf, &())?.into();
@@ -65,14 +71,15 @@ impl<V: Codec> Read for Node<V> {
         } else {
             Some((n - 1) as u32)
         };
-        let value = V::read_cfg(buf, cfg)?;
-        Ok(Self { next, value })
+        let key = K::read_cfg(buf, &cfg.0)?;
+        let value = V::read_cfg(buf, &cfg.1)?;
+        Ok(Self { next, key, value })
     }
 }
 
-impl<V: Codec> EncodeSize for Node<V> {
+impl<K: Codec, V: Codec> EncodeSize for Node<K, V> {
     fn encode_size(&self) -> usize {
-        UInt(0u128).encode_size() + self.value.encode_size()
+        UInt(0u128).encode_size() + self.key.encode_size() + self.value.encode_size()
     }
 }
 
@@ -83,30 +90,38 @@ impl<V: Codec> EncodeSize for Node<V> {
 /// in the same partition provided by [`Config`].
 pub struct Index<E: Storage + Metrics, T: Translator, V: Codec>
 where
-    T::Key: Into<u64>,
+    T::Key: PartialEq + Eq + Hash + Codec,
 {
     /// Converts external keys into the fixed representation used for indexing.
     translator: T,
     /// Blob storing the pointer table.
-    index: E::Blob,
-    /// Current length of the index blob.
-    index_len: u64,
+    buckets: E::Blob,
     /// Journal storing linked list nodes.
-    journal: Journal<E, Node<V>>,
+    journal: Journal<E, Node<T::Key, V>>,
     /// Wasted reads due to collisions.
     wasted_reads: Counter,
+    /// Number of keys in the index.
+    keys: Gauge,
+    /// Number of items in the index.
+    items: Gauge,
+    /// Size of the hash table.
+    table_size: u64,
 }
 
 impl<E: Storage + Metrics, T: Translator, V: Codec> Index<E, T, V>
 where
-    T::Key: Into<u64>,
+    T::Key: PartialEq + Eq + Hash + Codec,
 {
     /// Initialize a new [`Disk`].
     ///
     /// The index blob and journal are opened (or created) inside
     /// `cfg.partition`.  Metrics for key and item counts are registered on the
     /// provided [`Metrics`] context.
-    pub async fn init(context: E, cfg: Config<V::Cfg>, translator: T) -> Result<Self, Error> {
+    pub async fn init(
+        context: E,
+        cfg: Config<(T::Key, V::Cfg)>,
+        translator: T,
+    ) -> Result<Self, Error> {
         let journal = Journal::init(
             context.with_label("index_journal"),
             JConfig {
@@ -119,18 +134,32 @@ where
         .await?;
 
         let (blob, size) = context.open(&cfg.table_partition, b"table").await?;
+        if size == 0 {
+            blob.write_at(vec![0; (cfg.table_size * PTR_SIZE) as usize], 0)
+                .await?;
+        } else if size != cfg.table_size * PTR_SIZE {
+            return Err(Error::Runtime(commonware_runtime::Error::Corrupted(
+                "table size mismatch".into(),
+            )));
+        }
         let wasted_reads = Counter::default();
         context.register(
             "wasted_reads",
             "Wasted reads due to collisions",
             wasted_reads.clone(),
         );
+        let keys = Gauge::default();
+        context.register("keys", "Number of keys", keys.clone());
+        let items = Gauge::default();
+        context.register("items", "Number of items", items.clone());
         Ok(Self {
             translator,
-            index: blob,
-            index_len: size,
+            buckets: blob,
             journal,
             wasted_reads,
+            keys,
+            items,
+            table_size: cfg.table_size,
         })
     }
 
@@ -139,31 +168,30 @@ where
     /// The value is appended to the journal and becomes the new head of the
     /// linked list for the translated key.
     pub async fn insert(&mut self, key: &[u8], value: V) -> Result<(), Error> {
-        let k = self.translator.transform(key).into();
-        let pos = k.into() * 4;
-
-        if pos + 4 > self.index_len {
-            let extend = pos + 4 - self.index_len;
-            self.index
-                .write_at(vec![0u8; extend as usize], self.index_len)
-                .await?;
-            self.index_len = pos + 4;
-        }
+        let k = self.translator.transform(key);
+        let mut hasher = self.translator.build_hasher();
+        k.hash(&mut hasher);
+        let pos = hasher.finish() % self.table_size;
 
         let mut buf = [0u8; 4];
-        if pos < self.index_len {
-            let read = self.index.read_at(vec![0u8; ptr as usize], pos).await?;
-            buf[..ptr as usize].copy_from_slice(read.as_ref());
-        }
+        let read = self
+            .buckets
+            .read_at(vec![0u8; PTR_SIZE as usize], pos)
+            .await?;
+        buf[..PTR_SIZE as usize].copy_from_slice(read.as_ref());
 
         let entry = u32::from_le_bytes(buf);
         let head = if entry == 0 { None } else { Some(entry - 1) };
 
-        let node = Node { next: head, value };
+        let node = Node {
+            next: head,
+            key: k,
+            value,
+        };
         let (offset, _) = self.journal.append(0, node).await?;
         let bytes = (offset + 1).to_le_bytes();
-        self.index
-            .write_at(bytes[..ptr as usize].to_vec(), pos)
+        self.buckets
+            .write_at(bytes[..PTR_SIZE as usize].to_vec(), pos)
             .await?;
         if head.is_none() {
             self.keys.inc();
@@ -179,21 +207,26 @@ where
     pub async fn get(&self, key: &[u8]) -> Result<Vec<V>, Error> {
         let mut values = Vec::new();
         let k = self.translator.transform(key);
-        let ptr = std::mem::size_of::<T::Key>() as u64;
-        let pos = k.into() * ptr;
-        if pos + ptr > self.index_len {
-            return Ok(values);
-        }
+        let mut hasher = self.translator.build_hasher();
+        k.hash(&mut hasher);
+        let pos = hasher.finish() % self.table_size;
 
-        let read = self.index.read_at(vec![0u8; ptr as usize], pos).await?;
+        let read = self
+            .buckets
+            .read_at(vec![0u8; PTR_SIZE as usize], pos)
+            .await?;
         let mut buf = [0u8; 4];
-        buf[..ptr as usize].copy_from_slice(read.as_ref());
+        buf[..PTR_SIZE as usize].copy_from_slice(read.as_ref());
         let entry = u32::from_le_bytes(buf);
         let mut current = if entry == 0 { None } else { Some(entry - 1) };
 
         while let Some(offset) = current {
             let node = self.journal.get(0, offset).await?.expect("record missing");
-            values.push(node.value);
+            if node.key == k {
+                values.push(node.value);
+            } else {
+                self.wasted_reads.inc();
+            }
             current = node.next;
         }
         Ok(values)
@@ -201,14 +234,14 @@ where
 
     /// Flush all pending data to the underlying [`Storage`].
     pub async fn sync(&self) -> Result<(), Error> {
-        self.index.sync().await?;
+        self.buckets.sync().await?;
         self.journal.sync(0).await?;
         Ok(())
     }
 
     /// Close the index and persist all pending data.
     pub async fn close(self) -> Result<(), Error> {
-        self.index.close().await?;
+        self.buckets.close().await?;
         self.journal.close().await?;
         Ok(())
     }
@@ -226,9 +259,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let cfg = Config {
-                partition: "disk_index_basic".into(),
+                table_partition: "disk_index_basic_table".into(),
+                journal_partition: "disk_index_basic_journal".into(),
                 write_buffer: 128,
-                codec: (),
+                codec: ((), ()),
+                table_size: 1024,
             };
             let translator = TwoCap;
             let mut index =
@@ -257,9 +292,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let cfg = Config {
-                partition: "disk_index_collision".into(),
+                table_partition: "disk_index_collision_table".into(),
+                journal_partition: "disk_index_collision_journal".into(),
                 write_buffer: 128,
-                codec: (),
+                codec: ((), ()),
+                table_size: 1024,
             };
             let translator = TwoCap;
             let mut index =
@@ -292,9 +329,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let cfg = Config {
-                partition: "disk_index_unclean".into(),
+                table_partition: "disk_index_unclean_table".into(),
+                journal_partition: "disk_index_unclean_journal".into(),
                 write_buffer: 128,
-                codec: (),
+                codec: ((), ()),
+                table_size: 1024,
             };
             let translator = TwoCap;
             {
