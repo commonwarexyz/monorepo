@@ -413,7 +413,7 @@ mod tests {
                                 };
 
                                 // Sleep to avoid busy loop
-                                context.sleep(Duration::from_secs(1)).await;
+                                context.sleep(Duration::from_secs(10)).await;
                             }
                         });
 
