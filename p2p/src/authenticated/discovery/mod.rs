@@ -236,6 +236,23 @@ mod tests {
 
     const DEFAULT_MESSAGE_BACKLOG: usize = 128;
 
+    /// Ensure no message rate limiting occurred.
+    ///
+    /// If a message is rate limited, it would be formatted as:
+    ///
+    /// ```text
+    /// peer-9_network_spawner_messages_rate_limited_total{peer="e2e8aa145e1ec5cb01ebfaa40e10e12f0230c832fd8135470c001cb86d77de00",message="data_0"} 1
+    /// peer-9_network_spawner_messages_rate_limited_total{peer="e2e8aa145e1ec5cb01ebfaa40e10e12f0230c832fd8135470c001cb86d77de00",message="ping"} 1
+    /// ```
+    fn assert_no_rate_limiting(context: &impl Metrics) {
+        let metrics = context.encode();
+        assert!(
+            !metrics.contains("messages_rate_limited_total{"),
+            "ping messages should not be rate limited: {}",
+            metrics
+        );
+    }
+
     /// Test connectivity between `n` peers.
     ///
     /// We set a unique `base_port` for each test to avoid "address already in use"
@@ -408,19 +425,7 @@ mod tests {
         }
 
         // Ensure no message rate limiting occurred
-        //
-        // If a message is rate limited, it would be formatted as:
-        //
-        // ```
-        // peer-9_network_spawner_messages_rate_limited_total{peer="e2e8aa145e1ec5cb01ebfaa40e10e12f0230c832fd8135470c001cb86d77de00",message="data_0"} 1
-        // peer-9_network_spawner_messages_rate_limited_total{peer="e2e8aa145e1ec5cb01ebfaa40e10e12f0230c832fd8135470c001cb86d77de00",message="ping"} 1
-        // ```
-        let metrics = context.encode();
-        assert!(
-            !metrics.contains("messages_rate_limited_total{"),
-            "ping messages should not be rate limited: {}",
-            metrics
-        );
+        assert_no_rate_limiting(&context);
     }
 
     fn run_deterministic_test(seed: u64, mode: Mode) {
@@ -591,6 +596,9 @@ mod tests {
             for waiter in waiters.into_iter().rev() {
                 waiter.await.unwrap();
             }
+
+            // Ensure no message rate limiting occurred
+            assert_no_rate_limiting(&context);
         });
     }
 
