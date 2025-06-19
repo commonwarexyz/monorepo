@@ -12,7 +12,7 @@ use crate::journal::variable::{Config as JConfig, Journal};
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Codec, EncodeSize, Read, Write as CodecWrite};
 use commonware_runtime::{buffer::Write, Blob, Metrics, Storage};
-use prometheus_client::metrics::gauge::Gauge;
+use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 
 /// Errors that can occur when interacting with [Index].
 #[derive(Debug, thiserror::Error)]
@@ -26,8 +26,10 @@ pub enum Error {
 /// Configuration for [Index].
 #[derive(Clone)]
 pub struct Config<C> {
-    /// Partition used for both the index blob and journal.
-    pub partition: String,
+    /// Partition used for the table.
+    pub table_partition: String,
+    /// Partition for the journal.
+    pub journal_partition: String,
     /// Size of the journal write buffer.
     pub write_buffer: usize,
     /// Codec configuration for stored values.
@@ -86,15 +88,13 @@ where
     /// Converts external keys into the fixed representation used for indexing.
     translator: T,
     /// Blob storing the pointer table.
-    index: Write<E::Blob>,
+    index: E::Blob,
     /// Current length of the index blob.
     index_len: u64,
     /// Journal storing linked list nodes.
     journal: Journal<E, Node<V>>,
-    /// Number of unique translated keys in the index.
-    keys: Gauge,
-    /// Total number of items stored across all keys.
-    items: Gauge,
+    /// Wasted reads due to collisions.
+    wasted_reads: Counter,
 }
 
 impl<E: Storage + Metrics, T: Translator, V: Codec> Index<E, T, V>
@@ -107,34 +107,30 @@ where
     /// `cfg.partition`.  Metrics for key and item counts are registered on the
     /// provided [`Metrics`] context.
     pub async fn init(context: E, cfg: Config<V::Cfg>, translator: T) -> Result<Self, Error> {
-        let partition = cfg.partition.clone();
         let journal = Journal::init(
-            context.with_label("disk_index"),
+            context.with_label("index_journal"),
             JConfig {
-                partition: cfg.partition.clone(),
+                partition: cfg.journal_partition,
                 compression: None,
                 codec_config: cfg.codec,
                 write_buffer: cfg.write_buffer,
             },
         )
         .await?;
-        let keys = Gauge::default();
-        let items = Gauge::default();
-        context.register("keys", "Number of keys", keys.clone());
-        context.register("items", "Number of items", items.clone());
 
-        // store the pointer table in a separate partition so `Journal` doesn't
-        // see it when scanning for section blobs
-        let table_partition = format!("{partition}_index");
-        let (blob, size) = context.open(&table_partition, b"table").await?;
-        let index = Write::new(blob, size, cfg.write_buffer);
+        let (blob, size) = context.open(&cfg.table_partition, b"table").await?;
+        let wasted_reads = Counter::default();
+        context.register(
+            "wasted_reads",
+            "Wasted reads due to collisions",
+            wasted_reads.clone(),
+        );
         Ok(Self {
             translator,
-            index,
+            index: blob,
             index_len: size,
             journal,
-            keys,
-            items,
+            wasted_reads,
         })
     }
 
