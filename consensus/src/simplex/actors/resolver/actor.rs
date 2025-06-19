@@ -9,7 +9,7 @@ use crate::{
     },
     Supervisor,
 };
-use commonware_cryptography::{Digest, Scheme};
+use commonware_cryptography::{Digest, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{
     utils::{
@@ -99,9 +99,9 @@ impl Inflight {
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
     E: Clock + GClock + Rng + Metrics + Spawner,
-    C: Scheme,
+    C: PublicKey,
     D: Digest,
-    S: Supervisor<Index = View, PublicKey = C::PublicKey>,
+    S: Supervisor<Index = View, PublicKey = C>,
 > {
     context: E,
     supervisor: S,
@@ -122,7 +122,7 @@ pub struct Actor<
     max_fetch_count: usize,
     fetch_concurrent: usize,
     max_participants: usize,
-    requester: requester::Requester<E, C::PublicKey>,
+    requester: requester::Requester<E, C>,
 
     unfulfilled: Gauge,
     outstanding: Gauge,
@@ -131,15 +131,15 @@ pub struct Actor<
 
 impl<
         E: Clock + GClock + Rng + Metrics + Spawner,
-        C: Scheme,
+        C: PublicKey,
         D: Digest,
-        S: Supervisor<Index = View, PublicKey = C::PublicKey>,
+        S: Supervisor<Index = View, PublicKey = C>,
     > Actor<E, C, D, S>
 {
     pub fn new(context: E, cfg: Config<C, S>) -> (Self, Mailbox<C::Signature, D>) {
         // Initialize requester
         let config = requester::Config {
-            public_key: cfg.crypto.public_key(),
+            public_key: cfg.crypto,
             rate_limit: cfg.fetch_rate_per_peer,
             initial: cfg.fetch_timeout / 2,
             timeout: cfg.fetch_timeout,
@@ -196,7 +196,7 @@ impl<
     }
 
     /// Concurrent indicates whether we should send a new request (only if we see a request for the first time)
-    async fn send<Sr: Sender<PublicKey = C::PublicKey>>(
+    async fn send<Sr: Sender<PublicKey = C>>(
         &mut self,
         shuffle: bool,
         sender: &mut WrappedSender<Sr, Backfiller<C::Signature, D>>,
@@ -296,8 +296,8 @@ impl<
     pub fn start(
         mut self,
         voter: voter::Mailbox<C::Signature, D>,
-        sender: impl Sender<PublicKey = C::PublicKey>,
-        receiver: impl Receiver<PublicKey = C::PublicKey>,
+        sender: impl Sender<PublicKey = C>,
+        receiver: impl Receiver<PublicKey = C>,
     ) -> Handle<()> {
         self.context.spawn_ref()(self.run(voter, sender, receiver))
     }
@@ -305,8 +305,8 @@ impl<
     async fn run(
         mut self,
         mut voter: voter::Mailbox<C::Signature, D>,
-        sender: impl Sender<PublicKey = C::PublicKey>,
-        receiver: impl Receiver<PublicKey = C::PublicKey>,
+        sender: impl Sender<PublicKey = C>,
+        receiver: impl Receiver<PublicKey = C>,
     ) {
         // Wrap channel
         let (mut sender, mut receiver) = wrap(
@@ -516,7 +516,7 @@ impl<
                                     debug!(view, sender = ?s, "unknown view");
                                     continue;
                                 };
-                                if !notarization.verify::<C>(&self.namespace, participants) {
+                                if !notarization.verify(&self.namespace, participants) {
                                     warn!(view, sender = ?s, "invalid notarization");
                                     self.requester.block(s.clone());
                                     continue;
@@ -539,7 +539,7 @@ impl<
                                     debug!(view, sender = ?s, "unknown view");
                                     continue;
                                 };
-                                if !nullification.verify::<C>(&self.namespace, participants) {
+                                if !nullification.verify(&self.namespace, participants) {
                                     warn!(view, sender = ?s, "invalid nullification");
                                     self.requester.block(s.clone());
                                     continue;

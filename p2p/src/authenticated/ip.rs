@@ -98,8 +98,10 @@ const fn is_global_v6(ip: Ipv6Addr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-    use std::str::FromStr;
+    use std::{
+        net::{IpAddr, Ipv4Addr, Ipv6Addr},
+        str::FromStr,
+    };
 
     #[test]
     fn test_is_global_v4() {

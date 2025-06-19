@@ -516,4 +516,153 @@ mod tests {
             &[0xFF, 0xFF, 0xFF, 0xFF, 0x0F][..]
         );
     }
+
+    #[test]
+    fn test_all_u16_values() {
+        // Exhaustively test all u16 values to ensure size matches encoding
+        for i in 0..=u16::MAX {
+            let value = i;
+            let calculated_size = size(value);
+
+            let mut buf = Vec::new();
+            write(value, &mut buf);
+
+            assert_eq!(
+                buf.len(),
+                calculated_size,
+                "Size mismatch for u16 value {}",
+                value
+            );
+
+            // Also verify UInt wrapper
+            let uint = UInt(value);
+            assert_eq!(
+                uint.encode_size(),
+                buf.len(),
+                "UInt encode_size mismatch for value {}",
+                value
+            );
+        }
+    }
+
+    #[test]
+    fn test_all_i16_values() {
+        // Exhaustively test all i16 values to ensure size matches encoding
+        for i in i16::MIN..=i16::MAX {
+            let value = i;
+            let calculated_size = size_signed(value);
+
+            let mut buf = Vec::new();
+            write_signed(value, &mut buf);
+
+            assert_eq!(
+                buf.len(),
+                calculated_size,
+                "Size mismatch for i16 value {}",
+                value
+            );
+
+            // Also verify SInt wrapper
+            let sint = SInt(value);
+            assert_eq!(
+                sint.encode_size(),
+                buf.len(),
+                "SInt encode_size mismatch for value {}",
+                value
+            );
+
+            // Verify we can decode it back correctly
+            let mut slice = &buf[..];
+            let decoded: i16 = read_signed(&mut slice).unwrap();
+            assert_eq!(decoded, value, "Decode mismatch for value {}", value);
+            assert!(
+                slice.is_empty(),
+                "Buffer not fully consumed for value {}",
+                value
+            );
+        }
+    }
+
+    #[test]
+    fn test_exact_bit_boundaries() {
+        // Test values with exactly N bits set
+        fn test_exact_bits<T: UPrim + TryFrom<u128> + std::fmt::Display>() {
+            for bits in 1..=128 {
+                // Create a value with exactly 'bits' bits
+                // e.g., bits=3 -> 0b111 = 7
+                let val = if bits == 128 {
+                    u128::MAX
+                } else {
+                    (1u128 << bits) - 1
+                };
+                let Ok(value) = T::try_from(val) else {
+                    continue;
+                };
+
+                // Compute expected size
+                let expected_size = (bits as usize).div_ceil(DATA_BITS_PER_BYTE);
+                let calculated_size = size(value);
+                assert_eq!(
+                    calculated_size, expected_size,
+                    "Size calculation wrong for {} with {} bits",
+                    val, bits
+                );
+
+                // Compare encoded size
+                let mut buf = Vec::new();
+                write(value, &mut buf);
+                assert_eq!(
+                    buf.len(),
+                    expected_size,
+                    "Encoded size wrong for {} with {} bits",
+                    val,
+                    bits
+                );
+            }
+        }
+
+        test_exact_bits::<u16>();
+        test_exact_bits::<u32>();
+        test_exact_bits::<u64>();
+        test_exact_bits::<u128>();
+    }
+
+    #[test]
+    fn test_single_bit_boundaries() {
+        // Test values with only a single bit set at different positions
+        fn test_single_bits<T: UPrim + TryFrom<u128> + std::fmt::Display>() {
+            for bit_pos in 0..128 {
+                // Create a value with only a single bit set at the given position
+                let val = 1u128 << bit_pos;
+                let Ok(value) = T::try_from(val) else {
+                    continue;
+                };
+
+                // Compute expected size
+                let expected_size = ((bit_pos + 1) as usize).div_ceil(DATA_BITS_PER_BYTE);
+                let calculated_size = size(value);
+                assert_eq!(
+                    calculated_size, expected_size,
+                    "Size wrong for 1<<{} = {}",
+                    bit_pos, val
+                );
+
+                // Compare encoded size
+                let mut buf = Vec::new();
+                write(value, &mut buf);
+                assert_eq!(
+                    buf.len(),
+                    expected_size,
+                    "Encoded size wrong for 1<<{} = {}",
+                    bit_pos,
+                    val
+                );
+            }
+        }
+
+        test_single_bits::<u16>();
+        test_single_bits::<u32>();
+        test_single_bits::<u64>();
+        test_single_bits::<u128>();
+    }
 }

@@ -14,22 +14,23 @@ fn benchmark_receiver_receive(c: &mut Criterion) {
                 || {
                     // Set up a connection between two parties.
                     // We only send messages in one direction from A to B.
-                    let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
+                    let cipher1 = ChaCha20Poly1305::new(&[1u8; 32].into());
+                    let cipher2 = ChaCha20Poly1305::new(&[2u8; 32].into());
                     let (sink, stream) = mocks::Channel::init();
                     let (sink_dummy, stream_dummy) = mocks::Channel::init();
                     let conn_a = Connection::from_preestablished(
-                        false,
                         sink,
                         stream_dummy,
-                        cipher.clone(),
                         message_size,
+                        cipher1.clone(),
+                        cipher2.clone(),
                     );
                     let conn_b = Connection::from_preestablished(
-                        true,
                         sink_dummy,
                         stream,
-                        cipher,
                         message_size,
+                        cipher2,
+                        cipher1,
                     );
 
                     let (mut sender, _) = conn_a.split();

@@ -1,4 +1,4 @@
-use commonware_cryptography::{Ed25519, Signer, Verifier};
+use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _, Verifier as _};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
 use std::hint::black_box;
@@ -17,17 +17,13 @@ fn benchmark_signature_verify(c: &mut Criterion) {
         |b| {
             b.iter_batched(
                 || {
-                    let mut signer = Ed25519::new(&mut thread_rng());
-                    let signature = signer.sign(Some(namespace), &msg);
-                    (signer, signature)
+                    let private_key = ed25519::PrivateKey::from_rng(&mut thread_rng());
+                    let public_key = private_key.public_key();
+                    let signature = private_key.sign(Some(namespace), &msg);
+                    (public_key, signature)
                 },
-                |(signer, signature)| {
-                    black_box(Ed25519::verify(
-                        Some(namespace),
-                        &msg,
-                        &signer.public_key(),
-                        &signature,
-                    ));
+                |(public_key, signature)| {
+                    black_box(public_key.verify(Some(namespace), &msg, &signature));
                 },
                 BatchSize::SmallInput,
             );

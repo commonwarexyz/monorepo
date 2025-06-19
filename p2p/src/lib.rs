@@ -6,10 +6,8 @@
 //! expect breaking changes and occasional instability.
 
 use bytes::Bytes;
-use commonware_utils::Array;
-use std::error::Error as StdError;
-use std::fmt::Debug;
-use std::future::Future;
+use commonware_cryptography::PublicKey;
+use std::{error::Error as StdError, fmt::Debug, future::Future};
 
 pub mod authenticated;
 pub mod simulated;
@@ -26,7 +24,7 @@ pub type Channel = u32;
 
 /// Enum indicating the set of recipients to send a message to.
 #[derive(Clone)]
-pub enum Recipients<P: Array> {
+pub enum Recipients<P: PublicKey> {
     All,
     Some(Vec<P>),
     One(P),
@@ -38,7 +36,7 @@ pub trait Sender: Clone + Debug + Send + 'static {
     type Error: Debug + StdError + Send;
 
     /// Public key type used to identify recipients.
-    type PublicKey: Array;
+    type PublicKey: PublicKey;
 
     /// Send a message to a set of recipients.
     fn send(
@@ -55,7 +53,7 @@ pub trait Receiver: Debug + Send + 'static {
     type Error: Debug + StdError + Send;
 
     /// Public key type used to identify recipients.
-    type PublicKey: Array;
+    type PublicKey: PublicKey;
 
     /// Receive a message from an arbitrary recipient.
     fn recv(
@@ -66,7 +64,7 @@ pub trait Receiver: Debug + Send + 'static {
 /// Interface for blocking other peers.
 pub trait Blocker: Clone + Send + 'static {
     /// Public key type used to identify peers.
-    type PublicKey: Array;
+    type PublicKey: PublicKey;
 
     /// Block a peer, disconnecting them if currently connected and preventing future connections.
     fn block(&mut self, peer: Self::PublicKey) -> impl Future<Output = ()> + Send;

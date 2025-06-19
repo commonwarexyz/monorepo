@@ -1,4 +1,4 @@
-use commonware_cryptography::{Bls12381, Signer, Verifier};
+use commonware_cryptography::{bls12381, PrivateKeyExt as _, Signer as _, Verifier as _};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
 use std::hint::black_box;
@@ -17,17 +17,13 @@ fn benchmark_signature_verification(c: &mut Criterion) {
         |b| {
             b.iter_batched(
                 || {
-                    let mut signer = Bls12381::new(&mut thread_rng());
-                    let signature = signer.sign(Some(namespace), &msg);
-                    (signer, signature)
+                    let private_key = bls12381::PrivateKey::from_rng(&mut thread_rng());
+                    let public_key = private_key.public_key();
+                    let signature = private_key.sign(Some(namespace), &msg);
+                    (public_key, signature)
                 },
-                |(signer, signature)| {
-                    black_box(Bls12381::verify(
-                        Some(namespace),
-                        &msg,
-                        &signer.public_key(),
-                        &signature,
-                    ))
+                |(public_key, signature)| {
+                    black_box(public_key.verify(Some(namespace), &msg, &signature))
                 },
                 BatchSize::SmallInput,
             );

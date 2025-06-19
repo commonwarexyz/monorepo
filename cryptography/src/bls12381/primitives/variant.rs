@@ -1,15 +1,16 @@
 //! Different variants of the BLS signature scheme.
 
-use super::group::{
-    Point, DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE, G2_PROOF_OF_POSSESSION,
+use super::{
+    group::{
+        Point, DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE, G2_PROOF_OF_POSSESSION,
+    },
+    Error,
 };
-use super::Error;
 use crate::bls12381::primitives::group::{Element, Scalar};
 use blst::{Pairing as blst_pairing, BLS12_381_NEG_G1, BLS12_381_NEG_G2};
 use commonware_codec::FixedSize;
 use rand::{CryptoRng, RngCore};
-use std::fmt::Debug;
-use std::hash::Hash;
+use std::{fmt::Debug, hash::Hash};
 
 /// A specific instance of a signature scheme.
 pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {

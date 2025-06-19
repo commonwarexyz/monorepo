@@ -18,7 +18,7 @@ use commonware_cryptography::{
         ops::{threshold_signature_recover, threshold_signature_recover_pair},
         variant::Variant,
     },
-    Digest, Scheme,
+    Digest, PublicKey, Signer,
 };
 use commonware_macros::select;
 use commonware_p2p::{
@@ -43,11 +43,8 @@ use prometheus_client::metrics::{
 use rand::Rng;
 use std::{
     collections::BTreeMap,
-    time::{Duration, SystemTime},
-};
-use std::{
     sync::{atomic::AtomicI64, Arc},
-    time::Instant,
+    time::{Duration, SystemTime},
 };
 use tracing::{debug, info, trace, warn};
 
@@ -71,12 +68,12 @@ enum Action {
 
 struct Round<
     E: Clock,
-    C: Scheme,
+    C: PublicKey,
     V: Variant,
     D: Digest,
     S: ThresholdSupervisor<
         Index = View,
-        PublicKey = C::PublicKey,
+        PublicKey = C,
         Identity = V::Public,
         Seed = V::Signature,
         Share = group::Share,
@@ -89,7 +86,7 @@ struct Round<
     quorum: u32,
 
     // Leader is set as soon as we know the seed for the view.
-    leader: Option<(C::PublicKey, u32)>,
+    leader: Option<(C, u32)>,
 
     // We explicitly distinguish between the proposal being verified (we checked it)
     // and the proposal being recovered (network has determined its validity). As a sanity
@@ -132,14 +129,14 @@ struct Round<
 
 impl<
         E: Clock,
-        C: Scheme,
+        C: PublicKey,
         V: Variant,
         D: Digest,
         S: ThresholdSupervisor<
             Seed = V::Signature,
             Index = View,
             Share = group::Share,
-            PublicKey = C::PublicKey,
+            PublicKey = C,
             Identity = V::Public,
         >,
     > Round<E, C, V, D, S>
@@ -426,7 +423,7 @@ impl<
 
 pub struct Actor<
     E: Clock + Rng + Spawner + Storage + Metrics,
-    C: Scheme,
+    C: Signer,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     D: Digest,
@@ -452,7 +449,6 @@ pub struct Actor<
 
     partition: String,
     compression: Option<u8>,
-    replay_concurrency: usize,
     replay_buffer: usize,
     write_buffer: usize,
     journal: Option<Journal<E, Voter<V, D>>>,
@@ -469,7 +465,7 @@ pub struct Actor<
     mailbox_receiver: mpsc::Receiver<Message<V, D>>,
 
     view: View,
-    views: BTreeMap<View, Round<E, C, V, D, S>>,
+    views: BTreeMap<View, Round<E, C::PublicKey, V, D, S>>,
     last_finalized: View,
 
     current_view: Gauge,
@@ -484,7 +480,7 @@ pub struct Actor<
 
 impl<
         E: Clock + Rng + Spawner + Storage + Metrics,
-        C: Scheme,
+        C: Signer,
         B: Blocker<PublicKey = C::PublicKey>,
         V: Variant,
         D: Digest,
@@ -560,7 +556,6 @@ impl<
 
                 partition: cfg.partition,
                 compression: cfg.compression,
-                replay_concurrency: cfg.replay_concurrency,
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,
                 journal: None,
@@ -774,7 +769,17 @@ impl<
         // If retry, broadcast notarization that led us to enter this view
         let past_view = self.view - 1;
         if retry && past_view > 0 {
-            if let Some(notarization) = self.construct_notarization(past_view, true).await {
+            if let Some(finalization) = self.construct_finalization(past_view, true).await {
+                self.outbound_messages
+                    .get_or_create(&metrics::FINALIZATION)
+                    .inc();
+                let msg = Voter::Finalization(finalization);
+                recovered_sender
+                    .send(Recipients::All, msg, true)
+                    .await
+                    .unwrap();
+                debug!(view = past_view, "rebroadcast entry finalization");
+            } else if let Some(notarization) = self.construct_notarization(past_view, true).await {
                 self.outbound_messages
                     .get_or_create(&metrics::NOTARIZATION)
                     .inc();
@@ -797,8 +802,8 @@ impl<
                 debug!(view = past_view, "rebroadcast entry nullification");
             } else {
                 warn!(
-                    view = past_view,
-                    "unable to rebroadcast entry notarization/nullification"
+                    current = self.view,
+                    "unable to rebroadcast entry notarization/nullification/finalization"
                 );
             }
         }
@@ -1674,10 +1679,10 @@ impl<
         .expect("unable to open journal");
 
         // Rebuild from journal
-        let start = Instant::now();
+        let start = self.context.current();
         {
             let stream = journal
-                .replay(self.replay_concurrency, self.replay_buffer)
+                .replay(self.replay_buffer)
                 .await
                 .expect("unable to replay journal");
             pin_mut!(stream);
@@ -1764,8 +1769,14 @@ impl<
         self.journal = Some(journal);
 
         // Update current view and immediately move to timeout (very unlikely we restarted and still within timeout)
+        let end = self.context.current();
+        let elapsed = end.duration_since(start).unwrap_or_default();
         let observed_view = self.view;
-        info!(current_view = observed_view, elapsed = ?start.elapsed(), "consensus initialized");
+        info!(
+            current_view = observed_view,
+            ?elapsed,
+            "consensus initialized"
+        );
         {
             let round = self.views.get_mut(&observed_view).expect("missing round");
             round.leader_deadline = Some(self.context.current());

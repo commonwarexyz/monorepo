@@ -10,15 +10,18 @@ use commonware_cryptography::{
         poly::{Poly, Public},
         variant::{MinSig, Variant},
     },
-    Ed25519, Sha256, Signer,
+    ed25519, PrivateKeyExt as _, Sha256, Signer as _,
 };
 use commonware_p2p::authenticated;
 use commonware_runtime::{tokio, Metrics, Network, Runner};
 use commonware_stream::public_key::{self, Connection};
 use commonware_utils::{from_hex, quorum, union, NZU32};
 use governor::Quota;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::{str::FromStr, time::Duration};
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    str::FromStr,
+    time::Duration,
+};
 
 fn main() {
     // Parse arguments
@@ -61,7 +64,7 @@ fn main() {
         panic!("Identity not well-formed");
     }
     let key = parts[0].parse::<u64>().expect("Key not well-formed");
-    let signer = Ed25519::from_seed(key);
+    let signer = ed25519::PrivateKey::from_seed(key);
     tracing::info!(key = ?signer.public_key(), "loaded signer");
 
     // Configure my port
@@ -78,7 +81,7 @@ fn main() {
         panic!("Please provide at least one participant");
     }
     for peer in participants {
-        let verifier = Ed25519::from_seed(peer).public_key();
+        let verifier = ed25519::PrivateKey::from_seed(peer).public_key();
         tracing::info!(key = ?verifier, "registered authorized key");
         validators.push(verifier);
     }
@@ -92,7 +95,7 @@ fn main() {
             let bootstrapper_key = parts[0]
                 .parse::<u64>()
                 .expect("Bootstrapper key not well-formed");
-            let verifier = Ed25519::from_seed(bootstrapper_key).public_key();
+            let verifier = ed25519::PrivateKey::from_seed(bootstrapper_key).public_key();
             let bootstrapper_address =
                 SocketAddr::from_str(parts[1]).expect("Bootstrapper address not well-formed");
             bootstrapper_identities.push((verifier, bootstrapper_address));
@@ -126,7 +129,7 @@ fn main() {
     let indexer_key = parts[0]
         .parse::<u64>()
         .expect("Indexer key not well-formed");
-    let indexer = Ed25519::from_seed(indexer_key).public_key();
+    let indexer = ed25519::PrivateKey::from_seed(indexer_key).public_key();
     let indexer_address = SocketAddr::from_str(parts[1]).expect("Indexer address not well-formed");
 
     // Configure other public
@@ -152,7 +155,7 @@ fn main() {
     };
 
     // Configure network
-    let p2p_cfg = authenticated::Config::aggressive(
+    let p2p_cfg = authenticated::discovery::Config::aggressive(
         signer.clone(),
         &union(APPLICATION_NAMESPACE, P2P_SUFFIX),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
@@ -175,7 +178,7 @@ fn main() {
 
         // Setup p2p
         let (mut network, mut oracle) =
-            authenticated::Network::new(context.with_label("network"), p2p_cfg);
+            authenticated::discovery::Network::new(context.with_label("network"), p2p_cfg);
 
         // Provide authorized peers
         //
@@ -191,19 +194,16 @@ fn main() {
             0,
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
-            Some(3),
         );
         let (recovered_sender, recovered_receiver) = network.register(
             1,
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
-            Some(3),
         );
         let (resolver_sender, resolver_receiver) = network.register(
             2,
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
-            Some(3),
         );
 
         // Initialize application
@@ -236,7 +236,6 @@ fn main() {
                 compression: Some(3),
                 namespace: consensus_namespace,
                 mailbox_size: 1024,
-                replay_concurrency: 1,
                 replay_buffer: 1024 * 1024,
                 write_buffer: 1024 * 1024,
                 leader_timeout: Duration::from_secs(1),

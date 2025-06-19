@@ -79,13 +79,19 @@
 mod handlers;
 
 use clap::{value_parser, Arg, Command};
-use commonware_cryptography::{Ed25519, Signer};
-use commonware_p2p::authenticated::{self, Network};
+use commonware_cryptography::{
+    ed25519::{PrivateKey, PublicKey},
+    PrivateKeyExt as _, Signer as _,
+};
+use commonware_p2p::authenticated::discovery;
 use commonware_runtime::{tokio, Metrics, Runner};
 use commonware_utils::{quorum, NZU32};
 use governor::Quota;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::{str::FromStr, time::Duration};
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    str::FromStr,
+    time::Duration,
+};
 use tracing::info;
 
 // Unique namespace to avoid message replay attacks.
@@ -164,7 +170,7 @@ fn main() {
         panic!("Identity not well-formed");
     }
     let key = parts[0].parse::<u64>().expect("Key not well-formed");
-    let signer = Ed25519::from_seed(key);
+    let signer = PrivateKey::from_seed(key);
     tracing::info!(key = ?signer.public_key(), "loaded signer");
 
     // Configure my port
@@ -181,7 +187,7 @@ fn main() {
         panic!("Please provide at least one participant");
     }
     for peer in participants {
-        let verifier = Ed25519::from_seed(peer).public_key();
+        let verifier = PrivateKey::from_seed(peer).public_key();
         tracing::info!(key = ?verifier, "registered authorized key",);
         recipients.push(verifier);
     }
@@ -195,7 +201,7 @@ fn main() {
             let bootstrapper_key = parts[0]
                 .parse::<u64>()
                 .expect("Bootstrapper key not well-formed");
-            let verifier = Ed25519::from_seed(bootstrapper_key).public_key();
+            let verifier = PrivateKey::from_seed(bootstrapper_key).public_key();
             let bootstrapper_address =
                 SocketAddr::from_str(parts[1]).expect("Bootstrapper address not well-formed");
             bootstrapper_identities.push((verifier, bootstrapper_address));
@@ -204,7 +210,7 @@ fn main() {
 
     // Configure network
     const MAX_MESSAGE_SIZE: usize = 1024 * 1024; // 1 MB
-    let p2p_cfg = authenticated::Config::aggressive(
+    let p2p_cfg = discovery::Config::aggressive(
         signer.clone(),
         APPLICATION_NAMESPACE,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
@@ -215,7 +221,8 @@ fn main() {
 
     // Start context
     executor.start(|context| async move {
-        let (mut network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
+        let (mut network, mut oracle) =
+            discovery::Network::new(context.with_label("network"), p2p_cfg);
 
         // Provide authorized peers
         //
@@ -233,7 +240,7 @@ fn main() {
             panic!("Please provide at least one contributor");
         }
         for peer in participants {
-            let verifier = Ed25519::from_seed(peer).public_key();
+            let verifier = PrivateKey::from_seed(peer).public_key();
             tracing::info!(key = ?verifier, "registered contributor",);
             contributors.push(verifier);
         }
@@ -244,7 +251,6 @@ fn main() {
 
         // Check if I am the arbiter
         const DEFAULT_MESSAGE_BACKLOG: usize = 256;
-        const COMPRESSION_LEVEL: Option<i32> = Some(3);
         const DKG_FREQUENCY: Duration = Duration::from_secs(10);
         const DKG_PHASE_TIMEOUT: Duration = Duration::from_secs(1);
         if let Some(arbiter) = matches.get_one::<u64>("arbiter") {
@@ -256,9 +262,8 @@ fn main() {
                 handlers::DKG_CHANNEL,
                 Quota::per_second(NZU32!(10)),
                 DEFAULT_MESSAGE_BACKLOG,
-                COMPRESSION_LEVEL,
             );
-            let arbiter = Ed25519::from_seed(*arbiter).public_key();
+            let arbiter = PrivateKey::from_seed(*arbiter).public_key();
             let (contributor, requests) = handlers::Contributor::new(
                 context.with_label("contributor"),
                 signer,
@@ -276,7 +281,6 @@ fn main() {
                 handlers::VRF_CHANNEL,
                 Quota::per_second(NZU32!(10)),
                 DEFAULT_MESSAGE_BACKLOG,
-                None,
             );
             let signer = handlers::Vrf::new(
                 context.with_label("signer"),
@@ -291,9 +295,8 @@ fn main() {
                 handlers::DKG_CHANNEL,
                 Quota::per_second(NZU32!(10)),
                 DEFAULT_MESSAGE_BACKLOG,
-                COMPRESSION_LEVEL,
             );
-            let arbiter: handlers::Arbiter<_, Ed25519> = handlers::Arbiter::new(
+            let arbiter: handlers::Arbiter<_, PublicKey> = handlers::Arbiter::new(
                 context.with_label("arbiter"),
                 DKG_FREQUENCY,
                 DKG_PHASE_TIMEOUT,

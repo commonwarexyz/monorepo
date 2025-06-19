@@ -49,7 +49,7 @@ mod tests {
                 .recv(vec![0; CLIENT_SEND_DATA.len()])
                 .await
                 .expect("Failed to receive");
-            assert_eq!(&read, CLIENT_SEND_DATA.as_bytes());
+            assert_eq!(read.as_ref(), CLIENT_SEND_DATA.as_bytes());
             sink.send(Vec::from(SERVER_SEND_DATA))
                 .await
                 .expect("Failed to send");
@@ -71,7 +71,7 @@ mod tests {
                 .recv(vec![0; SERVER_SEND_DATA.len()])
                 .await
                 .expect("Failed to receive data");
-            assert_eq!(&read, SERVER_SEND_DATA.as_bytes());
+            assert_eq!(read.as_ref(), SERVER_SEND_DATA.as_bytes());
         });
 
         // Wait for both tasks to complete
@@ -97,12 +97,11 @@ mod tests {
             for _ in 0..3 {
                 let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
 
-                // runtime.spawn(async move {
                 let read = stream
                     .recv(vec![0; CLIENT_SEND_DATA.len()])
                     .await
                     .expect("Failed to receive");
-                assert_eq!(&read, CLIENT_SEND_DATA.as_bytes());
+                assert_eq!(read.as_ref(), CLIENT_SEND_DATA.as_bytes());
 
                 sink.send(Vec::from(SERVER_SEND_DATA))
                     .await
@@ -130,7 +129,7 @@ mod tests {
                     .await
                     .expect("Failed to receive data");
                 // Verify the received data
-                assert_eq!(&read, SERVER_SEND_DATA.as_bytes());
+                assert_eq!(read.as_ref(), SERVER_SEND_DATA.as_bytes());
             }
         });
 
@@ -185,7 +184,7 @@ mod tests {
                     .recv(vec![0; CHUNK_SIZE])
                     .await
                     .expect("Failed to receive chunk");
-                assert_eq!(&read, &pattern);
+                assert_eq!(read.as_ref(), pattern);
             }
         });
 
@@ -211,5 +210,61 @@ mod tests {
         // Try to bind to the same address
         let result = network.bind(listener_addr).await;
         assert!(matches!(result, Err(crate::Error::BindFailed)));
+    }
+
+    /// Network stress tests
+    pub(super) async fn stress_test_network_trait<N, F>(new_network: F)
+    where
+        F: Fn() -> N,
+        N: crate::Network,
+    {
+        stress_concurrent_streams(new_network()).await;
+    }
+
+    /// Creates a large number of concurrent streams and sends messages
+    /// back and forth between them.
+    async fn stress_concurrent_streams<N: crate::Network>(network: N) {
+        const NUM_CLIENTS: usize = 96;
+        const NUM_MESSAGES: usize = 16_384;
+        const MESSAGE_SIZE: usize = 4096;
+
+        let mut listener = network
+            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Spawn a server task that echoes messages from many clients.
+        let server = tokio::spawn(async move {
+            for _ in 0..NUM_CLIENTS {
+                let (_, mut sink, mut stream) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    for _ in 0..NUM_MESSAGES {
+                        let data = stream.recv(vec![0; MESSAGE_SIZE]).await.unwrap();
+                        sink.send(data).await.unwrap();
+                    }
+                });
+            }
+        });
+
+        // Spawn all clients.
+        let mut clients = Vec::new();
+        for _ in 0..NUM_CLIENTS {
+            let network = network.clone();
+            clients.push(tokio::spawn(async move {
+                let (mut sink, mut stream) = network.dial(addr).await.unwrap();
+                let payload = vec![42u8; MESSAGE_SIZE];
+                for _ in 0..NUM_MESSAGES {
+                    sink.send(payload.clone()).await.unwrap();
+                    let echo = stream.recv(vec![0; MESSAGE_SIZE]).await.unwrap();
+                    assert_eq!(echo.as_ref(), payload);
+                }
+            }));
+        }
+
+        for client in clients {
+            client.await.unwrap();
+        }
+        server.await.unwrap();
     }
 }

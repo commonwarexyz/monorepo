@@ -131,7 +131,6 @@ pub use dealer::Dealer;
 pub mod ops;
 pub mod player;
 pub use player::Player;
-
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -187,16 +186,21 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bls12381::primitives::ops::{
-        partial_sign_proof_of_possession, threshold_signature_recover, verify_proof_of_possession,
+    use crate::{
+        bls12381::primitives::{
+            ops::{
+                partial_sign_proof_of_possession, threshold_signature_recover,
+                verify_proof_of_possession,
+            },
+            poly::public,
+            variant::{MinPk, MinSig, Variant},
+        },
+        ed25519::PrivateKey,
+        PrivateKeyExt as _, Signer as _,
     };
-    use crate::bls12381::primitives::poly::public;
-    use crate::bls12381::primitives::variant::{MinPk, MinSig, Variant};
-    use crate::{Ed25519, Signer};
     use arbiter::Output;
     use commonware_utils::quorum;
-    use rand::rngs::StdRng;
-    use rand::SeedableRng;
+    use rand::{rngs::StdRng, SeedableRng};
     use std::collections::HashMap;
 
     fn run_dkg_and_reshare<V: Variant>(
@@ -212,7 +216,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n_0 {
-            let signer = Ed25519::from_seed(i as u64).public_key();
+            let signer = PrivateKey::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -326,7 +330,7 @@ mod tests {
         // Create reshare players (assume no overlap)
         let mut reshare_players = Vec::new();
         for i in 0..n_1 {
-            let player = Ed25519::from_seed((i + n_0) as u64).public_key();
+            let player = PrivateKey::from_seed((i + n_0) as u64).public_key();
             reshare_players.push(player);
         }
         reshare_players.sort();
@@ -483,7 +487,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
+            let signer = PrivateKey::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -518,7 +522,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
+            let signer = PrivateKey::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -559,7 +563,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
+            let signer = PrivateKey::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -604,7 +608,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
+            let signer = PrivateKey::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -645,7 +649,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
+            let signer = PrivateKey::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -681,7 +685,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
+            let signer = PrivateKey::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -700,7 +704,7 @@ mod tests {
         );
 
         // Send share from invalid dealer
-        let dealer = Ed25519::from_seed(n as u64).public_key();
+        let dealer = PrivateKey::from_seed(n as u64).public_key();
         let result = player.share(dealer.clone(), commitment.clone(), shares[0].clone());
         assert!(matches!(result, Err(Error::DealerInvalid)));
 
@@ -722,7 +726,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
+            let signer = PrivateKey::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -769,7 +773,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
+            let signer = PrivateKey::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -802,7 +806,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
+            let signer = PrivateKey::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -856,7 +860,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
+            let signer = PrivateKey::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -897,7 +901,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
+            let signer = PrivateKey::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -929,7 +933,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
+            let signer = PrivateKey::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -969,7 +973,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
+            let signer = PrivateKey::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -1003,7 +1007,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
+            let signer = PrivateKey::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -1035,7 +1039,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
+            let signer = PrivateKey::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -1070,7 +1074,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
+            let signer = PrivateKey::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -1106,7 +1110,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
+            let signer = PrivateKey::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -1137,7 +1141,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
+            let signer = PrivateKey::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -1168,7 +1172,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
+            let signer = PrivateKey::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -1204,7 +1208,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
+            let signer = PrivateKey::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -1232,7 +1236,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
+            let signer = PrivateKey::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -1260,7 +1264,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
+            let signer = PrivateKey::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -1286,7 +1290,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
+            let signer = PrivateKey::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -1312,7 +1316,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
+            let signer = PrivateKey::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -1321,7 +1325,7 @@ mod tests {
         let (mut dealer, _, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
 
         // Ack invalid player
-        let player = Ed25519::from_seed(n as u64).public_key();
+        let player = PrivateKey::from_seed(n as u64).public_key();
         let result = dealer.ack(player);
         assert!(matches!(result, Err(Error::PlayerInvalid)));
     }
@@ -1336,7 +1340,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
+            let signer = PrivateKey::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -1381,7 +1385,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
+            let signer = PrivateKey::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -1423,7 +1427,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
+            let signer = PrivateKey::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -1463,7 +1467,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
+            let signer = PrivateKey::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -1509,7 +1513,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
+            let signer = PrivateKey::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -1554,7 +1558,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
+            let signer = PrivateKey::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();

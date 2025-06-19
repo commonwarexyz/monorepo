@@ -1,5 +1,5 @@
+use commonware_cryptography::PublicKey;
 use commonware_runtime::{telemetry::metrics::status, Metrics as RuntimeMetrics};
-use commonware_utils::Array;
 use prometheus_client::{
     encoding::EncodeLabelSet,
     metrics::{counter::Counter, family::Family, gauge::Gauge},
@@ -14,14 +14,14 @@ pub struct SequencerLabel {
 
 impl SequencerLabel {
     /// Create a new sequencer label from a public key
-    pub fn from<A: Array>(sequencer: &A) -> Self {
+    pub fn from<P: PublicKey>(sequencer: &P) -> Self {
         Self {
             sequencer: sequencer.to_string(),
         }
     }
 }
 
-/// Metrics for the [`Engine`](super::Engine)
+/// Metrics for the [super::Engine]
 #[derive(Default)]
 pub struct Metrics {
     /// Number of broadcasts received by peer

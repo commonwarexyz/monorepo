@@ -1,14 +1,14 @@
 use crate::{ordered_broadcast::types::Epoch, Supervisor};
-use commonware_utils::Array;
+use commonware_cryptography::PublicKey;
 use std::collections::HashMap;
 
 #[derive(Clone)]
-pub struct Sequencers<P: Array> {
+pub struct Sequencers<P: PublicKey> {
     participants: Vec<P>,
     participants_map: HashMap<P, u32>,
 }
 
-impl<P: Array> Sequencers<P> {
+impl<P: PublicKey> Sequencers<P> {
     pub fn new(mut participants: Vec<P>) -> Self {
         // Setup participants
         participants.sort();
@@ -24,7 +24,7 @@ impl<P: Array> Sequencers<P> {
     }
 }
 
-impl<P: Array> Supervisor for Sequencers<P> {
+impl<P: PublicKey> Supervisor for Sequencers<P> {
     type Index = Epoch;
     type PublicKey = P;
 

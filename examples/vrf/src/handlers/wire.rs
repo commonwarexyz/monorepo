@@ -1,11 +1,14 @@
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
-use commonware_cryptography::bls12381::primitives::{
-    group,
-    poly::{self, Eval},
-    variant::{MinSig, Variant},
+use commonware_cryptography::{
+    bls12381::primitives::{
+        group,
+        poly::{self, Eval},
+        variant::{MinSig, Variant},
+    },
+    Signature,
 };
-use commonware_utils::{quorum, Array};
+use commonware_utils::quorum;
 use std::collections::HashMap;
 
 /// Represents a top-level message for the Distributed Key Generation (DKG) protocol,
@@ -14,29 +17,29 @@ use std::collections::HashMap;
 /// It encapsulates a specific round number and a payload containing the actual
 /// DKG protocol message content.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Dkg<Sig: Array> {
+pub struct Dkg<S: Signature> {
     pub round: u64,
-    pub payload: Payload<Sig>,
+    pub payload: Payload<S>,
 }
 
-impl<Sig: Array> Write for Dkg<Sig> {
+impl<S: Signature> Write for Dkg<S> {
     fn write(&self, buf: &mut impl BufMut) {
         UInt(self.round).write(buf);
         self.payload.write(buf);
     }
 }
 
-impl<Sig: Array> Read for Dkg<Sig> {
+impl<S: Signature> Read for Dkg<S> {
     type Cfg = usize;
 
     fn read_cfg(buf: &mut impl Buf, num_players: &usize) -> Result<Self, Error> {
         let round = UInt::read(buf)?.into();
-        let payload = Payload::<Sig>::read_cfg(buf, num_players)?;
+        let payload = Payload::<S>::read_cfg(buf, num_players)?;
         Ok(Self { round, payload })
     }
 }
 
-impl<Sig: Array> EncodeSize for Dkg<Sig> {
+impl<S: Signature> EncodeSize for Dkg<S> {
     fn encode_size(&self) -> usize {
         UInt(self.round).encode_size() + self.payload.encode_size()
     }
@@ -44,10 +47,10 @@ impl<Sig: Array> EncodeSize for Dkg<Sig> {
 
 /// Defines the different types of messages exchanged during the DKG protocol.
 ///
-/// This enum is used as the `payload` field within the [`Dkg`] message struct.
+/// This enum is used as the `payload` field within the [Dkg] message struct.
 /// The generic parameter `Sig` represents the type used for signatures in acknowledgments.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Payload<Sig: Array> {
+pub enum Payload<S: Signature> {
     /// Message sent by the arbiter to initiate a DKG round.
     ///
     /// Optionally includes a pre-existing group public key if reforming a group.
@@ -69,26 +72,26 @@ pub enum Payload<Sig: Array> {
 
     /// Message sent by a player node back to the dealer node.
     ///
-    /// Acknowledges the receipt and verification of a [`Payload::Share`] message.
+    /// Acknowledges the receipt and verification of a [Payload::Share] message.
     /// Includes a signature to authenticate the acknowledgment.
     Ack {
         /// The public key identifier of the player sending the acknowledgment.
         public_key: u32,
         /// A signature covering the DKG round, dealer ID, and the dealer's commitment.
         /// This confirms the player received and validated the correct share.
-        signature: Sig,
+        signature: S,
     },
 
     /// Message sent by a dealer node to the arbiter.
     ///
-    /// Sent after the dealer has collected a sufficient number of [`Payload::Ack`] messages
+    /// Sent after the dealer has collected a sufficient number of [Payload::Ack] messages
     /// from players. Contains the dealer's commitment, the collected acknowledgments,
     /// and potentially revealed shares (e.g., for handling unresponsive players).
     Commitment {
         /// The dealer's public commitment.
         commitment: poly::Public<MinSig>,
         /// A map of player public key identifiers to their corresponding acknowledgment signatures.
-        acks: HashMap<u32, Sig>,
+        acks: HashMap<u32, S>,
         /// A vector of shares revealed by the dealer, potentially for players who did not acknowledge.
         reveals: Vec<group::Share>,
     },
@@ -100,7 +103,7 @@ pub enum Payload<Sig: Array> {
         /// A map of dealer public key identifiers to their final public commitments.
         commitments: HashMap<u32, poly::Public<MinSig>>,
         /// A map of player public key identifiers to their corresponding revealed shares,
-        /// aggregated from all dealers' [`Payload::Commitment`] messages.
+        /// aggregated from all dealers' [Payload::Commitment] messages.
         reveals: HashMap<u32, group::Share>,
     },
 
@@ -108,7 +111,7 @@ pub enum Payload<Sig: Array> {
     Abort,
 }
 
-impl<Sig: Array> Write for Payload<Sig> {
+impl<S: Signature> Write for Payload<S> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             Payload::Start { group } => {
@@ -153,7 +156,7 @@ impl<Sig: Array> Write for Payload<Sig> {
     }
 }
 
-impl<Sig: Array> Read for Payload<Sig> {
+impl<S: Signature> Read for Payload<S> {
     type Cfg = usize;
 
     fn read_cfg(buf: &mut impl Buf, p: &usize) -> Result<Self, Error> {
@@ -169,11 +172,11 @@ impl<Sig: Array> Read for Payload<Sig> {
             },
             2 => Payload::Ack {
                 public_key: UInt::read(buf)?.into(),
-                signature: Sig::read(buf)?,
+                signature: S::read(buf)?,
             },
             3 => {
                 let commitment = poly::Public::<MinSig>::read_cfg(buf, &t)?;
-                let acks = HashMap::<u32, Sig>::read_range(buf, ..=*p)?;
+                let acks = HashMap::<u32, S>::read_range(buf, ..=*p)?;
                 let r = p.checked_sub(acks.len()).unwrap(); // The lengths of the two sets must sum to exactly p.
                 let reveals = Vec::<group::Share>::read_range(buf, r..=r)?;
                 Payload::Commitment {
@@ -199,7 +202,7 @@ impl<Sig: Array> Read for Payload<Sig> {
         Ok(result)
     }
 }
-impl<Sig: Array> EncodeSize for Payload<Sig> {
+impl<S: Signature> EncodeSize for Payload<S> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Payload::Start { group } => group.encode_size(),

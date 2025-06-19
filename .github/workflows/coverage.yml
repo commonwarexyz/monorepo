@@ -5,6 +5,13 @@ on:
     branches: [ "main" ]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: coverage-${{ github.head_ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -26,9 +33,6 @@ jobs:
     - name: Install cargo-llvm-cov
       uses: taiki-e/install-action@cargo-llvm-cov
     - name: Generate coverage report
-      # TODO: Re-enable when issue causing flaky authenticated::tests::test_tokio_connectivity is resolved
-      # See https://github.com/commonwarexyz/monorepo/issues/954
-      # run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info -- --include-ignored
       run: cargo llvm-cov --workspace --lcov --output-path lcov.info -- --include-ignored
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v5

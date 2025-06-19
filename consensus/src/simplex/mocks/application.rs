@@ -2,10 +2,9 @@ use super::relay::Relay;
 use crate::{simplex::types::Context, Automaton as Au, Relay as Re};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{FixedSize, ReadExt};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Spawner};
-use commonware_utils::Array;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -102,7 +101,7 @@ const GENESIS_BYTES: &[u8] = b"genesis";
 
 type Latency = (f64, f64);
 
-pub struct Config<H: Hasher, P: Array> {
+pub struct Config<H: Hasher, P: PublicKey> {
     pub hasher: H,
 
     pub relay: Arc<Relay<H::Digest, P>>,
@@ -117,7 +116,7 @@ pub struct Config<H: Hasher, P: Array> {
     pub verify_latency: Latency,
 }
 
-pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: Array> {
+pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
     context: E,
     hasher: H,
     participant: P,
@@ -135,7 +134,7 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: Array> {
     verified: HashSet<H::Digest>,
 }
 
-impl<E: Clock + RngCore + Spawner, H: Hasher, P: Array> Application<E, H, P> {
+impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
     pub fn new(context: E, cfg: Config<H, P>) -> (Self, Mailbox<H::Digest>) {
         // Register self on relay
         let broadcast = cfg.relay.register(cfg.participant.clone());

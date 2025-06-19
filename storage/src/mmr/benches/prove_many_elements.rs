@@ -1,4 +1,4 @@
-use commonware_cryptography::{sha256, Digest as _, Hasher, Sha256};
+use commonware_cryptography::{sha256, Digest as _, Sha256};
 use commonware_storage::mmr::{hasher::Standard, mem::Mmr};
 use criterion::{criterion_group, Criterion};
 use futures::executor::block_on;
@@ -13,13 +13,12 @@ fn bench_prove_many_elements(c: &mut Criterion) {
         let mut positions = Vec::with_capacity(n);
         let mut elements = Vec::with_capacity(n);
         let mut sampler = StdRng::seed_from_u64(0);
-        let mut hasher = Sha256::new();
-        let mut hasher = Standard::new(&mut hasher);
+        let mut hasher = Standard::new();
 
         block_on(async {
             for i in 0..n {
                 let element = sha256::Digest::random(&mut sampler);
-                let pos = mmr.add(&mut hasher, &element).await.unwrap();
+                let pos = mmr.add(&mut hasher, &element);
                 positions.push((i, pos));
                 elements.push(element);
             }
@@ -55,8 +54,7 @@ fn bench_prove_many_elements(c: &mut Criterion) {
                             })
                         },
                         |samples| {
-                            let mut hasher = Sha256::new();
-                            let mut hasher = Standard::new(&mut hasher);
+                            let mut hasher = Standard::new();
                             block_on(async {
                                 for ((start_index, end_index), (start_pos, end_pos)) in samples {
                                     let proof = mmr.range_proof(start_pos, end_pos).await.unwrap();

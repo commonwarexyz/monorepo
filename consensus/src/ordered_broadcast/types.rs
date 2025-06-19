@@ -1,4 +1,4 @@
-//! Types used in [`ordered_broadcast`](crate::ordered_broadcast).
+//! Types used in [crate::ordered_broadcast].
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -11,9 +11,9 @@ use commonware_cryptography::{
         poly::{self, PartialSignature},
         variant::Variant,
     },
-    Digest, Scheme, Verifier,
+    Digest, PublicKey, Signer,
 };
-use commonware_utils::{union, Array};
+use commonware_utils::union;
 use futures::channel::oneshot;
 use std::hash::{Hash, Hasher};
 
@@ -163,7 +163,7 @@ pub fn ack_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, ACK_SUFFIX)
 }
 
-/// Used as the [`Index`](crate::Supervisor::Index) type for monitoring epochs.
+/// Used as the [crate::Supervisor::Index] type for monitoring epochs.
 /// Defines the current set of sequencers and validators.
 ///
 /// This is not a single "View" in the sense of a consensus protocol, but rather a continuous
@@ -171,12 +171,12 @@ pub fn ack_namespace(namespace: &[u8]) -> Vec<u8> {
 /// of participants changes, the epoch increments.
 pub type Epoch = u64;
 
-/// Used as the [`Automaton::Context`](crate::Automaton::Context) type.
+/// Used as the [crate::Automaton::Context] type.
 ///
 /// Carries the necessary context for the automaton to verify a payload, including
 /// the sequencer's public key and its sequencer-specific height.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct Context<P: Array> {
+pub struct Context<P: PublicKey> {
     /// Sequencer's public key.
     pub sequencer: P,
 
@@ -191,7 +191,7 @@ pub struct Context<P: Array> {
 /// acknowledge chunks with partial signatures, which are then aggregated into threshold
 /// signatures to prove reliable broadcast.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Chunk<P: Array, D: Digest> {
+pub struct Chunk<P: PublicKey, D: Digest> {
     /// Sequencer's public key.
     pub sequencer: P,
 
@@ -202,7 +202,7 @@ pub struct Chunk<P: Array, D: Digest> {
     pub payload: D,
 }
 
-impl<P: Array, D: Digest> Chunk<P, D> {
+impl<P: PublicKey, D: Digest> Chunk<P, D> {
     /// Create a new chunk with the given sequencer, height, and payload.
     ///
     /// This is the basic unit of data in the ordered broadcast system.
@@ -215,7 +215,7 @@ impl<P: Array, D: Digest> Chunk<P, D> {
     }
 }
 
-impl<P: Array, D: Digest> Write for Chunk<P, D> {
+impl<P: PublicKey, D: Digest> Write for Chunk<P, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.sequencer.write(writer);
         UInt(self.height).write(writer);
@@ -223,7 +223,7 @@ impl<P: Array, D: Digest> Write for Chunk<P, D> {
     }
 }
 
-impl<P: Array, D: Digest> Read for Chunk<P, D> {
+impl<P: PublicKey, D: Digest> Read for Chunk<P, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -238,7 +238,7 @@ impl<P: Array, D: Digest> Read for Chunk<P, D> {
     }
 }
 
-impl<P: Array, D: Digest> EncodeSize for Chunk<P, D> {
+impl<P: PublicKey, D: Digest> EncodeSize for Chunk<P, D> {
     fn encode_size(&self) -> usize {
         self.sequencer.encode_size() + UInt(self.height).encode_size() + self.payload.encode_size()
     }
@@ -315,9 +315,9 @@ impl<V: Variant, D: Digest> EncodeSize for Parent<V, D> {
 /// Nodes form a linked chain from each sequencer, ensuring that new chunks can only be added
 /// after their predecessors have been properly acknowledged by the validator set.
 #[derive(Clone, Debug)]
-pub struct Node<C: Verifier, V: Variant, D: Digest> {
+pub struct Node<C: PublicKey, V: Variant, D: Digest> {
     /// Chunk of the node.
-    pub chunk: Chunk<C::PublicKey, D>,
+    pub chunk: Chunk<C, D>,
 
     /// Signature of the sequencer over the chunk.
     pub signature: C::Signature,
@@ -332,16 +332,12 @@ pub struct Node<C: Verifier, V: Variant, D: Digest> {
     pub parent: Option<Parent<V, D>>,
 }
 
-impl<C: Verifier, V: Variant, D: Digest> Node<C, V, D> {
+impl<C: PublicKey, V: Variant, D: Digest> Node<C, V, D> {
     /// Create a new node with the given chunk, signature, and parent.
     ///
     /// For genesis nodes (height = 0), parent should be None.
     /// For all other nodes, parent must be provided.
-    pub fn new(
-        chunk: Chunk<C::PublicKey, D>,
-        signature: C::Signature,
-        parent: Option<Parent<V, D>>,
-    ) -> Self {
+    pub fn new(chunk: Chunk<C, D>, signature: C::Signature, parent: Option<Parent<V, D>>) -> Self {
         Self {
             chunk,
             signature,
@@ -364,16 +360,15 @@ impl<C: Verifier, V: Variant, D: Digest> Node<C, V, D> {
         &self,
         namespace: &[u8],
         public: &V::Public,
-    ) -> Result<Option<Chunk<C::PublicKey, D>>, Error> {
+    ) -> Result<Option<Chunk<C, D>>, Error> {
         // Verify chunk
         let chunk_namespace = chunk_namespace(namespace);
         let message = self.chunk.encode();
-        if !C::verify(
-            Some(chunk_namespace.as_ref()),
-            &message,
-            &self.chunk.sequencer,
-            &self.signature,
-        ) {
+        if !self
+            .chunk
+            .sequencer
+            .verify(Some(chunk_namespace.as_ref()), &message, &self.signature)
+        {
             return Err(Error::InvalidSequencerSignature);
         }
         let Some(parent) = &self.parent else {
@@ -410,21 +405,22 @@ impl<C: Verifier, V: Variant, D: Digest> Node<C, V, D> {
     ///
     /// This is used by sequencers to create and sign new nodes for broadcast.
     /// For non-genesis nodes (height > 0), a parent with threshold signature must be provided.
-    pub fn sign<S: Scheme<PublicKey = C::PublicKey, Signature = C::Signature>>(
+    pub fn sign<S: Signer<PublicKey = C, Signature = C::Signature>>(
         namespace: &[u8],
-        scheme: &mut S,
+        signer: &mut S,
         height: u64,
         payload: D,
         parent: Option<Parent<V, D>>,
     ) -> Self {
         let chunk_namespace = chunk_namespace(namespace);
-        let chunk = Chunk::new(scheme.public_key(), height, payload);
-        let signature = scheme.sign(Some(chunk_namespace.as_ref()), &chunk.encode());
+        let pub_key = signer.public_key();
+        let chunk = Chunk::new(pub_key, height, payload);
+        let signature = signer.sign(Some(chunk_namespace.as_ref()), &chunk.encode());
         Self::new(chunk, signature, parent)
     }
 }
 
-impl<C: Verifier, V: Variant, D: Digest> Write for Node<C, V, D> {
+impl<C: PublicKey, V: Variant, D: Digest> Write for Node<C, V, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.chunk.write(writer);
         self.signature.write(writer);
@@ -432,7 +428,7 @@ impl<C: Verifier, V: Variant, D: Digest> Write for Node<C, V, D> {
     }
 }
 
-impl<C: Verifier, V: Variant, D: Digest> Read for Node<C, V, D> {
+impl<C: PublicKey, V: Variant, D: Digest> Read for Node<C, V, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -458,13 +454,13 @@ impl<C: Verifier, V: Variant, D: Digest> Read for Node<C, V, D> {
     }
 }
 
-impl<C: Verifier, V: Variant, D: Digest> EncodeSize for Node<C, V, D> {
+impl<C: PublicKey, V: Variant, D: Digest> EncodeSize for Node<C, V, D> {
     fn encode_size(&self) -> usize {
         self.chunk.encode_size() + self.signature.encode_size() + self.parent.encode_size()
     }
 }
 
-impl<C: Verifier, V: Variant, D: Digest> Hash for Node<C, V, D> {
+impl<C: PublicKey, V: Variant, D: Digest> Hash for Node<C, V, D> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.chunk.hash(state);
         self.signature.hash(state);
@@ -472,7 +468,7 @@ impl<C: Verifier, V: Variant, D: Digest> Hash for Node<C, V, D> {
     }
 }
 
-impl<C: Verifier, V: Variant, D: Digest> PartialEq for Node<C, V, D> {
+impl<C: PublicKey, V: Variant, D: Digest> PartialEq for Node<C, V, D> {
     fn eq(&self, other: &Self) -> bool {
         self.chunk == other.chunk
             && self.signature == other.signature
@@ -480,7 +476,7 @@ impl<C: Verifier, V: Variant, D: Digest> PartialEq for Node<C, V, D> {
     }
 }
 
-impl<C: Verifier, V: Variant, D: Digest> Eq for Node<C, V, D> {}
+impl<C: PublicKey, V: Variant, D: Digest> Eq for Node<C, V, D> {}
 
 /// Ack is a message sent by a validator to acknowledge the receipt of a Chunk.
 ///
@@ -493,7 +489,7 @@ impl<C: Verifier, V: Variant, D: Digest> Eq for Node<C, V, D> {}
 /// once enough validators (a quorum) have acknowledged the chunk. This threshold signature
 /// serves as proof that the chunk was reliably broadcast.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Ack<P: Array, V: Variant, D: Digest> {
+pub struct Ack<P: PublicKey, V: Variant, D: Digest> {
     /// Chunk that is being acknowledged.
     pub chunk: Chunk<P, D>,
 
@@ -506,7 +502,7 @@ pub struct Ack<P: Array, V: Variant, D: Digest> {
     pub signature: PartialSignature<V>,
 }
 
-impl<P: Array, V: Variant, D: Digest> Ack<P, V, D> {
+impl<P: PublicKey, V: Variant, D: Digest> Ack<P, V, D> {
     /// Create a new ack with the given chunk, epoch, and signature.
     pub fn new(chunk: Chunk<P, D>, epoch: Epoch, signature: PartialSignature<V>) -> Self {
         Self {
@@ -566,7 +562,7 @@ impl<P: Array, V: Variant, D: Digest> Ack<P, V, D> {
     }
 }
 
-impl<P: Array, V: Variant, D: Digest> Write for Ack<P, V, D> {
+impl<P: PublicKey, V: Variant, D: Digest> Write for Ack<P, V, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.chunk.write(writer);
         UInt(self.epoch).write(writer);
@@ -574,7 +570,7 @@ impl<P: Array, V: Variant, D: Digest> Write for Ack<P, V, D> {
     }
 }
 
-impl<P: Array, V: Variant, D: Digest> Read for Ack<P, V, D> {
+impl<P: PublicKey, V: Variant, D: Digest> Read for Ack<P, V, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -589,13 +585,13 @@ impl<P: Array, V: Variant, D: Digest> Read for Ack<P, V, D> {
     }
 }
 
-impl<P: Array, V: Variant, D: Digest> EncodeSize for Ack<P, V, D> {
+impl<P: PublicKey, V: Variant, D: Digest> EncodeSize for Ack<P, V, D> {
     fn encode_size(&self) -> usize {
         self.chunk.encode_size() + UInt(self.epoch).encode_size() + self.signature.encode_size()
     }
 }
 
-/// Activity is the type associated with the [`Reporter`](crate::Reporter) trait.
+/// Activity is the type associated with the [crate::Reporter] trait.
 ///
 /// This enum represents the two main types of activities that are reported:
 /// 1. Tips - when a new chunk at the latest tip is verified for some sequencer
@@ -605,16 +601,16 @@ impl<P: Array, V: Variant, D: Digest> EncodeSize for Ack<P, V, D> {
 /// and provide the appropriate information to other components.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
-pub enum Activity<C: Verifier, V: Variant, D: Digest> {
+pub enum Activity<C: PublicKey, V: Variant, D: Digest> {
     /// A new tip for a sequencer
     ///
     /// This activity is only emitted when the application has verified some peer proposal.
     Tip(Proposal<C, D>),
     /// A threshold signature for a chunk, indicating it has been acknowledged by a quorum
-    Lock(Lock<C::PublicKey, V, D>),
+    Lock(Lock<C, V, D>),
 }
 
-impl<C: Verifier, V: Variant, D: Digest> Write for Activity<C, V, D> {
+impl<C: PublicKey, V: Variant, D: Digest> Write for Activity<C, V, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Activity::Tip(proposal) => {
@@ -629,7 +625,7 @@ impl<C: Verifier, V: Variant, D: Digest> Write for Activity<C, V, D> {
     }
 }
 
-impl<C: Verifier, V: Variant, D: Digest> Read for Activity<C, V, D> {
+impl<C: PublicKey, V: Variant, D: Digest> Read for Activity<C, V, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -644,7 +640,7 @@ impl<C: Verifier, V: Variant, D: Digest> Read for Activity<C, V, D> {
     }
 }
 
-impl<C: Verifier, V: Variant, D: Digest> EncodeSize for Activity<C, V, D> {
+impl<C: PublicKey, V: Variant, D: Digest> EncodeSize for Activity<C, V, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Activity::Tip(proposal) => proposal.encode_size(),
@@ -659,18 +655,18 @@ impl<C: Verifier, V: Variant, D: Digest> EncodeSize for Activity<C, V, D> {
 /// broadcast to validators for acknowledgment. It contains the chunk itself and the
 /// sequencer's signature over that chunk.
 #[derive(Clone, Debug)]
-pub struct Proposal<C: Verifier, D: Digest> {
+pub struct Proposal<C: PublicKey, D: Digest> {
     /// Chunk that is being proposed.
-    pub chunk: Chunk<C::PublicKey, D>,
+    pub chunk: Chunk<C, D>,
 
     /// Signature over the chunk.
     /// This is the sequencer's signature proving authenticity of the chunk.
     pub signature: C::Signature,
 }
 
-impl<C: Verifier, D: Digest> Proposal<C, D> {
+impl<C: PublicKey, D: Digest> Proposal<C, D> {
     /// Create a new Proposal with the given chunk and signature.
-    pub fn new(chunk: Chunk<C::PublicKey, D>, signature: C::Signature) -> Self {
+    pub fn new(chunk: Chunk<C, D>, signature: C::Signature) -> Self {
         Self { chunk, signature }
     }
 
@@ -682,23 +678,20 @@ impl<C: Verifier, D: Digest> Proposal<C, D> {
         // Verify chunk
         let chunk_namespace = chunk_namespace(namespace);
         let message = self.chunk.encode();
-        C::verify(
-            Some(chunk_namespace.as_ref()),
-            &message,
-            &self.chunk.sequencer,
-            &self.signature,
-        )
+        self.chunk
+            .sequencer
+            .verify(Some(chunk_namespace.as_ref()), &message, &self.signature)
     }
 }
 
-impl<C: Verifier, D: Digest> Write for Proposal<C, D> {
+impl<C: PublicKey, D: Digest> Write for Proposal<C, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.chunk.write(writer);
         self.signature.write(writer);
     }
 }
 
-impl<C: Verifier, D: Digest> Read for Proposal<C, D> {
+impl<C: PublicKey, D: Digest> Read for Proposal<C, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -708,27 +701,27 @@ impl<C: Verifier, D: Digest> Read for Proposal<C, D> {
     }
 }
 
-impl<C: Verifier, D: Digest> EncodeSize for Proposal<C, D> {
+impl<C: PublicKey, D: Digest> EncodeSize for Proposal<C, D> {
     fn encode_size(&self) -> usize {
         self.chunk.encode_size() + self.signature.encode_size()
     }
 }
 
-impl<C: Verifier, D: Digest> Hash for Proposal<C, D> {
+impl<C: PublicKey, D: Digest> Hash for Proposal<C, D> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.chunk.hash(state);
         self.signature.hash(state);
     }
 }
 
-impl<C: Verifier, D: Digest> PartialEq for Proposal<C, D> {
+impl<C: PublicKey, D: Digest> PartialEq for Proposal<C, D> {
     fn eq(&self, other: &Self) -> bool {
         self.chunk == other.chunk && self.signature == other.signature
     }
 }
 
 /// This is needed to implement `Eq` for `Proposal`.
-impl<C: Verifier, D: Digest> Eq for Proposal<C, D> {}
+impl<C: PublicKey, D: Digest> Eq for Proposal<C, D> {}
 
 /// Lock is a message that can be generated once `2f + 1` acks are received for a Chunk.
 ///
@@ -742,7 +735,7 @@ impl<C: Verifier, D: Digest> Eq for Proposal<C, D> {}
 /// 2. Allowing sequencers to build chains of chunks
 /// 3. Preventing sequencers from creating forks in their chains
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Lock<P: Array, V: Variant, D: Digest> {
+pub struct Lock<P: PublicKey, V: Variant, D: Digest> {
     /// Chunk that is being locked.
     pub chunk: Chunk<P, D>,
 
@@ -755,7 +748,7 @@ pub struct Lock<P: Array, V: Variant, D: Digest> {
     pub signature: V::Signature,
 }
 
-impl<P: Array, V: Variant, D: Digest> Lock<P, V, D> {
+impl<P: PublicKey, V: Variant, D: Digest> Lock<P, V, D> {
     /// Create a new Lock with the given chunk, epoch, and signature.
     pub fn new(chunk: Chunk<P, D>, epoch: Epoch, signature: V::Signature) -> Self {
         Self {
@@ -784,7 +777,7 @@ impl<P: Array, V: Variant, D: Digest> Lock<P, V, D> {
     }
 }
 
-impl<P: Array, V: Variant, D: Digest> Write for Lock<P, V, D> {
+impl<P: PublicKey, V: Variant, D: Digest> Write for Lock<P, V, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.chunk.write(writer);
         UInt(self.epoch).write(writer);
@@ -792,7 +785,7 @@ impl<P: Array, V: Variant, D: Digest> Write for Lock<P, V, D> {
     }
 }
 
-impl<P: Array, V: Variant, D: Digest> Read for Lock<P, V, D> {
+impl<P: PublicKey, V: Variant, D: Digest> Read for Lock<P, V, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -807,7 +800,7 @@ impl<P: Array, V: Variant, D: Digest> Read for Lock<P, V, D> {
     }
 }
 
-impl<P: Array, V: Variant, D: Digest> EncodeSize for Lock<P, V, D> {
+impl<P: PublicKey, V: Variant, D: Digest> EncodeSize for Lock<P, V, D> {
     fn encode_size(&self) -> usize {
         self.chunk.encode_size() + UInt(self.epoch).encode_size() + self.signature.encode_size()
     }
@@ -827,9 +820,9 @@ mod tests {
                 variant::{MinPk, MinSig},
             },
         },
-        ed25519::PublicKey,
+        ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
-        Ed25519, Signer,
+        PrivateKeyExt as _, Signer,
     };
     use commonware_utils::quorum;
     use rand::{rngs::StdRng, SeedableRng};
@@ -842,8 +835,8 @@ mod tests {
     }
 
     // Helper function to create a sample Ed25519 scheme
-    fn sample_scheme(v: u64) -> Ed25519 {
-        Ed25519::from_seed(v)
+    fn sample_scheme(v: u64) -> PrivateKey {
+        PrivateKey::from_seed(v)
     }
 
     // Helper function to generate BLS shares and polynomial
@@ -907,7 +900,7 @@ mod tests {
     }
 
     fn node_encode_decode<V: Variant>() {
-        let mut scheme = sample_scheme(0);
+        let scheme = sample_scheme(0);
         let public_key = scheme.public_key();
         let chunk_namespace = chunk_namespace(NAMESPACE);
 
@@ -915,9 +908,9 @@ mod tests {
         let chunk = Chunk::new(public_key.clone(), 0, sample_digest(1));
         let message = chunk.encode();
         let signature = scheme.sign(Some(chunk_namespace.as_ref()), &message);
-        let node = Node::<Ed25519, V, Sha256Digest>::new(chunk, signature.clone(), None);
+        let node = Node::<PublicKey, V, Sha256Digest>::new(chunk, signature.clone(), None);
         let encoded = node.encode();
-        let decoded = Node::<Ed25519, V, Sha256Digest>::decode(encoded).unwrap();
+        let decoded = Node::<PublicKey, V, Sha256Digest>::decode(encoded).unwrap();
         assert_eq!(decoded.chunk, node.chunk);
         assert_eq!(decoded.signature, node.signature);
         assert_eq!(decoded.parent, node.parent);
@@ -954,11 +947,11 @@ mod tests {
         let chunk2 = Chunk::new(public_key.clone(), 1, sample_digest(2));
         let message2 = chunk2.encode();
         let signature2 = scheme.sign(Some(chunk_namespace.as_ref()), &message2);
-        let node2 = Node::<Ed25519, V, Sha256Digest>::new(chunk2, signature2, parent);
+        let node2 = Node::<PublicKey, V, Sha256Digest>::new(chunk2, signature2, parent);
 
         // Test encode/decode
         let encoded2 = node2.encode();
-        let decoded2 = Node::<Ed25519, V, Sha256Digest>::decode(encoded2).unwrap();
+        let decoded2 = Node::<PublicKey, V, Sha256Digest>::decode(encoded2).unwrap();
         assert_eq!(decoded2.chunk, node2.chunk);
         assert_eq!(decoded2.signature, node2.signature);
         assert_eq!(decoded2.parent, node2.parent);
@@ -1004,7 +997,7 @@ mod tests {
     }
 
     fn activity_encode_decode<V: Variant>() {
-        let mut scheme = sample_scheme(0);
+        let scheme = sample_scheme(0);
         let public_key = scheme.public_key();
         let chunk_namespace = chunk_namespace(NAMESPACE);
 
@@ -1012,10 +1005,10 @@ mod tests {
         let chunk = Chunk::new(public_key.clone(), 42, sample_digest(1));
         let message = chunk.encode();
         let signature = scheme.sign(Some(chunk_namespace.as_ref()), &message);
-        let proposal = Proposal::<Ed25519, Sha256Digest>::new(chunk.clone(), signature.clone());
-        let activity = Activity::<_, V, _>::Tip(proposal);
+        let proposal = Proposal::<PublicKey, Sha256Digest>::new(chunk.clone(), signature.clone());
+        let activity = Activity::<PublicKey, V, _>::Tip(proposal);
         let encoded = activity.encode();
-        let decoded = Activity::<Ed25519, V, Sha256Digest>::decode(encoded).unwrap();
+        let decoded = Activity::<PublicKey, V, Sha256Digest>::decode(encoded).unwrap();
 
         match decoded {
             Activity::Tip(p) => {
@@ -1049,9 +1042,9 @@ mod tests {
         assert!(lock.verify(NAMESPACE, identity));
 
         // Test activity with the lock
-        let activity = Activity::<Ed25519, V, Sha256Digest>::Lock(lock);
+        let activity = Activity::<PublicKey, V, Sha256Digest>::Lock(lock);
         let encoded = activity.encode();
-        let decoded = Activity::<Ed25519, V, Sha256Digest>::decode(encoded).unwrap();
+        let decoded = Activity::<PublicKey, V, Sha256Digest>::decode(encoded).unwrap();
 
         match decoded {
             Activity::Lock(l) => {
@@ -1072,7 +1065,7 @@ mod tests {
 
     #[test]
     fn test_proposal_encode_decode() {
-        let mut scheme = sample_scheme(0);
+        let scheme = sample_scheme(0);
         let public_key = scheme.public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
 
@@ -1081,9 +1074,9 @@ mod tests {
         let message = chunk.encode();
         let signature = scheme.sign(Some(chunk_namespace.as_ref()), &message);
 
-        let proposal = Proposal::<Ed25519, Sha256Digest>::new(chunk, signature);
+        let proposal = Proposal::<PublicKey, Sha256Digest>::new(chunk, signature);
         let encoded = proposal.encode();
-        let decoded = Proposal::<Ed25519, Sha256Digest>::decode(encoded).unwrap();
+        let decoded = Proposal::<PublicKey, Sha256Digest>::decode(encoded).unwrap();
 
         assert_eq!(decoded.chunk, proposal.chunk);
         assert_eq!(decoded.signature, proposal.signature);
@@ -1143,7 +1136,7 @@ mod tests {
         let identity = public::<V>(&polynomial);
 
         // Test genesis node (no parent)
-        let node = Node::<Ed25519, V, Sha256Digest>::sign(
+        let node = Node::<PublicKey, V, Sha256Digest>::sign(
             NAMESPACE,
             &mut scheme,
             0,
@@ -1172,7 +1165,7 @@ mod tests {
             parent_epoch,
             parent_threshold,
         ));
-        let node = Node::<Ed25519, V, Sha256Digest>::sign(
+        let node = Node::<PublicKey, V, Sha256Digest>::sign(
             NAMESPACE,
             &mut scheme,
             1,
@@ -1287,14 +1280,14 @@ mod tests {
 
     #[test]
     fn test_proposal_verify() {
-        let mut scheme = sample_scheme(0);
+        let scheme = sample_scheme(0);
         let chunk = Chunk::new(scheme.public_key(), 42, sample_digest(1));
 
         // Sign and create proposal
         let chunk_namespace = chunk_namespace(NAMESPACE);
         let message = chunk.encode();
         let signature = scheme.sign(Some(chunk_namespace.as_ref()), &message);
-        let proposal = Proposal::<Ed25519, Sha256Digest>::new(chunk, signature);
+        let proposal = Proposal::<PublicKey, Sha256Digest>::new(chunk, signature);
 
         // Verify proposal
         assert!(proposal.verify(NAMESPACE));
@@ -1334,8 +1327,8 @@ mod tests {
         let parent = Parent::new(sample_digest(0), parent_epoch, parent_signature);
 
         let encoded =
-            Node::<Ed25519, MinSig, Sha256Digest>::new(chunk, signature, Some(parent)).encode();
-        Node::<Ed25519, MinSig, Sha256Digest>::decode(encoded).unwrap();
+            Node::<PublicKey, MinSig, Sha256Digest>::new(chunk, signature, Some(parent)).encode();
+        Node::<PublicKey, MinSig, Sha256Digest>::decode(encoded).unwrap();
     }
 
     #[test]
@@ -1348,12 +1341,12 @@ mod tests {
         let message = chunk.encode();
         let signature = sample_scheme(0).sign(Some(chunk_namespace.as_ref()), &message);
 
-        let encoded = Node::<Ed25519, MinSig, Sha256Digest>::new(chunk, signature, None).encode();
-        Node::<Ed25519, MinSig, Sha256Digest>::decode(encoded).unwrap();
+        let encoded = Node::<PublicKey, MinSig, Sha256Digest>::new(chunk, signature, None).encode();
+        Node::<PublicKey, MinSig, Sha256Digest>::decode(encoded).unwrap();
     }
 
     fn node_verify_invalid_signature<V: Variant>() {
-        let mut scheme = sample_scheme(0);
+        let scheme = sample_scheme(0);
         let public_key = scheme.public_key();
         let n = 4;
         let t = quorum(n as u32);
@@ -1369,14 +1362,14 @@ mod tests {
         let signature = scheme.sign(Some(chunk_namespace.as_ref()), &message);
 
         // Create a node with valid signature
-        let node = Node::<Ed25519, V, Sha256Digest>::new(chunk.clone(), signature, None);
+        let node = Node::<PublicKey, V, Sha256Digest>::new(chunk.clone(), signature, None);
 
         // Verification should succeed
         assert!(node.verify(NAMESPACE, identity).is_ok());
 
         // Now create a node with invalid signature
         let tampered_signature = scheme.sign(Some(chunk_namespace.as_ref()), &node.encode());
-        let invalid_node = Node::<Ed25519, V, Sha256Digest>::new(chunk, tampered_signature, None);
+        let invalid_node = Node::<PublicKey, V, Sha256Digest>::new(chunk, tampered_signature, None);
 
         // Verification should fail
         assert!(matches!(
@@ -1392,7 +1385,7 @@ mod tests {
     }
 
     fn node_verify_invalid_parent_signature<V: Variant>() {
-        let mut scheme = sample_scheme(0);
+        let scheme = sample_scheme(0);
         let public_key = scheme.public_key();
 
         // Generate BLS keys for threshold signature verification
@@ -1422,7 +1415,7 @@ mod tests {
         let chunk_namespace = chunk_namespace(NAMESPACE);
         let message = child_chunk.encode();
         let node_signature = scheme.sign(Some(chunk_namespace.as_ref()), &message);
-        let node = Node::<Ed25519, V, Sha256Digest>::new(
+        let node = Node::<PublicKey, V, Sha256Digest>::new(
             child_chunk.clone(),
             node_signature.clone(),
             Some(parent),
@@ -1450,8 +1443,11 @@ mod tests {
         let wrong_parent = Parent::new(parent_chunk.payload, epoch, wrong_signature);
 
         // Create child node with wrong parent
-        let node =
-            Node::<Ed25519, V, Sha256Digest>::new(child_chunk, node_signature, Some(wrong_parent));
+        let node = Node::<PublicKey, V, Sha256Digest>::new(
+            child_chunk,
+            node_signature,
+            Some(wrong_parent),
+        );
 
         // Verification should fail because the parent signature doesn't verify with the correct public key
         assert!(matches!(
@@ -1584,14 +1580,14 @@ mod tests {
 
     #[test]
     fn test_proposal_verify_wrong_namespace() {
-        let mut scheme = sample_scheme(0);
+        let scheme = sample_scheme(0);
         let chunk = Chunk::new(scheme.public_key(), 42, sample_digest(1));
 
         // Sign and create proposal
         let chunk_namespace = chunk_namespace(NAMESPACE);
         let message = chunk.encode();
         let signature = scheme.sign(Some(chunk_namespace.as_ref()), &message);
-        let proposal = Proposal::<Ed25519, Sha256Digest>::new(chunk, signature);
+        let proposal = Proposal::<PublicKey, Sha256Digest>::new(chunk, signature);
 
         // Verify with correct namespace - should pass
         assert!(proposal.verify(NAMESPACE));
@@ -1603,7 +1599,7 @@ mod tests {
     #[test]
     fn test_proposal_verify_wrong_sequencer() {
         let scheme1 = sample_scheme(0);
-        let mut scheme2 = sample_scheme(1); // Different key
+        let scheme2 = sample_scheme(1); // Different key
 
         // Create chunk with scheme1's public key
         let chunk = Chunk::new(scheme1.public_key(), 42, sample_digest(1));
@@ -1612,7 +1608,7 @@ mod tests {
         let chunk_namespace = chunk_namespace(NAMESPACE);
         let message = chunk.encode();
         let signature = scheme2.sign(Some(chunk_namespace.as_ref()), &message);
-        let proposal = Proposal::<Ed25519, Sha256Digest>::new(chunk, signature);
+        let proposal = Proposal::<PublicKey, Sha256Digest>::new(chunk, signature);
 
         // Verification should fail because the signature doesn't match the sequencer's public key
         assert!(!proposal.verify(NAMESPACE));
@@ -1642,10 +1638,10 @@ mod tests {
 
         // Create the genesis node with a parent - should fail to decode
         let encoded =
-            Node::<Ed25519, V, Sha256Digest>::new(chunk, signature, Some(parent)).encode();
+            Node::<PublicKey, V, Sha256Digest>::new(chunk, signature, Some(parent)).encode();
 
         // This should error because genesis nodes can't have parents
-        let result = Node::<Ed25519, V, Sha256Digest>::decode(encoded);
+        let result = Node::<PublicKey, V, Sha256Digest>::decode(encoded);
         assert!(result.is_err());
     }
 
@@ -1664,10 +1660,10 @@ mod tests {
         let signature = sample_scheme(0).sign(Some(chunk_namespace.as_ref()), &message);
 
         // Create the node without a parent - should fail to decode
-        let encoded = Node::<Ed25519, V, Sha256Digest>::new(chunk, signature, None).encode();
+        let encoded = Node::<PublicKey, V, Sha256Digest>::new(chunk, signature, None).encode();
 
         // This should error because non-genesis nodes must have parents
-        let result = Node::<Ed25519, V, Sha256Digest>::decode(encoded);
+        let result = Node::<PublicKey, V, Sha256Digest>::decode(encoded);
         assert!(result.is_err());
     }
 

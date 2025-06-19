@@ -3,13 +3,14 @@ use crate::{
     Consumer,
 };
 use bytes::Bytes;
+use commonware_cryptography::PublicKey;
 use commonware_p2p::utils::requester;
 use commonware_utils::Array;
 use std::time::Duration;
 
 /// Configuration for the peer actor.
 pub struct Config<
-    P: Array,
+    P: PublicKey,
     D: Coordinator<PublicKey = P>,
     Key: Array,
     Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,

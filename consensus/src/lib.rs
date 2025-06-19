@@ -5,13 +5,14 @@
 //! `commonware-consensus` is **ALPHA** software and is not yet recommended for production use. Developers should
 //! expect breaking changes and occasional instability.
 
+use commonware_cryptography::PublicKey;
+
 pub mod ordered_broadcast;
 pub mod simplex;
 pub mod threshold_simplex;
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
-        use commonware_utils::Array;
         use commonware_cryptography::Digest;
         use futures::channel::{oneshot, mpsc};
         use std::future::Future;
@@ -106,7 +107,7 @@ cfg_if::cfg_if! {
             type Index;
 
             /// Public key used to identify participants.
-            type PublicKey: Array;
+            type PublicKey: PublicKey;
 
             /// Return the leader at a given index for the provided seed.
             fn leader(&self, index: Self::Index) -> Option<Self::PublicKey>;
@@ -124,7 +125,7 @@ cfg_if::cfg_if! {
         ///
         /// ## Synchronization
         ///
-        /// The same considerations for [`Supervisor`](crate::Supervisor) apply here.
+        /// The same considerations for [crate::Supervisor] apply here.
         pub trait ThresholdSupervisor: Supervisor {
             /// Identity is the type against which threshold signatures are verified.
             type Identity;
@@ -162,7 +163,7 @@ cfg_if::cfg_if! {
         /// Monitor is used to implement mechanisms that share the same set of active participants as consensus and/or
         /// perform some activity that requires some synchronization with the progress of consensus.
         ///
-        /// Monitor can be implemented using [`Reporter`](crate::Reporter) to avoid introducing complexity
+        /// Monitor can be implemented using [crate::Reporter] to avoid introducing complexity
         /// into any particular consensus implementation.
         pub trait Monitor: Clone + Send + 'static {
             /// Index is the type used to indicate the in-progress consensus decision.

@@ -16,8 +16,12 @@ pub enum Error {
     UnableToDecode(CodecError),
     #[error("handshake not for us")]
     HandshakeNotForUs,
+    #[error("handshake uses our public key")]
+    HandshakeUsesOurKey,
     #[error("handshake timeout")]
     HandshakeTimeout,
+    #[error("cannot dial self")]
+    DialSelf,
     #[error("invalid signature")]
     InvalidSignature,
     #[error("wrong peer")]
@@ -34,8 +38,12 @@ pub enum Error {
     SendTooLarge(usize),
     #[error("connection closed")]
     StreamClosed,
+    #[error("shared secret was not contributory")]
+    SharedSecretNotContributory,
     #[error("cipher creation failed")]
-    CipherCreationFailed,
+    CipherCreation,
+    #[error("HKDF expansion failed")]
+    HKDFExpansion,
     #[error("nonce overflow")]
     NonceOverflow,
     #[error("encryption failed")]

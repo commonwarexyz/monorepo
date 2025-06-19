@@ -21,7 +21,7 @@
 //!
 //! # Design
 //!
-//! The core of the module is the [`Engine`]. It is responsible for:
+//! The core of the module is the [Engine]. It is responsible for:
 //! - Broadcasting nodes (if a sequencer)
 //! - Signing chunks (if a validator)
 //! - Tracking the latest chunk in each sequencer’s chain
@@ -64,27 +64,22 @@ mod tests {
                 variant::{MinPk, MinSig, Variant},
             },
         },
-        ed25519::PublicKey,
+        ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
-        Ed25519, Signer,
+        PrivateKeyExt as _, Signer as _,
     };
     use commonware_macros::test_traced;
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{
         deterministic::{self, Context},
-        Metrics,
+        Clock, Metrics, Runner, Spawner,
     };
-    use commonware_runtime::{Clock, Runner, Spawner};
     use commonware_utils::quorum;
-    use futures::channel::oneshot;
-    use futures::future::join_all;
+    use futures::{channel::oneshot, future::join_all};
     use rand::{rngs::StdRng, SeedableRng as _};
     use std::{
-        collections::HashMap,
+        collections::{BTreeMap, HashMap, HashSet},
         sync::{Arc, Mutex},
-    };
-    use std::{
-        collections::{BTreeMap, HashSet},
         time::Duration,
     };
     use tracing::debug;
@@ -146,7 +141,7 @@ mod tests {
         shares_vec: &mut [Share],
     ) -> (
         Oracle<PublicKey>,
-        Vec<(PublicKey, Ed25519, Share)>,
+        Vec<(PublicKey, PrivateKey, Share)>,
         Vec<PublicKey>,
         Registrations<PublicKey>,
     ) {
@@ -159,10 +154,10 @@ mod tests {
         network.start();
 
         let mut schemes = (0..num_validators)
-            .map(|i| Ed25519::from_seed(i as u64))
+            .map(|i| PrivateKey::from_seed(i as u64))
             .collect::<Vec<_>>();
         schemes.sort_by_key(|s| s.public_key());
-        let validators: Vec<(PublicKey, Ed25519, Share)> = schemes
+        let validators: Vec<(PublicKey, PrivateKey, Share)> = schemes
             .iter()
             .enumerate()
             .map(|(i, scheme)| (scheme.public_key(), scheme.clone(), shares_vec[i].clone()))
@@ -188,10 +183,10 @@ mod tests {
         polynomial: poly::Public<V>,
         sequencer_pks: &[PublicKey],
         validator_pks: &[PublicKey],
-        validators: &[(PublicKey, Ed25519, Share)],
+        validators: &[(PublicKey, PrivateKey, Share)],
         registrations: &mut Registrations<PublicKey>,
         automatons: &mut BTreeMap<PublicKey, mocks::Automaton<PublicKey>>,
-        reporters: &mut BTreeMap<PublicKey, mocks::ReporterMailbox<Ed25519, V, Sha256Digest>>,
+        reporters: &mut BTreeMap<PublicKey, mocks::ReporterMailbox<PublicKey, V, Sha256Digest>>,
         rebroadcast_timeout: Duration,
         invalid_when: fn(u64) -> bool,
         misses_allowed: Option<usize>,
@@ -212,7 +207,7 @@ mod tests {
             let automaton = mocks::Automaton::<PublicKey>::new(invalid_when);
             automatons.insert(validator.clone(), automaton.clone());
 
-            let (reporter, reporter_mailbox) = mocks::Reporter::<Ed25519, V, Sha256Digest>::new(
+            let (reporter, reporter_mailbox) = mocks::Reporter::<PublicKey, V, Sha256Digest>::new(
                 namespace,
                 *poly::public::<V>(&polynomial),
                 misses_allowed,
@@ -237,7 +232,6 @@ mod tests {
                     priority_acks: false,
                     priority_proposals: false,
                     journal_heights_per_section: 10,
-                    journal_replay_concurrency: 1,
                     journal_replay_buffer: 4096,
                     journal_write_buffer: 4096,
                     journal_name_prefix: format!("ordered-broadcast-seq/{}/", validator),
@@ -254,7 +248,7 @@ mod tests {
     async fn await_reporters<V: Variant>(
         context: Context,
         sequencers: Vec<PublicKey>,
-        reporters: &BTreeMap<PublicKey, mocks::ReporterMailbox<Ed25519, V, Sha256Digest>>,
+        reporters: &BTreeMap<PublicKey, mocks::ReporterMailbox<PublicKey, V, Sha256Digest>>,
         threshold: (u64, Epoch, bool),
     ) {
         let mut receivers = Vec::new();
@@ -303,7 +297,7 @@ mod tests {
     }
 
     async fn get_max_height<V: Variant>(
-        reporters: &mut BTreeMap<PublicKey, mocks::ReporterMailbox<Ed25519, V, Sha256Digest>>,
+        reporters: &mut BTreeMap<PublicKey, mocks::ReporterMailbox<PublicKey, V, Sha256Digest>>,
     ) -> u64 {
         let mut max_height = 0;
         for (sequencer, mailbox) in reporters.iter_mut() {
@@ -335,7 +329,7 @@ mod tests {
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
             ));
             let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, V, Sha256Digest>>::new();
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, V, Sha256Digest>>::new();
             spawn_validator_engines::<V>(
                 context.with_label("validator"),
                 polynomial.clone(),
@@ -392,10 +386,10 @@ mod tests {
                 network.start();
 
                 let mut schemes = (0..num_validators)
-                    .map(|i| Ed25519::from_seed(i as u64))
+                    .map(|i| PrivateKey::from_seed(i as u64))
                     .collect::<Vec<_>>();
                 schemes.sort_by_key(|s| s.public_key());
-                let validators: Vec<(PublicKey, Ed25519, Share)> = schemes
+                let validators: Vec<(PublicKey, PrivateKey, Share)> = schemes
                     .iter()
                     .enumerate()
                     .map(|(i, scheme)| (scheme.public_key(), scheme.clone(), shares_vec[i].clone()))
@@ -418,7 +412,8 @@ mod tests {
                     mocks::Automaton<PublicKey>,
                 >::new()));
                 let mut reporters =
-                    BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, V, Sha256Digest>>::new();
+                    BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, V, Sha256Digest>>::new(
+                    );
                 spawn_validator_engines(
                     context.with_label("validator"),
                     polynomial.clone(),
@@ -435,7 +430,7 @@ mod tests {
 
                 let reporter_pairs: Vec<(
                     PublicKey,
-                    mocks::ReporterMailbox<Ed25519, V, Sha256Digest>,
+                    mocks::ReporterMailbox<PublicKey, V, Sha256Digest>,
                 )> = reporters
                     .iter()
                     .map(|(v, m)| (v.clone(), m.clone()))
@@ -500,7 +495,7 @@ mod tests {
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
             ));
             let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, V, Sha256Digest>>::new();
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, V, Sha256Digest>>::new();
             spawn_validator_engines(
                 context.with_label("validator"),
                 polynomial.clone(),
@@ -577,7 +572,7 @@ mod tests {
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
             ));
             let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, V, Sha256Digest>>::new();
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, V, Sha256Digest>>::new();
             spawn_validator_engines(
                 context.with_label("validator"),
                 polynomial.clone(),
@@ -649,7 +644,7 @@ mod tests {
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
             ));
             let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, V, Sha256Digest>>::new();
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, V, Sha256Digest>>::new();
             spawn_validator_engines::<V>(
                 context.with_label("validator"),
                 polynomial.clone(),
@@ -701,7 +696,7 @@ mod tests {
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
             ));
             let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, V, Sha256Digest>>::new();
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, V, Sha256Digest>>::new();
             let monitors = spawn_validator_engines::<V>(
                 context.with_label("validator"),
                 polynomial.clone(),
@@ -771,12 +766,12 @@ mod tests {
 
             // Generate validator schemes
             let mut schemes = (0..num_validators)
-                .map(|i| Ed25519::from_seed(i as u64))
+                .map(|i| PrivateKey::from_seed(i as u64))
                 .collect::<Vec<_>>();
             schemes.sort_by_key(|s| s.public_key());
 
             // Generate validators
-            let validators: Vec<(PublicKey, Ed25519, Share)> = schemes
+            let validators: Vec<(PublicKey, PrivateKey, Share)> = schemes
                 .iter()
                 .enumerate()
                 .map(|(i, scheme)| (scheme.public_key(), scheme.clone(), shares[i].clone()))
@@ -787,7 +782,7 @@ mod tests {
                 .collect::<Vec<_>>();
 
             // Generate sequencer
-            let sequencer = Ed25519::from_seed(u64::MAX);
+            let sequencer = PrivateKey::from_seed(u64::MAX);
 
             // Generate network participants
             let mut participants = validators
@@ -819,7 +814,7 @@ mod tests {
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
             ));
             let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, V, Sha256Digest>>::new();
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, V, Sha256Digest>>::new();
             let mut monitors = HashMap::new();
             let namespace = b"my testing namespace";
 
@@ -841,11 +836,12 @@ mod tests {
                     .unwrap()
                     .insert(validator.clone(), automaton.clone());
 
-                let (reporter, reporter_mailbox) = mocks::Reporter::<Ed25519, V, Sha256Digest>::new(
-                    namespace,
-                    *poly::public::<V>(&polynomial),
-                    Some(5),
-                );
+                let (reporter, reporter_mailbox) =
+                    mocks::Reporter::<PublicKey, V, Sha256Digest>::new(
+                        namespace,
+                        *poly::public::<V>(&polynomial),
+                        Some(5),
+                    );
                 context.with_label("reporter").spawn(|_| reporter.run());
                 reporters.insert(validator.clone(), reporter_mailbox);
 
@@ -866,7 +862,6 @@ mod tests {
                         priority_acks: false,
                         priority_proposals: false,
                         journal_heights_per_section: 10,
-                        journal_replay_concurrency: 1,
                         journal_replay_buffer: 4096,
                         journal_write_buffer: 4096,
                         journal_name_prefix: format!("ordered-broadcast-seq/{}/", validator),
@@ -886,11 +881,12 @@ mod tests {
                     .lock()
                     .unwrap()
                     .insert(sequencer.public_key(), automaton.clone());
-                let (reporter, reporter_mailbox) = mocks::Reporter::<Ed25519, V, Sha256Digest>::new(
-                    namespace,
-                    *poly::public::<V>(&polynomial),
-                    Some(5),
-                );
+                let (reporter, reporter_mailbox) =
+                    mocks::Reporter::<PublicKey, V, Sha256Digest>::new(
+                        namespace,
+                        *poly::public::<V>(&polynomial),
+                        Some(5),
+                    );
                 context.with_label("reporter").spawn(|_| reporter.run());
                 reporters.insert(sequencer.public_key(), reporter_mailbox);
                 let engine = Engine::new(
@@ -916,7 +912,6 @@ mod tests {
                         priority_acks: false,
                         priority_proposals: false,
                         journal_heights_per_section: 10,
-                        journal_replay_concurrency: 1,
                         journal_replay_buffer: 4096,
                         journal_write_buffer: 4096,
                         journal_name_prefix: format!(
@@ -977,7 +972,7 @@ mod tests {
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
             ));
             let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<Ed25519, V, Sha256Digest>>::new();
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, V, Sha256Digest>>::new();
             let sequencers = &pks[0..pks.len() / 2];
             spawn_validator_engines::<V>(
                 context.with_label("validator"),

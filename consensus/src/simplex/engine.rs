@@ -4,7 +4,7 @@ use super::{
     types::{Activity, Context, View},
 };
 use crate::{Automaton, Relay, Reporter, Supervisor};
-use commonware_cryptography::{Digest, Scheme};
+use commonware_cryptography::{Digest, Signer};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
@@ -15,7 +15,7 @@ use tracing::debug;
 /// Instance of `simplex` consensus engine.
 pub struct Engine<
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
-    C: Scheme,
+    C: Signer,
     D: Digest,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
@@ -26,13 +26,13 @@ pub struct Engine<
 
     voter: voter::Actor<E, C, D, A, R, F, S>,
     voter_mailbox: voter::Mailbox<C::Signature, D>,
-    resolver: resolver::Actor<E, C, D, S>,
+    resolver: resolver::Actor<E, C::PublicKey, D, S>,
     resolver_mailbox: resolver::Mailbox<C::Signature, D>,
 }
 
 impl<
         E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
-        C: Scheme,
+        C: Signer,
         D: Digest,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
@@ -46,10 +46,11 @@ impl<
         cfg.assert();
 
         // Create voter
+        let public_key = cfg.crypto.public_key();
         let (voter, voter_mailbox) = voter::Actor::new(
             context.with_label("voter"),
             voter::Config {
-                crypto: cfg.crypto.clone(),
+                crypto: cfg.crypto,
                 automaton: cfg.automaton,
                 relay: cfg.relay,
                 reporter: cfg.reporter,
@@ -64,7 +65,6 @@ impl<
                 nullify_retry: cfg.nullify_retry,
                 activity_timeout: cfg.activity_timeout,
                 skip_timeout: cfg.skip_timeout,
-                replay_concurrency: cfg.replay_concurrency,
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,
             },
@@ -74,7 +74,7 @@ impl<
         let (resolver, resolver_mailbox) = resolver::Actor::new(
             context.with_label("resolver"),
             resolver::Config {
-                crypto: cfg.crypto,
+                crypto: public_key,
                 supervisor: cfg.supervisor,
                 mailbox_size: cfg.mailbox_size,
                 namespace: cfg.namespace,

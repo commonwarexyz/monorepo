@@ -1,21 +1,19 @@
+#[cfg(not(feature = "iouring-network"))]
+use crate::network::tokio::{Config as TokioNetworkConfig, Network as TokioNetwork};
 #[cfg(feature = "iouring-storage")]
 use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage};
-
-#[cfg(feature = "iouring-network")]
-use crate::network::iouring::Network as IoUringNetwork;
-
-#[cfg(not(feature = "iouring-network"))]
-use crate::network::tokio::Network as TokioNetwork;
-
 #[cfg(not(feature = "iouring-storage"))]
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
-
-use crate::network::metered::Network as MeteredNetwork;
-use crate::network::tokio::Config as TokioNetworkConfig;
-use crate::storage::metered::Storage as MeteredStorage;
-use crate::telemetry::metrics::task::Label;
-use crate::{utils::Signaler, Clock, Error, Handle, Signal, METRICS_PREFIX};
-use crate::{SinkOf, StreamOf};
+#[cfg(feature = "iouring-network")]
+use crate::{
+    iouring,
+    network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork},
+};
+use crate::{
+    network::metered::Network as MeteredNetwork, storage::metered::Storage as MeteredStorage,
+    telemetry::metrics::task::Label, utils::Signaler, Clock, Error, Handle, Signal, SinkOf,
+    StreamOf, METRICS_PREFIX,
+};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
     encoding::text::encode,
@@ -32,6 +30,11 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tokio::runtime::{Builder, Runtime};
+
+#[cfg(feature = "iouring-network")]
+const IOURING_NETWORK_SIZE: u32 = 1024;
+#[cfg(feature = "iouring-network")]
+const IOURING_NETWORK_FORCE_POLL: Option<Duration> = Some(Duration::from_millis(100));
 
 #[derive(Debug)]
 struct Metrics {
@@ -56,6 +59,25 @@ impl Metrics {
             metrics.tasks_running.clone(),
         );
         metrics
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct NetworkConfig {
+    /// If Some, explicitly sets TCP_NODELAY on the socket.
+    /// Otherwise uses system default.
+    tcp_nodelay: Option<bool>,
+
+    /// Read/write timeout for network operations.
+    read_write_timeout: Duration,
+}
+
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self {
+            tcp_nodelay: None,
+            read_write_timeout: Duration::from_secs(60),
+        }
     }
 }
 
@@ -89,7 +111,8 @@ pub struct Config {
     /// Tokio sets the default value to 2MB.
     maximum_buffer_size: usize,
 
-    network_cfg: TokioNetworkConfig,
+    /// Network configuration.
+    network_cfg: NetworkConfig,
 }
 
 impl Config {
@@ -103,7 +126,7 @@ impl Config {
             catch_panics: true,
             storage_directory,
             maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
-            network_cfg: TokioNetworkConfig::default(),
+            network_cfg: NetworkConfig::default(),
         }
     }
 
@@ -124,18 +147,13 @@ impl Config {
         self
     }
     /// See [Config]
-    pub fn with_read_timeout(mut self, d: Duration) -> Self {
-        self.network_cfg = self.network_cfg.with_read_timeout(d);
-        self
-    }
-    /// See [Config]
-    pub fn with_write_timeout(mut self, d: Duration) -> Self {
-        self.network_cfg = self.network_cfg.with_write_timeout(d);
+    pub fn with_read_write_timeout(mut self, d: Duration) -> Self {
+        self.network_cfg.read_write_timeout = d;
         self
     }
     /// See [Config]
     pub fn with_tcp_nodelay(mut self, n: Option<bool>) -> Self {
-        self.network_cfg = self.network_cfg.with_tcp_nodelay(n);
+        self.network_cfg.tcp_nodelay = n;
         self
     }
     /// See [Config]
@@ -163,16 +181,12 @@ impl Config {
         self.catch_panics
     }
     /// See [Config]
-    pub fn read_timeout(&self) -> Duration {
-        self.network_cfg.read_timeout()
-    }
-    /// See [Config]
-    pub fn write_timeout(&self) -> Duration {
-        self.network_cfg.write_timeout()
+    pub fn read_write_timeout(&self) -> Duration {
+        self.network_cfg.read_write_timeout
     }
     /// See [Config]
     pub fn tcp_nodelay(&self) -> Option<bool> {
-        self.network_cfg.tcp_nodelay()
+        self.network_cfg.tcp_nodelay
     }
     /// See [Config]
     pub fn storage_directory(&self) -> &PathBuf {
@@ -242,11 +256,12 @@ impl crate::Runner for Runner {
 
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-storage")] {
+                let iouring_registry = runtime_registry.sub_registry_with_prefix("iouring_storage");
                 let storage = MeteredStorage::new(
                     IoUringStorage::start(IoUringConfig {
                         storage_directory: self.cfg.storage_directory.clone(),
                         ring_config: Default::default(),
-                    }),
+                    }, iouring_registry),
                     runtime_registry,
                 );
             } else {
@@ -262,13 +277,28 @@ impl crate::Runner for Runner {
 
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-network")] {
+                let iouring_registry = runtime_registry.sub_registry_with_prefix("iouring_network");
+                let config = IoUringNetworkConfig {
+                    tcp_nodelay: self.cfg.network_cfg.tcp_nodelay,
+                    iouring_config: iouring::Config {
+                        // TODO (#1045): make `IOURING_NETWORK_SIZE` configurable
+                        size: IOURING_NETWORK_SIZE,
+                        op_timeout: Some(self.cfg.network_cfg.read_write_timeout),
+                        force_poll: IOURING_NETWORK_FORCE_POLL,
+                        shutdown_timeout: Some(self.cfg.network_cfg.read_write_timeout),
+                        ..Default::default()
+                    },
+                };
                 let network = MeteredNetwork::new(
-                    IoUringNetwork::start(crate::iouring::Config::default()).unwrap(),
-                    runtime_registry,
-                );
-            } else {
+                    IoUringNetwork::start(config, iouring_registry).unwrap(),
+                runtime_registry,
+            );
+        } else {
+            let config = TokioNetworkConfig::default().with_read_timeout(self.cfg.network_cfg.read_write_timeout)
+                .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
+                .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay);
                 let network = MeteredNetwork::new(
-                    TokioNetwork::from(self.cfg.network_cfg.clone()),
+                    TokioNetwork::from(config),
                     runtime_registry,
                 );
             }

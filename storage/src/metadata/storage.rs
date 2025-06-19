@@ -8,7 +8,7 @@ use std::{
     collections::BTreeMap,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tracing::{trace, warn};
+use tracing::{debug, trace, warn};
 
 const BLOB_NAMES: [&[u8]; 2] = [b"left", b"right"];
 const SECONDS_IN_NANOSECONDS: u128 = 1_000_000_000;
@@ -20,6 +20,7 @@ pub struct Metadata<E: Clock + Storage + Metrics, K: Array> {
     // Data is stored in a BTreeMap to enable deterministic serialization.
     data: BTreeMap<K, Vec<u8>>,
     cursor: usize,
+    partition: String,
     blobs: [(E::Blob, u64, u128); 2],
 
     syncs: Counter,
@@ -72,6 +73,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
 
             data,
             cursor,
+            partition: cfg.partition,
             blobs: [
                 (left_blob, left_len, left_timestamp),
                 (right_blob, right_len, right_timestamp),
@@ -112,8 +114,9 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
 
         // Extract checksum
         let checksum_index = buf.len() - 4;
-        let stored_checksum = u32::from_be_bytes(buf[checksum_index..].try_into().unwrap());
-        let computed_checksum = crc32fast::hash(&buf[..checksum_index]);
+        let stored_checksum =
+            u32::from_be_bytes(buf.as_ref()[checksum_index..].try_into().unwrap());
+        let computed_checksum = crc32fast::hash(&buf.as_ref()[..checksum_index]);
         if stored_checksum != computed_checksum {
             // Truncate and return none
             warn!(
@@ -128,7 +131,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         }
 
         // Get parent
-        let timestamp = u128::from_be_bytes(buf[..16].try_into().unwrap());
+        let timestamp = u128::from_be_bytes(buf.as_ref()[..16].try_into().unwrap());
 
         // Extract data
         //
@@ -139,18 +142,18 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         while cursor < checksum_index {
             // Read key
             let next_cursor = cursor + K::SIZE;
-            let key = K::read(&mut buf[cursor..next_cursor].as_ref()).unwrap();
+            let key = K::read(&mut buf.as_ref()[cursor..next_cursor].as_ref()).unwrap();
             cursor = next_cursor;
 
             // Read value length
             let next_cursor = cursor + 4;
             let value_len =
-                u32::from_be_bytes(buf[cursor..next_cursor].try_into().unwrap()) as usize;
+                u32::from_be_bytes(buf.as_ref()[cursor..next_cursor].try_into().unwrap()) as usize;
             cursor = next_cursor;
 
             // Read value
             let next_cursor = cursor + value_len;
-            let value = buf[cursor..next_cursor].to_vec();
+            let value = buf.as_ref()[cursor..next_cursor].to_vec();
             cursor = next_cursor;
             data.insert(key, value);
         }
@@ -259,6 +262,18 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         self.sync().await?;
         for (blob, _, _) in self.blobs.into_iter() {
             blob.close().await?;
+        }
+        Ok(())
+    }
+
+    /// Close and remove the underlying blobs.
+    pub async fn destroy(self) -> Result<(), Error<K>> {
+        for (i, (blob, _, _)) in self.blobs.into_iter().enumerate() {
+            blob.close().await?;
+            self.context
+                .remove(&self.partition, Some(BLOB_NAMES[i]))
+                .await?;
+            debug!(blob = i, "destroyed blob");
         }
         Ok(())
     }

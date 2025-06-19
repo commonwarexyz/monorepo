@@ -33,7 +33,7 @@
 //! Because a translated representation of a key is only ever stored in memory, it is possible (and
 //! expected) that two keys will eventually be represented by the same translated key. To handle this
 //! case, `Archive` must check the persisted form of all conflicting keys to ensure data from the
-//! correct key is returned. To support efficient checks, `Archive` (via [Index](crate::index::Index))
+//! correct key is returned. To support efficient checks, `Archive` (via [crate::index::Index])
 //! keeps a linked list of all keys with the same translated prefix:
 //!
 //! ```rust
@@ -129,7 +129,6 @@
 //!         section_mask: 0xffff_ffff_ffff_0000u64,
 //!         pending_writes: 10,
 //!         write_buffer: 1024 * 1024,
-//!         replay_concurrency: 4,
 //!         replay_buffer: 4096,
 //!     };
 //!     let mut archive = Archive::init(context, cfg).await.unwrap();
@@ -143,9 +142,8 @@
 //! ```
 
 mod storage;
-pub use storage::{Archive, Identifier};
-
 pub use crate::index::Translator;
+pub use storage::{Archive, Identifier};
 use thiserror::Error;
 
 /// Errors that can occur when interacting with the archive.
@@ -192,9 +190,6 @@ pub struct Config<T: Translator, C> {
     /// The amount of bytes that can be buffered in a section before being written to disk.
     pub write_buffer: usize,
 
-    /// The number of blobs to replay concurrently on initialization.
-    pub replay_concurrency: usize,
-
     /// The buffer size to use when replaying a blob.
     pub replay_buffer: usize,
 }
@@ -202,10 +197,11 @@ pub struct Config<T: Translator, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::translator::{FourCap, TwoCap};
-    use crate::journal::Error as JournalError;
-    use commonware_codec::varint::UInt;
-    use commonware_codec::{DecodeExt, EncodeSize, Error as CodecError};
+    use crate::{
+        index::translator::{FourCap, TwoCap},
+        journal::Error as JournalError,
+    };
+    use commonware_codec::{varint::UInt, DecodeExt, EncodeSize, Error as CodecError};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
     use commonware_utils::array::FixedBytes;
@@ -215,7 +211,6 @@ mod tests {
     const DEFAULT_SECTION_MASK: u64 = 0xffff_ffff_ffff_0000u64;
     const DEFAULT_PENDING_WRITES: usize = 10;
     const DEFAULT_WRITE_BUFFER: usize = 1024;
-    const DEFAULT_REPLAY_CONCURRENCY: usize = 4;
     const DEFAULT_REPLAY_BUFFER: usize = 4096;
 
     fn test_key(key: &str) -> FixedBytes<64> {
@@ -238,7 +233,6 @@ mod tests {
                 codec_config: (),
                 pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
             };
@@ -338,7 +332,6 @@ mod tests {
                 compression: Some(3),
                 pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
             };
@@ -366,7 +359,6 @@ mod tests {
                 compression: None,
                 pending_writes: 10,
                 write_buffer: 1024,
-                replay_concurrency: 4,
                 replay_buffer: 4096,
                 section_mask: DEFAULT_SECTION_MASK,
             };
@@ -391,7 +383,6 @@ mod tests {
                 compression: None,
                 pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
             };
@@ -423,7 +414,7 @@ mod tests {
             blob.close().await.unwrap();
 
             // Initialize the archive again
-            let result = Archive::<_, _, FixedBytes<64>, i32>::init(
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(
                 context,
                 Config {
                     partition: "test_partition".into(),
@@ -432,16 +423,18 @@ mod tests {
                     compression: None,
                     pending_writes: DEFAULT_PENDING_WRITES,
                     write_buffer: DEFAULT_WRITE_BUFFER,
-                    replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
                     replay_buffer: DEFAULT_REPLAY_BUFFER,
                     section_mask: DEFAULT_SECTION_MASK,
                 },
             )
-            .await;
-            assert!(matches!(
-                result,
-                Err(Error::Journal(JournalError::ChecksumMismatch(_, _)))
-            ));
+            .await.expect("Failed to initialize archive");
+
+            // Check that the archive is empty
+            let retrieved: Option<i32> = archive
+                .get(Identifier::Index(index))
+                .await
+                .expect("Failed to get data");
+            assert!(retrieved.is_none());
         });
     }
 
@@ -458,7 +451,6 @@ mod tests {
                 compression: None,
                 pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
             };
@@ -518,7 +510,6 @@ mod tests {
                 compression: None,
                 pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
             };
@@ -563,7 +554,6 @@ mod tests {
                 compression: None,
                 pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
             };
@@ -627,7 +617,6 @@ mod tests {
                 compression: None,
                 pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
             };
@@ -685,7 +674,6 @@ mod tests {
                 compression: None,
                 pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: 0xffff_ffff_ffff_ffffu64, // no mask
             };
@@ -772,7 +760,6 @@ mod tests {
                 compression: None,
                 pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask,
             };
@@ -831,7 +818,6 @@ mod tests {
                 compression: None,
                 pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask,
             };
@@ -930,7 +916,6 @@ mod tests {
                 compression: None,
                 pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_concurrency: DEFAULT_REPLAY_CONCURRENCY,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
             };

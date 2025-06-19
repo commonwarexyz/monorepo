@@ -1,16 +1,15 @@
 use crate::Broadcaster;
 use commonware_codec::Codec;
-use commonware_cryptography::{Committable, Digest, Digestible};
+use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_p2p::Recipients;
-use commonware_utils::Array;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
 
 /// Message types that can be sent to the `Mailbox`
-pub enum Message<P: Array, Dc: Digest, Dd: Digest, M: Committable<Dc> + Digestible<Dd>> {
-    /// Broadcast a [`Message`](crate::Broadcaster::Message) to the network.
+pub enum Message<P: PublicKey, M: Committable + Digestible> {
+    /// Broadcast a [crate::Broadcaster::Message] to the network.
     ///
     /// The responder will be sent a list of peers that received the message.
     Broadcast {
@@ -26,37 +25,33 @@ pub enum Message<P: Array, Dc: Digest, Dd: Digest, M: Committable<Dc> + Digestib
     /// by dropping the responder.
     Subscribe {
         peer: Option<P>,
-        commitment: Dc,
-        digest: Option<Dd>,
+        commitment: M::Commitment,
+        digest: Option<M::Digest>,
         responder: oneshot::Sender<M>,
     },
 
     /// Get all messages for an commitment.
     Get {
         peer: Option<P>,
-        commitment: Dc,
-        digest: Option<Dd>,
+        commitment: M::Commitment,
+        digest: Option<M::Digest>,
         responder: oneshot::Sender<Vec<M>>,
     },
 }
 
-/// Ingress mailbox for [`Engine`](super::Engine).
+/// Ingress mailbox for [super::Engine].
 #[derive(Clone)]
-pub struct Mailbox<P: Array, Dc: Digest, Dd: Digest, M: Committable<Dc> + Digestible<Dd> + Codec> {
-    sender: mpsc::Sender<Message<P, Dc, Dd, M>>,
+pub struct Mailbox<P: PublicKey, M: Committable + Digestible + Codec> {
+    sender: mpsc::Sender<Message<P, M>>,
 }
 
-impl<P: Array, Dc: Digest, Dd: Digest, M: Committable<Dc> + Digestible<Dd> + Codec>
-    Mailbox<P, Dc, Dd, M>
-{
-    pub(super) fn new(sender: mpsc::Sender<Message<P, Dc, Dd, M>>) -> Self {
+impl<P: PublicKey, M: Committable + Digestible + Codec> Mailbox<P, M> {
+    pub(super) fn new(sender: mpsc::Sender<Message<P, M>>) -> Self {
         Self { sender }
     }
 }
 
-impl<P: Array, Dc: Digest, Dd: Digest, M: Committable<Dc> + Digestible<Dd> + Codec>
-    Mailbox<P, Dc, Dd, M>
-{
+impl<P: PublicKey, M: Committable + Digestible + Codec> Mailbox<P, M> {
     /// Subscribe to a message by peer (optionally), commitment, and digest (optionally).
     ///
     /// The responder will be sent the first message for an commitment when it is available; either
@@ -65,8 +60,8 @@ impl<P: Array, Dc: Digest, Dd: Digest, M: Committable<Dc> + Digestible<Dd> + Cod
     pub async fn subscribe(
         &mut self,
         peer: Option<P>,
-        commitment: Dc,
-        digest: Option<Dd>,
+        commitment: M::Commitment,
+        digest: Option<M::Digest>,
     ) -> oneshot::Receiver<M> {
         let (responder, receiver) = oneshot::channel();
         self.sender
@@ -90,8 +85,8 @@ impl<P: Array, Dc: Digest, Dd: Digest, M: Committable<Dc> + Digestible<Dd> + Cod
     pub async fn subscribe_prepared(
         &mut self,
         peer: Option<P>,
-        commitment: Dc,
-        digest: Option<Dd>,
+        commitment: M::Commitment,
+        digest: Option<M::Digest>,
         responder: oneshot::Sender<M>,
     ) {
         self.sender
@@ -106,7 +101,12 @@ impl<P: Array, Dc: Digest, Dd: Digest, M: Committable<Dc> + Digestible<Dd> + Cod
     }
 
     /// Get all messages for an commitment.
-    pub async fn get(&mut self, peer: Option<P>, commitment: Dc, digest: Option<Dd>) -> Vec<M> {
+    pub async fn get(
+        &mut self,
+        peer: Option<P>,
+        commitment: M::Commitment,
+        digest: Option<M::Digest>,
+    ) -> Vec<M> {
         let (responder, receiver) = oneshot::channel();
         self.sender
             .send(Message::Get {
@@ -121,9 +121,7 @@ impl<P: Array, Dc: Digest, Dd: Digest, M: Committable<Dc> + Digestible<Dd> + Cod
     }
 }
 
-impl<P: Array, Dc: Digest, Dd: Digest, M: Committable<Dc> + Digestible<Dd> + Codec> Broadcaster
-    for Mailbox<P, Dc, Dd, M>
-{
+impl<P: PublicKey, M: Committable + Digestible + Codec> Broadcaster for Mailbox<P, M> {
     type Recipients = Recipients<P>;
     type Message = M;
     type Response = Vec<P>;

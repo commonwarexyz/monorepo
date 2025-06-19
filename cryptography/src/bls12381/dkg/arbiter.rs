@@ -41,7 +41,7 @@ use crate::{
         dkg::{ops, Error},
         primitives::{group::Share, poly, variant::Variant},
     },
-    Array,
+    PublicKey,
 };
 use commonware_utils::{max_faults, quorum};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -60,7 +60,7 @@ pub struct Output<V: Variant> {
 }
 
 /// Gather commitments, acknowledgements, and reveals from all dealers.
-pub struct Arbiter<P: Array, V: Variant> {
+pub struct Arbiter<P: PublicKey, V: Variant> {
     previous: Option<poly::Public<V>>,
     dealer_threshold: u32,
     player_threshold: u32,
@@ -74,7 +74,7 @@ pub struct Arbiter<P: Array, V: Variant> {
     disqualified: HashSet<P>,
 }
 
-impl<P: Array, V: Variant> Arbiter<P, V> {
+impl<P: PublicKey, V: Variant> Arbiter<P, V> {
     /// Create a new arbiter for a DKG/Resharing procedure.
     pub fn new(
         previous: Option<poly::Public<V>>,

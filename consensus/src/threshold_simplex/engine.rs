@@ -6,7 +6,7 @@ use super::{
 use crate::{Automaton, Relay, Reporter, ThresholdSupervisor};
 use commonware_cryptography::{
     bls12381::primitives::{group, variant::Variant},
-    Digest, Scheme,
+    Digest, Signer,
 };
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
@@ -18,7 +18,7 @@ use tracing::debug;
 /// Instance of `threshold-simplex` consensus engine.
 pub struct Engine<
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
-    C: Scheme,
+    C: Signer,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     D: Digest,
@@ -39,16 +39,16 @@ pub struct Engine<
     voter: voter::Actor<E, C, B, V, D, A, R, F, S>,
     voter_mailbox: voter::Mailbox<V, D>,
 
-    batcher: batcher::Actor<E, C, B, V, D, F, S>,
+    batcher: batcher::Actor<E, C::PublicKey, B, V, D, F, S>,
     batcher_mailbox: batcher::Mailbox<C::PublicKey, V, D>,
 
-    resolver: resolver::Actor<E, C, B, V, D, S>,
+    resolver: resolver::Actor<E, C::PublicKey, B, V, D, S>,
     resolver_mailbox: resolver::Mailbox<V, D>,
 }
 
 impl<
         E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
-        C: Scheme,
+        C: Signer,
         B: Blocker<PublicKey = C::PublicKey>,
         V: Variant,
         D: Digest,
@@ -102,7 +102,6 @@ impl<
                 notarization_timeout: cfg.notarization_timeout,
                 nullify_retry: cfg.nullify_retry,
                 activity_timeout: cfg.activity_timeout,
-                replay_concurrency: cfg.replay_concurrency,
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,
             },
@@ -113,7 +112,7 @@ impl<
             context.with_label("resolver"),
             resolver::Config {
                 blocker: cfg.blocker,
-                crypto: cfg.crypto,
+                crypto: cfg.crypto.public_key(),
                 supervisor: cfg.supervisor,
                 mailbox_size: cfg.mailbox_size,
                 namespace: cfg.namespace,

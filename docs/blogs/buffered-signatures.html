@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    <link rel="icon" href="../favicon.ico" type="image/x-icon">
+
+    <title>commonware > Reducing Block Time (and Resource Usage) with Buffered Signatures</title>
+    <meta name="description" content="A few months ago, we launched Alto, a minimal (and wicked fast) blockchain for continuously benchmarking the Commonware Library. Today, I'm thrilled to share that this benchmarking drove a 20% reduction in block time (to ~200ms), a 20% reduction in block finality (to ~300ms), and a 65% reduction in CPU usage.">
+    <meta name="author" content="Patrick O'Grady">
+    <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
+
+    <meta property="og:url" content="https://commonware.xyz/blogs/buffered-signatures.html" />
+    <meta property="og:type" content="article" />
+    <meta property="og:site_name" content="commonware" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/buffering.png" />
+    <meta property="og:title" content="Reducing Block Time (and Resource Usage) with Buffered Signatures" />
+    <meta property="og:description" content="A few months ago, we launched Alto, a minimal (and wicked fast) blockchain for continuously benchmarking the Commonware Library. Today, I'm thrilled to share that this benchmarking drove a 20% reduction in block time (to ~200ms), a 20% reduction in block finality (to ~300ms), and a 65% reduction in CPU usage." />
+    <meta property="article:author" content="https://x.com/_patrickogrady" />
+    <meta property="article:published_time" content="2025-05-28T00:00:00Z" />
+    <meta property="article:modified_time" content="2025-05-28T00:00:00Z" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta property="twitter:domain" content="commonware.xyz" />
+    <meta property="twitter:url" content="https://commonware.xyz/blogs/buffered-signatures.html" />
+    <meta property="twitter:title" content="Reducing Block Time (and Resource Usage) with Buffered Signatures" />
+    <meta property="twitter:description" content="A few months ago, we launched Alto, a minimal (and wicked fast) blockchain for continuously benchmarking the Commonware Library. Today, I'm thrilled to share that this benchmarking drove a 20% reduction in block time (to ~200ms), a 20% reduction in block finality (to ~300ms), and a 65% reduction in CPU usage." />
+    <meta property="twitter:image" content="https://commonware.xyz/imgs/buffering.png" />
+    <meta property="twitter:site" content="@commonwarexyz" />
+    <meta property="twitter:creator" content="@_patrickogrady" />
+
+    <link rel="stylesheet" type="text/css" href="../style.css">
+</head>
+
+<body>
+    <div id="logo-placeholder">
+        <div class="logo-line">
+            <span class="edge-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="edge-logo-symbol">*</span>
+        </div>
+        <div class="logo-line">
+            <span class="vertical-logo-symbol">|</span>
+            <span class="logo-text"> commonware </span>
+            <span class="vertical-logo-symbol"> </span>
+        </div>
+        <div class="logo-line">
+            <span class="edge-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="edge-logo-symbol">+</span>
+        </div>
+    </div>
+    <div class="content">
+        <h1>Reducing Block Time (and Resource Usage) with Buffered Signatures</h1>
+        <div class="meta">
+            <div class="author">By <a href="https://x.com/_patrickogrady">Patrick O'Grady</a></div>
+            <div class="date">May 28, 2025</div>
+        </div>
+        <p>A few months ago, we launched <a href="https://x.com/_patrickogrady/status/1901645720823935341">Alto</a>, a minimal (and wicked fast) blockchain for continuously benchmarking the <a href="https://github.com/commonwarexyz/monorepo">Commonware Library</a>. Today, I'm thrilled <a href="https://alto.commonware.xyz">to share</a> that this benchmarking drove a 20% reduction in block time (to ~200ms), a 20% reduction in block finality (to ~300ms), and a 65% reduction in CPU usage.</p>
+        <p>It turns out procrastinating, even in the world of consensus, can be a great strategy.</p>
+        <h2>Laying the Foundation</h2>
+        <p><a href="https://commonware.xyz/blogs/introducing-commonware.html">Last August</a>, we released the first <a href="https://github.com/commonwarexyz/monorepo">Commonware Library</a> primitive: <a href="https://docs.rs/commonware-p2p/latest/commonware_p2p/authenticated/index.html">p2p::authenticated</a>. Unlike traditional p2p libraries that specialize in gossip-based messaging over a subset of peers (typically identified by randomly generated IDs), <i>p2p::authenticated</i> provides point-to-point messaging between a swarm of fully-connected and authenticated peers (identified by some public key on an externally synchronized list, like a staking registry).</p>
+        <div class="image-container">
+            <img src="../imgs/gossip-models.png" alt="Comparing gossip models">
+            <div class="image-caption">Figure 1: Comparing gossip models</div>
+        </div>
+        <p>The consensus primitives we released in <a href="https://commonware.xyz/blogs/commonware-the-anti-framework.html">December</a> (<a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html">consensus::simplex</a>) and <a href="https://commonware.xyz/blogs/threshold-simplex.html">January</a> (<a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/threshold_simplex/index.html">consensus::threshold-simplex</a>) built on top of <i>p2p::authenticated</i> but didn't do anything particularly clever with it (the point-to-point messaging alone was enough of an improvement to reach the ~250ms block time in the original Alto launch).</p>
+        <p>So, what would something clever look like?</p>
+        <h2>Buffered Signature Verification</h2>
+        <p>Seeking to progress through consensus as fast as possible, most consensus implementations verify signatures as soon as they are available (often in parallel to avoid slowing down the consensus state machine). This eager verification makes intuitive sense—you want to either enter a new view or finalize a block as soon as possible (and verifying a signature is a prerequisite for either).</p>
+        <p>When peers are tasked with forwarding messages in traditional p2p, the recipient of a message can never be sure what they have (and what they have from whom) until verification. A malicious peer could forward a message with a valid signature, tamper with a signature over a message that someone did send (invalid signature), or even fabricate messages to impersonate a different peer (invalid signature).</p>
+        <div class="image-container">
+            <img src="../imgs/invalid-signature-gossip.png" alt="Block peers that send invalid signatures">
+            <div class="image-caption">Figure 2: Block peers that send invalid signatures</div>
+        </div>
+        <p>With <i>p2p::authenticated</i>, we have the necessary functionality to do something novel: dedicated peer slots. Instead of verifying each peer signature individually as it arrives, we now buffer messages in slots dedicated to each authenticated peer. When we collect a quorum (<i>2f+1</i>) of signatures over some message, we perform a single multi-signature verification (with plans to support batch verification if not using BLS12-381 signatures) instead of verifying each signature individually (<a href="https://commonware.xyz/benchmarks.html">dramatically reducing the time spent verifying each signature</a>).</p>
+        <div class="image-container">
+            <img src="../imgs/buffering.png" alt="Buffer signatures until a quorum is reached">
+            <div class="image-caption">Figure 3: Buffer signatures until a quorum is reached</div>
+        </div>
+        <h2>Handling Invalid Signatures</h2>
+        <p>Now that we aren't verifying each message when it arrives over the wire, however, one bad apple can spoil the whole bunch.</p>
+        <p>Fortunately, we have one more capability in <i>p2p::authenticated</i> to make this safe: identity blocking. When verification fails, a binary search is run over all buffered signatures to identify the offender(s). In the worst case (where <i>f</i> signatures are invalid), this can lead to more verifications than the original eager approach in a given view. However, once identified as malicious, that peer is blocked by its staking identity, unable to send more invalid messages to us from any network address until the binary restarts. Without this blocking, it would be trivial for a set of malicious peers to undermine this optimization (and make it worse than the original eager approach on every view). With identity-based blocking, however, bisection will only be triggered on a very small number of views over the course of a typical 7-day epoch (3,000,000 views). Specifically, a validator set of 1000 could at most cause disruption in ~333 views (0.011% of views).</p>
+        <div class="image-container">
+            <img src="../imgs/bisection.png" alt="Search for invalid signatures via repeated bisection">
+            <div class="image-caption">Figure 4: Search for invalid signatures via repeated bisection</div>
+        </div>
+        <h2>Reducing Block Time (and Resource Usage)</h2>
+        <p>By transitioning from individual signature verifications to aggregate signature verification, the performance of <a href="https://alto.commonware.xyz">Alto</a> improved significantly (while using less resources):</p>
+        <ul>
+            <li><b>Block time</b>: 255ms → 200ms (20% reduction)</li>
+            <li><b>Finality</b>: 375ms → 300ms (20% reduction)</li>
+            <li><b>CPU usage</b>: 26% → 9% on a <a href="https://github.com/commonwarexyz/alto/tree/main/chain#create-artifacts-1">c7g.xlarge</a> (65% reduction)</li>
+        </ul>
+        <p>The footprint of <i>p2p::authenticated</i> and <i>consensus::threshold-simplex</i> is now less than half a core, leaving plenty of compute available for your application to do more of whatever it does best. Reproduce our results (and start building your own blockchain) with the free and open-source <a href="https://github.com/commonwarexyz/alto">code</a> today.</p>
+        <p>Consensus is often the main attraction. At Commonware, we've been working hard to ensure it is a sideshow.</p>
+    </div>
+
+    <div id="footer-placeholder"></div>
+    <script src="../shared.js"></script>
+    <script defer src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "07159b86f75b4af18e54dd0cda2fb4a7"}'></script>
+</body>
+
+</html>

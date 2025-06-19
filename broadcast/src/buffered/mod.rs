@@ -2,7 +2,7 @@
 //!
 //! # Overview
 //!
-//! The core of the module is the [`Engine`]. It is responsible for:
+//! The core of the module is the [Engine]. It is responsible for:
 //! - Accepting and caching messages from other participants
 //! - Broadcasting messages to all peers
 //! - Serving cached messages on-demand
@@ -13,8 +13,8 @@
 //! messages per peer. When the cache is full, the oldest message is removed to make room for the
 //! new one.
 //!
-//! The [`Mailbox`] is used to make requests to the [`Engine`]. It implements the
-//! [`Broadcaster`](crate::Broadcaster) trait. This is used to have the engine send a message to all
+//! The [Mailbox] is used to make requests to the [Engine]. It implements the
+//! [crate::Broadcaster] trait. This is used to have the engine send a message to all
 //! other peers in the network in a best-effort manner. It also has a method to request a message by
 //! digest. The engine will return the message immediately if it is in the cache, or wait for it to
 //! be received over the network if it is not.
@@ -37,8 +37,8 @@ mod tests {
     use crate::Broadcaster;
     use commonware_codec::RangeCfg;
     use commonware_cryptography::{
-        ed25519::PublicKey, sha256::Digest as Sha256Digest, Committable, Digestible, Ed25519,
-        Signer,
+        ed25519::{PrivateKey, PublicKey},
+        Committable, Digestible, PrivateKeyExt as _, Signer as _,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
@@ -77,7 +77,7 @@ mod tests {
         network.start();
 
         let mut schemes = (0..num_peers)
-            .map(|i| Ed25519::from_seed(i as u64))
+            .map(|i| PrivateKey::from_seed(i as u64))
             .collect::<Vec<_>>();
         schemes.sort_by_key(|s| s.public_key());
         let peers: Vec<PublicKey> = schemes.iter().map(|c| (c.public_key())).collect();
@@ -112,7 +112,7 @@ mod tests {
     fn spawn_peer_engines(
         context: deterministic::Context,
         registrations: &mut Registrations,
-    ) -> BTreeMap<PublicKey, Mailbox<PublicKey, Sha256Digest, Sha256Digest, TestMessage>> {
+    ) -> BTreeMap<PublicKey, Mailbox<PublicKey, TestMessage>> {
         let mut mailboxes = BTreeMap::new();
         while let Some((peer, network)) = registrations.pop_first() {
             let context = context.with_label(&peer.to_string());
@@ -124,10 +124,7 @@ mod tests {
                 codec_config: RangeCfg::from(..),
             };
             let (engine, engine_mailbox) =
-                Engine::<_, PublicKey, Sha256Digest, Sha256Digest, TestMessage>::new(
-                    context.clone(),
-                    config,
-                );
+                Engine::<_, PublicKey, TestMessage>::new(context.clone(), config);
             mailboxes.insert(peer.clone(), engine_mailbox);
             engine.start(network);
         }

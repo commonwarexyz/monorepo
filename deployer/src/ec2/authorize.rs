@@ -1,15 +1,12 @@
 //! `authorize` subcommand for `ec2`
 
-use crate::ec2::utils::{
-    exact_cidr, get_public_ip, DEPLOYER_MAX_PORT, DEPLOYER_MIN_PORT, DEPLOYER_PROTOCOL,
-};
 use crate::ec2::{
-    aws::*, deployer_directory, Config, Error, CREATED_FILE_NAME, DESTROYED_FILE_NAME,
-    MONITORING_REGION,
+    aws::*,
+    deployer_directory,
+    utils::{exact_cidr, get_public_ip, DEPLOYER_MAX_PORT, DEPLOYER_MIN_PORT, DEPLOYER_PROTOCOL},
+    Config, Error, CREATED_FILE_NAME, DESTROYED_FILE_NAME, MONITORING_REGION,
 };
-use std::collections::HashSet;
-use std::fs::File;
-use std::path::PathBuf;
+use std::{collections::HashSet, fs::File, path::PathBuf};
 use tracing::info;
 
 /// Adds the deployer's IP (or the one provided) to all security groups.

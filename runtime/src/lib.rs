@@ -17,11 +17,11 @@
 //! `commonware-runtime` is **ALPHA** software and is not yet recommended for production use. Developers should
 //! expect breaking changes and occasional instability.
 
-use commonware_utils::{StableBuf, StableBufMut};
+use commonware_utils::StableBuf;
 use prometheus_client::registry::Metric;
-use std::io::Error as IoError;
 use std::{
     future::Future,
+    io::Error as IoError,
     net::SocketAddr,
     time::{Duration, SystemTime},
 };
@@ -299,7 +299,10 @@ pub trait Listener: Sync + Send + 'static {
 /// messages over a network connection.
 pub trait Sink: Sync + Send + 'static {
     /// Send a message to the sink.
-    fn send<B: StableBuf>(&mut self, msg: B) -> impl Future<Output = Result<(), Error>> + Send;
+    fn send(
+        &mut self,
+        msg: impl Into<StableBuf> + Send,
+    ) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 /// Interface that any runtime must implement to receive
@@ -307,7 +310,10 @@ pub trait Sink: Sync + Send + 'static {
 pub trait Stream: Sync + Send + 'static {
     /// Receive a message from the stream, storing it in the given buffer.
     /// Reads exactly the number of bytes that fit in the buffer.
-    fn recv<B: StableBufMut>(&mut self, buf: B) -> impl Future<Output = Result<B, Error>> + Send;
+    fn recv(
+        &mut self,
+        buf: impl Into<StableBuf> + Send,
+    ) -> impl Future<Output = Result<StableBuf, Error>> + Send;
 }
 
 /// Interface to interact with storage.
@@ -361,16 +367,16 @@ pub trait Blob: Clone + Send + Sync + 'static {
     ///
     /// `read_at` does not return the number of bytes read because it
     /// only returns once the entire buffer has been filled.
-    fn read_at<B: StableBufMut>(
+    fn read_at(
         &self,
-        buf: B,
+        buf: impl Into<StableBuf> + Send,
         offset: u64,
-    ) -> impl Future<Output = Result<B, Error>> + Send;
+    ) -> impl Future<Output = Result<StableBuf, Error>> + Send;
 
     /// Write `buf` to the blob at the given offset.
-    fn write_at<B: StableBuf>(
+    fn write_at(
         &self,
-        buf: B,
+        buf: impl Into<StableBuf> + Send,
         offset: u64,
     ) -> impl Future<Output = Result<(), Error>> + Send;
 
@@ -389,13 +395,18 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use commonware_macros::select;
-    use futures::channel::oneshot;
-    use futures::{channel::mpsc, future::ready, join, SinkExt, StreamExt};
+    use futures::{
+        channel::{mpsc, oneshot},
+        future::ready,
+        join, SinkExt, StreamExt,
+    };
     use prometheus_client::metrics::counter::Counter;
-    use std::collections::HashMap;
-    use std::panic::{catch_unwind, AssertUnwindSafe};
-    use std::str::FromStr;
-    use std::sync::Mutex;
+    use std::{
+        collections::HashMap,
+        panic::{catch_unwind, AssertUnwindSafe},
+        str::FromStr,
+        sync::Mutex,
+    };
     use tracing::{error, Level};
     use utils::reschedule;
 
@@ -593,7 +604,7 @@ mod tests {
                 .read_at(vec![0; data.len()], 0)
                 .await
                 .expect("Failed to read from blob");
-            assert_eq!(read, data);
+            assert_eq!(read.as_ref(), data);
 
             // Close the blob
             blob.close().await.expect("Failed to close blob");
@@ -617,7 +628,7 @@ mod tests {
                 .read_at(vec![0u8; 7], 7)
                 .await
                 .expect("Failed to read data");
-            assert_eq!(read, b"Storage");
+            assert_eq!(read.as_ref(), b"Storage");
 
             // Close the blob
             blob.close().await.expect("Failed to close blob");
@@ -676,8 +687,8 @@ mod tests {
                 .read_at(vec![0u8; 10], 0)
                 .await
                 .expect("Failed to read data");
-            assert_eq!(&read[..5], data1);
-            assert_eq!(&read[5..], data2);
+            assert_eq!(&read.as_ref()[..5], data1);
+            assert_eq!(&read.as_ref()[5..], data2);
 
             // Rewrite data without affecting length
             let data3 = b"Store";
@@ -691,7 +702,7 @@ mod tests {
                 .read_at(vec![0; 5], 0)
                 .await
                 .expect("Failed to read data");
-            assert_eq!(&read[..5], data1);
+            assert_eq!(&read.as_ref()[..5], data1);
 
             // Full read after truncation
             let result = blob.read_at(vec![0u8; 10], 0).await;
@@ -744,8 +755,8 @@ mod tests {
                     .read_at(vec![0u8; 10 + additional], 0)
                     .await
                     .expect("Failed to read data");
-                assert_eq!(&read[..5], b"Hello");
-                assert_eq!(&read[5 + additional..], b"World");
+                assert_eq!(&read.as_ref()[..5], b"Hello");
+                assert_eq!(&read.as_ref()[5 + additional..], b"World");
 
                 // Close the blob
                 blob.close().await.expect("Failed to close blob");
@@ -814,7 +825,7 @@ mod tests {
                         .read_at(vec![0u8; data.len()], 0)
                         .await
                         .expect("Failed to read from blob");
-                    assert_eq!(read, data);
+                    assert_eq!(read.as_ref(), data);
                 }
             });
             let check2 = context.with_label("check2").spawn({
@@ -824,7 +835,7 @@ mod tests {
                         .read_at(vec![0; data.len()], 0)
                         .await
                         .expect("Failed to read from blob");
-                    assert_eq!(read, data);
+                    assert_eq!(read.as_ref(), data);
                 }
             });
 
@@ -838,7 +849,7 @@ mod tests {
                 .read_at(vec![0; data.len()], 0)
                 .await
                 .expect("Failed to read from blob");
-            assert_eq!(read, data);
+            assert_eq!(read.as_ref(), data);
 
             // Close the blob
             blob.close().await.expect("Failed to close blob");
@@ -1460,7 +1471,7 @@ mod tests {
                 content_length: usize,
             ) -> Result<String, Error> {
                 let read = stream.recv(vec![0; content_length]).await?;
-                String::from_utf8(read).map_err(|_| Error::ReadFailed)
+                String::from_utf8(read.as_ref().to_vec()).map_err(|_| Error::ReadFailed)
             }
 
             // Simulate a client connecting to the server
@@ -1483,7 +1494,7 @@ mod tests {
                         "GET /metrics HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
                         address
                     );
-                    sink.send(Bytes::from(request)).await.unwrap();
+                    sink.send(Bytes::from(request).to_vec()).await.unwrap();
 
                     // Read and verify the HTTP status line
                     let status_line = read_line(&mut stream).await.unwrap();

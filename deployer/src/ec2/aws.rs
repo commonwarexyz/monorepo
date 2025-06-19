@@ -7,22 +7,31 @@ use crate::ec2::{
 };
 use aws_config::BehaviorVersion;
 pub use aws_config::Region;
-use aws_sdk_ec2::error::BuildError;
-use aws_sdk_ec2::primitives::Blob;
-use aws_sdk_ec2::types::{
-    BlockDeviceMapping, EbsBlockDevice, Filter, InstanceStateName, ResourceType, SecurityGroup,
-    SummaryStatus, Tag, TagSpecification, VpcPeeringConnectionStateReasonCode,
-};
 pub use aws_sdk_ec2::types::{InstanceType, IpPermission, IpRange, UserIdGroupPair, VolumeType};
-use aws_sdk_ec2::{Client as Ec2Client, Error as Ec2Error};
-use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use aws_sdk_ec2::{
+    error::BuildError,
+    primitives::Blob,
+    types::{
+        BlockDeviceMapping, EbsBlockDevice, Filter, InstanceStateName, ResourceType, SecurityGroup,
+        SummaryStatus, Tag, TagSpecification, VpcPeeringConnectionStateReasonCode,
+    },
+    Client as Ec2Client, Error as Ec2Error,
+};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 use tokio::time::sleep;
 
 /// Creates an EC2 client for the specified AWS region
 pub async fn create_ec2_client(region: Region) -> Ec2Client {
+    let retry = aws_config::retry::RetryConfig::adaptive()
+        .with_max_attempts(10)
+        .with_initial_backoff(Duration::from_millis(500))
+        .with_max_backoff(Duration::from_secs(30));
     let config = aws_config::defaults(BehaviorVersion::v2025_01_17())
         .region(region)
+        .retry_config(retry)
         .load()
         .await;
     Ec2Client::new(&config)
@@ -842,7 +851,7 @@ pub async fn assert_arm64_support(
             }
         }
 
-        // Check if there’s another page
+        // Check if there's another page
         next_token = response.next_token;
         if next_token.is_none() {
             break;

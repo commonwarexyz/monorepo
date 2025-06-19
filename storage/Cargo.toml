@@ -2,7 +2,7 @@
 name = "commonware-storage"
 edition = "2021"
 publish = true
-version = "0.0.52"
+version = "0.0.54"
 license = "MIT OR Apache-2.0"
 description = "Persist and retrieve data from an abstract store."
 readme = "README.md"
@@ -24,6 +24,7 @@ prometheus-client = { workspace = true }
 futures-util = { workspace = true }
 tracing = { workspace = true }
 zstd = { workspace = true }
+rayon = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
@@ -33,6 +34,11 @@ criterion = { workspace = true }
 [lib]
 bench = false
 crate-type = ["rlib", "cdylib"]
+
+[[bench]]
+name = "adb"
+harness = false
+path = "src/adb/benches/bench.rs"
 
 [[bench]]
 name="archive"

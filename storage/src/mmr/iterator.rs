@@ -201,6 +201,23 @@ pub(crate) const fn leaf_num_to_pos(leaf_num: u64) -> u64 {
     pos
 }
 
+/// Returns the height of the node at position `pos` in an MMR.
+pub(crate) const fn pos_to_height(mut pos: u64) -> u32 {
+    if pos == 0 {
+        return 0;
+    }
+
+    let mut size = u64::MAX >> pos.leading_zeros();
+    while size != 0 {
+        if pos >= size {
+            pos -= size;
+        }
+        size >>= 1;
+    }
+
+    pos as u32
+}
+
 /// A PathIterator returns a (parent_pos, sibling_pos) tuple for the sibling of each node along the
 /// path from a given perfect binary tree peak to a designated leaf, not including the peak itself.
 ///
@@ -247,7 +264,7 @@ impl Iterator for PathIterator {
         }
 
         let left_pos = self.node_pos - self.two_h;
-        let right_pos = left_pos + self.two_h - 1;
+        let right_pos = self.node_pos - 1;
         self.two_h >>= 1;
 
         if left_pos < self.leaf_pos {
@@ -276,12 +293,11 @@ mod tests {
         executor.start(|_| async move {
             // Build MMR with 1000 leaves and make sure we can correctly convert each leaf position to
             // its number and back again.
-            let mut mmr = Mmr::new();
-            let mut hasher = Sha256::default();
-            let mut hasher = Standard::new(&mut hasher);
+            let mut mmr: Mmr<Sha256> = Mmr::new();
+            let mut hasher = Standard::new();
             let mut num_to_pos = Vec::new();
             for _ in 0u64..1000 {
-                num_to_pos.push(mmr.add(&mut hasher, &digest).await.unwrap());
+                num_to_pos.push(mmr.add(&mut hasher, &digest));
             }
 
             let mut last_leaf_pos = 0;

@@ -11,7 +11,7 @@ use crate::{
     },
     Automaton, Relay, Reporter, Supervisor, LATENCY,
 };
-use commonware_cryptography::{Digest, Scheme};
+use commonware_cryptography::{Digest, PublicKey, Signer};
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
@@ -31,10 +31,10 @@ use prometheus_client::metrics::{
 use rand::Rng;
 use std::{
     cmp::max,
-    collections::{btree_map::Entry, BTreeMap, HashMap},
-    time::{Duration, Instant, SystemTime},
+    collections::{btree_map::Entry, BTreeMap, BTreeSet, HashMap},
+    sync::atomic::AtomicI64,
+    time::{Duration, SystemTime},
 };
-use std::{collections::BTreeSet, sync::atomic::AtomicI64};
 use tracing::{debug, trace, warn};
 
 type Notarizable<'a, V, D> = Option<(
@@ -52,17 +52,17 @@ type Finalizable<'a, V, D> = Option<(
 const GENESIS_VIEW: View = 0;
 
 struct Round<
-    C: Scheme,
+    C: PublicKey,
     D: Digest,
     R: Reporter<Activity = Activity<C::Signature, D>>,
-    S: Supervisor<Index = View, PublicKey = C::PublicKey>,
+    S: Supervisor<Index = View, PublicKey = C>,
 > {
     start: SystemTime,
     supervisor: S,
     reporter: R,
 
     view: View,
-    leader: C::PublicKey,
+    leader: C,
     leader_deadline: Option<SystemTime>,
     advance_deadline: Option<SystemTime>,
     nullify_retry: Option<SystemTime>,
@@ -91,10 +91,10 @@ struct Round<
 }
 
 impl<
-        C: Scheme,
+        C: PublicKey,
         D: Digest,
         R: Reporter<Activity = Activity<C::Signature, D>>,
-        S: Supervisor<Index = View, PublicKey = C::PublicKey>,
+        S: Supervisor<Index = View, PublicKey = C>,
     > Round<C, D, R, S>
 {
     pub fn new(current: SystemTime, reporter: R, supervisor: S, view: View) -> Self {
@@ -310,7 +310,7 @@ impl<
 
 pub struct Actor<
     E: Clock + Rng + Spawner + Storage + Metrics,
-    C: Scheme,
+    C: Signer,
     D: Digest,
     A: Automaton<Context = Context<D>, Digest = D>,
     R: Relay<Digest = D>,
@@ -326,7 +326,6 @@ pub struct Actor<
 
     partition: String,
     compression: Option<u8>,
-    replay_concurrency: usize,
     replay_buffer: usize,
     write_buffer: usize,
     journal: Option<Journal<E, Voter<C::Signature, D>>>,
@@ -346,7 +345,7 @@ pub struct Actor<
 
     last_finalized: View,
     view: View,
-    views: BTreeMap<View, Round<C, D, F, S>>,
+    views: BTreeMap<View, Round<C::PublicKey, D, F, S>>,
 
     current_view: Gauge,
     tracked_views: Gauge,
@@ -359,7 +358,7 @@ pub struct Actor<
 
 impl<
         E: Clock + Rng + Spawner + Storage + Metrics,
-        C: Scheme,
+        C: Signer,
         D: Digest,
         A: Automaton<Context = Context<D>, Digest = D>,
         R: Relay<Digest = D>,
@@ -419,7 +418,6 @@ impl<
 
                 partition: cfg.partition,
                 compression: cfg.compression,
-                replay_concurrency: cfg.replay_concurrency,
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,
                 journal: None,
@@ -624,7 +622,14 @@ impl<
         // If retry, broadcast notarization that led us to enter this view
         let past_view = self.view - 1;
         if retry && past_view > 0 {
-            if let Some(notarization) = self.construct_notarization(past_view, true) {
+            if let Some(finalization) = self.construct_finalization(past_view, true) {
+                let msg = Voter::Finalization(finalization);
+                sender.send(Recipients::All, msg, true).await.unwrap();
+                self.broadcast_messages
+                    .get_or_create(&metrics::FINALIZATION)
+                    .inc();
+                debug!(view = past_view, "rebroadcast entry finalization");
+            } else if let Some(notarization) = self.construct_notarization(past_view, true) {
                 let msg = Voter::Notarization(notarization);
                 sender.send(Recipients::All, msg, true).await.unwrap();
                 self.broadcast_messages
@@ -640,8 +645,8 @@ impl<
                 debug!(view = past_view, "rebroadcast entry nullification");
             } else {
                 warn!(
-                    view = past_view,
-                    "unable to rebroadcast entry notarization/nullification"
+                    current = self.view,
+                    "unable to rebroadcast entry notarization/nullification/finalization"
                 );
             }
         }
@@ -693,7 +698,7 @@ impl<
         };
 
         // Verify the signature
-        if !nullify.verify::<C>(&self.namespace, public_key) {
+        if !nullify.verify(&self.namespace, public_key) {
             return false;
         }
 
@@ -1012,7 +1017,7 @@ impl<
         };
 
         // Verify the signature
-        if !notarize.verify::<C>(&self.namespace, public_key) {
+        if !notarize.verify(&self.namespace, public_key) {
             return false;
         }
 
@@ -1064,7 +1069,7 @@ impl<
         let Some(participants) = self.supervisor.participants(view) else {
             return false;
         };
-        if !notarization.verify::<C>(&self.namespace, participants) {
+        if !notarization.verify(&self.namespace, participants) {
             return false;
         }
 
@@ -1133,7 +1138,7 @@ impl<
         let Some(participants) = self.supervisor.participants(nullification.view) else {
             return false;
         };
-        if !nullification.verify::<C>(&self.namespace, participants) {
+        if !nullification.verify(&self.namespace, participants) {
             return false;
         }
 
@@ -1190,7 +1195,7 @@ impl<
         };
 
         // Verify the signature
-        if !finalize.verify::<C>(&self.namespace, public_key) {
+        if !finalize.verify(&self.namespace, public_key) {
             return false;
         }
 
@@ -1242,7 +1247,7 @@ impl<
         let Some(participants) = self.supervisor.participants(view) else {
             return false;
         };
-        if !finalization.verify::<C>(&self.namespace, participants) {
+        if !finalization.verify(&self.namespace, participants) {
             return false;
         }
 
@@ -1704,10 +1709,10 @@ impl<
 
         // Rebuild from journal
         let mut observed_view = 1;
-        let start = Instant::now();
+        let start = self.context.current();
         {
             let stream = journal
-                .replay(self.replay_concurrency, self.replay_buffer)
+                .replay(self.replay_buffer)
                 .await
                 .expect("unable to replay journal");
             pin_mut!(stream);
@@ -1772,7 +1777,13 @@ impl<
         self.journal = Some(journal);
 
         // Update current view and immediately move to timeout (very unlikely we restarted and still within timeout)
-        debug!(current_view = observed_view, elapsed = ?start.elapsed(), "consensus initialized");
+        let end = self.context.current();
+        let elapsed = end.duration_since(start).unwrap_or_default();
+        debug!(
+            current_view = observed_view,
+            ?elapsed,
+            "consensus initialized"
+        );
         self.enter_view(observed_view);
         {
             let round = self.views.get_mut(&observed_view).expect("missing round");

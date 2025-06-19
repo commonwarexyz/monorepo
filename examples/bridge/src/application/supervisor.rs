@@ -2,20 +2,23 @@ use commonware_codec::Encode;
 use commonware_consensus::{
     threshold_simplex::types::View, Supervisor as Su, ThresholdSupervisor as TSu,
 };
-use commonware_cryptography::bls12381::{
-    dkg::ops::evaluate_all,
-    primitives::{
-        group,
-        poly::{self, Public},
-        variant::{MinSig, Variant},
+use commonware_cryptography::{
+    bls12381::{
+        dkg::ops::evaluate_all,
+        primitives::{
+            group,
+            poly::{self, Public},
+            variant::{MinSig, Variant},
+        },
     },
+    PublicKey,
 };
-use commonware_utils::{modulo, Array};
+use commonware_utils::modulo;
 use std::collections::HashMap;
 
 /// Implementation of `commonware-consensus::Supervisor`.
 #[derive(Clone)]
-pub struct Supervisor<P: Array> {
+pub struct Supervisor<P: PublicKey> {
     identity: <MinSig as Variant>::Public,
     polynomial: Vec<<MinSig as Variant>::Public>,
     participants: Vec<P>,
@@ -24,7 +27,7 @@ pub struct Supervisor<P: Array> {
     share: group::Share,
 }
 
-impl<P: Array> Supervisor<P> {
+impl<P: PublicKey> Supervisor<P> {
     pub fn new(polynomial: Public<MinSig>, mut participants: Vec<P>, share: group::Share) -> Self {
         // Setup participants
         participants.sort();
@@ -46,7 +49,7 @@ impl<P: Array> Supervisor<P> {
     }
 }
 
-impl<P: Array> Su for Supervisor<P> {
+impl<P: PublicKey> Su for Supervisor<P> {
     type Index = View;
     type PublicKey = P;
 
@@ -63,7 +66,7 @@ impl<P: Array> Su for Supervisor<P> {
     }
 }
 
-impl<P: Array> TSu for Supervisor<P> {
+impl<P: PublicKey> TSu for Supervisor<P> {
     type Seed = <MinSig as Variant>::Signature;
     type Polynomial = Vec<<MinSig as Variant>::Public>;
     type Share = group::Share;

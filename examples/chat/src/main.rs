@@ -56,16 +56,16 @@ mod handler;
 mod logger;
 
 use clap::{value_parser, Arg, Command};
-use commonware_cryptography::{Ed25519, Signer};
-use commonware_p2p::authenticated::{self, Network};
-use commonware_runtime::tokio;
-use commonware_runtime::Metrics;
-use commonware_runtime::Runner as _;
+use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
+use commonware_p2p::authenticated::discovery;
+use commonware_runtime::{tokio, Metrics, Runner as _};
 use commonware_utils::NZU32;
 use governor::Quota;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    str::FromStr,
+    sync::{Arc, Mutex},
+};
 use tracing::info;
 
 /// Unique namespace to avoid message replay attacks.
@@ -111,7 +111,7 @@ fn main() {
         .expect("Please provide identity");
     let parts = me.split('@').collect::<Vec<&str>>();
     let key = parts[0].parse::<u64>().expect("Key not well-formed");
-    let signer = Ed25519::from_seed(key);
+    let signer = ed25519::PrivateKey::from_seed(key);
     info!(key = ?signer.public_key(), "loaded signer");
 
     // Configure my port
@@ -128,7 +128,7 @@ fn main() {
         panic!("Please provide at least one friend");
     }
     for peer in allowed_keys {
-        let verifier = Ed25519::from_seed(peer).public_key();
+        let verifier = ed25519::PrivateKey::from_seed(peer).public_key();
         info!(key = ?verifier, "registered authorized key");
         recipients.push(verifier);
     }
@@ -142,7 +142,7 @@ fn main() {
             let bootstrapper_key = parts[0]
                 .parse::<u64>()
                 .expect("Bootstrapper key not well-formed");
-            let verifier = Ed25519::from_seed(bootstrapper_key).public_key();
+            let verifier = ed25519::PrivateKey::from_seed(bootstrapper_key).public_key();
             let bootstrapper_address =
                 SocketAddr::from_str(parts[1]).expect("Bootstrapper address not well-formed");
             bootstrapper_identities.push((verifier, bootstrapper_address));
@@ -151,7 +151,7 @@ fn main() {
 
     // Configure network
     const MAX_MESSAGE_SIZE: usize = 1024; // 1 KB
-    let p2p_cfg = authenticated::Config::aggressive(
+    let p2p_cfg = discovery::Config::aggressive(
         signer.clone(),
         APPLICATION_NAMESPACE,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
@@ -163,7 +163,8 @@ fn main() {
     // Start context
     executor.start(|context| async move {
         // Initialize network
-        let (mut network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
+        let (mut network, mut oracle) =
+            discovery::Network::new(context.with_label("network"), p2p_cfg);
 
         // Provide authorized peers
         //
@@ -173,12 +174,10 @@ fn main() {
 
         // Initialize chat
         const MAX_MESSAGE_BACKLOG: usize = 128;
-        const COMPRESSION_LEVEL: Option<i32> = Some(3);
         let (chat_sender, chat_receiver) = network.register(
             handler::CHANNEL,
             Quota::per_second(NZU32!(128)),
             MAX_MESSAGE_BACKLOG,
-            COMPRESSION_LEVEL,
         );
 
         // Start network

@@ -1,5 +1,5 @@
 use clap::{value_parser, Arg, Command};
-use commonware_cryptography::{Ed25519, Signer};
+use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
 use commonware_deployer::ec2;
 use commonware_flood::Config;
 use rand::{rngs::OsRng, seq::IteratorRandom};
@@ -109,7 +109,7 @@ fn main() {
         "bootstrappers must be less than peers"
     );
     let peer_schemes = (0..peers)
-        .map(|_| Ed25519::new(&mut OsRng))
+        .map(|_| ed25519::PrivateKey::from_rng(&mut OsRng))
         .collect::<Vec<_>>();
     let allowed_peers: Vec<String> = peer_schemes
         .iter()
@@ -147,7 +147,7 @@ fn main() {
         let name = scheme.public_key().to_string();
         let peer_config_file = format!("{}.yaml", name);
         let peer_config = Config {
-            private_key: scheme.private_key().to_string(),
+            private_key: scheme.to_string(),
             port: PORT,
             allowed_peers: allowed_peers.clone(),
             bootstrappers: bootstrappers.clone(),

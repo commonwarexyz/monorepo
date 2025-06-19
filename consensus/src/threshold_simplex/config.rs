@@ -2,7 +2,7 @@ use super::types::{Activity, Context, View};
 use crate::{Automaton, Relay, Reporter, ThresholdSupervisor};
 use commonware_cryptography::{
     bls12381::primitives::{group, variant::Variant},
-    Digest, Scheme,
+    Digest, Signer,
 };
 use commonware_p2p::Blocker;
 use governor::Quota;
@@ -10,7 +10,7 @@ use std::time::Duration;
 
 /// Configuration for the consensus engine.
 pub struct Config<
-    C: Scheme,
+    C: Signer,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     D: Digest,
@@ -58,9 +58,6 @@ pub struct Config<
     /// Prefix for all signed messages to prevent replay attacks.
     pub namespace: Vec<u8>,
 
-    /// Number of views to replay concurrently during startup.
-    pub replay_concurrency: usize,
-
     /// Number of bytes to buffer when replaying during startup.
     pub replay_buffer: usize,
 
@@ -106,7 +103,7 @@ pub struct Config<
 }
 
 impl<
-        C: Scheme,
+        C: Signer,
         B: Blocker<PublicKey = C::PublicKey>,
         V: Variant,
         D: Digest,
@@ -163,10 +160,6 @@ impl<
         assert!(
             self.fetch_concurrent > 0,
             "it must be possible to fetch from at least one peer at a time"
-        );
-        assert!(
-            self.replay_concurrency > 0,
-            "it must be possible to replay at least one view at a time"
         );
     }
 }

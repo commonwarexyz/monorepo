@@ -30,6 +30,10 @@ use std::{
     fmt::{Debug, Display},
     ops::Deref,
 };
+use zeroize::Zeroize;
+
+/// Re-export `sha2::Sha256` as `CoreSha256` for external use if needed.
+pub type CoreSha256 = ISha256;
 
 const DIGEST_LENGTH: usize = 32;
 
@@ -152,6 +156,12 @@ impl crate::Digest for Digest {
         let mut array = [0u8; DIGEST_LENGTH];
         rng.fill_bytes(&mut array);
         Self(array)
+    }
+}
+
+impl Zeroize for Digest {
+    fn zeroize(&mut self) {
+        self.0.zeroize();
     }
 }
 

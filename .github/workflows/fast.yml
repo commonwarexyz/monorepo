@@ -1,0 +1,142 @@
+name: Fast
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  UDEPS_VERSION: 0.1.50
+  FUZZ_VERSION: 0.12.0
+
+jobs:
+  Lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        flags:
+          - "--features commonware-runtime/iouring-storage"
+          - "--features commonware-runtime/iouring-network"
+          - ""
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Install nightly Rust toolchain
+      run: rustup toolchain install nightly && rustup component add --toolchain nightly rustfmt
+    - name: Run setup
+      uses: ./.github/actions/setup
+    - name: Lint
+      run: cargo clippy --all-targets ${{ matrix.flags }} -- -D warnings
+    - name: Fmt
+      run: cargo +nightly fmt --all -- --check
+    - name: Check docs
+      run: cargo doc ${{ matrix.flags }} --no-deps --document-private-items
+      env:
+        RUSTDOCFLAGS: "-D warnings"
+
+  Tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        flags:
+          - "--features commonware-runtime/iouring-storage"
+          - "--features commonware-runtime/iouring-network"
+          - ""
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Run setup
+      uses: ./.github/actions/setup
+    - name: Run tests
+      run: cargo test ${{ matrix.flags }} --verbose
+
+  Dependencies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Install nightly Rust toolchain
+      run: rustup toolchain install nightly
+    - name: Get Rust version
+      id: rust-version
+      run: echo "rust_version=$(rustc +nightly --version)" >> "$GITHUB_OUTPUT"
+    - name: Run setup
+      uses: ./.github/actions/setup
+    - name: Cache cargo-udeps
+      id: cargo-udeps-cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/bin/cargo-udeps
+        key: ${{ runner.os }}-${{ env.UDEPS_VERSION }}-cargo-udeps-${{ steps.rust-version.outputs.rust_version }}
+    - name: Install cargo-udeps
+      if: steps.cargo-udeps-cache.outputs.cache-hit != 'true'
+      run: cargo +nightly install cargo-udeps --version ${{ env.UDEPS_VERSION }}
+    - name: Check for unused dependencies
+      run: cargo +nightly udeps --all-targets
+
+  Fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Install nightly Rust toolchain
+      run: rustup toolchain install nightly
+    - name: Get Rust version
+      id: rust-version
+      run: echo "rust_version=$(rustc +nightly --version)" >> "$GITHUB_OUTPUT"
+    - name: Run setup
+      uses: ./.github/actions/setup
+    - name: Cache cargo-fuzz
+      id: cargo-fuzz-cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/bin/cargo-fuzz
+        key: ${{ runner.os }}-${{ env.FUZZ_VERSION }}-cargo-fuzz-${{ steps.rust-version.outputs.rust_version }}
+    - name: Install cargo-fuzz
+      if: steps.cargo-fuzz-cache.outputs.cache-hit != 'true'
+      run: cargo +nightly install cargo-fuzz --version ${{ env.FUZZ_VERSION }}
+    - name: Build codec
+      run: cargo +nightly fuzz build --fuzz-dir codec/fuzz
+    - name: Build cryptography
+      run: cargo +nightly fuzz build --fuzz-dir cryptography/fuzz
+    - name: Build stream
+      run: cargo +nightly fuzz build --fuzz-dir stream/fuzz
+
+  WASM:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Run setup
+      uses: ./.github/actions/setup
+    - name: Add WASM target
+      run: rustup target add wasm32-unknown-unknown
+    - name: Build cryptography
+      run: cargo build --target wasm32-unknown-unknown --release --manifest-path cryptography/Cargo.toml && du -h target/wasm32-unknown-unknown/release/commonware_cryptography.wasm
+    - name: Build macros
+      run: cargo build --target wasm32-unknown-unknown --release --manifest-path macros/Cargo.toml # can't check size because it is a proc-macro
+    - name: Build utils
+      run: cargo build --target wasm32-unknown-unknown --release --manifest-path utils/Cargo.toml && du -h target/wasm32-unknown-unknown/release/commonware_utils.wasm
+    - name: Build runtime
+      run: cargo build --target wasm32-unknown-unknown --release --manifest-path runtime/Cargo.toml && du -h target/wasm32-unknown-unknown/release/commonware_runtime.wasm
+    - name: Build consensus
+      run: cargo build --target wasm32-unknown-unknown --release --manifest-path consensus/Cargo.toml && du -h target/wasm32-unknown-unknown/release/commonware_consensus.wasm
+    - name: Build storage
+      run: cargo build --target wasm32-unknown-unknown --release --manifest-path storage/Cargo.toml && du -h target/wasm32-unknown-unknown/release/commonware_storage.wasm
+
+  Scripts:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Run shellcheck
+      run: find scripts -name "*.sh" -exec shellcheck -o all {} +

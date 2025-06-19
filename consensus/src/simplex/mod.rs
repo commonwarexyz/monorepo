@@ -5,7 +5,7 @@
 //! finalization latency in a partially synchronous setting.
 //!
 //! _If your application would benefit from succinct consensus certificates or a bias-resistant
-//! VRF, see [Threshold Simplex](crate::threshold_simplex)._
+//! VRF, see [crate::threshold_simplex]._
 //!
 //! # Features
 //!
@@ -58,7 +58,7 @@
 //!
 //! The `Voter` caches all data required to participate in consensus to avoid any disk reads on
 //! on the critical path. To enable recovery, the `Voter` writes valid messages it receives from
-//! consensus and messages it generates to a write-ahead log (WAL) implemented by [`Journal`](https://docs.rs/commonware-storage/latest/commonware_storage/journal/index.html).
+//! consensus and messages it generates to a write-ahead log (WAL) implemented by [commonware_storage::journal::variable::Journal].
 //! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
 //! on restart (especially in the case of unclean shutdown).
 //!
@@ -134,11 +134,15 @@ pub mod mocks;
 mod tests {
     use super::*;
     use crate::Monitor;
-    use commonware_cryptography::{sha256::Digest as Sha256Digest, Ed25519, Sha256, Signer};
+    use commonware_cryptography::{
+        ed25519::{PrivateKey, PublicKey},
+        sha256::Digest as Sha256Digest,
+        PrivateKeyExt as _, PublicKey as CPublicKey, Sha256, Signer as _,
+    };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
-    use commonware_utils::{quorum, Array, NZU32};
+    use commonware_utils::{quorum, NZU32};
     use engine::Engine;
     use futures::{future::join_all, StreamExt};
     use governor::Quota;
@@ -152,7 +156,7 @@ mod tests {
     use types::Activity;
 
     /// Registers all validators using the oracle.
-    async fn register_validators<P: Array>(
+    async fn register_validators<P: CPublicKey>(
         oracle: &mut Oracle<P>,
         validators: &[P],
     ) -> HashMap<P, ((Sender<P>, Receiver<P>), (Sender<P>, Receiver<P>))> {
@@ -185,7 +189,7 @@ mod tests {
     /// The `action` parameter determines the action (e.g. link, unlink) to take.
     /// The `restrict_to` function can be used to restrict the linking to certain connections,
     /// otherwise all validators will be linked to all other validators.
-    async fn link_validators<P: Array>(
+    async fn link_validators<P: CPublicKey>(
         oracle: &mut Oracle<P>,
         validators: &[P],
         action: Action,
@@ -254,7 +258,7 @@ mod tests {
             let mut schemes = Vec::new();
             let mut validators = Vec::new();
             for i in 0..n {
-                let scheme = Ed25519::from_seed(i as u64);
+                let scheme = PrivateKey::from_seed(i as u64);
                 let pk = scheme.public_key();
                 schemes.push(scheme);
                 validators.push(pk);
@@ -286,8 +290,9 @@ mod tests {
                     namespace: namespace.clone(),
                     participants: view_validators.clone(),
                 };
-                let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(
+                    supervisor_config,
+                );
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -321,7 +326,6 @@ mod tests {
                     max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
                     write_buffer: 1024 * 1024,
                 };
@@ -496,7 +500,7 @@ mod tests {
                 let mut schemes = Vec::new();
                 let mut validators = Vec::new();
                 for i in 0..n {
-                    let scheme = Ed25519::from_seed(i as u64);
+                    let scheme = PrivateKey::from_seed(i as u64);
                     let pk = scheme.public_key();
                     schemes.push(scheme);
                     validators.push(pk);
@@ -530,7 +534,7 @@ mod tests {
                         namespace: namespace.clone(),
                         participants: view_validators.clone(),
                     };
-                    let supervisor = mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(
+                    let supervisor = mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(
                         supervisor_config,
                     );
                     supervisors.insert(validator.clone(), supervisor.clone());
@@ -566,7 +570,6 @@ mod tests {
                         max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
-                        replay_concurrency: 1,
                         replay_buffer: 1024 * 1024,
                         write_buffer: 1024 * 1024,
                     };
@@ -657,7 +660,7 @@ mod tests {
             let mut schemes = Vec::new();
             let mut validators = Vec::new();
             for i in 0..n {
-                let scheme = Ed25519::from_seed(i as u64);
+                let scheme = PrivateKey::from_seed(i as u64);
                 let pk = scheme.public_key();
                 schemes.push(scheme);
                 validators.push(pk);
@@ -700,8 +703,9 @@ mod tests {
                     namespace: namespace.clone(),
                     participants: view_validators.clone(),
                 };
-                let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(
+                    supervisor_config,
+                );
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -735,7 +739,6 @@ mod tests {
                     max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
                     write_buffer: 1024 * 1024,
                 };
@@ -820,7 +823,7 @@ mod tests {
                 participants: view_validators.clone(),
             };
             let mut supervisor =
-                mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
+                mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(supervisor_config);
             supervisors.push(supervisor.clone());
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
@@ -854,7 +857,6 @@ mod tests {
                 max_participants: n as usize,
                 fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                 fetch_concurrent: 1,
-                replay_concurrency: 1,
                 replay_buffer: 1024 * 1024,
                 write_buffer: 1024 * 1024,
             };
@@ -898,7 +900,7 @@ mod tests {
             let mut schemes = Vec::new();
             let mut validators = Vec::new();
             for i in 0..n {
-                let scheme = Ed25519::from_seed(i as u64);
+                let scheme = PrivateKey::from_seed(i as u64);
                 let pk = scheme.public_key();
                 schemes.push(scheme);
                 validators.push(pk);
@@ -941,8 +943,9 @@ mod tests {
                     namespace: namespace.clone(),
                     participants: view_validators.clone(),
                 };
-                let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(
+                    supervisor_config,
+                );
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -976,7 +979,6 @@ mod tests {
                     max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
                     write_buffer: 1024 * 1024,
                 };
@@ -1125,7 +1127,7 @@ mod tests {
             let mut schemes = Vec::new();
             let mut validators = Vec::new();
             for i in 0..n {
-                let scheme = Ed25519::from_seed(i as u64);
+                let scheme = PrivateKey::from_seed(i as u64);
                 let pk = scheme.public_key();
                 schemes.push(scheme);
                 validators.push(pk);
@@ -1157,8 +1159,9 @@ mod tests {
                     namespace: namespace.clone(),
                     participants: view_validators.clone(),
                 };
-                let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(
+                    supervisor_config,
+                );
                 supervisors.push(supervisor.clone());
                 let application_cfg = if idx_scheme == 0 {
                     mocks::application::Config {
@@ -1202,7 +1205,6 @@ mod tests {
                     max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
                     write_buffer: 1024 * 1024,
                 };
@@ -1293,7 +1295,7 @@ mod tests {
             let mut schemes = Vec::new();
             let mut validators = Vec::new();
             for i in 0..n {
-                let scheme = Ed25519::from_seed(i as u64);
+                let scheme = PrivateKey::from_seed(i as u64);
                 let pk = scheme.public_key();
                 schemes.push(scheme);
                 validators.push(pk);
@@ -1325,8 +1327,9 @@ mod tests {
                     namespace: namespace.clone(),
                     participants: view_validators.clone(),
                 };
-                let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(
+                    supervisor_config,
+                );
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -1360,7 +1363,6 @@ mod tests {
                     max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
                     write_buffer: 1024 * 1024,
                 };
@@ -1479,7 +1481,7 @@ mod tests {
             let mut schemes = Vec::new();
             let mut validators = Vec::new();
             for i in 0..n {
-                let scheme = Ed25519::from_seed(i as u64);
+                let scheme = PrivateKey::from_seed(i as u64);
                 let pk = scheme.public_key();
                 schemes.push(scheme);
                 validators.push(pk);
@@ -1508,8 +1510,9 @@ mod tests {
                     namespace: namespace.clone(),
                     participants: view_validators.clone(),
                 };
-                let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(
+                    supervisor_config,
+                );
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -1543,7 +1546,6 @@ mod tests {
                     max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
                     write_buffer: 1024 * 1024,
                 };
@@ -1655,7 +1657,7 @@ mod tests {
             let mut schemes = Vec::new();
             let mut validators = Vec::new();
             for i in 0..n {
-                let scheme = Ed25519::from_seed(i as u64);
+                let scheme = PrivateKey::from_seed(i as u64);
                 let pk = scheme.public_key();
                 schemes.push(scheme);
                 validators.push(pk);
@@ -1687,8 +1689,9 @@ mod tests {
                     namespace: namespace.clone(),
                     participants: view_validators.clone(),
                 };
-                let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(
+                    supervisor_config,
+                );
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -1722,7 +1725,6 @@ mod tests {
                     max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
                     write_buffer: 1024 * 1024,
                 };
@@ -1807,7 +1809,7 @@ mod tests {
             let mut schemes = Vec::new();
             let mut validators = Vec::new();
             for i in 0..n {
-                let scheme = Ed25519::from_seed(i as u64);
+                let scheme = PrivateKey::from_seed(i as u64);
                 let pk = scheme.public_key();
                 schemes.push(scheme);
                 validators.push(pk);
@@ -1838,8 +1840,9 @@ mod tests {
                     namespace: namespace.clone(),
                     participants: view_validators.clone(),
                 };
-                let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(
+                    supervisor_config,
+                );
                 if idx_scheme == 0 {
                     let cfg = mocks::conflicter::Config {
                         crypto: scheme,
@@ -1889,7 +1892,6 @@ mod tests {
                         max_participants: n as usize,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
-                        replay_concurrency: 1,
                         replay_buffer: 1024 * 1024,
                         write_buffer: 1024 * 1024,
                     };
@@ -1978,7 +1980,7 @@ mod tests {
             let mut schemes = Vec::new();
             let mut validators = Vec::new();
             for i in 0..n {
-                let scheme = Ed25519::from_seed(i as u64);
+                let scheme = PrivateKey::from_seed(i as u64);
                 let pk = scheme.public_key();
                 schemes.push(scheme);
                 validators.push(pk);
@@ -2009,8 +2011,9 @@ mod tests {
                     namespace: namespace.clone(),
                     participants: view_validators.clone(),
                 };
-                let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(
+                    supervisor_config,
+                );
                 if idx_scheme == 0 {
                     let cfg = mocks::nuller::Config {
                         crypto: scheme,
@@ -2057,7 +2060,6 @@ mod tests {
                         max_participants: n as usize,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
-                        replay_concurrency: 1,
                         replay_buffer: 1024 * 1024,
                         write_buffer: 1024 * 1024,
                     };
@@ -2141,7 +2143,7 @@ mod tests {
             let mut schemes = Vec::new();
             let mut validators = Vec::new();
             for i in 0..n {
-                let scheme = Ed25519::from_seed(i as u64);
+                let scheme = PrivateKey::from_seed(i as u64);
                 let pk = scheme.public_key();
                 schemes.push(scheme);
                 validators.push(pk);
@@ -2172,8 +2174,9 @@ mod tests {
                     namespace: namespace.clone(),
                     participants: view_validators.clone(),
                 };
-                let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(
+                    supervisor_config,
+                );
                 if idx_scheme == 0 {
                     let cfg = mocks::outdated::Config {
                         crypto: scheme,
@@ -2221,7 +2224,6 @@ mod tests {
                         max_participants: n as usize,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
-                        replay_concurrency: 1,
                         replay_buffer: 1024 * 1024,
                         write_buffer: 1024 * 1024,
                     };
@@ -2290,7 +2292,7 @@ mod tests {
             let mut schemes = Vec::new();
             let mut validators = Vec::new();
             for i in 0..n {
-                let scheme = Ed25519::from_seed(i as u64);
+                let scheme = PrivateKey::from_seed(i as u64);
                 let pk = scheme.public_key();
                 schemes.push(scheme);
                 validators.push(pk);
@@ -2322,8 +2324,9 @@ mod tests {
                     namespace: namespace.clone(),
                     participants: view_validators.clone(),
                 };
-                let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(
+                    supervisor_config,
+                );
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -2357,7 +2360,6 @@ mod tests {
                     max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_concurrency: 1,
                     replay_buffer: 1024 * 1024,
                     write_buffer: 1024 * 1024,
                 };

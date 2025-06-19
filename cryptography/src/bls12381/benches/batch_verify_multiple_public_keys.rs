@@ -1,4 +1,4 @@
-use commonware_cryptography::{bls12381::Bls12381Batch, BatchScheme, Bls12381, Signer};
+use commonware_cryptography::{bls12381, BatchVerifier, PrivateKeyExt as _, Signer as _};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
 use std::hint::black_box;
@@ -11,9 +11,9 @@ fn benchmark_batch_verify_multiple_public_keys(c: &mut Criterion) {
         c.bench_function(&format!("{}/pks={}", module_path!(), n_signers), |b| {
             b.iter_batched(
                 || {
-                    let mut batch = Bls12381Batch::new();
+                    let mut batch = bls12381::Batch::new();
                     for _ in 0..n_signers {
-                        let mut signer = Bls12381::new(&mut thread_rng());
+                        let signer = bls12381::PrivateKey::from_rng(&mut thread_rng());
                         let sig = signer.sign(Some(namespace), &msg);
                         assert!(batch.add(Some(namespace), &msg, &signer.public_key(), &sig));
                     }

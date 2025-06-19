@@ -16,22 +16,27 @@ members = [
     "examples/flood",
     "examples/log",
     "examples/vrf",
+
+    # Fuzz builds
+    "codec/fuzz",
+    "cryptography/fuzz",
+    "stream/fuzz"
 ]
 resolver = "2"
 
 [workspace.dependencies]
-commonware-broadcast = { version = "0.0.52", path = "broadcast" }
-commonware-codec = { version = "0.0.52", path = "codec" }
-commonware-consensus = { version = "0.0.52", path = "consensus" }
-commonware-cryptography = { version = "0.0.52", path = "cryptography" }
-commonware-deployer = { version = "0.0.52", path = "deployer", default-features = false }
-commonware-macros = { version = "0.0.52", path = "macros" }
-commonware-p2p = { version = "0.0.52", path = "p2p" }
-commonware-resolver = { version = "0.0.52", path = "resolver" }
-commonware-runtime = { version = "0.0.52", path = "runtime" }
-commonware-storage = { version = "0.0.52", path = "storage" }
-commonware-stream = { version = "0.0.52", path = "stream" }
-commonware-utils = { version = "0.0.52", path = "utils" }
+commonware-broadcast = { version = "0.0.54", path = "broadcast" }
+commonware-codec = { version = "0.0.54", path = "codec" }
+commonware-consensus = { version = "0.0.54", path = "consensus" }
+commonware-cryptography = { version = "0.0.54", path = "cryptography" }
+commonware-deployer = { version = "0.0.54", path = "deployer", default-features = false }
+commonware-macros = { version = "0.0.54", path = "macros" }
+commonware-p2p = { version = "0.0.54", path = "p2p" }
+commonware-resolver = { version = "0.0.54", path = "resolver" }
+commonware-runtime = { version = "0.0.54", path = "runtime" }
+commonware-storage = { version = "0.0.54", path = "storage" }
+commonware-stream = { version = "0.0.54", path = "stream" }
+commonware-utils = { version = "0.0.54", path = "utils" }
 thiserror = "2.0.12"
 bytes = "1.7.1"
 sha2 = "0.10.8"
@@ -70,6 +75,13 @@ io-uring = "0.7.4"
 rayon = "1.10.0"
 async-lock = "3.4.0"
 libc = "0.2.172"
+zeroize = "1.5.7"
+blst = "0.3.13"
+p256 = "0.13.2"
+
+# Fuzz deps
+libfuzzer-sys = "0.4.9"
+arbitrary = "1.4.1"
 
 [profile.bench]
 # Because we enable overflow checks in "release," we should benchmark with them.

@@ -131,6 +131,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b3d1d046238990b9cf5bcde22a3fb3584ee5cf65fb2765f454ed428c7a0063da"
 
 [[package]]
+name = "arbitrary"
+version = "1.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dde20b3d026af13f561bdd0f15edf01fc734f0dafcedbaf42bba506a9517f223"
+dependencies = [
+ "derive_arbitrary",
+]
+
+[[package]]
 name = "async-lock"
 version = "3.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -922,7 +931,7 @@ checksum = "d3fd119d74b830634cea2a0f58bbd0d54540518a14397557951e79340abc28c0"
 
 [[package]]
 name = "commonware-bridge"
-version = "0.0.52"
+version = "0.0.54"
 dependencies = [
  "bytes",
  "clap",
@@ -945,7 +954,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-broadcast"
-version = "0.0.52"
+version = "0.0.54"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -963,7 +972,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-chat"
-version = "0.0.52"
+version = "0.0.54"
 dependencies = [
  "chrono",
  "clap",
@@ -984,7 +993,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-codec"
-version = "0.0.52"
+version = "0.0.54"
 dependencies = [
  "bytes",
  "paste",
@@ -992,8 +1001,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-codec-fuzz"
+version = "0.0.1"
+dependencies = [
+ "arbitrary",
+ "bytes",
+ "commonware-codec",
+ "libfuzzer-sys",
+ "paste",
+ "thiserror 2.0.12",
+]
+
+[[package]]
 name = "commonware-consensus"
-version = "0.0.52"
+version = "0.0.54"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -1016,7 +1037,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-cryptography"
-version = "0.0.52"
+version = "0.0.54"
 dependencies = [
  "blst",
  "bytes",
@@ -1034,8 +1055,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-cryptography-fuzz"
+version = "0.0.1"
+dependencies = [
+ "arbitrary",
+ "blst",
+ "commonware-codec",
+ "commonware-cryptography",
+ "ed25519-zebra",
+ "libfuzzer-sys",
+ "p256",
+ "sha2 0.10.8",
+]
+
+[[package]]
 name = "commonware-deployer"
-version = "0.0.52"
+version = "0.0.54"
 dependencies = [
  "aws-config",
  "aws-sdk-ec2",
@@ -1054,7 +1089,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-flood"
-version = "0.0.52"
+version = "0.0.54"
 dependencies = [
  "clap",
  "commonware-codec",
@@ -1076,7 +1111,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-log"
-version = "0.0.52"
+version = "0.0.54"
 dependencies = [
  "bytes",
  "chrono",
@@ -1101,7 +1136,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-macros"
-version = "0.0.52"
+version = "0.0.54"
 dependencies = [
  "futures",
  "futures-timer",
@@ -1114,7 +1149,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-p2p"
-version = "0.0.52"
+version = "0.0.54"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1132,12 +1167,11 @@ dependencies = [
  "thiserror 2.0.12",
  "tracing",
  "tracing-subscriber",
- "zstd",
 ]
 
 [[package]]
 name = "commonware-resolver"
-version = "0.0.52"
+version = "0.0.54"
 dependencies = [
  "bimap",
  "bytes",
@@ -1159,7 +1193,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-runtime"
-version = "0.0.52"
+version = "0.0.54"
 dependencies = [
  "async-lock",
  "axum",
@@ -1189,7 +1223,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-storage"
-version = "0.0.52"
+version = "0.0.54"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1203,6 +1237,7 @@ dependencies = [
  "futures-util",
  "prometheus-client",
  "rand",
+ "rayon",
  "thiserror 2.0.12",
  "tracing",
  "tracing-subscriber",
@@ -1211,7 +1246,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-stream"
-version = "0.0.52"
+version = "0.0.54"
 dependencies = [
  "bytes",
  "chacha20poly1305",
@@ -1222,14 +1257,29 @@ dependencies = [
  "commonware-utils",
  "criterion",
  "futures",
+ "hkdf",
  "rand",
  "thiserror 2.0.12",
  "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "commonware-stream-fuzz"
+version = "0.0.1"
+dependencies = [
+ "arbitrary",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-runtime",
+ "commonware-stream",
+ "futures",
+ "libfuzzer-sys",
 ]
 
 [[package]]
 name = "commonware-utils"
-version = "0.0.52"
+version = "0.0.54"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1242,7 +1292,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-vrf"
-version = "0.0.52"
+version = "0.0.54"
 dependencies = [
  "bytes",
  "clap",
@@ -1473,6 +1523,7 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "curve25519-dalek-derive",
+ "digest 0.10.7",
  "fiat-crypto",
  "rustc_version",
  "subtle",
@@ -1537,6 +1588,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "derive_arbitrary"
+version = "1.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "30542c1ad912e0e3d22a1935c290e12e8a29d704a420177a31faad4a601a0800"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.98",
+]
+
+[[package]]
 name = "digest"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1595,6 +1657,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ed25519"
+version = "2.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "115531babc129696a58c64a4fef0a8bf9e9698629fb97e9e40767d235cfbcd53"
+dependencies = [
+ "pkcs8",
+ "serde",
+ "signature",
+]
+
+[[package]]
 name = "ed25519-consensus"
 version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1606,6 +1679,22 @@ dependencies = [
  "serde",
  "sha2 0.9.9",
  "thiserror 1.0.63",
+ "zeroize",
+]
+
+[[package]]
+name = "ed25519-zebra"
+version = "4.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d9ce6874da5d4415896cd45ffbc4d1cfc0c4f9c079427bd870742c30f2f65a9"
+dependencies = [
+ "curve25519-dalek",
+ "ed25519",
+ "hashbrown",
+ "hex",
+ "rand_core",
+ "serde",
+ "sha2 0.10.8",
  "zeroize",
 ]
 
@@ -1994,6 +2083,15 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
+name = "hkdf"
+version = "0.12.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b5f8eb2ad728638ea2c7d47a21db23b7b58a72ed6a38256b8a1849f15fbbdf7"
+dependencies = [
+ "hmac",
+]
 
 [[package]]
 name = "hmac"
@@ -2470,6 +2568,16 @@ name = "libc"
 version = "0.2.172"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d750af042f7ef4f724306de029d18836c26c1765a54a6a3f094cbd23a7267ffa"
+
+[[package]]
+name = "libfuzzer-sys"
+version = "0.4.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf78f52d400cf2d84a3a973a78a592b4adc535739e0a5597a0da6f0c357adc75"
+dependencies = [
+ "arbitrary",
+ "cc",
+]
 
 [[package]]
 name = "libloading"

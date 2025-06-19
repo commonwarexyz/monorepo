@@ -1,7 +1,7 @@
-use commonware_utils::Array;
+use commonware_cryptography::PublicKey;
 
-/// Configuration for the [`Engine`](super::Engine).
-pub struct Config<P: Array, MCfg> {
+/// Configuration for the [super::Engine].
+pub struct Config<P: PublicKey, MCfg> {
     /// The public key of the participant.
     pub public_key: P,
 

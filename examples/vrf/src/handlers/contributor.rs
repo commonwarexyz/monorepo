@@ -8,7 +8,7 @@ use commonware_cryptography::{
         dkg::{player::Output, Dealer, Player},
         primitives::{group, variant::MinSig},
     },
-    Scheme,
+    Signer, Verifier as _,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -21,7 +21,7 @@ use tracing::{debug, info, warn};
 
 /// A DKG/Resharing contributor that can be configured to behave honestly
 /// or deviate as a rogue, lazy, or forger.
-pub struct Contributor<E: Clock + Rng + Spawner, C: Scheme> {
+pub struct Contributor<E: Clock + Rng + Spawner, C: Signer> {
     context: E,
     crypto: C,
     dkg_phase_timeout: Duration,
@@ -37,7 +37,7 @@ pub struct Contributor<E: Clock + Rng + Spawner, C: Scheme> {
     signatures: mpsc::Sender<(u64, Output<MinSig>)>,
 }
 
-impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
+impl<E: Clock + Rng + Spawner, C: Signer> Contributor<E, C> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         context: E,
@@ -249,7 +249,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                     },
                     result = receiver.recv() => {
                         match result {
-                            Ok((s, msg)) => {
+                            Ok((peer, msg)) => {
                                 let msg = match wire::Dkg::<C::Signature>::decode_cfg(msg, &self.contributors.len()) {
                                     Ok(msg) => msg,
                                     Err(_) => {
@@ -281,38 +281,38 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                                         let Some(player) = self.contributors.get(public_key as usize) else {
                                             continue;
                                         };
-                                        if player != &s {
-                                            warn!(round, "received ack with wrong index");
+                                        if player != &peer {
+                                            warn!(round, ?peer, "received ack with wrong index");
                                             continue;
                                         }
 
                                         // Verify signature on incoming ack
                                         let payload = payload(round, &me, commitment);
-                                        if !C::verify(Some(ACK_NAMESPACE), &payload, &s, &signature) {
-                                            warn!(round, sender = ?s, "received invalid ack signature");
+                                        if !peer.verify(Some(ACK_NAMESPACE), &payload, &signature) {
+                                            warn!(round, ?peer, "received invalid ack signature");
                                             continue;
                                         }
 
                                         // Store ack
-                                        if let Err(e) = dealer.ack(s.clone()) {
-                                            warn!(round, error = ?e, sender = ?s, "failed to record ack");
+                                        if let Err(e) = dealer.ack(peer) {
+                                            warn!(round, error = ?e, "failed to record ack");
                                             continue;
                                         }
                                         acks.insert(public_key, signature);
                                     },
                                     wire::Payload::Share{ commitment, share } => {
                                         // Store share
-                                        if let Err(e) = player_obj.share(s.clone(), commitment.clone(), share){
+                                        if let Err(e) = player_obj.share(peer.clone(), commitment.clone(), share){
                                             warn!(round, error = ?e, "failed to store share");
                                             continue;
                                         }
 
                                         // Send ack
-                                        let payload = payload(round, &s, &commitment);
+                                        let payload = payload(round, &peer, &commitment);
                                         let signature = self.crypto.sign(Some(ACK_NAMESPACE), &payload);
                                         sender
                                             .send(
-                                                Recipients::One(s),
+                                                Recipients::One(peer),
                                                 wire::Dkg {
                                                     round,
                                                     payload: wire::Payload::Ack{
@@ -378,7 +378,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
         // Wait for message from arbiter
         loop {
             match receiver.recv().await {
-                Ok((s, msg)) => {
+                Ok((peer, msg)) => {
                     let msg = match wire::Dkg::<C::Signature>::decode_cfg(
                         msg,
                         &self.contributors.len(),
@@ -396,7 +396,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Contributor<E, C> {
                         );
                         return (round, None);
                     }
-                    if s != self.arbiter {
+                    if peer != self.arbiter {
                         continue;
                     }
                     let (commitments, reveals) = match msg.payload {
