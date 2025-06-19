@@ -50,6 +50,8 @@ pub enum Error {
     EncryptionFailed,
     #[error("decryption failed")]
     DecryptionFailed,
+    #[error("invalid authentication proof")]
+    InvalidAuthenticationProof,
     #[error("timestamp too old: {0}")]
     InvalidTimestampOld(u64),
     #[error("timestamp too future: {0}")]
