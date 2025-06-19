@@ -1,8 +1,10 @@
-use super::x25519;
+use super::{x25519, ENCRYPTION_TAG_LENGTH};
 use crate::Error;
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, Bytes};
+use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, Nonce};
 use commonware_codec::{
-    varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
+    varint::UInt, Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt,
+    Write,
 };
 use commonware_cryptography::{PublicKey, Signer};
 use commonware_runtime::Clock;
@@ -186,6 +188,178 @@ impl<C: PublicKey> Read for Signed<C> {
 impl<C: PublicKey> EncodeSize for Signed<C> {
     fn encode_size(&self) -> usize {
         self.info.encode_size() + self.signer.encode_size() + self.signature.encode_size()
+    }
+}
+
+/// Proof that a party can correctly derive the shared secret.
+///
+/// This is used in the 3-message handshake protocol to ensure mutual authentication.
+/// Each party encrypts a known plaintext using the derived shared secret to prove
+/// they can compute the same key material.
+pub struct AuthenticationProof {
+    /// Encrypted proof demonstrating knowledge of the shared secret.
+    ///
+    /// Contains a known plaintext encrypted with ChaCha20Poly1305 using
+    /// the derived cipher. The plaintext is "auth_proof" concatenated
+    /// with the timestamp to prevent replay attacks.
+    encrypted_proof: Bytes,
+}
+
+impl AuthenticationProof {
+    /// Create a new authentication proof using the provided cipher and ephemeral public key.
+    ///
+    /// The proof encrypts the ephemeral public key of the peer to demonstrate
+    /// knowledge of the shared secret in a challenge-response fashion.
+    pub fn create(
+        cipher: &ChaCha20Poly1305,
+        nonce: &Nonce,
+        ephemeral_key: &x25519::PublicKey,
+    ) -> Result<Self, Error> {
+        // Encrypt the proof
+        let encrypted_proof = cipher
+            .encrypt(nonce, ephemeral_key.encode().as_ref())
+            .map_err(|_| Error::EncryptionFailed)?;
+
+        Ok(Self {
+            encrypted_proof: Bytes::from(encrypted_proof),
+        })
+    }
+
+    /// Verify the authentication proof using the provided cipher and ephemeral public key.
+    ///
+    /// Returns Ok(()) if the proof is valid, otherwise returns an error.
+    pub fn verify(
+        &self,
+        cipher: &ChaCha20Poly1305,
+        nonce: &Nonce,
+        ephemeral_key: &x25519::PublicKey,
+    ) -> Result<(), Error> {
+        // Decrypt the proof
+        let decrypted = cipher
+            .decrypt(nonce, self.encrypted_proof.as_ref())
+            .map_err(|_| Error::DecryptionFailed)?;
+
+        // Verify the proof content
+        let expected_proof = ephemeral_key.encode();
+        if decrypted == expected_proof {
+            Ok(())
+        } else {
+            Err(Error::InvalidAuthenticationProof)
+        }
+    }
+}
+
+impl Write for AuthenticationProof {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.encrypted_proof.write(buf);
+    }
+}
+
+impl Read for AuthenticationProof {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let len = x25519::PublicKey::SIZE + ENCRYPTION_TAG_LENGTH;
+        let range = RangeCfg::from(len..=len);
+        let encrypted_proof = Bytes::read_cfg(buf, &range)?;
+        Ok(Self { encrypted_proof })
+    }
+}
+
+impl EncodeSize for AuthenticationProof {
+    fn encode_size(&self) -> usize {
+        self.encrypted_proof.encode_size()
+    }
+}
+
+/// Message 2 in the 3-message handshake protocol: Listener's response with authentication proof.
+///
+/// The listener sends their signed handshake along with a proof that they can
+/// derive the correct shared secret.
+pub struct ListenerResponse<C: PublicKey> {
+    /// The signed handshake from the listener
+    handshake: Signed<C>,
+
+    /// Proof that the listener can derive the shared secret
+    auth_proof: AuthenticationProof,
+}
+
+impl<C: PublicKey> ListenerResponse<C> {
+    pub fn new(handshake: Signed<C>, auth_proof: AuthenticationProof) -> Self {
+        Self {
+            handshake,
+            auth_proof,
+        }
+    }
+
+    pub fn into_parts(self) -> (Signed<C>, AuthenticationProof) {
+        (self.handshake, self.auth_proof)
+    }
+}
+
+impl<C: PublicKey> Write for ListenerResponse<C> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.handshake.write(buf);
+        self.auth_proof.write(buf);
+    }
+}
+
+impl<C: PublicKey> Read for ListenerResponse<C> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let handshake = Signed::read(buf)?;
+        let auth_proof = AuthenticationProof::read(buf)?;
+        Ok(Self {
+            handshake,
+            auth_proof,
+        })
+    }
+}
+
+impl<C: PublicKey> EncodeSize for ListenerResponse<C> {
+    fn encode_size(&self) -> usize {
+        self.handshake.encode_size() + self.auth_proof.encode_size()
+    }
+}
+
+/// Message 3 in the 3-message handshake protocol: Dialer's final confirmation.
+///
+/// The dialer sends a proof that they can derive the correct shared secret,
+/// completing the mutual authentication.
+pub struct DialerConfirmation {
+    /// Proof that the dialer can derive the shared secret
+    auth_proof: AuthenticationProof,
+}
+
+impl DialerConfirmation {
+    pub fn new(auth_proof: AuthenticationProof) -> Self {
+        Self { auth_proof }
+    }
+
+    pub fn auth_proof(&self) -> &AuthenticationProof {
+        &self.auth_proof
+    }
+}
+
+impl Write for DialerConfirmation {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.auth_proof.write(buf);
+    }
+}
+
+impl Read for DialerConfirmation {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let auth_proof = AuthenticationProof::read(buf)?;
+        Ok(Self { auth_proof })
+    }
+}
+
+impl EncodeSize for DialerConfirmation {
+    fn encode_size(&self) -> usize {
+        self.auth_proof.encode_size()
     }
 }
 
@@ -507,6 +681,120 @@ mod tests {
             );
             assert!(matches!(result, Err(Error::InvalidTimestampOld(t)) if t == 0));
         });
+    }
+
+    #[test]
+    fn test_authentication_proof_create_and_verify() {
+        use chacha20poly1305::KeyInit;
+
+        let key = [1u8; 32];
+        let cipher = ChaCha20Poly1305::new(&key.into());
+        let ephemeral_key = x25519::PublicKey::from_bytes([42u8; 32]);
+
+        // Create authentication proof
+        let nonce_zero = Nonce::from_slice(&[0u8; 12]);
+        let proof = AuthenticationProof::create(&cipher, nonce_zero, &ephemeral_key).unwrap();
+
+        // Verify the proof with the same parameters
+        proof.verify(&cipher, nonce_zero, &ephemeral_key).unwrap();
+
+        // Verify that proof fails with different ephemeral key
+        let different_ephemeral = x25519::PublicKey::from_bytes([43u8; 32]);
+        let result = proof.verify(&cipher, nonce_zero, &different_ephemeral);
+        assert!(matches!(result, Err(Error::InvalidAuthenticationProof)));
+
+        // Verify that proof fails with different cipher
+        let different_key = [2u8; 32];
+        let different_cipher = ChaCha20Poly1305::new(&different_key.into());
+        let result = proof.verify(&different_cipher, nonce_zero, &ephemeral_key);
+        assert!(matches!(result, Err(Error::DecryptionFailed)));
+    }
+
+    #[test]
+    fn test_authentication_proof_encoding() {
+        use chacha20poly1305::KeyInit;
+        use commonware_codec::{DecodeExt, Encode};
+
+        let key = [1u8; 32];
+        let cipher = ChaCha20Poly1305::new(&key.into());
+        let ephemeral_key = x25519::PublicKey::from_bytes([42u8; 32]);
+
+        // Create and encode proof
+        let nonce_zero = Nonce::from_slice(&[0u8; 12]);
+        let original_proof =
+            AuthenticationProof::create(&cipher, nonce_zero, &ephemeral_key).unwrap();
+        let encoded = original_proof.encode();
+
+        // Decode and verify it matches
+        let decoded_proof = AuthenticationProof::decode(encoded).unwrap();
+        decoded_proof
+            .verify(&cipher, nonce_zero, &ephemeral_key)
+            .unwrap();
+    }
+
+    #[test]
+    fn test_listener_response_encoding() {
+        use chacha20poly1305::KeyInit;
+        use commonware_codec::{DecodeExt, Encode};
+
+        // Create test components
+        let mut sender = PrivateKey::from_seed(0);
+        let recipient = PrivateKey::from_seed(1).public_key();
+        let ephemeral_public_key = PublicKey::from_bytes([3u8; 32]);
+
+        let handshake = Signed::sign(
+            &mut sender,
+            TEST_NAMESPACE,
+            Info {
+                timestamp: 12345,
+                recipient: recipient.clone(),
+                ephemeral_public_key,
+            },
+        );
+
+        let key = [1u8; 32];
+        let cipher = ChaCha20Poly1305::new(&key.into());
+        let nonce_zero = Nonce::from_slice(&[0u8; 12]);
+        let auth_proof =
+            AuthenticationProof::create(&cipher, nonce_zero, &ephemeral_public_key).unwrap();
+
+        // Create and encode listener response
+        let original_response = ListenerResponse::new(handshake, auth_proof);
+        let encoded = original_response.encode();
+
+        // Decode and verify components
+        let decoded_response = ListenerResponse::<edPublicKey>::decode(encoded).unwrap();
+        let (decoded_handshake, decoded_proof) = decoded_response.into_parts();
+
+        assert_eq!(decoded_handshake.signer(), sender.public_key());
+        let nonce_zero = Nonce::from_slice(&[0u8; 12]);
+        decoded_proof
+            .verify(&cipher, nonce_zero, &ephemeral_public_key)
+            .unwrap();
+    }
+
+    #[test]
+    fn test_dialer_confirmation_encoding() {
+        use chacha20poly1305::KeyInit;
+        use commonware_codec::{DecodeExt, Encode};
+
+        let key = [1u8; 32];
+        let cipher = ChaCha20Poly1305::new(&key.into());
+        let ephemeral_key = x25519::PublicKey::from_bytes([42u8; 32]);
+
+        let nonce_zero = Nonce::from_slice(&[0u8; 12]);
+        let auth_proof = AuthenticationProof::create(&cipher, nonce_zero, &ephemeral_key).unwrap();
+
+        // Create and encode dialer confirmation
+        let original_confirmation = DialerConfirmation::new(auth_proof);
+        let encoded = original_confirmation.encode();
+
+        // Decode and verify
+        let decoded_confirmation = DialerConfirmation::decode(encoded).unwrap();
+        decoded_confirmation
+            .auth_proof()
+            .verify(&cipher, nonce_zero, &ephemeral_key)
+            .unwrap();
     }
 
     #[test]

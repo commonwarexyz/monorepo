@@ -64,6 +64,10 @@
 
 use std::time::Duration;
 
+// When encrypting data, an encryption tag is appended to the ciphertext.
+// This constant represents the size of the encryption tag in bytes.
+const ENCRYPTION_TAG_LENGTH: usize = 16;
+
 mod cipher;
 mod connection;
 use commonware_cryptography::Signer;
