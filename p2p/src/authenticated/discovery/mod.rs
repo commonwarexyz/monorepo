@@ -219,6 +219,7 @@ mod tests {
         deterministic, tokio, Clock, Metrics, Network as RNetwork, Runner, Spawner,
     };
     use commonware_utils::NZU32;
+    use futures::{channel::mpsc, SinkExt, StreamExt};
     use governor::{clock::ReasonablyRealtime, Quota};
     use rand::{CryptoRng, Rng};
     use std::{
@@ -272,7 +273,7 @@ mod tests {
         let addresses = peers.iter().map(|p| p.public_key()).collect::<Vec<_>>();
 
         // Create networks
-        let mut waiters = Vec::new();
+        let (complete_sender, mut complete_receiver) = mpsc::channel(peers.len());
         for (i, peer) in peers.iter().enumerate() {
             // Create peer context
             let context = context.with_label(&format!("peer-{}", i));
@@ -310,11 +311,13 @@ mod tests {
             network.start();
 
             // Send/Receive messages
-            let handler = context.with_label("agent").spawn({
+            context.with_label("agent").spawn({
+                let mut complete_sender = complete_sender.clone();
                 let addresses = addresses.clone();
                 move |context| async move {
                     // Wait for all peers to send their identity
-                    let acker = context.with_label("receiver").spawn(move |_| async move {
+                    context.with_label("receiver").spawn(move |_| async move {
+                        // Wait for all peers to send their identity
                         let mut received = HashSet::new();
                         while received.len() < n - 1 {
                             // Ensure message equals sender identity
@@ -324,11 +327,17 @@ mod tests {
                             // Add to received set
                             received.insert(sender);
                         }
+                        complete_sender.send(()).await.unwrap();
+
+                        // Process messages until all finished (or else sender loops could get stuck as a peer may drop)
+                        loop {
+                            receiver.recv().await.unwrap();
+                        }
                     });
 
                     // Send identity to all peers
                     let msg = signer.public_key();
-                    let sender = context
+                    context
                         .with_label("sender")
                         .spawn(move |context| async move {
                             // Loop forever to account for unexpected message drops
@@ -416,20 +425,13 @@ mod tests {
                                 context.sleep(Duration::from_secs(10)).await;
                             }
                         });
-
-                    // Wait for all peers to send their identity
-                    acker.await.unwrap();
-                    sender.abort();
                 }
             });
-
-            // Add to waiters
-            waiters.push(handler);
         }
 
         // Wait for all peers to finish
-        for waiter in waiters {
-            waiter.await.unwrap();
+        for _ in 0..n {
+            complete_receiver.next().await.unwrap();
         }
 
         // Ensure no message rate limiting occurred
