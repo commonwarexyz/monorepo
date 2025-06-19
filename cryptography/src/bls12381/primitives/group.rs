@@ -46,7 +46,7 @@ pub type DST = &'static [u8];
 
 /// An element of a group.
 pub trait Element:
-    Read<Cfg = ()> + Write + FixedSize + Clone + Eq + PartialEq + Send + Sync
+    Read<Cfg = ()> + Write + FixedSize + Clone + Eq + PartialEq + Ord + PartialOrd + Send + Sync
 {
     /// Returns the additive identity.
     fn zero() -> Self;
