@@ -122,7 +122,7 @@ impl<E: Storage + Metrics, V: Codec> Index<E, V> {
             JConfig {
                 partition: cfg.journal_partition.clone(),
                 compression: None,
-                codec_config: (Default::default(), cfg.codec),
+                codec_config: (((), ()), cfg.codec),
                 write_buffer: cfg.write_buffer,
             },
         )
