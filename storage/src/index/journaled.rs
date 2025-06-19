@@ -139,16 +139,15 @@ where
     /// The value is appended to the journal and becomes the new head of the
     /// linked list for the translated key.
     pub async fn insert(&mut self, key: &[u8], value: V) -> Result<(), Error> {
-        let k = self.translator.transform(key);
-        let ptr = std::mem::size_of::<T::Key>() as u64;
-        let pos = k.into() * ptr;
+        let k = self.translator.transform(key).into();
+        let pos = k.into() * 4;
 
-        if pos + ptr > self.index_len {
-            let extend = pos + ptr - self.index_len;
+        if pos + 4 > self.index_len {
+            let extend = pos + 4 - self.index_len;
             self.index
                 .write_at(vec![0u8; extend as usize], self.index_len)
                 .await?;
-            self.index_len = pos + ptr;
+            self.index_len = pos + 4;
         }
 
         let mut buf = [0u8; 4];
