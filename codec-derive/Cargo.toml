@@ -21,3 +21,6 @@ syn = { version = "2.0", features = ["full"] }
 [dev-dependencies]
 commonware-codec = { workspace = true }
 bytes = { workspace = true }
+
+[package.metadata.cargo-udeps.ignore]
+development = ["commonware-codec", "bytes"]
