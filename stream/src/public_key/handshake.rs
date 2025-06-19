@@ -12,15 +12,15 @@ use std::time::Duration;
 /// Handshake information that is signed over by the sender.
 pub struct Info<C: PublicKey> {
     /// The public key of the recipient.
-    pub recipient: C,
+    recipient: C,
 
     /// The ephemeral public key of the sender.
     ///
     /// This is used to derive the shared secret for the encrypted connection.
-    pub ephemeral_public_key: x25519::PublicKey,
+    ephemeral_public_key: x25519::PublicKey,
 
     /// Timestamp of the handshake (in epoch milliseconds).
-    pub timestamp: u64,
+    timestamp: u64,
 }
 
 impl<C: PublicKey> Info<C> {

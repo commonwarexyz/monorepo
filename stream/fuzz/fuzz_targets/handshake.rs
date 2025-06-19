@@ -83,11 +83,11 @@ fuzz_target!(|input: FuzzInput| {
         let handshake = Signed::sign(
             &mut dialer_crypto,
             input.namespace.as_slice(),
-            Info {
-                timestamp: input.timestamp,
-                recipient: input.random_peer,
-                ephemeral_public_key: input.ephemeral_public_key,
-            },
+            Info::new(
+                input.random_peer,
+                input.ephemeral_public_key,
+                input.timestamp,
+            ),
         );
 
         let (sink, _) = mocks::Channel::init();
