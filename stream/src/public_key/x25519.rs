@@ -15,7 +15,6 @@ impl PublicKey {
         }
     }
 
-    #[cfg(test)]
     pub fn from_bytes(array: [u8; 32]) -> Self {
         PublicKey {
             inner: X25519PublicKey::from(array),

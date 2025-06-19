@@ -107,6 +107,8 @@ jobs:
       run: cargo +nightly fuzz build --fuzz-dir codec/fuzz
     - name: Build cryptography
       run: cargo +nightly fuzz build --fuzz-dir cryptography/fuzz
+    - name: Build stream
+      run: cargo +nightly fuzz build --fuzz-dir stream/fuzz
 
   WASM:
     runs-on: ubuntu-latest
