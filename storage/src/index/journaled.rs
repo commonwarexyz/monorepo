@@ -1,13 +1,12 @@
-//! [Journal]-backed implementation of the [Translator] based index.
+//! [Journal]-backed implementation of an index.
 //!
-//! Each translated key maps to a pointer stored in an "index" blob.  The pointer
+//! Each key maps to a pointer stored in an "index" blob.  The pointer
 //! occupies `size_of::<T::Key>()` bytes and contains the offset of the most
 //! recently inserted [`Node`] in a [`Journal`] (offsets are stored 1 based so that
 //! `0` represents `None`).  Every node in the journal forms a linked list to the
 //! previous value for that key.  Lookups follow this chain and collect all
 //! values.
 
-use super::Translator;
 use crate::journal::variable::{Config as JConfig, Journal};
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Codec, EncodeSize, Read, Write as CodecWrite};
@@ -88,16 +87,11 @@ impl<K: Codec, V: Codec> EncodeSize for Node<K, V> {
 /// Values are appended to a `Journal` and the index blob only stores the
 /// pointer to the head of each linked list.  Both the index and the journal live
 /// in the same partition provided by [`Config`].
-pub struct Index<E: Storage + Metrics, T: Translator, V: Codec>
-where
-    T::Key: PartialEq + Eq + Hash + Codec,
-{
-    /// Converts external keys into the fixed representation used for indexing.
-    translator: T,
+pub struct Index<E: Storage + Metrics, V: Codec> {
     /// Blob storing the pointer table.
     buckets: E::Blob,
     /// Journal storing linked list nodes.
-    journal: Journal<E, Node<T::Key, V>>,
+    journal: Journal<E, Node<Vec<u8>, V>>,
     /// Wasted reads due to collisions.
     wasted_reads: Counter,
     /// Number of keys in the index.
@@ -108,26 +102,19 @@ where
     table_size: u64,
 }
 
-impl<E: Storage + Metrics, T: Translator, V: Codec> Index<E, T, V>
-where
-    T::Key: PartialEq + Eq + Hash + Codec,
-{
+impl<E: Storage + Metrics, V: Codec> Index<E, V> {
     /// Initialize a new [`Disk`].
     ///
     /// The index blob and journal are opened (or created) inside
     /// `cfg.partition`.  Metrics for key and item counts are registered on the
     /// provided [`Metrics`] context.
-    pub async fn init(
-        context: E,
-        cfg: Config<(T::Key, V::Cfg)>,
-        translator: T,
-    ) -> Result<Self, Error> {
+    pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         let journal = Journal::init(
             context.with_label("index_journal"),
             JConfig {
                 partition: cfg.journal_partition,
                 compression: None,
-                codec_config: cfg.codec,
+                codec_config: (Default::default(), cfg.codec),
                 write_buffer: cfg.write_buffer,
             },
         )
@@ -138,7 +125,7 @@ where
             blob.write_at(vec![0; (cfg.table_size * PTR_SIZE) as usize], 0)
                 .await?;
         } else if size != cfg.table_size * PTR_SIZE {
-            return Err(Error::Runtime(commonware_runtime::Error::Corrupted(
+            return Err(Error::Runtime(commonware_runtime::Error::PartitionCorrupt(
                 "table size mismatch".into(),
             )));
         }
@@ -153,7 +140,6 @@ where
         let items = Gauge::default();
         context.register("items", "Number of items", items.clone());
         Ok(Self {
-            translator,
             buckets: blob,
             journal,
             wasted_reads,
@@ -168,9 +154,8 @@ where
     /// The value is appended to the journal and becomes the new head of the
     /// linked list for the translated key.
     pub async fn insert(&mut self, key: &[u8], value: V) -> Result<(), Error> {
-        let k = self.translator.transform(key);
-        let mut hasher = self.translator.build_hasher();
-        k.hash(&mut hasher);
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut hasher);
         let pos = hasher.finish() % self.table_size;
 
         let mut buf = [0u8; 4];
@@ -185,7 +170,7 @@ where
 
         let node = Node {
             next: head,
-            key: k,
+            key: key.to_vec(),
             value,
         };
         let (offset, _) = self.journal.append(0, node).await?;
@@ -206,9 +191,8 @@ where
     /// index blob and collects values in insertion order (most recent first).
     pub async fn get(&self, key: &[u8]) -> Result<Vec<V>, Error> {
         let mut values = Vec::new();
-        let k = self.translator.transform(key);
-        let mut hasher = self.translator.build_hasher();
-        k.hash(&mut hasher);
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut hasher);
         let pos = hasher.finish() % self.table_size;
 
         let read = self
@@ -222,7 +206,7 @@ where
 
         while let Some(offset) = current {
             let node = self.journal.get(0, offset).await?.expect("record missing");
-            if node.key == k {
+            if node.key.as_slice() == key {
                 values.push(node.value);
             } else {
                 self.wasted_reads.inc();
@@ -250,7 +234,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::translator::TwoCap;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Metrics, Runner};
 
@@ -262,21 +245,19 @@ mod tests {
                 table_partition: "disk_index_basic_table".into(),
                 journal_partition: "disk_index_basic_journal".into(),
                 write_buffer: 128,
-                codec: ((), ()),
+                codec: (),
                 table_size: 1024,
             };
-            let translator = TwoCap;
-            let mut index =
-                Index::<_, _, u32>::init(context.clone(), cfg.clone(), translator.clone())
-                    .await
-                    .expect("init");
+            let mut index = Index::<_, u32>::init(context.clone(), cfg.clone())
+                .await
+                .expect("init");
 
             index.insert(b"a1", 1).await.unwrap();
             index.insert(b"b1", 2).await.unwrap();
             index.sync().await.unwrap();
             index.close().await.unwrap();
 
-            let index = Index::<_, _, u32>::init(context.clone(), cfg, translator)
+            let index = Index::<_, u32>::init(context.clone(), cfg)
                 .await
                 .expect("reinit");
             assert_eq!(index.get(b"a1").await.unwrap(), vec![1]);
@@ -295,31 +276,28 @@ mod tests {
                 table_partition: "disk_index_collision_table".into(),
                 journal_partition: "disk_index_collision_journal".into(),
                 write_buffer: 128,
-                codec: ((), ()),
-                table_size: 1024,
+                codec: (),
+                table_size: 1, // force a collision
             };
-            let translator = TwoCap;
-            let mut index =
-                Index::<_, _, u32>::init(context.clone(), cfg.clone(), translator.clone())
-                    .await
-                    .expect("init");
+            let mut index = Index::<_, u32>::init(context.clone(), cfg.clone())
+                .await
+                .expect("init");
 
             index.insert(b"ab", 1).await.unwrap();
             index.insert(b"abc", 2).await.unwrap();
 
-            let expected = vec![2, 1];
-            assert_eq!(index.get(b"ab").await.unwrap(), expected);
-            assert_eq!(index.get(b"abc").await.unwrap(), expected);
+            assert_eq!(index.get(b"ab").await.unwrap(), vec![1]);
+            assert_eq!(index.get(b"abc").await.unwrap(), vec![2]);
 
             index.sync().await.unwrap();
             index.close().await.unwrap();
 
-            let index = Index::<_, _, u32>::init(context.clone(), cfg, translator)
+            let index = Index::<_, u32>::init(context.clone(), cfg)
                 .await
                 .expect("reinit");
-            assert_eq!(index.get(b"ab").await.unwrap(), expected);
+            assert_eq!(index.get(b"ab").await.unwrap(), vec![1]);
             let metrics = context.encode();
-            assert!(metrics.contains("keys 1"));
+            assert!(metrics.contains("keys 2"));
             assert!(metrics.contains("items 2"));
         });
     }
@@ -332,15 +310,13 @@ mod tests {
                 table_partition: "disk_index_unclean_table".into(),
                 journal_partition: "disk_index_unclean_journal".into(),
                 write_buffer: 128,
-                codec: ((), ()),
+                codec: (),
                 table_size: 1024,
             };
-            let translator = TwoCap;
             {
-                let mut index =
-                    Index::<_, _, u32>::init(context.clone(), cfg.clone(), translator.clone())
-                        .await
-                        .expect("init");
+                let mut index = Index::<_, u32>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("init");
 
                 // two keys that will be synced
                 index.insert(b"ab", 1).await.unwrap();
@@ -352,10 +328,9 @@ mod tests {
             }
 
             // unsynced key should be gone but others remain
-            let mut index =
-                Index::<_, _, u32>::init(context.clone(), cfg.clone(), translator.clone())
-                    .await
-                    .expect("reinit");
+            let mut index = Index::<_, u32>::init(context.clone(), cfg.clone())
+                .await
+                .expect("reinit");
             assert_eq!(index.get(b"ab").await.unwrap(), vec![1]);
             assert_eq!(index.get(b"cd").await.unwrap(), vec![2]);
             assert!(index.get(b"ef").await.unwrap().is_empty());
@@ -364,7 +339,7 @@ mod tests {
             index.sync().await.unwrap();
             index.close().await.unwrap();
 
-            let index = Index::<_, _, u32>::init(context.clone(), cfg, translator)
+            let index = Index::<_, u32>::init(context.clone(), cfg)
                 .await
                 .expect("final");
             assert_eq!(index.get(b"ab").await.unwrap(), vec![1]);
