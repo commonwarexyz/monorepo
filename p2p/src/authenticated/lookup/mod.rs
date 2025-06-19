@@ -185,7 +185,7 @@ mod tests {
         let metrics = context.encode();
         assert!(
             !metrics.contains("messages_rate_limited_total{"),
-            "ping messages should not be rate limited: {}",
+            "no messages should be rate limited: {}",
             metrics
         );
     }
