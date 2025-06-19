@@ -219,14 +219,18 @@ pub struct AuthenticationProof {
 }
 
 impl AuthenticationProof {
-    /// Create a new authentication proof using the provided cipher and timestamp.
+    /// Create a new authentication proof using the provided cipher and ephemeral public key.
     ///
-    /// The proof encrypts the string "auth_proof" concatenated with the timestamp
-    /// using the provided nonce.
-    pub fn create(cipher: &ChaCha20Poly1305, nonce: &Nonce, timestamp: u64) -> Result<Self, Error> {
+    /// The proof encrypts the ephemeral public key of the peer to demonstrate
+    /// knowledge of the shared secret in a challenge-response fashion.
+    pub fn create(
+        cipher: &ChaCha20Poly1305,
+        nonce: &Nonce,
+        ephemeral_key: &x25519::PublicKey,
+    ) -> Result<Self, Error> {
         // Encrypt the proof
         let encrypted_proof = cipher
-            .encrypt(nonce, timestamp.encode().as_ref())
+            .encrypt(nonce, ephemeral_key.encode().as_ref())
             .map_err(|_| Error::EncryptionFailed)?;
 
         Ok(Self {
@@ -234,14 +238,14 @@ impl AuthenticationProof {
         })
     }
 
-    /// Verify the authentication proof using the provided cipher and timestamp.
+    /// Verify the authentication proof using the provided cipher and ephemeral public key.
     ///
     /// Returns Ok(()) if the proof is valid, otherwise returns an error.
     pub fn verify(
         &self,
         cipher: &ChaCha20Poly1305,
         nonce: &Nonce,
-        timestamp: u64,
+        ephemeral_key: &x25519::PublicKey,
     ) -> Result<(), Error> {
         // Decrypt the proof
         let decrypted = cipher
@@ -249,7 +253,7 @@ impl AuthenticationProof {
             .map_err(|_| Error::DecryptionFailed)?;
 
         // Verify the proof content
-        let expected_proof = timestamp.encode();
+        let expected_proof = ephemeral_key.encode();
         if decrypted == expected_proof {
             Ok(())
         } else {
@@ -268,7 +272,7 @@ impl Read for AuthenticationProof {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let len = u64::SIZE + ENCRYPTION_TAG_LENGTH;
+        let len = x25519::PublicKey::SIZE + ENCRYPTION_TAG_LENGTH;
         let range = RangeCfg::from(len..=len);
         let encrypted_proof = Bytes::read_cfg(buf, &range)?;
         Ok(Self { encrypted_proof })
@@ -698,23 +702,24 @@ mod tests {
 
         let key = [1u8; 32];
         let cipher = ChaCha20Poly1305::new(&key.into());
-        let timestamp = 12345u64;
+        let ephemeral_key = x25519::PublicKey::from_bytes([42u8; 32]);
 
         // Create authentication proof
         let nonce_zero = Nonce::from_slice(&[0u8; 12]);
-        let proof = AuthenticationProof::create(&cipher, nonce_zero, timestamp).unwrap();
+        let proof = AuthenticationProof::create(&cipher, nonce_zero, &ephemeral_key).unwrap();
 
         // Verify the proof with the same parameters
-        proof.verify(&cipher, nonce_zero, timestamp).unwrap();
+        proof.verify(&cipher, nonce_zero, &ephemeral_key).unwrap();
 
-        // Verify that proof fails with different timestamp
-        let result = proof.verify(&cipher, nonce_zero, timestamp + 1);
+        // Verify that proof fails with different ephemeral key
+        let different_ephemeral = x25519::PublicKey::from_bytes([43u8; 32]);
+        let result = proof.verify(&cipher, nonce_zero, &different_ephemeral);
         assert!(matches!(result, Err(Error::InvalidAuthenticationProof)));
 
         // Verify that proof fails with different cipher
         let different_key = [2u8; 32];
         let different_cipher = ChaCha20Poly1305::new(&different_key.into());
-        let result = proof.verify(&different_cipher, nonce_zero, timestamp);
+        let result = proof.verify(&different_cipher, nonce_zero, &ephemeral_key);
         assert!(matches!(result, Err(Error::DecryptionFailed)));
     }
 
@@ -725,17 +730,18 @@ mod tests {
 
         let key = [1u8; 32];
         let cipher = ChaCha20Poly1305::new(&key.into());
-        let timestamp = 12345u64;
+        let ephemeral_key = x25519::PublicKey::from_bytes([42u8; 32]);
 
         // Create and encode proof
         let nonce_zero = Nonce::from_slice(&[0u8; 12]);
-        let original_proof = AuthenticationProof::create(&cipher, nonce_zero, timestamp).unwrap();
+        let original_proof =
+            AuthenticationProof::create(&cipher, nonce_zero, &ephemeral_key).unwrap();
         let encoded = original_proof.encode();
 
         // Decode and verify it matches
         let decoded_proof = AuthenticationProof::decode(encoded).unwrap();
         decoded_proof
-            .verify(&cipher, nonce_zero, timestamp)
+            .verify(&cipher, nonce_zero, &ephemeral_key)
             .unwrap();
     }
 
@@ -762,7 +768,8 @@ mod tests {
         let key = [1u8; 32];
         let cipher = ChaCha20Poly1305::new(&key.into());
         let nonce_zero = Nonce::from_slice(&[0u8; 12]);
-        let auth_proof = AuthenticationProof::create(&cipher, nonce_zero, 12345).unwrap();
+        let auth_proof =
+            AuthenticationProof::create(&cipher, nonce_zero, &ephemeral_public_key).unwrap();
 
         // Create and encode listener response
         let original_response = ListenerResponse::new(handshake, auth_proof);
@@ -774,7 +781,9 @@ mod tests {
 
         assert_eq!(decoded_handshake.signer(), sender.public_key());
         let nonce_zero = Nonce::from_slice(&[0u8; 12]);
-        decoded_proof.verify(&cipher, nonce_zero, 12345).unwrap();
+        decoded_proof
+            .verify(&cipher, nonce_zero, &ephemeral_public_key)
+            .unwrap();
     }
 
     #[test]
@@ -784,10 +793,10 @@ mod tests {
 
         let key = [1u8; 32];
         let cipher = ChaCha20Poly1305::new(&key.into());
-        let timestamp = 12345u64;
+        let ephemeral_key = x25519::PublicKey::from_bytes([42u8; 32]);
 
         let nonce_zero = Nonce::from_slice(&[0u8; 12]);
-        let auth_proof = AuthenticationProof::create(&cipher, nonce_zero, timestamp).unwrap();
+        let auth_proof = AuthenticationProof::create(&cipher, nonce_zero, &ephemeral_key).unwrap();
 
         // Create and encode dialer confirmation
         let original_confirmation = DialerConfirmation::new(auth_proof);
@@ -797,7 +806,7 @@ mod tests {
         let decoded_confirmation = DialerConfirmation::decode(encoded).unwrap();
         decoded_confirmation
             .auth_proof()
-            .verify(&cipher, nonce_zero, timestamp)
+            .verify(&cipher, nonce_zero, &ephemeral_key)
             .unwrap();
     }
 

@@ -147,14 +147,11 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
 
         // Send handshake (Message 1)
         let dialer_timestamp = context.current().epoch_millis();
+        let dialer_ephemeral = x25519::PublicKey::from_secret(&secret);
         let d2l_msg = handshake::Signed::sign(
             &mut config.crypto,
             &config.namespace,
-            handshake::Info::new(
-                peer.clone(),
-                x25519::PublicKey::from_secret(&secret),
-                dialer_timestamp,
-            ),
+            handshake::Info::new(peer.clone(), dialer_ephemeral, dialer_timestamp),
         )
         .encode();
 
@@ -215,14 +212,18 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let mut l2d_nonce = nonce::Info::default();
 
         // Verify listener's authentication proof (uses nonce 0)
-        let listener_timestamp = signed_handshake.timestamp();
+        // Listener should have encrypted our (dialer's) ephemeral public key
         let l2d_auth_nonce = l2d_nonce.next()?;
-        listener_auth_proof.verify(&l2d_cipher, &l2d_auth_nonce, listener_timestamp)?;
+        listener_auth_proof.verify(&l2d_cipher, &l2d_auth_nonce, &dialer_ephemeral)?;
 
         // Create and send dialer confirmation (Message 3)
+        // We encrypt the listener's ephemeral public key to prove we can derive the shared secret
         let d2l_auth_nonce = d2l_nonce.next()?;
-        let dialer_auth_proof =
-            handshake::AuthenticationProof::create(&d2l_cipher, &d2l_auth_nonce, dialer_timestamp)?;
+        let dialer_auth_proof = handshake::AuthenticationProof::create(
+            &d2l_cipher,
+            &d2l_auth_nonce,
+            &signed_handshake.ephemeral(),
+        )?;
         let dialer_confirmation = handshake::DialerConfirmation::new(dialer_auth_proof);
         let confirmation_bytes = dialer_confirmation.encode();
 
@@ -270,14 +271,11 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
 
         // Create handshake
         let timestamp = context.current().epoch_millis();
+        let listener_ephemeral = x25519::PublicKey::from_secret(&secret);
         let l2d_handshake = handshake::Signed::sign(
             &mut crypto,
             &namespace,
-            handshake::Info::new(
-                incoming.peer_public_key,
-                x25519::PublicKey::from_secret(&secret),
-                timestamp,
-            ),
+            handshake::Info::new(incoming.peer_public_key, listener_ephemeral, timestamp),
         );
         let l2d_msg = l2d_handshake.encode();
 
@@ -296,9 +294,13 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let mut l2d_nonce = nonce::Info::default();
 
         // Create authentication proof using the derived cipher (uses nonce 0)
+        // We encrypt the dialer's ephemeral public key to prove we can derive the shared secret
         let l2d_auth_nonce = l2d_nonce.next()?;
-        let auth_proof =
-            handshake::AuthenticationProof::create(&l2d_cipher, &l2d_auth_nonce, timestamp)?;
+        let auth_proof = handshake::AuthenticationProof::create(
+            &l2d_cipher,
+            &l2d_auth_nonce,
+            &incoming.ephemeral_public_key,
+        )?;
 
         // Create and send listener response (Message 2)
         let listener_response = handshake::ListenerResponse::new(l2d_handshake, auth_proof);
@@ -327,16 +329,14 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let dialer_confirmation = handshake::DialerConfirmation::decode(confirmation_msg.as_ref())
             .map_err(Error::UnableToDecode)?;
 
-        // Verify dialer's authentication proof using dialer's original timestamp
-        let dialer_handshake =
-            handshake::Signed::<C::PublicKey>::decode(incoming.dialer_handshake_bytes.as_ref())
-                .map_err(Error::UnableToDecode)?;
-        let dialer_ts = dialer_handshake.timestamp();
-
+        // Verify dialer's authentication proof
+        // Dialer should have encrypted our (listener's) ephemeral public key
         let d2l_auth_nonce = d2l_nonce.next()?;
-        dialer_confirmation
-            .auth_proof()
-            .verify(&d2l_cipher, &d2l_auth_nonce, dialer_ts)?;
+        dialer_confirmation.auth_proof().verify(
+            &d2l_cipher,
+            &d2l_auth_nonce,
+            &listener_ephemeral,
+        )?;
 
         // Connection successfully established with mutual authentication
         Ok(Connection {
@@ -712,11 +712,15 @@ mod tests {
                     let signed_handshake =
                         handshake::Signed::sign(&mut actual_peer, &peer_config.namespace, info);
 
-                    // Create fake authentication proof
+                    // Create fake authentication proof (using wrong ephemeral key)
+                    let fake_ephemeral = x25519::PublicKey::from_bytes([99u8; 32]);
                     let nonce_zero = chacha20poly1305::Nonce::from_slice(&[0u8; 12]);
-                    let auth_proof =
-                        handshake::AuthenticationProof::create(&mock_cipher, nonce_zero, timestamp)
-                            .unwrap();
+                    let auth_proof = handshake::AuthenticationProof::create(
+                        &mock_cipher,
+                        nonce_zero,
+                        &fake_ephemeral,
+                    )
+                    .unwrap();
                     let listener_response =
                         handshake::ListenerResponse::new(signed_handshake, auth_proof);
 
@@ -791,11 +795,15 @@ mod tests {
                     let signed_handshake =
                         handshake::Signed::sign(&mut listener_crypto, &namespace, info);
 
-                    // Create fake authentication proof and ListenerResponse
+                    // Create fake authentication proof and ListenerResponse (using wrong ephemeral key)
+                    let fake_ephemeral = x25519::PublicKey::from_bytes([99u8; 32]);
                     let nonce_zero = chacha20poly1305::Nonce::from_slice(&[0u8; 12]);
-                    let auth_proof =
-                        handshake::AuthenticationProof::create(&mock_cipher, nonce_zero, timestamp)
-                            .unwrap();
+                    let auth_proof = handshake::AuthenticationProof::create(
+                        &mock_cipher,
+                        nonce_zero,
+                        &fake_ephemeral,
+                    )
+                    .unwrap();
                     let listener_response =
                         handshake::ListenerResponse::new(signed_handshake, auth_proof);
 
