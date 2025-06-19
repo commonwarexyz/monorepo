@@ -1005,6 +1005,8 @@ dependencies = [
 name = "commonware-codec-derive"
 version = "0.0.54"
 dependencies = [
+ "bytes",
+ "commonware-codec",
  "proc-macro2",
  "quote",
  "syn 2.0.98",

@@ -5,7 +5,7 @@ use commonware_codec::{
     codec::*,
     extensions::*,
     varint::{SInt, UInt},
-    EncodeSize, Read, Write,
+    EncodeSize, Error, Read, Write,
 };
 
 #[derive(Debug, Clone, PartialEq, Read, Write, EncodeSize)]
@@ -57,6 +57,38 @@ struct DefaultConfigStruct {
     count: u32, // Uses () (no config needed)
 }
 // Cfg type should be () since default_data is excluded and count needs no config
+
+#[derive(Debug, Clone, PartialEq, Read, Write, EncodeSize)]
+enum SimpleEnum {
+    Unit,
+    Tuple(u32),
+    Struct { field: u16 },
+}
+
+#[derive(Debug, Clone, PartialEq, Read, Write, EncodeSize)]
+enum VarintEnum {
+    None,
+    Value(#[codec(varint)] u32),
+    Signed(#[codec(varint)] i32),
+}
+
+#[derive(Debug, Clone, PartialEq, Read, Write, EncodeSize)]
+enum ComplexEnum {
+    Empty,
+    Single(bool),
+    Double(u16, u32),
+    Named {
+        id: u8,
+        #[codec(varint)]
+        count: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Read, Write, EncodeSize)]
+enum NestedEnum {
+    Simple(SimpleEnum),
+    WithStruct { point: SimpleStruct, tag: u8 },
+}
 
 #[cfg(test)]
 mod tests {
@@ -279,5 +311,208 @@ mod tests {
         let encoded = original.encode();
         let decoded = DefaultConfigStruct::read_cfg(&mut encoded.as_ref(), &cfg).unwrap();
         assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_simple_enum_unit() {
+        let original = SimpleEnum::Unit;
+
+        // Test encode size
+        assert_eq!(original.encode_size(), 1); // Just discriminant
+
+        // Test encode/decode
+        let encoded = original.encode();
+        assert_eq!(encoded.len(), 1);
+        assert_eq!(encoded[0], 0); // First variant = discriminant 0
+
+        let decoded = SimpleEnum::decode(encoded).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_simple_enum_tuple() {
+        let original = SimpleEnum::Tuple(42);
+
+        // Test encode size
+        assert_eq!(original.encode_size(), 1 + 4); // discriminant + u32
+
+        // Test encode/decode
+        let encoded = original.encode();
+        assert_eq!(encoded.len(), 5);
+        assert_eq!(encoded[0], 1); // Second variant = discriminant 1
+
+        let decoded = SimpleEnum::decode(encoded).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_simple_enum_struct() {
+        let original = SimpleEnum::Struct { field: 1337 };
+
+        // Test encode size
+        assert_eq!(original.encode_size(), 1 + 2); // discriminant + u16
+
+        // Test encode/decode
+        let encoded = original.encode();
+        assert_eq!(encoded.len(), 3);
+        assert_eq!(encoded[0], 2); // Third variant = discriminant 2
+
+        let decoded = SimpleEnum::decode(encoded).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_varint_enum() {
+        let test_cases = [
+            VarintEnum::None,
+            VarintEnum::Value(127), // Single byte varint
+            VarintEnum::Value(300), // Multi-byte varint
+            VarintEnum::Signed(-1),
+            VarintEnum::Signed(-64),
+        ];
+
+        for original in test_cases {
+            let encoded = original.encode();
+            let decoded = VarintEnum::decode(encoded.clone()).unwrap();
+            assert_eq!(original, decoded);
+
+            // Verify that encode_size matches actual encoded length
+            assert_eq!(original.encode_size(), encoded.len());
+        }
+    }
+
+    #[test]
+    fn test_varint_enum_efficiency() {
+        // Test that varint encoding is more efficient for small values
+        let small_value = VarintEnum::Value(127);
+        let large_value = VarintEnum::Value(u32::MAX);
+
+        // Small value should use fewer bytes than large value
+        assert!(small_value.encode_size() < large_value.encode_size());
+
+        // Small signed value should be efficient
+        let small_signed = VarintEnum::Signed(-1);
+        assert_eq!(small_signed.encode_size(), 2); // 1 discriminant + 1 varint byte
+    }
+
+    #[test]
+    fn test_complex_enum() {
+        let test_cases = [
+            ComplexEnum::Empty,
+            ComplexEnum::Single(true),
+            ComplexEnum::Single(false),
+            ComplexEnum::Double(0x1234, 0xABCDEF01),
+            ComplexEnum::Named {
+                id: 42,
+                count: 1000000,
+            },
+        ];
+
+        for original in test_cases {
+            let encoded = original.encode();
+            let decoded = ComplexEnum::decode(encoded.clone()).unwrap();
+            assert_eq!(original, decoded);
+
+            // Verify that encode_size matches actual encoded length
+            assert_eq!(original.encode_size(), encoded.len());
+        }
+    }
+
+    #[test]
+    fn test_nested_enum() {
+        let test_cases = [
+            NestedEnum::Simple(SimpleEnum::Unit),
+            NestedEnum::Simple(SimpleEnum::Tuple(123)),
+            NestedEnum::Simple(SimpleEnum::Struct { field: 456 }),
+            NestedEnum::WithStruct {
+                point: SimpleStruct {
+                    a: 1,
+                    b: 2,
+                    c: true,
+                },
+                tag: 99,
+            },
+        ];
+
+        for original in test_cases {
+            let encoded = original.encode();
+            let decoded = NestedEnum::decode(encoded.clone()).unwrap();
+            assert_eq!(original, decoded);
+
+            // Verify that encode_size matches actual encoded length
+            assert_eq!(original.encode_size(), encoded.len());
+        }
+    }
+
+    #[test]
+    fn test_enum_discriminant_values() {
+        // Test that discriminants are assigned correctly (0, 1, 2, ...)
+        let unit = SimpleEnum::Unit.encode();
+        let tuple = SimpleEnum::Tuple(0).encode();
+        let struct_variant = SimpleEnum::Struct { field: 0 }.encode();
+
+        assert_eq!(unit[0], 0);
+        assert_eq!(tuple[0], 1);
+        assert_eq!(struct_variant[0], 2);
+    }
+
+    #[test]
+    fn test_enum_invalid_discriminant() {
+        // Test that invalid discriminants return InvalidEnum error
+        let invalid_data = vec![255u8]; // Invalid discriminant for SimpleEnum
+        let result = SimpleEnum::decode(&mut invalid_data.as_slice());
+
+        assert!(matches!(result, Err(Error::InvalidEnum(255))));
+    }
+
+    #[test]
+    fn test_enum_write_implementation() {
+        let value = ComplexEnum::Named {
+            id: 42,
+            count: 1000,
+        };
+
+        let mut buf = BytesMut::with_capacity(value.encode_size());
+        value.write(&mut buf);
+
+        // Verify the buffer has the expected length
+        assert_eq!(buf.len(), value.encode_size());
+    }
+
+    #[test]
+    fn test_enum_read_implementation() {
+        let original = ComplexEnum::Double(0x1234, 0xABCDEF01);
+
+        let encoded = original.encode();
+        let mut buf = &encoded[..];
+
+        let decoded = ComplexEnum::read_cfg(&mut buf, &()).unwrap();
+        assert_eq!(original, decoded);
+        assert_eq!(buf.len(), 0); // All bytes should be consumed
+    }
+
+    #[test]
+    fn test_enum_conformity() {
+        // Test specific wire format expectations
+
+        // Unit variant: just discriminant
+        assert_eq!(SimpleEnum::Unit.encode().as_ref(), &[0]);
+
+        // Tuple variant: discriminant + data
+        assert_eq!(
+            SimpleEnum::Tuple(0x1234).encode().as_ref(),
+            &[1, 0x00, 0x00, 0x12, 0x34]
+        );
+
+        // Struct variant: discriminant + field data
+        assert_eq!(
+            SimpleEnum::Struct { field: 0xABCD }.encode().as_ref(),
+            &[2, 0xAB, 0xCD]
+        );
+
+        // Complex enum with varints
+        assert_eq!(VarintEnum::None.encode().as_ref(), &[0]);
+        assert_eq!(VarintEnum::Value(127).encode().as_ref(), &[1, 0x7F]);
+        assert_eq!(VarintEnum::Signed(-1).encode().as_ref(), &[2, 0x01]); // ZigZag encoding
     }
 }

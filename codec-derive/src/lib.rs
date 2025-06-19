@@ -9,7 +9,7 @@ use syn::{
 
 /// Derive macro for the `Read` trait.
 ///
-/// Automatically implements `Read` for structs where all fields implement `Read`.
+/// Automatically implements `Read` for structs and enums where all fields implement `Read`.
 /// The `Cfg` type is automatically inferred from field attributes and types.
 ///
 /// # Helper Attributes
@@ -29,10 +29,18 @@ use syn::{
 /// - Single config field uses the type directly (not wrapped in tuple)
 /// - Fields without explicit `#[config]` use inferred defaults (e.g., `RangeCfg` for `Vec`, `String`)
 ///
+/// # Enum Support
+///
+/// Enums are encoded with a u8 discriminant (0, 1, 2, ...) followed by the variant data.
+/// - Maximum 256 variants supported
+/// - Unit variants encode as just the discriminant
+/// - Data variants encode discriminant + field data
+/// - Enum `Cfg` type is currently always `()` for simplicity
+///
 /// # Example
 ///
 /// ```
-/// use commonware_codec::{Read, extensions::ReadExt, RangeCfg};
+/// use commonware_codec::{extensions::ReadExt, RangeCfg};
 /// use commonware_codec_derive::Read;
 ///
 /// #[derive(Read)]
@@ -50,17 +58,19 @@ use syn::{
 /// }
 ///
 /// #[derive(Read)]
-/// struct ConfigurableStruct {
-///     #[config(RangeCfg)]
-///     data: Vec<u8>,      // Uses RangeCfg for length limits
-///     #[config(default)]
-///     more_data: Vec<u8>, // Uses Default::default() for RangeCfg
-///     count: u32,         // Uses () (no config needed)
+/// enum Message {
+///     Ping,
+///     Pong(u32),
+///     Data { id: u16, count: u32 },
 /// }
-/// // Cfg type is RangeCfg - single config type, not wrapped in tuple
-/// // The `more_data` field is excluded from cfg tuple since it uses default
 ///
-/// // Read is now implemented for all structs
+/// #[derive(Read)]
+/// struct SimpleStruct {
+///     id: u32,
+///     value: u16,
+/// }
+///
+/// // Read is now implemented for all types
 /// ```
 #[proc_macro_derive(Read, attributes(codec, config))]
 pub fn derive_read(input: TokenStream) -> TokenStream {
@@ -72,7 +82,7 @@ pub fn derive_read(input: TokenStream) -> TokenStream {
 
 /// Derive macro for the `Write` trait.
 ///
-/// Automatically implements `Write` for structs where all fields implement `Write`.
+/// Automatically implements `Write` for structs and enums where all fields implement `Write`.
 ///
 /// # Codec Helper Attributes
 ///
@@ -81,10 +91,16 @@ pub fn derive_read(input: TokenStream) -> TokenStream {
 ///
 /// Supported types: u16, u32, u64, u128, i16, i32, i64, i128
 ///
+/// # Enum Support
+///
+/// Enums are encoded with a u8 discriminant (0, 1, 2, ...) followed by the variant data.
+/// - Maximum 256 variants supported
+/// - Unit variants encode as just the discriminant
+/// - Data variants encode discriminant + field data
+///
 /// # Example
 ///
 /// ```
-/// use commonware_codec::Write;
 /// use commonware_codec_derive::Write;
 ///
 /// #[derive(Write)]
@@ -101,7 +117,14 @@ pub fn derive_read(input: TokenStream) -> TokenStream {
 ///     y: i32,  // Encoded as SInt (signed varint)
 /// }
 ///
-/// // Write is now implemented for both structs
+/// #[derive(Write)]
+/// enum Message {
+///     Ping,
+///     Pong(u32),
+///     Data { id: u16, payload: Vec<u8> },
+/// }
+///
+/// // Write is now implemented for all types
 /// ```
 #[proc_macro_derive(Write, attributes(codec, config))]
 pub fn derive_write(input: TokenStream) -> TokenStream {
@@ -113,7 +136,7 @@ pub fn derive_write(input: TokenStream) -> TokenStream {
 
 /// Derive macro for the `EncodeSize` trait.
 ///
-/// Automatically implements `EncodeSize` for structs where all fields implement `EncodeSize`.
+/// Automatically implements `EncodeSize` for structs and enums where all fields implement `EncodeSize`.
 ///
 /// # Codec Helper Attributes
 ///
@@ -122,10 +145,15 @@ pub fn derive_write(input: TokenStream) -> TokenStream {
 ///
 /// Supported types: u16, u32, u64, u128, i16, i32, i64, i128
 ///
+/// # Enum Support
+///
+/// Enums return size as 1 (discriminant) + size of variant data.
+/// - Unit variants return size 1
+/// - Data variants return 1 + sum of field sizes
+///
 /// # Example
 ///
 /// ```
-/// use commonware_codec::EncodeSize;
 /// use commonware_codec_derive::EncodeSize;
 ///
 /// #[derive(EncodeSize)]
@@ -142,7 +170,14 @@ pub fn derive_write(input: TokenStream) -> TokenStream {
 ///     y: i32,  // Encoded as SInt (signed varint)
 /// }
 ///
-/// // EncodeSize is now implemented for both structs
+/// #[derive(EncodeSize)]
+/// enum Message {
+///     Ping,           // Size: 1
+///     Pong(u32),      // Size: 1 + 4 = 5
+///     Data { id: u16, payload: Vec<u8> },  // Size: 1 + 2 + payload.encode_size()
+/// }
+///
+/// // EncodeSize is now implemented for all types
 /// ```
 #[proc_macro_derive(EncodeSize, attributes(codec, config))]
 pub fn derive_encode_size(input: TokenStream) -> TokenStream {
@@ -162,12 +197,7 @@ fn expand_read(input: &DeriveInput) -> syn::Result<TokenStream2> {
             Fields::Unnamed(fields) => expand_read_unnamed_fields_with_cfg(fields)?,
             Fields::Unit => (quote! { Ok(#name) }, syn::parse_quote!(())),
         },
-        Data::Enum(_) => {
-            return Err(syn::Error::new_spanned(
-                input,
-                "Read derive macro does not support enums",
-            ));
-        }
+        Data::Enum(data) => expand_read_enum_with_cfg(data)?,
         Data::Union(_) => {
             return Err(syn::Error::new_spanned(
                 input,
@@ -197,12 +227,7 @@ fn expand_write(input: &DeriveInput) -> syn::Result<TokenStream2> {
             Fields::Unnamed(fields) => expand_write_unnamed_fields(fields)?,
             Fields::Unit => quote! {},
         },
-        Data::Enum(_) => {
-            return Err(syn::Error::new_spanned(
-                input,
-                "Write derive macro does not support enums",
-            ));
-        }
+        Data::Enum(data) => expand_write_enum(data)?,
         Data::Union(_) => {
             return Err(syn::Error::new_spanned(
                 input,
@@ -230,12 +255,7 @@ fn expand_encode_size(input: &DeriveInput) -> syn::Result<TokenStream2> {
             Fields::Unnamed(fields) => expand_encode_size_unnamed_fields(fields)?,
             Fields::Unit => quote! { 0 },
         },
-        Data::Enum(_) => {
-            return Err(syn::Error::new_spanned(
-                input,
-                "EncodeSize derive macro does not support enums",
-            ));
-        }
+        Data::Enum(data) => expand_encode_size_enum(data)?,
         Data::Union(_) => {
             return Err(syn::Error::new_spanned(
                 input,
@@ -638,13 +658,13 @@ fn generate_field_read_with_cfg(
 fn generate_field_write(field_access: TokenStream2, wrapper: &CodecWrapper) -> TokenStream2 {
     match wrapper {
         CodecWrapper::None => quote! {
-            ::commonware_codec::Write::write(&#field_access, buf);
+            (#field_access).write(buf);
         },
         CodecWrapper::UInt => quote! {
-            ::commonware_codec::Write::write(&::commonware_codec::varint::UInt(#field_access), buf);
+            ::commonware_codec::varint::UInt(#field_access).write(buf);
         },
         CodecWrapper::SInt => quote! {
-            ::commonware_codec::Write::write(&::commonware_codec::varint::SInt(#field_access), buf);
+            ::commonware_codec::varint::SInt(#field_access).write(buf);
         },
     }
 }
@@ -653,13 +673,13 @@ fn generate_field_write(field_access: TokenStream2, wrapper: &CodecWrapper) -> T
 fn generate_field_encode_size(field_access: TokenStream2, wrapper: &CodecWrapper) -> TokenStream2 {
     match wrapper {
         CodecWrapper::None => quote! {
-            ::commonware_codec::EncodeSize::encode_size(&#field_access)
+            (#field_access).encode_size()
         },
         CodecWrapper::UInt => quote! {
-            ::commonware_codec::EncodeSize::encode_size(&::commonware_codec::varint::UInt(#field_access))
+            ::commonware_codec::varint::UInt(#field_access).encode_size()
         },
         CodecWrapper::SInt => quote! {
-            ::commonware_codec::EncodeSize::encode_size(&::commonware_codec::varint::SInt(#field_access))
+            ::commonware_codec::varint::SInt(#field_access).encode_size()
         },
     }
 }
@@ -762,4 +782,251 @@ fn build_cfg_type(field_configs: &[FieldConfig], field_types: &[&syn::Type]) -> 
             })
         }
     }
+}
+
+// ---------- Enum Support Functions ----------
+
+fn expand_read_enum_with_cfg(data: &syn::DataEnum) -> syn::Result<(TokenStream2, syn::Type)> {
+    if data.variants.len() > 256 {
+        return Err(syn::Error::new_spanned(
+            data.variants.first(),
+            "Enum cannot have more than 256 variants (u8 discriminant limit)",
+        ));
+    }
+
+    // For simplicity, enum configurations are always unit type () for now
+    // This can be enhanced later if needed for complex enum variants
+    let cfg_type = syn::parse_quote!(());
+
+    let match_arms = data
+        .variants
+        .iter()
+        .enumerate()
+        .map(|(index, variant)| {
+            let variant_name = &variant.ident;
+            let discriminant = index as u8;
+
+            match &variant.fields {
+                Fields::Unit => Ok(quote! {
+                    #discriminant => Ok(Self::#variant_name),
+                }),
+                Fields::Unnamed(fields) => {
+                    let field_reads = fields
+                        .unnamed
+                        .iter()
+                        .enumerate()
+                        .map(|(i, field)| {
+                            let field_name = format_ident!("field_{}", i);
+                            let field_config = parse_field_attributes(field)?;
+
+                            if is_unit_type(&field.ty) {
+                                Ok(quote! { let #field_name = (); })
+                            } else {
+                                Ok(generate_field_read_with_cfg(
+                                    &field_name,
+                                    &field_config.wrapper,
+                                    quote! { &() },
+                                ))
+                            }
+                        })
+                        .collect::<syn::Result<Vec<_>>>()?;
+
+                    let field_names =
+                        (0..fields.unnamed.len()).map(|i| format_ident!("field_{}", i));
+
+                    Ok(quote! {
+                        #discriminant => {
+                            #(#field_reads)*
+                            Ok(Self::#variant_name(#(#field_names,)*))
+                        },
+                    })
+                }
+                Fields::Named(fields) => {
+                    let field_reads = fields
+                        .named
+                        .iter()
+                        .map(|field| {
+                            let field_name = field.ident.as_ref().unwrap();
+                            let field_config = parse_field_attributes(field)?;
+
+                            if is_unit_type(&field.ty) {
+                                Ok(quote! { let #field_name = (); })
+                            } else {
+                                Ok(generate_field_read_with_cfg(
+                                    field_name,
+                                    &field_config.wrapper,
+                                    quote! { &() },
+                                ))
+                            }
+                        })
+                        .collect::<syn::Result<Vec<_>>>()?;
+
+                    let field_names = fields.named.iter().map(|field| &field.ident);
+
+                    Ok(quote! {
+                        #discriminant => {
+                            #(#field_reads)*
+                            Ok(Self::#variant_name { #(#field_names,)* })
+                        },
+                    })
+                }
+            }
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
+
+    let read_impl = quote! {
+        let discriminant = u8::read(buf)?;
+        match discriminant {
+            #(#match_arms)*
+            invalid => Err(::commonware_codec::Error::InvalidEnum(invalid)),
+        }
+    };
+
+    Ok((read_impl, cfg_type))
+}
+
+fn expand_write_enum(data: &syn::DataEnum) -> syn::Result<TokenStream2> {
+    if data.variants.len() > 256 {
+        return Err(syn::Error::new_spanned(
+            data.variants.first(),
+            "Enum cannot have more than 256 variants (u8 discriminant limit)",
+        ));
+    }
+
+    let match_arms = data
+        .variants
+        .iter()
+        .enumerate()
+        .map(|(index, variant)| {
+            let variant_name = &variant.ident;
+            let discriminant = index as u8;
+
+            match &variant.fields {
+                Fields::Unit => Ok(quote! {
+                    Self::#variant_name => {
+                        ::bytes::BufMut::put_u8(buf, #discriminant);
+                    }
+                }),
+                Fields::Unnamed(fields) => {
+                    let field_patterns =
+                        (0..fields.unnamed.len()).map(|i| format_ident!("field_{}", i));
+                    let field_writes = fields
+                        .unnamed
+                        .iter()
+                        .enumerate()
+                        .map(|(i, field)| {
+                            let field_name = format_ident!("field_{}", i);
+                            let wrapper = parse_codec_attributes(field)?;
+                            Ok(generate_field_write(quote! { *#field_name }, &wrapper))
+                        })
+                        .collect::<syn::Result<Vec<_>>>()?;
+
+                    Ok(quote! {
+                        Self::#variant_name(#(#field_patterns,)*) => {
+                            ::bytes::BufMut::put_u8(buf, #discriminant);
+                            #(#field_writes)*
+                        }
+                    })
+                }
+                Fields::Named(fields) => {
+                    let field_names = fields.named.iter().map(|field| &field.ident);
+                    let field_writes = fields
+                        .named
+                        .iter()
+                        .map(|field| {
+                            let field_name = &field.ident;
+                            let wrapper = parse_codec_attributes(field)?;
+                            Ok(generate_field_write(quote! { *#field_name }, &wrapper))
+                        })
+                        .collect::<syn::Result<Vec<_>>>()?;
+
+                    Ok(quote! {
+                        Self::#variant_name { #(#field_names,)* } => {
+                            ::bytes::BufMut::put_u8(buf, #discriminant);
+                            #(#field_writes)*
+                        }
+                    })
+                }
+            }
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
+
+    Ok(quote! {
+        match self {
+            #(#match_arms)*
+        }
+    })
+}
+
+fn expand_encode_size_enum(data: &syn::DataEnum) -> syn::Result<TokenStream2> {
+    if data.variants.len() > 256 {
+        return Err(syn::Error::new_spanned(
+            data.variants.first(),
+            "Enum cannot have more than 256 variants (u8 discriminant limit)",
+        ));
+    }
+
+    let match_arms = data
+        .variants
+        .iter()
+        .map(|variant| {
+            let variant_name = &variant.ident;
+
+            match &variant.fields {
+                Fields::Unit => Ok(quote! {
+                    Self::#variant_name => 1,
+                }),
+                Fields::Unnamed(fields) => {
+                    let field_patterns =
+                        (0..fields.unnamed.len()).map(|i| format_ident!("field_{}", i));
+                    let field_sizes = fields
+                        .unnamed
+                        .iter()
+                        .enumerate()
+                        .map(|(i, field)| {
+                            let field_name = format_ident!("field_{}", i);
+                            let wrapper = parse_codec_attributes(field)?;
+                            Ok(generate_field_encode_size(
+                                quote! { *#field_name },
+                                &wrapper,
+                            ))
+                        })
+                        .collect::<syn::Result<Vec<_>>>()?;
+
+                    Ok(quote! {
+                        Self::#variant_name(#(#field_patterns,)*) => {
+                            1 #(+ #field_sizes)*
+                        },
+                    })
+                }
+                Fields::Named(fields) => {
+                    let field_names = fields.named.iter().map(|field| &field.ident);
+                    let field_sizes = fields
+                        .named
+                        .iter()
+                        .map(|field| {
+                            let field_name = &field.ident;
+                            let wrapper = parse_codec_attributes(field)?;
+                            Ok(generate_field_encode_size(
+                                quote! { *#field_name },
+                                &wrapper,
+                            ))
+                        })
+                        .collect::<syn::Result<Vec<_>>>()?;
+
+                    Ok(quote! {
+                        Self::#variant_name { #(#field_names,)* } => {
+                            1 #(+ #field_sizes)*
+                        },
+                    })
+                }
+            }
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
+
+    Ok(quote! {
+        match self {
+            #(#match_arms)*
+        }
+    })
 }
