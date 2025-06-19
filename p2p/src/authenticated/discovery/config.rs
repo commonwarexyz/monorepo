@@ -181,7 +181,7 @@ impl<C: Signer> Config<C> {
             tracked_peer_sets: 4,
             max_peer_set_size: 1 << 16, // 2^16
             gossip_bit_vec_frequency: Duration::from_secs(5),
-            allowed_bit_vec_rate: Quota::per_second(NZU32!(5)),
+            allowed_bit_vec_rate: Quota::per_second(NZU32!(2)),
             peer_gossip_max_count: 32,
             allowed_peers_rate: Quota::per_second(NZU32!(5)),
         }

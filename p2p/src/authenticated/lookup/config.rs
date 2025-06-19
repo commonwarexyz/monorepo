@@ -39,9 +39,6 @@ pub struct Config<C: Signer> {
     /// sending a message will be blocked until the mailbox is processed.
     pub mailbox_size: usize,
 
-    /// Frequency at which we send ping messages to peers.
-    pub ping_frequency: Duration,
-
     /// Time into the future that a timestamp can be and still be considered valid.
     pub synchrony_bound: Duration,
 
@@ -59,6 +56,9 @@ pub struct Config<C: Signer> {
 
     /// Quota for incoming connections across all peers.
     pub allowed_incoming_connection_rate: Quota,
+
+    /// Frequency at which we send ping messages to peers.
+    pub ping_frequency: Duration,
 
     /// Quota for ping messages received from a peer.
     pub allowed_ping_rate: Quota,
@@ -104,13 +104,13 @@ impl<C: Signer> Config<C> {
             allow_private_ips: false,
             max_message_size,
             mailbox_size: 1_000,
-            ping_frequency: Duration::from_secs(50),
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
             allowed_connection_rate_per_peer: Quota::per_minute(NZU32!(1)),
             allowed_incoming_connection_rate: Quota::per_second(NZU32!(256)),
-            allowed_ping_rate: Quota::per_minute(NZU32!(15)),
+            ping_frequency: Duration::from_secs(50),
+            allowed_ping_rate: Quota::per_minute(NZU32!(2)),
             dial_frequency: Duration::from_millis(1_000),
             query_frequency: Duration::from_secs(60),
             tracked_peer_sets: 4,
@@ -139,13 +139,13 @@ impl<C: Signer> Config<C> {
             allow_private_ips: true,
             max_message_size,
             mailbox_size: 1_000,
-            ping_frequency: Duration::from_secs(5),
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
             allowed_connection_rate_per_peer: Quota::per_second(NZU32!(1)),
             allowed_incoming_connection_rate: Quota::per_second(NZU32!(256)),
-            allowed_ping_rate: Quota::per_minute(NZU32!(15)),
+            ping_frequency: Duration::from_secs(5),
+            allowed_ping_rate: Quota::per_second(NZU32!(2)),
             dial_frequency: Duration::from_millis(500),
             query_frequency: Duration::from_secs(30),
             tracked_peer_sets: 4,
@@ -164,13 +164,13 @@ impl<C: Signer> Config<C> {
             allow_private_ips: true,
             max_message_size,
             mailbox_size: 1_000,
-            ping_frequency: Duration::from_secs(1),
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
             allowed_connection_rate_per_peer: Quota::per_second(NZU32!(4)),
             allowed_incoming_connection_rate: Quota::per_second(NZU32!(1_024)),
-            allowed_ping_rate: Quota::per_minute(NZU32!(15)),
+            ping_frequency: Duration::from_secs(1),
+            allowed_ping_rate: Quota::per_second(NZU32!(5)),
             dial_frequency: Duration::from_millis(200),
             query_frequency: Duration::from_millis(5_000),
             tracked_peer_sets: 4,
