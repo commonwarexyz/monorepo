@@ -1,6 +1,6 @@
 use super::{Config, Error, Translator};
 use crate::{
-    index::Index,
+    index::mem::Index,
     journal::variable::{Config as JConfig, Journal},
     rmap::RMap,
 };

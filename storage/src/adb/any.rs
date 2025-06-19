@@ -9,7 +9,7 @@
 
 use crate::{
     adb::{operation::Operation, Error},
-    index::{Index, Translator},
+    index::{mem::Index, Translator},
     journal::fixed::{Config as JConfig, Journal},
     mmr::{
         bitmap::Bitmap,
