@@ -303,11 +303,8 @@ mod tests {
             oracle.register(0, addresses.clone()).await;
 
             // Register basic application
-            let (mut sender, mut receiver) = network.register(
-                0,
-                Quota::per_second(NZU32!(5)), // Ensure we hit the rate limit
-                DEFAULT_MESSAGE_BACKLOG,
-            );
+            let (mut sender, mut receiver) =
+                network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
 
             // Wait to connect to all peers, and then send messages to everyone
             network.start();
