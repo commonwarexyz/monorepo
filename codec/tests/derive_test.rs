@@ -5,8 +5,9 @@ use commonware_codec::{
     codec::*,
     extensions::*,
     varint::{SInt, UInt},
-    EncodeSize, Error, Read, Write,
+    EncodeSize, Error, FixedSize, Read, Write,
 };
+use commonware_codec_derive::FixedSize;
 
 #[derive(Debug, Clone, PartialEq, Read, Write, EncodeSize)]
 struct SimpleStruct {
@@ -514,5 +515,114 @@ mod tests {
         assert_eq!(VarintEnum::None.encode().as_ref(), &[0]);
         assert_eq!(VarintEnum::Value(127).encode().as_ref(), &[1, 0x7F]);
         assert_eq!(VarintEnum::Signed(-1).encode().as_ref(), &[2, 0x01]); // ZigZag encoding
+    }
+}
+
+// FixedSize derive tests
+#[derive(Debug, Clone, PartialEq, FixedSize)]
+struct FixedSimpleStruct {
+    a: u32,
+    b: u64,
+    c: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, FixedSize)]
+struct FixedTupleStruct(u32, u64, bool);
+
+#[derive(Debug, Clone, PartialEq, FixedSize)]
+struct FixedUnitStruct;
+
+#[derive(Debug, Clone, PartialEq, FixedSize)]
+struct FixedArrayStruct {
+    header: [u8; 4],
+    version: u16,
+    flags: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, FixedSize)]
+struct FixedNestedStruct {
+    point: FixedSimpleStruct,
+    value: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, FixedSize)]
+struct FixedFloatStruct {
+    x: f32,
+    y: f64,
+}
+
+#[cfg(test)]
+mod fixed_size_tests {
+    use super::*;
+
+    #[test]
+    fn test_fixed_simple_struct() {
+        // u32 (4) + u64 (8) + bool (1) = 13 bytes
+        assert_eq!(FixedSimpleStruct::SIZE, 13);
+    }
+
+    #[test]
+    fn test_fixed_tuple_struct() {
+        // u32 (4) + u64 (8) + bool (1) = 13 bytes
+        assert_eq!(FixedTupleStruct::SIZE, 13);
+    }
+
+    #[test]
+    fn test_fixed_unit_struct() {
+        // No fields = 0 bytes
+        assert_eq!(FixedUnitStruct::SIZE, 0);
+    }
+
+    #[test]
+    fn test_fixed_array_struct() {
+        // [u8; 4] (4) + u16 (2) + u8 (1) = 7 bytes
+        assert_eq!(FixedArrayStruct::SIZE, 7);
+    }
+
+    #[test]
+    fn test_fixed_nested_struct() {
+        // FixedSimpleStruct (13) + u16 (2) = 15 bytes
+        assert_eq!(FixedNestedStruct::SIZE, 15);
+    }
+
+    #[test]
+    fn test_fixed_float_struct() {
+        // f32 (4) + f64 (8) = 12 bytes
+        assert_eq!(FixedFloatStruct::SIZE, 12);
+    }
+
+    #[test]
+    fn test_fixed_size_automatic_encode_size() {
+        // FixedSize types should automatically implement EncodeSize
+        let instance = FixedSimpleStruct {
+            a: 42,
+            b: 1337,
+            c: true,
+        };
+        assert_eq!(instance.encode_size(), FixedSimpleStruct::SIZE);
+        assert_eq!(instance.encode_size(), 13);
+    }
+
+    #[test]
+    fn test_primitives_are_fixed_size() {
+        // Verify that our primitive types have the expected sizes
+        assert_eq!(u8::SIZE, 1);
+        assert_eq!(u16::SIZE, 2);
+        assert_eq!(u32::SIZE, 4);
+        assert_eq!(u64::SIZE, 8);
+        assert_eq!(i8::SIZE, 1);
+        assert_eq!(i16::SIZE, 2);
+        assert_eq!(i32::SIZE, 4);
+        assert_eq!(i64::SIZE, 8);
+        assert_eq!(f32::SIZE, 4);
+        assert_eq!(f64::SIZE, 8);
+        assert_eq!(bool::SIZE, 1);
+    }
+
+    #[test]
+    fn test_array_fixed_size() {
+        // Arrays should have fixed size equal to their length
+        assert_eq!(<[u8; 10]>::SIZE, 10);
+        assert_eq!(<[u8; 256]>::SIZE, 256);
     }
 }

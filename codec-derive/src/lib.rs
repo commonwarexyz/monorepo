@@ -187,6 +187,59 @@ pub fn derive_encode_size(input: TokenStream) -> TokenStream {
         .into()
 }
 
+/// Derive macro for the `FixedSize` trait.
+///
+/// Automatically implements `FixedSize` for structs where all fields implement `FixedSize`.
+/// The total `SIZE` is calculated as the sum of all field sizes.
+///
+/// # Requirements
+///
+/// - All fields must implement `FixedSize`
+/// - Only works with structs (not enums or unions)
+/// - Does not support generic types currently
+///
+/// # Codec Helper Attributes
+///
+/// The `#[codec(varint)]` attribute is not supported for `FixedSize` since varint encoding
+/// produces variable-length output. Using this attribute will result in a compile error.
+///
+/// # Example
+///
+/// ```
+/// use commonware_codec_derive::FixedSize;
+///
+/// #[derive(FixedSize)]
+/// struct Point {
+///     x: u32,
+///     y: u32,
+/// }
+///
+/// // SIZE = 4 + 4 = 8 bytes
+///
+/// #[derive(FixedSize)]
+/// struct Header {
+///     magic: [u8; 4],
+///     version: u16,
+///     flags: u8,
+/// }
+///
+/// // SIZE = 4 + 2 + 1 = 7 bytes
+///
+/// #[derive(FixedSize)]
+/// struct Tuple(u64, bool, u16);
+///
+/// // SIZE = 8 + 1 + 2 = 11 bytes
+///
+/// // FixedSize is now implemented for all types
+/// ```
+#[proc_macro_derive(FixedSize, attributes(codec))]
+pub fn derive_fixed_size(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    expand_fixed_size(&input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
 fn expand_read(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let name = &input.ident;
     let (impl_generics, type_generics, where_clause) = input.generics.split_for_impl();
@@ -955,6 +1008,99 @@ fn expand_write_enum(data: &syn::DataEnum) -> syn::Result<TokenStream2> {
         match self {
             #(#match_arms)*
         }
+    })
+}
+
+fn expand_fixed_size(input: &DeriveInput) -> syn::Result<TokenStream2> {
+    let name = &input.ident;
+    let (impl_generics, type_generics, where_clause) = input.generics.split_for_impl();
+
+    // Check if there are any generics - we don't support them currently
+    if !input.generics.params.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &input.generics,
+            "FixedSize derive macro does not support generic types",
+        ));
+    }
+
+    let size_calculation = match &input.data {
+        Data::Struct(data) => match &data.fields {
+            Fields::Named(fields) => expand_fixed_size_named_fields(fields)?,
+            Fields::Unnamed(fields) => expand_fixed_size_unnamed_fields(fields)?,
+            Fields::Unit => quote! { 0 },
+        },
+        Data::Enum(_) => {
+            return Err(syn::Error::new_spanned(
+                input,
+                "FixedSize derive macro does not support enums - enums have variable size due to discriminant",
+            ));
+        }
+        Data::Union(_) => {
+            return Err(syn::Error::new_spanned(
+                input,
+                "FixedSize derive macro does not support unions",
+            ));
+        }
+    };
+
+    Ok(quote! {
+        impl #impl_generics ::commonware_codec::FixedSize for #name #type_generics #where_clause {
+            const SIZE: usize = #size_calculation;
+        }
+    })
+}
+
+fn expand_fixed_size_named_fields(fields: &FieldsNamed) -> syn::Result<TokenStream2> {
+    if fields.named.is_empty() {
+        return Ok(quote! { 0 });
+    }
+
+    let field_sizes = fields
+        .named
+        .iter()
+        .map(|field| {
+            // Check for varint attributes - not allowed for FixedSize
+            if let Some(attr) = field.attrs.iter().find(|attr| attr.path().is_ident("codec")) {
+                return Err(syn::Error::new_spanned(
+                    attr,
+                    "FixedSize derive macro does not support #[codec] attributes - varint encoding produces variable-length output",
+                ));
+            }
+
+            let field_type = &field.ty;
+            Ok(quote! { <#field_type as ::commonware_codec::FixedSize>::SIZE })
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
+
+    Ok(quote! {
+        0 #(+ #field_sizes)*
+    })
+}
+
+fn expand_fixed_size_unnamed_fields(fields: &FieldsUnnamed) -> syn::Result<TokenStream2> {
+    if fields.unnamed.is_empty() {
+        return Ok(quote! { 0 });
+    }
+
+    let field_sizes = fields
+        .unnamed
+        .iter()
+        .map(|field| {
+            // Check for varint attributes - not allowed for FixedSize
+            if let Some(attr) = field.attrs.iter().find(|attr| attr.path().is_ident("codec")) {
+                return Err(syn::Error::new_spanned(
+                    attr,
+                    "FixedSize derive macro does not support #[codec] attributes - varint encoding produces variable-length output",
+                ));
+            }
+
+            let field_type = &field.ty;
+            Ok(quote! { <#field_type as ::commonware_codec::FixedSize>::SIZE })
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
+
+    Ok(quote! {
+        0 #(+ #field_sizes)*
     })
 }
 
