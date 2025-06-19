@@ -32,6 +32,7 @@ use std::{
 use tokio::runtime::{Builder, Runtime};
 
 #[cfg(feature = "iouring-network")]
+const IOURING_NETWORK_SIZE: u32 = 1024;
 const IOURING_NETWORK_FORCE_POLL: Option<Duration> = Some(Duration::from_millis(100));
 
 #[derive(Debug)]
@@ -279,6 +280,8 @@ impl crate::Runner for Runner {
                 let config = IoUringNetworkConfig {
                     tcp_nodelay: self.cfg.network_cfg.tcp_nodelay,
                     iouring_config: iouring::Config {
+                        // TODO (#1045): make `IOURING_NETWORK_SIZE` configurable
+                        size: IOURING_NETWORK_SIZE,
                         op_timeout: Some(self.cfg.network_cfg.read_write_timeout),
                         force_poll: IOURING_NETWORK_FORCE_POLL,
                         shutdown_timeout: Some(self.cfg.network_cfg.read_write_timeout),
