@@ -5,7 +5,7 @@ use chacha20poly1305::Nonce;
 /// the nonce is used. Is able to be incremented up-to 96 bits (12 bytes) before overflowing.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Info {
-    pub counter: u128,
+    counter: u128,
 }
 
 /// If the counter is greater-than-or-equal to this value, it is considered to have overflowed.
@@ -13,6 +13,11 @@ pub struct Info {
 const OVERFLOW_VALUE: u128 = 1 << 96;
 
 impl Info {
+    /// Create a new nonce with the given counter value.
+    pub fn new(counter: u128) -> Self {
+        Self { counter }
+    }
+
     /// Encodes the nonce information into a 12-byte array and increments the nonce by 1 (to prevent
     /// reuse).
     ///

@@ -1,4 +1,4 @@
-use super::{cipher, handshake, nonce, x25519, Config};
+use super::{cipher, handshake, nonce, x25519, Config, ENCRYPTION_TAG_LENGTH};
 use crate::{
     utils::codec::{recv_frame, send_frame},
     Error,
@@ -12,10 +12,6 @@ use commonware_runtime::{Clock, Sink, Spawner, Stream};
 use commonware_utils::SystemTimeExt as _;
 use rand::{CryptoRng, Rng};
 use std::time::SystemTime;
-
-// When encrypting data, an encryption tag is appended to the ciphertext.
-// This constant represents the size of the encryption tag in bytes.
-const ENCRYPTION_TAG_LENGTH: usize = 16;
 
 /// An incoming connection with a verified peer handshake.
 pub struct IncomingConnection<C: Signer, Si: Sink, St: Stream> {
@@ -104,6 +100,9 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
     /// Create a new connection from pre-established components.
     ///
     /// This is useful in tests, or when upgrading a connection that has already been verified.
+    ///
+    /// The nonces are initialized to 1 since the 0 nonce is reserved for part of the handshake
+    /// authentication.
     pub fn from_preestablished(
         sink: Si,
         stream: St,
@@ -117,8 +116,8 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             max_message_size,
             cipher_send,
             cipher_recv,
-            nonce_send: nonce::Info { counter: 1 },
-            nonce_recv: nonce::Info { counter: 1 },
+            nonce_send: nonce::Info::new(1),
+            nonce_recv: nonce::Info::new(1),
         }
     }
 
@@ -240,9 +239,9 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         Ok(Self {
             sink,
             stream,
+            max_message_size: config.max_message_size,
             cipher_send: d2l_cipher,
             cipher_recv: l2d_cipher,
-            max_message_size: config.max_message_size,
             nonce_send: d2l_nonce,
             nonce_recv: l2d_nonce,
         })
@@ -355,8 +354,6 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
     ///
     /// This pattern is commonly used to efficiently send and receive messages
     /// over the same connection concurrently.
-    ///
-    /// Uses the nonce counters that were initialized during the handshake process.
     pub fn split(self) -> (Sender<Si>, Receiver<St>) {
         (
             Sender {

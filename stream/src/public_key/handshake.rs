@@ -1,11 +1,12 @@
 //! Operations over handshake messages.
 
-use super::x25519;
+use super::{x25519, ENCRYPTION_TAG_LENGTH};
 use crate::Error;
 use bytes::{Buf, BufMut, Bytes};
 use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, Nonce};
 use commonware_codec::{
-    varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
+    varint::UInt, Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt,
+    Write,
 };
 use commonware_cryptography::{PublicKey, Signer};
 use commonware_runtime::Clock;
@@ -223,12 +224,9 @@ impl AuthenticationProof {
     /// The proof encrypts the string "auth_proof" concatenated with the timestamp
     /// using the provided nonce.
     pub fn create(cipher: &ChaCha20Poly1305, nonce: &Nonce, timestamp: u64) -> Result<Self, Error> {
-        // Create proof plaintext
-        let proof_text = format!("auth_proof{}", timestamp);
-
         // Encrypt the proof
         let encrypted_proof = cipher
-            .encrypt(nonce, proof_text.as_bytes())
+            .encrypt(nonce, timestamp.encode().as_ref())
             .map_err(|_| Error::EncryptionFailed)?;
 
         Ok(Self {
@@ -251,8 +249,8 @@ impl AuthenticationProof {
             .map_err(|_| Error::DecryptionFailed)?;
 
         // Verify the proof content
-        let expected_proof = format!("auth_proof{}", timestamp);
-        if decrypted == expected_proof.as_bytes() {
+        let expected_proof = timestamp.encode();
+        if decrypted == expected_proof {
             Ok(())
         } else {
             Err(Error::InvalidAuthenticationProof)
@@ -262,8 +260,7 @@ impl AuthenticationProof {
 
 impl Write for AuthenticationProof {
     fn write(&self, buf: &mut impl BufMut) {
-        UInt(self.encrypted_proof.len() as u64).write(buf);
-        buf.put_slice(&self.encrypted_proof);
+        self.encrypted_proof.write(buf);
     }
 }
 
@@ -271,24 +268,16 @@ impl Read for AuthenticationProof {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let len_uint: UInt<u64> = UInt::read(buf)?;
-        let len: u64 = len_uint.into();
-        let len_usize = len as usize;
-
-        if buf.remaining() < len_usize {
-            return Err(CodecError::EndOfBuffer);
-        }
-        let mut encrypted_proof = vec![0u8; len_usize];
-        buf.copy_to_slice(&mut encrypted_proof);
-        Ok(Self {
-            encrypted_proof: Bytes::from(encrypted_proof),
-        })
+        let len = u64::SIZE + ENCRYPTION_TAG_LENGTH;
+        let range = RangeCfg::from(len..=len);
+        let encrypted_proof = Bytes::read_cfg(buf, &range)?;
+        Ok(Self { encrypted_proof })
     }
 }
 
 impl EncodeSize for AuthenticationProof {
     fn encode_size(&self) -> usize {
-        UInt(self.encrypted_proof.len() as u64).encode_size() + self.encrypted_proof.len()
+        self.encrypted_proof.encode_size()
     }
 }
 
