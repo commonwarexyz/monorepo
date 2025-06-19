@@ -5,7 +5,7 @@ use chacha20poly1305::Nonce;
 /// the nonce is used. Is able to be incremented up-to 96 bits (12 bytes) before overflowing.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Info {
-    counter: u128,
+    pub counter: u128,
 }
 
 /// If the counter is greater-than-or-equal to this value, it is considered to have overflowed.
