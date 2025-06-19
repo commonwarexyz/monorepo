@@ -7,22 +7,21 @@ use commonware_codec::{
     varint::{SInt, UInt},
     EncodeSize, Error, FixedSize, Read, Write,
 };
-use commonware_codec_derive::FixedSize;
 
-#[derive(Debug, Clone, PartialEq, Read, Write, EncodeSize)]
+#[derive(Debug, Clone, PartialEq, Read, Write, FixedSize)]
 struct SimpleStruct {
     a: u32,
     b: u64,
     c: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Read, Write, EncodeSize)]
+#[derive(Debug, Clone, PartialEq, Read, Write, FixedSize)]
 struct TupleStruct(u32, u64, bool);
 
-#[derive(Debug, Clone, PartialEq, Read, Write, EncodeSize)]
+#[derive(Debug, Clone, PartialEq, Read, Write, FixedSize)]
 struct UnitStruct;
 
-#[derive(Debug, Clone, PartialEq, Read, Write, EncodeSize)]
+#[derive(Debug, Clone, PartialEq, Read, Write, FixedSize)]
 struct NestedStruct {
     simple: SimpleStruct,
     value: u16,
@@ -40,7 +39,7 @@ struct VarintStruct {
 #[derive(Debug, Clone, PartialEq, Read, Write, EncodeSize)]
 struct TupleVarintStruct(#[codec(varint)] u64, #[codec(varint)] i64, bool);
 
-#[derive(Debug, Clone, PartialEq, Read, Write, EncodeSize)]
+#[derive(Debug, Clone, PartialEq, Read, Write, FixedSize)]
 struct SimpleTest {
     count: u32,
 }
@@ -624,5 +623,35 @@ mod fixed_size_tests {
         // Arrays should have fixed size equal to their length
         assert_eq!(<[u8; 10]>::SIZE, 10);
         assert_eq!(<[u8; 256]>::SIZE, 256);
+    }
+
+    // Test generic FixedSize derives
+    #[derive(Debug, Clone, PartialEq, FixedSize)]
+    struct GenericPoint<T> {
+        x: T,
+        y: T,
+    }
+
+    #[derive(Debug, Clone, PartialEq, FixedSize)]
+    struct GenericTuple<T, U>(T, U);
+
+    #[derive(Debug, Clone, PartialEq, FixedSize)]
+    struct GenericWithBounds<T: Clone + PartialEq> {
+        value: T,
+        flag: bool,
+    }
+
+    #[test]
+    fn test_generic_fixed_size() {
+        // Test that generic FixedSize derives work correctly
+        assert_eq!(GenericPoint::<u32>::SIZE, 8); // 4 + 4
+        assert_eq!(GenericPoint::<u64>::SIZE, 16); // 8 + 8
+        assert_eq!(GenericPoint::<bool>::SIZE, 2); // 1 + 1
+
+        assert_eq!(GenericTuple::<u32, u64>::SIZE, 12); // 4 + 8
+        assert_eq!(GenericTuple::<bool, f32>::SIZE, 5); // 1 + 4
+
+        assert_eq!(GenericWithBounds::<u32>::SIZE, 5); // 4 + 1
+        assert_eq!(GenericWithBounds::<u64>::SIZE, 9); // 8 + 1
     }
 }

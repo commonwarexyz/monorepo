@@ -94,16 +94,12 @@ pub struct PutBlock<D: Digest> {
 }
 
 /// Message to retrieve a block from the indexer's storage.
-#[derive(Debug, Clone, PartialEq, Eq, Read, Write)]
+#[derive(Debug, Clone, PartialEq, Eq, Read, Write, FixedSize)]
 pub struct GetBlock<D: Digest> {
     /// The network identifier for which the block belongs.
     pub network: <MinSig as Variant>::Public,
     /// The digest of the block to retrieve.
     pub digest: D,
-}
-
-impl<D: Digest> FixedSize for GetBlock<D> {
-    const SIZE: usize = <MinSig as Variant>::Public::SIZE + D::SIZE;
 }
 
 /// Message to store a finality certificate in the indexer's storage.

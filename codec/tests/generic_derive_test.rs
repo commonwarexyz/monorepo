@@ -1,7 +1,42 @@
 //! Integration tests for derive macros with generic types.
 
 use bytes::BytesMut;
-use commonware_codec::{codec::*, extensions::*, varint::UInt, EncodeSize, Error, Read, Write};
+use commonware_codec::{
+    codec::*, extensions::*, varint::UInt, EncodeSize, Error, FixedSize, Read, Write,
+};
+
+// ========== FixedSize Generic Test Structs ==========
+// These demonstrate our new FixedSize generic support
+
+// Simple generic with FixedSize
+#[derive(Debug, Clone, PartialEq, Read, Write, FixedSize)]
+struct FixedGeneric<T>
+where
+    T: Read<Cfg = ()> + Write + FixedSize,
+{
+    value: T,
+}
+
+// Generic tuple with FixedSize
+#[derive(Debug, Clone, PartialEq, Read, Write, FixedSize)]
+struct FixedGenericTuple<T, U>(T, U)
+where
+    T: Read<Cfg = ()> + Write + FixedSize,
+    U: Read<Cfg = ()> + Write + FixedSize;
+
+// Multi-field generic with FixedSize
+#[derive(Debug, Clone, PartialEq, Read, Write, FixedSize)]
+struct FixedMultiField<T>
+where
+    T: Read<Cfg = ()> + Write + FixedSize,
+{
+    generic_field: T,
+    fixed_field1: u32,
+    fixed_field2: bool,
+    fixed_field3: u16,
+}
+
+// ========== Original Test Structs ==========
 
 // Basic generic struct
 #[derive(Debug, Clone, PartialEq, Read, Write, EncodeSize)]
@@ -12,7 +47,7 @@ where
     value: T,
 }
 
-// Generic struct with multiple fields
+// Generic struct with multiple fields (second and third are fixed-size)
 #[derive(Debug, Clone, PartialEq, Read, Write, EncodeSize)]
 struct MultiFieldGeneric<T>
 where
@@ -23,7 +58,7 @@ where
     third: bool,
 }
 
-// Generic tuple struct
+// Generic tuple struct (u16 is fixed-size)
 #[derive(Debug, Clone, PartialEq, Read, Write, EncodeSize)]
 struct GenericTuple<T>(T, u16)
 where
@@ -450,5 +485,58 @@ mod tests {
         let result = GenericEnum::<u32>::decode(&mut invalid_data.as_slice());
 
         assert!(matches!(result, Err(Error::InvalidEnum(255))));
+    }
+
+    // ========== FixedSize Generic Tests ==========
+
+    #[test]
+    fn test_fixed_generic_sizes() {
+        // Test that FixedSize derive works correctly with generic types
+        assert_eq!(FixedGeneric::<u32>::SIZE, 4);
+        assert_eq!(FixedGeneric::<u64>::SIZE, 8);
+        assert_eq!(FixedGeneric::<bool>::SIZE, 1);
+
+        assert_eq!(FixedGenericTuple::<u32, u16>::SIZE, 6); // 4 + 2
+        assert_eq!(FixedGenericTuple::<bool, u64>::SIZE, 9); // 1 + 8
+
+        assert_eq!(FixedMultiField::<u32>::SIZE, 11); // 4 + 4 + 1 + 2
+        assert_eq!(FixedMultiField::<u64>::SIZE, 15); // 8 + 4 + 1 + 2
+    }
+
+    #[test]
+    fn test_fixed_generic_encode_size_automatic() {
+        // Test that FixedSize types automatically get EncodeSize
+        let simple = FixedGeneric { value: 42u32 };
+        assert_eq!(simple.encode_size(), FixedGeneric::<u32>::SIZE);
+        assert_eq!(simple.encode_size(), 4);
+
+        let tuple = FixedGenericTuple(true, 1000u64);
+        assert_eq!(tuple.encode_size(), FixedGenericTuple::<bool, u64>::SIZE);
+        assert_eq!(tuple.encode_size(), 9);
+
+        let multi = FixedMultiField {
+            generic_field: 12345u32,
+            fixed_field1: 67890u32,
+            fixed_field2: true,
+            fixed_field3: 321u16,
+        };
+        assert_eq!(multi.encode_size(), FixedMultiField::<u32>::SIZE);
+        assert_eq!(multi.encode_size(), 11);
+    }
+
+    #[test]
+    fn test_fixed_generic_round_trip() {
+        // Test that FixedSize generic structs work for encoding/decoding
+        let original = FixedMultiField {
+            generic_field: 42u32,
+            fixed_field1: 1337u32,
+            fixed_field2: true,
+            fixed_field3: 999u16,
+        };
+
+        let encoded = original.encode();
+        let decoded = FixedMultiField::<u32>::decode(encoded.clone()).unwrap();
+        assert_eq!(original, decoded);
+        assert_eq!(encoded.len(), FixedMultiField::<u32>::SIZE);
     }
 }

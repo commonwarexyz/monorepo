@@ -1013,15 +1013,20 @@ fn expand_write_enum(data: &syn::DataEnum) -> syn::Result<TokenStream2> {
 
 fn expand_fixed_size(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let name = &input.ident;
-    let (impl_generics, type_generics, where_clause) = input.generics.split_for_impl();
 
-    // Check if there are any generics - we don't support them currently
-    if !input.generics.params.is_empty() {
-        return Err(syn::Error::new_spanned(
-            &input.generics,
-            "FixedSize derive macro does not support generic types",
-        ));
+    // Generate bounds for generic type parameters
+    let mut generics = input.generics.clone();
+
+    // Add FixedSize bound to each type parameter
+    for param in &mut generics.params {
+        if let syn::GenericParam::Type(type_param) = param {
+            type_param
+                .bounds
+                .push(syn::parse_quote!(::commonware_codec::FixedSize));
+        }
     }
+
+    let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
 
     let size_calculation = match &input.data {
         Data::Struct(data) => match &data.fields {

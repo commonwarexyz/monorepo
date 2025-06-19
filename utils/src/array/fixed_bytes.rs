@@ -18,7 +18,7 @@ pub enum Error {
 }
 
 /// An `Array` implementation for fixed-length byte arrays.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Read, Write)]
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Read, Write, FixedSize)]
 #[repr(transparent)]
 pub struct FixedBytes<const N: usize>([u8; N]);
 
@@ -27,10 +27,6 @@ impl<const N: usize> FixedBytes<N> {
     pub fn new(value: [u8; N]) -> Self {
         Self(value)
     }
-}
-
-impl<const N: usize> FixedSize for FixedBytes<N> {
-    const SIZE: usize = N;
 }
 
 impl<const N: usize> Array for FixedBytes<N> {}
