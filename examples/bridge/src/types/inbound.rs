@@ -85,7 +85,7 @@ impl<D: Digest> EncodeSize for Inbound<D> {
 }
 
 /// Message to store a new block in the indexer's storage.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Read, Write, EncodeSize)]
 pub struct PutBlock<D: Digest> {
     /// The network identifier for which the block belongs.
     pub network: <MinSig as Variant>::Public,
@@ -93,53 +93,13 @@ pub struct PutBlock<D: Digest> {
     pub block: BlockFormat<D>,
 }
 
-impl<D: Digest> Write for PutBlock<D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.network.write(buf);
-        self.block.write(buf);
-    }
-}
-
-impl<D: Digest> Read for PutBlock<D> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let network = <MinSig as Variant>::Public::read(buf)?;
-        let block = BlockFormat::<D>::read(buf)?;
-        Ok(PutBlock { network, block })
-    }
-}
-
-impl<D: Digest> EncodeSize for PutBlock<D> {
-    fn encode_size(&self) -> usize {
-        <MinSig as Variant>::Public::SIZE + self.block.encode_size()
-    }
-}
-
 /// Message to retrieve a block from the indexer's storage.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Read, Write)]
 pub struct GetBlock<D: Digest> {
     /// The network identifier for which the block belongs.
     pub network: <MinSig as Variant>::Public,
     /// The digest of the block to retrieve.
     pub digest: D,
-}
-
-impl<D: Digest> Write for GetBlock<D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.network.write(buf);
-        self.digest.write(buf);
-    }
-}
-
-impl<D: Digest> Read for GetBlock<D> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let network = <MinSig as Variant>::Public::read(buf)?;
-        let digest = D::read(buf)?;
-        Ok(GetBlock { network, digest })
-    }
 }
 
 impl<D: Digest> FixedSize for GetBlock<D> {

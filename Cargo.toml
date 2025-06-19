@@ -27,6 +27,7 @@ resolver = "2"
 [workspace.dependencies]
 commonware-broadcast = { version = "0.0.54", path = "broadcast" }
 commonware-codec = { version = "0.0.54", path = "codec" }
+commonware-codec-derive = { version = "0.0.54", path = "codec-derive" }
 commonware-consensus = { version = "0.0.54", path = "consensus" }
 commonware-cryptography = { version = "0.0.54", path = "cryptography" }
 commonware-deployer = { version = "0.0.54", path = "deployer", default-features = false }
