@@ -586,4 +586,76 @@ mod tests {
             assert!(matches!(result, Err(Error::MessageTooLarge(_))));
         });
     }
+
+    #[test_traced]
+    #[should_panic(expected = "no messages should be rate limited")]
+    fn test_rate_limiting() {
+        // Configure test
+        let base_port = 3000;
+        let n: usize = 2;
+
+        // Initialize context
+        let executor = deterministic::Runner::seeded(0);
+        executor.start(|context| async move {
+            // Create peers
+            let mut peers_and_sks = Vec::new();
+            for i in 0..n {
+                let sk = ed25519::PrivateKey::from_seed(i as u64);
+                let pk = sk.public_key();
+                let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + i as u16);
+                peers_and_sks.push((sk, pk, addr));
+            }
+            let peers = peers_and_sks
+                .iter()
+                .map(|(_, pk, addr)| (pk.clone(), *addr))
+                .collect::<Vec<_>>();
+            let (sk0, _, addr0) = peers_and_sks[0].clone();
+            let (sk1, pk1, addr1) = peers_and_sks[1].clone();
+
+            // Create network for peer 0
+            let config0 = Config::test(sk0, addr0, 1_024 * 1_024); // 1MB
+            let (mut network0, mut oracle0) = Network::new(context.with_label("peer-0"), config0);
+            oracle0.register(0, peers.clone()).await;
+            let (mut sender0, _receiver0) =
+                network0.register(0, Quota::per_hour(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
+            network0.start();
+
+            // Create network for peer 1
+            let config1 = Config::test(sk1, addr1, 1_024 * 1_024); // 1MB
+            let (mut network1, mut oracle1) = Network::new(context.with_label("peer-1"), config1);
+            oracle1.register(0, peers.clone()).await;
+            let (_sender1, _receiver1) =
+                network1.register(0, Quota::per_hour(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
+            network1.start();
+
+            // Send first message, which should be allowed and consume the quota.
+            let msg = vec![0u8; 1024]; // 1KB
+            loop {
+                // Confirm message is sent to peer
+                let sent = sender0
+                    .send(Recipients::One(pk1.clone()), msg.clone().into(), true)
+                    .await
+                    .unwrap();
+                if !sent.is_empty() {
+                    break;
+                }
+
+                // Sleep and try again (avoid busy loop)
+                context.sleep(Duration::from_millis(100)).await;
+            }
+
+            // Immediately send the second message to trigger the rate limit.
+            let sent = sender0
+                .send(Recipients::One(pk1), msg.into(), true)
+                .await
+                .unwrap();
+            assert!(!sent.is_empty());
+
+            // Loop until the metrics reflect the rate-limited message.
+            for _ in 0..10 {
+                assert_no_rate_limiting(&context);
+                context.sleep(Duration::from_millis(100)).await;
+            }
+        });
+    }
 }
