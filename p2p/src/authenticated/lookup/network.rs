@@ -56,7 +56,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 mailbox_size: cfg.mailbox_size,
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 allowed_connection_rate_per_peer: cfg.allowed_connection_rate_per_peer,
-                max_peer_set_size: cfg.max_peer_set_size,
                 allow_private_ips: cfg.allow_private_ips,
             },
         );

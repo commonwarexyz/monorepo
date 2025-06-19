@@ -19,10 +19,6 @@ use tracing::debug;
 pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> {
     context: E,
 
-    // ---------- Configuration ----------
-    /// The maximum number of peers in a set.
-    max_peer_set_size: usize,
-
     // ---------- Message-Passing ----------
     /// The mailbox for the actor.
     receiver: mpsc::Receiver<Message<E, C::PublicKey>>,
@@ -67,7 +63,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         (
             Self {
                 context,
-                max_peer_set_size: cfg.max_peer_set_size,
                 receiver,
                 directory,
                 mailboxes: HashMap::new(),
@@ -86,13 +81,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
         while let Some(msg) = self.receiver.next().await {
             match msg {
                 Message::Register { index, peers } => {
-                    // Ensure that peer set is not too large.
-                    // Panic since there is no way to recover from this.
-                    let len = peers.len();
-                    let max = self.max_peer_set_size;
-                    assert!(len <= max, "peer set too large: {} > {}", len, max);
-
-                    // If we deleted peers, release them.
+                    // If we are no longer interested in a peer, release them.
                     for peer in self.directory.add_set(index, peers) {
                         if let Some(mut mailbox) = self.mailboxes.remove(&peer) {
                             mailbox.kill().await;
@@ -181,7 +170,6 @@ mod tests {
             mailbox_size: 32,
             tracked_peer_sets: 2,
             allowed_connection_rate_per_peer: Quota::per_second(NZU32!(5)),
-            max_peer_set_size: 128,
             allow_private_ips: true,
         }
     }
@@ -197,51 +185,17 @@ mod tests {
     struct TestHarness {
         mailbox: Mailbox<Message<deterministic::Context, PublicKey>>,
         oracle: Oracle<deterministic::Context, PublicKey>,
-        cfg: Config<PrivateKey>, // Store cloned config for access to its values
     }
 
     fn setup_actor(
         runner_context: deterministic::Context,
         cfg_to_clone: Config<PrivateKey>, // Pass by value to allow cloning
     ) -> TestHarness {
-        let stored_cfg = cfg_to_clone.clone(); // Clone for storing in harness
-
         // Actor::new takes ownership, so clone again if cfg_to_clone is needed later
         let (actor, mailbox, oracle) = Actor::new(runner_context.clone(), cfg_to_clone);
         runner_context.spawn(|_| actor.run());
 
-        TestHarness {
-            mailbox,
-            oracle,
-            cfg: stored_cfg,
-        }
-    }
-
-    #[test]
-    #[should_panic(expected = "peer set too large")]
-    fn test_register_peer_set_too_large() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg_initial = default_test_config(PrivateKey::from_seed(0));
-            let TestHarness {
-                mut oracle,
-                cfg,
-                mut mailbox,
-                ..
-            } = setup_actor(context.clone(), cfg_initial);
-            let too_many_peers: Vec<(PublicKey, SocketAddr)> = (1..=(cfg.max_peer_set_size + 1)
-                as u64)
-                .map(|i| {
-                    (
-                        new_signer_and_pk(i).1,
-                        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-                    )
-                })
-                .collect();
-            oracle.register(0, too_many_peers).await;
-            // Ensure the message is processed causing the panic
-            let _ = mailbox.dialable().await;
-        });
+        TestHarness { mailbox, oracle }
     }
 
     #[test]
