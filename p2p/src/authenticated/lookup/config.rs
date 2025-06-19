@@ -80,10 +80,6 @@ pub struct Config<C: Signer> {
     /// set (if we, for example, are trying to do a reshare of a threshold
     /// key).
     pub tracked_peer_sets: usize,
-
-    /// Maximum number of peers to track in a single peer set.
-    /// This number can be set to a reasonably high value that we never expect to reach.
-    pub max_peer_set_size: usize,
 }
 
 impl<C: Signer> Config<C> {
@@ -114,7 +110,6 @@ impl<C: Signer> Config<C> {
             dial_frequency: Duration::from_millis(1_000),
             query_frequency: Duration::from_secs(60),
             tracked_peer_sets: 4,
-            max_peer_set_size: 1 << 16, // 2^16
         }
     }
 
@@ -149,7 +144,6 @@ impl<C: Signer> Config<C> {
             dial_frequency: Duration::from_millis(500),
             query_frequency: Duration::from_secs(30),
             tracked_peer_sets: 4,
-            max_peer_set_size: 1 << 16, // 2^16
         }
     }
 
@@ -174,7 +168,6 @@ impl<C: Signer> Config<C> {
             dial_frequency: Duration::from_millis(200),
             query_frequency: Duration::from_millis(5_000),
             tracked_peer_sets: 4,
-            max_peer_set_size: 1 << 8, // 2^8
         }
     }
 }
