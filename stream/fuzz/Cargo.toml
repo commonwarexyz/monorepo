@@ -1,0 +1,45 @@
+[package]
+name = "commonware-stream-fuzz"
+version = "0.0.1"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+commonware-codec = { workspace = true }
+commonware-cryptography = { workspace = true }
+commonware-stream = { workspace = true}
+commonware-runtime = { workspace = true }
+arbitrary = { workspace = true, features = ["derive"] }
+futures = { workspace = true }
+libfuzzer-sys = { workspace = true }
+
+[[bin]]
+name = "handshake"
+path = "fuzz_targets/handshake.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transport"
+path = "fuzz_targets/transport.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lazy_transport"
+path = "fuzz_targets/lazy_transport.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "connection"
+path = "fuzz_targets/connection.rs"
+test = false
+doc = false
+bench = false

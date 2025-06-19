@@ -1,21 +1,25 @@
+//! Operations over x25519 keys.
+
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use rand::{CryptoRng, Rng};
 use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
 
+/// x25519 Public Key.
 #[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
 pub struct PublicKey {
     inner: X25519PublicKey,
 }
 
 impl PublicKey {
+    /// Derive a public key from a secret key.
     pub fn from_secret(secret: &EphemeralSecret) -> Self {
         PublicKey {
             inner: X25519PublicKey::from(secret),
         }
     }
 
-    #[cfg(test)]
+    /// Parse a public key from a byte array.
     pub fn from_bytes(array: [u8; 32]) -> Self {
         PublicKey {
             inner: X25519PublicKey::from(array),
@@ -50,6 +54,7 @@ impl FixedSize for PublicKey {
     const SIZE: usize = 32;
 }
 
+/// Generate a new ephemeral secret.
 pub fn new<R: Rng + CryptoRng>(rng: &mut R) -> EphemeralSecret {
     EphemeralSecret::random_from_rng(rng)
 }

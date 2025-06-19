@@ -1265,6 +1265,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-stream-fuzz"
+version = "0.0.1"
+dependencies = [
+ "arbitrary",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-runtime",
+ "commonware-stream",
+ "futures",
+ "libfuzzer-sys",
+]
+
+[[package]]
 name = "commonware-utils"
 version = "0.0.54"
 dependencies = [

@@ -1,3 +1,5 @@
+//! Operations over handshake messages.
+
 use super::x25519;
 use crate::Error;
 use bytes::{Buf, BufMut};
@@ -9,7 +11,7 @@ use commonware_runtime::Clock;
 use commonware_utils::SystemTimeExt;
 use std::time::Duration;
 
-/// Handshake information that is signed over by the sender.
+/// Handshake information that is signed over by some peer.
 pub struct Info<C: PublicKey> {
     /// The public key of the recipient.
     recipient: C,
@@ -24,6 +26,7 @@ pub struct Info<C: PublicKey> {
 }
 
 impl<C: PublicKey> Info<C> {
+    /// Create a new handshake.
     pub fn new(recipient: C, ephemeral_public_key: x25519::PublicKey, timestamp: u64) -> Self {
         Self {
             recipient,
@@ -64,16 +67,18 @@ impl<K: PublicKey> EncodeSize for Info<K> {
     }
 }
 
-// Allows recipient to verify that the sender has the private key
-// of public key before sending any data.
-//
-// By requiring the server to have their public key signed, they prevent
-// a malicious peer from forwarding a handshake message from a previous
-// connection with public key (which could be used to convince the server
-// to start a useless handshake). Alternatively, we could require the
-// dialer to sign some random bytes provided by the server but this would
-// require the server to send a message to a peer before authorizing that
-// it should connect to them.
+/// A signed handshake message.
+///
+/// Allows recipient to verify that the sender has the private key
+/// of public key before sending any data.
+///
+/// By requiring the server to have their public key signed, they prevent
+/// a malicious peer from forwarding a handshake message from a previous
+/// connection with public key (which could be used to convince the server
+/// to start a useless handshake). Alternatively, we could require the
+/// dialer to sign some random bytes provided by the server but this would
+/// require the server to send a message to a peer before authorizing that
+/// it should connect to them.
 pub struct Signed<C: PublicKey> {
     // The handshake info that was signed over
     info: Info<C>,
@@ -86,6 +91,7 @@ pub struct Signed<C: PublicKey> {
 }
 
 impl<C: PublicKey> Signed<C> {
+    /// Sign a handshake message.
     pub fn sign<Sk: Signer<PublicKey = C, Signature = C::Signature>>(
         crypto: &mut Sk,
         namespace: &[u8],
@@ -99,14 +105,17 @@ impl<C: PublicKey> Signed<C> {
         }
     }
 
+    /// Get the public key of the signer.
     pub fn signer(&self) -> C {
         self.signer.clone()
     }
 
+    /// Get the ephemeral public key of the signer.
     pub fn ephemeral(&self) -> x25519::PublicKey {
         self.info.ephemeral_public_key
     }
 
+    /// Verify a signed handshake message.
     pub fn verify<E: Clock>(
         &self,
         context: &E,
