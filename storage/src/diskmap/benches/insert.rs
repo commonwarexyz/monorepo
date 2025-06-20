@@ -41,7 +41,7 @@ fn bench_insert(c: &mut Criterion) {
                         directory_size: 1024,
                         codec_config: (),
                         write_buffer: 1024,
-                        max_journal_size: 64 * 1024 * 1024, // 64MB
+                        target_journal_size: 64 * 1024 * 1024, // 64MB
                     };
 
                     let mut diskmap = DiskMap::<_, TestKey, TestValue>::init(ctx.clone(), config)

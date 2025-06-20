@@ -419,19 +419,18 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
     }
 
     /// Determine which journal section to write to based on current journal size.
-    async fn determine_journal_section(&mut self, entry_size: usize) -> Result<u64, Error> {
-        // If we have an existing journal, check if it has enough space
+    async fn determine_journal_section(&mut self, _entry_size: usize) -> Result<u64, Error> {
+        // If we have an existing journal, check if it has reached the target size
         if self.current_journal_id > 0 {
             let current_size = self.journal.section_size(self.current_journal_id).await?;
 
-            // Check if adding this entry would exceed the limit
-            if current_size + entry_size as u64 <= self.config.max_journal_size {
-                // Current journal has space, continue using it
+            // Continue using current journal if it hasn't reached target size
+            if current_size < self.config.target_journal_size {
                 return Ok(self.current_journal_id);
             }
         }
 
-        // Need a new journal (either first write or current is full)
+        // Need a new journal (either first write or current has reached target size)
         self.current_journal_id += 1;
         Ok(self.current_journal_id)
     }
@@ -614,7 +613,7 @@ mod tests {
                 directory_size: 256,
                 codec_config: (),
                 write_buffer: 1024,
-                max_journal_size: 64 * 1024 * 1024, // 64MB
+                target_journal_size: 64 * 1024 * 1024, // 64MB
             };
 
             let mut diskmap = DiskMap::<_, TestKey, TestValue>::init(context, config)
@@ -659,7 +658,7 @@ mod tests {
                 directory_size: 256,
                 codec_config: (),
                 write_buffer: 1024,
-                max_journal_size: 64 * 1024 * 1024, // 64MB
+                target_journal_size: 64 * 1024 * 1024, // 64MB
             };
 
             let mut diskmap = DiskMap::<_, TestKey, TestValue>::init(context, config)
@@ -692,7 +691,7 @@ mod tests {
                     directory_size: 256,
                     codec_config: (),
                     write_buffer: 1024,
-                    max_journal_size: 64 * 1024 * 1024, // 64MB
+                    target_journal_size: 64 * 1024 * 1024, // 64MB
                 };
 
                 let mut diskmap = DiskMap::<_, TestKey, TestValue>::init(context.clone(), config)
@@ -723,7 +722,7 @@ mod tests {
                     directory_size: 256,
                     codec_config: (),
                     write_buffer: 1024,
-                    max_journal_size: 64 * 1024 * 1024, // 64MB
+                    target_journal_size: 64 * 1024 * 1024, // 64MB
                 };
 
                 let mut diskmap = DiskMap::<_, TestKey, TestValue>::init(context.clone(), config)
@@ -760,7 +759,7 @@ mod tests {
                 directory_size: 256,
                 codec_config: (),
                 write_buffer: 1024,
-                max_journal_size: 64 * 1024 * 1024, // 64MB
+                target_journal_size: 64 * 1024 * 1024, // 64MB
             };
 
             let mut diskmap = DiskMap::<_, TestKey, TestValue>::init(context, config)
@@ -804,7 +803,7 @@ mod tests {
                 directory_size: 256,
                 codec_config: (),
                 write_buffer: 1024,
-                max_journal_size: 64 * 1024 * 1024, // 64MB
+                target_journal_size: 64 * 1024 * 1024, // 64MB
             };
 
             let mut diskmap = DiskMap::<_, TestKey, TestValue>::init(context, config)
