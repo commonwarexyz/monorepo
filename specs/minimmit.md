@@ -211,6 +211,7 @@ sequenceDiagram
 - [Kudzu: Fast and Simple High-Throughput BFT](https://arxiv.org/abs/2505.08771)
 - [Hydrangea: Optimistic Two-Round Partial Synchrony with One-Third Fault Resilience](https://eprint.iacr.org/2025/1112)
 - [Autobahn: Seamless high speed BFT](https://arxiv.org/abs/2401.10369)
+- [ChonkyBFT: Consensus Protocol of ZKsync](https://arxiv.org/abs/2503.15380)
 
 # Appendix: Proof Sketches
 
