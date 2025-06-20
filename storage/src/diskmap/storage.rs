@@ -524,7 +524,10 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
     }
 
     /// Close the disk map and underlying journal.
-    pub async fn close(self) -> Result<(), Error> {
+    pub async fn close(mut self) -> Result<(), Error> {
+        // Sync any pending updates before closing
+        self.sync().await?;
+
         self.journal.close().await?;
         self.table_blob.close().await?;
         Ok(())
