@@ -864,7 +864,7 @@ mod tests {
                         expected_size,
                         "serialized proof should have expected size"
                     );
-                    let max_digests = j - i + 1;
+                    let max_digests = proof.digests.len();
                     let deserialized_proof =
                         Proof::decode_cfg(serialized_proof, &max_digests).unwrap();
                     assert_eq!(
@@ -894,11 +894,14 @@ mod tests {
                     );
 
                     // Confirm deserialization fails when max length is exceeded.
-                    let serialized_proof = proof.encode().freeze();
-                    assert!(
-                        Proof::<Sha256>::decode_cfg(serialized_proof, &(max_digests - 1),).is_err(),
-                        "proof should not deserialize with max length exceeded"
-                    );
+                    if max_digests > 0 {
+                        let serialized_proof = proof.encode().freeze();
+                        assert!(
+                            Proof::<Sha256>::decode_cfg(serialized_proof, &(max_digests - 1),)
+                                .is_err(),
+                            "proof should not deserialize with max length exceeded"
+                        );
+                    }
                 }
             }
         });
