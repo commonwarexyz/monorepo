@@ -9,7 +9,7 @@ use crate::mmr::{
     Hasher,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{varint::UInt, EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::Hasher as CHasher;
 use futures::future::try_join_all;
 use tracing::debug;
@@ -41,68 +41,31 @@ impl<H: CHasher> PartialEq for Proof<H> {
 
 impl<H: CHasher> EncodeSize for Proof<H> {
     fn encode_size(&self) -> usize {
-        let digests_size = self.digests.len() * H::Digest::SIZE;
-        u64::SIZE + u16::SIZE + digests_size
+        UInt(self.size).encode_size() + self.digests.encode_size()
     }
 }
 
 impl<H: CHasher> Write for Proof<H> {
     fn write(&self, buf: &mut impl BufMut) {
-        // Write the number of nodes in the MMR
-        self.size.write(buf);
+        // Write the number of nodes in the MMR as a varint
+        UInt(self.size).write(buf);
 
-        // Write the number of digests
-        let num_digests = self.digests.len() as u16;
-        num_digests.write(buf);
-
-        // Write each digest
-        for hash in self.digests.iter() {
-            hash.write(buf);
-        }
+        // Write the digests
+        self.digests.write(buf);
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct ProofReadCfg {
-    pub max_len: u64,
-}
-
 impl<H: CHasher> Read for Proof<H> {
-    type Cfg = ProofReadCfg;
+    /// The maximum number of digests in the proof.
+    type Cfg = usize;
 
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, max_len: &usize) -> Result<Self, commonware_codec::Error> {
         // Read the number of nodes in the MMR
-        let size = u64::read(buf)?;
-
-        // Read the number of digests
-        let count = u16::read(buf)? as usize;
-
-        // Compute the size of all the digests
-        let digests_size = (count as u64)
-            .checked_mul(H::Digest::SIZE as u64)
-            .ok_or_else(|| commonware_codec::Error::Invalid("Proof", "digest size overflow"))?;
-
-        // Check that the total size of the proof does not exceed the configured maximum length
-        let header = u64::SIZE as u64 + u16::SIZE as u64;
-        if header + digests_size > cfg.max_len {
-            return Err(commonware_codec::Error::Invalid(
-                "Proof",
-                "exceeds size limit",
-            ));
-        }
-        // Check that the buffer has enough remaining bytes for the digests
-        if digests_size > buf.remaining() as u64 {
-            return Err(commonware_codec::Error::Invalid(
-                "Proof",
-                "not enough data for digests",
-            ));
-        }
+        let size = UInt::<u64>::read(buf)?.into();
 
         // Read the digests
-        let mut digests = Vec::with_capacity(count);
-        for _ in 0..count {
-            digests.push(H::Digest::read(buf)?);
-        }
+        let range = ..=max_len;
+        let digests = Vec::<H::Digest>::read_range(buf, range)?;
 
         Ok(Proof { size, digests })
     }
@@ -902,13 +865,9 @@ mod tests {
                         expected_size,
                         "serialized proof should have expected size"
                     );
-                    let deserialized_proof = Proof::decode_cfg(
-                        serialized_proof,
-                        &ProofReadCfg {
-                            max_len: 1024 * 1024, // 1 MiB
-                        },
-                    )
-                    .unwrap();
+                    let max_digests = j - i + 1;
+                    let deserialized_proof =
+                        Proof::decode_cfg(serialized_proof, &max_digests).unwrap();
                     assert_eq!(
                         proof, deserialized_proof,
                         "deserialized proof should match source proof"
@@ -920,13 +879,7 @@ mod tests {
                     let serialized_proof: Bytes =
                         serialized_proof.slice(0..serialized_proof.len() - 1);
                     assert!(
-                        Proof::<Sha256>::decode_cfg(
-                            serialized_proof,
-                            &ProofReadCfg {
-                                max_len: 1024 * 1024, // 1 MiB
-                            },
-                        )
-                        .is_err(),
+                        Proof::<Sha256>::decode_cfg(serialized_proof, &max_digests).is_err(),
                         "proof should not deserialize with truncated data"
                     );
 
@@ -937,27 +890,14 @@ mod tests {
                     let serialized_proof = serialized_proof.freeze();
 
                     assert!(
-                        Proof::<Sha256>::decode_cfg(
-                            serialized_proof,
-                            &ProofReadCfg {
-                                max_len: 1024 * 1024, // 1 MiB
-                            },
-                        )
-                        .is_err(),
+                        Proof::<Sha256>::decode_cfg(serialized_proof, &max_digests,).is_err(),
                         "proof should not deserialize with extra data"
                     );
 
                     // Confirm deserialization fails when max length is exceeded.
                     let serialized_proof = proof.encode().freeze();
-                    let serialized_proof_len = serialized_proof.len();
                     assert!(
-                        Proof::<Sha256>::decode_cfg(
-                            serialized_proof,
-                            &ProofReadCfg {
-                                max_len: (serialized_proof_len - 1) as u64,
-                            },
-                        )
-                        .is_err(),
+                        Proof::<Sha256>::decode_cfg(serialized_proof, &(max_digests - 1),).is_err(),
                         "proof should not deserialize with max length exceeded"
                     );
                 }
