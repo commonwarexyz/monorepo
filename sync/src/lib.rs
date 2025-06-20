@@ -1,5 +1,4 @@
 use crate::resolver::Resolver;
-use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
@@ -89,8 +88,8 @@ impl Default for SyncConfig {
 pub struct SyncClient<E, K, V, H, T, R>
 where
     E: Storage + Clock + Metrics,
-    K: Array + Encode + Decode,
-    V: Array + Encode + Decode,
+    K: Array,
+    V: Array,
     H: Hasher,
     T: Translator,
     R: Resolver<H, K, V>,
@@ -105,8 +104,8 @@ where
 impl<E, K, V, H, T, R> SyncClient<E, K, V, H, T, R>
 where
     E: Storage + Clock + Metrics,
-    K: Array + Encode + Decode,
-    V: Array + Encode + Decode,
+    K: Array,
+    V: Array,
     H: Hasher,
     T: Translator,
     R: Resolver<H, K, V>,
@@ -514,8 +513,8 @@ pub async fn simple_sync<E, K, V, H, T, R>(
 ) -> Result<Any<E, K, V, H, T>, Error>
 where
     E: Storage + Clock + Metrics,
-    K: Array + Encode + Decode,
-    V: Array + Encode + Decode,
+    K: Array,
+    V: Array,
     H: Hasher,
     T: Translator,
     R: Resolver<H, K, V>,
