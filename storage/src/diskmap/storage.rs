@@ -13,8 +13,6 @@ const TABLE_BLOB_NAME: &[u8] = b"table";
 const TABLE_ENTRY_SIZE: usize = 40; // Two entries: 2 * (u64 journal_id + u32 offset + u32 crc + u32 other_crc)
 const SINGLE_ENTRY_SIZE: usize = 20; // u64 journal_id + u32 offset + u32 crc + u32 other_crc
 
-const MAX_JOURNAL_SIZE: u64 = 64 * 1024 * 1024; // 64MB per journal
-
 /// Single table entry stored in the table blob.
 #[derive(Debug, Clone, PartialEq)]
 struct TableEntry {
@@ -427,7 +425,7 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
             let current_size = self.journal.section_size(self.current_journal_id).await?;
 
             // Check if adding this entry would exceed the limit
-            if current_size + entry_size as u64 <= MAX_JOURNAL_SIZE {
+            if current_size + entry_size as u64 <= self.config.max_journal_size {
                 // Current journal has space, continue using it
                 return Ok(self.current_journal_id);
             }
@@ -616,6 +614,7 @@ mod tests {
                 directory_size: 256,
                 codec_config: (),
                 write_buffer: 1024,
+                max_journal_size: 64 * 1024 * 1024, // 64MB
             };
 
             let mut diskmap = DiskMap::<_, TestKey, TestValue>::init(context, config)
@@ -660,6 +659,7 @@ mod tests {
                 directory_size: 256,
                 codec_config: (),
                 write_buffer: 1024,
+                max_journal_size: 64 * 1024 * 1024, // 64MB
             };
 
             let mut diskmap = DiskMap::<_, TestKey, TestValue>::init(context, config)
@@ -692,6 +692,7 @@ mod tests {
                     directory_size: 256,
                     codec_config: (),
                     write_buffer: 1024,
+                    max_journal_size: 64 * 1024 * 1024, // 64MB
                 };
 
                 let mut diskmap = DiskMap::<_, TestKey, TestValue>::init(context.clone(), config)
@@ -722,6 +723,7 @@ mod tests {
                     directory_size: 256,
                     codec_config: (),
                     write_buffer: 1024,
+                    max_journal_size: 64 * 1024 * 1024, // 64MB
                 };
 
                 let mut diskmap = DiskMap::<_, TestKey, TestValue>::init(context.clone(), config)
@@ -758,6 +760,7 @@ mod tests {
                 directory_size: 256,
                 codec_config: (),
                 write_buffer: 1024,
+                max_journal_size: 64 * 1024 * 1024, // 64MB
             };
 
             let mut diskmap = DiskMap::<_, TestKey, TestValue>::init(context, config)
@@ -801,6 +804,7 @@ mod tests {
                 directory_size: 256,
                 codec_config: (),
                 write_buffer: 1024,
+                max_journal_size: 64 * 1024 * 1024, // 64MB
             };
 
             let mut diskmap = DiskMap::<_, TestKey, TestValue>::init(context, config)

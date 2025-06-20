@@ -74,4 +74,7 @@ pub struct Config<C> {
 
     /// The size of the write buffer to use for each blob.
     pub write_buffer: usize,
+
+    /// The maximum size of each journal before creating a new one.
+    pub max_journal_size: u64,
 }
