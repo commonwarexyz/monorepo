@@ -7,6 +7,8 @@
 //! authenticated database is most useful for applications involving keys that are given values once
 //! and cannot be updated after.
 
+use std::num::NonZeroU64;
+
 use crate::{
     adb::{operation::Operation, Error},
     index::{Index, Translator},
@@ -508,8 +510,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     pub async fn proof(
         &self,
         start_loc: u64,
-        max_ops: u64,
+        max_ops: NonZeroU64,
     ) -> Result<(Proof<H>, Vec<Operation<K, V>>), Error> {
+        let max_ops = max_ops.get();
         let mmr = &self.ops;
         let start_pos = leaf_num_to_pos(start_loc);
         let end_pos_last = mmr.last_leaf_pos().unwrap();
@@ -1032,7 +1035,7 @@ mod test {
 
             // Make sure size-constrained batches of operations are provable from the oldest
             // retained op to tip.
-            let max_ops = 4;
+            let max_ops = NonZeroU64::new(4).unwrap();
             let end_loc = db.op_count();
             let start_pos = db.ops.pruned_to_pos();
             let start_loc = leaf_pos_to_num(start_pos).unwrap();

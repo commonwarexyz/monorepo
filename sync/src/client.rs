@@ -1,3 +1,5 @@
+use std::num::NonZeroU64;
+
 use crate::resolver::Resolver;
 use crate::{Error, SyncProgress};
 use commonware_cryptography::Hasher;
@@ -12,13 +14,13 @@ use tracing::{debug, info};
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
     /// Maximum operations to fetch per batch
-    pub max_ops_per_batch: u64,
+    pub max_ops_per_batch: NonZeroU64,
 }
 
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
-            max_ops_per_batch: 1000,
+            max_ops_per_batch: NonZeroU64::new(1000).unwrap(),
         }
     }
 }
@@ -98,12 +100,6 @@ where
             });
         }
 
-        if config.max_ops_per_batch == 0 {
-            return Err(Error::InvalidConfig(
-                "max_ops_per_batch cannot be zero".into(),
-            ));
-        }
-
         let state = ClientState::Init {
             db,
             target_index,
@@ -138,18 +134,18 @@ where
                 target_index,
                 target_hash,
             } => {
-                let current_index = db.op_count();
-                info!(current_index, target_index, "Starting sync process");
+                let op_count = db.op_count();
+                info!(op_count, target_index, "Starting sync process");
 
                 let progress = SyncProgress {
-                    current_index,
+                    current_index: op_count,
                     target_index,
                     operations_applied: 0,
                     batches_processed: 0,
                 };
 
-                if current_index == target_index {
-                    // Already at exact target, verify hash
+                if op_count == target_index + 1 {
+                    // Already at exact target (applied operations 0 through target_index inclusive)
                     let root_hash = db.root(&mut self.hasher);
                     if root_hash == target_hash {
                         self.state = Some(ClientState::Done {
@@ -164,7 +160,7 @@ where
                             actual: Box::new(root_hash),
                         });
                     }
-                } else if current_index > target_index {
+                } else if op_count > target_index + 1 {
                     // We're already past the target - this shouldn't happen
                     return Err(Error::InvalidState);
                 } else {
@@ -187,11 +183,11 @@ where
             } => {
                 // Calculate exactly how many operations we need
                 let next_index = db.op_count();
-                if next_index >= target_index {
+                if next_index > target_index {
                     return Err(Error::InvalidState);
                 }
 
-                let operations_needed = target_index - next_index;
+                let operations_needed = NonZeroU64::new(target_index + 1 - next_index).unwrap();
                 let batch_size = std::cmp::min(self.config.max_ops_per_batch, operations_needed);
 
                 debug!(
@@ -202,11 +198,11 @@ where
                 let (proof, operations) = self.resolver.get_proof(next_index, batch_size).await?;
 
                 // Validate that we didn't get more operations than requested
-                if operations.len() as u64 > batch_size {
+                if operations.len() as u64 > batch_size.get() {
                     return Err(Error::InvalidResolver(format!(
                         "Resolver returned {} operations but only {} were requested",
                         operations.len(),
-                        batch_size
+                        batch_size.get()
                     )));
                 }
 
@@ -261,7 +257,7 @@ where
 
                 // Ensure we won't exceed the target after applying these operations
                 let expected_final_index = start_index + operations.len() as u64;
-                if expected_final_index > target_index {
+                if expected_final_index > target_index + 1 {
                     return Err(Error::InvalidResolver(format!(
                         "Applying {} operations from index {} would exceed target index {}",
                         operations.len(),
@@ -298,7 +294,7 @@ where
                 progress.current_index = new_current_index;
 
                 // Verify we didn't somehow exceed the target
-                if new_current_index > target_index {
+                if new_current_index > target_index + 1 {
                     return Err(Error::ExceededTarget {
                         target: target_index,
                         actual: new_current_index,
@@ -315,7 +311,7 @@ where
                 );
 
                 // Check if we've reached exactly the target
-                if new_current_index == target_index {
+                if new_current_index == target_index + 1 {
                     // Verify the final hash matches the target
                     let final_root = db.root(&mut self.hasher);
 
