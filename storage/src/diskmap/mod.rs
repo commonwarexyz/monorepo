@@ -43,6 +43,8 @@ use thiserror::Error;
 pub enum Error {
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
+    #[error("journal error: {0}")]
+    Journal(#[from] crate::journal::Error),
     #[error("invalid key length: expected {expected}, got {actual}")]
     InvalidKeyLength { expected: usize, actual: usize },
     #[error("invalid value length: expected {expected}, got {actual}")]

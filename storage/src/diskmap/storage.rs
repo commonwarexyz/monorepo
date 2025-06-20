@@ -1,31 +1,28 @@
 use super::{Config, Error};
+use crate::journal::variable::{Config as JournalConfig, Journal};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, EncodeSize, Read, ReadExt, Write as CodecWrite};
-use commonware_runtime::{buffer::Write, Blob, Metrics, Storage};
+use commonware_runtime::{Blob, Metrics, Storage};
 use commonware_utils::{hex, Array};
 use prometheus_client::metrics::counter::Counter;
-use std::collections::HashMap;
 use std::marker::PhantomData;
 use tracing::trace;
 
 const TABLE_BLOB_NAME: &[u8] = b"table";
-const JOURNAL_PREFIX: &str = "journal_";
-const TABLE_ENTRY_SIZE: usize = 48; // Two entries: 2 * (u64 journal_id + u64 offset + u32 crc + u32 other_crc)
-const SINGLE_ENTRY_SIZE: usize = 24; // u64 journal_id + u64 offset + u32 crc + u32 other_crc
-
-const MAX_JOURNAL_SIZE: u64 = 64 * 1024 * 1024; // 64MB per journal
+const TABLE_ENTRY_SIZE: usize = 48; // Two entries: 2 * (u64 journal_id + u32 offset + u32 crc + u32 other_crc)
+const SINGLE_ENTRY_SIZE: usize = 24; // u64 journal_id + u32 offset + u32 crc + u32 other_crc
 
 /// Record stored in the journal for linked list entries.
 struct JournalEntry<K: Array, V: Codec> {
     next_journal_id: u64,
-    next_offset: u64,
+    next_offset: u32, // Changed to u32 to match variable journal offsets
     key: K,
     value: V,
 }
 
 impl<K: Array, V: Codec> JournalEntry<K, V> {
     /// Create a new `JournalEntry`.
-    fn new(next_journal_id: u64, next_offset: u64, key: K, value: V) -> Self {
+    fn new(next_journal_id: u64, next_offset: u32, key: K, value: V) -> Self {
         Self {
             next_journal_id,
             next_offset,
@@ -55,9 +52,9 @@ impl<K: Array, V: Codec> Read for JournalEntry<K, V> {
         buf.copy_to_slice(&mut next_journal_id_bytes);
         let next_journal_id = u64::from_le_bytes(next_journal_id_bytes);
 
-        let mut next_offset_bytes = [0u8; 8];
+        let mut next_offset_bytes = [0u8; 4]; // Changed to 4 bytes
         buf.copy_to_slice(&mut next_offset_bytes);
-        let next_offset = u64::from_le_bytes(next_offset_bytes);
+        let next_offset = u32::from_le_bytes(next_offset_bytes);
 
         let key = K::read(buf)?;
 
@@ -79,21 +76,18 @@ impl<K: Array, V: Codec> Read for JournalEntry<K, V> {
 
 impl<K: Array, V: Codec> EncodeSize for JournalEntry<K, V> {
     fn encode_size(&self) -> usize {
-        8 + 8 + K::SIZE + 4 + self.value.encode_size() // Added 4 bytes for value size
+        8 + 4 + K::SIZE + 4 + self.value.encode_size() // Changed to 4 bytes for next_offset
     }
 }
 
 /// Implementation of `DiskMap` storage.
 pub struct DiskMap<E: Storage + Metrics, K: Array, V: Codec> {
-    context: E,
-    config: Config<V::Cfg>,
-
     // Table blob that maps hash values to journal locations (journal_id, offset)
     table_blob: E::Blob,
     table_size: u64, // Number of table entries
 
-    // Cache of open journal blobs
-    journal_cache: HashMap<u64, Write<E::Blob>>,
+    // Variable journal for storing entries
+    journal: Journal<E, JournalEntry<K, V>>,
 
     // Current journal for new writes
     current_journal_id: u64,
@@ -104,8 +98,6 @@ pub struct DiskMap<E: Storage + Metrics, K: Array, V: Codec> {
     // Metrics
     puts: Counter,
     gets: Counter,
-    journal_hits: Counter,
-    journal_misses: Counter,
     table_reads: Counter,
 }
 
@@ -131,39 +123,33 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
             table_blob.sync().await?;
         }
 
+        // Initialize variable journal with a separate partition
+        let journal_partition = format!("{}_journal", config.partition);
+        let journal_config = JournalConfig {
+            partition: journal_partition,
+            compression: None, // Can be configurable if needed
+            codec_config: config.codec_config.clone(),
+            write_buffer: config.write_buffer,
+        };
+        let journal = Journal::init(context.clone(), journal_config).await?;
+
         // Create metrics
         let puts = Counter::default();
         let gets = Counter::default();
-        let journal_hits = Counter::default();
-        let journal_misses = Counter::default();
         let table_reads = Counter::default();
 
         context.register("puts", "number of put operations", puts.clone());
         context.register("gets", "number of get operations", gets.clone());
-        context.register(
-            "journal_hits",
-            "number of journal cache hits",
-            journal_hits.clone(),
-        );
-        context.register(
-            "journal_misses",
-            "number of journal cache misses",
-            journal_misses.clone(),
-        );
         context.register("table_reads", "number of table reads", table_reads.clone());
 
         Ok(Self {
-            context,
-            config,
             table_blob,
             table_size,
-            journal_cache: HashMap::new(),
+            journal,
             current_journal_id: 0,
             _phantom: PhantomData,
             puts,
             gets,
-            journal_hits,
-            journal_misses,
             table_reads,
         })
     }
@@ -175,7 +161,7 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
     }
 
     /// Get the journal location (journal_id, offset) for a given table index.
-    async fn get_table_entry(&self, table_index: u64) -> Result<(u64, u64), Error> {
+    async fn get_table_entry(&self, table_index: u64) -> Result<(u64, u32), Error> {
         self.table_reads.inc();
 
         let offset = table_index * TABLE_ENTRY_SIZE as u64;
@@ -194,22 +180,22 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
     }
 
     /// Parse a single table entry: [journal_id][journal_offset][crc][other_crc]
-    fn parse_single_entry(&self, data: &[u8]) -> Result<(u64, u64, u32, u32), Error> {
+    fn parse_single_entry(&self, data: &[u8]) -> Result<(u64, u32, u32, u32), Error> {
         if data.len() != SINGLE_ENTRY_SIZE {
             return Err(Error::DirectoryCorrupted);
         }
 
         let journal_id = u64::from_le_bytes(data[0..8].try_into().unwrap());
-        let journal_offset = u64::from_le_bytes(data[8..16].try_into().unwrap());
-        let crc = u32::from_le_bytes(data[16..20].try_into().unwrap());
-        let other_crc = u32::from_le_bytes(data[20..24].try_into().unwrap());
+        let journal_offset = u32::from_le_bytes(data[8..12].try_into().unwrap()); // Changed to u32
+        let crc = u32::from_le_bytes(data[12..16].try_into().unwrap());
+        let other_crc = u32::from_le_bytes(data[16..20].try_into().unwrap());
 
         Ok((journal_id, journal_offset, crc, other_crc))
     }
 
     /// Calculate CRC for the data portion of an entry (journal_id + journal_offset)
-    fn calculate_entry_crc(&self, journal_id: u64, journal_offset: u64) -> u32 {
-        let mut data = Vec::with_capacity(16);
+    fn calculate_entry_crc(&self, journal_id: u64, journal_offset: u32) -> u32 {
+        let mut data = Vec::with_capacity(12);
         data.extend_from_slice(&journal_id.to_le_bytes());
         data.extend_from_slice(&journal_offset.to_le_bytes());
         crc32fast::hash(&data)
@@ -218,9 +204,9 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
     /// Select the valid entry from two candidates based on CRC validation and cross-references
     fn select_valid_entry(
         &self,
-        entry1: (u64, u64, u32, u32),
-        entry2: (u64, u64, u32, u32),
-    ) -> Result<(u64, u64), Error> {
+        entry1: (u64, u32, u32, u32),
+        entry2: (u64, u32, u32, u32),
+    ) -> Result<(u64, u32), Error> {
         let (journal_id1, journal_offset1, crc1, other_crc1) = entry1;
         let (journal_id2, journal_offset2, crc2, other_crc2) = entry2;
 
@@ -276,7 +262,7 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         &self,
         table_index: u64,
         journal_id: u64,
-        journal_offset: u64,
+        journal_offset: u32,
     ) -> Result<(), Error> {
         let offset = table_index * TABLE_ENTRY_SIZE as u64;
 
@@ -325,6 +311,8 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
             new_buf.extend_from_slice(&journal_offset.to_le_bytes());
             new_buf.extend_from_slice(&new_crc.to_le_bytes());
             new_buf.extend_from_slice(&old_crc.to_le_bytes()); // Reference to old entry
+                                                               // Pad to maintain SINGLE_ENTRY_SIZE
+            new_buf.extend_from_slice(&[0u8; 4]);
 
             // Copy second slot unchanged
             new_buf.extend_from_slice(&read_buf.as_ref()[SINGLE_ENTRY_SIZE..TABLE_ENTRY_SIZE]);
@@ -337,6 +325,8 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
             new_buf.extend_from_slice(&journal_offset.to_le_bytes());
             new_buf.extend_from_slice(&new_crc.to_le_bytes());
             new_buf.extend_from_slice(&old_crc.to_le_bytes()); // Reference to old entry
+                                                               // Pad to maintain SINGLE_ENTRY_SIZE
+            new_buf.extend_from_slice(&[0u8; 4]);
         }
 
         // Write the complete entry atomically
@@ -346,22 +336,18 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         Ok(())
     }
 
-    /// Get or create a journal blob.
-    async fn get_journal(&mut self, journal_id: u64) -> Result<&mut Write<E::Blob>, Error> {
-        if !self.journal_cache.contains_key(&journal_id) {
-            self.journal_misses.inc();
-            let journal_name = format!("{}{}", JOURNAL_PREFIX, journal_id);
-            let (journal_blob, journal_len) = self
-                .context
-                .open(&self.config.partition, journal_name.as_bytes())
-                .await?;
-            let write_journal = Write::new(journal_blob, journal_len, self.config.write_buffer);
-            self.journal_cache.insert(journal_id, write_journal);
-        } else {
-            self.journal_hits.inc();
+    /// Determine which journal section to write to based on current journal size.
+    async fn determine_journal_section(&mut self) -> Result<u64, Error> {
+        if self.current_journal_id == 0 {
+            // First write, start with journal 1
+            self.current_journal_id = 1;
+            return Ok(1);
         }
 
-        Ok(self.journal_cache.get_mut(&journal_id).unwrap())
+        // Check current journal size by trying to get an entry from it
+        // Since we can't directly check journal size, we'll use section rotation
+        self.current_journal_id += 1;
+        Ok(self.current_journal_id)
     }
 
     /// Insert a key-value pair into a journal using proper linked list chaining.
@@ -375,38 +361,14 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         let (current_head_journal_id, current_head_offset) =
             self.get_table_entry(table_index).await?;
 
-        // Determine which journal to write to
-        let target_journal_id = if self.current_journal_id == 0 {
-            // First write, start with journal 0
-            self.current_journal_id = 1;
-            1
-        } else {
-            // Check if current journal is getting too large
-            let current_journal = self.get_journal(self.current_journal_id).await?;
-            let current_size = current_journal.size().await;
+        // Determine which journal section to write to
+        let target_journal_id = self.determine_journal_section().await?;
 
-            if current_size > MAX_JOURNAL_SIZE {
-                // Start a new journal
-                self.current_journal_id += 1;
-                self.current_journal_id
-            } else {
-                self.current_journal_id
-            }
-        };
-
-        let journal = self.get_journal(target_journal_id).await?;
-        let new_entry_offset = journal.size().await;
-
-        // Create journal entry
+        // Create journal entry with proper linked list chaining
         let entry = JournalEntry::new(current_head_journal_id, current_head_offset, key, value);
 
-        // Encode the entry
-        let mut buf = Vec::with_capacity(entry.encode_size());
-        entry.write(&mut buf);
-
-        // Write the entry to the journal
-        journal.write_at(buf, new_entry_offset).await?;
-        journal.sync().await?;
+        // Append entry to the variable journal
+        let (new_entry_offset, _size) = self.journal.append(target_journal_id, entry).await?;
 
         // Update table to point to this new entry as the head
         self.set_table_entry(table_index, target_journal_id, new_entry_offset)
@@ -453,52 +415,23 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         let mut values = Vec::new();
 
         loop {
-            // Get the journal for this entry
-            let journal = self.get_journal(journal_id).await?;
+            // Get the entry from the variable journal
+            let entry = match self.journal.get(journal_id, offset).await? {
+                Some(entry) => entry,
+                None => break, // Entry not found, end of chain
+            };
 
-            // Read the next pointers first to get the structure
-            let next_journal_buf = vec![0u8; 8];
-            let next_journal_buf = journal.read_at(next_journal_buf, offset).await?;
-            let next_journal_id = u64::from_le_bytes(next_journal_buf.as_ref().try_into().unwrap());
-
-            let next_offset_buf = vec![0u8; 8];
-            let next_offset_buf = journal.read_at(next_offset_buf, offset + 8).await?;
-            let next_offset = u64::from_le_bytes(next_offset_buf.as_ref().try_into().unwrap());
-
-            // Read the key
-            let key_buf = vec![0u8; K::SIZE];
-            let key_buf = journal.read_at(key_buf, offset + 16).await?;
-            let entry_key =
-                K::read(&mut key_buf.as_ref()).map_err(|_| Error::BucketCorrupted(offset))?;
-
-            // Check if this key matches before reading the value
-            if entry_key.as_ref() == key.as_ref() {
-                // Read the value size first
-                let value_size_buf = vec![0u8; 4];
-                let value_size_buf = journal
-                    .read_at(value_size_buf, offset + 16 + K::SIZE as u64)
-                    .await?;
-                let value_size =
-                    u32::from_le_bytes(value_size_buf.as_ref().try_into().unwrap()) as usize;
-
-                // Now read exactly the amount of data we need for the value
-                let value_buf = vec![0u8; value_size];
-                let value_buf = journal
-                    .read_at(value_buf, offset + 16 + K::SIZE as u64 + 4)
-                    .await?;
-
-                let entry_value = V::read_cfg(&mut value_buf.as_ref(), &self.config.codec_config)
-                    .map_err(|_| Error::BucketCorrupted(offset))?;
-
-                values.push(entry_value);
+            // Check if this key matches
+            if entry.key.as_ref() == key.as_ref() {
+                values.push(entry.value);
             }
 
             // Follow the chain
-            if next_journal_id == 0 {
+            if entry.next_journal_id == 0 {
                 break; // End of chain
             }
-            journal_id = next_journal_id;
-            offset = next_offset;
+            journal_id = entry.next_journal_id;
+            offset = entry.next_offset;
         }
 
         trace!(
@@ -519,6 +452,13 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
     /// Get the number of table entries.
     pub fn table_size(&self) -> u64 {
         self.table_size
+    }
+
+    /// Close the disk map and underlying journal.
+    pub async fn close(self) -> Result<(), Error> {
+        self.journal.close().await?;
+        self.table_blob.close().await?;
+        Ok(())
     }
 }
 
@@ -569,6 +509,9 @@ mod tests {
             assert!(diskmap.contains_key(&key).await.unwrap());
             let nonexist_key = TestKey::new(*b"nonexist");
             assert!(!diskmap.contains_key(&nonexist_key).await.unwrap());
+
+            // Close the diskmap
+            diskmap.close().await.unwrap();
         });
     }
 
@@ -596,6 +539,9 @@ mod tests {
 
             assert_eq!(values.len(), 1);
             assert_eq!(values[0], value);
+
+            // Close the diskmap
+            diskmap.close().await.unwrap();
         });
     }
 }
