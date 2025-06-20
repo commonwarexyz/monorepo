@@ -5,6 +5,7 @@ use commonware_codec::{Codec, EncodeSize, Read, ReadExt, Write as CodecWrite};
 use commonware_runtime::{Blob, Metrics, Storage};
 use commonware_utils::{hex, Array};
 use prometheus_client::metrics::counter::Counter;
+use std::collections::HashSet;
 use std::marker::PhantomData;
 use tracing::trace;
 
@@ -101,6 +102,9 @@ pub struct DiskMap<E: Storage + Metrics, K: Array, V: Codec> {
     puts: Counter,
     gets: Counter,
     table_reads: Counter,
+
+    // Track modified journal sections
+    modified_sections: HashSet<u64>,
 }
 
 impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
@@ -147,6 +151,9 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         context.register("gets", "number of get operations", gets.clone());
         context.register("table_reads", "number of table reads", table_reads.clone());
 
+        // Initialize modified sections set
+        let modified_sections = HashSet::new();
+
         Ok(Self {
             table_blob,
             table_size,
@@ -156,6 +163,7 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
             puts,
             gets,
             table_reads,
+            modified_sections,
         })
     }
 
@@ -379,6 +387,9 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         // Append entry to the variable journal
         let (new_entry_offset, _size) = self.journal.append(target_journal_id, entry).await?;
 
+        // Track that this section has been modified
+        self.modified_sections.insert(target_journal_id);
+
         // Update table to point to this new entry as the head
         self.set_table_entry(table_index, target_journal_id, new_entry_offset)
             .await?;
@@ -461,6 +472,23 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
     /// Get the number of table entries.
     pub fn table_size(&self) -> u64 {
         self.table_size
+    }
+
+    /// Sync all data to the underlying store.
+    /// First syncs all journal sections, then syncs the table.
+    pub async fn sync(&mut self) -> Result<(), Error> {
+        // First sync all modified journal sections
+        for &section in &self.modified_sections {
+            self.journal.sync(section).await?;
+        }
+
+        // Clear the modified sections since they're now synced
+        self.modified_sections.clear();
+
+        // Then sync the table
+        self.table_blob.sync().await?;
+
+        Ok(())
     }
 
     /// Close the disk map and underlying journal.
@@ -619,6 +647,99 @@ mod tests {
 
                 diskmap.close().await.unwrap();
             }
+        });
+    }
+
+    #[test]
+    fn test_diskmap_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let config = Config {
+                partition: "test_sync".to_string(),
+                directory_size: 256,
+                codec_config: (),
+                write_buffer: 1024,
+            };
+
+            let mut diskmap = DiskMap::<_, TestKey, TestValue>::init(context, config)
+                .await
+                .unwrap();
+
+            // Add some data
+            let key1 = TestKey::new(*b"testkey1");
+            let value1 = TestValue::new(*b"testvalue1234567");
+            diskmap.put(key1.clone(), value1.clone()).await.unwrap();
+
+            let key2 = TestKey::new(*b"testkey2");
+            let value2 = TestValue::new(*b"testvalue7654321");
+            diskmap.put(key2.clone(), value2.clone()).await.unwrap();
+
+            // Test sync - should not error and should force data to storage
+            diskmap.sync().await.unwrap();
+
+            // Verify data is still retrievable after sync
+            let values1 = diskmap.get(&key1).await.unwrap();
+            assert_eq!(values1.len(), 1);
+            assert_eq!(values1[0], value1);
+
+            let values2 = diskmap.get(&key2).await.unwrap();
+            assert_eq!(values2.len(), 1);
+            assert_eq!(values2[0], value2);
+
+            // Test that sync can be called multiple times (should be no-op after first sync)
+            diskmap.sync().await.unwrap();
+
+            diskmap.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_diskmap_sync_efficiency() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let config = Config {
+                partition: "test_sync_efficiency".to_string(),
+                directory_size: 256,
+                codec_config: (),
+                write_buffer: 1024,
+            };
+
+            let mut diskmap = DiskMap::<_, TestKey, TestValue>::init(context, config)
+                .await
+                .unwrap();
+
+            // Initially, no sections should be modified
+            assert!(diskmap.modified_sections.is_empty());
+
+            // Add some data - should track that a section was modified
+            let key1 = TestKey::new(*b"testkey1");
+            let value1 = TestValue::new(*b"testvalue1234567");
+            diskmap.put(key1.clone(), value1.clone()).await.unwrap();
+
+            // Should have one modified section now
+            assert_eq!(diskmap.modified_sections.len(), 1);
+
+            // Add more data to same hash bucket - should still be same section
+            let key2 = TestKey::new(*b"testkey2");
+            let value2 = TestValue::new(*b"testvalue7654321");
+            diskmap.put(key2.clone(), value2.clone()).await.unwrap();
+
+            // Should still have at most one section (might be the same section)
+            assert!(!diskmap.modified_sections.is_empty());
+
+            // After sync, modified sections should be cleared
+            diskmap.sync().await.unwrap();
+            assert!(diskmap.modified_sections.is_empty());
+
+            // Add more data after sync - should track new modifications
+            let key3 = TestKey::new(*b"testkey3");
+            let value3 = TestValue::new(*b"testvalue3333333");
+            diskmap.put(key3.clone(), value3.clone()).await.unwrap();
+
+            // Should have modified sections again
+            assert!(!diskmap.modified_sections.is_empty());
+
+            diskmap.close().await.unwrap();
         });
     }
 }
