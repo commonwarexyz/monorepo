@@ -45,6 +45,8 @@ pub enum Error {
     Runtime(#[from] commonware_runtime::Error),
     #[error("journal error: {0}")]
     Journal(#[from] crate::journal::Error),
+    #[error("codec error: {0}")]
+    Codec(#[from] commonware_codec::Error),
     #[error("invalid key length: expected {expected}, got {actual}")]
     InvalidKeyLength { expected: usize, actual: usize },
     #[error("invalid value length: expected {expected}, got {actual}")]

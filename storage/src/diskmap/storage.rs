@@ -1,7 +1,7 @@
 use super::{Config, Error};
 use crate::journal::variable::{Config as JournalConfig, Journal};
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, EncodeSize, Read, ReadExt, Write as CodecWrite};
+use commonware_codec::{Codec, EncodeSize, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_runtime::{Blob, Metrics, Storage};
 use commonware_utils::{hex, Array};
 use prometheus_client::metrics::counter::Counter;
@@ -14,6 +14,80 @@ const TABLE_ENTRY_SIZE: usize = 48; // Two entries: 2 * (u64 journal_id + u32 of
 const SINGLE_ENTRY_SIZE: usize = 24; // u64 journal_id + u32 offset + u32 crc + u32 other_crc
 
 const MAX_JOURNAL_SIZE: u64 = 64 * 1024 * 1024; // 64MB per journal
+
+/// Single table entry stored in the table blob.
+#[derive(Debug, Clone, PartialEq)]
+struct TableEntry {
+    journal_id: u64,
+    journal_offset: u32,
+    crc: u32,
+    other_crc: u32,
+}
+
+impl TableEntry {
+    /// Create a new `TableEntry`.
+    fn new(journal_id: u64, journal_offset: u32, crc: u32, other_crc: u32) -> Self {
+        Self {
+            journal_id,
+            journal_offset,
+            crc,
+            other_crc,
+        }
+    }
+
+    /// Check if this entry is empty (all zeros).
+    fn is_empty(&self) -> bool {
+        self.journal_id == 0 && self.journal_offset == 0 && self.crc == 0 && self.other_crc == 0
+    }
+}
+
+impl FixedSize for TableEntry {
+    const SIZE: usize = SINGLE_ENTRY_SIZE;
+}
+
+impl CodecWrite for TableEntry {
+    fn write(&self, buf: &mut impl BufMut) {
+        buf.put_slice(&self.journal_id.to_le_bytes());
+        buf.put_slice(&self.journal_offset.to_le_bytes());
+        buf.put_slice(&self.crc.to_le_bytes());
+        buf.put_slice(&self.other_crc.to_le_bytes());
+        // Pad to reach SINGLE_ENTRY_SIZE
+        buf.put_slice(&[0u8; 4]);
+    }
+}
+
+impl Read for TableEntry {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let mut journal_id_bytes = [0u8; 8];
+        buf.copy_to_slice(&mut journal_id_bytes);
+        let journal_id = u64::from_le_bytes(journal_id_bytes);
+
+        let mut journal_offset_bytes = [0u8; 4];
+        buf.copy_to_slice(&mut journal_offset_bytes);
+        let journal_offset = u32::from_le_bytes(journal_offset_bytes);
+
+        let mut crc_bytes = [0u8; 4];
+        buf.copy_to_slice(&mut crc_bytes);
+        let crc = u32::from_le_bytes(crc_bytes);
+
+        let mut other_crc_bytes = [0u8; 4];
+        buf.copy_to_slice(&mut other_crc_bytes);
+        let other_crc = u32::from_le_bytes(other_crc_bytes);
+
+        // Skip padding bytes
+        let mut padding = [0u8; 4];
+        buf.copy_to_slice(&mut padding);
+
+        Ok(Self {
+            journal_id,
+            journal_offset,
+            crc,
+            other_crc,
+        })
+    }
+}
 
 /// Record stored in the journal for linked list entries.
 struct JournalEntry<K: Array, V: Codec> {
@@ -201,29 +275,17 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         let buf = vec![0u8; TABLE_ENTRY_SIZE];
         let read_buf = self.table_blob.read_at(buf, offset).await?;
 
-        // Parse both entries
-        let entry1 = self.parse_single_entry(&read_buf.as_ref()[0..SINGLE_ENTRY_SIZE])?;
-        let entry2 =
-            self.parse_single_entry(&read_buf.as_ref()[SINGLE_ENTRY_SIZE..TABLE_ENTRY_SIZE])?;
+        // Parse both entries using codec
+        let mut buf1 = &read_buf.as_ref()[0..SINGLE_ENTRY_SIZE];
+        let mut buf2 = &read_buf.as_ref()[SINGLE_ENTRY_SIZE..TABLE_ENTRY_SIZE];
+
+        let entry1 = TableEntry::read(&mut buf1)?;
+        let entry2 = TableEntry::read(&mut buf2)?;
 
         // Determine which entry is valid
-        let (journal_id, journal_offset) = self.select_valid_entry(entry1, entry2)?;
+        let (journal_id, journal_offset) = self.select_valid_entry(&entry1, &entry2)?;
 
         Ok((journal_id, journal_offset))
-    }
-
-    /// Parse a single table entry: [journal_id][journal_offset][crc][other_crc]
-    fn parse_single_entry(&self, data: &[u8]) -> Result<(u64, u32, u32, u32), Error> {
-        if data.len() != SINGLE_ENTRY_SIZE {
-            return Err(Error::DirectoryCorrupted);
-        }
-
-        let journal_id = u64::from_le_bytes(data[0..8].try_into().unwrap());
-        let journal_offset = u32::from_le_bytes(data[8..12].try_into().unwrap()); // Changed to u32
-        let crc = u32::from_le_bytes(data[12..16].try_into().unwrap());
-        let other_crc = u32::from_le_bytes(data[16..20].try_into().unwrap());
-
-        Ok((journal_id, journal_offset, crc, other_crc))
     }
 
     /// Calculate CRC for the data portion of an entry (journal_id + journal_offset)
@@ -237,29 +299,26 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
     /// Select the valid entry from two candidates based on CRC validation and cross-references
     fn select_valid_entry(
         &self,
-        entry1: (u64, u32, u32, u32),
-        entry2: (u64, u32, u32, u32),
+        entry1: &TableEntry,
+        entry2: &TableEntry,
     ) -> Result<(u64, u32), Error> {
-        let (journal_id1, journal_offset1, crc1, other_crc1) = entry1;
-        let (journal_id2, journal_offset2, crc2, other_crc2) = entry2;
-
         // Calculate expected CRCs
-        let expected_crc1 = self.calculate_entry_crc(journal_id1, journal_offset1);
-        let expected_crc2 = self.calculate_entry_crc(journal_id2, journal_offset2);
+        let expected_crc1 = self.calculate_entry_crc(entry1.journal_id, entry1.journal_offset);
+        let expected_crc2 = self.calculate_entry_crc(entry2.journal_id, entry2.journal_offset);
 
         // Check which entries have valid CRCs
-        let entry1_valid = crc1 == expected_crc1;
-        let entry2_valid = crc2 == expected_crc2;
+        let entry1_valid = entry1.crc == expected_crc1;
+        let entry2_valid = entry2.crc == expected_crc2;
 
         match (entry1_valid, entry2_valid) {
             (true, true) => {
                 // Both valid - select the one that references the other's CRC
-                if other_crc1 == expected_crc2 {
+                if entry1.other_crc == expected_crc2 {
                     // Entry1 references entry2, so entry1 is newer
-                    Ok((journal_id1, journal_offset1))
-                } else if other_crc2 == expected_crc1 {
+                    Ok((entry1.journal_id, entry1.journal_offset))
+                } else if entry2.other_crc == expected_crc1 {
                     // Entry2 references entry1, so entry2 is newer
-                    Ok((journal_id2, journal_offset2))
+                    Ok((entry2.journal_id, entry2.journal_offset))
                 } else {
                     // Neither references the other correctly - corruption
                     Err(Error::DirectoryCorrupted)
@@ -267,19 +326,15 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
             }
             (true, false) => {
                 // Only entry1 is valid
-                Ok((journal_id1, journal_offset1))
+                Ok((entry1.journal_id, entry1.journal_offset))
             }
             (false, true) => {
                 // Only entry2 is valid
-                Ok((journal_id2, journal_offset2))
+                Ok((entry2.journal_id, entry2.journal_offset))
             }
             (false, false) => {
                 // Both entries are corrupted or empty
-                if journal_id1 == 0
-                    && journal_offset1 == 0
-                    && journal_id2 == 0
-                    && journal_offset2 == 0
-                {
+                if entry1.is_empty() && entry2.is_empty() {
                     // Empty entry
                     Ok((0, 0))
                 } else {
@@ -316,20 +371,22 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         let buf = vec![0u8; TABLE_ENTRY_SIZE];
         let read_buf = self.table_blob.read_at(buf, offset).await?;
 
-        // Parse current entries
-        let entry1 = self.parse_single_entry(&read_buf.as_ref()[0..SINGLE_ENTRY_SIZE])?;
-        let entry2 =
-            self.parse_single_entry(&read_buf.as_ref()[SINGLE_ENTRY_SIZE..TABLE_ENTRY_SIZE])?;
+        // Parse current entries using codec
+        let mut buf1 = &read_buf.as_ref()[0..SINGLE_ENTRY_SIZE];
+        let mut buf2 = &read_buf.as_ref()[SINGLE_ENTRY_SIZE..TABLE_ENTRY_SIZE];
+
+        let entry1 = TableEntry::read(&mut buf1)?;
+        let entry2 = TableEntry::read(&mut buf2)?;
 
         // Calculate CRCs for new entry
         let new_crc = self.calculate_entry_crc(journal_id, journal_offset);
 
         // Determine which slot to update (alternate between them)
-        let (update_first, old_entry) = match self.select_valid_entry(entry1, entry2) {
+        let (update_first, old_entry) = match self.select_valid_entry(&entry1, &entry2) {
             Ok((old_journal_id, old_journal_offset)) => {
                 // There's a valid current entry - figure out which slot it's in
                 let old_crc = self.calculate_entry_crc(old_journal_id, old_journal_offset);
-                let entry1_crc = self.calculate_entry_crc(entry1.0, entry1.1);
+                let entry1_crc = self.calculate_entry_crc(entry1.journal_id, entry1.journal_offset);
 
                 if entry1_crc == old_crc {
                     // Current entry is in slot 1, update slot 2
@@ -353,26 +410,14 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
 
         if update_first {
             // Update first slot, keep second slot
-            new_buf.extend_from_slice(&journal_id.to_le_bytes());
-            new_buf.extend_from_slice(&journal_offset.to_le_bytes());
-            new_buf.extend_from_slice(&new_crc.to_le_bytes());
-            new_buf.extend_from_slice(&old_crc.to_le_bytes()); // Reference to old entry
-                                                               // Pad to maintain SINGLE_ENTRY_SIZE
-            new_buf.extend_from_slice(&[0u8; 4]);
-
-            // Copy second slot unchanged
-            new_buf.extend_from_slice(&read_buf.as_ref()[SINGLE_ENTRY_SIZE..TABLE_ENTRY_SIZE]);
+            let new_entry1 = TableEntry::new(journal_id, journal_offset, new_crc, old_crc);
+            new_entry1.write(&mut new_buf);
+            entry2.write(&mut new_buf);
         } else {
             // Keep first slot, update second slot
-            new_buf.extend_from_slice(&read_buf.as_ref()[0..SINGLE_ENTRY_SIZE]);
-
-            // Update second slot
-            new_buf.extend_from_slice(&journal_id.to_le_bytes());
-            new_buf.extend_from_slice(&journal_offset.to_le_bytes());
-            new_buf.extend_from_slice(&new_crc.to_le_bytes());
-            new_buf.extend_from_slice(&old_crc.to_le_bytes()); // Reference to old entry
-                                                               // Pad to maintain SINGLE_ENTRY_SIZE
-            new_buf.extend_from_slice(&[0u8; 4]);
+            entry1.write(&mut new_buf);
+            let new_entry2 = TableEntry::new(journal_id, journal_offset, new_crc, old_crc);
+            new_entry2.write(&mut new_buf);
         }
 
         // Write the complete entry
