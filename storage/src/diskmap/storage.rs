@@ -10,8 +10,8 @@ use std::marker::PhantomData;
 use tracing::trace;
 
 const TABLE_BLOB_NAME: &[u8] = b"table";
-const TABLE_ENTRY_SIZE: usize = 48; // Two entries: 2 * (u64 journal_id + u32 offset + u32 crc + u32 other_crc)
-const SINGLE_ENTRY_SIZE: usize = 24; // u64 journal_id + u32 offset + u32 crc + u32 other_crc
+const TABLE_ENTRY_SIZE: usize = 40; // Two entries: 2 * (u64 journal_id + u32 offset + u32 crc + u32 other_crc)
+const SINGLE_ENTRY_SIZE: usize = 20; // u64 journal_id + u32 offset + u32 crc + u32 other_crc
 
 const MAX_JOURNAL_SIZE: u64 = 64 * 1024 * 1024; // 64MB per journal
 
@@ -51,8 +51,6 @@ impl CodecWrite for TableEntry {
         buf.put_slice(&self.journal_offset.to_le_bytes());
         buf.put_slice(&self.crc.to_le_bytes());
         buf.put_slice(&self.other_crc.to_le_bytes());
-        // Pad to reach SINGLE_ENTRY_SIZE
-        buf.put_slice(&[0u8; 4]);
     }
 }
 
@@ -75,10 +73,6 @@ impl Read for TableEntry {
         let mut other_crc_bytes = [0u8; 4];
         buf.copy_to_slice(&mut other_crc_bytes);
         let other_crc = u32::from_le_bytes(other_crc_bytes);
-
-        // Skip padding bytes
-        let mut padding = [0u8; 4];
-        buf.copy_to_slice(&mut padding);
 
         Ok(Self {
             journal_id,
