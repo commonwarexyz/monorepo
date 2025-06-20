@@ -5,7 +5,7 @@ use commonware_codec::{Codec, EncodeSize, Read, ReadExt, Write as CodecWrite};
 use commonware_runtime::{Blob, Metrics, Storage};
 use commonware_utils::{hex, Array};
 use prometheus_client::metrics::counter::Counter;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use tracing::trace;
 
@@ -105,6 +105,9 @@ pub struct DiskMap<E: Storage + Metrics, K: Array, V: Codec> {
 
     // Track modified journal sections
     modified_sections: HashSet<u64>,
+
+    // Pending table updates to be written on sync (table_index -> (journal_id, journal_offset))
+    pending_table_updates: HashMap<u64, (u64, u32)>,
 }
 
 impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
@@ -154,6 +157,9 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         // Initialize modified sections set
         let modified_sections = HashSet::new();
 
+        // Initialize pending table updates
+        let pending_table_updates = HashMap::new();
+
         Ok(Self {
             table_blob,
             table_size,
@@ -164,6 +170,7 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
             gets,
             table_reads,
             modified_sections,
+            pending_table_updates,
         })
     }
 
@@ -176,6 +183,11 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
     /// Get the journal location (journal_id, offset) for a given table index.
     async fn get_table_entry(&self, table_index: u64) -> Result<(u64, u32), Error> {
         self.table_reads.inc();
+
+        // Check if there's a pending update first
+        if let Some(&(journal_id, journal_offset)) = self.pending_table_updates.get(&table_index) {
+            return Ok((journal_id, journal_offset));
+        }
 
         let offset = table_index * TABLE_ENTRY_SIZE as u64;
         let buf = vec![0u8; TABLE_ENTRY_SIZE];
@@ -270,8 +282,21 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         }
     }
 
-    /// Set the journal location for a given table index using atomic dual-entry writes.
-    async fn set_table_entry(
+    /// Set the journal location for a given table index by storing it in memory for later sync.
+    fn set_table_entry(
+        &mut self,
+        table_index: u64,
+        journal_id: u64,
+        journal_offset: u32,
+    ) -> Result<(), Error> {
+        // Store the update in memory for later sync
+        self.pending_table_updates
+            .insert(table_index, (journal_id, journal_offset));
+        Ok(())
+    }
+
+    /// Write a table entry to disk using atomic dual-entry writes.
+    async fn write_table_entry_to_disk(
         &self,
         table_index: u64,
         journal_id: u64,
@@ -342,9 +367,8 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
             new_buf.extend_from_slice(&[0u8; 4]);
         }
 
-        // Write the complete entry atomically
+        // Write the complete entry
         self.table_blob.write_at(new_buf, offset).await?;
-        self.table_blob.sync().await?;
 
         Ok(())
     }
@@ -391,8 +415,7 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         self.modified_sections.insert(target_journal_id);
 
         // Update table to point to this new entry as the head
-        self.set_table_entry(table_index, target_journal_id, new_entry_offset)
-            .await?;
+        self.set_table_entry(table_index, target_journal_id, new_entry_offset)?;
 
         Ok(())
     }
@@ -475,7 +498,7 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
     }
 
     /// Sync all data to the underlying store.
-    /// First syncs all journal sections, then syncs the table.
+    /// First syncs all journal sections, then flushes pending table updates, and finally syncs the table.
     pub async fn sync(&mut self) -> Result<(), Error> {
         // First sync all modified journal sections
         for &section in &self.modified_sections {
@@ -485,7 +508,16 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         // Clear the modified sections since they're now synced
         self.modified_sections.clear();
 
-        // Then sync the table
+        // Flush all pending table updates to disk
+        for (&table_index, &(journal_id, journal_offset)) in &self.pending_table_updates {
+            self.write_table_entry_to_disk(table_index, journal_id, journal_offset)
+                .await?;
+        }
+
+        // Clear pending updates since they're now written
+        self.pending_table_updates.clear();
+
+        // Finally sync the table
         self.table_blob.sync().await?;
 
         Ok(())
@@ -708,36 +740,41 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Initially, no sections should be modified
+            // Initially, no sections should be modified and no pending table updates
             assert!(diskmap.modified_sections.is_empty());
+            assert!(diskmap.pending_table_updates.is_empty());
 
-            // Add some data - should track that a section was modified
+            // Add some data - should track that a section was modified and a table update is pending
             let key1 = TestKey::new(*b"testkey1");
             let value1 = TestValue::new(*b"testvalue1234567");
             diskmap.put(key1.clone(), value1.clone()).await.unwrap();
 
-            // Should have one modified section now
+            // Should have one modified section and one pending table update now
             assert_eq!(diskmap.modified_sections.len(), 1);
+            assert_eq!(diskmap.pending_table_updates.len(), 1);
 
-            // Add more data to same hash bucket - should still be same section
+            // Add more data to same hash bucket - should still be same section but might be more table updates
             let key2 = TestKey::new(*b"testkey2");
             let value2 = TestValue::new(*b"testvalue7654321");
             diskmap.put(key2.clone(), value2.clone()).await.unwrap();
 
-            // Should still have at most one section (might be the same section)
+            // Should still have at most one section (might be the same section) and possibly more table updates
             assert!(!diskmap.modified_sections.is_empty());
+            assert!(!diskmap.pending_table_updates.is_empty());
 
-            // After sync, modified sections should be cleared
+            // After sync, modified sections and pending table updates should be cleared
             diskmap.sync().await.unwrap();
             assert!(diskmap.modified_sections.is_empty());
+            assert!(diskmap.pending_table_updates.is_empty());
 
             // Add more data after sync - should track new modifications
             let key3 = TestKey::new(*b"testkey3");
             let value3 = TestValue::new(*b"testvalue3333333");
             diskmap.put(key3.clone(), value3.clone()).await.unwrap();
 
-            // Should have modified sections again
+            // Should have modified sections and pending table updates again
             assert!(!diskmap.modified_sections.is_empty());
+            assert!(!diskmap.pending_table_updates.is_empty());
 
             diskmap.close().await.unwrap();
         });
