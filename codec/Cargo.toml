@@ -14,3 +14,8 @@ documentation = "https://docs.rs/commonware-codec"
 thiserror = { workspace = true }
 bytes = { workspace = true }
 paste = { workspace = true }
+commonware-codec-derive = { path = "../codec-derive", version = "0.0.54", optional = true }
+
+[features]
+default = ["derive"]
+derive = ["commonware-codec-derive"]
