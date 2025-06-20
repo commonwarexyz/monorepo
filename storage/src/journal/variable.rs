@@ -642,11 +642,11 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         self.blobs.keys().max().copied()
     }
 
-    /// Truncates a specific section to the given byte size.
+    /// Truncates a specific section to the given offset.
     ///
-    /// This removes any data in the section beyond the specified size.
-    /// The size should be aligned to the journal's item boundaries.
-    pub async fn truncate_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
+    /// This removes any data in the section beyond the specified offset.
+    /// The offset is in journal offset units (aligned to ITEM_ALIGNMENT).
+    pub async fn truncate_section(&mut self, section: u64, offset: u32) -> Result<(), Error> {
         self.prune_guard(section, false)?;
 
         let blob = match self.blobs.get_mut(&section) {
@@ -654,16 +654,20 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             None => return Ok(()), // Section doesn't exist, nothing to truncate
         };
 
+        // Convert offset to byte position
+        let target_size = offset as u64 * ITEM_ALIGNMENT;
+
         let current_size = blob.size().await;
-        if size >= current_size {
+        if target_size >= current_size {
             return Ok(()); // Already smaller than or equal to target size
         }
 
-        blob.truncate(size).await?;
+        blob.truncate(target_size).await?;
         debug!(
             section,
             from = current_size,
-            to = size,
+            to = target_size,
+            offset,
             "truncated journal section"
         );
         Ok(())
@@ -1800,13 +1804,12 @@ mod tests {
                 .expect("Failed to get section size");
             assert!(initial_size > 0);
 
-            // Calculate the size after 5 items (approximately)
-            // Each item is roughly: 4 (size) + 4 (i32 value) + 4 (crc) = 12 bytes, aligned to 16 = 16 bytes per item
-            let target_size = 5 * 16; // Approximate size for first 5 items
+            // Truncate to the first 5 items (offset 5)
+            let target_offset = 5u32;
 
-            // Truncate to roughly half the size
+            // Truncate to roughly half the items
             journal
-                .truncate_section(1, target_size)
+                .truncate_section(1, target_offset)
                 .await
                 .expect("Failed to truncate section");
 
@@ -1815,7 +1818,8 @@ mod tests {
                 .section_size(1)
                 .await
                 .expect("Failed to get section size");
-            assert_eq!(truncated_size, target_size);
+            let expected_size = target_offset as u64 * 16; // ITEM_ALIGNMENT
+            assert_eq!(truncated_size, expected_size);
             assert!(truncated_size < initial_size);
 
             // Verify we can still read the remaining items
@@ -1830,19 +1834,20 @@ mod tests {
 
             // Test truncating a non-existent section (should not error)
             journal
-                .truncate_section(999, 100)
+                .truncate_section(999, 10)
                 .await
                 .expect("Failed to truncate non-existent section");
 
-            // Test truncating to a larger size (should be a no-op)
+            // Test truncating to a larger offset (should be a no-op)
             let size_before = journal
                 .section_size(1)
                 .await
                 .expect("Failed to get section size");
+            let large_offset = (size_before / 16 + 100) as u32; // Convert to offset units plus some extra
             journal
-                .truncate_section(1, size_before + 1000)
+                .truncate_section(1, large_offset)
                 .await
-                .expect("Failed to truncate to larger size");
+                .expect("Failed to truncate to larger offset");
             let size_after = journal
                 .section_size(1)
                 .await

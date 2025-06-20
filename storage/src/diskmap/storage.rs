@@ -695,20 +695,22 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
                 let entry_byte_offset = (max_reachable_offset as u64) * 16; // Convert offset to byte position
                 let entry_end = entry_byte_offset + 4 + entry_size as u64 + 4; // size + data + crc
 
-                // Align to next 16-byte boundary
-                let aligned_end = ((entry_end + 15) / 16) * 16;
+                // Align to next 16-byte boundary and convert back to offset
+                let aligned_end_bytes = ((entry_end + 15) / 16) * 16;
+                let truncate_to_offset = (aligned_end_bytes / 16) as u32;
 
-                if aligned_end < current_size {
+                if aligned_end_bytes < current_size {
                     trace!(
                         section_id,
                         max_reachable_offset,
                         current_size,
-                        truncate_to = aligned_end,
+                        truncate_to_bytes = aligned_end_bytes,
+                        truncate_to_offset,
                         "truncating journal section to remove unreachable entries"
                     );
 
                     self.journal
-                        .truncate_section(section_id, aligned_end)
+                        .truncate_section(section_id, truncate_to_offset)
                         .await?;
                 }
             }
