@@ -135,6 +135,9 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         };
         let journal = Journal::init(context.clone(), journal_config).await?;
 
+        // Find the current journal ID from existing journals
+        let current_journal_id = journal.max_section_id().unwrap_or(0);
+
         // Create metrics
         let puts = Counter::default();
         let gets = Counter::default();
@@ -148,7 +151,7 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
             table_blob,
             table_size,
             journal,
-            current_journal_id: 0,
+            current_journal_id,
             _phantom: PhantomData,
             puts,
             gets,
@@ -339,24 +342,21 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
     }
 
     /// Determine which journal section to write to based on current journal size.
-    async fn determine_journal_section(&mut self) -> Result<u64, Error> {
-        if self.current_journal_id == 0 {
-            // First write, start with journal 1
-            self.current_journal_id = 1;
-            return Ok(1);
+    async fn determine_journal_section(&mut self, entry_size: usize) -> Result<u64, Error> {
+        // If we have an existing journal, check if it has enough space
+        if self.current_journal_id > 0 {
+            let current_size = self.journal.section_size(self.current_journal_id).await?;
+
+            // Check if adding this entry would exceed the limit
+            if current_size + entry_size as u64 <= MAX_JOURNAL_SIZE {
+                // Current journal has space, continue using it
+                return Ok(self.current_journal_id);
+            }
         }
 
-        // Check current journal size
-        let current_size = self.journal.section_size(self.current_journal_id).await?;
-
-        if current_size > MAX_JOURNAL_SIZE {
-            // Current journal is too large, start a new one
-            self.current_journal_id += 1;
-            Ok(self.current_journal_id)
-        } else {
-            // Current journal has space, continue using it
-            Ok(self.current_journal_id)
-        }
+        // Need a new journal (either first write or current is full)
+        self.current_journal_id += 1;
+        Ok(self.current_journal_id)
     }
 
     /// Insert a key-value pair into a journal using proper linked list chaining.
@@ -370,11 +370,11 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         let (current_head_journal_id, current_head_offset) =
             self.get_table_entry(table_index).await?;
 
-        // Determine which journal section to write to
-        let target_journal_id = self.determine_journal_section().await?;
-
         // Create journal entry with proper linked list chaining
         let entry = JournalEntry::new(current_head_journal_id, current_head_offset, key, value);
+
+        // Determine which journal section to write to based on entry size
+        let target_journal_id = self.determine_journal_section(entry.encode_size()).await?;
 
         // Append entry to the variable journal
         let (new_entry_offset, _size) = self.journal.append(target_journal_id, entry).await?;
@@ -551,6 +551,74 @@ mod tests {
 
             // Close the diskmap
             diskmap.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_diskmap_journal_initialization() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // First, create a diskmap and add some data
+            {
+                let config = Config {
+                    partition: "test_restart".to_string(),
+                    directory_size: 256,
+                    codec_config: (),
+                    write_buffer: 1024,
+                };
+
+                let mut diskmap = DiskMap::<_, TestKey, TestValue>::init(context.clone(), config)
+                    .await
+                    .unwrap();
+
+                // Add some data that should go to journal 1
+                let key1 = TestKey::new(*b"testkey1");
+                let value1 = TestValue::new(*b"testvalue1234567");
+                diskmap.put(key1.clone(), value1.clone()).await.unwrap();
+
+                let key2 = TestKey::new(*b"testkey2");
+                let value2 = TestValue::new(*b"testvalue7654321");
+                diskmap.put(key2.clone(), value2.clone()).await.unwrap();
+
+                // Verify data is retrievable
+                let values1 = diskmap.get(&key1).await.unwrap();
+                assert_eq!(values1.len(), 1);
+                assert_eq!(values1[0], value1);
+
+                diskmap.close().await.unwrap();
+            }
+
+            // Now restart and verify it finds the existing journal
+            {
+                let config = Config {
+                    partition: "test_restart".to_string(),
+                    directory_size: 256,
+                    codec_config: (),
+                    write_buffer: 1024,
+                };
+
+                let mut diskmap = DiskMap::<_, TestKey, TestValue>::init(context.clone(), config)
+                    .await
+                    .unwrap();
+
+                // Verify existing data is still accessible
+                let key1 = TestKey::new(*b"testkey1");
+                let value1 = TestValue::new(*b"testvalue1234567");
+                let values1 = diskmap.get(&key1).await.unwrap();
+                assert_eq!(values1.len(), 1);
+                assert_eq!(values1[0], value1);
+
+                // Add more data - should continue in the same journal if there's space
+                let key3 = TestKey::new(*b"testkey3");
+                let value3 = TestValue::new(*b"testvalue3333333");
+                diskmap.put(key3.clone(), value3.clone()).await.unwrap();
+
+                let values3 = diskmap.get(&key3).await.unwrap();
+                assert_eq!(values3.len(), 1);
+                assert_eq!(values3[0], value3);
+
+                diskmap.close().await.unwrap();
+            }
         });
     }
 }

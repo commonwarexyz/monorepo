@@ -637,6 +637,11 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         }
     }
 
+    /// Gets the highest existing section ID, or None if no sections exist.
+    pub fn max_section_id(&self) -> Option<u64> {
+        self.blobs.keys().max().copied()
+    }
+
     /// Prunes all `sections` less than `min`.
     pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
         // Check if we already ran this prune
