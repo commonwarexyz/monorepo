@@ -40,6 +40,9 @@ impl<K: Array, V: Codec> CodecWrite for JournalEntry<K, V> {
         buf.put_slice(&self.next_journal_id.to_le_bytes());
         buf.put_slice(&self.next_offset.to_le_bytes());
         self.key.write(buf);
+        // Write value size first, then the value
+        let value_size = self.value.encode_size() as u32;
+        buf.put_slice(&value_size.to_le_bytes());
         self.value.write(buf);
     }
 }
@@ -57,6 +60,12 @@ impl<K: Array, V: Codec> Read for JournalEntry<K, V> {
         let next_offset = u64::from_le_bytes(next_offset_bytes);
 
         let key = K::read(buf)?;
+
+        // Read value size first
+        let mut value_size_bytes = [0u8; 4];
+        buf.copy_to_slice(&mut value_size_bytes);
+        let _value_size = u32::from_le_bytes(value_size_bytes);
+
         let value = V::read_cfg(buf, cfg)?;
 
         Ok(Self {
@@ -70,7 +79,7 @@ impl<K: Array, V: Codec> Read for JournalEntry<K, V> {
 
 impl<K: Array, V: Codec> EncodeSize for JournalEntry<K, V> {
     fn encode_size(&self) -> usize {
-        8 + 8 + K::SIZE + self.value.encode_size()
+        8 + 8 + K::SIZE + 4 + self.value.encode_size() // Added 4 bytes for value size
     }
 }
 
@@ -464,13 +473,18 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
 
             // Check if this key matches before reading the value
             if entry_key.as_ref() == key.as_ref() {
-                // Read the value only if key matches
-                // First, we need to determine the size of the value
-                // For now, read a reasonable buffer and decode
-                let max_value_size = 1024; // Conservative estimate
-                let value_buf = vec![0u8; max_value_size];
+                // Read the value size first
+                let value_size_buf = vec![0u8; 4];
+                let value_size_buf = journal
+                    .read_at(value_size_buf, offset + 16 + K::SIZE as u64)
+                    .await?;
+                let value_size =
+                    u32::from_le_bytes(value_size_buf.as_ref().try_into().unwrap()) as usize;
+
+                // Now read exactly the amount of data we need for the value
+                let value_buf = vec![0u8; value_size];
                 let value_buf = journal
-                    .read_at(value_buf, offset + 16 + K::SIZE as u64)
+                    .read_at(value_buf, offset + 16 + K::SIZE as u64 + 4)
                     .await?;
 
                 let entry_value = V::read_cfg(&mut value_buf.as_ref(), &self.config.codec_config)
