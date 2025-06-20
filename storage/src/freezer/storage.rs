@@ -6,6 +6,7 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_runtime::{Metrics, Storage};
 use commonware_utils::{array::U64, Array};
+use futures::StreamExt;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use tracing::debug;
 
@@ -57,15 +58,24 @@ impl<E: Storage + Metrics, K: Array + Codec<Cfg = ()>, V: Codec> Freezer<E, K, V
             write_buffer: cfg.write_buffer,
             target_journal_size: cfg.target_journal_size,
         };
-        let index_to_key =
+        let index_to_key: DiskMap<E, U64, K> =
             DiskMap::init(context.with_label("index_to_key"), index_to_key_config).await?;
 
-        // Initialize RMap
-        // Note: Since diskmap doesn't provide iteration, we can't rebuild RMap from existing data
-        // This means the RMap will be empty on restart, which is a limitation
-        let intervals = RMap::new();
+        // Initialize RMap and rebuild from existing data
+        let mut intervals = RMap::new();
         {
             debug!("initializing freezer");
+
+            // Replay the index->key diskmap to rebuild the RMap
+            let stream = index_to_key.replay(cfg.write_buffer).await?;
+            let mut stream = Box::pin(stream);
+
+            while let Some(result) = stream.next().await {
+                let (index_key, _key) = result?;
+                let index = index_key.to_u64();
+                intervals.insert(index);
+            }
+
             debug!("freezer initialized");
         }
 
@@ -83,8 +93,9 @@ impl<E: Storage + Metrics, K: Array + Codec<Cfg = ()>, V: Codec> Freezer<E, K, V
         context.register("has", "Number of has performed", has.clone());
         context.register("syncs", "Number of syncs called", syncs.clone());
 
-        // Set initial item count to 0 since we can't easily count items in diskmap
-        items_tracked.set(0);
+        // Set initial item count based on the number of intervals we found
+        let item_count = intervals.iter().count() as i64;
+        items_tracked.set(item_count);
 
         // Return populated freezer
         Ok(Self {
@@ -335,7 +346,7 @@ mod tests {
 
             // Test gap functionality with multiple items
             let (current_end, next_start) = freezer.next_gap(5);
-            assert_eq!(current_end, Some(5)); // Item 5 exists (in continuous range 0-9)
+            assert_eq!(current_end, Some(9)); // Item 5 exists (in continuous range 0-9, so end is 9)
             assert_eq!(next_start, None); // No gap until end
 
             // Clean up the freezer

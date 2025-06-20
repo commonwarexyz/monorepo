@@ -577,6 +577,79 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         Ok(())
     }
 
+    /// Returns a stream of all key-value pairs in the disk map.
+    ///
+    /// This function iterates through all table entries and follows linked list chains
+    /// to return all stored key-value pairs. This is useful for rebuilding in-memory
+    /// indexes during initialization.
+    pub async fn replay(
+        &self,
+        _buffer: usize,
+    ) -> Result<impl futures::Stream<Item = Result<(K, V), Error>> + '_, Error>
+    where
+        K: Clone,
+        V: Clone,
+    {
+        use futures::stream::{self, StreamExt};
+
+        // Collect all non-empty table entries
+        let mut table_entries = Vec::new();
+
+        for table_index in 0..self.table_size {
+            let (journal_id, journal_offset) = self.get_table_entry(table_index).await?;
+            if journal_id != 0 || journal_offset != 0 {
+                table_entries.push((journal_id, journal_offset));
+            }
+        }
+
+        trace!(
+            entries_found = table_entries.len(),
+            "found non-empty table entries for replay"
+        );
+
+        // Create a stream that processes each table entry
+        let journal = &self.journal;
+        let stream = stream::iter(table_entries).then(
+            move |(mut journal_id, mut journal_offset)| async move {
+                let mut items = Vec::new();
+
+                // Follow the linked list chain starting from this table entry
+                loop {
+                    if journal_id == 0 {
+                        break; // End of chain
+                    }
+
+                    // Get the entry from the journal
+                    let entry = match journal.get(journal_id, journal_offset).await {
+                        Ok(Some(entry)) => entry,
+                        Ok(None) => break, // Entry not found, end of chain
+                        Err(err) => return Err(Error::Journal(err)),
+                    };
+
+                    // Add this key-value pair to our results
+                    items.push((entry.key.clone(), entry.value.clone()));
+
+                    // Follow the chain to the next entry
+                    journal_id = entry.next_journal_id;
+                    journal_offset = entry.next_offset;
+                }
+
+                Ok(items)
+            },
+        );
+
+        // Flatten the stream to return individual key-value pairs
+        Ok(stream
+            .map(|result| {
+                let items: Vec<Result<(K, V), Error>> = match result {
+                    Ok(items) => items.into_iter().map(|item| Ok(item)).collect(),
+                    Err(err) => vec![Err(err)],
+                };
+                stream::iter(items)
+            })
+            .flatten())
+    }
+
     /// Close and remove any underlying blobs created by the disk map.
     pub async fn destroy(self) -> Result<(), Error> {
         // Destroy the journal (removes all journal sections)
@@ -847,6 +920,79 @@ mod tests {
             assert!(!diskmap.pending_table_updates.is_empty());
 
             diskmap.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_diskmap_replay() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let config = Config {
+                partition: "test_replay".to_string(),
+                directory_size: 256,
+                codec_config: (),
+                write_buffer: 1024,
+                target_journal_size: 64 * 1024 * 1024, // 64MB
+            };
+
+            let mut diskmap =
+                DiskMap::<_, TestKey, TestValue>::init(context.clone(), config.clone())
+                    .await
+                    .unwrap();
+
+            // Add some test data
+            let test_data = vec![
+                (
+                    TestKey::new(*b"key00001"),
+                    TestValue::new(*b"value00000000001"),
+                ),
+                (
+                    TestKey::new(*b"key00002"),
+                    TestValue::new(*b"value00000000002"),
+                ),
+                (
+                    TestKey::new(*b"key00003"),
+                    TestValue::new(*b"value00000000003"),
+                ),
+            ];
+
+            for (key, value) in &test_data {
+                diskmap.put(key.clone(), value.clone()).await.unwrap();
+            }
+
+            // Sync to ensure data is persisted
+            diskmap.sync().await.unwrap();
+            diskmap.close().await.unwrap();
+
+            // Re-initialize diskmap
+            let diskmap = DiskMap::<_, TestKey, TestValue>::init(context, config)
+                .await
+                .unwrap();
+
+            // Replay all items
+            use futures::StreamExt;
+            let mut replayed_items = Vec::new();
+            {
+                let stream = diskmap.replay(1024).await.unwrap();
+                let mut stream = Box::pin(stream);
+
+                while let Some(result) = stream.next().await {
+                    let (key, value) = result.unwrap();
+                    replayed_items.push((key, value));
+                }
+            } // stream is dropped here
+
+            // Verify we got all the items back (order might be different due to hashing)
+            assert_eq!(replayed_items.len(), test_data.len());
+
+            // Check that all test data is present in replayed items
+            for (expected_key, expected_value) in &test_data {
+                assert!(replayed_items
+                    .iter()
+                    .any(|(k, v)| k == expected_key && v == expected_value));
+            }
+
+            diskmap.destroy().await.unwrap();
         });
     }
 }
