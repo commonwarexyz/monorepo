@@ -12,6 +12,8 @@ const TABLE_BLOB_NAME: &[u8] = b"table";
 const TABLE_ENTRY_SIZE: usize = 48; // Two entries: 2 * (u64 journal_id + u32 offset + u32 crc + u32 other_crc)
 const SINGLE_ENTRY_SIZE: usize = 24; // u64 journal_id + u32 offset + u32 crc + u32 other_crc
 
+const MAX_JOURNAL_SIZE: u64 = 64 * 1024 * 1024; // 64MB per journal
+
 /// Record stored in the journal for linked list entries.
 struct JournalEntry<K: Array, V: Codec> {
     next_journal_id: u64,
@@ -344,10 +346,17 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
             return Ok(1);
         }
 
-        // Check current journal size by trying to get an entry from it
-        // Since we can't directly check journal size, we'll use section rotation
-        self.current_journal_id += 1;
-        Ok(self.current_journal_id)
+        // Check current journal size
+        let current_size = self.journal.section_size(self.current_journal_id).await?;
+
+        if current_size > MAX_JOURNAL_SIZE {
+            // Current journal is too large, start a new one
+            self.current_journal_id += 1;
+            Ok(self.current_journal_id)
+        } else {
+            // Current journal has space, continue using it
+            Ok(self.current_journal_id)
+        }
     }
 
     /// Insert a key-value pair into a journal using proper linked list chaining.
