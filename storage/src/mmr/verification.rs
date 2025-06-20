@@ -59,14 +59,13 @@ impl<H: CHasher> Read for Proof<H> {
     /// The maximum number of digests in the proof.
     type Cfg = usize;
 
-    fn read_cfg(buf: &mut impl Buf, max_len: &usize) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, max_len: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         // Read the number of nodes in the MMR
         let size = UInt::<u64>::read(buf)?.into();
 
         // Read the digests
         let range = ..=max_len;
         let digests = Vec::<H::Digest>::read_range(buf, range)?;
-
         Ok(Proof { size, digests })
     }
 }
