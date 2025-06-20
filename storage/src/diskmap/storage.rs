@@ -85,6 +85,12 @@ impl<K: Array, V: Codec> EncodeSize for JournalEntry<K, V> {
 
 /// Implementation of `DiskMap` storage.
 pub struct DiskMap<E: Storage + Metrics, K: Array, V: Codec> {
+    // Context for storage operations
+    context: E,
+
+    // Configuration
+    config: Config<V::Cfg>,
+
     // Table blob that maps hash values to journal locations (journal_id, offset)
     table_blob: E::Blob,
     table_size: u64, // Number of table entries
@@ -161,6 +167,8 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         let pending_table_updates = HashMap::new();
 
         Ok(Self {
+            context,
+            config,
             table_blob,
             table_size,
             journal,
@@ -532,6 +540,23 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         self.table_blob.close().await?;
         Ok(())
     }
+
+    /// Close and remove any underlying blobs created by the disk map.
+    pub async fn destroy(self) -> Result<(), Error> {
+        // Destroy the journal (removes all journal sections)
+        self.journal.destroy().await?;
+
+        // Close and remove the table blob
+        self.table_blob.close().await?;
+        self.context
+            .remove(&self.config.partition, Some(TABLE_BLOB_NAME))
+            .await?;
+
+        // Remove the partition itself
+        self.context.remove(&self.config.partition, None).await?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -582,8 +607,8 @@ mod tests {
             let nonexist_key = TestKey::new(*b"nonexist");
             assert!(!diskmap.contains_key(&nonexist_key).await.unwrap());
 
-            // Close the diskmap
-            diskmap.close().await.unwrap();
+            // Clean up the diskmap
+            diskmap.destroy().await.unwrap();
         });
     }
 
@@ -592,7 +617,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let config = Config {
-                partition: "test".to_string(),
+                partition: "test_type_safety".to_string(),
                 directory_size: 256,
                 codec_config: (),
                 write_buffer: 1024,
@@ -612,8 +637,8 @@ mod tests {
             assert_eq!(values.len(), 1);
             assert_eq!(values[0], value);
 
-            // Close the diskmap
-            diskmap.close().await.unwrap();
+            // Clean up the diskmap
+            diskmap.destroy().await.unwrap();
         });
     }
 

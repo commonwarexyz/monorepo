@@ -54,8 +54,8 @@ fn bench_insert(c: &mut Criterion) {
                     }
                     total += start.elapsed();
 
-                    // Clean up
-                    diskmap.close().await.unwrap();
+                    // Clean up - destroy to remove all data
+                    diskmap.destroy().await.unwrap();
                 }
                 total
             });
