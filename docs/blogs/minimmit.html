@@ -84,59 +84,59 @@
             <img src="../imgs/minimmit.jpg" alt="Minimmit">
         </div>
         <p>Many first heard of this research direction when Anza Labs released <a href="https://www.anza.xyz/blog/alpenglow-a-new-consensus-for-solana">Alpenglow</a> at <a href="https://youtu.be/x1sxtm-dvyE?">Solana Accelerate</a> a few weeks ago. However, teams at <a href="https://arxiv.org/abs/2503.15380">Matter Labs</a>, <a href="https://arxiv.org/abs/2505.08771">Offchain Labs</a>, and <a href="https://eprint.iacr.org/2025/1112">Supra Research/Espresso Systems</a> have also recently proposed schemes exploring different design choices. Many share a common goal: extending the <i>n = 5f + 1</i> results from <a href="https://ieeexplore.ieee.org/document/1467815">Fast Byzantine Consensus</a> to also tolerate some independent set of <i>p</i> crashed nodes, with a "slow path" fallback that maintains progress under some combination of <i>f</i> and <i>p</i> faults (exceeding ~20% in total).</p>
-        <p>For teams interested in exploring the Two-Phase Commit direction, we are excited to share <a href="https://github.com/commonwarexyz/monorepo/tree/main/specs/minimmit.md">Minimmit: A Minimal Specification for Propose-and-Vote Consensus</a>. Minimmit provides a basic foundation for reasoning about Two-Phase Consensus (under a <i>n = 5f + 1</i> parametrization) and a collection of various dialects that can be incorporated to expand its capability (albeit with additional complexity). While not yet peer-reviewed or implemented, we are releasing this MIT/Apache-2 specification for others to reuse or improve. Below, we provide a high-level summary and explore some of these dialects. We are also releasing an early draft of the safety and liveness proof sketches <a href="https://github.com/commonwarexyz/monorepo/tree/main/specs/minimmit.md">here</a>.</p>
-        <h2>Minimmit: A Minimal Specification for Propose-and-Vote Consensus</h2>
-        <h3>1. Model & Parameters</h3>
-        <ul>
-            <li>Replicas: n = 5f + 1</li>
-            <li>Byzantine replicas: ≤ f</li>
-            <li>Partial synchrony: after an unknown GST every message arrives within Δ.</li>
-            <li>Ancestry: a ≺ b means "a is an ancestor of b"; ⊥ ≺ x for every block x.</li>
-        </ul>
+        <p>For teams interested in exploring the Two-Phase Commit line of research, we are excited to share <a href="https://github.com/commonwarexyz/monorepo/tree/main/specs/minimmit.md">Minimmit: A Minimal Specification for Propose-and-Vote Consensus</a>. Minimmit provides a basic foundation for reasoning about Two-Phase Consensus (under a <i>n = 5f + 1</i> parametrization) and a collection of various dialects that can be incorporated to expand its capability (albeit with additional complexity). While not yet peer-reviewed or implemented, we are releasing this MIT/Apache-2 specification for others to reuse or improve. Below, we provide a high-level summary and explore some of these dialects. We are also releasing an early draft of the safety and liveness proof sketches <a href="https://github.com/commonwarexyz/monorepo/tree/main/specs/minimmit.md">here
+                <h2>Minimmit: A Minimal Specification for Propose-and-Vote Consensus</h2>
+                <h3>1. Model & Parameters</h3>
+                <ul>
+                    <li>Replicas: n = 5f + 1</li>
+                    <li>Byzantine replicas: ≤ f</li>
+                    <li>Partial synchrony: after an unknown GST every message arrives within Δ.</li>
+                    <li>Ancestry: a ≺ b means "a is an ancestor of b"; ⊥ ≺ x for every block x.</li>
+                </ul>
 
-        <h3>2. Message Types</h3>
-        <table style="border-collapse: collapse; width: 100%; margin: 10px 0;">
-            <tr style="border-bottom: 1px solid #ddd;">
-                <th style="text-align: left; padding: 8px;">Message</th>
-                <th style="text-align: left; padding: 8px;">Purpose</th>
-            </tr>
-            <tr style="border-bottom: 1px solid #eee;">
-                <td style="padding: 8px;"><code>propose(c, v, proof)</code></td>
-                <td style="padding: 8px;">Leader's proposal for view <code>v</code>; <code>proof</code> is a <code>commit</code> or a <code>timeout</code> from <code>v - 1</code>.</td>
-            </tr>
-            <tr style="border-bottom: 1px solid #eee;">
-                <td style="padding: 8px;"><code>vote(c, v)</code></td>
-                <td style="padding: 8px;">Vote for block <code>c</code> in view <code>v</code>.</td>
-            </tr>
-            <tr style="border-bottom: 1px solid #eee;">
-                <td style="padding: 8px;"><code>skip(v, lock)</code></td>
-                <td style="padding: 8px;">Replica declines to vote in <code>v</code>; carries its current <code>lock</code>.</td>
-            </tr>
-            <tr style="border-bottom: 1px solid #eee;">
-                <td style="padding: 8px;"><code>commit(c, v)</code></td>
-                <td style="padding: 8px;">Certificate of ≥ <code>Q</code> votes for <code>(c, v)</code>.</td>
-            </tr>
-            <tr style="border-bottom: 1px solid #eee;">
-                <td style="padding: 8px;"><code>timeout(v, {skip(v, ·)})</code></td>
-                <td style="padding: 8px;">Certificate of ≥ <code>Q</code> <code>skip</code> messages in view <code>v</code>.</td>
-            </tr>
-        </table>
+                <h3>2. Message Types</h3>
+                <table style="border-collapse: collapse; width: 100%; margin: 10px 0;">
+                    <tr style="border-bottom: 1px solid #ddd;">
+                        <th style="text-align: left; padding: 8px;">Message</th>
+                        <th style="text-align: left; padding: 8px;">Purpose</th>
+                    </tr>
+                    <tr style="border-bottom: 1px solid #eee;">
+                        <td style="padding: 8px;"><code>propose(c, v, proof)</code></td>
+                        <td style="padding: 8px;">Leader's proposal for view <code>v</code>; <code>proof</code> is a <code>commit</code> or a <code>timeout</code> from <code>v - 1</code>.</td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid #eee;">
+                        <td style="padding: 8px;"><code>vote(c, v)</code></td>
+                        <td style="padding: 8px;">Vote for block <code>c</code> in view <code>v</code>.</td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid #eee;">
+                        <td style="padding: 8px;"><code>skip(v, lock)</code></td>
+                        <td style="padding: 8px;">Replica declines to vote in <code>v</code>; carries its current <code>lock</code>.</td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid #eee;">
+                        <td style="padding: 8px;"><code>commit(c, v)</code></td>
+                        <td style="padding: 8px;">Certificate of ≥ <code>Q</code> votes for <code>(c, v)</code>.</td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid #eee;">
+                        <td style="padding: 8px;"><code>timeout(v, {skip(v, ·)})</code></td>
+                        <td style="padding: 8px;">Certificate of ≥ <code>Q</code> <code>skip</code> messages in view <code>v</code>.</td>
+                    </tr>
+                </table>
 
-        <h3>3. Quorums</h3>
-        <ul>
-            <li><code>Q = n - f</code> (≥ <code>4f + 1</code>). Two <code>Q</code>-sets intersect in ≥ <code>3f + 1</code> replicas (≥ <code>2f + 1</code> honest).</li>
-            <li><code>L = n - 3f</code> (≥ <code>2f + 1</code>). A timeout that co-exists with a commit must contain ≥ <code>L</code> votes for that commit's block.</li>
-        </ul>
+                <h3>3. Quorums</h3>
+                <ul>
+                    <li><code>Q = n - f</code> (≥ <code>4f + 1</code>). Two <code>Q</code>-sets intersect in ≥ <code>3f + 1</code> replicas (≥ <code>2f + 1</code> honest).</li>
+                    <li><code>L = n - 3f</code> (≥ <code>2f + 1</code>). A timeout that co-exists with a commit must contain ≥ <code>L</code> votes for that commit's block.</li>
+                </ul>
 
-        <h3>4. Replica State (initial)</h3>
-        <pre style="background-color: #f5f5f5; padding: 10px; margin: 10px 0; overflow-x: auto;">view         = 0
+                <h3>4. Replica State (initial)</h3>
+                <pre style="background-color: #f5f5f5; padding: 10px; margin: 10px 0; overflow-x: auto;">view         = 0
 lock         = ⊥            # highest (block, view) this replica voted for
 skipped      = ⊥            # highest view this replica skipped
 last_commit  = commit(⊥, 0) # seeded with genesis
 last_timeout = ⊥</pre>
 
-        <h3>5. Helpers</h3>
-        <pre style="background-color: #f5f5f5; padding: 10px; margin: 10px 0; overflow-x: auto;">leader(v):
+                <h3>5. Helpers</h3>
+                <pre style="background-color: #f5f5f5; padding: 10px; margin: 10px 0; overflow-x: auto;">leader(v):
     return (v % n)
 
 find_lock(timeout):
@@ -146,115 +146,115 @@ find_lock(timeout):
         return c
     return ⊥</pre>
 
-        <h3>6. Protocol for View <code>v</code></h3>
+                <h3>6. Protocol for View <code>v</code></h3>
 
-        <h4 style="font-size: 0.95em; margin-bottom: 5px;">6.1 Entering view <code>v</code></h4>
-        <ol>
-            <li><code>l = leader(v)</code>. Start timers:
-                <ul>
-                    <li><code>t_l = 2Δ</code></li>
-                    <li><code>t_a = 3Δ</code>.</li>
-                </ul>
-            </li>
-            <li>If <code>self == l</code>:
-                <ul>
-                    <li>If <code>v == last_commit.view + 1</code>:
-                        <ol>
-                            <li>Build a child <code>c</code> of <code>last_commit</code>.</li>
-                            <li>Broadcast <code>propose(c, v, last_commit)</code>.</li>
-                        </ol>
-                    </li>
-                    <li>Else if <code>v == last_timeout.view + 1</code>:
-                        <ol>
-                            <li><code>c = find_lock(last_timeout)</code>; if <code>c == ⊥</code>, <code>c = child(last_commit)</code>.</li>
-                            <li>Broadcast <code>propose(c, v, last_timeout)</code>.</li>
-                        </ol>
-                    </li>
-                </ul>
-            </li>
-        </ol>
-
-        <h4 style="font-size: 0.95em; margin-bottom: 5px;">6.2 Receiving <code>propose(c, v, proof)</code> from <code>l</code></h4>
-        <ol>
-            <li>Update state:
-                <ul>
-                    <li>If <code>proof</code> is a newer commit: <code>last_commit = proof</code>.</li>
-                    <li>If <code>proof</code> is a newer timeout: <code>last_timeout = proof</code>.</li>
-                </ul>
-            </li>
-            <li><strong>Drop</strong> the proposal if <code>lock.view == v</code> (already voted) or <code>skipped == v</code> (already skipped).</li>
-            <li>Cancel <code>t_l</code>.</li>
-            <li>Vote for <code>c</code> iff:
+                <h4 style="font-size: 0.95em; margin-bottom: 5px;">6.1 Entering view <code>v</code></h4>
                 <ol>
-                    <li><code>last_commit ≺ c</code>, and</li>
-                    <li>one of:
+                    <li><code>l = leader(v)</code>. Start timers:
                         <ul>
-                            <li><code>v == last_commit.view + 1</code>, or</li>
-                            <li><code>v == last_timeout.view + 1</code> and (<code>find_lock(last_timeout) == ⊥</code> <strong>or</strong> <code>c == find_lock(last_timeout)</code>).</li>
+                            <li><code>t_l = 2Δ</code></li>
+                            <li><code>t_a = 3Δ</code>.</li>
                         </ul>
                     </li>
-                    <li><code>c</code> passes verification.</li>
+                    <li>If <code>self == l</code>:
+                        <ul>
+                            <li>If <code>v == last_commit.view + 1</code>:
+                                <ol>
+                                    <li>Build a child <code>c</code> of <code>last_commit</code>.</li>
+                                    <li>Broadcast <code>propose(c, v, last_commit)</code>.</li>
+                                </ol>
+                            </li>
+                            <li>Else if <code>v == last_timeout.view + 1</code>:
+                                <ol>
+                                    <li><code>c = find_lock(last_timeout)</code>; if <code>c == ⊥</code>, <code>c = child(last_commit)</code>.</li>
+                                    <li>Broadcast <code>propose(c, v, last_timeout)</code>.</li>
+                                </ol>
+                            </li>
+                        </ul>
+                    </li>
                 </ol>
-            </li>
-            <li>If voting:
+
+                <h4 style="font-size: 0.95em; margin-bottom: 5px;">6.2 Receiving <code>propose(c, v, proof)</code> from <code>l</code></h4>
+                <ol>
+                    <li>Update state:
+                        <ul>
+                            <li>If <code>proof</code> is a newer commit: <code>last_commit = proof</code>.</li>
+                            <li>If <code>proof</code> is a newer timeout: <code>last_timeout = proof</code>.</li>
+                        </ul>
+                    </li>
+                    <li><strong>Drop</strong> the proposal if <code>lock.view == v</code> (already voted) or <code>skipped == v</code> (already skipped).</li>
+                    <li>Cancel <code>t_l</code>.</li>
+                    <li>Vote for <code>c</code> iff:
+                        <ol>
+                            <li><code>last_commit ≺ c</code>, and</li>
+                            <li>one of:
+                                <ul>
+                                    <li><code>v == last_commit.view + 1</code>, or</li>
+                                    <li><code>v == last_timeout.view + 1</code> and (<code>find_lock(last_timeout) == ⊥</code> <strong>or</strong> <code>c == find_lock(last_timeout)</code>).</li>
+                                </ul>
+                            </li>
+                            <li><code>c</code> passes verification.</li>
+                        </ol>
+                    </li>
+                    <li>If voting:
+                        <ul>
+                            <li><code>lock = (c, v)</code>.</li>
+                            <li>Broadcast <code>vote(c, v)</code>.</li>
+                        </ul>
+                    </li>
+                </ol>
+
+                <h4 style="font-size: 0.95em; margin-bottom: 5px;">6.3 Timer expiry (<code>t_l</code> <strong>or</strong> <code>t_a</code>)</h4>
+                <ol>
+                    <li>If <code>skipped == v</code>: <strong>drop</strong>.</li>
+                    <li><code>skipped = v</code>.</li>
+                    <li>Broadcast <code>skip(v, lock)</code>.</li>
+                </ol>
+
+                <h4 style="font-size: 0.95em; margin-bottom: 5px;">6.4 Assembling / Receiving <code>commit(c, v)</code></h4>
                 <ul>
-                    <li><code>lock = (c, v)</code>.</li>
-                    <li>Broadcast <code>vote(c, v)</code>.</li>
+                    <li>On observing <code>≥ Q</code> <code>vote(c, v)</code> messages: assemble <code>commit(c, v)</code> and forward it to the next leader.</li>
+                    <li>Upon a valid <code>commit(c, v)</code>:
+                        <ol>
+                            <li>Cancel timers.</li>
+                            <li><code>last_commit = commit(c, v)</code>.</li>
+                            <li>If <code>commit.view >= lock.view</code>: <code>lock = ⊥</code>.</li>
+                            <li><code>view = v + 1</code>.</li>
+                        </ol>
+                    </li>
                 </ul>
-            </li>
-        </ol>
+                <p style="font-style: italic; margin-top: 10px;"><code>propose(c, v, timeout)</code> counts as a leader <code>l</code>'s <code>vote(c, v)</code>.</p>
 
-        <h4 style="font-size: 0.95em; margin-bottom: 5px;">6.3 Timer expiry (<code>t_l</code> <strong>or</strong> <code>t_a</code>)</h4>
-        <ol>
-            <li>If <code>skipped == v</code>: <strong>drop</strong>.</li>
-            <li><code>skipped = v</code>.</li>
-            <li>Broadcast <code>skip(v, lock)</code>.</li>
-        </ol>
+                <h4 style="font-size: 0.95em; margin-bottom: 5px;">6.5 Assembling / Receiving <code>timeout(v, {skip(v, ·)})</code></h4>
+                <ul>
+                    <li>On observing <code>≥ Q</code> <code>skip(v, ·)</code> messages: assemble <code>(timeout(v, {skip(v, ·)}), last_commit)</code> and forward it to the next leader.</li>
+                    <li>Upon a valid timeout certificate:
+                        <ol>
+                            <li>Cancel timers.</li>
+                            <li><code>last_timeout = timeout(v, {skip(v, ·)})</code>.</li>
+                            <li><code>view = v + 1</code>.</li>
+                        </ol>
+                    </li>
+                </ul>
 
-        <h4 style="font-size: 0.95em; margin-bottom: 5px;">6.4 Assembling / Receiving <code>commit(c, v)</code></h4>
-        <ul>
-            <li>On observing <code>≥ Q</code> <code>vote(c, v)</code> messages: assemble <code>commit(c, v)</code> and forward it to the next leader.</li>
-            <li>Upon a valid <code>commit(c, v)</code>:
-                <ol>
-                    <li>Cancel timers.</li>
-                    <li><code>last_commit = commit(c, v)</code>.</li>
-                    <li>If <code>commit.view >= lock.view</code>: <code>lock = ⊥</code>.</li>
-                    <li><code>view = v + 1</code>.</li>
-                </ol>
-            </li>
-        </ul>
-        <p style="font-style: italic; margin-top: 10px;"><code>propose(c, v, timeout)</code> counts as a leader <code>l</code>'s <code>vote(c, v)</code>.</p>
+                <h3>7. Intuition</h3>
+                <ul>
+                    <li>A <code>timeout(v,{skip(v,·)})</code> <strong>without</strong> any block that has <code>L</code> votes proves that no <code>commit</code> was possible in view <code>v</code>. In <code>v + 1</code> replicas may therefore vote for <em>any</em> block that merely extends <code>last_commit</code>. If the timeout instead shows <strong>≥ L but < Q</strong> votes for some block <code>c</code>, a <code>commit(c,v)</code> <strong>might</strong> exist, so leaders must keep re-proposing <code>c</code> until it either commits or a later timeout contradicts it.</li>
+                    <li>If multiple such timeouts exist and each carries a (possibly different) block with <code>≥ L</code> votes, a leader in view <code>v + 1</code> may re-propose <strong>any</strong> of those blocks; the fact that two different blocks have <code>L</code> votes implies that neither could have reached <code>Q</code> votes (hence no commit yet).</li>
+                    <li>The only long-lived piece of local state is the <code>lock</code>. A replica abandons its lock <strong>only</strong> when shown proof—via a <code>commit</code> or an appropriate <code>timeout</code>—that the locked view cannot contain a committed block.</li>
+                    <li>Suppose a correct leader broadcasts a block <code>c</code> and, just after all replicas vote, the network partitions. Replicas will gather <code>Q</code> <code>skip</code> messages and advance, perhaps unaware that <code>c</code> already has <code>Q</code> votes. This is safe: any resulting timeout must still include <code>≥ L</code> votes for <code>(c,v)</code>, forcing the next leader to re-propose <code>c</code> until it commits.</li>
+                    <li>A Byzantine leader could equivocate, sending a distinct proposal to each replica and causing them to lock on different blocks. Nonetheless, any timeout they create will lack a block with <code>L</code> votes, so replicas will freely vote in the next view for extensions of <code>last_commit</code>, ignoring their conflicting locks when justified.</li>
+                </ul>
 
-        <h4 style="font-size: 0.95em; margin-bottom: 5px;">6.5 Assembling / Receiving <code>timeout(v, {skip(v, ·)})</code></h4>
-        <ul>
-            <li>On observing <code>≥ Q</code> <code>skip(v, ·)</code> messages: assemble <code>(timeout(v, {skip(v, ·)}), last_commit)</code> and forward it to the next leader.</li>
-            <li>Upon a valid timeout certificate:
-                <ol>
-                    <li>Cancel timers.</li>
-                    <li><code>last_timeout = timeout(v, {skip(v, ·)})</code>.</li>
-                    <li><code>view = v + 1</code>.</li>
-                </ol>
-            </li>
-        </ul>
+                <h3>8. Dialects</h3>
+                <ul>
+                    <li><strong>Slow Path Fallback:</strong> <a href="https://drive.google.com/file/d/1y_7ddr8oNOknTQYHzXeeMD2ProQ0WjMs/view">Alpenglow</a>, <a href="https://arxiv.org/abs/2505.08771">Kudzu</a>, and <a href="https://eprint.iacr.org/2025/1112">Hydrangea</a> propose falling back to a "slow path" (e.g. three-phase commit) if the number of offline replicas is less then some <code>p</code> (and/or the sum of byzantine and offline replicas is less than some <code>k</code>). While this is a practical adaptation of the consensus problem, it carries with it the complexity of having to ensure voting between the "fast path" and "slow path" is consistent and, in some schemes, the message complexity of running multiple consensus processes concurrently in a single view.</li>
+                    <li><strong>Productive Timeouts:</strong> A malicious leader might only send block <code>c</code> to <code>2f + 1</code> honest replicas in view <code>v</code>, forcing the leader of <code>v + 1</code> to re-propose <code>c</code> (revoking their right to propose a unique block). <a href="https://eprint.iacr.org/2025/1112">Hydrangea</a> proposes a mitigation to this attack, allowing the next leader to propose some <em>descendant</em> of a block with <code>≥ L</code> votes in a <code>timeout</code>, rather than just re-proposing the same value. This tweak requires voters to perform a common ancestry check on last votes in <code>timeout</code> to determine the last common ancestor they can build on some view <code>v + k</code>, logic that can be expensive to run in practice especially in the presence of equivocating leaders (requires tracking the ancestry of all <code>vote</code> messages). When paired with <a href="https://arxiv.org/abs/2401.10369">Autobahn</a>-style execution certificates, forced re-proposal is less of a concern as transaction ordering can continue regardless of commit progress (jumping to latest in the first view where an honest leader can propose a unique block).</li>
+                    <li><strong>Fast Recovery:</strong> Unlike <a href="https://eprint.iacr.org/2023/463">Simplex</a>, replicas forward <code>commit(c,v)</code> or <code>(timeout(v,{skip(v,·)}),last_commit)</code> <strong>only</strong> to the next leader. To reduce the worst-case recovery latency after GST (where the next leader is not aware of the highest commit held by any correct replica), replicas can broadcast <code>last_commit</code> anytime they enter a new view (with multi-signature or threshold signature certificates, this is negligible overhead).</li>
+                    <li><strong>VRF Leader Election and Threshold Certificates:</strong> Like <a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/threshold_simplex/index.html">threshold-simplex</a> did for <a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html">simplex</a>, this specification can be extended to support both VRF leader election and threshold certificates with <code>vote</code> and <code>skip</code> partial signatures, <code>Q</code>-set threshold signatures, and by piggy-backing a partial signature over <code>view</code> in both <code>vote</code> and <code>skip</code> messages (to power a VRF).</li>
+                </ul>
 
-        <h3>7. Intuition</h3>
-        <ul>
-            <li>A <code>timeout(v,{skip(v,·)})</code> <strong>without</strong> any block that has <code>L</code> votes proves that no <code>commit</code> was possible in view <code>v</code>. In <code>v + 1</code> replicas may therefore vote for <em>any</em> block that merely extends <code>last_commit</code>. If the timeout instead shows <strong>≥ L but < Q</strong> votes for some block <code>c</code>, a <code>commit(c,v)</code> <strong>might</strong> exist, so leaders must keep re-proposing <code>c</code> until it either commits or a later timeout contradicts it.</li>
-            <li>If multiple such timeouts exist and each carries a (possibly different) block with <code>≥ L</code> votes, a leader in view <code>v + 1</code> may re-propose <strong>any</strong> of those blocks; the fact that two different blocks have <code>L</code> votes implies that neither could have reached <code>Q</code> votes (hence no commit yet).</li>
-            <li>The only long-lived piece of local state is the <code>lock</code>. A replica abandons its lock <strong>only</strong> when shown proof—via a <code>commit</code> or an appropriate <code>timeout</code>—that the locked view cannot contain a committed block.</li>
-            <li>Suppose a correct leader broadcasts a block <code>c</code> and, just after all replicas vote, the network partitions. Replicas will gather <code>Q</code> <code>skip</code> messages and advance, perhaps unaware that <code>c</code> already has <code>Q</code> votes. This is safe: any resulting timeout must still include <code>≥ L</code> votes for <code>(c,v)</code>, forcing the next leader to re-propose <code>c</code> until it commits.</li>
-            <li>A Byzantine leader could equivocate, sending a distinct proposal to each replica and causing them to lock on different blocks. Nonetheless, any timeout they create will lack a block with <code>L</code> votes, so replicas will freely vote in the next view for extensions of <code>last_commit</code>, ignoring their conflicting locks when justified.</li>
-        </ul>
-
-        <h3>8. Dialects</h3>
-        <ul>
-            <li><strong>Slow Path Fallback:</strong> <a href="https://drive.google.com/file/d/1y_7ddr8oNOknTQYHzXeeMD2ProQ0WjMs/view">Alpenglow</a>, <a href="https://arxiv.org/abs/2505.08771">Kudzu</a>, and <a href="https://eprint.iacr.org/2025/1112">Hydrangea</a> propose falling back to a "slow path" (e.g. three-phase commit) if the number of offline replicas is less then some <code>p</code> (and/or the sum of byzantine and offline replicas is less than some <code>k</code>). While this is a practical adaptation of the consensus problem, it carries with it the complexity of having to ensure voting between the "fast path" and "slow path" is consistent and, in some schemes, the message complexity of running multiple consensus processes concurrently in a single view.</li>
-            <li><strong>Productive Timeouts:</strong> A malicious leader might only send block <code>c</code> to <code>2f + 1</code> honest replicas in view <code>v</code>, forcing the leader of <code>v + 1</code> to re-propose <code>c</code> (revoking their right to propose a unique block). <a href="https://eprint.iacr.org/2025/1112">Hydrangea</a> proposes a mitigation to this attack, allowing the next leader to propose some <em>descendant</em> of a block with <code>≥ L</code> votes in a <code>timeout</code>, rather than just re-proposing the same value. This tweak requires voters to perform a common ancestry check on last votes in <code>timeout</code> to determine the last common ancestor they can build on some view <code>v + k</code>, logic that can be expensive to run in practice especially in the presence of equivocating leaders (requires tracking the ancestry of all <code>vote</code> messages). When paired with <a href="https://arxiv.org/abs/2401.10369">Autobahn</a>-style execution certificates, forced re-proposal is less of a concern as transaction ordering can continue regardless of commit progress (jumping to latest in the first view where an honest leader can propose a unique block).</li>
-            <li><strong>Fast Recovery:</strong> Unlike <a href="https://eprint.iacr.org/2023/463">Simplex</a>, replicas forward <code>commit(c,v)</code> or <code>(timeout(v,{skip(v,·)}),last_commit)</code> <strong>only</strong> to the next leader. To reduce the worst-case recovery latency after GST (where the next leader is not aware of the highest commit held by any correct replica), replicas can broadcast <code>last_commit</code> anytime they enter a new view (with multi-signature or threshold signature certificates, this is negligible overhead).</li>
-            <li><strong>VRF Leader Election and Threshold Certificates:</strong> Like <a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/threshold_simplex/index.html">threshold-simplex</a> did for <a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html">simplex</a>, this specification can be extended to support both VRF leader election and threshold certificates with <code>vote</code> and <code>skip</code> partial signatures, <code>Q</code>-set threshold signatures, and by piggy-backing a partial signature over <code>view</code> in both <code>vote</code> and <code>skip</code> messages (to power a VRF).</li>
-        </ul>
-
-        <p>Have an idea to simplify, improve, or extend the specification? <a href="https://github.com/commonwarexyz/monorepo/tree/main/specs/minimmit.md">Open a PR</a> or reach out at <a href="mailto:minimmit@commonware.xyz">minimmit@commonware.xyz</a></p>
+                <p>Have an idea to simplify, improve, or extend the specification? <a href="https://github.com/commonwarexyz/monorepo/tree/main/specs/minimmit.md">Open a PR</a> or reach out at <a href="mailto:minimmit@commonware.xyz">minimmit@commonware.xyz</a></p>
     </div>
 
     <div id="footer-placeholder"></div>
