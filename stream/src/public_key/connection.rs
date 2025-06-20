@@ -125,8 +125,8 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
     ///
     /// This implements the 3-message handshake protocol where the dialer:
     /// 1. Sends initial handshake message to the listener
-    /// 2. Receives listener response with handshake + authentication proof
-    /// 3. Sends confirmation with own authentication proof to complete mutual auth
+    /// 2. Receives listener response with handshake + key confirmation
+    /// 3. Sends confirmation with own key confirmation to complete mutual auth
     pub async fn upgrade_dialer<R: Rng + CryptoRng + Spawner + Clock, C: Signer>(
         mut context: R,
         mut config: Config<C>,
@@ -180,7 +180,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             .map_err(Error::UnableToDecode)?;
 
         // Verify listener handshake
-        let (signed_handshake, listener_auth_proof) = listener_response.into_parts();
+        let (signed_handshake, listener_key_confirmation) = listener_response.into_parts();
         signed_handshake.verify(
             &context,
             &config.crypto.public_key(),
@@ -211,20 +211,20 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let mut d2l_nonce = nonce::Info::default();
         let mut l2d_nonce = nonce::Info::default();
 
-        // Verify listener's authentication proof (uses nonce 0)
+        // Verify listener's key confirmation (uses nonce 0)
         // Listener should have encrypted our (dialer's) ephemeral public key
         let l2d_auth_nonce = l2d_nonce.next()?;
-        listener_auth_proof.verify(&l2d_cipher, &l2d_auth_nonce, &dialer_ephemeral)?;
+        listener_key_confirmation.verify(&l2d_cipher, &l2d_auth_nonce, &dialer_ephemeral)?;
 
         // Create and send dialer confirmation (Message 3)
         // We encrypt the listener's ephemeral public key to prove we can derive the shared secret
         let d2l_auth_nonce = d2l_nonce.next()?;
-        let dialer_auth_proof = handshake::AuthenticationProof::create(
+        let dialer_key_confirmation = handshake::KeyConfirmation::create(
             &d2l_cipher,
             &d2l_auth_nonce,
             &signed_handshake.ephemeral(),
         )?;
-        let dialer_confirmation = handshake::DialerConfirmation::new(dialer_auth_proof);
+        let dialer_confirmation = handshake::DialerConfirmation::new(dialer_key_confirmation);
         let confirmation_bytes = dialer_confirmation.encode();
 
         select! {
@@ -251,9 +251,9 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
     /// Attempt to upgrade a connection initiated by some peer.
     ///
     /// This implements the 3-message handshake protocol where the listener:
-    /// 1. Sends a response containing their handshake + authentication proof
-    /// 2. Waits for the dialer's confirmation with their authentication proof
-    /// 3. Verifies the dialer's proof to complete mutual authentication
+    /// 1. Sends a response containing their handshake + key confirmation
+    /// 2. Waits for the dialer's confirmation with their key confirmation
+    /// 3. Verifies the dialer's confirmation to complete mutual authentication
     pub async fn upgrade_listener<R: Rng + CryptoRng + Spawner + Clock, C: Signer>(
         mut context: R,
         incoming: IncomingConnection<C, Si, St>,
@@ -293,17 +293,17 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let mut d2l_nonce = nonce::Info::default();
         let mut l2d_nonce = nonce::Info::default();
 
-        // Create authentication proof using the derived cipher (uses nonce 0)
+        // Create key confirmation using the derived cipher (uses nonce 0)
         // We encrypt the dialer's ephemeral public key to prove we can derive the shared secret
         let l2d_auth_nonce = l2d_nonce.next()?;
-        let auth_proof = handshake::AuthenticationProof::create(
+        let key_confirmation = handshake::KeyConfirmation::create(
             &l2d_cipher,
             &l2d_auth_nonce,
             &incoming.ephemeral_public_key,
         )?;
 
         // Create and send listener response (Message 2)
-        let listener_response = handshake::ListenerResponse::new(l2d_handshake, auth_proof);
+        let listener_response = handshake::ListenerResponse::new(l2d_handshake, key_confirmation);
         let response_bytes = listener_response.encode();
 
         select! {
@@ -329,10 +329,10 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let dialer_confirmation = handshake::DialerConfirmation::decode(confirmation_msg.as_ref())
             .map_err(Error::UnableToDecode)?;
 
-        // Verify dialer's authentication proof
+        // Verify dialer's key confirmation
         // Dialer should have encrypted our (listener's) ephemeral public key
         let d2l_auth_nonce = d2l_nonce.next()?;
-        dialer_confirmation.auth_proof().verify(
+        dialer_confirmation.key_confirmation().verify(
             &d2l_cipher,
             &d2l_auth_nonce,
             &listener_ephemeral,
@@ -697,7 +697,7 @@ mod tests {
                     let msg = recv_frame(&mut peer_stream, 1024).await.unwrap();
                     let _ = handshake::Signed::<PublicKey>::decode(msg).unwrap(); // Simulate reading
 
-                    // Create mock shared secret and cipher for authentication proof
+                    // Create mock shared secret and cipher for key confirmation
                     let mock_secret = [1u8; 32];
                     let mock_cipher = ChaCha20Poly1305::new(&mock_secret.into());
 
@@ -712,17 +712,17 @@ mod tests {
                     let signed_handshake =
                         handshake::Signed::sign(&mut actual_peer, &peer_config.namespace, info);
 
-                    // Create fake authentication proof (using wrong ephemeral key)
+                    // Create fake key confirmation (using wrong ephemeral key)
                     let fake_ephemeral = x25519::PublicKey::from_bytes([99u8; 32]);
                     let nonce_zero = chacha20poly1305::Nonce::from_slice(&[0u8; 12]);
-                    let auth_proof = handshake::AuthenticationProof::create(
+                    let key_confirmation = handshake::KeyConfirmation::create(
                         &mock_cipher,
                         nonce_zero,
                         &fake_ephemeral,
                     )
                     .unwrap();
                     let listener_response =
-                        handshake::ListenerResponse::new(signed_handshake, auth_proof);
+                        handshake::ListenerResponse::new(signed_handshake, key_confirmation);
 
                     send_frame(&mut peer_sink, &listener_response.encode(), 1024)
                         .await
@@ -779,7 +779,7 @@ mod tests {
                     let msg = recv_frame(&mut peer_stream, 1024).await.unwrap();
                     let _ = handshake::Signed::<PublicKey>::decode(msg).unwrap();
 
-                    // Create mock cipher for authentication proof
+                    // Create mock cipher for key confirmation
                     let mock_secret = [1u8; 32];
                     let mock_cipher = ChaCha20Poly1305::new(&mock_secret.into());
 
@@ -795,17 +795,17 @@ mod tests {
                     let signed_handshake =
                         handshake::Signed::sign(&mut listener_crypto, &namespace, info);
 
-                    // Create fake authentication proof and ListenerResponse (using wrong ephemeral key)
+                    // Create fake key confirmation and ListenerResponse (using wrong ephemeral key)
                     let fake_ephemeral = x25519::PublicKey::from_bytes([99u8; 32]);
                     let nonce_zero = chacha20poly1305::Nonce::from_slice(&[0u8; 12]);
-                    let auth_proof = handshake::AuthenticationProof::create(
+                    let key_confirmation = handshake::KeyConfirmation::create(
                         &mock_cipher,
                         nonce_zero,
                         &fake_ephemeral,
                     )
                     .unwrap();
                     let listener_response =
-                        handshake::ListenerResponse::new(signed_handshake, auth_proof);
+                        handshake::ListenerResponse::new(signed_handshake, key_confirmation);
 
                     // Send the ListenerResponse
                     send_frame(&mut peer_sink, &listener_response.encode(), 1024)
