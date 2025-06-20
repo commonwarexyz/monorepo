@@ -57,7 +57,7 @@ pub enum Error {
 
 /// Configuration for `DiskMap` storage.
 #[derive(Clone)]
-pub struct Config {
+pub struct Config<C> {
     /// The `commonware-runtime::Storage` partition to use for storing the disk map.
     pub partition: String,
 
@@ -65,11 +65,8 @@ pub struct Config {
     /// the expected number of buckets for better distribution.
     pub directory_size: u64,
 
-    /// The fixed length of keys in bytes.
-    pub key_length: usize,
-
-    /// The fixed length of values in bytes.
-    pub value_length: usize,
+    /// The codec configuration to use for the value stored in the disk map.
+    pub codec_config: C,
 
     /// The size of the write buffer to use for each blob.
     pub write_buffer: usize,

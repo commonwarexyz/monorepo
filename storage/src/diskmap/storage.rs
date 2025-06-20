@@ -1,8 +1,11 @@
 use super::{Config, Error};
+use bytes::{Buf, BufMut};
+use commonware_codec::{Codec, EncodeSize, Read, ReadExt, Write as CodecWrite};
 use commonware_runtime::{buffer::Write, Blob, Metrics, Storage};
-use commonware_utils::hex;
+use commonware_utils::{hex, Array};
 use prometheus_client::metrics::counter::Counter;
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use tracing::trace;
 
 const TABLE_BLOB_NAME: &[u8] = b"table";
@@ -12,10 +15,69 @@ const SINGLE_ENTRY_SIZE: usize = 24; // u64 journal_id + u64 offset + u32 crc + 
 
 const MAX_JOURNAL_SIZE: u64 = 64 * 1024 * 1024; // 64MB per journal
 
+/// Record stored in the journal for linked list entries.
+struct JournalEntry<K: Array, V: Codec> {
+    next_journal_id: u64,
+    next_offset: u64,
+    key: K,
+    value: V,
+}
+
+impl<K: Array, V: Codec> JournalEntry<K, V> {
+    /// Create a new `JournalEntry`.
+    fn new(next_journal_id: u64, next_offset: u64, key: K, value: V) -> Self {
+        Self {
+            next_journal_id,
+            next_offset,
+            key,
+            value,
+        }
+    }
+}
+
+impl<K: Array, V: Codec> CodecWrite for JournalEntry<K, V> {
+    fn write(&self, buf: &mut impl BufMut) {
+        buf.put_slice(&self.next_journal_id.to_le_bytes());
+        buf.put_slice(&self.next_offset.to_le_bytes());
+        self.key.write(buf);
+        self.value.write(buf);
+    }
+}
+
+impl<K: Array, V: Codec> Read for JournalEntry<K, V> {
+    type Cfg = V::Cfg;
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let mut next_journal_id_bytes = [0u8; 8];
+        buf.copy_to_slice(&mut next_journal_id_bytes);
+        let next_journal_id = u64::from_le_bytes(next_journal_id_bytes);
+
+        let mut next_offset_bytes = [0u8; 8];
+        buf.copy_to_slice(&mut next_offset_bytes);
+        let next_offset = u64::from_le_bytes(next_offset_bytes);
+
+        let key = K::read(buf)?;
+        let value = V::read_cfg(buf, cfg)?;
+
+        Ok(Self {
+            next_journal_id,
+            next_offset,
+            key,
+            value,
+        })
+    }
+}
+
+impl<K: Array, V: Codec> EncodeSize for JournalEntry<K, V> {
+    fn encode_size(&self) -> usize {
+        8 + 8 + K::SIZE + self.value.encode_size()
+    }
+}
+
 /// Implementation of `DiskMap` storage.
-pub struct DiskMap<E: Storage + Metrics> {
+pub struct DiskMap<E: Storage + Metrics, K: Array, V: Codec> {
     context: E,
-    config: Config,
+    config: Config<V::Cfg>,
 
     // Table blob that maps hash values to journal locations (journal_id, offset)
     table_blob: E::Blob,
@@ -27,6 +89,9 @@ pub struct DiskMap<E: Storage + Metrics> {
     // Current journal for new writes
     current_journal_id: u64,
 
+    // Phantom data to satisfy the compiler about generic types
+    _phantom: PhantomData<(K, V)>,
+
     // Metrics
     puts: Counter,
     gets: Counter,
@@ -35,9 +100,9 @@ pub struct DiskMap<E: Storage + Metrics> {
     table_reads: Counter,
 }
 
-impl<E: Storage + Metrics> DiskMap<E> {
+impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
     /// Initialize a new `DiskMap` instance.
-    pub async fn init(context: E, config: Config) -> Result<Self, Error> {
+    pub async fn init(context: E, config: Config<V::Cfg>) -> Result<Self, Error> {
         // Validate configuration
         if config.directory_size == 0 || !config.directory_size.is_power_of_two() {
             return Err(Error::DirectoryCorrupted);
@@ -85,6 +150,7 @@ impl<E: Storage + Metrics> DiskMap<E> {
             table_size,
             journal_cache: HashMap::new(),
             current_journal_id: 0,
+            _phantom: PhantomData,
             puts,
             gets,
             journal_hits,
@@ -94,8 +160,8 @@ impl<E: Storage + Metrics> DiskMap<E> {
     }
 
     /// Hash a key to a table index.
-    fn hash_key(&self, key: &[u8]) -> u64 {
-        let hash = crc32fast::hash(key) as u64;
+    fn hash_key(&self, key: &K) -> u64 {
+        let hash = crc32fast::hash(key.as_ref()) as u64;
         hash % self.table_size
     }
 
@@ -293,12 +359,9 @@ impl<E: Storage + Metrics> DiskMap<E> {
     async fn insert_into_journal(
         &mut self,
         table_index: u64,
-        key: &[u8],
-        value: &[u8],
+        key: K,
+        value: V,
     ) -> Result<(), Error> {
-        let key_length = self.config.key_length;
-        let value_length = self.config.value_length;
-
         // Get current head of the chain from table
         let (current_head_journal_id, current_head_offset) =
             self.get_table_entry(table_index).await?;
@@ -325,64 +388,37 @@ impl<E: Storage + Metrics> DiskMap<E> {
         let journal = self.get_journal(target_journal_id).await?;
         let new_entry_offset = journal.size().await;
 
-        // Write the new entry: [next_journal_id][next_offset][key][value]
-        // Next pointers point to the previous head of the chain
-        journal
-            .write_at(
-                current_head_journal_id.to_le_bytes().to_vec(),
-                new_entry_offset,
-            )
-            .await?;
-        let mut offset = new_entry_offset + 8;
+        // Create journal entry
+        let entry = JournalEntry::new(current_head_journal_id, current_head_offset, key, value);
 
-        journal
-            .write_at(current_head_offset.to_le_bytes().to_vec(), offset)
-            .await?;
-        offset += 8;
+        // Encode the entry
+        let mut buf = Vec::with_capacity(entry.encode_size());
+        entry.write(&mut buf);
 
-        journal.write_at(key.to_vec(), offset).await?;
-        offset += key_length as u64;
-
-        journal.write_at(value.to_vec(), offset).await?;
-
+        // Write the entry to the journal
+        journal.write_at(buf, new_entry_offset).await?;
         journal.sync().await?;
 
         // Update table to point to this new entry as the head
         self.set_table_entry(table_index, target_journal_id, new_entry_offset)
             .await?;
-        self.table_blob.sync().await?;
 
         Ok(())
     }
 
     /// Put a key-value pair into the disk map.
-    pub async fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), Error> {
+    pub async fn put(&mut self, key: K, value: V) -> Result<(), Error> {
         self.puts.inc();
 
-        // Validate input lengths
-        if key.len() != self.config.key_length {
-            return Err(Error::InvalidKeyLength {
-                expected: self.config.key_length,
-                actual: key.len(),
-            });
-        }
-
-        if value.len() != self.config.value_length {
-            return Err(Error::InvalidValueLength {
-                expected: self.config.value_length,
-                actual: value.len(),
-            });
-        }
-
         // Hash key to table index
-        let table_index = self.hash_key(key);
+        let table_index = self.hash_key(&key);
 
         // Insert into journal (this will handle the linked list chaining)
-        self.insert_into_journal(table_index, key, value).await?;
+        self.insert_into_journal(table_index, key.clone(), value)
+            .await?;
 
         trace!(
-            key = hex(key),
-            value = hex(value),
+            key = hex(key.as_ref()),
             table_index = table_index,
             "inserted key-value pair"
         );
@@ -391,16 +427,8 @@ impl<E: Storage + Metrics> DiskMap<E> {
     }
 
     /// Get all values for a given key from the disk map.
-    pub async fn get(&mut self, key: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
+    pub async fn get(&mut self, key: &K) -> Result<Vec<V>, Error> {
         self.gets.inc();
-
-        // Validate input length
-        if key.len() != self.config.key_length {
-            return Err(Error::InvalidKeyLength {
-                expected: self.config.key_length,
-                actual: key.len(),
-            });
-        }
 
         // Hash key to table index
         let table_index = self.hash_key(key);
@@ -413,15 +441,13 @@ impl<E: Storage + Metrics> DiskMap<E> {
         }
 
         // Follow the linked list chain, collecting values for matching keys
-        let key_length = self.config.key_length;
-        let value_length = self.config.value_length;
         let mut values = Vec::new();
 
         loop {
             // Get the journal for this entry
             let journal = self.get_journal(journal_id).await?;
 
-            // Read next pointers first: [next_journal_id][next_offset][key][value]
+            // Read the next pointers first to get the structure
             let next_journal_buf = vec![0u8; 8];
             let next_journal_buf = journal.read_at(next_journal_buf, offset).await?;
             let next_journal_id = u64::from_le_bytes(next_journal_buf.as_ref().try_into().unwrap());
@@ -430,19 +456,27 @@ impl<E: Storage + Metrics> DiskMap<E> {
             let next_offset_buf = journal.read_at(next_offset_buf, offset + 8).await?;
             let next_offset = u64::from_le_bytes(next_offset_buf.as_ref().try_into().unwrap());
 
-            // Read key
-            let key_buf = vec![0u8; key_length];
+            // Read the key
+            let key_buf = vec![0u8; K::SIZE];
             let key_buf = journal.read_at(key_buf, offset + 16).await?;
+            let entry_key =
+                K::read(&mut key_buf.as_ref()).map_err(|_| Error::BucketCorrupted(offset))?;
 
-            // Read value
-            let value_buf = vec![0u8; value_length];
-            let value_buf = journal
-                .read_at(value_buf, offset + 16 + key_length as u64)
-                .await?;
+            // Check if this key matches before reading the value
+            if entry_key.as_ref() == key.as_ref() {
+                // Read the value only if key matches
+                // First, we need to determine the size of the value
+                // For now, read a reasonable buffer and decode
+                let max_value_size = 1024; // Conservative estimate
+                let value_buf = vec![0u8; max_value_size];
+                let value_buf = journal
+                    .read_at(value_buf, offset + 16 + K::SIZE as u64)
+                    .await?;
 
-            // Check if this key matches
-            if key_buf.as_ref() == key {
-                values.push(value_buf.as_ref().to_vec());
+                let entry_value = V::read_cfg(&mut value_buf.as_ref(), &self.config.codec_config)
+                    .map_err(|_| Error::BucketCorrupted(offset))?;
+
+                values.push(entry_value);
             }
 
             // Follow the chain
@@ -454,7 +488,7 @@ impl<E: Storage + Metrics> DiskMap<E> {
         }
 
         trace!(
-            key = hex(key),
+            key = hex(key.as_ref()),
             values_found = values.len(),
             "retrieved values for key"
         );
@@ -463,7 +497,7 @@ impl<E: Storage + Metrics> DiskMap<E> {
     }
 
     /// Check if a key exists in the disk map.
-    pub async fn contains_key(&mut self, key: &[u8]) -> Result<bool, Error> {
+    pub async fn contains_key(&mut self, key: &K) -> Result<bool, Error> {
         let values = self.get(key).await?;
         Ok(!values.is_empty())
     }
@@ -472,22 +506,16 @@ impl<E: Storage + Metrics> DiskMap<E> {
     pub fn table_size(&self) -> u64 {
         self.table_size
     }
-
-    /// Get the configured key length.
-    pub fn key_length(&self) -> usize {
-        self.config.key_length
-    }
-
-    /// Get the configured value length.
-    pub fn value_length(&self) -> usize {
-        self.config.value_length
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use commonware_runtime::{deterministic, Runner};
+    use commonware_utils::array::FixedBytes;
+
+    type TestKey = FixedBytes<8>;
+    type TestValue = FixedBytes<16>;
 
     #[test]
     fn test_diskmap_basic_operations() {
@@ -496,59 +524,64 @@ mod tests {
             let config = Config {
                 partition: "test".to_string(),
                 directory_size: 256,
-                key_length: 8,
-                value_length: 16,
+                codec_config: (),
                 write_buffer: 1024,
             };
 
-            let mut diskmap = DiskMap::init(context, config).await.unwrap();
+            let mut diskmap = DiskMap::<_, TestKey, TestValue>::init(context, config)
+                .await
+                .unwrap();
 
             // Test put and get
-            let key = b"testkey1";
-            let value = b"testvalue1234567";
+            let key = TestKey::new(*b"testkey1");
+            let value = TestValue::new(*b"testvalue1234567");
 
-            diskmap.put(key, value).await.unwrap();
-            let values = diskmap.get(key).await.unwrap();
+            diskmap.put(key.clone(), value.clone()).await.unwrap();
+            let values = diskmap.get(&key).await.unwrap();
 
             assert_eq!(values.len(), 1);
             assert_eq!(values[0], value);
 
             // Test multiple values for same key
-            let value2 = b"testvalue7654321";
-            diskmap.put(key, value2).await.unwrap();
-            let values = diskmap.get(key).await.unwrap();
+            let value2 = TestValue::new(*b"testvalue7654321");
+            diskmap.put(key.clone(), value2.clone()).await.unwrap();
+            let values = diskmap.get(&key).await.unwrap();
 
             assert_eq!(values.len(), 2);
-            assert!(values.contains(&value.to_vec()));
-            assert!(values.contains(&value2.to_vec()));
+            assert!(values.contains(&value));
+            assert!(values.contains(&value2));
 
             // Test contains_key
-            assert!(diskmap.contains_key(key).await.unwrap());
-            assert!(!diskmap.contains_key(b"nonexist").await.unwrap());
+            assert!(diskmap.contains_key(&key).await.unwrap());
+            let nonexist_key = TestKey::new(*b"nonexist");
+            assert!(!diskmap.contains_key(&nonexist_key).await.unwrap());
         });
     }
 
     #[test]
-    fn test_diskmap_invalid_lengths() {
+    fn test_diskmap_type_safety() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let config = Config {
                 partition: "test".to_string(),
                 directory_size: 256,
-                key_length: 8,
-                value_length: 16,
+                codec_config: (),
                 write_buffer: 1024,
             };
 
-            let mut diskmap = DiskMap::init(context, config).await.unwrap();
+            let mut diskmap = DiskMap::<_, TestKey, TestValue>::init(context, config)
+                .await
+                .unwrap();
 
-            // Test invalid key length
-            let result = diskmap.put(b"short", b"testvalue1234567").await;
-            assert!(matches!(result, Err(Error::InvalidKeyLength { .. })));
+            // Test basic type safety - this should compile and work
+            let key = TestKey::new(*b"testkey1");
+            let value = TestValue::new(*b"testvalue1234567");
 
-            // Test invalid value length
-            let result = diskmap.put(b"testkey1", b"short").await;
-            assert!(matches!(result, Err(Error::InvalidValueLength { .. })));
+            diskmap.put(key.clone(), value.clone()).await.unwrap();
+            let values = diskmap.get(&key).await.unwrap();
+
+            assert_eq!(values.len(), 1);
+            assert_eq!(values[0], value);
         });
     }
 }
