@@ -1281,10 +1281,14 @@ dependencies = [
 name = "commonware-sync"
 version = "0.0.54"
 dependencies = [
+ "commonware-codec",
  "commonware-cryptography",
+ "commonware-macros",
  "commonware-runtime",
  "commonware-storage",
  "commonware-utils",
+ "thiserror 2.0.12",
+ "tracing",
 ]
 
 [[package]]

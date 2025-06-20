@@ -15,7 +15,11 @@ commonware-storage = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-utils = { workspace = true }
 commonware-cryptography = { workspace = true }
+commonware-codec = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
+commonware-macros = { workspace = true }
 
 [lib]
