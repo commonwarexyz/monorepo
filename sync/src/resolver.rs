@@ -40,7 +40,7 @@ where
     T: Translator,
 {
     /// Create a new local resolver wrapping the given database
-    pub fn new(db: Any<E, K, V, H, T>) -> Self {
+    pub fn _new(db: Any<E, K, V, H, T>) -> Self {
         Self { db }
     }
 }
@@ -155,7 +155,7 @@ mod tests {
             let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
-            let mut resolver = TestResolver::new(source_db);
+            let mut resolver = TestResolver::_new(source_db);
             let (proof, returned_ops) = resolver.get_proof(0, NZU64!(5)).await.unwrap();
 
             assert_eq!(returned_ops.len(), 5);
@@ -191,7 +191,7 @@ mod tests {
             let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
-            let mut resolver = TestResolver::new(source_db);
+            let mut resolver = TestResolver::_new(source_db);
             let (proof, returned_ops) = resolver.get_proof(0, NZU64!(1000)).await.unwrap();
 
             // Should return all available operations
@@ -228,7 +228,7 @@ mod tests {
             let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
-            let mut resolver = TestResolver::new(source_db);
+            let mut resolver = TestResolver::_new(source_db);
             let (proof, returned_ops) = resolver.get_proof(5, NZU64!(10)).await.unwrap();
 
             assert!(returned_ops.len() <= 10);
@@ -268,7 +268,7 @@ mod tests {
             let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
-            let mut resolver = TestResolver::new(source_db);
+            let mut resolver = TestResolver::_new(source_db);
             let (proof, returned_ops) = resolver.get_proof(0, NZU64!(1)).await.unwrap();
 
             assert_eq!(returned_ops.len(), 1);
@@ -300,7 +300,7 @@ mod tests {
             let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
-            let mut resolver = TestResolver::new(source_db);
+            let mut resolver = TestResolver::_new(source_db);
             let (proof, returned_ops) = resolver.get_proof(0, NZU64!(3)).await.unwrap();
 
             assert!(returned_ops.len() <= 3);
@@ -322,7 +322,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let source_db = create_test_db(context.clone()).await;
-            let mut resolver = TestResolver::new(source_db);
+            let mut resolver = TestResolver::_new(source_db);
 
             let result = resolver.get_proof(0, NZU64!(10)).await;
             assert!(result.is_err());
@@ -336,7 +336,7 @@ mod tests {
         executor.start(|context| async move {
             let mut source_db = create_test_db(context.clone()).await;
             populate_db_with_operations(&mut source_db, 5).await;
-            let mut resolver = TestResolver::new(source_db);
+            let mut resolver = TestResolver::_new(source_db);
 
             let result = resolver.get_proof(100, NZU64!(10)).await;
 
@@ -368,7 +368,7 @@ mod tests {
             let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
-            let mut resolver = TestResolver::new(source_db);
+            let mut resolver = TestResolver::_new(source_db);
             let (proof, returned_ops) = resolver.get_proof(0, NZU64!(20)).await.unwrap();
 
             // Should have at least the operations we created
@@ -431,7 +431,7 @@ mod tests {
             let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
-            let mut resolver = TestResolver::new(source_db);
+            let mut resolver = TestResolver::_new(source_db);
             let (proof, returned_ops) = resolver.get_proof(0, NZU64!(20)).await.unwrap();
 
             // Should contain both updates and deletes
@@ -470,7 +470,7 @@ mod tests {
             let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
-            let mut resolver = TestResolver::new(source_db);
+            let mut resolver = TestResolver::_new(source_db);
             // This should handle the edge case gracefully
             // The current implementation may have issues with max_ops = 0
             // so we test with a minimal request instead
@@ -499,7 +499,7 @@ mod tests {
             let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
-            let mut resolver = TestResolver::new(source_db);
+            let mut resolver = TestResolver::_new(source_db);
             let (proof, returned_ops) = resolver.get_proof(0, NZU64!(30)).await.unwrap();
 
             assert!(returned_ops.len() <= 30);
@@ -539,7 +539,7 @@ mod tests {
             let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
-            let mut resolver = TestResolver::new(source_db);
+            let mut resolver = TestResolver::_new(source_db);
 
             // Make consecutive requests
             let (proof1, ops1) = resolver.get_proof(0, NZU64!(10)).await.unwrap();
@@ -590,7 +590,7 @@ mod tests {
             let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
-            let mut resolver = TestResolver::new(source_db);
+            let mut resolver = TestResolver::_new(source_db);
             let (proof, returned_ops) = resolver.get_proof(0, NZU64!(20)).await.unwrap();
 
             // Should have multiple operations for the same key
@@ -627,7 +627,7 @@ mod tests {
             let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
-            let mut resolver = TestResolver::new(source_db);
+            let mut resolver = TestResolver::_new(source_db);
             let (proof, returned_ops) = resolver.get_proof(0, NZU64!(5)).await.unwrap();
 
             // Verify the proof is structurally valid
@@ -654,7 +654,7 @@ mod tests {
             let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
-            let mut resolver = TestResolver::new(source_db);
+            let mut resolver = TestResolver::_new(source_db);
 
             // Test different ranges
             let ranges = [(0, NZU64!(3)), (5, NZU64!(5)), (10, NZU64!(8))];

@@ -1287,6 +1287,7 @@ dependencies = [
  "commonware-runtime",
  "commonware-storage",
  "commonware-utils",
+ "rand",
  "thiserror 2.0.12",
  "tracing",
 ]

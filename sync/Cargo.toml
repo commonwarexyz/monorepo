@@ -18,6 +18,8 @@ commonware-cryptography = { workspace = true }
 commonware-codec = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+rand = { workspace = true }
+
 
 [dev-dependencies]
 commonware-macros = { workspace = true }
