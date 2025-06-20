@@ -1,12 +1,13 @@
 use super::{
     ingress::{Message, Messenger},
-    Config, Mailbox,
+    Config,
 };
 use crate::{
     authenticated::{
         data::Data,
         lookup::{channels::Channels, metrics},
         relay::Relay,
+        Mailbox,
     },
     Channel, Recipients,
 };
@@ -31,7 +32,7 @@ pub struct Actor<E: Spawner + Metrics, P: PublicKey> {
 impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
     /// Returns a new [Actor] along with a [Mailbox] and [Messenger]
     /// that can be used to send messages to the router.
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<P>, Messenger<P>) {
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<P>>, Messenger<P>) {
         // Create mailbox
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
 

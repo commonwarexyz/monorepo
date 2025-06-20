@@ -46,7 +46,7 @@ pub type DST = &'static [u8];
 
 /// An element of a group.
 pub trait Element:
-    Read<Cfg = ()> + Write + FixedSize + Clone + Eq + PartialEq + Send + Sync
+    Read<Cfg = ()> + Write + FixedSize + Clone + Eq + PartialEq + Ord + PartialOrd + Hash + Send + Sync
 {
     /// Returns the additive identity.
     fn zero() -> Self;
@@ -85,16 +85,16 @@ pub trait Point: Element {
 pub struct Scalar(blst_fr);
 
 /// Number of bytes required to encode a scalar in its canonical
-/// little‑endian form (`32 × 8 = 256 bits`).
+/// little‑endian form (`32 × 8 = 256 bits`).
 ///
-/// Because `r` is only 255 bits wide, the most‑significant byte is always in
+/// Because `r` is only 255 bits wide, the most‑significant byte is always in
 /// the range `0x00‥=0x7f`, leaving the top bit clear.
 const SCALAR_LENGTH: usize = 32;
 
-/// Effective bit‑length of the field modulus `r` (`⌈log_2 r⌉ = 255`).
+/// Effective bit‑length of the field modulus `r` (`⌈log_2 r⌉ = 255`).
 ///
 /// Useful for constant‑time exponentiation loops and for validating that a
-/// decoded integer lies in the range `0 ≤ x < r`.
+/// decoded integer lies in the range `0 ≤ x < r`.
 const SCALAR_BITS: usize = 255;
 
 /// This constant serves as the multiplicative identity (i.e., "one") in the
@@ -300,6 +300,18 @@ impl Hash for Scalar {
     }
 }
 
+impl PartialOrd for Scalar {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Scalar {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_slice().cmp(&other.as_slice())
+    }
+}
+
 impl Debug for Scalar {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", hex(&self.as_slice()))
@@ -327,7 +339,7 @@ impl Drop for Scalar {
 impl ZeroizeOnDrop for Scalar {}
 
 /// A share of a threshold signing key.
-#[derive(Clone, PartialEq, Hash)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Share {
     /// The share's index in the polynomial.
     pub index: u32,
@@ -483,6 +495,18 @@ impl Hash for G1 {
     fn hash<H: Hasher>(&self, state: &mut H) {
         let slice = self.as_slice();
         state.write(&slice);
+    }
+}
+
+impl PartialOrd for G1 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for G1 {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_slice().cmp(&other.as_slice())
     }
 }
 
@@ -683,6 +707,18 @@ impl Hash for G2 {
     }
 }
 
+impl PartialOrd for G2 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for G2 {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_slice().cmp(&other.as_slice())
+    }
+}
+
 impl Point for G2 {
     fn map(&mut self, dst: DST, data: &[u8]) {
         unsafe {
@@ -777,6 +813,7 @@ mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode};
     use rand::prelude::*;
+    use std::collections::{BTreeSet, HashMap};
 
     #[test]
     fn basic_group() {
@@ -1044,5 +1081,60 @@ mod tests {
         let expected_g2 = naive_msm(&points_g2, &scalars);
         let result_g2 = G2::msm(&points_g2, &scalars);
         assert_eq!(expected_g2, result_g2, "G2 MSM basic case failed");
+    }
+
+    #[test]
+    fn test_trait_implementations() {
+        // Generate a set of unique items to test.
+        let mut rng = thread_rng();
+        const NUM_ITEMS: usize = 10;
+        let mut scalar_set = BTreeSet::new();
+        let mut g1_set = BTreeSet::new();
+        let mut g2_set = BTreeSet::new();
+        let mut share_set = BTreeSet::new();
+        while scalar_set.len() < NUM_ITEMS {
+            let scalar = Scalar::rand(&mut rng);
+            let mut g1 = G1::one();
+            g1.mul(&scalar);
+            let mut g2 = G2::one();
+            g2.mul(&scalar);
+            let share = Share {
+                index: scalar_set.len() as u32,
+                private: scalar.clone(),
+            };
+
+            scalar_set.insert(scalar);
+            g1_set.insert(g1);
+            g2_set.insert(g2);
+            share_set.insert(share);
+        }
+
+        // Verify that the sets contain the expected number of unique items.
+        assert_eq!(scalar_set.len(), NUM_ITEMS);
+        assert_eq!(g1_set.len(), NUM_ITEMS);
+        assert_eq!(g2_set.len(), NUM_ITEMS);
+        assert_eq!(share_set.len(), NUM_ITEMS);
+
+        // Verify that `BTreeSet` iteration is sorted, which relies on `Ord`.
+        let scalars: Vec<_> = scalar_set.iter().collect();
+        assert!(scalars.windows(2).all(|w| w[0] <= w[1]));
+        let g1s: Vec<_> = g1_set.iter().collect();
+        assert!(g1s.windows(2).all(|w| w[0] <= w[1]));
+        let g2s: Vec<_> = g2_set.iter().collect();
+        assert!(g2s.windows(2).all(|w| w[0] <= w[1]));
+        let shares: Vec<_> = share_set.iter().collect();
+        assert!(shares.windows(2).all(|w| w[0] <= w[1]));
+
+        // Test that we can use these types as keys in hash maps, which relies on `Hash` and `Eq`.
+        let scalar_map: HashMap<_, _> = scalar_set.iter().cloned().zip(0..).collect();
+        let g1_map: HashMap<_, _> = g1_set.iter().cloned().zip(0..).collect();
+        let g2_map: HashMap<_, _> = g2_set.iter().cloned().zip(0..).collect();
+        let share_map: HashMap<_, _> = share_set.iter().cloned().zip(0..).collect();
+
+        // Verify that the maps contain the expected number of unique items.
+        assert_eq!(scalar_map.len(), NUM_ITEMS);
+        assert_eq!(g1_map.len(), NUM_ITEMS);
+        assert_eq!(g2_map.len(), NUM_ITEMS);
+        assert_eq!(share_map.len(), NUM_ITEMS);
     }
 }

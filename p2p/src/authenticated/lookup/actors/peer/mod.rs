@@ -6,13 +6,11 @@ use governor::Quota;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use thiserror::Error;
 
-pub mod actor;
+mod actor;
 pub use actor::Actor;
 
 mod ingress;
-pub use ingress::Mailbox;
-#[cfg(test)]
-pub(super) use ingress::Message;
+pub use ingress::Message;
 
 pub struct Config {
     pub mailbox_size: usize,

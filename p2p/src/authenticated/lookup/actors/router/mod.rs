@@ -1,8 +1,8 @@
-pub mod actor;
-pub mod ingress;
+mod actor;
+mod ingress;
 
 pub use actor::Actor;
-pub use ingress::{Mailbox, Messenger};
+pub use ingress::{Message, Messenger};
 
 /// Config for an [Actor].
 pub struct Config {

@@ -1,6 +1,9 @@
 //! Listener
 
-use crate::authenticated::lookup::actors::{spawner, tracker};
+use crate::authenticated::{
+    lookup::actors::{spawner, tracker},
+    Mailbox,
+};
 use commonware_cryptography::Signer;
 use commonware_runtime::{
     telemetry::traces::status, Clock, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf,
@@ -63,16 +66,18 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         }
     }
 
+    #[allow(clippy::type_complexity)]
     async fn handshake(
         context: E,
+        address: SocketAddr,
         stream_cfg: StreamConfig<C>,
         sink: SinkOf<E>,
         stream: StreamOf<E>,
-        mut tracker: tracker::Mailbox<E, C::PublicKey>,
-        mut supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
+        mut tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
+        mut supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         // Create span
-        let span = debug_span!("listener");
+        let span = debug_span!("listener", ?address);
         let guard = span.enter();
 
         // Wait for the peer to send us their public key
@@ -125,20 +130,22 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         supervisor.spawn(stream, reservation).await;
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn start(
         self,
-        tracker: tracker::Mailbox<E, C::PublicKey>,
-        supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
+        tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
+        supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) -> Handle<()> {
         self.context
             .clone()
             .spawn(|_| self.run(tracker, supervisor))
     }
 
+    #[allow(clippy::type_complexity)]
     async fn run(
         self,
-        tracker: tracker::Mailbox<E, C::PublicKey>,
-        supervisor: spawner::Mailbox<E, SinkOf<E>, StreamOf<E>, C::PublicKey>,
+        tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
+        supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         // Start listening for incoming connections
         let mut listener = self
@@ -172,7 +179,9 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                 let tracker = tracker.clone();
                 let supervisor = supervisor.clone();
                 move |context| {
-                    Self::handshake(context, stream_cfg, sink, stream, tracker, supervisor)
+                    Self::handshake(
+                        context, address, stream_cfg, sink, stream, tracker, supervisor,
+                    )
                 }
             });
         }

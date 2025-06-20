@@ -20,8 +20,8 @@ sha2 = { workspace = true }
 rayon = { workspace = true }
 zeroize = { workspace = true, features = ["zeroize_derive"] }
 ed25519-consensus = "2.1.0"
-blst = { version = "0.3.13", features = ["no-threads"] }
-p256 = { version = "0.13.2", features = ["ecdsa"] }
+blst = { workspace = true, features = ["no-threads"] }
+p256 = { workspace = true, features = ["ecdsa"] }
 
 # Enable "js" feature when WASM is target
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]

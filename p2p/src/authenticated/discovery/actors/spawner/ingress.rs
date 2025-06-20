@@ -1,10 +1,9 @@
-use crate::authenticated::discovery::actors::tracker::Reservation;
+use crate::authenticated::{discovery::actors::tracker::Reservation, Mailbox};
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Clock, Metrics, Sink, Spawner, Stream};
+use commonware_runtime::{Clock, Metrics, Network, Sink, Spawner, Stream};
 use commonware_stream::public_key::Connection;
-use futures::{channel::mpsc, SinkExt};
 
-/// Messages that can be processed by the spawner [super::Actor].
+/// Messages that can be processed by the spawner actor.
 pub enum Message<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKey> {
     /// Notify the spawner to create a new task for the given peer.
     Spawn {
@@ -17,41 +16,17 @@ pub enum Message<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKe
     },
 }
 
-/// Sends messages to the spawner [super::Actor].
-pub struct Mailbox<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKey> {
-    sender: mpsc::Sender<Message<E, Si, St, P>>,
-}
-
-impl<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKey> Mailbox<E, Si, St, P> {
-    /// Returns a new [Mailbox] with the given `sender`.
-    /// (The [super::Actor] has the corresponding receiver.)
-    pub fn new(sender: mpsc::Sender<Message<E, Si, St, P>>) -> Self {
-        Self { sender }
-    }
-
-    /// Send a message to the [super::Actor] to spawn a new task for the given peer.
-    pub async fn spawn(&mut self, connection: Connection<Si, St>, reservation: Reservation<E, P>) {
-        self.sender
-            .send(Message::Spawn {
-                peer: reservation.metadata().public_key().clone(),
-                connection,
-                reservation,
-            })
-            .await
-            .unwrap();
-    }
-}
-
-impl<E: Spawner + Clock + Metrics, Si: Sink, St: Stream, P: PublicKey> Clone
-    for Mailbox<E, Si, St, P>
+impl<E: Spawner + Clock + Metrics + Network, P: PublicKey, Si: Sink, St: Stream>
+    Mailbox<Message<E, Si, St, P>>
 {
-    /// Clone the mailbox.
-    ///
-    /// We manually implement `clone` because the auto-generated `derive` would
-    /// require the `E`, `C`, `Si`, and `St` types to be `Clone`.
-    fn clone(&self) -> Self {
-        Self {
-            sender: self.sender.clone(),
-        }
+    /// Send a message to the actor to spawn a new task for the given peer.
+    pub async fn spawn(&mut self, connection: Connection<Si, St>, reservation: Reservation<E, P>) {
+        self.send(Message::Spawn {
+            peer: reservation.metadata().public_key().clone(),
+            connection,
+            reservation,
+        })
+        .await
+        .unwrap();
     }
 }

@@ -13,7 +13,7 @@ mod record;
 mod reservation;
 
 pub use actor::Actor;
-pub use ingress::{Mailbox, Oracle};
+pub use ingress::{Message, Oracle};
 pub use metadata::Metadata;
 pub use reservation::Reservation;
 
@@ -23,7 +23,6 @@ pub struct Config<C: Signer> {
     pub address: SocketAddr,
     pub mailbox_size: usize,
     pub tracked_peer_sets: usize,
-    pub max_peer_set_size: usize,
     pub allowed_connection_rate_per_peer: Quota,
     pub allow_private_ips: bool,
 }

@@ -131,7 +131,6 @@ fn main() {
             0,
             Quota::per_second(NZU32!(u32::MAX)),
             config.message_backlog,
-            None,
         );
 
         // Create network

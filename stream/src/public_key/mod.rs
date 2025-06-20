@@ -68,9 +68,9 @@ mod cipher;
 mod connection;
 use commonware_cryptography::Signer;
 pub use connection::{Connection, IncomingConnection, Receiver, Sender};
-mod handshake;
+pub mod handshake;
 mod nonce;
-mod x25519;
+pub mod x25519;
 
 /// Configuration for a connection.
 ///

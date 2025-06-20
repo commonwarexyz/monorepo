@@ -1,10 +1,13 @@
-use super::{
-    ingress::{Mailbox, Message},
-    Config,
-};
-use crate::authenticated::discovery::{
-    actors::{peer, router, tracker},
-    metrics,
+use super::{ingress::Message, Config};
+use crate::authenticated::{
+    discovery::{
+        actors::{
+            peer, router,
+            tracker::{self, Metadata},
+        },
+        metrics,
+    },
+    Mailbox,
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
@@ -45,7 +48,8 @@ impl<
         C: PublicKey,
     > Actor<E, Si, St, C>
 {
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<E, Si, St, C>) {
+    #[allow(clippy::type_complexity)]
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<E, Si, St, C>>) {
         let connections = Gauge::default();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
@@ -89,13 +93,17 @@ impl<
 
     pub fn start(
         mut self,
-        tracker: tracker::Mailbox<E, C>,
-        router: router::Mailbox<C>,
+        tracker: Mailbox<tracker::Message<E, C>>,
+        router: Mailbox<router::Message<C>>,
     ) -> Handle<()> {
         self.context.spawn_ref()(self.run(tracker, router))
     }
 
-    async fn run(mut self, tracker: tracker::Mailbox<E, C>, router: router::Mailbox<C>) {
+    async fn run(
+        mut self,
+        tracker: Mailbox<tracker::Message<E, C>>,
+        router: Mailbox<router::Message<C>>,
+    ) {
         while let Some(msg) = self.receiver.next().await {
             match msg {
                 Message::Spawn {
@@ -111,8 +119,9 @@ impl<
                     let sent_messages = self.sent_messages.clone();
                     let received_messages = self.received_messages.clone();
                     let rate_limited = self.rate_limited.clone();
-                    let tracker = tracker.clone();
+                    let mut tracker = tracker.clone();
                     let mut router = router.clone();
+                    let is_dialer = matches!(reservation.metadata(), Metadata::Dialer(..));
 
                     // Spawn peer
                     self.context
@@ -120,7 +129,7 @@ impl<
                         .spawn(move |context| async move {
                             // Create peer
                             debug!(?peer, "peer started");
-                            let (actor, messenger) = peer::Actor::new(
+                            let (peer_actor, peer_mailbox, messenger) = peer::Actor::new(
                                 context,
                                 peer::Config {
                                     sent_messages,
@@ -133,19 +142,25 @@ impl<
                                     allowed_peers_rate: self.allowed_peers_rate,
                                     peer_gossip_max_count: self.peer_gossip_max_count,
                                 },
-                                reservation,
                             );
 
                             // Register peer with the router
                             let channels = router.ready(peer.clone(), messenger).await;
 
+                            // Register peer with tracker
+                            tracker.connect(peer.clone(), is_dialer, peer_mailbox).await;
+
                             // Run peer
-                            let e = actor.run(peer.clone(), connection, tracker, channels).await;
+                            let e = peer_actor
+                                .run(peer.clone(), connection, tracker, channels)
+                                .await;
                             connections.dec();
 
                             // Let the router know the peer has exited
                             debug!(error = ?e, ?peer, "peer shutdown");
                             router.release(peer).await;
+                            // Release the reservation
+                            drop(reservation);
                         });
                 }
             }

@@ -194,19 +194,16 @@ fn main() {
             0,
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
-            Some(3),
         );
         let (recovered_sender, recovered_receiver) = network.register(
             1,
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
-            Some(3),
         );
         let (resolver_sender, resolver_receiver) = network.register(
             2,
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
-            Some(3),
         );
 
         // Initialize application
