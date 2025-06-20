@@ -1,0 +1,46 @@
+[package]
+name = "commonware-cryptography-fuzz"
+version = "0.0.1"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+commonware-codec = { workspace = true }
+commonware-cryptography = { workspace = true }
+arbitrary = { workspace = true, features = ["derive"] }
+blst = { workspace = true, features = ["no-threads"] }
+libfuzzer-sys = { workspace = true }
+p256 = { workspace = true, features = ["ecdsa"] }
+sha2 = { workspace = true }
+ed25519-zebra = "4.0.3"
+
+[[bin]]
+name = "bls12381_decode"
+path = "fuzz_targets/bls12381_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ed25519_decode"
+path = "fuzz_targets/ed25519_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "secp256r1_decode"
+path = "fuzz_targets/secp256r1_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sha256_hasher"
+path = "fuzz_targets/sha256_hasher.rs"
+test = false
+doc = false
+bench = false

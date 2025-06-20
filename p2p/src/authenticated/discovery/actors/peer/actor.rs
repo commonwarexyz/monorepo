@@ -1,8 +1,9 @@
-use super::{Config, Error, Mailbox, Message};
+use super::{Config, Error, Message};
 use crate::authenticated::{
     data::Data,
     discovery::{actors::tracker, channels::Channels, metrics, types},
     relay::Relay,
+    Mailbox,
 };
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
@@ -28,7 +29,7 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey
 
     codec_config: types::Config,
 
-    mailbox: Mailbox<C>,
+    mailbox: Mailbox<Message<C>>,
     control: mpsc::Receiver<Message<C>>,
     high: mpsc::Receiver<Data>,
     low: mpsc::Receiver<Data>,
@@ -41,7 +42,7 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime + Metrics, C: PublicKey
 impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: PublicKey>
     Actor<E, C>
 {
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<C>, Relay<Data>) {
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<C>>, Relay<Data>) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
@@ -98,7 +99,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         mut self,
         peer: C,
         connection: Connection<Si, St>,
-        mut tracker: tracker::Mailbox<E, C>,
+        mut tracker: Mailbox<tracker::Message<E, C>>,
         channels: Channels<C>,
     ) -> Error {
         // Instantiate rate limiters for each message type
@@ -172,10 +173,13 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                 let peers_rate_limiter =
                     RateLimiter::direct_with_clock(self.allowed_peers_rate, &context);
                 loop {
+                    // Receive a message from the peer
                     let msg = conn_receiver
                         .receive()
                         .await
                         .map_err(Error::ReceiveFailed)?;
+
+                    // Parse the message
                     let msg = match types::Payload::decode_cfg(msg, &self.codec_config) {
                         Ok(msg) => msg,
                         Err(err) => {
@@ -186,60 +190,47 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                             return Err(Error::DecodeFailed(err));
                         }
                     };
-                    match msg {
-                        types::Payload::BitVec(bit_vec) => {
-                            self.received_messages
-                                .get_or_create(&metrics::Message::new_bit_vec(&peer))
-                                .inc();
 
-                            // Ensure peer is not spamming us with bit vectors
-                            if let Err(wait_until) = bit_vec_rate_limiter.check() {
-                                self.rate_limited
-                                    .get_or_create(&metrics::Message::new_bit_vec(&peer))
-                                    .inc();
-                                let wait = wait_until.wait_time_from(context.now());
-                                context.sleep(wait).await;
-                            }
+                    // Update metrics
+                    let metric = match &msg {
+                        types::Payload::BitVec(_) => &metrics::Message::new_bit_vec(&peer),
+                        types::Payload::Peers(_) => &metrics::Message::new_peers(&peer),
+                        types::Payload::Data(data) => &metrics::Message::new_data(&peer, data.channel),
+                    };
+                    self.received_messages.get_or_create(metric).inc();
 
-                            // Gather useful peers
-                            tracker.bit_vec(bit_vec, self.mailbox.clone()).await;
-                        }
-                        types::Payload::Peers(peers) => {
-                            self.received_messages
-                                .get_or_create(&metrics::Message::new_peers(&peer))
-                                .inc();
-
-                            // Ensure peer is not spamming us with peer messages
-                            if let Err(wait_until) = peers_rate_limiter.check() {
-                                self.rate_limited
-                                    .get_or_create(&metrics::Message::new_peers(&peer))
-                                    .inc();
-                                let wait = wait_until.wait_time_from(context.now());
-                                context.sleep(wait).await;
-                            }
-
-                            // Send peers to tracker
-                            tracker.peers(peers, self.mailbox.clone()).await;
-                        }
+                    // Wait until rate limiter allows us to process the message
+                    let rate_limiter = match &msg {
+                        types::Payload::BitVec(_) => &bit_vec_rate_limiter,
+                        types::Payload::Peers(_) => &peers_rate_limiter,
                         types::Payload::Data(data) => {
-                            self.received_messages
-                                .get_or_create(&metrics::Message::new_data(&peer, data.channel))
-                                .inc();
-
-                            // Ensure peer is not spamming us with content messages
                             let Some(rate_limiter) = rate_limits.get(&data.channel) else {
                                 // We permit unknown messages to be received in case peers
                                 // are on a newer version than us
                                 continue;
                             };
-                            if let Err(wait_until) = rate_limiter.check() {
-                                self.rate_limited
-                                    .get_or_create(&metrics::Message::new_data(&peer, data.channel))
-                                    .inc();
-                                let wait_duration = wait_until.wait_time_from(context.now());
-                                context.sleep(wait_duration).await;
-                            }
+                            rate_limiter
+                        }
+                    };
+                    if let Err(wait_until) = rate_limiter.check() {
+                        self.rate_limited
+                            .get_or_create(metric)
+                            .inc();
+                        let wait_duration = wait_until.wait_time_from(context.now());
+                        context.sleep(wait_duration).await;
+                    }
 
+
+                    match msg {
+                        types::Payload::BitVec(bit_vec) => {
+                            // Gather useful peers
+                            tracker.bit_vec(bit_vec, self.mailbox.clone()).await;
+                        }
+                        types::Payload::Peers(peers) => {
+                            // Send peers to tracker
+                            tracker.peers(peers, self.mailbox.clone()).await;
+                        }
+                        types::Payload::Data(data) => {
                             // Send message to client
                             //
                             // If the channel handler is closed, we log an error but don't

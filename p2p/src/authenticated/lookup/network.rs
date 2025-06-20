@@ -6,7 +6,7 @@ use super::{
     config::Config,
     types,
 };
-use crate::Channel;
+use crate::{authenticated::Mailbox, Channel};
 use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics, Network as RNetwork, Spawner};
@@ -29,9 +29,9 @@ pub struct Network<
 
     channels: Channels<C::PublicKey>,
     tracker: tracker::Actor<E, C>,
-    tracker_mailbox: tracker::Mailbox<E, C::PublicKey>,
+    tracker_mailbox: Mailbox<tracker::Message<E, C::PublicKey>>,
     router: router::Actor<E, C::PublicKey>,
-    router_mailbox: router::Mailbox<C::PublicKey>,
+    router_mailbox: Mailbox<router::Message<C::PublicKey>>,
 }
 
 impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics, C: Signer>
@@ -56,7 +56,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 mailbox_size: cfg.mailbox_size,
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 allowed_connection_rate_per_peer: cfg.allowed_connection_rate_per_peer,
-                max_peer_set_size: cfg.max_peer_set_size,
                 allow_private_ips: cfg.allow_private_ips,
             },
         );
@@ -90,7 +89,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
     /// * `channel` - Unique identifier for the channel.
     /// * `rate` - Rate at which messages can be received over the channel.
     /// * `backlog` - Maximum number of messages that can be queued on the channel before blocking.
-    /// * `compression` - Optional compression level (using `zstd`) to use for messages on the channel.
     ///
     /// # Returns
     ///
@@ -102,12 +100,11 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
         channel: Channel,
         rate: Quota,
         backlog: usize,
-        compression: Option<i32>,
     ) -> (
         channels::Sender<C::PublicKey>,
         channels::Receiver<C::PublicKey>,
     ) {
-        self.channels.register(channel, rate, backlog, compression)
+        self.channels.register(channel, rate, backlog)
     }
 
     /// Starts the network.

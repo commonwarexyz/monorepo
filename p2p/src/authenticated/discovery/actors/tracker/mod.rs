@@ -19,7 +19,7 @@ mod reservation;
 mod set;
 
 pub use actor::Actor;
-pub use ingress::{Mailbox, Oracle};
+pub use ingress::{Message, Oracle};
 pub use metadata::Metadata;
 pub use reservation::Reservation;
 
