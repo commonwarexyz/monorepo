@@ -605,10 +605,11 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         }))
     }
 
-    /// Scans all table entries to build a map of reachable journal entries.
-    /// This ensures consistency between the hash table and journal content.
+    /// Scans all table entries to build a map of reachable journal entries and truncates
+    /// journal sections to remove unreachable entries.
     async fn truncate_to_latest_reachable_entry(&mut self) -> Result<(), Error> {
         let mut reachable_entries = std::collections::BTreeSet::<(u64, u32)>::new();
+        let mut section_max_offsets = std::collections::BTreeMap::<u64, u32>::new();
         let mut valid_entries = 0;
         let mut invalid_entries = 0;
 
@@ -635,6 +636,14 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
                     Ok(Some(entry)) => {
                         valid_entries += 1;
                         reachable_entries.insert((current_journal_id, current_offset));
+
+                        // Track the maximum offset for each section
+                        section_max_offsets
+                            .entry(current_journal_id)
+                            .and_modify(|max_offset| {
+                                *max_offset = (*max_offset).max(current_offset)
+                            })
+                            .or_insert(current_offset);
 
                         // Follow the chain to the next entry
                         current_journal_id = entry.next_journal_id;
@@ -669,13 +678,41 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
             valid_entries,
             invalid_entries,
             reachable_entries = reachable_entries.len(),
+            sections_to_check = section_max_offsets.len(),
             "table scan and reachability analysis complete"
         );
 
-        // TODO: In the future, we could implement journal section truncation here
-        // For now, we've identified all reachable entries which ensures consistency
-        // The variable journal replay will return all entries, but we know which ones
-        // are actually reachable through the hash table
+        // Now truncate each journal section to remove unreachable entries
+        for (&section_id, &max_reachable_offset) in &section_max_offsets {
+            // Get the current section size
+            let current_size = self.journal.section_size(section_id).await?;
+
+            // Calculate the end position of the last reachable entry
+            if let Ok(Some(entry)) = self.journal.get(section_id, max_reachable_offset).await {
+                // Variable journal uses 16-byte aligned offsets
+                // Each entry is: size(4) + data(variable) + crc(4), then aligned to 16 bytes
+                let entry_size = entry.encode_size();
+                let entry_byte_offset = (max_reachable_offset as u64) * 16; // Convert offset to byte position
+                let entry_end = entry_byte_offset + 4 + entry_size as u64 + 4; // size + data + crc
+
+                // Align to next 16-byte boundary
+                let aligned_end = ((entry_end + 15) / 16) * 16;
+
+                if aligned_end < current_size {
+                    trace!(
+                        section_id,
+                        max_reachable_offset,
+                        current_size,
+                        truncate_to = aligned_end,
+                        "truncating journal section to remove unreachable entries"
+                    );
+
+                    self.journal
+                        .truncate_section(section_id, aligned_end)
+                        .await?;
+                }
+            }
+        }
 
         Ok(())
     }

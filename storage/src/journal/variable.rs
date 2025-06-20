@@ -642,6 +642,33 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         self.blobs.keys().max().copied()
     }
 
+    /// Truncates a specific section to the given byte size.
+    ///
+    /// This removes any data in the section beyond the specified size.
+    /// The size should be aligned to the journal's item boundaries.
+    pub async fn truncate_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
+        self.prune_guard(section, false)?;
+
+        let blob = match self.blobs.get_mut(&section) {
+            Some(blob) => blob,
+            None => return Ok(()), // Section doesn't exist, nothing to truncate
+        };
+
+        let current_size = blob.size().await;
+        if size >= current_size {
+            return Ok(()); // Already smaller than or equal to target size
+        }
+
+        blob.truncate(size).await?;
+        debug!(
+            section,
+            from = current_size,
+            to = size,
+            "truncated journal section"
+        );
+        Ok(())
+    }
+
     /// Prunes all `sections` less than `min`.
     pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
         // Check if we already ran this prune
@@ -1737,6 +1764,93 @@ mod tests {
                 hex(&digest),
                 "ca3845fa7fabd4d2855ab72ed21226d1d6eb30cb895ea9ec5e5a14201f3f25d8",
             );
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_truncate_section() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+
+        // Start the test within the executor
+        executor.start(|context| async move {
+            // Create a journal configuration
+            let cfg = Config {
+                partition: "test_truncate".into(),
+                compression: None,
+                codec_config: (),
+                write_buffer: 1024,
+            };
+
+            // Initialize the journal
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize journal");
+
+            // Append several items to section 1
+            for i in 0..10 {
+                journal.append(1, i).await.expect("Failed to append data");
+            }
+            journal.sync(1).await.expect("Failed to sync blob");
+
+            // Get the initial size
+            let initial_size = journal
+                .section_size(1)
+                .await
+                .expect("Failed to get section size");
+            assert!(initial_size > 0);
+
+            // Calculate the size after 5 items (approximately)
+            // Each item is roughly: 4 (size) + 4 (i32 value) + 4 (crc) = 12 bytes, aligned to 16 = 16 bytes per item
+            let target_size = 5 * 16; // Approximate size for first 5 items
+
+            // Truncate to roughly half the size
+            journal
+                .truncate_section(1, target_size)
+                .await
+                .expect("Failed to truncate section");
+
+            // Verify the section was truncated
+            let truncated_size = journal
+                .section_size(1)
+                .await
+                .expect("Failed to get section size");
+            assert_eq!(truncated_size, target_size);
+            assert!(truncated_size < initial_size);
+
+            // Verify we can still read the remaining items
+            for i in 0..3 {
+                // Read fewer items since some were truncated
+                match journal.get(1, i as u32).await {
+                    Ok(Some(value)) => assert_eq!(value, i),
+                    Ok(None) => break, // Hit the truncation point
+                    Err(_) => break,   // Hit the truncation point
+                }
+            }
+
+            // Test truncating a non-existent section (should not error)
+            journal
+                .truncate_section(999, 100)
+                .await
+                .expect("Failed to truncate non-existent section");
+
+            // Test truncating to a larger size (should be a no-op)
+            let size_before = journal
+                .section_size(1)
+                .await
+                .expect("Failed to get section size");
+            journal
+                .truncate_section(1, size_before + 1000)
+                .await
+                .expect("Failed to truncate to larger size");
+            let size_after = journal
+                .section_size(1)
+                .await
+                .expect("Failed to get section size");
+            assert_eq!(size_before, size_after);
+
+            // Clean up
+            journal.close().await.expect("Failed to close journal");
         });
     }
 }
