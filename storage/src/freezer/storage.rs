@@ -78,6 +78,7 @@ impl<E: Storage + Metrics, K: Array + Codec<Cfg = ()>, V: Codec> Freezer<E, K, V
 
             debug!("freezer initialized");
         }
+        // TODO: can we ensure consistency between diskmaps somehow?
 
         // Initialize metrics
         let items_tracked = Gauge::default();
