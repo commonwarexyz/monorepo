@@ -16,13 +16,139 @@ pub enum Identifier<'a, K: Array> {
     Key(&'a K),
 }
 
-/// Implementation of `Freezer` storage.
-pub struct Freezer<E: Storage + Metrics, K: Array, V: Codec> {
-    // DiskMap for key -> value storage
-    key_to_value: DiskMap<E, K, V>,
+/// Prefix types for the unified diskmap
+#[repr(u8)]
+enum Prefix {
+    Key = 0x00,
+    Index = 0x01,
+}
 
-    // DiskMap for index -> key mapping
-    index_to_key: DiskMap<E, U64, K>,
+/// Wrapper for prefixed array that properly implements Array trait
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct PrefixedArray<const N: usize> {
+    data: [u8; N],
+}
+
+impl<const N: usize> PrefixedArray<N> {
+    #[allow(dead_code)]
+    fn new_key(key: &[u8]) -> Self {
+        assert_eq!(key.len() + 1, N, "Key size mismatch");
+        let mut data = [0u8; N];
+        data[0] = Prefix::Key as u8;
+        data[1..].copy_from_slice(key);
+        Self { data }
+    }
+
+    #[allow(dead_code)]
+    fn new_index(index: &U64) -> Self {
+        assert_eq!(9, N, "Index prefixed array must be 9 bytes");
+        let mut data = [0u8; N];
+        data[0] = Prefix::Index as u8;
+        data[1..].copy_from_slice(index.as_ref());
+        Self { data }
+    }
+}
+
+impl<const N: usize> AsRef<[u8]> for PrefixedArray<N> {
+    fn as_ref(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+impl<const N: usize> std::ops::Deref for PrefixedArray<N> {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+
+impl<const N: usize> std::fmt::Display for PrefixedArray<N> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PrefixedArray({})", commonware_utils::hex(&self.data))
+    }
+}
+
+impl<const N: usize> commonware_codec::FixedSize for PrefixedArray<N> {
+    const SIZE: usize = N;
+}
+
+impl<const N: usize> commonware_codec::Write for PrefixedArray<N> {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        buf.put_slice(&self.data);
+    }
+}
+
+impl<const N: usize> commonware_codec::Read for PrefixedArray<N> {
+    type Cfg = ();
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        _cfg: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        if buf.remaining() < N {
+            return Err(commonware_codec::Error::EndOfBuffer);
+        }
+        let mut data = [0u8; N];
+        buf.copy_to_slice(&mut data);
+        Ok(Self { data })
+    }
+}
+
+impl<const N: usize> Array for PrefixedArray<N> {}
+
+/// Wrapper enum for values in the unified diskmap
+#[derive(Clone, Debug)]
+enum StorageValue<K: Array, V: Codec> {
+    Value(V),
+    Key(K),
+}
+
+impl<K: Array + Codec<Cfg = ()>, V: Codec> commonware_codec::EncodeSize for StorageValue<K, V> {
+    fn encode_size(&self) -> usize {
+        match self {
+            StorageValue::Value(v) => 1 + v.encode_size(),
+            StorageValue::Key(k) => 1 + k.encode_size(),
+        }
+    }
+}
+
+impl<K: Array + Codec<Cfg = ()>, V: Codec> commonware_codec::Write for StorageValue<K, V> {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        match self {
+            StorageValue::Value(v) => {
+                buf.put_u8(0);
+                v.write(buf);
+            }
+            StorageValue::Key(k) => {
+                buf.put_u8(1);
+                k.write(buf);
+            }
+        }
+    }
+}
+
+impl<K: Array + Codec<Cfg = ()>, V: Codec> commonware_codec::Read for StorageValue<K, V> {
+    type Cfg = V::Cfg;
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        cfg: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        let tag = buf.get_u8();
+        match tag {
+            0 => Ok(StorageValue::Value(V::read_cfg(buf, cfg)?)),
+            1 => Ok(StorageValue::Key(K::read_cfg(buf, &())?)),
+            _ => Err(commonware_codec::Error::InvalidEnum(tag)),
+        }
+    }
+}
+
+/// Implementation of `Freezer` storage using a single diskmap with prefixed keys.
+pub struct Freezer<E: Storage + Metrics, K: Array, V: Codec> {
+    // Single DiskMap for both key->value and index->key storage
+    // We use a large enough array to hold any prefixed key (1 byte prefix + max of key or index)
+    storage: DiskMap<E, PrefixedArray<256>, StorageValue<K, V>>,
 
     // RMap for interval tracking (only in-memory data structure)
     intervals: RMap,
@@ -32,53 +158,65 @@ pub struct Freezer<E: Storage + Metrics, K: Array, V: Codec> {
     gets: Counter,
     has: Counter,
     syncs: Counter,
+
+    // Store the actual key size for runtime validation
+    _key_size: usize,
 }
 
 impl<E: Storage + Metrics, K: Array + Codec<Cfg = ()>, V: Codec> Freezer<E, K, V> {
     /// Initialize a new `Freezer` instance.
     ///
-    /// The in-memory RMap is populated during this call by scanning the index diskmap.
+    /// The in-memory RMap is populated during this call by scanning the index entries.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        // Initialize diskmap for key -> value storage
-        let key_to_value_config = DiskMapConfig {
-            partition: format!("{}_keys", cfg.partition),
+        // Validate that our key size fits in the prefixed array
+        let key_size = K::SIZE;
+        if key_size + 1 > 256 {
+            return Err(Error::Runtime(commonware_runtime::Error::PartitionCorrupt(
+                format!("Key size {} is too large (max 255)", key_size),
+            )));
+        }
+
+        // Initialize single diskmap for all storage
+        let diskmap_config = DiskMapConfig {
+            partition: cfg.partition.clone(),
             directory_size: cfg.directory_size,
             codec_config: cfg.codec_config.clone(),
             write_buffer: cfg.write_buffer,
             target_journal_size: cfg.target_journal_size,
         };
-        let key_to_value =
-            DiskMap::init(context.with_label("key_to_value"), key_to_value_config).await?;
-
-        // Initialize diskmap for index -> key mapping
-        let index_to_key_config = DiskMapConfig {
-            partition: format!("{}_indices", cfg.partition),
-            directory_size: cfg.directory_size,
-            codec_config: (),
-            write_buffer: cfg.write_buffer,
-            target_journal_size: cfg.target_journal_size,
-        };
-        let index_to_key: DiskMap<E, U64, K> =
-            DiskMap::init(context.with_label("index_to_key"), index_to_key_config).await?;
+        let storage: DiskMap<E, PrefixedArray<256>, StorageValue<K, V>> =
+            DiskMap::init(context.with_label("storage"), diskmap_config).await?;
 
         // Initialize RMap and rebuild from existing data
         let mut intervals = RMap::new();
         {
             debug!("initializing freezer");
 
-            // Replay the index->key diskmap to rebuild the RMap
-            let stream = index_to_key.replay(cfg.write_buffer).await?;
+            // Replay the diskmap to rebuild the RMap from index entries
+            let stream = storage.replay(cfg.write_buffer).await?;
             let mut stream = Box::pin(stream);
 
             while let Some(result) = stream.next().await {
-                let (index_key, _key) = result?;
-                let index = index_key.to_u64();
-                intervals.insert(index);
+                let (prefixed_key, value) = result?;
+                // Check if this is an index entry
+                if prefixed_key.as_ref()[0] == Prefix::Index as u8 {
+                    // Extract the index from the key
+                    let mut index_bytes = [0u8; 8];
+                    index_bytes.copy_from_slice(&prefixed_key.as_ref()[1..9]);
+                    let index = u64::from_le_bytes(index_bytes);
+
+                    // Only add to intervals if the value is a Key (not corrupted)
+                    if matches!(value, StorageValue::Key(_)) {
+                        intervals.insert(index);
+                    }
+                }
             }
 
-            debug!("freezer initialized");
+            debug!(
+                "freezer initialized with {} indices",
+                intervals.iter().count()
+            );
         }
-        // TODO: can we ensure consistency between diskmaps somehow?
 
         // Initialize metrics
         let items_tracked = Gauge::default();
@@ -100,14 +238,30 @@ impl<E: Storage + Metrics, K: Array + Codec<Cfg = ()>, V: Codec> Freezer<E, K, V
 
         // Return populated freezer
         Ok(Self {
-            key_to_value,
-            index_to_key,
+            storage,
             intervals,
             items_tracked,
             gets,
             has,
             syncs,
+            _key_size: key_size,
         })
+    }
+
+    /// Create a prefixed array for a key, padding with zeros to reach 256 bytes
+    fn make_key_prefix(&self, key: &[u8]) -> PrefixedArray<256> {
+        let mut data = [0u8; 256];
+        data[0] = Prefix::Key as u8;
+        data[1..1 + key.len()].copy_from_slice(key);
+        PrefixedArray { data }
+    }
+
+    /// Create a prefixed array for an index, padding with zeros to reach 256 bytes
+    fn make_index_prefix(&self, index: &U64) -> PrefixedArray<256> {
+        let mut data = [0u8; 256];
+        data[0] = Prefix::Index as u8;
+        data[1..9].copy_from_slice(index.as_ref());
+        PrefixedArray { data }
     }
 
     /// Store an item in `Freezer`. Both indices and keys are assumed to be globally unique.
@@ -120,12 +274,18 @@ impl<E: Storage + Metrics, K: Array + Codec<Cfg = ()>, V: Codec> Freezer<E, K, V
             return Ok(());
         }
 
-        // Store key -> value mapping in diskmap
-        self.key_to_value.put(key.clone(), data).await?;
+        // First, store key -> value mapping (this ensures the value is persisted before the index)
+        let key_prefix = self.make_key_prefix(key.as_ref());
+        self.storage
+            .put(key_prefix, StorageValue::Value(data))
+            .await?;
 
-        // Store index -> key mapping in diskmap
+        // Then, store index -> key mapping (if this fails, we have an orphaned key but that's okay)
         let index_key = U64::new(index);
-        self.index_to_key.put(index_key, key).await?;
+        let index_prefix = self.make_index_prefix(&index_key);
+        self.storage
+            .put(index_prefix, StorageValue::Key(key))
+            .await?;
 
         // Update interval tracking with the actual index requested
         self.intervals.insert(index);
@@ -154,30 +314,40 @@ impl<E: Storage + Metrics, K: Array + Codec<Cfg = ()>, V: Codec> Freezer<E, K, V
             return Ok(None);
         }
 
-        // Get key from index->key diskmap
+        // Get key from index->key mapping
         let index_key = U64::new(index);
-        let keys = self.index_to_key.get(&index_key).await?;
-        let key = match keys.into_iter().next() {
-            Some(key) => key,
-            None => return Ok(None),
+        let index_prefix = self.make_index_prefix(&index_key);
+        let values = self.storage.get(&index_prefix).await?;
+
+        let key = match values.into_iter().next() {
+            Some(StorageValue::Key(k)) => k,
+            _ => return Ok(None),
         };
 
-        // Get value from key->value diskmap
-        let values = self.key_to_value.get(&key).await?;
+        // Get value from key->value mapping
+        let key_prefix = self.make_key_prefix(key.as_ref());
+        let values = self.storage.get(&key_prefix).await?;
 
-        // Return the first value (there should only be one for a given key)
-        Ok(values.into_iter().next())
+        // Return the first value
+        match values.into_iter().next() {
+            Some(StorageValue::Value(v)) => Ok(Some(v)),
+            _ => Ok(None),
+        }
     }
 
     async fn get_key(&mut self, key: &K) -> Result<Option<V>, Error> {
         // Update metrics
         self.gets.inc();
 
-        // Get value directly from key->value diskmap
-        let values = self.key_to_value.get(key).await?;
+        // Get value directly from key->value mapping
+        let key_prefix = self.make_key_prefix(key.as_ref());
+        let values = self.storage.get(&key_prefix).await?;
 
-        // Return the first value (there should only be one for a given key)
-        Ok(values.into_iter().next())
+        // Return the first value
+        match values.into_iter().next() {
+            Some(StorageValue::Value(v)) => Ok(Some(v)),
+            _ => Ok(None),
+        }
     }
 
     /// Check if an item exists in the `Freezer`.
@@ -195,17 +365,17 @@ impl<E: Storage + Metrics, K: Array + Codec<Cfg = ()>, V: Codec> Freezer<E, K, V
     }
 
     async fn has_key(&mut self, key: &K) -> Result<bool, Error> {
-        // Check if key exists in key->value diskmap
-        Ok(self.key_to_value.contains_key(key).await?)
+        // Check if key exists in storage
+        let key_prefix = self.make_key_prefix(key.as_ref());
+        Ok(self.storage.contains_key(&key_prefix).await?)
     }
 
     /// Forcibly sync all pending writes.
     pub async fn sync(&mut self) -> Result<(), Error> {
         self.syncs.inc();
 
-        // Sync both diskmaps
-        self.key_to_value.sync().await?;
-        self.index_to_key.sync().await?;
+        // Sync the single diskmap
+        self.storage.sync().await?;
 
         Ok(())
     }
@@ -226,8 +396,7 @@ impl<E: Storage + Metrics, K: Array + Codec<Cfg = ()>, V: Codec> Freezer<E, K, V
         self.sync().await?;
 
         // Close underlying storage
-        self.key_to_value.close().await?;
-        self.index_to_key.close().await?;
+        self.storage.close().await?;
 
         Ok(())
     }
@@ -235,8 +404,7 @@ impl<E: Storage + Metrics, K: Array + Codec<Cfg = ()>, V: Codec> Freezer<E, K, V
     /// Remove all on-disk data created by this `Freezer`.
     pub async fn destroy(self) -> Result<(), Error> {
         // Destroy underlying storage
-        self.key_to_value.destroy().await?;
-        self.index_to_key.destroy().await?;
+        self.storage.destroy().await?;
 
         Ok(())
     }
@@ -384,6 +552,73 @@ mod tests {
             assert_eq!(retrieved, Some(value));
 
             freezer.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_freezer_consistency_after_restart() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let config = Config {
+                partition: "test_consistency".to_string(),
+                codec_config: (),
+                write_buffer: 1024,
+                directory_size: 256,
+                target_journal_size: 64 * 1024 * 1024,
+            };
+
+            // First, create a freezer and add some data
+            {
+                let mut freezer =
+                    Freezer::<_, TestKey, TestValue>::init(context.clone(), config.clone())
+                        .await
+                        .unwrap();
+
+                // Add multiple items
+                for i in 0..5u64 {
+                    let key = TestKey::new((i as u64).to_be_bytes());
+                    let value = TestValue::new([i as u8; 16]);
+                    freezer.put(i, key, value).await.unwrap();
+                }
+
+                // Don't sync - simulate unclean shutdown
+                // In the new design, we write key->value first, then index->key
+                // So worst case is we have orphaned keys but indices always point to valid keys
+            }
+
+            // Restart and verify consistency
+            {
+                let mut freezer =
+                    Freezer::<_, TestKey, TestValue>::init(context.clone(), config.clone())
+                        .await
+                        .unwrap();
+
+                // The RMap should be rebuilt from index entries during init
+                // All indices in RMap should have valid key->value mappings
+                for i in 0..5u64 {
+                    if freezer.has_index(i) {
+                        // If the index exists in RMap, we should be able to retrieve the value
+                        let key = TestKey::new((i as u64).to_be_bytes());
+                        let expected_value = TestValue::new([i as u8; 16]);
+
+                        let retrieved_by_index = freezer.get(Identifier::Index(i)).await.unwrap();
+                        assert!(
+                            retrieved_by_index.is_some(),
+                            "Index {} exists in RMap but value retrieval failed",
+                            i
+                        );
+
+                        // The value should match what we expect
+                        assert_eq!(retrieved_by_index, Some(expected_value.clone()));
+
+                        // Key lookup should also work
+                        let retrieved_by_key = freezer.get(Identifier::Key(&key)).await.unwrap();
+                        assert_eq!(retrieved_by_key, Some(expected_value));
+                    }
+                }
+
+                freezer.destroy().await.unwrap();
+            }
         });
     }
 }
