@@ -579,75 +579,73 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
 
     /// Returns a stream of all key-value pairs in the disk map.
     ///
-    /// This function iterates through all table entries and follows linked list chains
-    /// to return all stored key-value pairs. This is useful for rebuilding in-memory
-    /// indexes during initialization.
+    /// This function uses the journal's efficient replay mechanism to stream through
+    /// all entries. This is much faster than following linked lists manually as it
+    /// uses buffered reading.
     pub async fn replay(
         &self,
-        _buffer: usize,
-    ) -> Result<impl futures::Stream<Item = Result<(K, V), Error>> + '_, Error>
-    where
-        K: Clone,
-        V: Clone,
-    {
-        use futures::stream::{self, StreamExt};
+        buffer: usize,
+    ) -> Result<impl futures::Stream<Item = Result<(K, V), Error>> + '_, Error> {
+        use futures::StreamExt;
 
-        // Collect all non-empty table entries
-        let mut table_entries = Vec::new();
+        trace!("starting diskmap replay using journal replay");
+
+        // Use the journal's efficient replay to get all entries
+        let journal_stream = self.journal.replay(buffer).await?;
+
+        // Transform the journal entries to key-value pairs
+        Ok(journal_stream.map(|result| match result {
+            Ok((_, _, _, entry)) => Ok((entry.key, entry.value)),
+            Err(err) => Err(Error::Journal(err)),
+        }))
+    }
+
+    /// Validates the integrity of the hash table by checking that all table entries
+    /// point to valid journal entries. This is optional and mainly useful for debugging.
+    pub async fn validate_table_integrity(&self) -> Result<usize, Error> {
+        let mut valid_entries = 0;
+        let mut invalid_entries = 0;
 
         for table_index in 0..self.table_size {
             let (journal_id, journal_offset) = self.get_table_entry(table_index).await?;
-            if journal_id != 0 || journal_offset != 0 {
-                table_entries.push((journal_id, journal_offset));
+
+            // Skip empty table entries
+            if journal_id == 0 && journal_offset == 0 {
+                continue;
+            }
+
+            // Check if the journal entry exists
+            match self.journal.get(journal_id, journal_offset).await {
+                Ok(Some(_)) => valid_entries += 1,
+                Ok(None) => {
+                    invalid_entries += 1;
+                    trace!(
+                        table_index,
+                        journal_id,
+                        journal_offset,
+                        "table entry points to non-existent journal entry"
+                    );
+                }
+                Err(err) => {
+                    invalid_entries += 1;
+                    trace!(
+                        table_index,
+                        journal_id,
+                        journal_offset,
+                        ?err,
+                        "error accessing journal entry from table"
+                    );
+                }
             }
         }
 
         trace!(
-            entries_found = table_entries.len(),
-            "found non-empty table entries for replay"
+            valid_entries,
+            invalid_entries,
+            "table integrity validation complete"
         );
 
-        // Create a stream that processes each table entry
-        let journal = &self.journal;
-        let stream = stream::iter(table_entries).then(
-            move |(mut journal_id, mut journal_offset)| async move {
-                let mut items = Vec::new();
-
-                // Follow the linked list chain starting from this table entry
-                loop {
-                    if journal_id == 0 {
-                        break; // End of chain
-                    }
-
-                    // Get the entry from the journal
-                    let entry = match journal.get(journal_id, journal_offset).await {
-                        Ok(Some(entry)) => entry,
-                        Ok(None) => break, // Entry not found, end of chain
-                        Err(err) => return Err(Error::Journal(err)),
-                    };
-
-                    // Add this key-value pair to our results
-                    items.push((entry.key.clone(), entry.value.clone()));
-
-                    // Follow the chain to the next entry
-                    journal_id = entry.next_journal_id;
-                    journal_offset = entry.next_offset;
-                }
-
-                Ok(items)
-            },
-        );
-
-        // Flatten the stream to return individual key-value pairs
-        Ok(stream
-            .map(|result| {
-                let items: Vec<Result<(K, V), Error>> = match result {
-                    Ok(items) => items.into_iter().map(|item| Ok(item)).collect(),
-                    Err(err) => vec![Err(err)],
-                };
-                stream::iter(items)
-            })
-            .flatten())
+        Ok(valid_entries)
     }
 
     /// Close and remove any underlying blobs created by the disk map.
@@ -960,6 +958,10 @@ mod tests {
                 diskmap.put(key.clone(), value.clone()).await.unwrap();
             }
 
+            // Validate table integrity before sync
+            let valid_entries = diskmap.validate_table_integrity().await.unwrap();
+            assert_eq!(valid_entries, test_data.len());
+
             // Sync to ensure data is persisted
             diskmap.sync().await.unwrap();
             diskmap.close().await.unwrap();
@@ -969,7 +971,11 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Replay all items
+            // Validate table integrity after restart
+            let valid_entries = diskmap.validate_table_integrity().await.unwrap();
+            assert_eq!(valid_entries, test_data.len());
+
+            // Replay all items using efficient journal replay
             use futures::StreamExt;
             let mut replayed_items = Vec::new();
             {
