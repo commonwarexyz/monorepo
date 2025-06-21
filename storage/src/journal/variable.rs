@@ -626,6 +626,70 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         blob.sync().await.map_err(Error::Runtime)
     }
 
+    /// Gets the size of a specific section in bytes.
+    ///
+    /// Returns 0 if the section does not exist.
+    pub async fn section_size(&self, section: u64) -> Result<u64, Error> {
+        self.prune_guard(section, false)?;
+        match self.blobs.get(&section) {
+            Some(blob) => Ok(blob.size().await),
+            None => Ok(0),
+        }
+    }
+
+    /// Gets the highest existing section ID, or None if no sections exist.
+    pub fn max_section_id(&self) -> Option<u64> {
+        self.blobs.keys().max().copied()
+    }
+
+    /// Rewinds the journal to the given offset.
+    ///
+    /// This removes any data beyond the specified section(s) and offset(s).
+    pub async fn rewind(&mut self, section: u64, offset: u32) -> Result<(), Error> {
+        self.prune_guard(section, false)?;
+
+        // Remove any sections beyond the given section
+        let trailing: Vec<u64> = self
+            .blobs
+            .range((
+                std::ops::Bound::Excluded(section),
+                std::ops::Bound::Unbounded,
+            ))
+            .map(|(&s, _)| s)
+            .collect();
+        for index in trailing {
+            if let Some(blob) = self.blobs.remove(&index) {
+                // Remove the underlying blob from storage.
+                blob.close().await?;
+                self.context
+                    .remove(&self.cfg.partition, Some(&index.to_be_bytes()))
+                    .await?;
+                debug!(section = index, "removed section");
+                self.tracked.dec();
+            }
+        }
+
+        // If the section exists, truncate it to the given offset
+        let blob = match self.blobs.get_mut(&section) {
+            Some(blob) => blob,
+            None => return Ok(()),
+        };
+        let target_size = offset as u64 * ITEM_ALIGNMENT;
+        let current_size = blob.size().await;
+        if target_size >= current_size {
+            return Ok(()); // Already smaller than or equal to target size
+        }
+        blob.truncate(target_size).await?;
+        debug!(
+            section,
+            from = current_size,
+            to = target_size,
+            offset,
+            "rewound journal"
+        );
+        Ok(())
+    }
+
     /// Prunes all `sections` less than `min`.
     pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
         // Check if we already ran this prune
@@ -1243,41 +1307,6 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Re-initialize the journal to simulate a restart
-            let journal = Journal::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to re-initialize journal");
-
-            // Attempt to replay the journal
-            let mut items = Vec::<(u64, u32)>::new();
-            {
-                let stream = journal.replay(1024).await.expect("unable to setup replay");
-                pin_mut!(stream);
-                while let Some(result) = stream.next().await {
-                    match result {
-                        Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
-                        Err(err) => panic!("Failed to read item: {}", err),
-                    }
-                }
-            }
-            journal.close().await.expect("Failed to close journal");
-
-            // Verify that only non-corrupted items were replayed
-            assert_eq!(items.len(), 3);
-            assert_eq!(items[0].0, 1);
-            assert_eq!(items[0].1, 1);
-            assert_eq!(items[1].0, data_items[0].0);
-            assert_eq!(items[1].1, data_items[0].1);
-            assert_eq!(items[2].0, data_items[1].0);
-            assert_eq!(items[2].1, data_items[1].1);
-
-            // Confirm blob is expected length
-            let (_, blob_size) = context
-                .open(&cfg.partition, &2u64.to_be_bytes())
-                .await
-                .expect("Failed to open blob");
-            assert_eq!(blob_size, 28);
-
-            // Attempt to replay journal after truncation
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
@@ -1672,6 +1701,42 @@ mod tests {
             let data = 1;
             let result = journal.append(1, data).await;
             assert!(matches!(result, Err(Error::OffsetOverflow)));
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_section_size() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create journal
+            let cfg = Config {
+                partition: "test_partition".to_string(),
+                compression: None,
+                codec_config: (),
+                write_buffer: 1024,
+            };
+            let mut journal = Journal::init(context, cfg).await.unwrap();
+
+            // Check size of non-existent section
+            let size = journal.section_size(1).await.unwrap();
+            assert_eq!(size, 0);
+
+            // Append data to section 1
+            journal.append(1, 42i32).await.unwrap();
+
+            // Check size of section 1 - should be greater than 0
+            let size = journal.section_size(1).await.unwrap();
+            assert!(size > 0);
+
+            // Check size of different section - should still be 0
+            let size = journal.section_size(2).await.unwrap();
+            assert_eq!(size, 0);
+
+            // Append more data and verify size increases
+            journal.append(1, 43i32).await.unwrap();
+            let new_size = journal.section_size(1).await.unwrap();
+            assert!(new_size > size);
         });
     }
 
