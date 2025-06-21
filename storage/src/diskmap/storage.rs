@@ -5,13 +5,12 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, Encode, EncodeSize, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_runtime::{Blob, Clock, Metrics, Storage};
 use commonware_utils::array::U64;
-use commonware_utils::{hex, Array};
+use commonware_utils::Array;
 use futures::future::try_join_all;
 use prometheus_client::metrics::counter::Counter;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
-use std::mem::take;
-use tracing::{debug, trace};
+use tracing::debug;
 
 const COMMITTED_EPOCH: u64 = 0;
 const COMMITTED_SECTION: u64 = 1;
@@ -161,6 +160,7 @@ pub struct DiskMap<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     codec: V::Cfg,
 
     // Table size
+    table_partition: String,
     table_size: u32,
 
     // Committed data for the disk map
@@ -302,6 +302,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
             table_size: config.table_size,
             metadata,
             table,
+            table_partition: config.table_partition,
             journal,
             target_journal_size: config.target_journal_size,
             current_section,
@@ -525,7 +526,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
         self.sync().await?;
 
         self.journal.close().await?;
-        self.table_blob.close().await?;
+        self.table.close().await?;
+        self.metadata.close().await?;
         Ok(())
     }
 
@@ -535,13 +537,13 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
         self.journal.destroy().await?;
 
         // Close and remove the table blob
-        self.table_blob.close().await?;
+        self.table.close().await?;
         self.context
-            .remove(&self.config.partition, Some(TABLE_BLOB_NAME))
+            .remove(&self.table_partition, Some(TABLE_BLOB_NAME))
             .await?;
 
-        // Remove the partition itself
-        self.context.remove(&self.config.partition, None).await?;
+        // Remove the metadata blob
+        self.metadata.destroy().await?;
 
         Ok(())
     }
