@@ -35,6 +35,7 @@
 
 mod storage;
 
+use commonware_utils::array::U64;
 pub use storage::DiskMap;
 use thiserror::Error;
 
@@ -45,6 +46,8 @@ pub enum Error {
     Runtime(#[from] commonware_runtime::Error),
     #[error("journal error: {0}")]
     Journal(#[from] crate::journal::Error),
+    #[error("metadata error: {0}")]
+    Metadata(#[from] crate::metadata::Error<U64>),
     #[error("codec error: {0}")]
     Codec(#[from] commonware_codec::Error),
     #[error("invalid key length: expected {expected}, got {actual}")]
@@ -64,6 +67,9 @@ pub enum Error {
 pub struct Config<C> {
     /// The `commonware-runtime::Storage` partition to use for storing the disk map.
     pub journal_partition: String,
+
+    /// The compression algorithm to use for the journal.
+    pub journal_compression: Option<u8>,
 
     /// The `commonware-runtime::Storage` partition to use for storing the disk map metadata.
     pub metadata_partition: String,

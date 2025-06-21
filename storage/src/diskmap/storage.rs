@@ -1,8 +1,10 @@
 use super::{Config, Error};
 use crate::journal::variable::{Config as JournalConfig, Journal};
+use crate::metadata::{self, Metadata};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, EncodeSize, FixedSize, Read, ReadExt, Write as CodecWrite};
-use commonware_runtime::{Blob, Metrics, Storage};
+use commonware_runtime::{Blob, Clock, Metrics, Storage};
+use commonware_utils::array::U64;
 use commonware_utils::{hex, Array};
 use futures::future::try_join_all;
 use prometheus_client::metrics::counter::Counter;
@@ -10,7 +12,9 @@ use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use tracing::trace;
 
-const TABLE_BLOB_NAME: &[u8] = b"table";
+const COMMITTED_EPOCH: u64 = 0;
+const COMMITTED_SECTION: u64 = 1;
+const COMMITTED_OFFSET: u64 = 2;
 
 // -------------------------------------------------------------------------------------------------
 // Table layout
@@ -22,6 +26,7 @@ const TABLE_BLOB_NAME: &[u8] = b"table";
 //   u32 crc                  – CRC of (epoch | section | offset )
 
 /// Two slots per bucket, each slot now 24 bytes.
+const TABLE_BLOB_NAME: &[u8] = b"table";
 const TABLE_ENTRY_SIZE: usize = 24;
 const FULL_TABLE_ENTRY_SIZE: usize = 2 * TABLE_ENTRY_SIZE;
 
@@ -159,12 +164,15 @@ impl<K: Array, V: Codec> EncodeSize for JournalEntry<K, V> {
 }
 
 /// Implementation of `DiskMap` storage.
-pub struct DiskMap<E: Storage + Metrics, K: Array, V: Codec> {
+pub struct DiskMap<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     // Context for storage operations
     context: E,
 
     // Configuration
     config: Config<V::Cfg>,
+
+    // Committed data for the disk map
+    metadata: Metadata<E, U64>,
 
     // Table blob that maps hash values to journal locations (journal_id, offset)
     table_blob: E::Blob,
@@ -173,118 +181,92 @@ pub struct DiskMap<E: Storage + Metrics, K: Array, V: Codec> {
     // Variable journal for storing entries
     journal: Journal<E, JournalEntry<K, V>>,
 
-    // Current journal for new writes
-    current_journal_id: u64,
-
-    // Phantom data to satisfy the compiler about generic types
-    _phantom: PhantomData<(K, V)>,
+    // Current section for new writes
+    current_section: u64,
 
     // Metrics
     puts: Counter,
     gets: Counter,
-    table_reads: Counter,
 
     // Track modified journal sections
     modified_sections: HashSet<u64>,
 
-    // Pending table updates to be written on sync (table_index -> (journal_id, journal_offset))
+    // Pending table updates to be written on sync (table_index -> (epoch, section, offset))
     pending_table_updates: HashMap<
         u64,
         (
             u64, /*epoch*/
-            u64, /*journal_id*/
+            u64, /*section*/
             u32, /*offset*/
         ),
     >,
 
-    // Durability pointer (populated at init and advanced on every sync)
-    committed_epoch: u64,
-    committed_journal_id: u64,
-    committed_offset: u32,
-
-    // which header slot is current (0 or 1)
-    header_cursor: usize,
+    // Phantom data to satisfy the compiler about generic types
+    _phantom: PhantomData<(K, V)>,
 }
 
-impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
+impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
     /// Initialize a new `DiskMap` instance.
     pub async fn init(context: E, config: Config<V::Cfg>) -> Result<Self, Error> {
         // Validate configuration
-        if config.directory_size == 0 || !config.directory_size.is_power_of_two() {
-            return Err(Error::DirectoryCorrupted);
-        }
+        assert_ne!(config.table_size, 0, "table size must be non-zero");
+        assert!(
+            config.table_size.is_power_of_two(),
+            "table size must be a power of two"
+        );
 
-        // Calculate table size based on configuration
-        let table_size = config.directory_size;
+        // Initialize metadata
+        let metadata = Metadata::init(
+            context.clone(),
+            metadata::Config {
+                partition: config.metadata_partition,
+            },
+        )
+        .await?;
 
         // Open table blob (includes header)
-        let (table_blob, table_len) = context.open(&config.partition, TABLE_BLOB_NAME).await?;
+        let (table_blob, table_len) = context
+            .open(&config.table_partition, TABLE_BLOB_NAME)
+            .await?;
 
         // If the blob is brand new, create header + zeroed buckets.
         if table_len == 0 {
-            // header
-            table_blob.write_at(vec![0u8; TABLE_HEADER_SIZE], 0).await?;
             // buckets
-            let table_data_size = table_size * TABLE_ENTRY_SIZE as u64;
+            let table_data_size = config.table_size * FULL_TABLE_ENTRY_SIZE as u64;
             let table_data = vec![0u8; table_data_size as usize];
-            table_blob
-                .write_at(table_data, TABLE_HEADER_SIZE as u64)
-                .await?;
+            table_blob.write_at(table_data, 0).await?;
             table_blob.sync().await?;
         }
 
-        // ------------------------------------------------------------------
-        // Load commit pointer (two-header scheme)
-        // ------------------------------------------------------------------
-        let hdr_buf = table_blob.read_at(vec![0u8; TABLE_HEADER_SIZE], 0).await?;
-
-        let mut hdr_slice1 = &hdr_buf.as_ref()[0..HEADER_SLOT_SIZE];
-        let mut hdr_slice2 = &hdr_buf.as_ref()[HEADER_SLOT_SIZE..TABLE_HEADER_SIZE];
-
-        let h1 = HeaderSlot::read(&mut hdr_slice1).unwrap();
-        let h2 = HeaderSlot::read(&mut hdr_slice2).unwrap();
-
-        let h1_valid = h1.is_valid();
-        let h2_valid = h2.is_valid();
-
-        let (committed_epoch, committed_journal_id, committed_offset, header_cursor) =
-            match (h1_valid, h2_valid) {
-                (true, true) => {
-                    if h2.epoch > h1.epoch {
-                        (h2.epoch, h2.max_journal_id, h2.max_offset, 1)
-                    } else {
-                        (h1.epoch, h1.max_journal_id, h1.max_offset, 0)
-                    }
-                }
-                (true, false) => (h1.epoch, h1.max_journal_id, h1.max_offset, 0),
-                (false, true) => (h2.epoch, h2.max_journal_id, h2.max_offset, 1),
-                (false, false) => {
-                    trace!("both header slots invalid – starting at epoch 0");
-                    (0, 0, 0, 0)
-                }
-            };
+        // Load committed data from metadata
+        let committed_epoch = metadata
+            .get(&COMMITTED_EPOCH.into())
+            .and_then(|v| Some(u64::from_be_bytes(v.as_slice().try_into().unwrap())))
+            .unwrap_or(0u64);
+        let committed_section = metadata
+            .get(&COMMITTED_SECTION.into())
+            .and_then(|v| Some(u64::from_be_bytes(v.as_slice().try_into().unwrap())))
+            .unwrap_or(0u64);
+        let committed_offset = metadata
+            .get(&COMMITTED_OFFSET.into())
+            .and_then(|v| Some(u32::from_be_bytes(v.as_slice().try_into().unwrap())))
+            .unwrap_or(0u32);
 
         // Initialize variable journal with a separate partition
-        let journal_partition = format!("{}_journal", config.partition);
         let journal_config = JournalConfig {
-            partition: journal_partition,
-            compression: None, // Can be configurable if needed
+            partition: config.journal_partition,
+            compression: config.journal_compression,
             codec_config: config.codec_config.clone(),
             write_buffer: config.write_buffer,
         };
         let journal = Journal::init(context.clone(), journal_config).await?;
 
-        // Find the current journal ID from existing journals
-        let current_journal_id = journal.max_section_id().unwrap_or(0);
-
         // Create metrics
         let puts = Counter::default();
         let gets = Counter::default();
-        let table_reads = Counter::default();
 
         context.register("puts", "number of put operations", puts.clone());
         context.register("gets", "number of get operations", gets.clone());
-        context.register("table_reads", "number of table reads", table_reads.clone());
 
         // Initialize modified sections set
         let modified_sections = HashSet::new();
