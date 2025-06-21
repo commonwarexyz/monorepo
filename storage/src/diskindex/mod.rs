@@ -31,12 +31,10 @@ pub enum Error {
     Runtime(#[from] commonware_runtime::Error),
     #[error("codec error: {0}")]
     Codec(#[from] commonware_codec::Error),
-    #[error("index out of bounds: {index}")]
-    IndexOutOfBounds { index: u64 },
-    #[error("record corrupted at index {0}")]
-    RecordCorrupted(u64),
-    #[error("header corrupted")]
-    HeaderCorrupted,
+    #[error("invalid blob name: {0}")]
+    InvalidBlobName(String),
+    #[error("invalid record: {0}")]
+    InvalidRecord(u64),
 }
 
 /// Configuration for `DiskIndex` storage.

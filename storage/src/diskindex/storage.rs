@@ -7,12 +7,12 @@ use commonware_runtime::{
     Blob, Clock, Metrics, Storage,
 };
 use commonware_utils::{hex, Array};
-use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
+use prometheus_client::metrics::counter::Counter;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    mem::{swap, take},
+    mem::take,
 };
-use tracing::{debug, trace, warn};
+use tracing::{debug, warn};
 
 /// Value stored in the index file.
 #[derive(Debug, Clone)]
@@ -88,7 +88,7 @@ impl<E: Storage + Metrics + Clock, V: Array> DiskIndex<E, V> {
             let (blob, len) = context.open(&config.partition, &name).await?;
             let index = match name.try_into() {
                 Ok(index) => u64::from_be_bytes(index),
-                Err(nm) => Err(Error::InvalidBlobName(nm))?,
+                Err(nm) => Err(Error::InvalidBlobName(hex(&nm)))?,
             };
             debug!(blob = index, len, "found index blob");
             let blob = Write::new(blob, len, config.write_buffer);
@@ -100,19 +100,19 @@ impl<E: Storage + Metrics + Clock, V: Array> DiskIndex<E, V> {
             blobs = blobs.len(),
             "rebuilding intervals from existing index"
         );
-        let mut start = context.current();
+        let start = context.current();
         let mut items = 0;
         let mut intervals = RMap::new();
-        for (section, blob) in blobs {
+        for (section, blob) in &blobs {
             // Initialize read buffer
-            let size = blob.size();
+            let size = blob.size().await;
             let mut replay_blob = ReadBuffer::new(blob.clone(), size, config.read_buffer);
 
             // Iterate over all records in the blob
             let mut offset = 0;
             while offset < size {
                 // Calculate index for this record
-                let index = section * config.items_per_blob + (offset / Record::<V>::SIZE) as u64;
+                let index = section * config.items_per_blob + (offset / Record::<V>::SIZE as u64);
 
                 // Attempt to read record at offset
                 replay_blob.seek_to(offset)?;
@@ -121,6 +121,7 @@ impl<E: Storage + Metrics + Clock, V: Array> DiskIndex<E, V> {
                     .read_exact(&mut record_buf, Record::<V>::SIZE)
                     .await?;
                 let record = Record::<V>::read(&mut record_buf.as_slice())?;
+                offset += Record::<V>::SIZE as u64;
 
                 // If record is empty, skip it
                 if record.is_empty() {
@@ -196,7 +197,7 @@ impl<E: Storage + Metrics + Clock, V: Array> DiskIndex<E, V> {
         if record.is_valid() {
             Ok(Some(record.value))
         } else {
-            Err(Error::RecordCorrupted(index))
+            Err(Error::InvalidRecord(index))
         }
     }
 
@@ -290,6 +291,8 @@ mod tests {
         executor.start(|context| async move {
             let config = Config {
                 partition: "test".to_string(),
+                items_per_blob: 1024,
+                read_buffer: 1024,
                 write_buffer: 1024,
             };
 
@@ -329,6 +332,8 @@ mod tests {
         executor.start(|context| async move {
             let config = Config {
                 partition: "test_restart".to_string(),
+                items_per_blob: 1024,
+                read_buffer: 1024,
                 write_buffer: 1024,
             };
 
@@ -371,6 +376,8 @@ mod tests {
         executor.start(|context| async move {
             let config = Config {
                 partition: "test_crash".to_string(),
+                items_per_blob: 1024,
+                read_buffer: 1024,
                 write_buffer: 1024,
             };
 
