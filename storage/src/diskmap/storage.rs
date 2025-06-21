@@ -8,6 +8,7 @@ use commonware_utils::array::U64;
 use commonware_utils::Array;
 use futures::future::try_join_all;
 use prometheus_client::metrics::counter::Counter;
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 use tracing::debug;
@@ -40,18 +41,8 @@ struct TableEntry {
 }
 
 impl TableEntry {
-    /// Create a new `TableEntry`.
-    fn new(epoch: u64, section: u64, offset: u32, crc: u32) -> Self {
-        Self {
-            epoch,
-            section,
-            offset,
-            crc,
-        }
-    }
-
-    /// Construct a new `TableEntry` with a CRC.
-    fn construct(epoch: u64, section: u64, offset: u32) -> Self {
+    /// Create a new [TableEntry] with a CRC.
+    fn new(epoch: u64, section: u64, offset: u32) -> Self {
         let mut hasher = crc32fast::Hasher::new();
         hasher.update(&epoch.to_be_bytes());
         hasher.update(&section.to_be_bytes());
@@ -156,9 +147,6 @@ pub struct DiskMap<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     // Context for storage operations
     context: E,
 
-    // Codec configuration
-    codec: V::Cfg,
-
     // Table size
     table_partition: String,
     table_size: u32,
@@ -213,7 +201,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
         let journal_config = JournalConfig {
             partition: config.journal_partition,
             compression: config.journal_compression,
-            codec_config: config.codec_config.clone(),
+            codec_config: config.codec_config,
             write_buffer: config.write_buffer,
         };
         let mut journal = Journal::init(context.clone(), journal_config).await?;
@@ -235,15 +223,15 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
             // Load committed data from metadata
             let committed_epoch = metadata
                 .get(&COMMITTED_EPOCH.into())
-                .and_then(|v| Some(u64::from_be_bytes(v.as_slice().try_into().unwrap())))
+                .map(|v| u64::from_be_bytes(v.as_slice().try_into().unwrap()))
                 .unwrap_or(0u64);
             let committed_section = metadata
                 .get(&COMMITTED_SECTION.into())
-                .and_then(|v| Some(u64::from_be_bytes(v.as_slice().try_into().unwrap())))
+                .map(|v| u64::from_be_bytes(v.as_slice().try_into().unwrap()))
                 .unwrap_or(0u64);
             let committed_offset = metadata
                 .get(&COMMITTED_OFFSET.into())
-                .and_then(|v| Some(u32::from_be_bytes(v.as_slice().try_into().unwrap())))
+                .map(|v| u32::from_be_bytes(v.as_slice().try_into().unwrap()))
                 .unwrap_or(0u32);
 
             // Rewind the journal to the committed section and offset
@@ -298,7 +286,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
 
         Ok(Self {
             context,
-            codec: config.codec_config,
             table_size: config.table_size,
             metadata,
             table,
@@ -326,15 +313,13 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
             !entry1.is_empty() && entry1.is_valid(),
             !entry2.is_empty() && entry2.is_valid(),
         ) {
-            (true, true) => {
-                if entry1.epoch > entry2.epoch {
-                    Some((entry1.section, entry1.offset))
-                } else if entry2.epoch > entry1.epoch {
-                    Some((entry2.section, entry2.offset))
-                } else {
-                    unreachable!("two valid entries with the same epoch");
+            (true, true) => match entry1.epoch.cmp(&entry2.epoch) {
+                Ordering::Greater => Some((entry1.section, entry1.offset)),
+                Ordering::Less => Some((entry2.section, entry2.offset)),
+                Ordering::Equal => {
+                    unreachable!("two valid entries with the same epoch")
                 }
-            }
+            },
             (true, false) => Some((entry1.section, entry1.offset)),
             (false, true) => Some((entry2.section, entry2.offset)),
             (false, false) => None,
@@ -392,7 +377,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
         };
 
         // Build the new entry
-        let entry = TableEntry::construct(epoch, section, offset);
+        let entry = TableEntry::new(epoch, section, offset);
 
         // Write the new entry
         self.table
@@ -495,7 +480,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
         let committed_epoch = self
             .metadata
             .get(&COMMITTED_EPOCH.into())
-            .and_then(|v| Some(u64::from_be_bytes(v.as_slice().try_into().unwrap())))
+            .map(|v| u64::from_be_bytes(v.as_slice().try_into().unwrap()))
             .unwrap_or(0);
         let next_epoch = committed_epoch.checked_add(1).expect("epoch overflow");
 
