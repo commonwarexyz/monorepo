@@ -432,50 +432,38 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
         Ok(())
     }
 
-    /// Get all values for a given key from the disk map.
-    pub async fn get(&mut self, key: &K) -> Result<Vec<V>, Error> {
+    /// Get the first value for a given key.
+    pub async fn get(&mut self, key: &K) -> Result<Option<V>, Error> {
         self.gets.inc();
 
-        // Hash key to table index
-        let table_index = self.hash_key(key);
-
         // Get head of the chain from table
-        let (mut journal_id, mut offset) = self.get_table_entry(table_index).await?;
-
-        if journal_id == 0 {
-            return Ok(vec![]); // No entries for this key
-        }
+        let table_index = self.table_index(key);
+        let Some((mut section, mut offset)) = self.get_head(table_index).await? else {
+            return Ok(None);
+        };
 
         // Follow the linked list chain, collecting values for matching keys
-        let mut values = Vec::new();
-
         loop {
             // Get the entry from the variable journal
-            let entry = match self.journal.get(journal_id, offset).await? {
+            let entry = match self.journal.get(section, offset).await? {
                 Some(entry) => entry,
-                None => break, // Entry not found, end of chain
+                None => unreachable!("missing entry"),
             };
 
             // Check if this key matches
             if entry.key.as_ref() == key.as_ref() {
-                values.push(entry.value);
+                return Ok(Some(entry.value));
             }
 
             // Follow the chain
-            if entry.next_journal_id == 0 {
+            let Some(next) = entry.next else {
                 break; // End of chain
-            }
-            journal_id = entry.next_journal_id;
-            offset = entry.next_offset;
+            };
+            section = next.0;
+            offset = next.1;
         }
 
-        trace!(
-            key = hex(key.as_ref()),
-            values_found = values.len(),
-            "retrieved values for key"
-        );
-
-        Ok(values)
+        Ok(None)
     }
 
     /// Check if a key exists in the disk map.
