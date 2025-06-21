@@ -90,7 +90,7 @@ impl CodecWrite for TableEntry {
 impl Read for TableEntry {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let epoch = u64::read(buf)?;
         let section = u64::read(buf)?;
         let offset = u32::read(buf)?;
@@ -127,12 +127,9 @@ impl<K: Array, V: Codec> JournalEntry<K, V> {
 
 impl<K: Array, V: Codec> CodecWrite for JournalEntry<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
-        buf.put_slice(&self.next_journal_id.to_le_bytes());
-        buf.put_slice(&self.next_offset.to_le_bytes());
+        self.next_section.write(buf);
+        self.next_offset.write(buf);
         self.key.write(buf);
-        // Write value size first, then the value
-        let value_size = self.value.encode_size() as u32;
-        buf.put_slice(&value_size.to_le_bytes());
         self.value.write(buf);
     }
 }
@@ -141,25 +138,13 @@ impl<K: Array, V: Codec> Read for JournalEntry<K, V> {
     type Cfg = V::Cfg;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let mut next_journal_id_bytes = [0u8; 8];
-        buf.copy_to_slice(&mut next_journal_id_bytes);
-        let next_journal_id = u64::from_le_bytes(next_journal_id_bytes);
-
-        let mut next_offset_bytes = [0u8; 4]; // Changed to 4 bytes
-        buf.copy_to_slice(&mut next_offset_bytes);
-        let next_offset = u32::from_le_bytes(next_offset_bytes);
-
+        let next_section = u64::read(buf)?;
+        let next_offset = u32::read(buf)?;
         let key = K::read(buf)?;
-
-        // Read value size first
-        let mut value_size_bytes = [0u8; 4];
-        buf.copy_to_slice(&mut value_size_bytes);
-        let _value_size = u32::from_le_bytes(value_size_bytes);
-
         let value = V::read_cfg(buf, cfg)?;
 
         Ok(Self {
-            next_journal_id,
+            next_section,
             next_offset,
             key,
             value,
@@ -169,7 +154,7 @@ impl<K: Array, V: Codec> Read for JournalEntry<K, V> {
 
 impl<K: Array, V: Codec> EncodeSize for JournalEntry<K, V> {
     fn encode_size(&self) -> usize {
-        8 + 4 + K::SIZE + 4 + self.value.encode_size() // Changed to 4 bytes for next_offset
+        u64::SIZE + u32::SIZE + K::SIZE + 4 + self.value.encode_size()
     }
 }
 
