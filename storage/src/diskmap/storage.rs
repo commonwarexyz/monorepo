@@ -2,7 +2,7 @@ use super::{Config, Error};
 use crate::journal::variable::{Config as JournalConfig, Journal};
 use crate::metadata::{self, Metadata};
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, EncodeSize, FixedSize, Read, ReadExt, Write as CodecWrite};
+use commonware_codec::{Codec, Encode, EncodeSize, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_runtime::{Blob, Clock, Metrics, Storage};
 use commonware_utils::array::U64;
 use commonware_utils::{hex, Array};
@@ -374,99 +374,44 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
         Ok(self.select_valid_entry(&entry1, &entry2))
     }
 
-    /// Set the journal location for a given table index by storing it in memory for later sync.
-    fn set_table_entry(
-        &mut self,
-        table_index: u64,
-        journal_id: u64,
-        journal_offset: u32,
-    ) -> Result<(), Error> {
-        // Store the update in memory for later sync
-        let epoch = self.committed_epoch + 1;
-        self.pending_table_updates
-            .insert(table_index, (epoch, journal_id, journal_offset));
-        Ok(())
-    }
-
     /// Write a table entry to disk using atomic dual-entry writes.
-    async fn write_table_entry_to_disk(
+    async fn update_head(
         &self,
         table_index: u64,
         epoch: u64,
-        journal_id: u64,
-        journal_offset: u32,
+        section: u64,
+        offset: u32,
     ) -> Result<(), Error> {
-        let offset = TABLE_HEADER_SIZE as u64 + table_index * TABLE_ENTRY_SIZE as u64;
-
         // Read current entries to determine which slot to update
-        let buf = vec![0u8; TABLE_ENTRY_SIZE];
-        let read_buf = self.table_blob.read_at(buf, offset).await?;
+        let table_offset = table_index as u64 * FULL_TABLE_ENTRY_SIZE as u64;
+        let buf = vec![0u8; FULL_TABLE_ENTRY_SIZE];
+        let read_buf = self.table.read_at(buf, table_offset).await?;
 
         // Parse current entries using codec
-        let mut buf1 = &read_buf.as_ref()[0..SINGLE_ENTRY_SIZE];
-        let mut buf2 = &read_buf.as_ref()[SINGLE_ENTRY_SIZE..TABLE_ENTRY_SIZE];
-
+        let mut buf1 = &read_buf.as_ref()[0..TABLE_ENTRY_SIZE];
         let entry1 = TableEntry::read(&mut buf1)?;
+        let mut buf2 = &read_buf.as_ref()[TABLE_ENTRY_SIZE..FULL_TABLE_ENTRY_SIZE];
         let entry2 = TableEntry::read(&mut buf2)?;
 
-        // Calculate CRCs for new entry
-        let new_crc = self.calculate_entry_crc(epoch, journal_id, journal_offset);
-
-        // Determine which slot to update (alternate between them)
-        let (update_first, _) = match self.select_valid_entry(&entry1, &entry2) {
-            Ok((old_journal_id, old_journal_offset)) => {
-                // There's a valid current entry - figure out which slot it's in
-                let entry1_matches = entry1.journal_id == old_journal_id
-                    && entry1.journal_offset == old_journal_offset;
-
-                let (update_first, old_crc) = if entry1_matches {
-                    // Current entry is in slot 1, update slot 2
-                    (
-                        false,
-                        self.calculate_entry_crc(
-                            entry1.epoch,
-                            entry1.journal_id,
-                            entry1.journal_offset,
-                        ),
-                    )
-                } else {
-                    // Current entry is in slot 2, update slot 1
-                    (
-                        true,
-                        self.calculate_entry_crc(
-                            entry2.epoch,
-                            entry2.journal_id,
-                            entry2.journal_offset,
-                        ),
-                    )
-                };
-                (update_first, old_crc)
-            }
-            Err(_) => {
-                // No valid current entry, use slot 1
-                (true, 0)
-            }
+        // Determine where to start writing the new entry
+        let start = if entry1.is_empty() {
+            0
+        } else if entry2.is_empty() {
+            TABLE_ENTRY_SIZE
+        } else if entry1.epoch > entry2.epoch {
+            0
+        } else {
+            unreachable!("two valid entries with the same epoch");
         };
 
-        // Build the new complete table entry
-        let mut new_buf = Vec::with_capacity(TABLE_ENTRY_SIZE);
+        // Build the new entry
+        let entry = TableEntry::construct(epoch, section, offset);
 
-        if update_first {
-            // Update first slot, keep second slot
-            let new_entry1 = TableEntry::new(epoch, journal_id, journal_offset, new_crc);
-            new_entry1.write(&mut new_buf);
-            entry2.write(&mut new_buf);
-        } else {
-            // Keep first slot, update second slot
-            entry1.write(&mut new_buf);
-            let new_entry2 = TableEntry::new(epoch, journal_id, journal_offset, new_crc);
-            new_entry2.write(&mut new_buf);
-        }
-
-        // Write the complete entry
-        self.table_blob.write_at(new_buf, offset).await?;
-
-        Ok(())
+        // Write the new entry
+        self.table
+            .write_at(entry.encode(), table_offset + start as u64)
+            .await
+            .map_err(|e| Error::Runtime(e))
     }
 
     /// Determine which journal section to write to based on current journal size.
