@@ -10,12 +10,37 @@ use std::marker::PhantomData;
 use tracing::trace;
 
 const TABLE_BLOB_NAME: &[u8] = b"table";
-const TABLE_ENTRY_SIZE: usize = 40; // Two entries: 2 * (u64 journal_id + u32 offset + u32 crc + u32 other_crc)
-const SINGLE_ENTRY_SIZE: usize = 20; // u64 journal_id + u32 offset + u32 crc + u32 other_crc
+
+// -------------------------------------------------------------------------------------------------
+// Table layout
+// -------------------------------------------------------------------------------------------------
+// The very first bytes of the table blob form a fixed-size header that acts as a durable commit
+// pointer.  The rest of the blob contains the actual bucket slots (two per bucket as before).
+//
+// Header (24 bytes):
+//   u64 committed_epoch      – highest epoch that is *fully* flushed to disk
+//   u64 max_journal_id       – greatest journal-section id referenced by any bucket of that epoch
+//   u32 max_offset           – greatest offset inside that journal section
+//   u32 crc                  – CRC32 of the first 20 bytes
+//
+// Bucket slot (28 bytes – previous 20 + epoch):
+//   u64 epoch                – epoch in which this slot was written
+//   u64 journal_id
+//   u32 journal_offset
+//   u32 crc                  – CRC of (epoch | journal_id | journal_offset)
+//   u32 other_crc            – CRC of the sibling slot (for atomic toggle)
+
+/// Size in bytes of the commit pointer header.
+const TABLE_HEADER_SIZE: usize = 24;
+
+/// Two slots per bucket, each slot now 28 bytes.
+const SINGLE_ENTRY_SIZE: usize = 28;
+const TABLE_ENTRY_SIZE: usize = 2 * SINGLE_ENTRY_SIZE;
 
 /// Single table entry stored in the table blob.
 #[derive(Debug, Clone, PartialEq)]
 struct TableEntry {
+    epoch: u64,
     journal_id: u64,
     journal_offset: u32,
     crc: u32,
@@ -24,8 +49,9 @@ struct TableEntry {
 
 impl TableEntry {
     /// Create a new `TableEntry`.
-    fn new(journal_id: u64, journal_offset: u32, crc: u32, other_crc: u32) -> Self {
+    fn new(epoch: u64, journal_id: u64, journal_offset: u32, crc: u32, other_crc: u32) -> Self {
         Self {
+            epoch,
             journal_id,
             journal_offset,
             crc,
@@ -45,6 +71,7 @@ impl FixedSize for TableEntry {
 
 impl CodecWrite for TableEntry {
     fn write(&self, buf: &mut impl BufMut) {
+        buf.put_slice(&self.epoch.to_le_bytes());
         buf.put_slice(&self.journal_id.to_le_bytes());
         buf.put_slice(&self.journal_offset.to_le_bytes());
         buf.put_slice(&self.crc.to_le_bytes());
@@ -56,6 +83,10 @@ impl Read for TableEntry {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let mut epoch_bytes = [0u8; 8];
+        buf.copy_to_slice(&mut epoch_bytes);
+        let epoch = u64::from_le_bytes(epoch_bytes);
+
         let mut journal_id_bytes = [0u8; 8];
         buf.copy_to_slice(&mut journal_id_bytes);
         let journal_id = u64::from_le_bytes(journal_id_bytes);
@@ -73,6 +104,7 @@ impl Read for TableEntry {
         let other_crc = u32::from_le_bytes(other_crc_bytes);
 
         Ok(Self {
+            epoch,
             journal_id,
             journal_offset,
             crc,
@@ -179,7 +211,19 @@ pub struct DiskMap<E: Storage + Metrics, K: Array, V: Codec> {
     modified_sections: HashSet<u64>,
 
     // Pending table updates to be written on sync (table_index -> (journal_id, journal_offset))
-    pending_table_updates: HashMap<u64, (u64, u32)>,
+    pending_table_updates: HashMap<
+        u64,
+        (
+            u64, /*epoch*/
+            u64, /*journal_id*/
+            u32, /*offset*/
+        ),
+    >,
+
+    // Durability pointer (populated at init and advanced on every sync)
+    committed_epoch: u64,
+    committed_journal_id: u64,
+    committed_offset: u32,
 }
 
 impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
@@ -193,15 +237,43 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         // Calculate table size based on configuration
         let table_size = config.directory_size;
 
-        // Open table blob
+        // Open table blob (includes header)
         let (table_blob, table_len) = context.open(&config.partition, TABLE_BLOB_NAME).await?;
 
-        // Initialize table if empty
+        // If the blob is brand new, create header + zeroed buckets.
         if table_len == 0 {
+            // header
+            table_blob.write_at(vec![0u8; TABLE_HEADER_SIZE], 0).await?;
+            // buckets
             let table_data_size = table_size * TABLE_ENTRY_SIZE as u64;
             let table_data = vec![0u8; table_data_size as usize];
-            table_blob.write_at(table_data, 0).await?;
+            table_blob
+                .write_at(table_data, TABLE_HEADER_SIZE as u64)
+                .await?;
             table_blob.sync().await?;
+        }
+
+        // ------------------------------------------------------------------
+        // Load commit pointer (header)
+        // ------------------------------------------------------------------
+        let hdr_buf = table_blob.read_at(vec![0u8; TABLE_HEADER_SIZE], 0).await?;
+
+        let stored_crc = u32::from_le_bytes(
+            hdr_buf.as_ref()[TABLE_HEADER_SIZE - 4..TABLE_HEADER_SIZE]
+                .try_into()
+                .unwrap(),
+        );
+        let computed_crc = crc32fast::hash(&hdr_buf.as_ref()[..TABLE_HEADER_SIZE - 4]);
+
+        let (mut committed_epoch, mut committed_journal_id, mut committed_offset) =
+            (0u64, 0u64, 0u32);
+        if stored_crc == computed_crc {
+            committed_epoch = u64::from_le_bytes(hdr_buf.as_ref()[0..8].try_into().unwrap());
+            committed_journal_id = u64::from_le_bytes(hdr_buf.as_ref()[8..16].try_into().unwrap());
+            committed_offset = u32::from_le_bytes(hdr_buf.as_ref()[16..20].try_into().unwrap());
+        } else {
+            // Corrupted header – treat as epoch 0.
+            trace!("commit header corrupted – starting at epoch 0");
         }
 
         // Initialize variable journal with a separate partition
@@ -245,7 +317,13 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
             table_reads,
             modified_sections,
             pending_table_updates,
+            committed_epoch,
+            committed_journal_id,
+            committed_offset,
         };
+
+        // Zero-out any bucket slots that belong to a future epoch (after an unclean shutdown).
+        diskmap.clean_future_epochs().await?;
 
         // Scan table entries and truncate journal to latest reachable entry
         diskmap.truncate_to_latest_reachable_entry().await?;
@@ -264,11 +342,13 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         self.table_reads.inc();
 
         // Check if there's a pending update first
-        if let Some(&(journal_id, journal_offset)) = self.pending_table_updates.get(&table_index) {
+        if let Some(&(_epoch, journal_id, journal_offset)) =
+            self.pending_table_updates.get(&table_index)
+        {
             return Ok((journal_id, journal_offset));
         }
 
-        let offset = table_index * TABLE_ENTRY_SIZE as u64;
+        let offset = TABLE_HEADER_SIZE as u64 + table_index * TABLE_ENTRY_SIZE as u64;
         let buf = vec![0u8; TABLE_ENTRY_SIZE];
         let read_buf = self.table_blob.read_at(buf, offset).await?;
 
@@ -279,33 +359,14 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         let entry1 = TableEntry::read(&mut buf1)?;
         let entry2 = TableEntry::read(&mut buf2)?;
 
-        // Determine which entry is valid
-        let (journal_id, journal_offset) = self.select_valid_entry(&entry1, &entry2)?;
+        // Validate CRCs *and* epoch ≤ committed_epoch.
+        let expected_crc1 =
+            self.calculate_entry_crc(entry1.epoch, entry1.journal_id, entry1.journal_offset);
+        let expected_crc2 =
+            self.calculate_entry_crc(entry2.epoch, entry2.journal_id, entry2.journal_offset);
 
-        Ok((journal_id, journal_offset))
-    }
-
-    /// Calculate CRC for the data portion of an entry (journal_id + journal_offset)
-    fn calculate_entry_crc(&self, journal_id: u64, journal_offset: u32) -> u32 {
-        let mut data = Vec::with_capacity(12);
-        data.extend_from_slice(&journal_id.to_le_bytes());
-        data.extend_from_slice(&journal_offset.to_le_bytes());
-        crc32fast::hash(&data)
-    }
-
-    /// Select the valid entry from two candidates based on CRC validation and cross-references
-    fn select_valid_entry(
-        &self,
-        entry1: &TableEntry,
-        entry2: &TableEntry,
-    ) -> Result<(u64, u32), Error> {
-        // Calculate expected CRCs
-        let expected_crc1 = self.calculate_entry_crc(entry1.journal_id, entry1.journal_offset);
-        let expected_crc2 = self.calculate_entry_crc(entry2.journal_id, entry2.journal_offset);
-
-        // Check which entries have valid CRCs
-        let entry1_valid = entry1.crc == expected_crc1;
-        let entry2_valid = entry2.crc == expected_crc2;
+        let entry1_valid = entry1.epoch <= self.committed_epoch && entry1.crc == expected_crc1;
+        let entry2_valid = entry2.epoch <= self.committed_epoch && entry2.crc == expected_crc2;
 
         match (entry1_valid, entry2_valid) {
             (true, true) => {
@@ -342,6 +403,52 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         }
     }
 
+    /// Calculate CRC for the data portion of an entry (journal_id + journal_offset)
+    fn calculate_entry_crc(&self, epoch: u64, journal_id: u64, journal_offset: u32) -> u32 {
+        let mut data = Vec::with_capacity(20);
+        data.extend_from_slice(&epoch.to_le_bytes());
+        data.extend_from_slice(&journal_id.to_le_bytes());
+        data.extend_from_slice(&journal_offset.to_le_bytes());
+        crc32fast::hash(&data)
+    }
+
+    /// Choose the newer valid entry between two table slots.
+    fn select_valid_entry(
+        &self,
+        entry1: &TableEntry,
+        entry2: &TableEntry,
+    ) -> Result<(u64, u32), Error> {
+        // Expected CRCs
+        let expected_crc1 =
+            self.calculate_entry_crc(entry1.epoch, entry1.journal_id, entry1.journal_offset);
+        let expected_crc2 =
+            self.calculate_entry_crc(entry2.epoch, entry2.journal_id, entry2.journal_offset);
+
+        let entry1_valid = entry1.epoch <= self.committed_epoch && entry1.crc == expected_crc1;
+        let entry2_valid = entry2.epoch <= self.committed_epoch && entry2.crc == expected_crc2;
+
+        match (entry1_valid, entry2_valid) {
+            (true, true) => {
+                if entry1.other_crc == expected_crc2 {
+                    Ok((entry1.journal_id, entry1.journal_offset))
+                } else if entry2.other_crc == expected_crc1 {
+                    Ok((entry2.journal_id, entry2.journal_offset))
+                } else {
+                    Err(Error::DirectoryCorrupted)
+                }
+            }
+            (true, false) => Ok((entry1.journal_id, entry1.journal_offset)),
+            (false, true) => Ok((entry2.journal_id, entry2.journal_offset)),
+            (false, false) => {
+                if entry1.is_empty() && entry2.is_empty() {
+                    Ok((0, 0))
+                } else {
+                    Err(Error::DirectoryCorrupted)
+                }
+            }
+        }
+    }
+
     /// Set the journal location for a given table index by storing it in memory for later sync.
     fn set_table_entry(
         &mut self,
@@ -350,8 +457,9 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         journal_offset: u32,
     ) -> Result<(), Error> {
         // Store the update in memory for later sync
+        let epoch = self.committed_epoch + 1;
         self.pending_table_updates
-            .insert(table_index, (journal_id, journal_offset));
+            .insert(table_index, (epoch, journal_id, journal_offset));
         Ok(())
     }
 
@@ -359,10 +467,11 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
     async fn write_table_entry_to_disk(
         &self,
         table_index: u64,
+        epoch: u64,
         journal_id: u64,
         journal_offset: u32,
     ) -> Result<(), Error> {
-        let offset = table_index * TABLE_ENTRY_SIZE as u64;
+        let offset = TABLE_HEADER_SIZE as u64 + table_index * TABLE_ENTRY_SIZE as u64;
 
         // Read current entries to determine which slot to update
         let buf = vec![0u8; TABLE_ENTRY_SIZE];
@@ -376,14 +485,22 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         let entry2 = TableEntry::read(&mut buf2)?;
 
         // Calculate CRCs for new entry
-        let new_crc = self.calculate_entry_crc(journal_id, journal_offset);
+        let new_crc = self.calculate_entry_crc(epoch, journal_id, journal_offset);
 
         // Determine which slot to update (alternate between them)
         let (update_first, old_entry) = match self.select_valid_entry(&entry1, &entry2) {
             Ok((old_journal_id, old_journal_offset)) => {
                 // There's a valid current entry - figure out which slot it's in
-                let old_crc = self.calculate_entry_crc(old_journal_id, old_journal_offset);
-                let entry1_crc = self.calculate_entry_crc(entry1.journal_id, entry1.journal_offset);
+                let old_crc = self.calculate_entry_crc(
+                    self.committed_epoch,
+                    old_journal_id,
+                    old_journal_offset,
+                );
+                let entry1_crc = self.calculate_entry_crc(
+                    self.committed_epoch,
+                    entry1.journal_id,
+                    entry1.journal_offset,
+                );
 
                 if entry1_crc == old_crc {
                     // Current entry is in slot 1, update slot 2
@@ -400,20 +517,20 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         };
 
         // Calculate the old entry's CRC for cross-reference
-        let old_crc = self.calculate_entry_crc(old_entry.0, old_entry.1);
+        let old_crc = self.calculate_entry_crc(self.committed_epoch, old_entry.0, old_entry.1);
 
         // Build the new complete table entry
         let mut new_buf = Vec::with_capacity(TABLE_ENTRY_SIZE);
 
         if update_first {
             // Update first slot, keep second slot
-            let new_entry1 = TableEntry::new(journal_id, journal_offset, new_crc, old_crc);
+            let new_entry1 = TableEntry::new(epoch, journal_id, journal_offset, new_crc, old_crc);
             new_entry1.write(&mut new_buf);
             entry2.write(&mut new_buf);
         } else {
             // Keep first slot, update second slot
             entry1.write(&mut new_buf);
-            let new_entry2 = TableEntry::new(journal_id, journal_offset, new_crc, old_crc);
+            let new_entry2 = TableEntry::new(epoch, journal_id, journal_offset, new_crc, old_crc);
             new_entry2.write(&mut new_buf);
         }
 
@@ -557,17 +674,43 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         // Clear the modified sections since they're now synced
         self.modified_sections.clear();
 
-        // Flush all pending table updates to disk
-        for (&table_index, &(journal_id, journal_offset)) in &self.pending_table_updates {
-            self.write_table_entry_to_disk(table_index, journal_id, journal_offset)
+        let mut max_journal = self.committed_journal_id;
+        let mut max_offset = self.committed_offset;
+
+        for (&table_index, &(epoch, journal_id, journal_offset)) in &self.pending_table_updates {
+            self.write_table_entry_to_disk(table_index, epoch, journal_id, journal_offset)
                 .await?;
+
+            if journal_id > max_journal
+                || (journal_id == max_journal && journal_offset > max_offset)
+            {
+                max_journal = journal_id;
+                max_offset = journal_offset;
+            }
         }
 
-        // Clear pending updates since they're now written
-        self.pending_table_updates.clear();
-
-        // Finally sync the table
+        // Flush table blob (buckets)
         self.table_blob.sync().await?;
+
+        // ------------------------------------------------------------------
+        // Update commit header (epoch advance)
+        // ------------------------------------------------------------------
+        let new_epoch = self.committed_epoch + 1;
+        let mut hdr_buf = Vec::with_capacity(TABLE_HEADER_SIZE);
+        hdr_buf.put_slice(&new_epoch.to_le_bytes());
+        hdr_buf.put_slice(&max_journal.to_le_bytes());
+        hdr_buf.put_slice(&max_offset.to_le_bytes());
+        let crc = crc32fast::hash(&hdr_buf);
+        hdr_buf.put_slice(&crc.to_le_bytes());
+
+        self.table_blob.write_at(hdr_buf, 0).await?;
+        self.table_blob.sync().await?;
+
+        self.committed_epoch = new_epoch;
+        self.committed_journal_id = max_journal;
+        self.committed_offset = max_offset;
+
+        self.pending_table_updates.clear();
 
         Ok(())
     }
@@ -781,6 +924,44 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         // Remove the partition itself
         self.context.remove(&self.config.partition, None).await?;
 
+        Ok(())
+    }
+
+    /// Remove bucket slots whose epoch is greater than the committed epoch.
+    async fn clean_future_epochs(&mut self) -> Result<(), Error> {
+        let mut zero_buf = vec![0u8; SINGLE_ENTRY_SIZE];
+        let buckets = self.table_size;
+        for table_index in 0..buckets {
+            let offset = TABLE_HEADER_SIZE as u64 + table_index * TABLE_ENTRY_SIZE as u64;
+            let buf = self
+                .table_blob
+                .read_at(vec![0u8; TABLE_ENTRY_SIZE], offset)
+                .await?;
+
+            let mut buf1 = &buf.as_ref()[0..SINGLE_ENTRY_SIZE];
+            let mut buf2 = &buf.as_ref()[SINGLE_ENTRY_SIZE..TABLE_ENTRY_SIZE];
+            let entry1 = TableEntry::read(&mut buf1)?;
+            let entry2 = TableEntry::read(&mut buf2)?;
+
+            let mut need_write = false;
+            let mut new_buf = Vec::with_capacity(TABLE_ENTRY_SIZE);
+
+            for entry in [&entry1, &entry2] {
+                if entry.epoch > self.committed_epoch {
+                    new_buf.extend_from_slice(&zero_buf);
+                    need_write = true;
+                } else {
+                    entry.write(&mut new_buf);
+                }
+            }
+
+            if need_write {
+                self.table_blob.write_at(new_buf, offset).await?;
+            }
+        }
+        if buckets > 0 {
+            self.table_blob.sync().await?;
+        }
         Ok(())
     }
 }
