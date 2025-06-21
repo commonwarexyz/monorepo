@@ -15,144 +15,75 @@ const TABLE_BLOB_NAME: &[u8] = b"table";
 // -------------------------------------------------------------------------------------------------
 // Table layout
 // -------------------------------------------------------------------------------------------------
-// The very first bytes of the table blob form a fixed-size header that acts as a durable commit
-// pointer.  The rest of the blob contains the actual bucket slots (two per bucket as before).
-//
-// Header (24 bytes):
-//   u64 committed_epoch      – highest epoch that is *fully* flushed to disk
-//   u64 max_journal_id       – greatest journal-section id referenced by any bucket of that epoch
-//   u32 max_offset           – greatest offset inside that journal section
-//   u32 crc                  – CRC32 of the first 20 bytes
-//
-// Bucket slot (28 bytes):
+// Bucket slot (24 bytes):
 //   u64 epoch                – epoch in which this slot was written
-//   u64 journal_id
-//   u32 journal_offset
-//   u32 crc                  – CRC of (epoch | journal_id | journal_offset)
-//   u32 other_crc            – CRC of the sibling slot (for atomic toggle)
+//   u64 section
+//   u32 offset
+//   u32 crc                  – CRC of (epoch | section | offset )
 
-/// Size of a single commit-pointer header slot.
-const HEADER_SLOT_SIZE: usize = 24;
-/// Total header region (two header slots).
-const TABLE_HEADER_SIZE: usize = HEADER_SLOT_SIZE * 2;
-
-/// Two slots per bucket, each slot now 28 bytes.
-const SINGLE_ENTRY_SIZE: usize = 28;
-const TABLE_ENTRY_SIZE: usize = 2 * SINGLE_ENTRY_SIZE;
-
-// -------------------------------------------------------------------------------------------------
-// Commit pointer header (duplicated)
-// -------------------------------------------------------------------------------------------------
-
-#[derive(Debug, Clone, PartialEq)]
-struct HeaderSlot {
-    epoch: u64,
-    max_journal_id: u64,
-    max_offset: u32,
-    crc: u32,
-}
-
-impl FixedSize for HeaderSlot {
-    const SIZE: usize = HEADER_SLOT_SIZE;
-}
-
-impl CodecWrite for HeaderSlot {
-    fn write(&self, buf: &mut impl BufMut) {
-        buf.put_slice(&self.epoch.to_le_bytes());
-        buf.put_slice(&self.max_journal_id.to_le_bytes());
-        buf.put_slice(&self.max_offset.to_le_bytes());
-        buf.put_slice(&self.crc.to_le_bytes());
-    }
-}
-
-impl Read for HeaderSlot {
-    type Cfg = ();
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let mut epoch_bytes = [0u8; 8];
-        buf.copy_to_slice(&mut epoch_bytes);
-        let epoch = u64::from_le_bytes(epoch_bytes);
-
-        let mut jid_bytes = [0u8; 8];
-        buf.copy_to_slice(&mut jid_bytes);
-        let max_journal_id = u64::from_le_bytes(jid_bytes);
-
-        let mut off_bytes = [0u8; 4];
-        buf.copy_to_slice(&mut off_bytes);
-        let max_offset = u32::from_le_bytes(off_bytes);
-
-        let mut crc_bytes = [0u8; 4];
-        buf.copy_to_slice(&mut crc_bytes);
-        let crc = u32::from_le_bytes(crc_bytes);
-
-        Ok(Self {
-            epoch,
-            max_journal_id,
-            max_offset,
-            crc,
-        })
-    }
-}
-
-impl HeaderSlot {
-    fn calc_crc(epoch: u64, jid: u64, off: u32) -> u32 {
-        let mut data = Vec::with_capacity(20);
-        data.extend_from_slice(&epoch.to_le_bytes());
-        data.extend_from_slice(&jid.to_le_bytes());
-        data.extend_from_slice(&off.to_le_bytes());
-        crc32fast::hash(&data)
-    }
-
-    fn new(epoch: u64, jid: u64, off: u32) -> Self {
-        let crc = Self::calc_crc(epoch, jid, off);
-        Self {
-            epoch,
-            max_journal_id: jid,
-            max_offset: off,
-            crc,
-        }
-    }
-
-    fn is_valid(&self) -> bool {
-        self.crc == Self::calc_crc(self.epoch, self.max_journal_id, self.max_offset)
-    }
-}
+/// Two slots per bucket, each slot now 24 bytes.
+const TABLE_ENTRY_SIZE: usize = 24;
+const FULL_TABLE_ENTRY_SIZE: usize = 2 * TABLE_ENTRY_SIZE;
 
 /// Single table entry stored in the table blob.
 #[derive(Debug, Clone, PartialEq)]
 struct TableEntry {
     epoch: u64,
-    journal_id: u64,
-    journal_offset: u32,
+    section: u64,
+    offset: u32,
     crc: u32,
 }
 
 impl TableEntry {
     /// Create a new `TableEntry`.
-    fn new(epoch: u64, journal_id: u64, journal_offset: u32, crc: u32) -> Self {
+    fn new(epoch: u64, section: u64, offset: u32, crc: u32) -> Self {
         Self {
             epoch,
-            journal_id,
-            journal_offset,
+            section,
+            offset,
             crc,
+        }
+    }
+
+    /// Construct a new `TableEntry` with a CRC.
+    fn construct(epoch: u64, section: u64, offset: u32) -> Self {
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&epoch.to_be_bytes());
+        hasher.update(&section.to_be_bytes());
+        hasher.update(&offset.to_be_bytes());
+        Self {
+            epoch,
+            section,
+            offset,
+            crc: hasher.finalize(),
         }
     }
 
     /// Check if this entry is empty (all zeros).
     fn is_empty(&self) -> bool {
-        self.journal_id == 0 && self.journal_offset == 0 && self.crc == 0
+        self.section == 0 && self.offset == 0 && self.crc == 0
+    }
+
+    /// Check if this entry is valid.
+    fn is_valid(&self) -> bool {
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&self.epoch.to_be_bytes());
+        hasher.update(&self.section.to_be_bytes());
+        hasher.update(&self.offset.to_be_bytes());
+        hasher.finalize() == self.crc
     }
 }
 
 impl FixedSize for TableEntry {
-    const SIZE: usize = SINGLE_ENTRY_SIZE;
+    const SIZE: usize = TABLE_ENTRY_SIZE;
 }
 
 impl CodecWrite for TableEntry {
     fn write(&self, buf: &mut impl BufMut) {
-        buf.put_slice(&self.epoch.to_le_bytes());
-        buf.put_slice(&self.journal_id.to_le_bytes());
-        buf.put_slice(&self.journal_offset.to_le_bytes());
-        buf.put_slice(&self.crc.to_le_bytes());
+        self.epoch.write(buf);
+        self.section.write(buf);
+        self.offset.write(buf);
+        self.crc.write(buf);
     }
 }
 
@@ -160,26 +91,15 @@ impl Read for TableEntry {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let mut epoch_bytes = [0u8; 8];
-        buf.copy_to_slice(&mut epoch_bytes);
-        let epoch = u64::from_le_bytes(epoch_bytes);
-
-        let mut journal_id_bytes = [0u8; 8];
-        buf.copy_to_slice(&mut journal_id_bytes);
-        let journal_id = u64::from_le_bytes(journal_id_bytes);
-
-        let mut journal_offset_bytes = [0u8; 4];
-        buf.copy_to_slice(&mut journal_offset_bytes);
-        let journal_offset = u32::from_le_bytes(journal_offset_bytes);
-
-        let mut crc_bytes = [0u8; 4];
-        buf.copy_to_slice(&mut crc_bytes);
-        let crc = u32::from_le_bytes(crc_bytes);
+        let epoch = u64::read(buf)?;
+        let section = u64::read(buf)?;
+        let offset = u32::read(buf)?;
+        let crc = u32::read(buf)?;
 
         Ok(Self {
             epoch,
-            journal_id,
-            journal_offset,
+            section,
+            offset,
             crc,
         })
     }
@@ -187,17 +107,17 @@ impl Read for TableEntry {
 
 /// Record stored in the journal for linked list entries.
 struct JournalEntry<K: Array, V: Codec> {
-    next_journal_id: u64,
-    next_offset: u32, // Changed to u32 to match variable journal offsets
+    next_section: u64,
+    next_offset: u32,
     key: K,
     value: V,
 }
 
 impl<K: Array, V: Codec> JournalEntry<K, V> {
     /// Create a new `JournalEntry`.
-    fn new(next_journal_id: u64, next_offset: u32, key: K, value: V) -> Self {
+    fn new(next_section: u64, next_offset: u32, key: K, value: V) -> Self {
         Self {
-            next_journal_id,
+            next_section,
             next_offset,
             key,
             value,

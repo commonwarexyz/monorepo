@@ -63,16 +63,22 @@ pub enum Error {
 #[derive(Clone)]
 pub struct Config<C> {
     /// The `commonware-runtime::Storage` partition to use for storing the disk map.
-    pub partition: String,
+    pub journal_partition: String,
 
-    /// The size of the directory table. Should be a power of 2 and much larger than
+    /// The `commonware-runtime::Storage` partition to use for storing the disk map metadata.
+    pub metadata_partition: String,
+
+    /// The `commonware-runtime::Storage` partition to use for storing the disk map table.
+    pub table_partition: String,
+
+    /// The size of the table. Should be a power of 2 and much larger than
     /// the expected number of buckets for better distribution.
-    pub directory_size: u64,
+    pub table_size: u64,
 
     /// The codec configuration to use for the value stored in the disk map.
     pub codec_config: C,
 
-    /// The size of the write buffer to use for each blob.
+    /// The size of the write buffer to use for the journal.
     pub write_buffer: usize,
 
     /// The target size of each journal before creating a new one.
