@@ -467,9 +467,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
     }
 
     /// Check if a key exists in the disk map.
-    pub async fn contains_key(&mut self, key: &K) -> Result<bool, Error> {
-        let values = self.get(key).await?;
-        Ok(!values.is_empty())
+    pub async fn has(&mut self, key: &K) -> Result<bool, Error> {
+        Ok(self.get(key).await?.is_some())
     }
 
     /// Sync all data to the underlying store.
@@ -538,54 +537,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
         self.journal.close().await?;
         self.table_blob.close().await?;
         Ok(())
-    }
-
-    /// Validates the integrity of the hash table by checking that all table entries
-    /// point to valid journal entries. This is optional and mainly useful for debugging.
-    pub async fn validate_table_integrity(&self) -> Result<usize, Error> {
-        let mut valid_entries = 0;
-        let mut invalid_entries = 0;
-
-        for table_index in 0..self.table_size {
-            let (journal_id, journal_offset) = self.get_table_entry(table_index).await?;
-
-            // Skip empty table entries
-            if journal_id == 0 && journal_offset == 0 {
-                continue;
-            }
-
-            // Check if the journal entry exists
-            match self.journal.get(journal_id, journal_offset).await {
-                Ok(Some(_)) => valid_entries += 1,
-                Ok(None) => {
-                    invalid_entries += 1;
-                    trace!(
-                        table_index,
-                        journal_id,
-                        journal_offset,
-                        "table entry points to non-existent journal entry"
-                    );
-                }
-                Err(err) => {
-                    invalid_entries += 1;
-                    trace!(
-                        table_index,
-                        journal_id,
-                        journal_offset,
-                        ?err,
-                        "error accessing journal entry from table"
-                    );
-                }
-            }
-        }
-
-        trace!(
-            valid_entries,
-            invalid_entries,
-            "table integrity validation complete"
-        );
-
-        Ok(valid_entries)
     }
 
     /// Close and remove any underlying blobs created by the disk map.
