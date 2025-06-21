@@ -827,29 +827,6 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         Ok(())
     }
 
-    /// Returns a stream of all key-value pairs in the disk map.
-    ///
-    /// This function uses the journal's efficient replay mechanism to stream through
-    /// all entries. This is much faster than following linked lists manually as it
-    /// uses buffered reading.
-    pub async fn replay(
-        &self,
-        buffer: usize,
-    ) -> Result<impl futures::Stream<Item = Result<(K, V), Error>> + '_, Error> {
-        use futures::StreamExt;
-
-        trace!("starting diskmap replay using journal replay");
-
-        // Use the journal's efficient replay to get all entries
-        let journal_stream = self.journal.replay(buffer).await?;
-
-        // Transform the journal entries to key-value pairs
-        Ok(journal_stream.map(|result| match result {
-            Ok((_, _, _, entry)) => Ok((entry.key, entry.value)),
-            Err(err) => Err(Error::Journal(err)),
-        }))
-    }
-
     /// Truncates journal sections to the last committed high-water mark from the table header.
     async fn truncate_to_latest_reachable_entry(&mut self) -> Result<(), Error> {
         trace!(
@@ -1226,87 +1203,6 @@ mod tests {
     }
 
     #[test]
-    fn test_diskmap_replay() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let config = Config {
-                partition: "test_replay".to_string(),
-                directory_size: 256,
-                codec_config: (),
-                write_buffer: 1024,
-                target_journal_size: 64 * 1024 * 1024, // 64MB
-            };
-
-            let mut diskmap =
-                DiskMap::<_, TestKey, TestValue>::init(context.clone(), config.clone())
-                    .await
-                    .unwrap();
-
-            // Add some test data
-            let test_data = vec![
-                (
-                    TestKey::new(*b"key00001"),
-                    TestValue::new(*b"value00000000001"),
-                ),
-                (
-                    TestKey::new(*b"key00002"),
-                    TestValue::new(*b"value00000000002"),
-                ),
-                (
-                    TestKey::new(*b"key00003"),
-                    TestValue::new(*b"value00000000003"),
-                ),
-            ];
-
-            for (key, value) in &test_data {
-                diskmap.put(key.clone(), value.clone()).await.unwrap();
-            }
-
-            // Validate table integrity before sync
-            let valid_entries = diskmap.validate_table_integrity().await.unwrap();
-            assert_eq!(valid_entries, test_data.len());
-
-            // Sync to ensure data is persisted
-            diskmap.sync().await.unwrap();
-            diskmap.close().await.unwrap();
-
-            // Re-initialize diskmap
-            let diskmap = DiskMap::<_, TestKey, TestValue>::init(context, config)
-                .await
-                .unwrap();
-
-            // Validate table integrity after restart
-            let valid_entries = diskmap.validate_table_integrity().await.unwrap();
-            assert_eq!(valid_entries, test_data.len());
-
-            // Replay all items using efficient journal replay
-            use futures::StreamExt;
-            let mut replayed_items = Vec::new();
-            {
-                let stream = diskmap.replay(1024).await.unwrap();
-                let mut stream = Box::pin(stream);
-
-                while let Some(result) = stream.next().await {
-                    let (key, value) = result.unwrap();
-                    replayed_items.push((key, value));
-                }
-            } // stream is dropped here
-
-            // Verify we got all the items back (order might be different due to hashing)
-            assert_eq!(replayed_items.len(), test_data.len());
-
-            // Check that all test data is present in replayed items
-            for (expected_key, expected_value) in &test_data {
-                assert!(replayed_items
-                    .iter()
-                    .any(|(k, v)| k == expected_key && v == expected_value));
-            }
-
-            diskmap.destroy().await.unwrap();
-        });
-    }
-
-    #[test]
     fn test_diskmap_initialization_validation() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1370,28 +1266,6 @@ mod tests {
                 let values2 = diskmap.get(&key2).await.unwrap();
                 assert_eq!(values2.len(), 1);
                 assert_eq!(values2[0], value2);
-
-                // Test replay functionality - should return both entries
-                use futures::StreamExt;
-                let mut replayed_items = Vec::new();
-                {
-                    let stream = diskmap.replay(1024).await.unwrap();
-                    let mut stream = Box::pin(stream);
-
-                    while let Some(result) = stream.next().await {
-                        let (key, value) = result.unwrap();
-                        replayed_items.push((key, value));
-                    }
-                }
-
-                // Should have replayed exactly the entries we can access through the hash table
-                assert_eq!(replayed_items.len(), 2);
-                assert!(replayed_items
-                    .iter()
-                    .any(|(k, v)| k == &key1 && v == &value1));
-                assert!(replayed_items
-                    .iter()
-                    .any(|(k, v)| k == &key2 && v == &value2));
 
                 diskmap.destroy().await.unwrap();
             }
