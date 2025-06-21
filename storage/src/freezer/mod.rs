@@ -11,6 +11,8 @@ mod storage;
 pub use storage::Freezer;
 use thiserror::Error;
 
+use crate::{diskindex, diskmap};
+
 /// Errors that can occur when interacting with the freezer.
 #[derive(Debug, Error)]
 pub enum Error {
@@ -27,18 +29,6 @@ pub enum Error {
 /// Configuration for `Freezer` storage.
 #[derive(Clone)]
 pub struct Config<C> {
-    /// The `commonware-runtime::Storage` partition to use for storing the freezer.
-    pub partition: String,
-
-    /// The codec configuration to use for the value stored in the freezer.
-    pub codec_config: C,
-
-    /// The size of the write buffer to use for both diskmaps.
-    pub write_buffer: usize,
-
-    /// The size of the diskmap directory table. Should be a power of 2.
-    pub directory_size: u64,
-
-    /// The target size of each journal in the diskmap before creating a new one.
-    pub target_journal_size: u64,
+    pub diskmap: diskmap::Config<C>,
+    pub diskindex: diskindex::Config,
 }

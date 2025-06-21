@@ -31,12 +31,10 @@ pub enum Error {
     Runtime(#[from] commonware_runtime::Error),
     #[error("codec error: {0}")]
     Codec(#[from] commonware_codec::Error),
-    #[error("index out of bounds: {index}")]
-    IndexOutOfBounds { index: u64 },
-    #[error("record corrupted at index {0}")]
-    RecordCorrupted(u64),
-    #[error("header corrupted")]
-    HeaderCorrupted,
+    #[error("invalid blob name: {0}")]
+    InvalidBlobName(String),
+    #[error("invalid record: {0}")]
+    InvalidRecord(u64),
 }
 
 /// Configuration for `DiskIndex` storage.
@@ -45,6 +43,12 @@ pub struct Config {
     /// The `commonware-runtime::Storage` partition to use for storing the index.
     pub partition: String,
 
-    /// The size of the write buffer for the index file.
+    /// The maximum number of items to store in each index blob.
+    pub items_per_blob: u64,
+
+    /// The size of the write buffer to use when writing to the index.
     pub write_buffer: usize,
+
+    /// The size of the read buffer to use on restart.
+    pub read_buffer: usize,
 }

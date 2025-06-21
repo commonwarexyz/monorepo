@@ -1,40 +1,6 @@
-//! A disk-based multi-map for fixed-length keys and values.
-//!
-//! `DiskMap` is a hash table with chaining that stores all data on disk using the Blob interface.
-//! It uses a directory structure with much higher cardinality than the number of buckets to
-//! provide better lookup performance.
-//!
-//! # Design
-//!
-//! The structure consists of:
-//! - A directory table with `directory_size` entries, each pointing to a bucket
-//! - Buckets stored as separate blobs, containing linked lists of key-value pairs
-//! - A hash function that maps keys to directory entries
-//!
-//! The directory_size is typically much larger than the number of actual buckets,
-//! allowing for better distribution and fewer collisions per bucket.
-//!
-//! # Format
-//!
-//! Directory blob format:
-//! ```text
-//! +---+---+---+---+---+---+---+---+
-//! |     Bucket ID (u64)          |  Entry 0
-//! +---+---+---+---+---+---+---+---+
-//! |     Bucket ID (u64)          |  Entry 1
-//! +---+---+---+---+---+---+---+---+
-//! |            ...               |
-//! ```
-//!
-//! Bucket blob format:
-//! ```text
-//! +---+---+---+---+---+---+---+---+---+---+---+---+
-//! |    Key    |   Value   | Next Offset (u64) | ... |
-//! +---+---+---+---+---+---+---+---+---+---+---+---+
-//! ```
-
 mod storage;
 
+use commonware_utils::array::U64;
 pub use storage::DiskMap;
 use thiserror::Error;
 
@@ -45,6 +11,8 @@ pub enum Error {
     Runtime(#[from] commonware_runtime::Error),
     #[error("journal error: {0}")]
     Journal(#[from] crate::journal::Error),
+    #[error("metadata error: {0}")]
+    Metadata(#[from] crate::metadata::Error<U64>),
     #[error("codec error: {0}")]
     Codec(#[from] commonware_codec::Error),
     #[error("invalid key length: expected {expected}, got {actual}")]
@@ -63,16 +31,25 @@ pub enum Error {
 #[derive(Clone)]
 pub struct Config<C> {
     /// The `commonware-runtime::Storage` partition to use for storing the disk map.
-    pub partition: String,
+    pub journal_partition: String,
 
-    /// The size of the directory table. Should be a power of 2 and much larger than
+    /// The compression algorithm to use for the journal.
+    pub journal_compression: Option<u8>,
+
+    /// The `commonware-runtime::Storage` partition to use for storing the disk map metadata.
+    pub metadata_partition: String,
+
+    /// The `commonware-runtime::Storage` partition to use for storing the disk map table.
+    pub table_partition: String,
+
+    /// The size of the table. Should be a power of 2 and much larger than
     /// the expected number of buckets for better distribution.
-    pub directory_size: u64,
+    pub table_size: u32,
 
     /// The codec configuration to use for the value stored in the disk map.
     pub codec_config: C,
 
-    /// The size of the write buffer to use for each blob.
+    /// The size of the write buffer to use for the journal.
     pub write_buffer: usize,
 
     /// The target size of each journal before creating a new one.
