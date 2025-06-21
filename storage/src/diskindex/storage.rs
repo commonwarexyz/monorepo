@@ -79,6 +79,7 @@ impl<E: Storage + Metrics, V: Array> DiskIndex<E, V> {
     pub async fn init(context: E, config: Config) -> Result<Self, Error> {
         // Open index blob
         // TODO: can't actually store u64 items in this blob (as each record takes non-zero bytes)
+        // TODO: limit size of each blob and crate on-demand
         let (index, len) = context.open(&config.partition, INDEX_BLOB_NAME).await?;
 
         // Initialize intervals by scanning existing records
