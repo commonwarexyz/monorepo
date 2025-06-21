@@ -50,16 +50,18 @@ impl<E: Storage + Metrics + Clock, K: Array + Codec<Cfg = ()>, V: Codec> Freezer
     /// If the index already exists, put does nothing and returns. If the same key is stored multiple times
     /// at different indices (not recommended), any value associated with the key may be returned.
     pub async fn put(&mut self, index: u64, key: K, data: V) -> Result<(), Error> {
+        self.puts.inc();
+
         // Check if index already exists
-        if self.index.has(index) {
+        if self.indices.has(index) {
             return Ok(());
         }
 
-        // First, store key -> value mapping (this ensures the value is persisted before the index)
-        self.values.put(key.clone(), data).await?;
+        // Store key -> value mapping
+        self.keys.put(key.clone(), data).await?;
 
-        // Then, store index -> key mapping (if this fails, we have an orphaned key but that's okay)
-        self.index.put(index, key)?;
+        // Store index -> key mapping
+        self.indices.put(index, key)?;
 
         Ok(())
     }
@@ -75,44 +77,39 @@ impl<E: Storage + Metrics + Clock, K: Array + Codec<Cfg = ()>, V: Codec> Freezer
 
     async fn get_index(&mut self, index: u64) -> Result<Option<V>, Error> {
         // Get key from index->key mapping
-        let key = match self.index.get(index).await? {
+        let key = match self.indices.get(index).await? {
             Some(key) => key,
             None => return Ok(None),
         };
 
         // Get value from key->value mapping
-        let values = self.values.get(&key).await?;
-        Ok(values.into_iter().next())
+        self.keys.get(&key).await.map_err(Error::DiskMap)
     }
 
     async fn get_key(&mut self, key: &K) -> Result<Option<V>, Error> {
         // Get value directly from key->value mapping
-        let values = self.values.get(key).await?;
-        Ok(values.into_iter().next())
+        self.keys.get(key).await.map_err(Error::DiskMap)
     }
 
     /// Check if an item exists in the `Freezer`.
     pub async fn has(&mut self, identifier: Identifier<'_, K>) -> Result<bool, Error> {
-        self.has.inc();
         match identifier {
-            Identifier::Index(index) => Ok(self.index.has(index)),
+            Identifier::Index(index) => Ok(self.indices.has(index)),
             Identifier::Key(key) => self.has_key(key).await,
         }
     }
 
     async fn has_key(&mut self, key: &K) -> Result<bool, Error> {
-        Ok(self.values.contains_key(key).await?)
+        Ok(self.keys.has(key).await?)
     }
 
     /// Forcibly sync all pending writes.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        self.syncs.inc();
+        // Sync diskmap
+        self.keys.sync().await?;
 
-        // First sync the values (diskmap)
-        self.values.sync().await?;
-
-        // Then sync the index (diskindex) - this ensures all keys are committed before indices are visible
-        self.index.sync().await?;
+        // Sync diskindex
+        self.indices.sync().await?;
 
         Ok(())
     }
@@ -122,7 +119,7 @@ impl<E: Storage + Metrics + Clock, K: Array + Codec<Cfg = ()>, V: Codec> Freezer
     ///
     /// This is useful for driving backfill operations over the freezer.
     pub fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
-        self.index.next_gap(index)
+        self.indices.next_gap(index)
     }
 
     /// Close `Freezer` (and underlying storage).
@@ -133,8 +130,8 @@ impl<E: Storage + Metrics + Clock, K: Array + Codec<Cfg = ()>, V: Codec> Freezer
         self.sync().await?;
 
         // Close underlying storage
-        self.values.close().await?;
-        self.index.close().await?;
+        self.keys.close().await?;
+        self.indices.close().await?;
 
         Ok(())
     }
@@ -142,8 +139,8 @@ impl<E: Storage + Metrics + Clock, K: Array + Codec<Cfg = ()>, V: Codec> Freezer
     /// Remove all on-disk data created by this `Freezer`.
     pub async fn destroy(self) -> Result<(), Error> {
         // Destroy underlying storage
-        self.values.destroy().await?;
-        self.index.destroy().await?;
+        self.keys.destroy().await?;
+        self.indices.destroy().await?;
 
         Ok(())
     }

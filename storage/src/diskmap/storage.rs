@@ -398,7 +398,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
         self.table
             .write_at(entry.encode(), table_offset + start as u64)
             .await
-            .map_err(|e| Error::Runtime(e))
+            .map_err(Error::Runtime)
     }
 
     /// Determine which journal section to write to based on current journal size.
