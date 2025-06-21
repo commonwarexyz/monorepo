@@ -112,30 +112,24 @@ impl Read for TableEntry {
 
 /// Record stored in the journal for linked list entries.
 struct JournalEntry<K: Array, V: Codec> {
-    next_section: u64,
-    next_offset: u32,
     key: K,
     value: V,
+
+    next: Option<(u64, u32)>,
 }
 
 impl<K: Array, V: Codec> JournalEntry<K, V> {
     /// Create a new `JournalEntry`.
-    fn new(next_section: u64, next_offset: u32, key: K, value: V) -> Self {
-        Self {
-            next_section,
-            next_offset,
-            key,
-            value,
-        }
+    fn new(key: K, value: V, next: Option<(u64, u32)>) -> Self {
+        Self { key, value, next }
     }
 }
 
 impl<K: Array, V: Codec> CodecWrite for JournalEntry<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
-        self.next_section.write(buf);
-        self.next_offset.write(buf);
         self.key.write(buf);
         self.value.write(buf);
+        self.next.write(buf);
     }
 }
 
@@ -143,23 +137,17 @@ impl<K: Array, V: Codec> Read for JournalEntry<K, V> {
     type Cfg = V::Cfg;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let next_section = u64::read(buf)?;
-        let next_offset = u32::read(buf)?;
         let key = K::read(buf)?;
         let value = V::read_cfg(buf, cfg)?;
+        let next = Option::<(u64, u32)>::read_cfg(buf, &((), ()))?;
 
-        Ok(Self {
-            next_section,
-            next_offset,
-            key,
-            value,
-        })
+        Ok(Self { key, value, next })
     }
 }
 
 impl<K: Array, V: Codec> EncodeSize for JournalEntry<K, V> {
     fn encode_size(&self) -> usize {
-        u64::SIZE + u32::SIZE + K::SIZE + 4 + self.value.encode_size()
+        K::SIZE + self.value.encode_size() + self.next.encode_size()
     }
 }
 
@@ -431,16 +419,19 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
         Ok(())
     }
 
-    /// Insert a key-value pair into a journal using proper linked list chaining.
-    async fn insert_into_journal(
-        &mut self,
-        table_index: u64,
-        key: K,
-        value: V,
-    ) -> Result<(), Error> {
+    /// Put a key-value pair into the disk map.
+    pub async fn put(&mut self, key: K, value: V) -> Result<(), Error> {
+        self.puts.inc();
+
+        // Update the section if needed
+        self.update_section().await?;
+
+        // Hash key to table index
+        let table_index = self.table_index(&key);
+
+        // Insert into journal (this will handle the linked list chaining)
         // Get current head of the chain from table
-        let (current_head_journal_id, current_head_offset) =
-            self.get_table_entry(table_index).await?;
+        let (section, offset) = self.get_head(table_index).await?;
 
         // Create journal entry with proper linked list chaining
         let entry = JournalEntry::new(current_head_journal_id, current_head_offset, key, value);
@@ -456,20 +447,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
 
         // Update table to point to this new entry as the head
         self.set_table_entry(table_index, target_journal_id, new_entry_offset)?;
-
-        Ok(())
-    }
-
-    /// Put a key-value pair into the disk map.
-    pub async fn put(&mut self, key: K, value: V) -> Result<(), Error> {
-        self.puts.inc();
-
-        // Hash key to table index
-        let table_index = self.hash_key(&key);
-
-        // Insert into journal (this will handle the linked list chaining)
-        self.insert_into_journal(table_index, key.clone(), value)
-            .await?;
 
         trace!(
             key = hex(key.as_ref()),
@@ -530,11 +507,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
     pub async fn contains_key(&mut self, key: &K) -> Result<bool, Error> {
         let values = self.get(key).await?;
         Ok(!values.is_empty())
-    }
-
-    /// Get the number of table entries.
-    pub fn table_size(&self) -> u64 {
-        self.table_size
     }
 
     /// Sync all data to the underlying store.
