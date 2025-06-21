@@ -100,14 +100,17 @@ impl<E: Storage + Metrics + Clock, V: Array> DiskIndex<E, V> {
         let mut start = context.current();
         let mut items = 0;
         let mut intervals = RMap::new();
-        for (index, blob) in blobs {
+        for (section, blob) in blobs {
             // Initialize read buffer
             let size = blob.size();
-            let mut replay_blob = ReadBuffer::new(index.clone(), size, config.read_buffer);
+            let mut replay_blob = ReadBuffer::new(blob.clone(), size, config.read_buffer);
 
             // Iterate over all records in the blob
             let mut offset = 0;
             while offset < size {
+                // Calculate index for this record
+                let index = section * config.items_per_blob + (offset / Record::<V>::SIZE) as u64;
+
                 // Attempt to read record at offset
                 replay_blob.seek_to(offset)?;
                 let mut record_buf = vec![0u8; Record::<V>::SIZE];
@@ -124,7 +127,7 @@ impl<E: Storage + Metrics + Clock, V: Array> DiskIndex<E, V> {
                 // If record is valid, add to intervals
                 if record.is_valid() {
                     items += 1;
-                    intervals.insert(index as u64);
+                    intervals.insert(index);
                     continue;
                 }
 
@@ -155,24 +158,16 @@ impl<E: Storage + Metrics + Clock, V: Array> DiskIndex<E, V> {
         })
     }
 
-    /// Add a key at the specified index (pending until sync).
-    pub fn put(&mut self, index: u64, key: K) -> Result<(), Error> {
+    /// Add a value at the specified index (pending until sync).
+    pub fn put(&mut self, index: u64, value: V) -> Result<(), Error> {
         self.puts.inc();
-
-        // Check if index already exists
-        if self.intervals.get(&index).is_some() {
-            return Ok(()); // Already exists, no-op
-        }
-
-        // Add to pending entries and immediately add to intervals
-        trace!(index, key = hex(key.as_ref()), "adding pending index entry");
-        self.pending_entries.insert(index, key);
+        self.pending.insert(index, value);
         self.intervals.insert(index);
 
         Ok(())
     }
 
-    /// Get the key for a given index.
+    /// Get the value for a given index.
     pub async fn get(&mut self, index: u64) -> Result<Option<V>, Error> {
         self.gets.inc();
 
@@ -182,20 +177,21 @@ impl<E: Storage + Metrics + Clock, V: Array> DiskIndex<E, V> {
         }
 
         // Check pending entries first
-        if let Some(key) = self.pending_entries.get(&index) {
-            return Ok(Some(key.clone()));
+        if let Some(value) = self.pending.get(&index) {
+            return Ok(Some(value.clone()));
         }
 
         // Read from disk
-        let record_offset = index * self.record_size as u64;
-        let record_buf = vec![0u8; self.record_size];
-        let read_buf = self.index_blob.read_at(record_buf, record_offset).await?;
+        let section = index / self.config.items_per_blob;
+        let blob = self.blobs.get(&section).unwrap();
+        let offset = (index % self.config.items_per_blob) * Record::<V>::SIZE as u64;
+        let read_buf = vec![0u8; Record::<V>::SIZE];
+        let read_buf = blob.read_at(read_buf, offset).await?;
+        let record = Record::<V>::read(&mut read_buf.as_ref())?;
 
-        let mut buf_slice = read_buf.as_ref();
-        let record = Record::<K>::read(&mut buf_slice)?;
-
+        // If record is valid, return it
         if record.is_valid() {
-            Ok(Some(record.key))
+            Ok(Some(record.value))
         } else {
             Err(Error::RecordCorrupted(index))
         }
