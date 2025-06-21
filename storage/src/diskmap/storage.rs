@@ -286,7 +286,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
         };
 
         // Zero-out any bucket slots that belong to a future epoch (after an unclean shutdown).
-        diskmap.clean_future_epochs().await?;
+        diskmap.clean_table().await?;
 
         // Scan table entries and truncate journal to latest reachable entry
         diskmap.truncate_to_latest_reachable_entry().await?;
@@ -780,39 +780,44 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
     }
 
     /// Remove bucket slots whose epoch is greater than the committed epoch.
-    async fn clean_future_epochs(&mut self) -> Result<(), Error> {
-        let mut zero_buf = vec![0u8; SINGLE_ENTRY_SIZE];
-        let buckets = self.table_size;
-        for table_index in 0..buckets {
-            let offset = TABLE_HEADER_SIZE as u64 + table_index * TABLE_ENTRY_SIZE as u64;
-            let buf = self
-                .table_blob
+    async fn clean_table(&mut self) -> Result<(), Error> {
+        // Determine last allowed epoch
+        let committed_epoch = self
+            .metadata
+            .get(&COMMITTED_EPOCH.into())
+            .and_then(|v| Some(u64::from_be_bytes(v.as_slice().try_into().unwrap())))
+            .unwrap_or(0u64);
+
+        // Zero out any table entries whose epoch is greater than the committed epoch
+        let mut sync = false;
+        let zero_buf = vec![0u8; TABLE_ENTRY_SIZE];
+        for table_index in 0..self.table_size {
+            let offset = table_index * FULL_TABLE_ENTRY_SIZE as u64;
+            let result = self
+                .table
                 .read_at(vec![0u8; TABLE_ENTRY_SIZE], offset)
                 .await?;
 
-            let mut buf1 = &buf.as_ref()[0..SINGLE_ENTRY_SIZE];
-            let mut buf2 = &buf.as_ref()[SINGLE_ENTRY_SIZE..TABLE_ENTRY_SIZE];
+            let mut buf1 = &result.as_ref()[0..TABLE_ENTRY_SIZE];
             let entry1 = TableEntry::read(&mut buf1)?;
-            let entry2 = TableEntry::read(&mut buf2)?;
-
-            let mut need_write = false;
-            let mut new_buf = Vec::with_capacity(TABLE_ENTRY_SIZE);
-
-            for entry in [&entry1, &entry2] {
-                if entry.epoch > self.committed_epoch {
-                    new_buf.extend_from_slice(&zero_buf);
-                    need_write = true;
-                } else {
-                    entry.write(&mut new_buf);
-                }
+            if entry1.epoch > committed_epoch {
+                self.table.write_at(zero_buf.clone(), offset).await?;
+                sync = true;
             }
 
-            if need_write {
-                self.table_blob.write_at(new_buf, offset).await?;
+            let mut buf2 = &result.as_ref()[TABLE_ENTRY_SIZE..FULL_TABLE_ENTRY_SIZE];
+            let entry2 = TableEntry::read(&mut buf2)?;
+            if entry2.epoch > committed_epoch {
+                self.table
+                    .write_at(zero_buf.clone(), offset + TABLE_ENTRY_SIZE as u64)
+                    .await?;
+                sync = true;
             }
         }
-        if buckets > 0 {
-            self.table_blob.sync().await?;
+
+        // Sync the table if any changes were made
+        if sync {
+            self.table.sync().await?;
         }
         Ok(())
     }

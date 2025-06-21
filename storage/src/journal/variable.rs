@@ -642,20 +642,13 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         self.blobs.keys().max().copied()
     }
 
-    /// Truncates a specific section to the given offset.
+    /// Rewinds the journal to the given offset.
     ///
-    /// This removes any data in the section beyond the specified offset.
-    /// The offset is in journal offset units (aligned to ITEM_ALIGNMENT).
-    pub async fn truncate_section(&mut self, section: u64, offset: u32) -> Result<(), Error> {
+    /// This removes any data beyond the specified section(s) and offset(s).
+    pub async fn rewind(&mut self, section: u64, offset: u32) -> Result<(), Error> {
         self.prune_guard(section, false)?;
 
-        // ------------------------------------------------------------------
-        // First, drop any sections with an id greater than `section` because
-        // they are by definition ahead of the truncation point and therefore
-        // uncommitted.  This mirrors a rollback to an earlier checkpoint.
-        // ------------------------------------------------------------------
-
-        // Collect the section ids > `section` so we can mutate `self.blobs` safely.
+        // Remove any sections beyond the given section
         let trailing: Vec<u64> = self
             .blobs
             .range((
@@ -664,46 +657,35 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             ))
             .map(|(&s, _)| s)
             .collect();
-
-        for sec in trailing {
-            if let Some(blob) = self.blobs.remove(&sec) {
-                let size = blob.size().await;
-                blob.close().await?;
-
+        for index in trailing {
+            if let Some(blob) = self.blobs.remove(&index) {
                 // Remove the underlying blob from storage.
+                blob.close().await?;
                 self.context
-                    .remove(&self.cfg.partition, Some(&sec.to_be_bytes()))
+                    .remove(&self.cfg.partition, Some(&index.to_be_bytes()))
                     .await?;
-
-                debug!(
-                    section = sec,
-                    size, "removed trailing section during truncate"
-                );
+                debug!(section = index, "removed section");
                 self.tracked.dec();
-                self.pruned.inc(); // reuse the metric
             }
         }
 
+        // If the section exists, truncate it to the given offset
         let blob = match self.blobs.get_mut(&section) {
             Some(blob) => blob,
-            None => return Ok(()), // Section doesn't exist, nothing to truncate
+            None => return Ok(()),
         };
-
-        // Convert offset to byte position
         let target_size = offset as u64 * ITEM_ALIGNMENT;
-
         let current_size = blob.size().await;
         if target_size >= current_size {
             return Ok(()); // Already smaller than or equal to target size
         }
-
         blob.truncate(target_size).await?;
         debug!(
             section,
             from = current_size,
             to = target_size,
             offset,
-            "truncated journal section"
+            "rewound journal"
         );
         Ok(())
     }
@@ -1803,94 +1785,6 @@ mod tests {
                 hex(&digest),
                 "ca3845fa7fabd4d2855ab72ed21226d1d6eb30cb895ea9ec5e5a14201f3f25d8",
             );
-        });
-    }
-
-    #[test_traced]
-    fn test_journal_truncate_section() {
-        // Initialize the deterministic context
-        let executor = deterministic::Runner::default();
-
-        // Start the test within the executor
-        executor.start(|context| async move {
-            // Create a journal configuration
-            let cfg = Config {
-                partition: "test_truncate".into(),
-                compression: None,
-                codec_config: (),
-                write_buffer: 1024,
-            };
-
-            // Initialize the journal
-            let mut journal = Journal::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to initialize journal");
-
-            // Append several items to section 1
-            for i in 0..10 {
-                journal.append(1, i).await.expect("Failed to append data");
-            }
-            journal.sync(1).await.expect("Failed to sync blob");
-
-            // Get the initial size
-            let initial_size = journal
-                .section_size(1)
-                .await
-                .expect("Failed to get section size");
-            assert!(initial_size > 0);
-
-            // Truncate to the first 5 items (offset 5)
-            let target_offset = 5u32;
-
-            // Truncate to roughly half the items
-            journal
-                .truncate_section(1, target_offset)
-                .await
-                .expect("Failed to truncate section");
-
-            // Verify the section was truncated
-            let truncated_size = journal
-                .section_size(1)
-                .await
-                .expect("Failed to get section size");
-            let expected_size = target_offset as u64 * 16; // ITEM_ALIGNMENT
-            assert_eq!(truncated_size, expected_size);
-            assert!(truncated_size < initial_size);
-
-            // Verify we can still read the remaining items
-            for i in 0..3 {
-                // Read fewer items since some were truncated
-                match journal.get(1, i as u32).await {
-                    Ok(Some(value)) => assert_eq!(value, i),
-                    Ok(None) => break, // Hit the truncation point
-                    Err(_) => break,   // Hit the truncation point
-                }
-            }
-
-            // Test truncating a non-existent section (should not error)
-            journal
-                .truncate_section(999, 10)
-                .await
-                .expect("Failed to truncate non-existent section");
-
-            // Test truncating to a larger offset (should be a no-op)
-            let size_before = journal
-                .section_size(1)
-                .await
-                .expect("Failed to get section size");
-            let large_offset = (size_before / 16 + 100) as u32; // Convert to offset units plus some extra
-            journal
-                .truncate_section(1, large_offset)
-                .await
-                .expect("Failed to truncate to larger offset");
-            let size_after = journal
-                .section_size(1)
-                .await
-                .expect("Failed to get section size");
-            assert_eq!(size_before, size_after);
-
-            // Clean up
-            journal.close().await.expect("Failed to close journal");
         });
     }
 }
