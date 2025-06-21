@@ -21,12 +21,15 @@ use crate::{
 };
 use commonware_codec::Encode as _;
 use commonware_cryptography::Hasher as CHasher;
-use commonware_runtime::{Clock, Metrics, Storage as RStorage, ThreadPool};
+use commonware_runtime::{
+    buffer::pool::BufferPool, Clock, Metrics, RwLock, Storage as RStorage, ThreadPool,
+};
 use commonware_utils::Array;
 use futures::{
     future::{try_join_all, TryFutureExt},
     pin_mut, try_join, StreamExt,
 };
+use std::sync::Arc;
 use tracing::{debug, warn};
 
 /// Indicator that the generic parameter N is unused by the call. N is only
@@ -66,6 +69,8 @@ pub struct Config<T: Translator> {
 
     /// An optional thread pool to use for parallelizing batch operations.
     pub pool: Option<ThreadPool>,
+
+    pub buffer_pool: Arc<RwLock<BufferPool>>,
 }
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
@@ -140,6 +145,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 log_write_buffer: cfg.log_write_buffer,
                 translator: cfg.translator,
                 pool: cfg.pool,
+                buffer_pool: cfg.buffer_pool,
             },
             &mut hasher,
         )
@@ -183,6 +189,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 items_per_blob: cfg.mmr_items_per_blob,
                 write_buffer: cfg.mmr_write_buffer,
                 pool: cfg.pool,
+                buffer_pool: cfg.buffer_pool.clone(),
             },
         )
         .await?;
@@ -193,6 +200,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 partition: cfg.log_journal_partition,
                 items_per_blob: cfg.log_items_per_blob,
                 write_buffer: cfg.log_write_buffer,
+                buffer_pool: cfg.buffer_pool,
             },
         )
         .await?;
@@ -361,7 +369,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// independent of the snapshot contents.
     async fn get_update_op(log: &Journal<E, Operation<K, V>>, loc: u64) -> Result<(K, V), Error> {
         let Operation::Update(k, v) = log.read(loc).await? else {
-            panic!("location does not reference update operation. loc={}", loc);
+            panic!("location does not reference update operation. loc={loc}");
         };
 
         Ok((k, v))
@@ -745,15 +753,16 @@ mod test {
 
     fn any_db_config<T: Translator>(suffix: &str, translator: T) -> Config<T> {
         Config {
-            mmr_journal_partition: format!("journal_{}", suffix),
-            mmr_metadata_partition: format!("metadata_{}", suffix),
+            mmr_journal_partition: format!("journal_{suffix}"),
+            mmr_metadata_partition: format!("metadata_{suffix}"),
             mmr_items_per_blob: 11,
             mmr_write_buffer: 1024,
-            log_journal_partition: format!("log_journal_{}", suffix),
+            log_journal_partition: format!("log_journal_{suffix}"),
             log_items_per_blob: 7,
             log_write_buffer: 1024,
             translator,
             pool: None,
+            buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
         }
     }
 
@@ -1022,7 +1031,7 @@ mod test {
                 let k = hash(&i.to_be_bytes());
                 if let Some(map_value) = map.get(&k) {
                     let Some(db_value) = db.get(&k).await.unwrap() else {
-                        panic!("key not found in db: {}", k);
+                        panic!("key not found in db: {k}");
                     };
                     assert_eq!(*map_value, db_value);
                 } else {

@@ -116,6 +116,11 @@ impl<B: Blob> Read<B> {
         if (self.buffer_remaining() + self.blob_remaining() as usize) < size {
             return Err(Error::BlobInsufficientLength);
         }
+        println!(
+            "read_exact. size={size} buffer_remaining={} blob_remaining={}",
+            self.buffer_remaining(),
+            self.blob_remaining()
+        );
 
         // Read until we have enough bytes
         let mut bytes_read = 0;

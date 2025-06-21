@@ -22,9 +22,12 @@ use crate::{
 };
 use commonware_codec::FixedSize;
 use commonware_cryptography::Hasher as CHasher;
-use commonware_runtime::{Clock, Metrics, Storage as RStorage, ThreadPool};
+use commonware_runtime::{
+    buffer::pool::BufferPool, Clock, Metrics, RwLock, Storage as RStorage, ThreadPool,
+};
 use commonware_utils::Array;
 use futures::future::try_join_all;
+use std::sync::Arc;
 use tracing::{debug, warn};
 
 /// Configuration for a [Current] authenticated db.
@@ -59,6 +62,9 @@ pub struct Config<T: Translator> {
 
     /// An optional thread pool to use for parallelizing batch operations.
     pub pool: Option<ThreadPool>,
+
+    /// The buffer pool to use for caching data.
+    pub buffer_pool: Arc<RwLock<BufferPool>>,
 }
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of whether
@@ -139,6 +145,7 @@ impl<
             log_write_buffer: config.log_write_buffer,
             translator: config.translator.clone(),
             pool: config.pool,
+            buffer_pool: config.buffer_pool,
         };
 
         let context = context.with_label("adb::current");
@@ -758,18 +765,19 @@ pub mod test {
     use commonware_runtime::{deterministic, Runner as _};
     use rand::{rngs::StdRng, RngCore, SeedableRng};
 
-    fn current_db_config(partition_prefix: &str) -> Config<TwoCap> {
+    fn current_db_config(prefix: &str) -> Config<TwoCap> {
         Config {
-            mmr_journal_partition: format!("{}_journal_partition", partition_prefix),
-            mmr_metadata_partition: format!("{}_metadata_partition", partition_prefix),
+            mmr_journal_partition: format!("{prefix}_journal_partition"),
+            mmr_metadata_partition: format!("{prefix}_metadata_partition"),
             mmr_items_per_blob: 11,
             mmr_write_buffer: 1024,
-            log_journal_partition: format!("{}_partition_prefix", partition_prefix),
+            log_journal_partition: format!("{prefix}_log_partition"),
             log_items_per_blob: 7,
-            log_write_buffer: 1024,
-            bitmap_metadata_partition: format!("{}_bitmap_metadata_partition", partition_prefix),
+            log_write_buffer: 1,
+            bitmap_metadata_partition: format!("{prefix}_bitmap_metadata_partition"),
             translator: TwoCap,
             pool: None,
+            buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
         }
     }
 
