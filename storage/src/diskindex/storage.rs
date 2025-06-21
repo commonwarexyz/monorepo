@@ -1,14 +1,17 @@
 use super::{Config, Error};
 use crate::rmap::RMap;
 use bytes::{Buf, BufMut};
-use commonware_codec::{FixedSize, Read, ReadExt, Write as CodecWrite};
+use commonware_codec::{Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
     Blob, Clock, Metrics, Storage,
 };
 use commonware_utils::{hex, Array};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    mem::{swap, take},
+};
 use tracing::{debug, trace, warn};
 
 /// Value stored in the index file.
@@ -199,50 +202,51 @@ impl<E: Storage + Metrics + Clock, V: Array> DiskIndex<E, V> {
 
     /// Check if an index exists.
     pub fn has(&self, index: u64) -> bool {
-        // Check intervals (includes both committed and pending)
         self.intervals.get(&index).is_some()
     }
 
     /// Get the next gap information for backfill operations.
     pub fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
-        // Intervals already includes both committed and pending entries
         self.intervals.next_gap(index)
     }
 
     /// Sync all pending entries to disk.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        self.syncs.inc();
-
-        if self.pending_entries.is_empty() {
-            return Ok(()); // Nothing to sync
+        // Check if there is anything to sync
+        if self.pending.is_empty() {
+            return Ok(());
         }
 
         // Write all pending entries to disk
-        for (&index, key) in &self.pending_entries {
-            let record = Record::new(key.clone());
-            let record_offset = index * self.record_size as u64;
+        let mut modified = BTreeSet::new();
+        for (index, value) in take(&mut self.pending) {
+            // Prepare record
+            let section = index / self.config.items_per_blob;
+            let offset = (index % self.config.items_per_blob) * Record::<V>::SIZE as u64;
+            let record = Record::new(value);
 
-            let mut record_buf = Vec::with_capacity(self.record_size);
-            record.write(&mut record_buf);
+            // If blob doesn't exist, create it
+            let mut blob = self.blobs.get(&section);
+            if blob.is_none() {
+                let (new, len) = self
+                    .context
+                    .open(&self.config.partition, &section.to_be_bytes())
+                    .await?;
+                self.blobs
+                    .insert(section, Write::new(new, len, self.config.write_buffer));
+                blob = self.blobs.get(&section);
+                debug!(section, "created blob");
+            }
 
-            self.index_blob.write_at(record_buf, record_offset).await?;
+            // Write record to blob
+            blob.unwrap().write_at(record.encode(), offset).await?;
+            modified.insert(section);
         }
 
-        // Sync the blob
-        self.index_blob.sync().await?;
-
-        // No need to update intervals - they were already updated in put()
-
-        // Update metrics
-        let new_item_count = self.intervals.iter().count() as i64;
-        self.items_tracked.set(new_item_count);
-
-        let synced_count = self.pending_entries.len();
-
-        // Clear pending entries
-        self.pending_entries.clear();
-
-        debug!("synced {} entries to disk", synced_count);
+        // Sync the blobs
+        for section in modified {
+            self.blobs.get(&section).unwrap().sync().await?;
+        }
         Ok(())
     }
 
@@ -251,17 +255,23 @@ impl<E: Storage + Metrics + Clock, V: Array> DiskIndex<E, V> {
         // Sync any pending entries
         self.sync().await?;
 
-        self.index_blob.close().await?;
+        // Close all blobs
+        for (_, blob) in take(&mut self.blobs) {
+            blob.close().await?;
+        }
         Ok(())
     }
 
     /// Destroy the disk index and remove all data.
     pub async fn destroy(self) -> Result<(), Error> {
-        self.index_blob.close().await?;
-        self.context
-            .remove(&self.config.partition, Some(INDEX_BLOB_NAME))
-            .await?;
-        self.context.remove(&self.config.partition, None).await?;
+        // Close all blobs
+        for (i, blob) in self.blobs.into_iter() {
+            blob.close().await?;
+            self.context
+                .remove(&self.config.partition, Some(&i.to_be_bytes()))
+                .await?;
+            debug!(section = i, "destroyed blob");
+        }
         Ok(())
     }
 }
