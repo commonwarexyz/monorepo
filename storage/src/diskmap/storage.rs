@@ -850,114 +850,74 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         }))
     }
 
-    /// Scans all table entries to build a map of reachable journal entries and truncates
-    /// journal sections to remove unreachable entries.
+    /// Truncates journal sections to the last committed high-water mark from the table header.
     async fn truncate_to_latest_reachable_entry(&mut self) -> Result<(), Error> {
-        let mut reachable_entries = std::collections::BTreeSet::<(u64, u32)>::new();
-        let mut section_max_offsets = std::collections::BTreeMap::<u64, u32>::new();
-        let mut valid_entries = 0;
-        let mut invalid_entries = 0;
-
-        // Scan all table entries to find reachable journal entries
-        for table_index in 0..self.table_size {
-            let (journal_id, journal_offset) = self.get_table_entry(table_index).await?;
-
-            // Skip empty table entries
-            if journal_id == 0 && journal_offset == 0 {
-                continue;
-            }
-
-            // For each table entry, follow the entire linked list chain to mark all reachable entries
-            let mut current_journal_id = journal_id;
-            let mut current_offset = journal_offset;
-
-            loop {
-                if current_journal_id == 0 {
-                    break; // End of chain
-                }
-
-                // Check if this journal entry exists
-                match self.journal.get(current_journal_id, current_offset).await {
-                    Ok(Some(entry)) => {
-                        valid_entries += 1;
-                        reachable_entries.insert((current_journal_id, current_offset));
-
-                        // Track the maximum offset for each section
-                        section_max_offsets
-                            .entry(current_journal_id)
-                            .and_modify(|max_offset| {
-                                *max_offset = (*max_offset).max(current_offset)
-                            })
-                            .or_insert(current_offset);
-
-                        // Follow the chain to the next entry
-                        current_journal_id = entry.next_journal_id;
-                        current_offset = entry.next_offset;
-                    }
-                    Ok(None) => {
-                        invalid_entries += 1;
-                        trace!(
-                            table_index,
-                            current_journal_id,
-                            current_offset,
-                            "table entry points to non-existent journal entry"
-                        );
-                        break; // Can't follow chain further
-                    }
-                    Err(err) => {
-                        invalid_entries += 1;
-                        trace!(
-                            table_index,
-                            current_journal_id,
-                            current_offset,
-                            ?err,
-                            "error accessing journal entry from table"
-                        );
-                        break; // Can't follow chain further
-                    }
-                }
-            }
-        }
-
         trace!(
-            valid_entries,
-            invalid_entries,
-            reachable_entries = reachable_entries.len(),
-            sections_to_check = section_max_offsets.len(),
-            "table scan and reachability analysis complete"
+            committed_journal_id = self.committed_journal_id,
+            committed_offset = self.committed_offset,
+            "truncating journal to last committed state"
         );
 
-        // Now truncate each journal section to remove unreachable entries
-        for (&section_id, &max_reachable_offset) in &section_max_offsets {
-            // Get the current section size
-            let current_size = self.journal.section_size(section_id).await?;
+        // If there is no committed section, we are done (nothing to truncate).
+        if self.committed_journal_id == 0 {
+            return Ok(());
+        }
 
-            // Calculate the end position of the last reachable entry
-            if let Ok(Some(entry)) = self.journal.get(section_id, max_reachable_offset).await {
-                // Variable journal uses 16-byte aligned offsets
-                // Each entry is: size(4) + data(variable) + crc(4), then aligned to 16 bytes
-                let entry_size = entry.encode_size();
-                let entry_byte_offset = (max_reachable_offset as u64) * 16; // Convert offset to byte position
-                let entry_end = entry_byte_offset + 4 + entry_size as u64 + 4; // size + data + crc
+        let section_id = self.committed_journal_id;
+        let committed_offset = self.committed_offset;
 
-                // Align to next 16-byte boundary and convert back to offset
-                let aligned_end_bytes = ((entry_end + 15) / 16) * 16;
-                let truncate_to_offset = (aligned_end_bytes / 16) as u32;
+        // If committed offset is 0, it means no entries are committed in this section.
+        // The first entry in a variable journal starts at offset 1 (16 bytes), so truncating
+        // to offset 1 effectively clears it to just its header.
+        if committed_offset == 0 {
+            trace!(
+                section_id,
+                "truncating journal section with no committed entries to header"
+            );
+            self.journal.truncate_section(section_id, 1).await?;
+            return Ok(());
+        }
 
-                if aligned_end_bytes < current_size {
+        // Otherwise, find the end of the last committed entry and truncate after it.
+        match self.journal.get(section_id, committed_offset).await {
+            Ok(Some(entry)) => {
+                let current_size = self.journal.section_size(section_id).await?;
+
+                // Each entry is: size(4) + data(variable) + crc(4), then aligned to 16 bytes.
+                let data_size = entry.encode_size() as u64;
+                let size_on_disk = 4 + data_size + 4;
+                let aligned_size = (size_on_disk + 15) & !15;
+                let new_size_in_bytes = (committed_offset as u64 * 16) + aligned_size;
+
+                if new_size_in_bytes < current_size {
+                    let new_offset = (new_size_in_bytes / 16) as u32;
                     trace!(
                         section_id,
-                        max_reachable_offset,
                         current_size,
-                        truncate_to_bytes = aligned_end_bytes,
-                        truncate_to_offset,
-                        "truncating journal section to remove unreachable entries"
+                        new_size_in_bytes,
+                        "truncating journal section to remove partial writes"
                     );
-
                     self.journal
-                        .truncate_section(section_id, truncate_to_offset)
+                        .truncate_section(section_id, new_offset)
                         .await?;
                 }
+            }
+            Ok(None) => {
+                trace!(
+                    section_id,
+                    committed_offset,
+                    "commit pointer refers to non-existent journal entry; truncating section"
+                );
+                self.journal.truncate_section(section_id, 1).await?;
+            }
+            Err(e) => {
+                trace!(
+                    section_id,
+                    committed_offset,
+                    error = ?e,
+                    "error reading committed journal entry; truncating section"
+                );
+                self.journal.truncate_section(section_id, 1).await?;
             }
         }
 
