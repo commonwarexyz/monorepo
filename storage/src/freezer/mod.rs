@@ -8,10 +8,9 @@
 
 mod storage;
 
+use crate::{diskindex, diskmap};
 pub use storage::Freezer;
 use thiserror::Error;
-
-use crate::{diskindex, diskmap};
 
 /// Errors that can occur when interacting with the freezer.
 #[derive(Debug, Error)]

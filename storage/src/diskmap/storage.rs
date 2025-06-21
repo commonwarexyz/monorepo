@@ -1,16 +1,19 @@
 use super::{Config, Error};
-use crate::journal::variable::{Config as JournalConfig, Journal};
-use crate::metadata::{self, Metadata};
+use crate::{
+    journal::variable::{Config as JournalConfig, Journal},
+    metadata::{self, Metadata},
+};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, Encode, EncodeSize, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_runtime::{Blob, Clock, Metrics, Storage};
-use commonware_utils::array::U64;
-use commonware_utils::Array;
+use commonware_utils::{array::U64, Array};
 use futures::future::try_join_all;
 use prometheus_client::metrics::counter::Counter;
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
-use std::marker::PhantomData;
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
+    marker::PhantomData,
+};
 use tracing::debug;
 
 const COMMITTED_EPOCH: u64 = 0;
