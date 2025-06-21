@@ -168,15 +168,17 @@ pub struct DiskMap<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     // Context for storage operations
     context: E,
 
-    // Configuration
-    config: Config<V::Cfg>,
+    // Codec configuration
+    codec: V::Cfg,
+
+    // Table size
+    table_size: u64,
 
     // Committed data for the disk map
     metadata: Metadata<E, U64>,
 
     // Table blob that maps hash values to journal locations (journal_id, offset)
-    table_blob: E::Blob,
-    table_size: u64, // Number of table entries
+    table: E::Blob,
 
     // Variable journal for storing entries
     journal: Journal<E, JournalEntry<K, V>>,
@@ -217,7 +219,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
 
         // Initialize metadata
         let metadata = Metadata::init(
-            context.clone(),
+            context.with_label("metadata"),
             metadata::Config {
                 partition: config.metadata_partition,
             },
@@ -225,7 +227,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
         .await?;
 
         // Open table blob (includes header)
-        let (table_blob, table_len) = context
+        let (table, table_len) = context
             .open(&config.table_partition, TABLE_BLOB_NAME)
             .await?;
 
@@ -234,8 +236,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
             // buckets
             let table_data_size = config.table_size * FULL_TABLE_ENTRY_SIZE as u64;
             let table_data = vec![0u8; table_data_size as usize];
-            table_blob.write_at(table_data, 0).await?;
-            table_blob.sync().await?;
+            table.write_at(table_data, 0).await?;
+            table.sync().await?;
         }
 
         // Load committed data from metadata
@@ -268,29 +270,19 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
         context.register("puts", "number of put operations", puts.clone());
         context.register("gets", "number of get operations", gets.clone());
 
-        // Initialize modified sections set
-        let modified_sections = HashSet::new();
-
-        // Initialize pending table updates
-        let pending_table_updates = HashMap::new();
-
         let mut diskmap = Self {
             context,
-            config,
-            table_blob,
-            table_size,
+            codec: config.codec_config,
+            table_size: config.table_size,
+            metadata,
+            table,
             journal,
-            current_journal_id,
-            _phantom: PhantomData,
+            current_section: committed_section,
             puts,
             gets,
-            table_reads,
-            modified_sections,
-            pending_table_updates,
-            committed_epoch,
-            committed_journal_id,
-            committed_offset,
-            header_cursor,
+            modified_sections: HashSet::new(),
+            pending_table_updates: HashMap::new(),
+            _phantom: PhantomData,
         };
 
         // Zero-out any bucket slots that belong to a future epoch (after an unclean shutdown).
