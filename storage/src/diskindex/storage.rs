@@ -2,7 +2,7 @@ use super::{Config, Error};
 use crate::rmap::RMap;
 use bytes::{Buf, BufMut};
 use commonware_codec::{FixedSize, Read, ReadExt, Write as CodecWrite};
-use commonware_runtime::{Blob, Metrics, Storage};
+use commonware_runtime::{buffer::Read as ReadBuffer, Blob, Metrics, Storage};
 use commonware_utils::{hex, Array};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::HashMap;
@@ -91,14 +91,14 @@ impl<E: Storage + Metrics, K: Array> DiskIndex<E, K> {
         if blob_len > 0 {
             debug!("scanning index file to rebuild RMap");
 
+            let mut index_blob = ReadBuffer::new(index_blob.clone(), blob_len, config.write_buffer);
             let num_records = blob_len as usize / record_size;
             for index in 0..num_records {
                 let record_offset = (index * record_size) as u64;
-                let record_buf = vec![0u8; record_size];
-                let read_buf = index_blob.read_at(record_buf, record_offset).await?;
-
-                let mut buf_slice = read_buf.as_ref();
-                let record = IndexRecord::<K>::read(&mut buf_slice)?;
+                index_blob.seek_to(record_offset)?;
+                let mut record_buf = vec![0u8; record_size];
+                index_blob.read_exact(&mut record_buf, record_size).await?;
+                let record = IndexRecord::<K>::read(&mut record_buf.as_slice())?;
 
                 if record.is_valid() {
                     intervals.insert(index as u64);
