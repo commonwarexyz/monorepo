@@ -23,19 +23,98 @@ const TABLE_BLOB_NAME: &[u8] = b"table";
 //   u32 max_offset           – greatest offset inside that journal section
 //   u32 crc                  – CRC32 of the first 20 bytes
 //
-// Bucket slot (28 bytes – previous 20 + epoch):
+// Bucket slot (28 bytes):
 //   u64 epoch                – epoch in which this slot was written
 //   u64 journal_id
 //   u32 journal_offset
 //   u32 crc                  – CRC of (epoch | journal_id | journal_offset)
 //   u32 other_crc            – CRC of the sibling slot (for atomic toggle)
 
-/// Size in bytes of the commit pointer header.
-const TABLE_HEADER_SIZE: usize = 24;
+/// Size of a single commit-pointer header slot.
+const HEADER_SLOT_SIZE: usize = 24;
+/// Total header region (two header slots).
+const TABLE_HEADER_SIZE: usize = HEADER_SLOT_SIZE * 2;
 
 /// Two slots per bucket, each slot now 28 bytes.
 const SINGLE_ENTRY_SIZE: usize = 28;
 const TABLE_ENTRY_SIZE: usize = 2 * SINGLE_ENTRY_SIZE;
+
+// -------------------------------------------------------------------------------------------------
+// Commit pointer header (duplicated)
+// -------------------------------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+struct HeaderSlot {
+    epoch: u64,
+    max_journal_id: u64,
+    max_offset: u32,
+    crc: u32,
+}
+
+impl FixedSize for HeaderSlot {
+    const SIZE: usize = HEADER_SLOT_SIZE;
+}
+
+impl CodecWrite for HeaderSlot {
+    fn write(&self, buf: &mut impl BufMut) {
+        buf.put_slice(&self.epoch.to_le_bytes());
+        buf.put_slice(&self.max_journal_id.to_le_bytes());
+        buf.put_slice(&self.max_offset.to_le_bytes());
+        buf.put_slice(&self.crc.to_le_bytes());
+    }
+}
+
+impl Read for HeaderSlot {
+    type Cfg = ();
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let mut epoch_bytes = [0u8; 8];
+        buf.copy_to_slice(&mut epoch_bytes);
+        let epoch = u64::from_le_bytes(epoch_bytes);
+
+        let mut jid_bytes = [0u8; 8];
+        buf.copy_to_slice(&mut jid_bytes);
+        let max_journal_id = u64::from_le_bytes(jid_bytes);
+
+        let mut off_bytes = [0u8; 4];
+        buf.copy_to_slice(&mut off_bytes);
+        let max_offset = u32::from_le_bytes(off_bytes);
+
+        let mut crc_bytes = [0u8; 4];
+        buf.copy_to_slice(&mut crc_bytes);
+        let crc = u32::from_le_bytes(crc_bytes);
+
+        Ok(Self {
+            epoch,
+            max_journal_id,
+            max_offset,
+            crc,
+        })
+    }
+}
+
+impl HeaderSlot {
+    fn calc_crc(epoch: u64, jid: u64, off: u32) -> u32 {
+        let mut data = Vec::with_capacity(20);
+        data.extend_from_slice(&epoch.to_le_bytes());
+        data.extend_from_slice(&jid.to_le_bytes());
+        data.extend_from_slice(&off.to_le_bytes());
+        crc32fast::hash(&data)
+    }
+
+    fn new(epoch: u64, jid: u64, off: u32) -> Self {
+        let crc = Self::calc_crc(epoch, jid, off);
+        Self {
+            epoch,
+            max_journal_id: jid,
+            max_offset: off,
+            crc,
+        }
+    }
+
+    fn is_valid(&self) -> bool {
+        self.crc == Self::calc_crc(self.epoch, self.max_journal_id, self.max_offset)
+    }
+}
 
 /// Single table entry stored in the table blob.
 #[derive(Debug, Clone, PartialEq)]
@@ -224,6 +303,9 @@ pub struct DiskMap<E: Storage + Metrics, K: Array, V: Codec> {
     committed_epoch: u64,
     committed_journal_id: u64,
     committed_offset: u32,
+
+    // which header slot is current (0 or 1)
+    header_cursor: usize,
 }
 
 impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
@@ -254,27 +336,35 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         }
 
         // ------------------------------------------------------------------
-        // Load commit pointer (header)
+        // Load commit pointer (two-header scheme)
         // ------------------------------------------------------------------
         let hdr_buf = table_blob.read_at(vec![0u8; TABLE_HEADER_SIZE], 0).await?;
 
-        let stored_crc = u32::from_le_bytes(
-            hdr_buf.as_ref()[TABLE_HEADER_SIZE - 4..TABLE_HEADER_SIZE]
-                .try_into()
-                .unwrap(),
-        );
-        let computed_crc = crc32fast::hash(&hdr_buf.as_ref()[..TABLE_HEADER_SIZE - 4]);
+        let mut hdr_slice1 = &hdr_buf.as_ref()[0..HEADER_SLOT_SIZE];
+        let mut hdr_slice2 = &hdr_buf.as_ref()[HEADER_SLOT_SIZE..TABLE_HEADER_SIZE];
 
-        let (mut committed_epoch, mut committed_journal_id, mut committed_offset) =
-            (0u64, 0u64, 0u32);
-        if stored_crc == computed_crc {
-            committed_epoch = u64::from_le_bytes(hdr_buf.as_ref()[0..8].try_into().unwrap());
-            committed_journal_id = u64::from_le_bytes(hdr_buf.as_ref()[8..16].try_into().unwrap());
-            committed_offset = u32::from_le_bytes(hdr_buf.as_ref()[16..20].try_into().unwrap());
-        } else {
-            // Corrupted header – treat as epoch 0.
-            trace!("commit header corrupted – starting at epoch 0");
-        }
+        let h1 = HeaderSlot::read(&mut hdr_slice1).unwrap();
+        let h2 = HeaderSlot::read(&mut hdr_slice2).unwrap();
+
+        let h1_valid = h1.is_valid();
+        let h2_valid = h2.is_valid();
+
+        let (committed_epoch, committed_journal_id, committed_offset, header_cursor) =
+            match (h1_valid, h2_valid) {
+                (true, true) => {
+                    if h2.epoch > h1.epoch {
+                        (h2.epoch, h2.max_journal_id, h2.max_offset, 1)
+                    } else {
+                        (h1.epoch, h1.max_journal_id, h1.max_offset, 0)
+                    }
+                }
+                (true, false) => (h1.epoch, h1.max_journal_id, h1.max_offset, 0),
+                (false, true) => (h2.epoch, h2.max_journal_id, h2.max_offset, 1),
+                (false, false) => {
+                    trace!("both header slots invalid – starting at epoch 0");
+                    (0, 0, 0, 0)
+                }
+            };
 
         // Initialize variable journal with a separate partition
         let journal_partition = format!("{}_journal", config.partition);
@@ -320,6 +410,7 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
             committed_epoch,
             committed_journal_id,
             committed_offset,
+            header_cursor,
         };
 
         // Zero-out any bucket slots that belong to a future epoch (after an unclean shutdown).
@@ -488,36 +579,40 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         let new_crc = self.calculate_entry_crc(epoch, journal_id, journal_offset);
 
         // Determine which slot to update (alternate between them)
-        let (update_first, old_entry) = match self.select_valid_entry(&entry1, &entry2) {
+        let (update_first, old_crc) = match self.select_valid_entry(&entry1, &entry2) {
             Ok((old_journal_id, old_journal_offset)) => {
                 // There's a valid current entry - figure out which slot it's in
-                let old_crc = self.calculate_entry_crc(
-                    self.committed_epoch,
-                    old_journal_id,
-                    old_journal_offset,
-                );
-                let entry1_crc = self.calculate_entry_crc(
-                    self.committed_epoch,
-                    entry1.journal_id,
-                    entry1.journal_offset,
-                );
+                let entry1_matches = entry1.journal_id == old_journal_id
+                    && entry1.journal_offset == old_journal_offset;
 
-                if entry1_crc == old_crc {
+                let (update_first, old_crc) = if entry1_matches {
                     // Current entry is in slot 1, update slot 2
-                    (false, (old_journal_id, old_journal_offset))
+                    (
+                        false,
+                        self.calculate_entry_crc(
+                            entry1.epoch,
+                            entry1.journal_id,
+                            entry1.journal_offset,
+                        ),
+                    )
                 } else {
                     // Current entry is in slot 2, update slot 1
-                    (true, (old_journal_id, old_journal_offset))
-                }
+                    (
+                        true,
+                        self.calculate_entry_crc(
+                            entry2.epoch,
+                            entry2.journal_id,
+                            entry2.journal_offset,
+                        ),
+                    )
+                };
+                (update_first, old_crc)
             }
             Err(_) => {
                 // No valid current entry, use slot 1
-                (true, (0, 0))
+                (true, 0)
             }
         };
-
-        // Calculate the old entry's CRC for cross-reference
-        let old_crc = self.calculate_entry_crc(self.committed_epoch, old_entry.0, old_entry.1);
 
         // Build the new complete table entry
         let mut new_buf = Vec::with_capacity(TABLE_ENTRY_SIZE);
@@ -693,22 +788,22 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         self.table_blob.sync().await?;
 
         // ------------------------------------------------------------------
-        // Update commit header (epoch advance)
+        // Update commit header (epoch advance) – write to alternate slot
         // ------------------------------------------------------------------
         let new_epoch = self.committed_epoch + 1;
-        let mut hdr_buf = Vec::with_capacity(TABLE_HEADER_SIZE);
-        hdr_buf.put_slice(&new_epoch.to_le_bytes());
-        hdr_buf.put_slice(&max_journal.to_le_bytes());
-        hdr_buf.put_slice(&max_offset.to_le_bytes());
-        let crc = crc32fast::hash(&hdr_buf);
-        hdr_buf.put_slice(&crc.to_le_bytes());
+        let header_slot = HeaderSlot::new(new_epoch, max_journal, max_offset);
+        let mut hdr_buf = Vec::with_capacity(HEADER_SLOT_SIZE);
+        header_slot.write(&mut hdr_buf);
 
-        self.table_blob.write_at(hdr_buf, 0).await?;
+        let next_cursor = 1 - self.header_cursor;
+        let hdr_offset = (next_cursor * HEADER_SLOT_SIZE) as u64;
+        self.table_blob.write_at(hdr_buf, hdr_offset).await?;
         self.table_blob.sync().await?;
 
         self.committed_epoch = new_epoch;
         self.committed_journal_id = max_journal;
         self.committed_offset = max_offset;
+        self.header_cursor = next_cursor;
 
         self.pending_table_updates.clear();
 
