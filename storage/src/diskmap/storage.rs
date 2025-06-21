@@ -4,6 +4,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, EncodeSize, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_runtime::{Blob, Metrics, Storage};
 use commonware_utils::{hex, Array};
+use futures::future::try_join_all;
 use prometheus_client::metrics::counter::Counter;
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
@@ -772,9 +773,14 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         let mut max_journal = self.committed_journal_id;
         let mut max_offset = self.committed_offset;
 
+        let mut updates = Vec::with_capacity(self.pending_table_updates.len());
         for (&table_index, &(epoch, journal_id, journal_offset)) in &self.pending_table_updates {
-            self.write_table_entry_to_disk(table_index, epoch, journal_id, journal_offset)
-                .await?;
+            updates.push(self.write_table_entry_to_disk(
+                table_index,
+                epoch,
+                journal_id,
+                journal_offset,
+            ));
 
             if journal_id > max_journal
                 || (journal_id == max_journal && journal_offset > max_offset)
@@ -783,6 +789,7 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
                 max_offset = journal_offset;
             }
         }
+        try_join_all(updates).await?;
 
         // Flush table blob (buckets)
         self.table_blob.sync().await?;
