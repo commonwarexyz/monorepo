@@ -10,7 +10,7 @@ use futures::future::try_join_all;
 use prometheus_client::metrics::counter::Counter;
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
-use tracing::trace;
+use tracing::{debug, trace, warn};
 
 const COMMITTED_EPOCH: u64 = 0;
 const COMMITTED_SECTION: u64 = 1;
@@ -226,20 +226,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
         )
         .await?;
 
-        // Open table blob (includes header)
-        let (table, table_len) = context
-            .open(&config.table_partition, TABLE_BLOB_NAME)
-            .await?;
-
-        // If the blob is brand new, create header + zeroed buckets.
-        if table_len == 0 {
-            // buckets
-            let table_data_size = config.table_size * FULL_TABLE_ENTRY_SIZE as u64;
-            let table_data = vec![0u8; table_data_size as usize];
-            table.write_at(table_data, 0).await?;
-            table.sync().await?;
-        }
-
         // Load committed data from metadata
         let committed_epoch = metadata
             .get(&COMMITTED_EPOCH.into())
@@ -254,6 +240,59 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
             .and_then(|v| Some(u32::from_be_bytes(v.as_slice().try_into().unwrap())))
             .unwrap_or(0u32);
 
+        // Open table blob (includes header)
+        let (table, table_len) = context
+            .open(&config.table_partition, TABLE_BLOB_NAME)
+            .await?;
+
+        // If the blob is brand new, create header + zeroed buckets.
+        if table_len == 0 {
+            // buckets
+            let table_data_size = config.table_size * FULL_TABLE_ENTRY_SIZE as u64;
+            let table_data = vec![0u8; table_data_size as usize];
+            table.write_at(table_data, 0).await?;
+            table.sync().await?;
+        } else {
+            // Zero out any table entries whose epoch is greater than the committed epoch
+            let mut sync = false;
+            let zero_buf = vec![0u8; TABLE_ENTRY_SIZE];
+            for table_index in 0..config.table_size {
+                let offset = table_index * FULL_TABLE_ENTRY_SIZE as u64;
+                let result = table.read_at(vec![0u8; TABLE_ENTRY_SIZE], offset).await?;
+
+                let mut buf1 = &result.as_ref()[0..TABLE_ENTRY_SIZE];
+                let entry1 = TableEntry::read(&mut buf1)?;
+                if entry1.epoch > committed_epoch {
+                    debug!(
+                        committed_epoch,
+                        epoch = entry1.epoch,
+                        "found invalid table entry"
+                    );
+                    table.write_at(zero_buf.clone(), offset).await?;
+                    sync = true;
+                }
+
+                let mut buf2 = &result.as_ref()[TABLE_ENTRY_SIZE..FULL_TABLE_ENTRY_SIZE];
+                let entry2 = TableEntry::read(&mut buf2)?;
+                if entry2.epoch > committed_epoch {
+                    debug!(
+                        committed_epoch,
+                        epoch = entry2.epoch,
+                        "found invalid table entry"
+                    );
+                    table
+                        .write_at(zero_buf.clone(), offset + TABLE_ENTRY_SIZE as u64)
+                        .await?;
+                    sync = true;
+                }
+            }
+
+            // Sync the table if any changes were made
+            if sync {
+                table.sync().await?;
+            }
+        }
+
         // Initialize variable journal with a separate partition
         let journal_config = JournalConfig {
             partition: config.journal_partition,
@@ -261,16 +300,18 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
             codec_config: config.codec_config.clone(),
             write_buffer: config.write_buffer,
         };
-        let journal = Journal::init(context.clone(), journal_config).await?;
+        let mut journal = Journal::init(context.clone(), journal_config).await?;
+
+        // Rewind the journal to the committed section and offset
+        journal.rewind(committed_section, committed_offset).await?;
 
         // Create metrics
         let puts = Counter::default();
         let gets = Counter::default();
-
         context.register("puts", "number of put operations", puts.clone());
         context.register("gets", "number of get operations", gets.clone());
 
-        let mut diskmap = Self {
+        Ok(Self {
             context,
             codec: config.codec_config,
             table_size: config.table_size,
@@ -283,15 +324,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
             modified_sections: HashSet::new(),
             pending_table_updates: HashMap::new(),
             _phantom: PhantomData,
-        };
-
-        // Zero-out any bucket slots that belong to a future epoch (after an unclean shutdown).
-        diskmap.clean_table().await?;
-
-        // Scan table entries and truncate journal to latest reachable entry
-        diskmap.truncate_to_latest_reachable_entry().await?;
-
-        Ok(diskmap)
+        })
     }
 
     /// Hash a key to a table index.
@@ -698,22 +731,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
         Ok(())
     }
 
-    /// Truncates journal sections to the last committed high-water mark from the table header.
-    async fn truncate_to_latest_reachable_entry(&mut self) -> Result<(), Error> {
-        trace!(
-            committed_journal_id = self.committed_journal_id,
-            committed_offset = self.committed_offset,
-            "truncating journal to last committed state via journal::truncate_section"
-        );
-
-        // Delegate truncation/rollback logic to the journal itself.
-        self.journal
-            .truncate_section(self.committed_journal_id, self.committed_offset)
-            .await?;
-
-        Ok(())
-    }
-
     /// Validates the integrity of the hash table by checking that all table entries
     /// point to valid journal entries. This is optional and mainly useful for debugging.
     pub async fn validate_table_integrity(&self) -> Result<usize, Error> {
@@ -776,49 +793,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
         // Remove the partition itself
         self.context.remove(&self.config.partition, None).await?;
 
-        Ok(())
-    }
-
-    /// Remove bucket slots whose epoch is greater than the committed epoch.
-    async fn clean_table(&mut self) -> Result<(), Error> {
-        // Determine last allowed epoch
-        let committed_epoch = self
-            .metadata
-            .get(&COMMITTED_EPOCH.into())
-            .and_then(|v| Some(u64::from_be_bytes(v.as_slice().try_into().unwrap())))
-            .unwrap_or(0u64);
-
-        // Zero out any table entries whose epoch is greater than the committed epoch
-        let mut sync = false;
-        let zero_buf = vec![0u8; TABLE_ENTRY_SIZE];
-        for table_index in 0..self.table_size {
-            let offset = table_index * FULL_TABLE_ENTRY_SIZE as u64;
-            let result = self
-                .table
-                .read_at(vec![0u8; TABLE_ENTRY_SIZE], offset)
-                .await?;
-
-            let mut buf1 = &result.as_ref()[0..TABLE_ENTRY_SIZE];
-            let entry1 = TableEntry::read(&mut buf1)?;
-            if entry1.epoch > committed_epoch {
-                self.table.write_at(zero_buf.clone(), offset).await?;
-                sync = true;
-            }
-
-            let mut buf2 = &result.as_ref()[TABLE_ENTRY_SIZE..FULL_TABLE_ENTRY_SIZE];
-            let entry2 = TableEntry::read(&mut buf2)?;
-            if entry2.epoch > committed_epoch {
-                self.table
-                    .write_at(zero_buf.clone(), offset + TABLE_ENTRY_SIZE as u64)
-                    .await?;
-                sync = true;
-            }
-        }
-
-        // Sync the table if any changes were made
-        if sync {
-            self.table.sync().await?;
-        }
         Ok(())
     }
 }
