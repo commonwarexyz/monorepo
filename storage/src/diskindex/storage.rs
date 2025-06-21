@@ -6,7 +6,7 @@ use commonware_runtime::{buffer::Read as ReadBuffer, Blob, Metrics, Storage};
 use commonware_utils::{hex, Array};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::HashMap;
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 const INDEX_BLOB_NAME: &[u8] = b"index";
 
@@ -91,20 +91,23 @@ impl<E: Storage + Metrics, K: Array> DiskIndex<E, K> {
         if blob_len > 0 {
             debug!("scanning index file to rebuild RMap");
 
-            let mut index_blob = ReadBuffer::new(index_blob.clone(), blob_len, config.write_buffer);
+            let mut replay_blob =
+                ReadBuffer::new(index_blob.clone(), blob_len, config.write_buffer);
             let num_records = blob_len as usize / record_size;
             for index in 0..num_records {
                 let record_offset = (index * record_size) as u64;
-                index_blob.seek_to(record_offset)?;
+                replay_blob.seek_to(record_offset)?;
                 let mut record_buf = vec![0u8; record_size];
-                index_blob.read_exact(&mut record_buf, record_size).await?;
+                replay_blob.read_exact(&mut record_buf, record_size).await?;
                 let record = IndexRecord::<K>::read(&mut record_buf.as_slice())?;
 
                 if record.is_valid() {
                     intervals.insert(index as u64);
                 } else {
-                    debug!(index, "found invalid record during scan - stopping");
-                    break;
+                    warn!(index, "found invalid record during scan - overwriting");
+                    index_blob
+                        .write_at(vec![0u8; record_size], record_offset)
+                        .await?;
                 }
             }
 
@@ -114,6 +117,9 @@ impl<E: Storage + Metrics, K: Array> DiskIndex<E, K> {
                 blob_len
             );
         }
+
+        // Sync index blob in case we wrote any invalid records
+        index_blob.sync().await?;
 
         // Initialize metrics
         let items_tracked = Gauge::default();
