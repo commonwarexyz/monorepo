@@ -93,15 +93,18 @@ impl<E: Storage + Metrics, V: Array> DiskIndex<E, V> {
         }
 
         // Initialize intervals by scanning existing records
+        debug!("rebuilding intervals from existing index");
         let mut intervals = RMap::new();
-        if len > 0 {
-            debug!("rebuilding intervals from existing index");
-            let mut replay_blob = ReadBuffer::new(index.clone(), len, config.read_buffer);
-            let num_records = len as u64 / Record::<V>::SIZE as u64;
-            for index in 0..num_records {
+        for (index, blob) in blobs {
+            // Initialize read buffer
+            let size = blob.size();
+            let mut replay_blob = ReadBuffer::new(index.clone(), size, config.read_buffer);
+
+            // Iterate over all records in the blob
+            let mut offset = 0;
+            while offset < size {
                 // Attempt to read record at offset
-                let record_offset = (index * Record::<V>::SIZE) as u64;
-                replay_blob.seek_to(record_offset)?;
+                replay_blob.seek_to(offset)?;
                 let mut record_buf = vec![0u8; Record::<V>::SIZE];
                 replay_blob
                     .read_exact(&mut record_buf, Record::<V>::SIZE)
@@ -117,12 +120,10 @@ impl<E: Storage + Metrics, V: Array> DiskIndex<E, V> {
                 if record.is_valid() {
                     intervals.insert(index as u64);
                     continue;
-                } else {
-                    warn!(index, "found invalid record during scan - overwriting");
-                    index_blob
-                        .write_at(vec![0u8; record_size], record_offset)
-                        .await?;
                 }
+
+                // If record is invalid, do nothing
+                warn!(index, "found invalid record during scan");
             }
 
             debug!(
@@ -186,17 +187,17 @@ impl<E: Storage + Metrics, V: Array> DiskIndex<E, V> {
     }
 
     /// Get the key for a given index.
-    pub async fn get(&mut self, index: u64) -> Result<Option<K>, Error> {
+    pub async fn get(&mut self, index: u64) -> Result<Option<V>, Error> {
         self.gets.inc();
+
+        // If get isn't in an interval, it doesn't exist and we don't need to access disk.
+        if self.intervals.get(&index).is_none() {
+            return Ok(None);
+        }
 
         // Check pending entries first
         if let Some(key) = self.pending_entries.get(&index) {
             return Ok(Some(key.clone()));
-        }
-
-        // Check if index exists in intervals
-        if self.intervals.get(&index).is_none() {
-            return Ok(None);
         }
 
         // Read from disk
