@@ -10,7 +10,7 @@ use futures::future::try_join_all;
 use prometheus_client::metrics::counter::Counter;
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
 const COMMITTED_EPOCH: u64 = 0;
 const COMMITTED_SECTION: u64 = 1;
@@ -172,7 +172,7 @@ pub struct DiskMap<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     codec: V::Cfg,
 
     // Table size
-    table_size: u64,
+    table_size: u32,
 
     // Committed data for the disk map
     metadata: Metadata<E, U64>,
@@ -195,7 +195,7 @@ pub struct DiskMap<E: Storage + Metrics + Clock, K: Array, V: Codec> {
 
     // Pending table updates to be written on sync (table_index -> (epoch, section, offset))
     pending_table_updates: HashMap<
-        u64,
+        u32,
         (
             u64, /*epoch*/
             u64, /*section*/
@@ -248,7 +248,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
         // If the blob is brand new, create header + zeroed buckets.
         if table_len == 0 {
             // buckets
-            let table_data_size = config.table_size * FULL_TABLE_ENTRY_SIZE as u64;
+            let table_data_size = config.table_size as u64 * FULL_TABLE_ENTRY_SIZE as u64;
             let table_data = vec![0u8; table_data_size as usize];
             table.write_at(table_data, 0).await?;
             table.sync().await?;
@@ -257,7 +257,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
             let mut sync = false;
             let zero_buf = vec![0u8; TABLE_ENTRY_SIZE];
             for table_index in 0..config.table_size {
-                let offset = table_index * FULL_TABLE_ENTRY_SIZE as u64;
+                let offset = table_index as u64 * FULL_TABLE_ENTRY_SIZE as u64;
                 let result = table.read_at(vec![0u8; TABLE_ENTRY_SIZE], offset).await?;
 
                 let mut buf1 = &result.as_ref()[0..TABLE_ENTRY_SIZE];
@@ -327,122 +327,51 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
         })
     }
 
-    /// Hash a key to a table index.
-    fn hash_key(&self, key: &K) -> u64 {
-        let hash = crc32fast::hash(key.as_ref()) as u64;
+    /// Compute the table index for a given key.
+    fn table_index(&self, key: &K) -> u32 {
+        let hash = crc32fast::hash(key.as_ref());
         hash % self.table_size
     }
 
-    /// Get the journal location (journal_id, offset) for a given table index.
-    async fn get_table_entry(&self, table_index: u64) -> Result<(u64, u32), Error> {
-        self.table_reads.inc();
+    /// Choose the newer valid entry between two table slots.
+    fn select_valid_entry(&self, entry1: &TableEntry, entry2: &TableEntry) -> Option<(u64, u32)> {
+        match (
+            !entry1.is_empty() && entry1.is_valid(),
+            !entry2.is_empty() && entry2.is_valid(),
+        ) {
+            (true, true) => {
+                if entry1.epoch > entry2.epoch {
+                    Some((entry1.section, entry1.offset))
+                } else if entry2.epoch > entry1.epoch {
+                    Some((entry2.section, entry2.offset))
+                } else {
+                    unreachable!("two valid entries with the same epoch");
+                }
+            }
+            (true, false) => Some((entry1.section, entry1.offset)),
+            (false, true) => Some((entry2.section, entry2.offset)),
+            (false, false) => None,
+        }
+    }
 
+    /// Get the head of the journal chain for a given table index.
+    async fn get_head(&self, table_index: u32) -> Result<Option<(u64, u32)>, Error> {
         // Check if there's a pending update first
-        if let Some(&(_epoch, journal_id, journal_offset)) =
-            self.pending_table_updates.get(&table_index)
-        {
-            return Ok((journal_id, journal_offset));
+        if let Some(&(_epoch, section, offset)) = self.pending_table_updates.get(&table_index) {
+            return Ok(Some((section, offset)));
         }
 
-        let offset = TABLE_HEADER_SIZE as u64 + table_index * TABLE_ENTRY_SIZE as u64;
-        let buf = vec![0u8; TABLE_ENTRY_SIZE];
-        let read_buf = self.table_blob.read_at(buf, offset).await?;
-
-        // Parse both entries using codec
-        let mut buf1 = &read_buf.as_ref()[0..SINGLE_ENTRY_SIZE];
-        let mut buf2 = &read_buf.as_ref()[SINGLE_ENTRY_SIZE..TABLE_ENTRY_SIZE];
-
+        // Read the table entry
+        let offset = table_index as u64 * FULL_TABLE_ENTRY_SIZE as u64;
+        let buf = vec![0u8; FULL_TABLE_ENTRY_SIZE];
+        let read_buf = self.table.read_at(buf, offset).await?;
+        let mut buf1 = &read_buf.as_ref()[0..TABLE_ENTRY_SIZE];
         let entry1 = TableEntry::read(&mut buf1)?;
+        let mut buf2 = &read_buf.as_ref()[TABLE_ENTRY_SIZE..FULL_TABLE_ENTRY_SIZE];
         let entry2 = TableEntry::read(&mut buf2)?;
 
-        // Validate CRCs *and* epoch ≤ committed_epoch.
-        let expected_crc1 =
-            self.calculate_entry_crc(entry1.epoch, entry1.journal_id, entry1.journal_offset);
-        let expected_crc2 =
-            self.calculate_entry_crc(entry2.epoch, entry2.journal_id, entry2.journal_offset);
-
-        let entry1_valid = entry1.epoch <= self.committed_epoch && entry1.crc == expected_crc1;
-        let entry2_valid = entry2.epoch <= self.committed_epoch && entry2.crc == expected_crc2;
-
-        match (entry1_valid, entry2_valid) {
-            (true, true) => {
-                // Both valid - select the one with the higher epoch
-                if entry1.epoch > entry2.epoch {
-                    // Entry1 is newer
-                    Ok((entry1.journal_id, entry1.journal_offset))
-                } else if entry2.epoch > entry1.epoch {
-                    // Entry2 references entry1, so entry2 is newer
-                    Ok((entry2.journal_id, entry2.journal_offset))
-                } else {
-                    // Both entries are the same epoch - corruption
-                    Err(Error::DirectoryCorrupted)
-                }
-            }
-            (true, false) => {
-                // Only entry1 is valid
-                Ok((entry1.journal_id, entry1.journal_offset))
-            }
-            (false, true) => {
-                // Only entry2 is valid
-                Ok((entry2.journal_id, entry2.journal_offset))
-            }
-            (false, false) => {
-                // Both entries are corrupted or empty
-                if entry1.is_empty() && entry2.is_empty() {
-                    // Empty entry
-                    Ok((0, 0))
-                } else {
-                    // Corrupted
-                    Err(Error::DirectoryCorrupted)
-                }
-            }
-        }
-    }
-
-    /// Calculate CRC for the data portion of an entry (journal_id + journal_offset)
-    fn calculate_entry_crc(&self, epoch: u64, journal_id: u64, journal_offset: u32) -> u32 {
-        let mut data = Vec::with_capacity(20);
-        data.extend_from_slice(&epoch.to_le_bytes());
-        data.extend_from_slice(&journal_id.to_le_bytes());
-        data.extend_from_slice(&journal_offset.to_le_bytes());
-        crc32fast::hash(&data)
-    }
-
-    /// Choose the newer valid entry between two table slots.
-    fn select_valid_entry(
-        &self,
-        entry1: &TableEntry,
-        entry2: &TableEntry,
-    ) -> Result<(u64, u32), Error> {
-        // Expected CRCs
-        let expected_crc1 =
-            self.calculate_entry_crc(entry1.epoch, entry1.journal_id, entry1.journal_offset);
-        let expected_crc2 =
-            self.calculate_entry_crc(entry2.epoch, entry2.journal_id, entry2.journal_offset);
-
-        let entry1_valid = entry1.epoch <= self.committed_epoch && entry1.crc == expected_crc1;
-        let entry2_valid = entry2.epoch <= self.committed_epoch && entry2.crc == expected_crc2;
-
-        match (entry1_valid, entry2_valid) {
-            (true, true) => {
-                if entry1.epoch > entry2.epoch {
-                    Ok((entry1.journal_id, entry1.journal_offset))
-                } else if entry2.epoch > entry1.epoch {
-                    Ok((entry2.journal_id, entry2.journal_offset))
-                } else {
-                    Err(Error::DirectoryCorrupted)
-                }
-            }
-            (true, false) => Ok((entry1.journal_id, entry1.journal_offset)),
-            (false, true) => Ok((entry2.journal_id, entry2.journal_offset)),
-            (false, false) => {
-                if entry1.is_empty() && entry2.is_empty() {
-                    Ok((0, 0))
-                } else {
-                    Err(Error::DirectoryCorrupted)
-                }
-            }
-        }
+        // Select the valid entry
+        Ok(self.select_valid_entry(&entry1, &entry2))
     }
 
     /// Set the journal location for a given table index by storing it in memory for later sync.

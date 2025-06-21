@@ -1,38 +1,3 @@
-//! A disk-based multi-map for fixed-length keys and values.
-//!
-//! `DiskMap` is a hash table with chaining that stores all data on disk using the Blob interface.
-//! It uses a directory structure with much higher cardinality than the number of buckets to
-//! provide better lookup performance.
-//!
-//! # Design
-//!
-//! The structure consists of:
-//! - A directory table with `directory_size` entries, each pointing to a bucket
-//! - Buckets stored as separate blobs, containing linked lists of key-value pairs
-//! - A hash function that maps keys to directory entries
-//!
-//! The directory_size is typically much larger than the number of actual buckets,
-//! allowing for better distribution and fewer collisions per bucket.
-//!
-//! # Format
-//!
-//! Directory blob format:
-//! ```text
-//! +---+---+---+---+---+---+---+---+
-//! |     Bucket ID (u64)          |  Entry 0
-//! +---+---+---+---+---+---+---+---+
-//! |     Bucket ID (u64)          |  Entry 1
-//! +---+---+---+---+---+---+---+---+
-//! |            ...               |
-//! ```
-//!
-//! Bucket blob format:
-//! ```text
-//! +---+---+---+---+---+---+---+---+---+---+---+---+
-//! |    Key    |   Value   | Next Offset (u64) | ... |
-//! +---+---+---+---+---+---+---+---+---+---+---+---+
-//! ```
-
 mod storage;
 
 use commonware_utils::array::U64;
@@ -79,7 +44,7 @@ pub struct Config<C> {
 
     /// The size of the table. Should be a power of 2 and much larger than
     /// the expected number of buckets for better distribution.
-    pub table_size: u64,
+    pub table_size: u32,
 
     /// The codec configuration to use for the value stored in the disk map.
     pub codec_config: C,
