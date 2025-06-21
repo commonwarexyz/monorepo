@@ -181,18 +181,8 @@ pub struct DiskMap<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     puts: Counter,
     gets: Counter,
 
-    // Track modified journal sections
-    modified_sections: HashSet<u64>,
-
-    // Pending table updates to be written on sync (table_index -> (epoch, section, offset))
-    pending_table_updates: HashMap<
-        u32,
-        (
-            u64, /*epoch*/
-            u64, /*section*/
-            u32, /*offset*/
-        ),
-    >,
+    // Pending table updates to be written on sync (table_index -> (section, offset))
+    pending: HashMap<u32, (u64 /*section*/, u32 /*offset*/)>,
 
     // Phantom data to satisfy the compiler about generic types
     _phantom: PhantomData<(K, V)>,
@@ -313,8 +303,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
             current_section: committed_section,
             puts,
             gets,
-            modified_sections: HashSet::new(),
-            pending_table_updates: HashMap::new(),
+            pending: HashMap::new(),
             _phantom: PhantomData,
         })
     }
@@ -349,7 +338,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
     /// Get the head of the journal chain for a given table index.
     async fn get_head(&self, table_index: u32) -> Result<Option<(u64, u32)>, Error> {
         // Check if there's a pending update first
-        if let Some(&(_epoch, section, offset)) = self.pending_table_updates.get(&table_index) {
+        if let Some(&(section, offset)) = self.pending.get(&table_index) {
             return Ok(Some((section, offset)));
         }
 
@@ -369,8 +358,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
     /// Write a table entry to disk using atomic dual-entry writes.
     async fn update_head(
         &self,
-        table_index: u64,
         epoch: u64,
+        table_index: u32,
         section: u64,
         offset: u32,
     ) -> Result<(), Error> {
@@ -426,33 +415,19 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
         // Update the section if needed
         self.update_section().await?;
 
-        // Hash key to table index
+        // Get head of the chain from table
         let table_index = self.table_index(&key);
+        let next = self.get_head(table_index).await?;
 
-        // Insert into journal (this will handle the linked list chaining)
-        // Get current head of the chain from table
-        let (section, offset) = self.get_head(table_index).await?;
-
-        // Create journal entry with proper linked list chaining
-        let entry = JournalEntry::new(current_head_journal_id, current_head_offset, key, value);
-
-        // Determine which journal section to write to based on entry size
-        let target_journal_id = self.determine_journal_section(entry.encode_size()).await?;
+        // Create new head of the chain
+        let entry = JournalEntry::new(key, value, next);
 
         // Append entry to the variable journal
-        let (new_entry_offset, _size) = self.journal.append(target_journal_id, entry).await?;
+        let (offset, _) = self.journal.append(self.current_section, entry).await?;
 
-        // Track that this section has been modified
-        self.modified_sections.insert(target_journal_id);
-
-        // Update table to point to this new entry as the head
-        self.set_table_entry(table_index, target_journal_id, new_entry_offset)?;
-
-        trace!(
-            key = hex(key.as_ref()),
-            table_index = table_index,
-            "inserted key-value pair"
-        );
+        // Stage table update
+        self.pending
+            .insert(table_index, (self.current_section, offset));
 
         Ok(())
     }
