@@ -4,7 +4,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
-    Blob, Metrics, Storage,
+    Blob, Clock, Metrics, Storage,
 };
 use commonware_utils::{hex, Array};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -56,7 +56,7 @@ impl<V: Array> Read for Record<V> {
 }
 
 /// Implementation of `DiskIndex` storage.
-pub struct DiskIndex<E: Storage + Metrics, V: Array> {
+pub struct DiskIndex<E: Storage + Metrics + Clock, V: Array> {
     // Configuration and context
     context: E,
     config: Config,
@@ -75,7 +75,7 @@ pub struct DiskIndex<E: Storage + Metrics, V: Array> {
     gets: Counter,
 }
 
-impl<E: Storage + Metrics, V: Array> DiskIndex<E, V> {
+impl<E: Storage + Metrics + Clock, V: Array> DiskIndex<E, V> {
     /// Initialize a new `DiskIndex` instance.
     pub async fn init(context: E, config: Config) -> Result<Self, Error> {
         // Scan for all blobs in the partition
@@ -93,7 +93,12 @@ impl<E: Storage + Metrics, V: Array> DiskIndex<E, V> {
         }
 
         // Initialize intervals by scanning existing records
-        debug!("rebuilding intervals from existing index");
+        debug!(
+            blobs = blobs.len(),
+            "rebuilding intervals from existing index"
+        );
+        let mut start = context.current();
+        let mut items = 0;
         let mut intervals = RMap::new();
         for (index, blob) in blobs {
             // Initialize read buffer
@@ -118,6 +123,7 @@ impl<E: Storage + Metrics, V: Array> DiskIndex<E, V> {
 
                 // If record is valid, add to intervals
                 if record.is_valid() {
+                    items += 1;
                     intervals.insert(index as u64);
                     continue;
                 }
@@ -125,47 +131,27 @@ impl<E: Storage + Metrics, V: Array> DiskIndex<E, V> {
                 // If record is invalid, do nothing
                 warn!(index, "found invalid record during scan");
             }
-
-            debug!(
-                "rebuilt RMap with {} indices (blob_len={})",
-                intervals.iter().count(),
-                blob_len
-            );
         }
-
-        // Sync index blob in case we wrote any invalid records
-        index_blob.sync().await?;
+        debug!(
+            items,
+            elapsed = ?context.current().duration_since(start).unwrap_or_default(),
+            "rebuilt intervals"
+        );
 
         // Initialize metrics
-        let items_tracked = Gauge::default();
         let puts = Counter::default();
         let gets = Counter::default();
-        let syncs = Counter::default();
-
-        context.register(
-            "items_tracked",
-            "Number of items tracked",
-            items_tracked.clone(),
-        );
         context.register("puts", "Number of puts performed", puts.clone());
         context.register("gets", "Number of gets performed", gets.clone());
-        context.register("syncs", "Number of syncs called", syncs.clone());
-
-        // Set initial item count
-        let item_count = intervals.iter().count() as i64;
-        items_tracked.set(item_count);
 
         Ok(Self {
             context,
             config,
-            index_blob,
+            blobs,
             intervals,
-            pending_entries: HashMap::new(),
-            items_tracked,
+            pending: HashMap::new(),
             puts,
             gets,
-            syncs,
-            record_size,
         })
     }
 
