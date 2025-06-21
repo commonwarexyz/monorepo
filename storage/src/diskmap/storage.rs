@@ -183,6 +183,9 @@ pub struct DiskMap<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     // Variable journal for storing entries
     journal: Journal<E, JournalEntry<K, V>>,
 
+    // Target size of each journal
+    target_journal_size: u64,
+
     // Current section for new writes
     current_section: u64,
 
@@ -318,6 +321,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
             metadata,
             table,
             journal,
+            target_journal_size: config.target_journal_size,
             current_section: committed_section,
             puts,
             gets,
@@ -415,20 +419,16 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
     }
 
     /// Determine which journal section to write to based on current journal size.
-    async fn determine_journal_section(&mut self, _entry_size: usize) -> Result<u64, Error> {
-        // If we have an existing journal, check if it has reached the target size
-        if self.current_journal_id > 0 {
-            let current_size = self.journal.section_size(self.current_journal_id).await?;
+    async fn update_section(&mut self) -> Result<(), Error> {
+        // Get the current section size
+        let current_size = self.journal.section_size(self.current_section).await?;
 
-            // Continue using current journal if it hasn't reached target size
-            if current_size < self.config.target_journal_size {
-                return Ok(self.current_journal_id);
-            }
+        // If the current section has reached the target size, create a new section
+        if current_size >= self.target_journal_size {
+            self.current_section += 1;
         }
 
-        // Need a new journal (either first write or current has reached target size)
-        self.current_journal_id += 1;
-        Ok(self.current_journal_id)
+        Ok(())
     }
 
     /// Insert a key-value pair into a journal using proper linked list chaining.
