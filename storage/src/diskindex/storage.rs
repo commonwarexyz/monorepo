@@ -2,13 +2,14 @@ use super::{Config, Error};
 use crate::rmap::RMap;
 use bytes::{Buf, BufMut};
 use commonware_codec::{FixedSize, Read, ReadExt, Write as CodecWrite};
-use commonware_runtime::{buffer::Read as ReadBuffer, Blob, Metrics, Storage};
+use commonware_runtime::{
+    buffer::{Read as ReadBuffer, Write},
+    Blob, Metrics, Storage,
+};
 use commonware_utils::{hex, Array};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, trace, warn};
-
-const INDEX_BLOB_NAME: &[u8] = b"index";
 
 /// Value stored in the index file.
 #[derive(Debug, Clone)]
@@ -60,8 +61,8 @@ pub struct DiskIndex<E: Storage + Metrics, V: Array> {
     context: E,
     config: Config,
 
-    // Index blob for storing key records
-    index: E::Blob,
+    // Index blobs for storing key records
+    blobs: BTreeMap<u64, Write<E::Blob>>,
 
     // RMap for interval tracking
     intervals: RMap,
@@ -77,10 +78,19 @@ pub struct DiskIndex<E: Storage + Metrics, V: Array> {
 impl<E: Storage + Metrics, V: Array> DiskIndex<E, V> {
     /// Initialize a new `DiskIndex` instance.
     pub async fn init(context: E, config: Config) -> Result<Self, Error> {
-        // Open index blob
-        // TODO: can't actually store u64 items in this blob (as each record takes non-zero bytes)
-        // TODO: limit size of each blob and crate on-demand
-        let (index, len) = context.open(&config.partition, INDEX_BLOB_NAME).await?;
+        // Scan for all blobs in the partition
+        let mut blobs = BTreeMap::new();
+        let stored_blobs = context.scan(&config.partition).await?;
+        for name in stored_blobs {
+            let (blob, len) = context.open(&config.partition, &name).await?;
+            let index = match name.try_into() {
+                Ok(index) => u64::from_be_bytes(index),
+                Err(nm) => Err(Error::InvalidBlobName(nm))?,
+            };
+            debug!(blob = index, len, "found index blob");
+            let blob = Write::new(blob, len, config.write_buffer);
+            blobs.insert(index, blob);
+        }
 
         // Initialize intervals by scanning existing records
         let mut intervals = RMap::new();

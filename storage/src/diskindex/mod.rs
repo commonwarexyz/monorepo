@@ -45,6 +45,12 @@ pub struct Config {
     /// The `commonware-runtime::Storage` partition to use for storing the index.
     pub partition: String,
 
+    /// The maximum number of items to store in each index blob.
+    pub items_per_blob: u64,
+
+    /// The size of the write buffer to use when writing to the index.
+    pub write_buffer: usize,
+
     /// The size of the read buffer to use on restart.
     pub read_buffer: usize,
 }
