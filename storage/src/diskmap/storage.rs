@@ -124,24 +124,22 @@ struct TableEntry {
     journal_id: u64,
     journal_offset: u32,
     crc: u32,
-    other_crc: u32,
 }
 
 impl TableEntry {
     /// Create a new `TableEntry`.
-    fn new(epoch: u64, journal_id: u64, journal_offset: u32, crc: u32, other_crc: u32) -> Self {
+    fn new(epoch: u64, journal_id: u64, journal_offset: u32, crc: u32) -> Self {
         Self {
             epoch,
             journal_id,
             journal_offset,
             crc,
-            other_crc,
         }
     }
 
     /// Check if this entry is empty (all zeros).
     fn is_empty(&self) -> bool {
-        self.journal_id == 0 && self.journal_offset == 0 && self.crc == 0 && self.other_crc == 0
+        self.journal_id == 0 && self.journal_offset == 0 && self.crc == 0
     }
 }
 
@@ -155,7 +153,6 @@ impl CodecWrite for TableEntry {
         buf.put_slice(&self.journal_id.to_le_bytes());
         buf.put_slice(&self.journal_offset.to_le_bytes());
         buf.put_slice(&self.crc.to_le_bytes());
-        buf.put_slice(&self.other_crc.to_le_bytes());
     }
 }
 
@@ -179,16 +176,11 @@ impl Read for TableEntry {
         buf.copy_to_slice(&mut crc_bytes);
         let crc = u32::from_le_bytes(crc_bytes);
 
-        let mut other_crc_bytes = [0u8; 4];
-        buf.copy_to_slice(&mut other_crc_bytes);
-        let other_crc = u32::from_le_bytes(other_crc_bytes);
-
         Ok(Self {
             epoch,
             journal_id,
             journal_offset,
             crc,
-            other_crc,
         })
     }
 }
@@ -462,15 +454,15 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
 
         match (entry1_valid, entry2_valid) {
             (true, true) => {
-                // Both valid - select the one that references the other's CRC
-                if entry1.other_crc == expected_crc2 {
-                    // Entry1 references entry2, so entry1 is newer
+                // Both valid - select the one with the higher epoch
+                if entry1.epoch > entry2.epoch {
+                    // Entry1 is newer
                     Ok((entry1.journal_id, entry1.journal_offset))
-                } else if entry2.other_crc == expected_crc1 {
+                } else if entry2.epoch > entry1.epoch {
                     // Entry2 references entry1, so entry2 is newer
                     Ok((entry2.journal_id, entry2.journal_offset))
                 } else {
-                    // Neither references the other correctly - corruption
+                    // Both entries are the same epoch - corruption
                     Err(Error::DirectoryCorrupted)
                 }
             }
@@ -521,9 +513,9 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
 
         match (entry1_valid, entry2_valid) {
             (true, true) => {
-                if entry1.other_crc == expected_crc2 {
+                if entry1.epoch > entry2.epoch {
                     Ok((entry1.journal_id, entry1.journal_offset))
-                } else if entry2.other_crc == expected_crc1 {
+                } else if entry2.epoch > entry1.epoch {
                     Ok((entry2.journal_id, entry2.journal_offset))
                 } else {
                     Err(Error::DirectoryCorrupted)
@@ -580,7 +572,7 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         let new_crc = self.calculate_entry_crc(epoch, journal_id, journal_offset);
 
         // Determine which slot to update (alternate between them)
-        let (update_first, old_crc) = match self.select_valid_entry(&entry1, &entry2) {
+        let (update_first, _) = match self.select_valid_entry(&entry1, &entry2) {
             Ok((old_journal_id, old_journal_offset)) => {
                 // There's a valid current entry - figure out which slot it's in
                 let entry1_matches = entry1.journal_id == old_journal_id
@@ -620,13 +612,13 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
 
         if update_first {
             // Update first slot, keep second slot
-            let new_entry1 = TableEntry::new(epoch, journal_id, journal_offset, new_crc, old_crc);
+            let new_entry1 = TableEntry::new(epoch, journal_id, journal_offset, new_crc);
             new_entry1.write(&mut new_buf);
             entry2.write(&mut new_buf);
         } else {
             // Keep first slot, update second slot
             entry1.write(&mut new_buf);
-            let new_entry2 = TableEntry::new(epoch, journal_id, journal_offset, new_crc, old_crc);
+            let new_entry2 = TableEntry::new(epoch, journal_id, journal_offset, new_crc);
             new_entry2.write(&mut new_buf);
         }
 
