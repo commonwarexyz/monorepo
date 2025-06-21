@@ -649,6 +649,41 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     pub async fn truncate_section(&mut self, section: u64, offset: u32) -> Result<(), Error> {
         self.prune_guard(section, false)?;
 
+        // ------------------------------------------------------------------
+        // First, drop any sections with an id greater than `section` because
+        // they are by definition ahead of the truncation point and therefore
+        // uncommitted.  This mirrors a rollback to an earlier checkpoint.
+        // ------------------------------------------------------------------
+
+        // Collect the section ids > `section` so we can mutate `self.blobs` safely.
+        let trailing: Vec<u64> = self
+            .blobs
+            .range((
+                std::ops::Bound::Excluded(section),
+                std::ops::Bound::Unbounded,
+            ))
+            .map(|(&s, _)| s)
+            .collect();
+
+        for sec in trailing {
+            if let Some(blob) = self.blobs.remove(&sec) {
+                let size = blob.size().await;
+                blob.close().await?;
+
+                // Remove the underlying blob from storage.
+                self.context
+                    .remove(&self.cfg.partition, Some(&sec.to_be_bytes()))
+                    .await?;
+
+                debug!(
+                    section = sec,
+                    size, "removed trailing section during truncate"
+                );
+                self.tracked.dec();
+                self.pruned.inc(); // reuse the metric
+            }
+        }
+
         let blob = match self.blobs.get_mut(&section) {
             Some(blob) => blob,
             None => return Ok(()), // Section doesn't exist, nothing to truncate

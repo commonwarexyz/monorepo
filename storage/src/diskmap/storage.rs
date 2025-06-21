@@ -855,71 +855,13 @@ impl<E: Storage + Metrics, K: Array, V: Codec> DiskMap<E, K, V> {
         trace!(
             committed_journal_id = self.committed_journal_id,
             committed_offset = self.committed_offset,
-            "truncating journal to last committed state"
+            "truncating journal to last committed state via journal::truncate_section"
         );
 
-        // If there is no committed section, we are done (nothing to truncate).
-        if self.committed_journal_id == 0 {
-            return Ok(());
-        }
-
-        let section_id = self.committed_journal_id;
-        let committed_offset = self.committed_offset;
-
-        // If committed offset is 0, it means no entries are committed in this section.
-        // The first entry in a variable journal starts at offset 1 (16 bytes), so truncating
-        // to offset 1 effectively clears it to just its header.
-        if committed_offset == 0 {
-            trace!(
-                section_id,
-                "truncating journal section with no committed entries to header"
-            );
-            self.journal.truncate_section(section_id, 1).await?;
-            return Ok(());
-        }
-
-        // Otherwise, find the end of the last committed entry and truncate after it.
-        match self.journal.get(section_id, committed_offset).await {
-            Ok(Some(entry)) => {
-                let current_size = self.journal.section_size(section_id).await?;
-
-                // Each entry is: size(4) + data(variable) + crc(4), then aligned to 16 bytes.
-                let data_size = entry.encode_size() as u64;
-                let size_on_disk = 4 + data_size + 4;
-                let aligned_size = (size_on_disk + 15) & !15;
-                let new_size_in_bytes = (committed_offset as u64 * 16) + aligned_size;
-
-                if new_size_in_bytes < current_size {
-                    let new_offset = (new_size_in_bytes / 16) as u32;
-                    trace!(
-                        section_id,
-                        current_size,
-                        new_size_in_bytes,
-                        "truncating journal section to remove partial writes"
-                    );
-                    self.journal
-                        .truncate_section(section_id, new_offset)
-                        .await?;
-                }
-            }
-            Ok(None) => {
-                trace!(
-                    section_id,
-                    committed_offset,
-                    "commit pointer refers to non-existent journal entry; truncating section"
-                );
-                self.journal.truncate_section(section_id, 1).await?;
-            }
-            Err(e) => {
-                trace!(
-                    section_id,
-                    committed_offset,
-                    error = ?e,
-                    "error reading committed journal entry; truncating section"
-                );
-                self.journal.truncate_section(section_id, 1).await?;
-            }
-        }
+        // Delegate truncation/rollback logic to the journal itself.
+        self.journal
+            .truncate_section(self.committed_journal_id, self.committed_offset)
+            .await?;
 
         Ok(())
     }
