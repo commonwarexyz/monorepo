@@ -1,10 +1,10 @@
 //! A persistent storage system that provides the same interface as archive but without pruning support.
 //!
-//! Behind the scenes, it uses diskmap for key indexing (key -> value) and a fixed journal for
-//! index queries (storing index -> key). Key queries use the diskmap and index queries lookup
-//! the key in the fixed journal and then get the value from the diskmap.
+//! Behind the scenes, it uses diskmap for key-value storage and diskindex for index-key mapping.
+//! Key queries use the diskmap directly and index queries lookup the key in the diskindex
+//! and then get the value from the diskmap.
 //!
-//! The only in-memory data structure is RMap for interval queries.
+//! The diskindex manages the RMap for interval queries.
 
 mod storage;
 
@@ -18,8 +18,8 @@ pub enum Error {
     Runtime(#[from] commonware_runtime::Error),
     #[error("diskmap error: {0}")]
     DiskMap(#[from] crate::diskmap::Error),
-    #[error("journal error: {0}")]
-    Journal(#[from] crate::journal::Error),
+    #[error("diskindex error: {0}")]
+    DiskIndex(#[from] crate::diskindex::Error),
     #[error("record corrupted")]
     RecordCorrupted,
 }
