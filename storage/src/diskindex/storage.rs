@@ -10,99 +10,102 @@ use tracing::{debug, trace, warn};
 
 const INDEX_BLOB_NAME: &[u8] = b"index";
 
-/// Record stored in the index file
+/// Value stored in the index file.
 #[derive(Debug, Clone)]
-struct IndexRecord<K: Array> {
-    key: K,
+struct Record<V: Array> {
+    value: V,
     crc: u32,
 }
 
-impl<K: Array> IndexRecord<K> {
-    fn new(key: K) -> Self {
-        let crc = crc32fast::hash(key.as_ref());
-        Self { key, crc }
+impl<V: Array> Record<V> {
+    fn new(value: V) -> Self {
+        let crc = crc32fast::hash(value.as_ref());
+        Self { value, crc }
     }
 
     fn is_valid(&self) -> bool {
-        self.crc == crc32fast::hash(self.key.as_ref())
+        self.crc == crc32fast::hash(self.value.as_ref())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.value.is_empty() && self.crc == 0
     }
 }
 
-impl<K: Array> FixedSize for IndexRecord<K> {
-    const SIZE: usize = K::SIZE + 4; // key + crc32
+impl<V: Array> FixedSize for Record<V> {
+    const SIZE: usize = V::SIZE + u32::SIZE;
 }
 
-impl<K: Array> CodecWrite for IndexRecord<K> {
+impl<V: Array> CodecWrite for Record<V> {
     fn write(&self, buf: &mut impl BufMut) {
-        self.key.write(buf);
-        buf.put_slice(&self.crc.to_le_bytes());
+        self.value.write(buf);
+        self.crc.write(buf);
     }
 }
 
-impl<K: Array> Read for IndexRecord<K> {
+impl<V: Array> Read for Record<V> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let key = K::read(buf)?;
+        let value = V::read(buf)?;
+        let crc = u32::read(buf)?;
 
-        let mut crc_bytes = [0u8; 4];
-        buf.copy_to_slice(&mut crc_bytes);
-        let crc = u32::from_le_bytes(crc_bytes);
-
-        Ok(Self { key, crc })
+        Ok(Self { value, crc })
     }
 }
 
 /// Implementation of `DiskIndex` storage.
-pub struct DiskIndex<E: Storage + Metrics, K: Array> {
+pub struct DiskIndex<E: Storage + Metrics, V: Array> {
     // Configuration and context
     context: E,
     config: Config,
 
     // Index blob for storing key records
-    index_blob: E::Blob,
+    index: E::Blob,
 
     // RMap for interval tracking
     intervals: RMap,
 
     // Pending index entries to be synced
-    pending_entries: HashMap<u64, K>,
+    pending: HashMap<u64, V>,
 
     // Metrics
-    items_tracked: Gauge,
     puts: Counter,
     gets: Counter,
-    syncs: Counter,
-
-    // Record size for this key type
-    record_size: usize,
 }
 
-impl<E: Storage + Metrics, K: Array> DiskIndex<E, K> {
+impl<E: Storage + Metrics, V: Array> DiskIndex<E, V> {
     /// Initialize a new `DiskIndex` instance.
     pub async fn init(context: E, config: Config) -> Result<Self, Error> {
-        let record_size = IndexRecord::<K>::SIZE;
-
         // Open index blob
-        let (index_blob, blob_len) = context.open(&config.partition, INDEX_BLOB_NAME).await?;
+        // TODO: can't actually store u64 items in this blob (as each record takes non-zero bytes)
+        let (index, len) = context.open(&config.partition, INDEX_BLOB_NAME).await?;
 
-        // Initialize RMap by scanning existing records
+        // Initialize intervals by scanning existing records
         let mut intervals = RMap::new();
-        if blob_len > 0 {
-            debug!("scanning index file to rebuild RMap");
-
-            let mut replay_blob =
-                ReadBuffer::new(index_blob.clone(), blob_len, config.write_buffer);
-            let num_records = blob_len as usize / record_size;
+        if len > 0 {
+            debug!("rebuilding intervals from existing index");
+            let mut replay_blob = ReadBuffer::new(index.clone(), len, config.read_buffer);
+            let num_records = len as u64 / Record::<V>::SIZE as u64;
             for index in 0..num_records {
-                let record_offset = (index * record_size) as u64;
+                // Attempt to read record at offset
+                let record_offset = (index * Record::<V>::SIZE) as u64;
                 replay_blob.seek_to(record_offset)?;
-                let mut record_buf = vec![0u8; record_size];
-                replay_blob.read_exact(&mut record_buf, record_size).await?;
-                let record = IndexRecord::<K>::read(&mut record_buf.as_slice())?;
+                let mut record_buf = vec![0u8; Record::<V>::SIZE];
+                replay_blob
+                    .read_exact(&mut record_buf, Record::<V>::SIZE)
+                    .await?;
+                let record = Record::<V>::read(&mut record_buf.as_slice())?;
 
+                // If record is empty, skip it
+                if record.is_empty() {
+                    continue;
+                }
+
+                // If record is valid, add to intervals
                 if record.is_valid() {
                     intervals.insert(index as u64);
+                    continue;
                 } else {
                     warn!(index, "found invalid record during scan - overwriting");
                     index_blob
@@ -191,7 +194,7 @@ impl<E: Storage + Metrics, K: Array> DiskIndex<E, K> {
         let read_buf = self.index_blob.read_at(record_buf, record_offset).await?;
 
         let mut buf_slice = read_buf.as_ref();
-        let record = IndexRecord::<K>::read(&mut buf_slice)?;
+        let record = Record::<K>::read(&mut buf_slice)?;
 
         if record.is_valid() {
             Ok(Some(record.key))
@@ -222,7 +225,7 @@ impl<E: Storage + Metrics, K: Array> DiskIndex<E, K> {
 
         // Write all pending entries to disk
         for (&index, key) in &self.pending_entries {
-            let record = IndexRecord::new(key.clone());
+            let record = Record::new(key.clone());
             let record_offset = index * self.record_size as u64;
 
             let mut record_buf = Vec::with_capacity(self.record_size);

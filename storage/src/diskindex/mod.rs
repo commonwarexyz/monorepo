@@ -45,6 +45,6 @@ pub struct Config {
     /// The `commonware-runtime::Storage` partition to use for storing the index.
     pub partition: String,
 
-    /// The size of the write buffer for the index file.
-    pub write_buffer: usize,
+    /// The size of the read buffer to use on restart.
+    pub read_buffer: usize,
 }
