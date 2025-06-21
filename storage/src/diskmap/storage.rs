@@ -8,8 +8,9 @@ use commonware_utils::array::U64;
 use commonware_utils::{hex, Array};
 use futures::future::try_join_all;
 use prometheus_client::metrics::counter::Counter;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::marker::PhantomData;
+use std::mem::take;
 use tracing::{debug, trace};
 
 const COMMITTED_EPOCH: u64 = 0;
@@ -182,7 +183,8 @@ pub struct DiskMap<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     gets: Counter,
 
     // Pending table updates to be written on sync (table_index -> (section, offset))
-    pending: HashMap<u32, (u64 /*section*/, u32 /*offset*/)>,
+    modified_sections: BTreeSet<u64>,
+    pending: BTreeMap<u32, (u64 /*section*/, u32 /*offset*/)>,
 
     // Phantom data to satisfy the compiler about generic types
     _phantom: PhantomData<(K, V)>,
@@ -207,19 +209,14 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
         )
         .await?;
 
-        // Load committed data from metadata
-        let committed_epoch = metadata
-            .get(&COMMITTED_EPOCH.into())
-            .and_then(|v| Some(u64::from_be_bytes(v.as_slice().try_into().unwrap())))
-            .unwrap_or(0u64);
-        let committed_section = metadata
-            .get(&COMMITTED_SECTION.into())
-            .and_then(|v| Some(u64::from_be_bytes(v.as_slice().try_into().unwrap())))
-            .unwrap_or(0u64);
-        let committed_offset = metadata
-            .get(&COMMITTED_OFFSET.into())
-            .and_then(|v| Some(u32::from_be_bytes(v.as_slice().try_into().unwrap())))
-            .unwrap_or(0u32);
+        // Initialize variable journal with a separate partition
+        let journal_config = JournalConfig {
+            partition: config.journal_partition,
+            compression: config.journal_compression,
+            codec_config: config.codec_config.clone(),
+            write_buffer: config.write_buffer,
+        };
+        let mut journal = Journal::init(context.clone(), journal_config).await?;
 
         // Open table blob (includes header)
         let (table, table_len) = context
@@ -227,13 +224,31 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
             .await?;
 
         // If the blob is brand new, create header + zeroed buckets.
-        if table_len == 0 {
+        let current_section = if table_len == 0 {
             // buckets
             let table_data_size = config.table_size as u64 * FULL_TABLE_ENTRY_SIZE as u64;
             let table_data = vec![0u8; table_data_size as usize];
             table.write_at(table_data, 0).await?;
             table.sync().await?;
+            0
         } else {
+            // Load committed data from metadata
+            let committed_epoch = metadata
+                .get(&COMMITTED_EPOCH.into())
+                .and_then(|v| Some(u64::from_be_bytes(v.as_slice().try_into().unwrap())))
+                .unwrap_or(0u64);
+            let committed_section = metadata
+                .get(&COMMITTED_SECTION.into())
+                .and_then(|v| Some(u64::from_be_bytes(v.as_slice().try_into().unwrap())))
+                .unwrap_or(0u64);
+            let committed_offset = metadata
+                .get(&COMMITTED_OFFSET.into())
+                .and_then(|v| Some(u32::from_be_bytes(v.as_slice().try_into().unwrap())))
+                .unwrap_or(0u32);
+
+            // Rewind the journal to the committed section and offset
+            journal.rewind(committed_section, committed_offset).await?;
+
             // Zero out any table entries whose epoch is greater than the committed epoch
             let mut sync = false;
             let zero_buf = vec![0u8; TABLE_ENTRY_SIZE];
@@ -272,19 +287,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
             if sync {
                 table.sync().await?;
             }
-        }
-
-        // Initialize variable journal with a separate partition
-        let journal_config = JournalConfig {
-            partition: config.journal_partition,
-            compression: config.journal_compression,
-            codec_config: config.codec_config.clone(),
-            write_buffer: config.write_buffer,
+            committed_section
         };
-        let mut journal = Journal::init(context.clone(), journal_config).await?;
-
-        // Rewind the journal to the committed section and offset
-        journal.rewind(committed_section, committed_offset).await?;
 
         // Create metrics
         let puts = Counter::default();
@@ -300,10 +304,11 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
             table,
             journal,
             target_journal_size: config.target_journal_size,
-            current_section: committed_section,
+            current_section,
             puts,
             gets,
-            pending: HashMap::new(),
+            modified_sections: BTreeSet::new(),
+            pending: BTreeMap::new(),
             _phantom: PhantomData,
         })
     }
@@ -426,6 +431,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
         let (offset, _) = self.journal.append(self.current_section, entry).await?;
 
         // Stage table update
+        self.modified_sections.insert(self.current_section);
         self.pending
             .insert(table_index, (self.current_section, offset));
 
@@ -475,56 +481,40 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
     /// First syncs all journal sections, then flushes pending table updates, and finally syncs the table.
     pub async fn sync(&mut self) -> Result<(), Error> {
         // First sync all modified journal sections
-        for &section in &self.modified_sections {
-            self.journal.sync(section).await?;
+        for section in &self.modified_sections {
+            self.journal.sync(*section).await?;
         }
-
-        // Clear the modified sections since they're now synced
         self.modified_sections.clear();
 
-        let mut max_journal = self.committed_journal_id;
-        let mut max_offset = self.committed_offset;
+        // Get max section and offset
+        let max_section = self.current_section;
+        let max_offset = self.journal.section_size(max_section).await?;
 
-        let mut updates = Vec::with_capacity(self.pending_table_updates.len());
-        for (&table_index, &(epoch, journal_id, journal_offset)) in &self.pending_table_updates {
-            updates.push(self.write_table_entry_to_disk(
-                table_index,
-                epoch,
-                journal_id,
-                journal_offset,
-            ));
+        // Get the current epoch
+        let committed_epoch = self
+            .metadata
+            .get(&COMMITTED_EPOCH.into())
+            .and_then(|v| Some(u64::from_be_bytes(v.as_slice().try_into().unwrap())))
+            .unwrap_or(0);
+        let next_epoch = committed_epoch.checked_add(1).expect("epoch overflow");
 
-            if journal_id > max_journal
-                || (journal_id == max_journal && journal_offset > max_offset)
-            {
-                max_journal = journal_id;
-                max_offset = journal_offset;
-            }
+        // Update table entries
+        let mut updates = Vec::with_capacity(self.pending.len());
+        for (&table_index, &(section, offset)) in &self.pending {
+            updates.push(self.update_head(next_epoch, table_index, section, offset));
         }
         try_join_all(updates).await?;
+        self.table.sync().await?;
+        self.pending.clear();
 
-        // Flush table blob (buckets)
-        self.table_blob.sync().await?;
-
-        // ------------------------------------------------------------------
-        // Update commit header (epoch advance) – write to alternate slot
-        // ------------------------------------------------------------------
-        let new_epoch = self.committed_epoch + 1;
-        let header_slot = HeaderSlot::new(new_epoch, max_journal, max_offset);
-        let mut hdr_buf = Vec::with_capacity(HEADER_SLOT_SIZE);
-        header_slot.write(&mut hdr_buf);
-
-        let next_cursor = 1 - self.header_cursor;
-        let hdr_offset = (next_cursor * HEADER_SLOT_SIZE) as u64;
-        self.table_blob.write_at(hdr_buf, hdr_offset).await?;
-        self.table_blob.sync().await?;
-
-        self.committed_epoch = new_epoch;
-        self.committed_journal_id = max_journal;
-        self.committed_offset = max_offset;
-        self.header_cursor = next_cursor;
-
-        self.pending_table_updates.clear();
+        // Update committed data
+        self.metadata
+            .put(COMMITTED_EPOCH.into(), next_epoch.to_be_bytes().to_vec());
+        self.metadata
+            .put(COMMITTED_SECTION.into(), max_section.to_be_bytes().to_vec());
+        self.metadata
+            .put(COMMITTED_OFFSET.into(), max_offset.to_be_bytes().to_vec());
+        self.metadata.sync().await?;
 
         Ok(())
     }
