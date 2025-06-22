@@ -1,3 +1,5 @@
+//! Primitive implementations of [Translator].
+
 use std::hash::{BuildHasher, Hash, Hasher};
 
 /// Translate keys into an internal representation used by `Index`.
