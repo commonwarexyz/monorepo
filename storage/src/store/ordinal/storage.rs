@@ -12,7 +12,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     mem::take,
 };
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Value stored in the index file.
 #[derive(Debug, Clone)]
@@ -29,10 +29,6 @@ impl<V: Array> Record<V> {
 
     fn is_valid(&self) -> bool {
         self.crc == crc32fast::hash(self.value.as_ref())
-    }
-
-    fn is_empty(&self) -> bool {
-        self.value.is_empty() && self.crc == 0
     }
 }
 
@@ -127,11 +123,6 @@ impl<E: Storage + Metrics + Clock, V: Array> Store<E, V> {
                 let record = Record::<V>::read(&mut record_buf.as_slice())?;
                 offset += Record::<V>::SIZE as u64;
 
-                // If record is empty, skip it
-                if record.is_empty() {
-                    continue;
-                }
-
                 // If record is valid, add to intervals
                 if record.is_valid() {
                     items += 1;
@@ -139,8 +130,8 @@ impl<E: Storage + Metrics + Clock, V: Array> Store<E, V> {
                     continue;
                 }
 
-                // If record is invalid, do nothing
-                warn!(index, "found invalid record during scan");
+                // If record is invalid, it may either be empty or corrupted. We don't
+                // store enough information to determine which (and thus don't log).
             }
         }
         debug!(
