@@ -137,10 +137,10 @@ pub enum Error {
 /// Configuration for [Archive] storage.
 #[derive(Clone)]
 pub struct Config<C> {
-    /// The configuration for the [immutable::Index].
+    /// The configuration for the [immutable::Store].
     pub immutable: immutable::Config<C>,
 
-    /// The configuration for the [ordinal::Index].
+    /// The configuration for the [ordinal::Store].
     pub ordinal: ordinal::Config,
 }
 

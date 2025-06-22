@@ -5,7 +5,7 @@
 //!
 //! Data is stored in [crate::journal::variable::Journal] (an append-only log) and the location of
 //! written data is stored in-memory by both index and key (translated representation using a
-//! caller-provided [crate::index::Translator]) to enable **single-read lookups** for both query
+//! caller-provided [crate::translator::Translator]) to enable **single-read lookups** for both query
 //! patterns over all archived data.
 //!
 //! _Notably, [Archive] does not make use of compaction nor on-disk indexes (and thus has no read
