@@ -48,18 +48,18 @@ fn bench_immutable_get(c: &mut Criterion) {
                             let keys = keys.clone();
                             async move {
                                 let ctx = context::get::<commonware_runtime::tokio::Context>();
-                                let mut archive = get_immutable(ctx, compression).await;
+                                let archive = get_immutable(ctx, compression).await;
                                 if pattern == "key" {
                                     let selected_keys = select_keys(&keys, reads, ITEMS);
                                     let start = Instant::now();
                                     for _ in 0..iters {
                                         match mode {
                                             "serial" => {
-                                                read_serial_keys(&mut archive, &selected_keys).await
+                                                read_serial_keys(&archive, &selected_keys).await
                                             }
                                             "concurrent" => {
                                                 read_concurrent_keys(
-                                                    &mut archive,
+                                                    &archive,
                                                     selected_keys.clone(),
                                                 )
                                                 .await
@@ -74,15 +74,12 @@ fn bench_immutable_get(c: &mut Criterion) {
                                     for _ in 0..iters {
                                         match mode {
                                             "serial" => {
-                                                read_serial_indices(&mut archive, &selected_indices)
+                                                read_serial_indices(&archive, &selected_indices)
                                                     .await
                                             }
                                             "concurrent" => {
-                                                read_concurrent_indices(
-                                                    &mut archive,
-                                                    &selected_indices,
-                                                )
-                                                .await
+                                                read_concurrent_indices(&archive, &selected_indices)
+                                                    .await
                                             }
                                             _ => unreachable!(),
                                         }
