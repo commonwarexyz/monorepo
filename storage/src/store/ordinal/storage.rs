@@ -54,7 +54,7 @@ impl<V: Array> Read for Record<V> {
     }
 }
 
-/// Implementation of `Index` storage.
+/// Implementation of ordinal storage.
 pub struct Store<E: Storage + Metrics + Clock, V: Array> {
     // Configuration and context
     context: E,
@@ -75,7 +75,7 @@ pub struct Store<E: Storage + Metrics + Clock, V: Array> {
 }
 
 impl<E: Storage + Metrics + Clock, V: Array> Store<E, V> {
-    /// Initialize a new `Index` instance.
+    /// Initialize a new [Store] instance.
     pub async fn init(context: E, config: Config) -> Result<Self, Error> {
         // Scan for all blobs in the partition
         let mut blobs = BTreeMap::new();
@@ -246,7 +246,7 @@ impl<E: Storage + Metrics + Clock, V: Array> Store<E, V> {
         Ok(())
     }
 
-    /// Close the disk index.
+    /// Close the store.
     pub async fn close(mut self) -> Result<(), Error> {
         // Sync any pending entries
         self.sync().await?;
@@ -258,7 +258,7 @@ impl<E: Storage + Metrics + Clock, V: Array> Store<E, V> {
         Ok(())
     }
 
-    /// Destroy the disk index and remove all data.
+    /// Destroy the store and remove all data.
     pub async fn destroy(self) -> Result<(), Error> {
         // Close all blobs
         for (i, blob) in self.blobs.into_iter() {

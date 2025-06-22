@@ -145,7 +145,7 @@ impl<K: Array, V: Codec> EncodeSize for JournalEntry<K, V> {
     }
 }
 
-/// Implementation of `Index` storage.
+/// Implementation of immutable key-value storage.
 pub struct Store<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     // Context for storage operations
     context: E,
@@ -154,7 +154,7 @@ pub struct Store<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     table_partition: String,
     table_size: u32,
 
-    // Committed data for the disk map
+    // Committed data for the store
     metadata: Metadata<E, U64>,
 
     // Table blob that maps hash values to journal locations (journal_id, offset)
@@ -182,7 +182,7 @@ pub struct Store<E: Storage + Metrics + Clock, K: Array, V: Codec> {
 }
 
 impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Store<E, K, V> {
-    /// Initialize a new `Index` instance.
+    /// Initialize a new [Store] instance.
     pub async fn init(context: E, config: Config<V::Cfg>) -> Result<Self, Error> {
         // Validate configuration
         assert_ne!(config.table_size, 0, "table size must be non-zero");
@@ -404,7 +404,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Store<E, K, V> {
         Ok(())
     }
 
-    /// Put a key-value pair into the disk map.
+    /// Put a key-value pair into the store.
     pub async fn put(&mut self, key: K, value: V) -> Result<(), Error> {
         self.puts.inc();
 
@@ -463,7 +463,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Store<E, K, V> {
         Ok(None)
     }
 
-    /// Check if a key exists in the disk map.
+    /// Check if a key exists in the store.
     pub async fn has(&self, key: &K) -> Result<bool, Error> {
         Ok(self.get(key).await?.is_some())
     }
@@ -512,7 +512,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Store<E, K, V> {
         Ok(())
     }
 
-    /// Close the disk map and underlying journal.
+    /// Close the store and underlying journal.
     pub async fn close(mut self) -> Result<(), Error> {
         // Sync any pending updates before closing
         self.sync().await?;
@@ -523,7 +523,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Store<E, K, V> {
         Ok(())
     }
 
-    /// Close and remove any underlying blobs created by the disk map.
+    /// Close and remove any underlying blobs created by the store.
     pub async fn destroy(self) -> Result<(), Error> {
         // Destroy the journal (removes all journal sections)
         self.journal.destroy().await?;
