@@ -18,7 +18,7 @@ use tracing::debug;
 
 const COMMITTED_EPOCH: u64 = 0;
 const COMMITTED_SECTION: u64 = 1;
-const COMMITTED_OFFSET: u64 = 2;
+const COMMITTED_SIZE: u64 = 2;
 
 // -------------------------------------------------------------------------------------------------
 // Table layout
@@ -232,13 +232,13 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Store<E, K, V> {
                 .get(&COMMITTED_SECTION.into())
                 .map(|v| u64::from_be_bytes(v.as_slice().try_into().unwrap()))
                 .unwrap_or(0u64);
-            let committed_offset = metadata
-                .get(&COMMITTED_OFFSET.into())
-                .map(|v| u32::from_be_bytes(v.as_slice().try_into().unwrap()))
-                .unwrap_or(0u32);
+            let committed_size = metadata
+                .get(&COMMITTED_SIZE.into())
+                .map(|v| u64::from_be_bytes(v.as_slice().try_into().unwrap()))
+                .unwrap_or(0u64);
 
             // Rewind the journal to the committed section and offset
-            journal.rewind(committed_section, committed_offset).await?;
+            journal.rewind(committed_section, committed_size).await?;
 
             // Zero out any table entries whose epoch is greater than the committed epoch
             let mut sync = false;
@@ -392,10 +392,10 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Store<E, K, V> {
     /// Determine which journal section to write to based on current journal size.
     async fn update_section(&mut self) -> Result<(), Error> {
         // Get the current section size
-        let current_size = self.journal.section_size(self.current_section).await?;
+        let size = self.journal.size(self.current_section).await?;
 
         // If the current section has reached the target size, create a new section
-        if current_size >= self.target_journal_size {
+        if size >= self.target_journal_size {
             self.current_section += 1;
         }
 
@@ -477,7 +477,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Store<E, K, V> {
             .unwrap_or(0);
         let next_epoch = committed_epoch.checked_add(1).expect("epoch overflow");
         let max_section = self.current_section;
-        let max_offset = self.journal.section_size(max_section).await?;
+        let max_section_size = self.journal.size(max_section).await?;
 
         // Sync all modified journal sections
         let mut updates = Vec::with_capacity(self.modified_sections.len());
@@ -501,8 +501,10 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Store<E, K, V> {
             .put(COMMITTED_EPOCH.into(), next_epoch.to_be_bytes().to_vec());
         self.metadata
             .put(COMMITTED_SECTION.into(), max_section.to_be_bytes().to_vec());
-        self.metadata
-            .put(COMMITTED_OFFSET.into(), max_offset.to_be_bytes().to_vec());
+        self.metadata.put(
+            COMMITTED_SIZE.into(),
+            max_section_size.to_be_bytes().to_vec(),
+        );
         self.metadata.sync().await?;
 
         Ok(())

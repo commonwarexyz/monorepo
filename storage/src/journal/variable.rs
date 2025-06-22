@@ -626,10 +626,10 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         blob.sync().await.map_err(Error::Runtime)
     }
 
-    /// Gets the size of a specific section in bytes.
+    /// Gets the size of the journal for a specific section.
     ///
     /// Returns 0 if the section does not exist.
-    pub async fn section_size(&self, section: u64) -> Result<u64, Error> {
+    pub async fn size(&self, section: u64) -> Result<u64, Error> {
         self.prune_guard(section, false)?;
         match self.blobs.get(&section) {
             Some(blob) => Ok(blob.size().await),
@@ -637,15 +637,10 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         }
     }
 
-    /// Gets the highest existing section ID, or None if no sections exist.
-    pub fn max_section_id(&self) -> Option<u64> {
-        self.blobs.keys().max().copied()
-    }
-
-    /// Rewinds the journal to the given offset.
+    /// Rewinds the journal to the given size.
     ///
     /// This removes any data beyond the specified section(s) and offset(s).
-    pub async fn rewind(&mut self, section: u64, offset: u32) -> Result<(), Error> {
+    pub async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
         self.prune_guard(section, false)?;
 
         // Remove any sections beyond the given section
@@ -674,19 +669,12 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             Some(blob) => blob,
             None => return Ok(()),
         };
-        let target_size = offset as u64 * ITEM_ALIGNMENT;
-        let current_size = blob.size().await;
-        if target_size >= current_size {
+        let current = blob.size().await;
+        if size >= current {
             return Ok(()); // Already smaller than or equal to target size
         }
-        blob.truncate(target_size).await?;
-        debug!(
-            section,
-            from = current_size,
-            to = target_size,
-            offset,
-            "rewound journal"
-        );
+        blob.truncate(size).await?;
+        debug!(section, from = current, to = size, "rewound journal");
         Ok(())
     }
 
@@ -1705,7 +1693,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journal_section_size() {
+    fn test_journal_rewind() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1719,23 +1707,23 @@ mod tests {
             let mut journal = Journal::init(context, cfg).await.unwrap();
 
             // Check size of non-existent section
-            let size = journal.section_size(1).await.unwrap();
+            let size = journal.size(1).await.unwrap();
             assert_eq!(size, 0);
 
             // Append data to section 1
             journal.append(1, 42i32).await.unwrap();
 
             // Check size of section 1 - should be greater than 0
-            let size = journal.section_size(1).await.unwrap();
+            let size = journal.size(1).await.unwrap();
             assert!(size > 0);
 
             // Check size of different section - should still be 0
-            let size = journal.section_size(2).await.unwrap();
+            let size = journal.size(2).await.unwrap();
             assert_eq!(size, 0);
 
             // Append more data and verify size increases
             journal.append(1, 43i32).await.unwrap();
-            let new_size = journal.section_size(1).await.unwrap();
+            let new_size = journal.size(1).await.unwrap();
             assert!(new_size > size);
         });
     }
