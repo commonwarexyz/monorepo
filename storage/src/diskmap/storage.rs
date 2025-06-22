@@ -469,25 +469,25 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
     /// Sync all data to the underlying store.
     /// First syncs all journal sections, then flushes pending table updates, and finally syncs the table.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        // First sync all modified journal sections
-        for section in &self.modified_sections {
-            self.journal.sync(*section).await?;
-        }
-        self.modified_sections.clear();
-
-        // Get max section and offset
-        let max_section = self.current_section;
-        let max_offset = self.journal.section_size(max_section).await?;
-
-        // Get the current epoch
+        // Compute the next epoch, max section, and max offset
         let committed_epoch = self
             .metadata
             .get(&COMMITTED_EPOCH.into())
             .map(|v| u64::from_be_bytes(v.as_slice().try_into().unwrap()))
             .unwrap_or(0);
         let next_epoch = committed_epoch.checked_add(1).expect("epoch overflow");
+        let max_section = self.current_section;
+        let max_offset = self.journal.section_size(max_section).await?;
 
-        // Update table entries
+        // Sync all modified journal sections
+        let mut updates = Vec::with_capacity(self.modified_sections.len());
+        for section in &self.modified_sections {
+            updates.push(self.journal.sync(*section));
+        }
+        try_join_all(updates).await?;
+        self.modified_sections.clear();
+
+        // Write updated table entries
         let mut updates = Vec::with_capacity(self.pending.len());
         for (&table_index, &(section, offset)) in &self.pending {
             updates.push(self.update_head(next_epoch, table_index, section, offset));
