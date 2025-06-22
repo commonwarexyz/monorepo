@@ -8,12 +8,12 @@ use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use prometheus_client::metrics::counter::Counter;
 
-/// Implementation of `Freezer` storage using diskmap + diskindex.
+/// Implementation of `Archive` storage using immutable and ordinal stores.
 pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: Codec> {
-    // DiskMap for key->value storage
+    // Immutable store for key->value storage
     keys: immutable::Store<E, K, V>,
 
-    // DiskIndex for index->key mapping and interval tracking
+    // Ordinal store for index->key mapping and interval tracking
     indices: ordinal::Store<E, K>,
 
     // Metrics
@@ -22,9 +22,9 @@ pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: Codec> {
 }
 
 impl<E: Storage + Metrics + Clock, K: Array + Codec<Cfg = ()>, V: Codec> Archive<E, K, V> {
-    /// Initialize a new `Freezer` instance.
+    /// Initialize a new `Archive` instance.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        // Initialize diskmap for key->value storage
+        // Initialize immutable store for key->value storage
         let keys = immutable::Store::init(context.with_label("keys"), cfg.immutable).await?;
         let indices = ordinal::Store::init(context.with_label("indices"), cfg.ordinal).await?;
 
@@ -42,7 +42,7 @@ impl<E: Storage + Metrics + Clock, K: Array + Codec<Cfg = ()>, V: Codec> Archive
         })
     }
 
-    /// Store an item in `Freezer`. Both indices and keys are assumed to be globally unique.
+    /// Store an item in `Archive`. Both indices and keys are assumed to be globally unique.
     ///
     /// If the index already exists, put does nothing and returns. If the same key is stored multiple times
     /// at different indices (not recommended), any value associated with the key may be returned.
@@ -63,8 +63,8 @@ impl<E: Storage + Metrics + Clock, K: Array + Codec<Cfg = ()>, V: Codec> Archive
         Ok(())
     }
 
-    /// Retrieve an item from `Freezer`.
-    pub async fn get(&mut self, identifier: Identifier<'_, u64, K>) -> Result<Option<V>, Error> {
+    /// Retrieve an item from `Archive`.
+    pub async fn get(&self, identifier: Identifier<'_, u64, K>) -> Result<Option<V>, Error> {
         self.gets.inc();
         match identifier {
             Identifier::Index(index) => self.get_index(index).await,
@@ -72,7 +72,7 @@ impl<E: Storage + Metrics + Clock, K: Array + Codec<Cfg = ()>, V: Codec> Archive
         }
     }
 
-    async fn get_index(&mut self, index: u64) -> Result<Option<V>, Error> {
+    async fn get_index(&self, index: u64) -> Result<Option<V>, Error> {
         // Get key from index->key mapping
         let key = match self.indices.get(index).await? {
             Some(key) => key,
@@ -83,29 +83,29 @@ impl<E: Storage + Metrics + Clock, K: Array + Codec<Cfg = ()>, V: Codec> Archive
         self.keys.get(&key).await.map_err(Error::Immutable)
     }
 
-    async fn get_key(&mut self, key: &K) -> Result<Option<V>, Error> {
+    async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
         // Get value directly from key->value mapping
         self.keys.get(key).await.map_err(Error::Immutable)
     }
 
-    /// Check if an item exists in the `Freezer`.
-    pub async fn has(&mut self, identifier: Identifier<'_, u64, K>) -> Result<bool, Error> {
+    /// Check if an item exists in the `Archive`.
+    pub async fn has(&self, identifier: Identifier<'_, u64, K>) -> Result<bool, Error> {
         match identifier {
             Identifier::Index(index) => Ok(self.indices.has(index)),
             Identifier::Key(key) => self.has_key(key).await,
         }
     }
 
-    async fn has_key(&mut self, key: &K) -> Result<bool, Error> {
+    async fn has_key(&self, key: &K) -> Result<bool, Error> {
         Ok(self.keys.has(key).await?)
     }
 
     /// Forcibly sync all pending writes.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        // Sync diskmap
+        // Sync immutable store
         self.keys.sync().await?;
 
-        // Sync diskindex
+        // Sync ordinal store
         self.indices.sync().await?;
 
         Ok(())
@@ -114,12 +114,12 @@ impl<E: Storage + Metrics + Clock, K: Array + Codec<Cfg = ()>, V: Codec> Archive
     /// Retrieve the end of the current range including `index` (inclusive) and
     /// the start of the next range after `index` (if it exists).
     ///
-    /// This is useful for driving backfill operations over the freezer.
+    /// This is useful for driving backfill operations over the archive.
     pub fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
         self.indices.next_gap(index)
     }
 
-    /// Close `Freezer` (and underlying storage).
+    /// Close `Archive` (and underlying storage).
     ///
     /// Any pending writes will be synced prior to closing.
     pub async fn close(mut self) -> Result<(), Error> {
@@ -133,7 +133,7 @@ impl<E: Storage + Metrics + Clock, K: Array + Codec<Cfg = ()>, V: Codec> Archive
         Ok(())
     }
 
-    /// Remove all on-disk data created by this `Freezer`.
+    /// Remove all on-disk data created by this `Archive`.
     pub async fn destroy(self) -> Result<(), Error> {
         // Destroy underlying storage
         self.keys.destroy().await?;

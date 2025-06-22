@@ -428,7 +428,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Store<E, K, V> {
     }
 
     /// Get the first value for a given key.
-    pub async fn get(&mut self, key: &K) -> Result<Option<V>, Error> {
+    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         self.gets.inc();
 
         // Get head of the chain from table
@@ -462,7 +462,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Store<E, K, V> {
     }
 
     /// Check if a key exists in the disk map.
-    pub async fn has(&mut self, key: &K) -> Result<bool, Error> {
+    pub async fn has(&self, key: &K) -> Result<bool, Error> {
         Ok(self.get(key).await?.is_some())
     }
 

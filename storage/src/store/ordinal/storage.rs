@@ -172,7 +172,7 @@ impl<E: Storage + Metrics + Clock, V: Array> Store<E, V> {
     }
 
     /// Get the value for a given index.
-    pub async fn get(&mut self, index: u64) -> Result<Option<V>, Error> {
+    pub async fn get(&self, index: u64) -> Result<Option<V>, Error> {
         self.gets.inc();
 
         // If get isn't in an interval, it doesn't exist and we don't need to access disk.
