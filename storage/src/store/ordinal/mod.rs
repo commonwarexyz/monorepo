@@ -133,6 +133,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
     use commonware_utils::array::FixedBytes;
+    use rand::RngCore;
 
     const DEFAULT_ITEMS_PER_BLOB: u64 = 1000;
     const DEFAULT_WRITE_BUFFER: usize = 4096;
@@ -1028,5 +1029,107 @@ mod tests {
                 );
             }
         });
+    }
+
+    fn test_store_operations_and_restart(num_values: usize) -> String {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: 100, // Smaller blobs to test multiple blob handling
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
+            };
+
+            // Initialize the store
+            let mut store = Store::<_, FixedBytes<128>>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize store");
+
+            // Generate and insert random values at various indices
+            let mut values = Vec::new();
+            let mut rng_index = 0u64;
+
+            for _ in 0..num_values {
+                // Generate a pseudo-random index (sparse to test gaps)
+                let mut index_bytes = [0u8; 8];
+                context.fill_bytes(&mut index_bytes);
+                let index_offset = u64::from_be_bytes(index_bytes) % 1000;
+                let index = rng_index + index_offset;
+                rng_index = index + 1;
+
+                // Generate random value
+                let mut value = [0u8; 128];
+                context.fill_bytes(&mut value);
+                let value = FixedBytes::<128>::new(value);
+
+                store.put(index, value.clone()).expect("Failed to put data");
+                values.push((index, value));
+            }
+
+            // Sync data
+            store.sync().await.expect("Failed to sync");
+
+            // Verify all values can be retrieved
+            for (index, value) in &values {
+                let retrieved = store
+                    .get(*index)
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(&retrieved, value);
+            }
+
+            // Test next_gap on various indices
+            for i in 0..10 {
+                let _ = store.next_gap(i * 100);
+            }
+
+            // Close the store
+            store.close().await.expect("Failed to close store");
+
+            // Reopen the store
+            let mut store = Store::<_, FixedBytes<128>>::init(context.clone(), cfg)
+                .await
+                .expect("Failed to initialize store");
+
+            // Verify all values are still there after restart
+            for (index, value) in &values {
+                let retrieved = store
+                    .get(*index)
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(&retrieved, value);
+            }
+
+            // Add more values after restart
+            for _ in 0..10 {
+                let mut index_bytes = [0u8; 8];
+                context.fill_bytes(&mut index_bytes);
+                let index = u64::from_be_bytes(index_bytes) % 10000;
+
+                let mut value = [0u8; 128];
+                context.fill_bytes(&mut value);
+                let value = FixedBytes::<128>::new(value);
+
+                store.put(index, value).expect("Failed to put data");
+            }
+
+            // Final sync
+            store.sync().await.expect("Failed to sync");
+
+            // Return the auditor state for comparison
+            context.auditor().state()
+        })
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_determinism() {
+        let state1 = test_store_operations_and_restart(100);
+        let state2 = test_store_operations_and_restart(100);
+        assert_eq!(state1, state2);
     }
 }

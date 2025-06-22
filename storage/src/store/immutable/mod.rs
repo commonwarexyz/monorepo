@@ -171,6 +171,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
     use commonware_utils::array::FixedBytes;
+    use rand::RngCore;
 
     const DEFAULT_TABLE_SIZE: u32 = 256;
     const DEFAULT_WRITE_BUFFER: usize = 1024;
@@ -889,5 +890,139 @@ mod tests {
                 assert!(result.is_none() || result == Some(42));
             }
         });
+    }
+
+    fn test_store_operations_and_restart(num_keys: usize) -> String {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let cfg = Config {
+                journal_partition: "test_journal".into(),
+                journal_compression: None,
+                metadata_partition: "test_metadata".into(),
+                table_partition: "test_table".into(),
+                table_size: 64, // Small table to force collisions
+                codec_config: (),
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
+            };
+
+            // Initialize the store
+            let mut store =
+                Store::<_, FixedBytes<96>, FixedBytes<256>>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+            // Generate and insert random key-value pairs
+            let mut pairs = Vec::new();
+
+            for _ in 0..num_keys {
+                // Generate random key
+                let mut key = [0u8; 96];
+                context.fill_bytes(&mut key);
+                let key = FixedBytes::<96>::new(key);
+
+                // Generate random value
+                let mut value = [0u8; 256];
+                context.fill_bytes(&mut value);
+                let value = FixedBytes::<256>::new(value);
+
+                store
+                    .put(key.clone(), value.clone())
+                    .await
+                    .expect("Failed to put data");
+                pairs.push((key, value));
+            }
+
+            // Sync data
+            store.sync().await.expect("Failed to sync");
+
+            // Verify all pairs can be retrieved
+            for (key, value) in &pairs {
+                let retrieved = store
+                    .get(key)
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(&retrieved, value);
+            }
+
+            // Test has() on all keys plus some non-existent ones
+            for (key, _) in &pairs {
+                assert!(store.has(key).await.expect("Failed to check key"));
+            }
+
+            // Check some non-existent keys
+            for _ in 0..10 {
+                let mut key = [0u8; 96];
+                context.fill_bytes(&mut key);
+                let key = FixedBytes::<96>::new(key);
+                let _ = store.has(&key).await;
+            }
+
+            // Close the store
+            store.close().await.expect("Failed to close store");
+
+            // Reopen the store
+            let mut store =
+                Store::<_, FixedBytes<96>, FixedBytes<256>>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+            // Verify all pairs are still there after restart
+            for (key, value) in &pairs {
+                let retrieved = store
+                    .get(key)
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(&retrieved, value);
+            }
+
+            // Add more pairs after restart to test collision handling
+            for _ in 0..20 {
+                let mut key = [0u8; 96];
+                context.fill_bytes(&mut key);
+                let key = FixedBytes::<96>::new(key);
+
+                let mut value = [0u8; 256];
+                context.fill_bytes(&mut value);
+                let value = FixedBytes::<256>::new(value);
+
+                store.put(key, value).await.expect("Failed to put data");
+            }
+
+            // Multiple syncs to test epoch progression
+            for _ in 0..3 {
+                store.sync().await.expect("Failed to sync");
+
+                // Add a few more entries between syncs
+                for _ in 0..5 {
+                    let mut key = [0u8; 96];
+                    context.fill_bytes(&mut key);
+                    let key = FixedBytes::<96>::new(key);
+
+                    let mut value = [0u8; 256];
+                    context.fill_bytes(&mut value);
+                    let value = FixedBytes::<256>::new(value);
+
+                    store.put(key, value).await.expect("Failed to put data");
+                }
+            }
+
+            // Final sync
+            store.sync().await.expect("Failed to sync");
+
+            // Return the auditor state for comparison
+            context.auditor().state()
+        })
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_determinism() {
+        let state1 = test_store_operations_and_restart(200);
+        let state2 = test_store_operations_and_restart(200);
+        assert_eq!(state1, state2);
     }
 }
