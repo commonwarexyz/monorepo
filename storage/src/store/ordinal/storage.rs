@@ -12,7 +12,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     mem::take,
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Value stored in the index file.
 #[derive(Debug, Clone)]
@@ -84,15 +84,32 @@ impl<E: Storage + Metrics + Clock, V: Array> Store<E, V> {
             Err(commonware_runtime::Error::PartitionMissing(_)) => Vec::new(),
             Err(err) => return Err(Error::Runtime(err)),
         };
+
+        // Open all blobs and check for partial records
         for name in stored_blobs {
-            let (blob, len) = context.open(&config.partition, &name).await?;
+            let (blob, mut len) = context.open(&config.partition, &name).await?;
             let index = match name.try_into() {
                 Ok(index) => u64::from_be_bytes(index),
                 Err(nm) => Err(Error::InvalidBlobName(hex(&nm)))?,
             };
+
+            // Check if blob size is aligned to record size
+            let record_size = Record::<V>::SIZE as u64;
+            if len % record_size != 0 {
+                warn!(
+                    blob = index,
+                    invalid_size = len,
+                    record_size,
+                    "blob size is not a multiple of record size, truncating"
+                );
+                len -= len % record_size;
+                blob.truncate(len).await?;
+                blob.sync().await?;
+            }
+
             debug!(blob = index, len, "found index blob");
-            let blob = Write::new(blob, len, config.write_buffer);
-            blobs.insert(index, blob);
+            let wrapped_blob = Write::new(blob, len, config.write_buffer);
+            blobs.insert(index, wrapped_blob);
         }
 
         // Initialize intervals by scanning existing records
