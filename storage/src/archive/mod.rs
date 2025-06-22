@@ -1,18 +1,19 @@
-//! A write-once key-value store optimized for low-latency reads.
+//! A write-once, prunable key-value store optimized for low-latency reads.
 //!
-//! `Archive` is a key-value store designed for workloads where all data is written only once and is
+//! [Archive] is a key-value store designed for workloads where all data is written only once and is
 //! uniquely associated with both an `index` and a `key`.
 //!
-//! Data is stored in `Journal` (an append-only log) and the location of written data is stored
-//! in-memory by both index and key (translated representation using a caller-provided `Translator`)
-//! to enable **single-read lookups** for both query patterns over all archived data.
+//! Data is stored in [crate::journal::variable::Journal] (an append-only log) and the location of
+//! written data is stored in-memory by both index and key (translated representation using a
+//! caller-provided [crate::index::Translator]) to enable **single-read lookups** for both query
+//! patterns over all archived data.
 //!
-//! _Notably, `Archive` does not make use of compaction nor on-disk indexes (and thus has no read
+//! _Notably, [Archive] does not make use of compaction nor on-disk indexes (and thus has no read
 //! nor write amplification during normal operation)._
 //!
 //! # Format
 //!
-//! `Archive` stores data in the following format:
+//! [Archive] stores data in the following format:
 //!
 //! ```text
 //! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
@@ -24,16 +25,16 @@
 //!
 //! # Uniqueness
 //!
-//! `Archive` assumes all stored indexes and keys are unique. If the same key is associated with
+//! [Archive] assumes all stored indexes and keys are unique. If the same key is associated with
 //! multiple `indices`, there is no guarantee which value will be returned. If the key is written to
-//! an existing `index`, `Archive` will return an error.
+//! an existing `index`, [Archive] will return an error.
 //!
 //! ## Conflicts
 //!
 //! Because a translated representation of a key is only ever stored in memory, it is possible (and
 //! expected) that two keys will eventually be represented by the same translated key. To handle this
-//! case, `Archive` must check the persisted form of all conflicting keys to ensure data from the
-//! correct key is returned. To support efficient checks, `Archive` (via [crate::index::Index])
+//! case, [Archive] must check the persisted form of all conflicting keys to ensure data from the
+//! correct key is returned. To support efficient checks, [Archive] (via [crate::index::Index])
 //! keeps a linked list of all keys with the same translated prefix:
 //!
 //! ```rust
@@ -48,8 +49,8 @@
 //! item in the linked list instead of a pointer to the first item._
 //!
 //! `index` is the key to the map used to serve lookups by `index` that stores the location of data
-//! in a given `Blob` (selected by `section = index & section_mask` to minimize the number of open
-//! `Journals`):
+//! in a given [commonware_runtime::Blob] (selected by `section = index & section_mask` to
+//! minimize the number of open [crate::journal::variable::Journal]s):
 //!
 //! ```rust
 //! struct Location {
@@ -58,54 +59,53 @@
 //! }
 //! ```
 //!
-//! _If the `Translator` provided by the caller does not uniformly distribute keys across the key
+//! _If the [Translator] provided by the caller does not uniformly distribute keys across the key
 //! space or uses a translated representation that means keys on average have many conflicts,
 //! performance will degrade._
 //!
 //! ## Memory Overhead
 //!
-//! `Archive` uses two maps to enable lookups by both index and key. The memory used to track each
+//! [Archive] uses two maps to enable lookups by both index and key. The memory used to track each
 //! index item is `8 + 4 + 4` (where `8` is the index, `4` is the offset, and `4` is the length).
 //! The memory used to track each key item is `~translated(key).len() + 16` bytes (where `16` is the
-//! size of the `Record` struct). This means that an `Archive` employing a `Translator` that uses
+//! size of the record struct). This means that an [Archive] employing a [Translator] that uses
 //! the first `8` bytes of a key will use `~40` bytes to index each key.
 //!
 //! # Sync
 //!
-//! `Archive` flushes writes in a given `section` (computed by `index & section_mask`) to `Storage`
-//! after `pending_writes`. If the caller requires durability on a particular write, they can call
-//! `sync`.
+//! [Archive] only flushes writes in a given `section` (computed by `index & section_mask`) to
+//! [commonware_runtime::Storage] when the caller invokes `sync`.
 //!
 //! # Pruning
 //!
-//! `Archive` supports pruning up to a minimum `index` using the `prune` method. After `prune` is
+//! [Archive] supports pruning up to a minimum `index` using the `prune` method. After `prune` is
 //! called on a `section`, all interaction with a `section` less than the pruned `section` will
 //! return an error.
 //!
 //! ## Lazy Index Cleanup
 //!
 //! Instead of performing a full iteration of the in-memory index, storing an additional in-memory
-//! index per `section`, or replaying a `section` of `Journal`, `Archive` lazily cleans up the
-//! in-memory index after pruning. When a new key is stored that overlaps (same translated value)
-//! with a pruned key, the pruned key is removed from the in-memory index.
+//! index per `section`, or replaying a `section` of [crate::journal::variable::Journal], [Archive]
+//! lazily cleans up the in-memory index after pruning. When a new key is stored that overlaps (same
+//! translated value) with a pruned key, the pruned key is removed from the in-memory index.
 //!
 //! # Single Operation Reads
 //!
-//! To enable single operation reads (i.e. reading all of an item in a single call to `Blob`),
-//! `Archive` caches the length of each item in its in-memory index. While it increases the
-//! footprint per key stored, the benefit of only ever performing a single operation to read a key
-//! (when there are no conflicts) is worth the tradeoff.
+//! To enable single operation reads (i.e. reading all of an item in a single call to
+//! [commonware_runtime::Blob]), [Archive] stores the length of each item in its in-memory index.
+//! While it increases the footprint per key stored, the benefit of only ever performing a single
+//! operation to read a key (when there are no conflicts) is worth the tradeoff.
 //!
 //! # Compression
 //!
-//! `Archive` supports compressing data before storing it on disk. This can be enabled by setting
-//! the `compression` field in the `Config` struct to a valid `zstd` compression level. This setting
-//! can be changed between initializations of `Archive`, however, it must remain populated if any
+//! [Archive] supports compressing data before storing it on disk. This can be enabled by setting
+//! the `compression` field in the [Config] struct to a valid `zstd` compression level. This setting
+//! can be changed between initializations of [Archive], however, it must remain populated if any
 //! data was written with compression enabled.
 //!
 //! # Querying for Gaps
 //!
-//! `Archive` tracks gaps in the index space to enable the caller to efficiently fetch unknown keys
+//! [Archive] tracks gaps in the index space to enable the caller to efficiently fetch unknown keys
 //! using `next_gap`. This is a very common pattern when syncing blocks in a blockchain.
 //!
 //! # Example
