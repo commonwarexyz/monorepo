@@ -514,7 +514,7 @@ mod tests {
 
             // Reinitialize the archive
             let archive =
-                Archive::<_, FixedBytes<64>, FixedBytes<1024>>::init(context.clone(), cfg.clone())
+                Archive::<_, FixedBytes<64>, FixedBytes<1024>>::init(context.clone(), cfg)
                     .await
                     .expect("Failed to initialize archive");
 

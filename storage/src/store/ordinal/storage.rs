@@ -9,7 +9,7 @@ use commonware_runtime::{
 use commonware_utils::{hex, Array};
 use prometheus_client::metrics::counter::Counter;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet},
     mem::take,
 };
 use tracing::{debug, warn};
@@ -71,7 +71,7 @@ pub struct Store<E: Storage + Metrics + Clock, V: Array> {
     intervals: RMap,
 
     // Pending index entries to be synced
-    pending: HashMap<u64, V>,
+    pending: BTreeMap<u64, V>,
 
     // Metrics
     puts: Counter,
@@ -160,7 +160,7 @@ impl<E: Storage + Metrics + Clock, V: Array> Store<E, V> {
             config,
             blobs,
             intervals,
-            pending: HashMap::new(),
+            pending: BTreeMap::new(),
             puts,
             gets,
         })
