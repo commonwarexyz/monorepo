@@ -1,10 +1,8 @@
 //! Random key-lookup benchmark for Immutable Archive.
 
-use super::utils::{
-    append_random_immutable, compression_label, create_benchmark_label, get_immutable_archive,
-    read_concurrent_indices_immutable, read_concurrent_keys_immutable,
-    read_serial_indices_immutable, read_serial_keys_immutable, select_indices, select_keys,
-};
+use crate::utils::append_random;
+
+use super::utils::{compression_label, get_immutable, select_indices, select_keys};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Config,
@@ -23,8 +21,8 @@ fn bench_immutable_get(c: &mut Criterion) {
         // Create a shared on-disk archive once so later setup is fast.
         let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
         let keys = builder.start(|ctx| async move {
-            let mut a = get_immutable_archive(ctx, compression).await;
-            let keys = append_random_immutable(&mut a, ITEMS).await;
+            let mut a = get_immutable(ctx, compression).await;
+            let keys = append_random(&mut a, ITEMS).await;
             a.close().await.unwrap();
             keys
         });

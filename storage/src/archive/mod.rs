@@ -24,7 +24,7 @@ pub trait Archive {
     type Value: Codec;
 
     /// The type of the error.
-    type Error;
+    type Error: std::error::Error;
 
     /// Store an item in [Archive]. Both indices and keys are assumed to both be globally unique.
     ///
