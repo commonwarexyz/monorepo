@@ -1,8 +1,7 @@
 //! Random index-lookup benchmark for Ordinal Store.
 
-use crate::utils::Ordinal;
-
 use super::utils::{append_random_ordinal, get_ordinal};
+use crate::utils::Ordinal;
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Config,

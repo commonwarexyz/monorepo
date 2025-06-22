@@ -1,8 +1,7 @@
 //! Random key-lookup benchmark for Immutable Store.
 
-use crate::utils::{Immutable, Key};
-
 use super::utils::{append_random_immutable, compression_label, get_immutable};
+use crate::utils::{Immutable, Key};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Config,
