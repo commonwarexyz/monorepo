@@ -59,7 +59,7 @@ impl<V: Array> Read for Record<V> {
 }
 
 /// Implementation of `Index` storage.
-pub struct Index<E: Storage + Metrics + Clock, V: Array> {
+pub struct Store<E: Storage + Metrics + Clock, V: Array> {
     // Configuration and context
     context: E,
     config: Config,
@@ -78,7 +78,7 @@ pub struct Index<E: Storage + Metrics + Clock, V: Array> {
     gets: Counter,
 }
 
-impl<E: Storage + Metrics + Clock, V: Array> Index<E, V> {
+impl<E: Storage + Metrics + Clock, V: Array> Store<E, V> {
     /// Initialize a new `Index` instance.
     pub async fn init(context: E, config: Config) -> Result<Self, Error> {
         // Scan for all blobs in the partition

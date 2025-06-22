@@ -1,7 +1,7 @@
 mod storage;
 
 use commonware_utils::array::U64;
-pub use storage::Index;
+pub use storage::Store;
 use thiserror::Error;
 
 /// Errors that can occur when interacting with the disk map.

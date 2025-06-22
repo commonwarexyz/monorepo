@@ -11,10 +11,10 @@ use prometheus_client::metrics::counter::Counter;
 /// Implementation of `Freezer` storage using diskmap + diskindex.
 pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     // DiskMap for key->value storage
-    keys: immutable::Index<E, K, V>,
+    keys: immutable::Store<E, K, V>,
 
     // DiskIndex for index->key mapping and interval tracking
-    indices: ordinal::Index<E, K>,
+    indices: ordinal::Store<E, K>,
 
     // Metrics
     gets: Counter,
@@ -25,8 +25,8 @@ impl<E: Storage + Metrics + Clock, K: Array + Codec<Cfg = ()>, V: Codec> Archive
     /// Initialize a new `Freezer` instance.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Initialize diskmap for key->value storage
-        let keys = immutable::Index::init(context.with_label("keys"), cfg.immutable).await?;
-        let indices = ordinal::Index::init(context.with_label("indices"), cfg.ordinal).await?;
+        let keys = immutable::Store::init(context.with_label("keys"), cfg.immutable).await?;
+        let indices = ordinal::Store::init(context.with_label("indices"), cfg.ordinal).await?;
 
         // Initialize metrics
         let gets = Counter::default();
