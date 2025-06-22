@@ -193,9 +193,9 @@ pub struct Config<T: Translator, C> {
 mod tests {
     use super::*;
     use crate::{
+        identifier::Identifier,
         journal::Error as JournalError,
         translator::{FourCap, TwoCap},
-        Identifier,
     };
     use commonware_codec::{varint::UInt, DecodeExt, EncodeSize, Error as CodecError};
     use commonware_macros::test_traced;

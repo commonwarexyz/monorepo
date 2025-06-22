@@ -8,14 +8,10 @@
 pub mod adb;
 pub mod archive;
 pub mod bmt;
-pub mod diskindex;
-pub mod diskmap;
-pub mod freezer;
-mod identifier;
+pub mod identifier;
 pub mod index;
 pub mod journal;
 pub mod metadata;
 pub mod mmr;
 pub mod rmap;
 pub mod translator;
-pub use identifier::Identifier;

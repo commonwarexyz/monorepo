@@ -58,8 +58,8 @@ impl<V: Array> Read for Record<V> {
     }
 }
 
-/// Implementation of `DiskIndex` storage.
-pub struct DiskIndex<E: Storage + Metrics + Clock, V: Array> {
+/// Implementation of `Index` storage.
+pub struct Index<E: Storage + Metrics + Clock, V: Array> {
     // Configuration and context
     context: E,
     config: Config,
@@ -78,8 +78,8 @@ pub struct DiskIndex<E: Storage + Metrics + Clock, V: Array> {
     gets: Counter,
 }
 
-impl<E: Storage + Metrics + Clock, V: Array> DiskIndex<E, V> {
-    /// Initialize a new `DiskIndex` instance.
+impl<E: Storage + Metrics + Clock, V: Array> Index<E, V> {
+    /// Initialize a new `Index` instance.
     pub async fn init(context: E, config: Config) -> Result<Self, Error> {
         // Scan for all blobs in the partition
         let mut blobs = BTreeMap::new();

@@ -6,7 +6,7 @@ use commonware_utils::Array;
 use prometheus_client::metrics::counter::Counter;
 
 /// Implementation of `Freezer` storage using diskmap + diskindex.
-pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
+pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     // DiskMap for key->value storage
     keys: DiskMap<E, K, V>,
 
@@ -18,7 +18,7 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     puts: Counter,
 }
 
-impl<E: Storage + Metrics + Clock, K: Array + Codec<Cfg = ()>, V: Codec> Freezer<E, K, V> {
+impl<E: Storage + Metrics + Clock, K: Array + Codec<Cfg = ()>, V: Codec> Archive<E, K, V> {
     /// Initialize a new `Freezer` instance.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Initialize diskmap for key->value storage

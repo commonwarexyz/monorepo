@@ -145,8 +145,8 @@ impl<K: Array, V: Codec> EncodeSize for JournalEntry<K, V> {
     }
 }
 
-/// Implementation of `DiskMap` storage.
-pub struct DiskMap<E: Storage + Metrics + Clock, K: Array, V: Codec> {
+/// Implementation of `Index` storage.
+pub struct Index<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     // Context for storage operations
     context: E,
 
@@ -181,8 +181,8 @@ pub struct DiskMap<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     _phantom: PhantomData<(K, V)>,
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
-    /// Initialize a new `DiskMap` instance.
+impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Index<E, K, V> {
+    /// Initialize a new `Index` instance.
     pub async fn init(context: E, config: Config<V::Cfg>) -> Result<Self, Error> {
         // Validate configuration
         assert_ne!(config.table_size, 0, "table size must be non-zero");

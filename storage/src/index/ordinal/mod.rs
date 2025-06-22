@@ -21,7 +21,7 @@
 
 mod storage;
 
-pub use storage::DiskIndex;
+pub use storage::Index;
 use thiserror::Error;
 
 /// Errors that can occur when interacting with the disk index.

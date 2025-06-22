@@ -1,9 +1,9 @@
 use super::{Config, Error, Translator};
 use crate::{
-    index::Index,
+    identifier::Identifier,
+    index::mutable::Index,
     journal::variable::{Config as JConfig, Journal},
     rmap::RMap,
-    Identifier,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Codec, EncodeSize, Read, ReadExt, Write};

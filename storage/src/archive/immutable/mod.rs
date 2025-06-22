@@ -8,29 +8,29 @@
 
 mod storage;
 
-use crate::{diskindex, diskmap};
-pub use storage::Freezer;
+use crate::index::{immutable, ordinal};
+pub use storage::Archive;
 use thiserror::Error;
 
-/// Errors that can occur when interacting with the freezer.
+/// Errors that can occur when interacting with the [Archive].
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
-    #[error("diskmap error: {0}")]
-    DiskMap(#[from] crate::diskmap::Error),
-    #[error("diskindex error: {0}")]
-    DiskIndex(#[from] crate::diskindex::Error),
+    #[error("immutable index error: {0}")]
+    ImmutableIndex(#[from] immutable::Error),
+    #[error("ordinal index error: {0}")]
+    OrdinalIndex(#[from] ordinal::Error),
     #[error("record corrupted")]
     RecordCorrupted,
 }
 
-/// Configuration for `Freezer` storage.
+/// Configuration for [Archive] storage.
 #[derive(Clone)]
 pub struct Config<C> {
-    /// The configuration for the [diskmap::DiskMap].
-    pub diskmap: diskmap::Config<C>,
+    /// The configuration for the [immutable::Index].
+    pub immutable: immutable::Config<C>,
 
-    /// The configuration for the [diskindex::DiskIndex].
-    pub diskindex: diskindex::Config,
+    /// The configuration for the [ordinal::Index].
+    pub ordinal: ordinal::Config,
 }
