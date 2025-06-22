@@ -546,7 +546,7 @@ mod tests {
                 blob.close().await.unwrap();
             }
 
-            // Reopen and verify it handles partial write
+            // Reopen and verify it handles partial write gracefully
             {
                 let store = Store::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
                     .await
@@ -558,9 +558,17 @@ mod tests {
                     FixedBytes::new([42u8; 32])
                 );
 
-                // Second record should be detected as invalid during restart
+                // Second record should be removed due to partial write
                 assert!(!store.has(1));
                 assert!(store.get(1).await.unwrap().is_none());
+
+                // Store should still be functional
+                let mut store_mut = store;
+                store_mut.put(1, FixedBytes::new([44u8; 32])).unwrap();
+                assert_eq!(
+                    store_mut.get(1).await.unwrap().unwrap(),
+                    FixedBytes::new([44u8; 32])
+                );
             }
         });
     }
@@ -598,12 +606,23 @@ mod tests {
                 blob.close().await.unwrap();
             }
 
-            // Reopen - the store should fail to initialize due to missing CRC
+            // Reopen - the store should now handle missing CRC gracefully
             {
-                let result = Store::<_, FixedBytes<32>>::init(context.clone(), cfg.clone()).await;
+                let store = Store::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store with partial record");
 
-                // The current implementation doesn't handle partial records gracefully
-                assert!(result.is_err());
+                // Record should be removed due to missing CRC
+                assert!(!store.has(0));
+                assert!(store.get(0).await.unwrap().is_none());
+
+                // Store should still be functional
+                let mut store_mut = store;
+                store_mut.put(0, FixedBytes::new([45u8; 32])).unwrap();
+                assert_eq!(
+                    store_mut.get(0).await.unwrap().unwrap(),
+                    FixedBytes::new([45u8; 32])
+                );
             }
         });
     }
@@ -734,7 +753,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_store_partial_record_fails_init() {
+    fn test_store_partial_record_multiple_blobs() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -792,16 +811,28 @@ mod tests {
                 blob.close().await.unwrap();
             }
 
-            // Reopen - the store should fail to initialize due to partial record
+            // Reopen - the store should now handle all corruptions gracefully
             {
-                let result = Store::<_, FixedBytes<32>>::init(context.clone(), cfg.clone()).await;
+                let store = Store::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
 
-                // The current implementation doesn't handle partial records gracefully
-                // during initialization, so it will fail
-                assert!(result.is_err());
+                // Corrupted records should not be present
+                assert!(!store.has(0)); // CRC corrupted
+                assert!(!store.has(10)); // Value corrupted (CRC mismatch)
+                assert!(!store.has(20)); // Truncated - removed during init
 
-                // This is actually exposing a limitation in the ordinal store's
-                // corruption handling compared to the journal implementation
+                // Valid records should still be accessible
+                assert!(store.has(5));
+                assert!(store.has(15));
+                assert_eq!(
+                    store.get(5).await.unwrap().unwrap(),
+                    FixedBytes::new([5u8; 32])
+                );
+                assert_eq!(
+                    store.get(15).await.unwrap().unwrap(),
+                    FixedBytes::new([15u8; 32])
+                );
             }
         });
     }
