@@ -1,19 +1,43 @@
 //! Random key-lookup benchmark for Immutable Store.
 
-use super::utils::{
-    append_random_immutable, compression_label, get_immutable, read_concurrent_keys_immutable,
-    read_serial_keys_immutable, select_keys,
-};
+use crate::utils::{Immutable, Key};
+
+use super::utils::{append_random_immutable, compression_label, get_immutable};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Config,
     Runner,
 };
-use criterion::{criterion_group, Criterion};
+use criterion::{black_box, criterion_group, Criterion};
+use futures::future::try_join_all;
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::time::Instant;
 
 /// Items pre-loaded into the store.
 const ITEMS: u64 = 250_000;
+
+/// Select random keys from a vec for benchmarking.
+pub fn select_keys(keys: &[Key], count: usize, items: u64) -> Vec<Key> {
+    let mut rng = StdRng::seed_from_u64(42);
+    let mut selected_keys = Vec::with_capacity(count);
+    for _ in 0..count {
+        selected_keys.push(keys[rng.gen_range(0..items as usize)].clone());
+    }
+    selected_keys
+}
+
+/// Read keys serially from an immutable store.
+pub async fn read_serial_keys(store: &Immutable, reads: &[Key]) {
+    for k in reads {
+        black_box(store.get(k).await.unwrap().unwrap());
+    }
+}
+
+/// Read keys concurrently from an immutable store.
+pub async fn read_concurrent_keys(store: &Immutable, reads: Vec<Key>) {
+    let futures = reads.iter().map(|k| store.get(k));
+    black_box(try_join_all(futures).await.unwrap());
+}
 
 fn bench_immutable_get(c: &mut Criterion) {
     // Create a config we can use across all benchmarks (with a fixed `storage_directory`).
@@ -50,15 +74,9 @@ fn bench_immutable_get(c: &mut Criterion) {
                             let start = Instant::now();
                             for _ in 0..iters {
                                 match mode {
-                                    "serial" => {
-                                        read_serial_keys_immutable(&store, &selected_keys).await
-                                    }
+                                    "serial" => read_serial_keys(&store, &selected_keys).await,
                                     "concurrent" => {
-                                        read_concurrent_keys_immutable(
-                                            &store,
-                                            selected_keys.clone(),
-                                        )
-                                        .await
+                                        read_concurrent_keys(&store, selected_keys.clone()).await
                                     }
                                     _ => unreachable!(),
                                 }
