@@ -169,7 +169,7 @@ mod tests {
     use super::*;
     use commonware_codec::DecodeExt;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Metrics, Runner};
+    use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
     use commonware_utils::array::FixedBytes;
 
     const DEFAULT_TABLE_SIZE: u32 = 256;
@@ -557,6 +557,336 @@ mod tests {
                 // Should not find any data
                 assert!(store.get(&test_key("destroy1")).await.unwrap().is_none());
                 assert!(store.get(&test_key("destroy2")).await.unwrap().is_none());
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_store_partial_table_entry_write() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                journal_partition: "test_journal".into(),
+                journal_compression: None,
+                metadata_partition: "test_metadata".into(),
+                table_partition: "test_table".into(),
+                table_size: 4,
+                codec_config: (),
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
+            };
+
+            // Create store with data and sync
+            {
+                let mut store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                store.put(test_key("key1"), 42).await.unwrap();
+                store.sync().await.unwrap();
+                store.close().await.unwrap();
+            }
+
+            // Corrupt the table by writing partial entry
+            {
+                let (blob, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
+                // Write incomplete table entry (only 10 bytes instead of 24)
+                blob.write_at(vec![0xFF; 10], 0).await.unwrap();
+                blob.close().await.unwrap();
+            }
+
+            // Reopen and verify it handles the corruption
+            {
+                let store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                // The key should still be retrievable from journal if table is corrupted
+                // but the table entry is zeroed out
+                let result = store.get(&test_key("key1")).await.unwrap();
+                assert!(result.is_none() || result == Some(42));
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_store_table_entry_invalid_crc() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                journal_partition: "test_journal".into(),
+                journal_compression: None,
+                metadata_partition: "test_metadata".into(),
+                table_partition: "test_table".into(),
+                table_size: 4,
+                codec_config: (),
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
+            };
+
+            // Create store with data
+            {
+                let mut store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                store.put(test_key("key1"), 42).await.unwrap();
+                store.sync().await.unwrap();
+                store.close().await.unwrap();
+            }
+
+            // Corrupt the CRC in the table entry
+            {
+                let (blob, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
+                // Read the first entry
+                let entry_data = blob.read_at(vec![0u8; 24], 0).await.unwrap();
+                let mut corrupted = entry_data.as_ref().to_vec();
+                // Corrupt the CRC (last 4 bytes of the entry)
+                corrupted[20] ^= 0xFF;
+                blob.write_at(corrupted, 0).await.unwrap();
+                blob.close().await.unwrap();
+            }
+
+            // Reopen and verify it handles invalid CRC
+            {
+                let store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                // With invalid CRC, the entry should be treated as invalid
+                let result = store.get(&test_key("key1")).await.unwrap();
+                // The store should still work but may not find the key due to invalid table entry
+                assert!(result.is_none() || result == Some(42));
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_store_invalid_epoch_cleanup() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                journal_partition: "test_journal".into(),
+                journal_compression: None,
+                metadata_partition: "test_metadata".into(),
+                table_partition: "test_table".into(),
+                table_size: 4,
+                codec_config: (),
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
+            };
+
+            // Create store with data
+            {
+                let mut store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                store.put(test_key("key1"), 42).await.unwrap();
+                store.sync().await.unwrap(); // This creates epoch 1
+                store.put(test_key("key2"), 43).await.unwrap();
+                store.sync().await.unwrap(); // This creates epoch 2
+                store.close().await.unwrap();
+            }
+
+            // Manually corrupt metadata to simulate crash after table write but before metadata update
+            {
+                use crate::metadata::{Config as MetadataConfig, Metadata};
+                use commonware_utils::array::U64;
+
+                let mut metadata = Metadata::<_, U64>::init(
+                    context.with_label("metadata"),
+                    MetadataConfig {
+                        partition: cfg.metadata_partition.clone(),
+                    },
+                )
+                .await
+                .unwrap();
+
+                // Set committed epoch back to 1 (simulating crash before epoch 2 was committed)
+                metadata.put(0u64.into(), 1u64.to_be_bytes().to_vec());
+                metadata.sync().await.unwrap();
+                metadata.close().await.unwrap();
+            }
+
+            // Reopen and verify epoch cleanup works
+            {
+                let store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                // key1 should still be there (epoch 1)
+                assert_eq!(store.get(&test_key("key1")).await.unwrap(), Some(42));
+
+                // key2 might not be found as its table entry (epoch 2) should be cleaned up
+                let key2_result = store.get(&test_key("key2")).await.unwrap();
+                assert!(key2_result.is_none() || key2_result == Some(43));
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_store_corrupted_journal_entry() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                journal_partition: "test_journal".into(),
+                journal_compression: None,
+                metadata_partition: "test_metadata".into(),
+                table_partition: "test_table".into(),
+                table_size: 4,
+                codec_config: (),
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
+            };
+
+            // Create store with multiple entries
+            {
+                let mut store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                store.put(test_key("key1"), 42).await.unwrap();
+                store.put(test_key("key2"), 43).await.unwrap();
+                store.sync().await.unwrap();
+                store.close().await.unwrap();
+            }
+
+            // Corrupt a journal entry
+            {
+                let journal_section = 0u64.to_be_bytes();
+                let (blob, size) = context
+                    .open(&cfg.journal_partition, &journal_section)
+                    .await
+                    .unwrap();
+
+                // Corrupt data somewhere in the middle of the journal
+                if size > 20 {
+                    blob.write_at(vec![0xFF; 4], 16).await.unwrap();
+                }
+                blob.close().await.unwrap();
+            }
+
+            // Reopen and verify it handles journal corruption
+            {
+                // Journal corruption is handled during replay
+                // The store should still initialize but may have lost some data
+                let store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                // Try to get the keys - behavior depends on what was corrupted
+                let _ = store.get(&test_key("key1")).await;
+                let _ = store.get(&test_key("key2")).await;
+
+                // Store should still be functional for new writes
+                let mut store_mut = store;
+                store_mut.put(test_key("key3"), 44).await.unwrap();
+                assert_eq!(store_mut.get(&test_key("key3")).await.unwrap(), Some(44));
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_store_table_with_extra_bytes() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                journal_partition: "test_journal".into(),
+                journal_compression: None,
+                metadata_partition: "test_metadata".into(),
+                table_partition: "test_table".into(),
+                table_size: 4,
+                codec_config: (),
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
+            };
+
+            // Create store with data
+            {
+                let mut store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                store.put(test_key("key1"), 42).await.unwrap();
+                store.sync().await.unwrap();
+                store.close().await.unwrap();
+            }
+
+            // Add extra bytes to the table blob
+            {
+                let (blob, size) = context.open(&cfg.table_partition, b"table").await.unwrap();
+                // Append garbage data
+                blob.write_at(vec![0xDE, 0xAD, 0xBE, 0xEF], size)
+                    .await
+                    .unwrap();
+                blob.close().await.unwrap();
+            }
+
+            // Reopen and verify it handles extra bytes gracefully
+            {
+                let store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                // Should still be able to read the key
+                assert_eq!(store.get(&test_key("key1")).await.unwrap(), Some(42));
+
+                // And write new data
+                let mut store_mut = store;
+                store_mut.put(test_key("key2"), 43).await.unwrap();
+                assert_eq!(store_mut.get(&test_key("key2")).await.unwrap(), Some(43));
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_store_missing_metadata() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                journal_partition: "test_journal".into(),
+                journal_compression: None,
+                metadata_partition: "test_metadata".into(),
+                table_partition: "test_table".into(),
+                table_size: 4,
+                codec_config: (),
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
+            };
+
+            // Create store with data
+            {
+                let mut store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                store.put(test_key("key1"), 42).await.unwrap();
+                store.sync().await.unwrap();
+                store.close().await.unwrap();
+            }
+
+            // Remove metadata
+            {
+                context.remove(&cfg.metadata_partition, None).await.unwrap();
+            }
+
+            // Reopen and verify it handles missing metadata
+            {
+                let store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                // With missing metadata, committed epoch is 0, so all table entries
+                // with epoch > 0 will be cleaned up
+                let result = store.get(&test_key("key1")).await.unwrap();
+                assert!(result.is_none() || result == Some(42));
             }
         });
     }

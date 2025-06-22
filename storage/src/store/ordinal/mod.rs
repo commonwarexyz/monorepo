@@ -511,4 +511,491 @@ mod tests {
             }
         });
     }
+
+    #[test_traced]
+    fn test_store_partial_record_write() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: DEFAULT_ITEMS_PER_BLOB,
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
+            };
+
+            // Create store with data
+            {
+                let mut store = Store::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                store.put(0, FixedBytes::new([42u8; 32])).unwrap();
+                store.put(1, FixedBytes::new([43u8; 32])).unwrap();
+                store.close().await.expect("Failed to close store");
+            }
+
+            // Corrupt by writing partial record (only value, no CRC)
+            {
+                let (blob, _) = context
+                    .open("test_ordinal", &0u64.to_be_bytes())
+                    .await
+                    .unwrap();
+                // Overwrite second record with partial data (32 bytes instead of 36)
+                blob.write_at(vec![0xFF; 32], 36).await.unwrap();
+                blob.close().await.unwrap();
+            }
+
+            // Reopen and verify it handles partial write
+            {
+                let store = Store::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                // First record should be fine
+                assert_eq!(
+                    store.get(0).await.unwrap().unwrap(),
+                    FixedBytes::new([42u8; 32])
+                );
+
+                // Second record should be detected as invalid during restart
+                assert!(!store.has(1));
+                assert!(store.get(1).await.unwrap().is_none());
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_store_missing_crc() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: DEFAULT_ITEMS_PER_BLOB,
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
+            };
+
+            // Create store with data
+            {
+                let mut store = Store::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                store.put(0, FixedBytes::new([42u8; 32])).unwrap();
+                store.close().await.expect("Failed to close store");
+            }
+
+            // Truncate the blob to remove CRC
+            {
+                let (blob, size) = context
+                    .open("test_ordinal", &0u64.to_be_bytes())
+                    .await
+                    .unwrap();
+                // Truncate to remove last 4 bytes (CRC)
+                blob.truncate(size - 4).await.unwrap();
+                blob.close().await.unwrap();
+            }
+
+            // Reopen - the store should fail to initialize due to missing CRC
+            {
+                let result = Store::<_, FixedBytes<32>>::init(context.clone(), cfg.clone()).await;
+
+                // The current implementation doesn't handle partial records gracefully
+                assert!(result.is_err());
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_store_corrupted_value() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: DEFAULT_ITEMS_PER_BLOB,
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
+            };
+
+            // Create store with data
+            {
+                let mut store = Store::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                store.put(0, FixedBytes::new([42u8; 32])).unwrap();
+                store.put(1, FixedBytes::new([43u8; 32])).unwrap();
+                store.close().await.expect("Failed to close store");
+            }
+
+            // Corrupt the value portion of a record
+            {
+                let (blob, _) = context
+                    .open("test_ordinal", &0u64.to_be_bytes())
+                    .await
+                    .unwrap();
+                // Corrupt some bytes in the value of the first record
+                blob.write_at(vec![0xFF, 0xFF, 0xFF, 0xFF], 10)
+                    .await
+                    .unwrap();
+                blob.close().await.unwrap();
+            }
+
+            // Reopen and verify it detects corruption
+            {
+                let store = Store::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                // First record should be detected as corrupted (CRC mismatch)
+                assert!(!store.has(0));
+
+                // Second record should still be valid
+                assert!(store.has(1));
+                assert_eq!(
+                    store.get(1).await.unwrap().unwrap(),
+                    FixedBytes::new([43u8; 32])
+                );
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_store_crc_corruptions() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: 10, // Small blob size for testing
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
+            };
+
+            // Create store with data across multiple blobs
+            {
+                let mut store = Store::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                // Add values across 2 blobs
+                store.put(0, FixedBytes::new([0u8; 32])).unwrap();
+                store.put(5, FixedBytes::new([5u8; 32])).unwrap();
+                store.put(10, FixedBytes::new([10u8; 32])).unwrap();
+                store.put(15, FixedBytes::new([15u8; 32])).unwrap();
+                store.close().await.expect("Failed to close store");
+            }
+
+            // Corrupt CRCs in different blobs
+            {
+                // Corrupt CRC in first blob
+                let (blob, _) = context
+                    .open("test_ordinal", &0u64.to_be_bytes())
+                    .await
+                    .unwrap();
+                blob.write_at(vec![0xFF], 32).await.unwrap(); // Corrupt CRC of index 0
+                blob.close().await.unwrap();
+
+                // Corrupt value in second blob (which will invalidate CRC)
+                let (blob, _) = context
+                    .open("test_ordinal", &1u64.to_be_bytes())
+                    .await
+                    .unwrap();
+                blob.write_at(vec![0xFF; 4], 5).await.unwrap(); // Corrupt value of index 10
+                blob.close().await.unwrap();
+            }
+
+            // Reopen and verify handling of CRC corruptions
+            {
+                let store = Store::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                // Corrupted records should not be present
+                assert!(!store.has(0)); // CRC corrupted
+                assert!(!store.has(10)); // Value corrupted (CRC mismatch)
+
+                // Valid records should still be accessible
+                assert!(store.has(5));
+                assert!(store.has(15));
+                assert_eq!(
+                    store.get(5).await.unwrap().unwrap(),
+                    FixedBytes::new([5u8; 32])
+                );
+                assert_eq!(
+                    store.get(15).await.unwrap().unwrap(),
+                    FixedBytes::new([15u8; 32])
+                );
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_store_partial_record_fails_init() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: 10, // Small blob size for testing
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
+            };
+
+            // Create store with data across multiple blobs
+            {
+                let mut store = Store::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                // Add values across 3 blobs
+                store.put(0, FixedBytes::new([0u8; 32])).unwrap();
+                store.put(5, FixedBytes::new([5u8; 32])).unwrap();
+                store.put(10, FixedBytes::new([10u8; 32])).unwrap();
+                store.put(15, FixedBytes::new([15u8; 32])).unwrap();
+                store.put(20, FixedBytes::new([20u8; 32])).unwrap();
+                store.close().await.expect("Failed to close store");
+            }
+
+            // Corrupt multiple records in different ways
+            {
+                // Corrupt CRC in first blob
+                let (blob, _) = context
+                    .open("test_ordinal", &0u64.to_be_bytes())
+                    .await
+                    .unwrap();
+                blob.write_at(vec![0xFF], 32).await.unwrap(); // Corrupt CRC of index 0
+                blob.close().await.unwrap();
+
+                // Corrupt value in second blob
+                // Index 10 with items_per_blob=10 means section 1
+                let (blob, _) = context
+                    .open("test_ordinal", &1u64.to_be_bytes())
+                    .await
+                    .unwrap();
+                blob.write_at(vec![0xFF; 4], 5).await.unwrap(); // Corrupt value of index 10
+                blob.close().await.unwrap();
+
+                // Truncate third blob to create partial record
+                // Index 20 with items_per_blob=10 means section 2
+                let (blob, size) = context
+                    .open("test_ordinal", &2u64.to_be_bytes())
+                    .await
+                    .unwrap();
+                // Truncate to create partial record
+                if size >= 36 {
+                    blob.truncate(26).await.unwrap(); // Partial record (less than 36 bytes)
+                }
+                blob.close().await.unwrap();
+            }
+
+            // Reopen - the store should fail to initialize due to partial record
+            {
+                let result = Store::<_, FixedBytes<32>>::init(context.clone(), cfg.clone()).await;
+
+                // The current implementation doesn't handle partial records gracefully
+                // during initialization, so it will fail
+                assert!(result.is_err());
+
+                // This is actually exposing a limitation in the ordinal store's
+                // corruption handling compared to the journal implementation
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_store_extra_bytes_in_blob() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: DEFAULT_ITEMS_PER_BLOB,
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
+            };
+
+            // Create store with data
+            {
+                let mut store = Store::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                store.put(0, FixedBytes::new([42u8; 32])).unwrap();
+                store.put(1, FixedBytes::new([43u8; 32])).unwrap();
+                store.close().await.expect("Failed to close store");
+            }
+
+            // Add extra bytes at the end of blob
+            {
+                let (blob, size) = context
+                    .open("test_ordinal", &0u64.to_be_bytes())
+                    .await
+                    .unwrap();
+                // Add garbage data that forms a complete but invalid record
+                // This avoids partial record issues
+                let mut garbage = vec![0xFF; 32]; // Invalid value
+                let invalid_crc = 0xDEADBEEFu32;
+                garbage.extend_from_slice(&invalid_crc.to_be_bytes());
+                assert_eq!(garbage.len(), 36); // Full record size
+                blob.write_at(garbage, size).await.unwrap();
+                blob.close().await.unwrap();
+            }
+
+            // Reopen and verify it handles extra bytes
+            {
+                let store = Store::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                // Original records should still be valid
+                assert!(store.has(0));
+                assert!(store.has(1));
+                assert_eq!(
+                    store.get(0).await.unwrap().unwrap(),
+                    FixedBytes::new([42u8; 32])
+                );
+                assert_eq!(
+                    store.get(1).await.unwrap().unwrap(),
+                    FixedBytes::new([43u8; 32])
+                );
+
+                // Store should still be functional
+                let mut store_mut = store;
+                store_mut.put(2, FixedBytes::new([44u8; 32])).unwrap();
+                assert_eq!(
+                    store_mut.get(2).await.unwrap().unwrap(),
+                    FixedBytes::new([44u8; 32])
+                );
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_store_corruption_at_blob_boundary() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: 10, // Small size to test boundaries
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
+            };
+
+            // Create store with data at blob boundaries
+            {
+                let mut store = Store::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                // Add values at boundaries
+                store.put(9, FixedBytes::new([9u8; 32])).unwrap(); // Last in first blob
+                store.put(10, FixedBytes::new([10u8; 32])).unwrap(); // First in second blob
+                store.put(19, FixedBytes::new([19u8; 32])).unwrap(); // Last in second blob
+                store.put(20, FixedBytes::new([20u8; 32])).unwrap(); // First in third blob
+                store.close().await.expect("Failed to close store");
+            }
+
+            // Corrupt records at boundaries
+            {
+                // Corrupt last record of first blob
+                let (blob, _) = context
+                    .open("test_ordinal", &0u64.to_be_bytes())
+                    .await
+                    .unwrap();
+                let offset = 9 * 36; // 9th index * record size
+                blob.write_at(vec![0xFF; 4], offset + 10).await.unwrap();
+                blob.close().await.unwrap();
+
+                // Corrupt first record of third blob
+                // Index 20 with items_per_blob=10 means section 2
+                let (blob, _) = context
+                    .open("test_ordinal", &2u64.to_be_bytes())
+                    .await
+                    .unwrap();
+                blob.write_at(vec![0xFF; 4], 10).await.unwrap();
+                blob.close().await.unwrap();
+            }
+
+            // Reopen and verify boundary corruption handling
+            {
+                let store = Store::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                // Corrupted boundary records should be invalid
+                assert!(!store.has(9)); // Last of first blob
+                assert!(!store.has(20)); // First of third blob
+
+                // Records in clean blobs should be valid
+                assert!(store.has(10));
+                assert!(store.has(19));
+                assert_eq!(
+                    store.get(10).await.unwrap().unwrap(),
+                    FixedBytes::new([10u8; 32])
+                );
+                assert_eq!(
+                    store.get(19).await.unwrap().unwrap(),
+                    FixedBytes::new([19u8; 32])
+                );
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_store_zero_filled_records() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: DEFAULT_ITEMS_PER_BLOB,
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
+            };
+
+            // Create blob with zero-filled space
+            {
+                let (blob, _) = context
+                    .open("test_ordinal", &0u64.to_be_bytes())
+                    .await
+                    .unwrap();
+
+                // Write zeros for several record positions
+                let zeros = vec![0u8; 36 * 5]; // 5 records worth of zeros
+                blob.write_at(zeros, 0).await.unwrap();
+
+                // Write a valid record after the zeros
+                let mut valid_record = vec![44u8; 32];
+                let crc = crc32fast::hash(&valid_record);
+                valid_record.extend_from_slice(&crc.to_be_bytes());
+                blob.write_at(valid_record, 36 * 5).await.unwrap();
+
+                blob.close().await.unwrap();
+            }
+
+            // Initialize store and verify it handles zero-filled records
+            {
+                let store = Store::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                // Zero-filled positions should not be considered valid
+                for i in 0..5 {
+                    assert!(!store.has(i));
+                }
+
+                // The valid record should be found
+                assert!(store.has(5));
+                assert_eq!(
+                    store.get(5).await.unwrap().unwrap(),
+                    FixedBytes::new([44u8; 32])
+                );
+            }
+        });
+    }
 }
