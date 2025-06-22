@@ -371,12 +371,10 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Store<E, K, V> {
         let entry2 = TableEntry::read(&mut buf2)?;
 
         // Determine where to start writing the new entry
-        let start = if entry1.is_empty() {
+        let start = if entry1.is_empty() || entry1.epoch < entry2.epoch {
             0
-        } else if entry2.is_empty() {
+        } else if entry2.is_empty() || entry2.epoch < entry1.epoch {
             TABLE_ENTRY_SIZE
-        } else if entry1.epoch > entry2.epoch {
-            0
         } else {
             unreachable!("two valid entries with the same epoch");
         };
