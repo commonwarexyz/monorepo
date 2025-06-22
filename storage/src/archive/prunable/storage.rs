@@ -1,9 +1,9 @@
 use super::{Config, Error, Translator};
 use crate::{
+    identifier::Identifier,
     index::Index,
     journal::variable::{Config as JConfig, Journal},
     rmap::RMap,
-    Identifier,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Codec, EncodeSize, Read, ReadExt, Write};
@@ -173,54 +173,6 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         })
     }
 
-    /// Store an item in `Archive`. Both indices and keys are assumed to both be globally unique.
-    ///
-    /// If the index already exists, put does nothing and returns. If the same key is stored multiple times
-    /// at different indices (not recommended), any value associated with the key may be returned.
-    pub async fn put(&mut self, index: u64, key: K, data: V) -> Result<(), Error> {
-        // Check last pruned
-        let oldest_allowed = self.oldest_allowed.unwrap_or(0);
-        if index < oldest_allowed {
-            return Err(Error::AlreadyPrunedTo(oldest_allowed));
-        }
-
-        // Check for existing index
-        if self.indices.contains_key(&index) {
-            return Ok(());
-        }
-
-        // Store item in journal
-        let record = Record::new(index, key.clone(), data);
-        let section = self.section_mask & index;
-        let (offset, len) = self.journal.append(section, record).await?;
-
-        // Store index
-        self.indices.insert(index, Location { offset, len });
-
-        // Store interval
-        self.intervals.insert(index);
-
-        // Insert and prune any useless keys
-        self.keys
-            .insert_and_prune(&key, index, |v| *v < oldest_allowed);
-
-        // Update pending writes
-        let pending_writes = self.pending.entry(section).or_default();
-        *pending_writes += 1;
-
-        // Update metrics
-        self.items_tracked.set(self.indices.len() as i64);
-        Ok(())
-    }
-
-    /// Retrieve an item from `Archive`.
-    pub async fn get(&self, identifier: Identifier<'_, u64, K>) -> Result<Option<V>, Error> {
-        match identifier {
-            Identifier::Index(index) => self.get_index(index).await,
-            Identifier::Key(key) => self.get_key(key).await,
-        }
-    }
-
     async fn get_index(&self, index: u64) -> Result<Option<V>, Error> {
         // Update metrics
         self.gets.inc();
@@ -271,15 +223,6 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         }
 
         Ok(None)
-    }
-
-    /// Check if an item exists in the `Archive`.
-    pub async fn has(&self, identifier: Identifier<'_, u64, K>) -> Result<bool, Error> {
-        self.has.inc();
-        match identifier {
-            Identifier::Index(index) => Ok(self.has_index(index)),
-            Identifier::Key(key) => self.get_key(key).await.map(|result| result.is_some()),
-        }
     }
 
     fn has_index(&self, index: u64) -> bool {
@@ -339,9 +282,72 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         self.items_tracked.set(self.indices.len() as i64);
         Ok(())
     }
+}
 
-    /// Forcibly sync all pending writes across all `Journals`.
-    pub async fn sync(&mut self) -> Result<(), Error> {
+impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Archive
+    for Archive<T, E, K, V>
+{
+    type Index = u64;
+    type Key = K;
+    type Value = V;
+    type Error = Error;
+
+    async fn put(&mut self, index: u64, key: K, data: V) -> Result<(), Error> {
+        // Check last pruned
+        let oldest_allowed = self.oldest_allowed.unwrap_or(0);
+        if index < oldest_allowed {
+            return Err(Error::AlreadyPrunedTo(oldest_allowed));
+        }
+
+        // Check for existing index
+        if self.indices.contains_key(&index) {
+            return Ok(());
+        }
+
+        // Store item in journal
+        let record = Record::new(index, key.clone(), data);
+        let section = self.section_mask & index;
+        let (offset, len) = self.journal.append(section, record).await?;
+
+        // Store index
+        self.indices.insert(index, Location { offset, len });
+
+        // Store interval
+        self.intervals.insert(index);
+
+        // Insert and prune any useless keys
+        self.keys
+            .insert_and_prune(&key, index, |v| *v < oldest_allowed);
+
+        // Update pending writes
+        let pending_writes = self.pending.entry(section).or_default();
+        *pending_writes += 1;
+
+        // Update metrics
+        self.items_tracked.set(self.indices.len() as i64);
+        Ok(())
+    }
+
+    async fn get(&self, identifier: Identifier<'_, u64, K>) -> Result<Option<V>, Error> {
+        match identifier {
+            Identifier::Index(index) => self.get_index(index).await,
+            Identifier::Key(key) => self.get_key(key).await,
+        }
+    }
+
+    async fn has(&self, identifier: Identifier<'_, u64, K>) -> Result<bool, Error> {
+        self.has.inc();
+        match identifier {
+            Identifier::Index(index) => Ok(self.has_index(index)),
+            Identifier::Key(key) => self.get_key(key).await.map(|result| result.is_some()),
+        }
+    }
+
+    async fn next_gap(&self, index: u64) -> Result<(Option<u64>, Option<u64>), Error> {
+        Ok(self.intervals.next_gap(index))
+    }
+
+    async fn sync(&mut self) -> Result<(), Error> {
         for (section, count) in self.pending.iter_mut() {
             if *count == 0 {
                 continue;
@@ -359,24 +365,11 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         Ok(())
     }
 
-    /// Retrieve the end of the current range including `index` (inclusive) and
-    /// the start of the next range after `index` (if it exists).
-    ///
-    /// This is useful for driving backfill operations over the archive.
-    pub fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
-        self.intervals.next_gap(index)
-    }
-
-    /// Close `Archive` (and underlying `Journal`).
-    ///
-    /// Any pending writes will be synced by `Journal` prior
-    /// to closing.
-    pub async fn close(self) -> Result<(), Error> {
+    async fn close(self) -> Result<(), Error> {
         self.journal.close().await.map_err(Error::Journal)
     }
 
-    /// Remove all on-disk data created by this `Archive`.
-    pub async fn destroy(self) -> Result<(), Error> {
+    async fn destroy(self) -> Result<(), Error> {
         self.journal.destroy().await.map_err(Error::Journal)
     }
 }

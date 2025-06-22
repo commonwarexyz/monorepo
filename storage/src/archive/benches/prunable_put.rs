@@ -1,9 +1,10 @@
-use super::utils::{append_random, get_archive};
+use super::utils::{append_random, compression_label, get_prunable};
 use commonware_runtime::benchmarks::{context, tokio};
+use commonware_storage::archive::Archive as _;
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 
-fn bench_put(c: &mut Criterion) {
+fn bench_prunable_put(c: &mut Criterion) {
     let runner = tokio::Runner::default();
     for compression in [None, Some(3)] {
         for items in [10_000, 50_000, 100_000] {
@@ -11,16 +12,14 @@ fn bench_put(c: &mut Criterion) {
                 "{}/items={} comp={}",
                 module_path!(),
                 items,
-                compression
-                    .map(|l| l.to_string())
-                    .unwrap_or_else(|| "off".into()),
+                compression_label(compression)
             );
             c.bench_function(&label, |b| {
                 b.to_async(&runner).iter_custom(move |iters| async move {
                     let ctx = context::get::<commonware_runtime::tokio::Context>();
                     let mut total = Duration::ZERO;
                     for _ in 0..iters {
-                        let mut archive = get_archive(ctx.clone(), compression).await;
+                        let mut archive = get_prunable(ctx.clone(), compression).await;
 
                         let start = Instant::now();
                         append_random(&mut archive, items).await;
@@ -38,5 +37,5 @@ fn bench_put(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_put
+    targets = bench_prunable_put
 }

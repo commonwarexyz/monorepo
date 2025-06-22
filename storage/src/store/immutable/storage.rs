@@ -18,7 +18,7 @@ use tracing::debug;
 
 const COMMITTED_EPOCH: u64 = 0;
 const COMMITTED_SECTION: u64 = 1;
-const COMMITTED_OFFSET: u64 = 2;
+const COMMITTED_SIZE: u64 = 2;
 
 // -------------------------------------------------------------------------------------------------
 // Table layout
@@ -145,8 +145,8 @@ impl<K: Array, V: Codec> EncodeSize for JournalEntry<K, V> {
     }
 }
 
-/// Implementation of `DiskMap` storage.
-pub struct DiskMap<E: Storage + Metrics + Clock, K: Array, V: Codec> {
+/// Implementation of immutable key-value storage.
+pub struct Store<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     // Context for storage operations
     context: E,
 
@@ -154,7 +154,7 @@ pub struct DiskMap<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     table_partition: String,
     table_size: u32,
 
-    // Committed data for the disk map
+    // Committed data for the store
     metadata: Metadata<E, U64>,
 
     // Table blob that maps hash values to journal locations (journal_id, offset)
@@ -181,8 +181,8 @@ pub struct DiskMap<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     _phantom: PhantomData<(K, V)>,
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
-    /// Initialize a new `DiskMap` instance.
+impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Store<E, K, V> {
+    /// Initialize a new [Store] instance.
     pub async fn init(context: E, config: Config<V::Cfg>) -> Result<Self, Error> {
         // Validate configuration
         assert_ne!(config.table_size, 0, "table size must be non-zero");
@@ -232,20 +232,22 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
                 .get(&COMMITTED_SECTION.into())
                 .map(|v| u64::from_be_bytes(v.as_slice().try_into().unwrap()))
                 .unwrap_or(0u64);
-            let committed_offset = metadata
-                .get(&COMMITTED_OFFSET.into())
-                .map(|v| u32::from_be_bytes(v.as_slice().try_into().unwrap()))
-                .unwrap_or(0u32);
+            let committed_size = metadata
+                .get(&COMMITTED_SIZE.into())
+                .map(|v| u64::from_be_bytes(v.as_slice().try_into().unwrap()))
+                .unwrap_or(0u64);
 
             // Rewind the journal to the committed section and offset
-            journal.rewind(committed_section, committed_offset).await?;
+            journal.rewind(committed_section, committed_size).await?;
 
             // Zero out any table entries whose epoch is greater than the committed epoch
             let mut sync = false;
             let zero_buf = vec![0u8; TABLE_ENTRY_SIZE];
             for table_index in 0..config.table_size {
                 let offset = table_index as u64 * FULL_TABLE_ENTRY_SIZE as u64;
-                let result = table.read_at(vec![0u8; TABLE_ENTRY_SIZE], offset).await?;
+                let result = table
+                    .read_at(vec![0u8; FULL_TABLE_ENTRY_SIZE], offset)
+                    .await?;
 
                 let mut buf1 = &result.as_ref()[0..TABLE_ENTRY_SIZE];
                 let entry1 = TableEntry::read(&mut buf1)?;
@@ -392,17 +394,17 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
     /// Determine which journal section to write to based on current journal size.
     async fn update_section(&mut self) -> Result<(), Error> {
         // Get the current section size
-        let current_size = self.journal.section_size(self.current_section).await?;
+        let size = self.journal.size(self.current_section).await?;
 
         // If the current section has reached the target size, create a new section
-        if current_size >= self.target_journal_size {
+        if size >= self.target_journal_size {
             self.current_section += 1;
         }
 
         Ok(())
     }
 
-    /// Put a key-value pair into the disk map.
+    /// Put a key-value pair into the store.
     pub async fn put(&mut self, key: K, value: V) -> Result<(), Error> {
         self.puts.inc();
 
@@ -428,7 +430,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
     }
 
     /// Get the first value for a given key.
-    pub async fn get(&mut self, key: &K) -> Result<Option<V>, Error> {
+    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         self.gets.inc();
 
         // Get head of the chain from table
@@ -461,8 +463,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
         Ok(None)
     }
 
-    /// Check if a key exists in the disk map.
-    pub async fn has(&mut self, key: &K) -> Result<bool, Error> {
+    /// Check if a key exists in the store.
+    pub async fn has(&self, key: &K) -> Result<bool, Error> {
         Ok(self.get(key).await?.is_some())
     }
 
@@ -477,7 +479,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
             .unwrap_or(0);
         let next_epoch = committed_epoch.checked_add(1).expect("epoch overflow");
         let max_section = self.current_section;
-        let max_offset = self.journal.section_size(max_section).await?;
+        let max_section_size = self.journal.size(max_section).await?;
 
         // Sync all modified journal sections
         let mut updates = Vec::with_capacity(self.modified_sections.len());
@@ -501,14 +503,16 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
             .put(COMMITTED_EPOCH.into(), next_epoch.to_be_bytes().to_vec());
         self.metadata
             .put(COMMITTED_SECTION.into(), max_section.to_be_bytes().to_vec());
-        self.metadata
-            .put(COMMITTED_OFFSET.into(), max_offset.to_be_bytes().to_vec());
+        self.metadata.put(
+            COMMITTED_SIZE.into(),
+            max_section_size.to_be_bytes().to_vec(),
+        );
         self.metadata.sync().await?;
 
         Ok(())
     }
 
-    /// Close the disk map and underlying journal.
+    /// Close the store and underlying journal.
     pub async fn close(mut self) -> Result<(), Error> {
         // Sync any pending updates before closing
         self.sync().await?;
@@ -519,7 +523,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> DiskMap<E, K, V> {
         Ok(())
     }
 
-    /// Close and remove any underlying blobs created by the disk map.
+    /// Close and remove any underlying blobs created by the store.
     pub async fn destroy(self) -> Result<(), Error> {
         // Destroy the journal (removes all journal sections)
         self.journal.destroy().await?;

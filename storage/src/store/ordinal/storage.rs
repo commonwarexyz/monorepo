@@ -9,10 +9,10 @@ use commonware_runtime::{
 use commonware_utils::{hex, Array};
 use prometheus_client::metrics::counter::Counter;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet},
     mem::take,
 };
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Value stored in the index file.
 #[derive(Debug, Clone)]
@@ -29,10 +29,6 @@ impl<V: Array> Record<V> {
 
     fn is_valid(&self) -> bool {
         self.crc == crc32fast::hash(self.value.as_ref())
-    }
-
-    fn is_empty(&self) -> bool {
-        self.value.is_empty() && self.crc == 0
     }
 }
 
@@ -58,8 +54,8 @@ impl<V: Array> Read for Record<V> {
     }
 }
 
-/// Implementation of `DiskIndex` storage.
-pub struct DiskIndex<E: Storage + Metrics + Clock, V: Array> {
+/// Implementation of ordinal storage.
+pub struct Store<E: Storage + Metrics + Clock, V: Array> {
     // Configuration and context
     context: E,
     config: Config,
@@ -71,19 +67,23 @@ pub struct DiskIndex<E: Storage + Metrics + Clock, V: Array> {
     intervals: RMap,
 
     // Pending index entries to be synced
-    pending: HashMap<u64, V>,
+    pending: BTreeMap<u64, V>,
 
     // Metrics
     puts: Counter,
     gets: Counter,
 }
 
-impl<E: Storage + Metrics + Clock, V: Array> DiskIndex<E, V> {
-    /// Initialize a new `DiskIndex` instance.
+impl<E: Storage + Metrics + Clock, V: Array> Store<E, V> {
+    /// Initialize a new [Store] instance.
     pub async fn init(context: E, config: Config) -> Result<Self, Error> {
         // Scan for all blobs in the partition
         let mut blobs = BTreeMap::new();
-        let stored_blobs = context.scan(&config.partition).await?;
+        let stored_blobs = match context.scan(&config.partition).await {
+            Ok(blobs) => blobs,
+            Err(commonware_runtime::Error::PartitionMissing(_)) => Vec::new(),
+            Err(err) => return Err(Error::Runtime(err)),
+        };
         for name in stored_blobs {
             let (blob, len) = context.open(&config.partition, &name).await?;
             let index = match name.try_into() {
@@ -123,11 +123,6 @@ impl<E: Storage + Metrics + Clock, V: Array> DiskIndex<E, V> {
                 let record = Record::<V>::read(&mut record_buf.as_slice())?;
                 offset += Record::<V>::SIZE as u64;
 
-                // If record is empty, skip it
-                if record.is_empty() {
-                    continue;
-                }
-
                 // If record is valid, add to intervals
                 if record.is_valid() {
                     items += 1;
@@ -135,8 +130,8 @@ impl<E: Storage + Metrics + Clock, V: Array> DiskIndex<E, V> {
                     continue;
                 }
 
-                // If record is invalid, do nothing
-                warn!(index, "found invalid record during scan");
+                // If record is invalid, it may either be empty or corrupted. We don't
+                // store enough information to determine which (and thus don't log).
             }
         }
         debug!(
@@ -156,7 +151,7 @@ impl<E: Storage + Metrics + Clock, V: Array> DiskIndex<E, V> {
             config,
             blobs,
             intervals,
-            pending: HashMap::new(),
+            pending: BTreeMap::new(),
             puts,
             gets,
         })
@@ -172,7 +167,7 @@ impl<E: Storage + Metrics + Clock, V: Array> DiskIndex<E, V> {
     }
 
     /// Get the value for a given index.
-    pub async fn get(&mut self, index: u64) -> Result<Option<V>, Error> {
+    pub async fn get(&self, index: u64) -> Result<Option<V>, Error> {
         self.gets.inc();
 
         // If get isn't in an interval, it doesn't exist and we don't need to access disk.
@@ -251,7 +246,7 @@ impl<E: Storage + Metrics + Clock, V: Array> DiskIndex<E, V> {
         Ok(())
     }
 
-    /// Close the disk index.
+    /// Close the store.
     pub async fn close(mut self) -> Result<(), Error> {
         // Sync any pending entries
         self.sync().await?;
@@ -263,7 +258,7 @@ impl<E: Storage + Metrics + Clock, V: Array> DiskIndex<E, V> {
         Ok(())
     }
 
-    /// Destroy the disk index and remove all data.
+    /// Destroy the store and remove all data.
     pub async fn destroy(self) -> Result<(), Error> {
         // Close all blobs
         for (i, blob) in self.blobs.into_iter() {
