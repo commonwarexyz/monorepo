@@ -3,6 +3,7 @@ use crate::{
     index::Index,
     journal::variable::{Config as JConfig, Journal},
     rmap::RMap,
+    Identifier,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Codec, EncodeSize, Read, ReadExt, Write};
@@ -12,12 +13,6 @@ use futures::{pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::BTreeMap;
 use tracing::{debug, trace};
-
-/// Subject of a `get` or `has` operation.
-pub enum Identifier<'a, K: Array> {
-    Index(u64),
-    Key(&'a K),
-}
 
 /// Location of a record in `Journal`.
 struct Location {
@@ -219,7 +214,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
     }
 
     /// Retrieve an item from `Archive`.
-    pub async fn get(&self, identifier: Identifier<'_, K>) -> Result<Option<V>, Error> {
+    pub async fn get(&self, identifier: Identifier<'_, u64, K>) -> Result<Option<V>, Error> {
         match identifier {
             Identifier::Index(index) => self.get_index(index).await,
             Identifier::Key(key) => self.get_key(key).await,
@@ -279,7 +274,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
     }
 
     /// Check if an item exists in the `Archive`.
-    pub async fn has(&self, identifier: Identifier<'_, K>) -> Result<bool, Error> {
+    pub async fn has(&self, identifier: Identifier<'_, u64, K>) -> Result<bool, Error> {
         self.has.inc();
         match identifier {
             Identifier::Index(index) => Ok(self.has_index(index)),

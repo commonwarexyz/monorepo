@@ -1,15 +1,9 @@
 use super::{Config, Error};
-use crate::{diskindex::DiskIndex, diskmap::DiskMap};
+use crate::{diskindex::DiskIndex, diskmap::DiskMap, Identifier};
 use commonware_codec::Codec;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use prometheus_client::metrics::counter::Counter;
-
-/// Subject of a `get` or `has` operation.
-pub enum Identifier<'a, K: Array> {
-    Index(u64),
-    Key(&'a K),
-}
 
 /// Implementation of `Freezer` storage using diskmap + diskindex.
 pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
@@ -67,7 +61,7 @@ impl<E: Storage + Metrics + Clock, K: Array + Codec<Cfg = ()>, V: Codec> Freezer
     }
 
     /// Retrieve an item from `Freezer`.
-    pub async fn get(&mut self, identifier: Identifier<'_, K>) -> Result<Option<V>, Error> {
+    pub async fn get(&mut self, identifier: Identifier<'_, u64, K>) -> Result<Option<V>, Error> {
         self.gets.inc();
         match identifier {
             Identifier::Index(index) => self.get_index(index).await,
@@ -92,7 +86,7 @@ impl<E: Storage + Metrics + Clock, K: Array + Codec<Cfg = ()>, V: Codec> Freezer
     }
 
     /// Check if an item exists in the `Freezer`.
-    pub async fn has(&mut self, identifier: Identifier<'_, K>) -> Result<bool, Error> {
+    pub async fn has(&mut self, identifier: Identifier<'_, u64, K>) -> Result<bool, Error> {
         match identifier {
             Identifier::Index(index) => Ok(self.indices.has(index)),
             Identifier::Key(key) => self.has_key(key).await,

@@ -143,7 +143,7 @@
 
 mod storage;
 use crate::translator::Translator;
-pub use storage::{Archive, Identifier};
+pub use storage::Archive;
 use thiserror::Error;
 
 /// Errors that can occur when interacting with the archive.
@@ -195,6 +195,7 @@ mod tests {
     use crate::{
         journal::Error as JournalError,
         translator::{FourCap, TwoCap},
+        Identifier,
     };
     use commonware_codec::{varint::UInt, DecodeExt, EncodeSize, Error as CodecError};
     use commonware_macros::test_traced;
