@@ -4,11 +4,10 @@
 //! uniquely associated with both an `index` and a `key`. This is useful for storing ordered data either
 //! [for a limited time](crate::archive::prunable) or [indefinitely](crate::archive::immutable).
 
-use std::future::Future;
-
 use crate::identifier::Identifier;
 use commonware_codec::Codec;
 use commonware_utils::Array;
+use std::future::Future;
 
 pub mod immutable;
 pub mod prunable;
@@ -39,34 +38,35 @@ pub trait Archive {
     ) -> impl Future<Output = Result<(), Self::Error>>;
 
     /// Retrieve an item from [Archive].
-    async fn get(
+    fn get(
         &self,
         identifier: Identifier<'_, Self::Index, Self::Key>,
-    ) -> Result<Option<Self::Value>, Self::Error>;
+    ) -> impl Future<Output = Result<Option<Self::Value>, Self::Error>>;
 
     /// Check if an item exists in [Archive].
-    async fn has(
+    fn has(
         &self,
         identifier: Identifier<'_, Self::Index, Self::Key>,
-    ) -> Result<bool, Self::Error>;
+    ) -> impl Future<Output = Result<bool, Self::Error>>;
 
     /// Retrieve the end of the current range including `index` (inclusive) and
     /// the start of the next range after `index` (if it exists).
     ///
     /// This is useful for driving backfill operations over the archive.
-    async fn next_gap(
+    #[allow(clippy::type_complexity)]
+    fn next_gap(
         &self,
         index: Self::Index,
-    ) -> Result<(Option<Self::Index>, Option<Self::Index>), Self::Error>;
+    ) -> impl Future<Output = Result<(Option<Self::Index>, Option<Self::Index>), Self::Error>>;
 
     /// Sync all pending writes.
-    async fn sync(&mut self) -> Result<(), Self::Error>;
+    fn sync(&mut self) -> impl Future<Output = Result<(), Self::Error>>;
 
     /// Close [Archive] (and underlying storage).
     ///
     /// Any pending writes are synced prior to closing.
-    async fn close(self) -> Result<(), Self::Error>;
+    fn close(self) -> impl Future<Output = Result<(), Self::Error>>;
 
     /// Remove all persistent data created by this [Archive].
-    async fn destroy(self) -> Result<(), Self::Error>;
+    fn destroy(self) -> impl Future<Output = Result<(), Self::Error>>;
 }
