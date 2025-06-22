@@ -637,9 +637,9 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         }
     }
 
-    /// Rewinds the journal to the given size.
+    /// Rewinds the journal to the given `section` and `size`.
     ///
-    /// This removes any data beyond the specified section(s) and offset(s).
+    /// This removes any data beyond the specified `section` and `size`.
     pub async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
         self.prune_guard(section, false)?;
 
@@ -1295,11 +1295,44 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
             // Attempt to replay the journal
+            let mut items = Vec::<(u64, u32)>::new();
+            {
+                let stream = journal.replay(1024).await.expect("unable to setup replay");
+                pin_mut!(stream);
+                while let Some(result) = stream.next().await {
+                    match result {
+                        Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
+                        Err(err) => panic!("Failed to read item: {}", err),
+                    }
+                }
+            }
+            journal.close().await.expect("Failed to close journal");
+
+            // Verify that only non-corrupted items were replayed
+            assert_eq!(items.len(), 3);
+            assert_eq!(items[0].0, 1);
+            assert_eq!(items[0].1, 1);
+            assert_eq!(items[1].0, data_items[0].0);
+            assert_eq!(items[1].1, data_items[0].1);
+            assert_eq!(items[2].0, data_items[1].0);
+            assert_eq!(items[2].1, data_items[1].1);
+
+            // Confirm blob is expected length
+            let (_, blob_size) = context
+                .open(&cfg.partition, &2u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            assert_eq!(blob_size, 28);
+
+            // Attempt to replay the journal after truncation
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to re-initialize journal");
             let mut items = Vec::<(u64, u32)>::new();
             {
                 let stream = journal.replay(1024).await.expect("unable to setup replay");
