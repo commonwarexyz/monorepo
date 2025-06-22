@@ -1,62 +1,20 @@
 //! Random key-lookup benchmark for Archive.
 
-use super::utils::{append_random, get_archive, ArchiveType, Key};
+use super::utils::{
+    append_random, compression_label, create_benchmark_label, get_archive,
+    read_concurrent_indices_prunable, read_concurrent_keys_prunable, read_serial_indices_prunable,
+    read_serial_keys_prunable, select_indices, select_keys,
+};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Config,
     Runner,
 };
-use commonware_storage::identifier::Identifier;
-use criterion::{black_box, criterion_group, Criterion};
-use futures::future::try_join_all;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use criterion::{criterion_group, Criterion};
 use std::time::Instant;
 
 /// Items pre-loaded into the archive.
 const ITEMS: u64 = 250_000;
-
-fn select_keys(keys: &[Key], reads: usize) -> Vec<Key> {
-    let mut rng = StdRng::seed_from_u64(42);
-    let mut selected_keys = Vec::with_capacity(reads);
-    for _ in 0..reads {
-        selected_keys.push(keys[rng.gen_range(0..ITEMS as usize)].clone());
-    }
-    selected_keys
-}
-
-fn select_indices(reads: usize) -> Vec<u64> {
-    let mut rng = StdRng::seed_from_u64(42);
-    let mut selected_indices = Vec::with_capacity(reads);
-    for _ in 0..reads {
-        selected_indices.push(rng.gen_range(0..ITEMS));
-    }
-    selected_indices
-}
-
-async fn read_serial_keys(a: &ArchiveType, reads: &[Key]) {
-    for k in reads {
-        black_box(a.get(Identifier::Key(k)).await.unwrap().unwrap());
-    }
-}
-
-async fn read_serial_indices(a: &ArchiveType, indices: &[u64]) {
-    for idx in indices {
-        black_box(a.get(Identifier::Index(*idx)).await.unwrap().unwrap());
-    }
-}
-
-async fn read_concurrent_keys(a: &ArchiveType, reads: Vec<Key>) {
-    let futures = reads.iter().map(|k| a.get(Identifier::Key(k)));
-    black_box(try_join_all(futures).await.unwrap());
-}
-
-async fn read_concurrent_indices(a: &ArchiveType, indices: &[u64]) {
-    let mut futs = Vec::with_capacity(indices.len());
-    for idx in indices {
-        futs.push(a.get(Identifier::Index(*idx)));
-    }
-    black_box(try_join_all(futs).await.unwrap());
-}
 
 fn bench_prunable_get(c: &mut Criterion) {
     // Create a config we can use across all benchmarks (with a fixed `storage_directory`).
@@ -76,15 +34,14 @@ fn bench_prunable_get(c: &mut Criterion) {
         for mode in ["serial", "concurrent"] {
             for pattern in ["key", "index"] {
                 for reads in [1_000, 10_000, 50_000] {
-                    let label = format!(
-                        "{}/mode={} pattern={} comp={} reads={}",
+                    let label = create_benchmark_label(
                         module_path!(),
-                        mode,
-                        pattern,
-                        compression
-                            .map(|l| l.to_string())
-                            .unwrap_or_else(|| "off".into()),
-                        reads
+                        &[
+                            ("mode", mode.to_string()),
+                            ("pattern", pattern.to_string()),
+                            ("comp", compression_label(compression)),
+                            ("reads", reads.to_string()),
+                        ],
                     );
                     c.bench_function(&label, |b| {
                         let keys = keys.clone();
@@ -94,15 +51,16 @@ fn bench_prunable_get(c: &mut Criterion) {
                                 let ctx = context::get::<commonware_runtime::tokio::Context>();
                                 let archive = get_archive(ctx, compression).await;
                                 if pattern == "key" {
-                                    let selected_keys = select_keys(&keys, reads);
+                                    let selected_keys = select_keys(&keys, reads, ITEMS);
                                     let start = Instant::now();
                                     for _ in 0..iters {
                                         match mode {
                                             "serial" => {
-                                                read_serial_keys(&archive, &selected_keys).await
+                                                read_serial_keys_prunable(&archive, &selected_keys)
+                                                    .await
                                             }
                                             "concurrent" => {
-                                                read_concurrent_keys(
+                                                read_concurrent_keys_prunable(
                                                     &archive,
                                                     selected_keys.clone(),
                                                 )
@@ -113,17 +71,23 @@ fn bench_prunable_get(c: &mut Criterion) {
                                     }
                                     start.elapsed()
                                 } else {
-                                    let selected_indices = select_indices(reads);
+                                    let selected_indices = select_indices(reads, ITEMS);
                                     let start = Instant::now();
                                     for _ in 0..iters {
                                         match mode {
                                             "serial" => {
-                                                read_serial_indices(&archive, &selected_indices)
-                                                    .await
+                                                read_serial_indices_prunable(
+                                                    &archive,
+                                                    &selected_indices,
+                                                )
+                                                .await
                                             }
                                             "concurrent" => {
-                                                read_concurrent_indices(&archive, &selected_indices)
-                                                    .await
+                                                read_concurrent_indices_prunable(
+                                                    &archive,
+                                                    &selected_indices,
+                                                )
+                                                .await
                                             }
                                             _ => unreachable!(),
                                         }

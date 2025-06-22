@@ -6,7 +6,7 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_utils::array::FixedBytes;
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
 
 /// Partition used across all archive benchmarks.
 pub const PARTITION: &str = "archive_bench_partition";
@@ -122,4 +122,109 @@ pub async fn append_random_immutable(archive: &mut ImmutableArchiveType, count: 
     }
     archive.sync().await.unwrap();
     keys
+}
+
+// === Common Imports for Benchmarks ===
+use commonware_storage::identifier::Identifier;
+use criterion::black_box;
+use futures::future::try_join_all;
+
+/// Create a compression label string for benchmarks.
+pub fn compression_label(compression: Option<u8>) -> String {
+    compression
+        .map(|l| l.to_string())
+        .unwrap_or_else(|| "off".into())
+}
+
+/// Create a benchmark label with the given parameters.
+pub fn create_benchmark_label(module_path: &str, params: &[(&str, String)]) -> String {
+    let mut label = module_path.to_string();
+    for (key, value) in params {
+        label.push_str(&format!("/{}={}", key, value));
+    }
+    label
+}
+
+// === Key Selection Helpers ===
+
+/// Select random keys from a vec for benchmarking.
+pub fn select_keys(keys: &[Key], count: usize, items: u64) -> Vec<Key> {
+    let mut rng = StdRng::seed_from_u64(42);
+    let mut selected_keys = Vec::with_capacity(count);
+    for _ in 0..count {
+        selected_keys.push(keys[rng.gen_range(0..items as usize)].clone());
+    }
+    selected_keys
+}
+
+/// Select random indices for benchmarking.
+pub fn select_indices(count: usize, items: u64) -> Vec<u64> {
+    let mut rng = StdRng::seed_from_u64(42);
+    let mut selected_indices = Vec::with_capacity(count);
+    for _ in 0..count {
+        selected_indices.push(rng.gen_range(0..items));
+    }
+    selected_indices
+}
+
+// === Reading Helpers for Prunable Archive ===
+
+/// Read keys serially from a prunable archive.
+pub async fn read_serial_keys_prunable(a: &ArchiveType, reads: &[Key]) {
+    for k in reads {
+        black_box(a.get(Identifier::Key(k)).await.unwrap().unwrap());
+    }
+}
+
+/// Read indices serially from a prunable archive.
+pub async fn read_serial_indices_prunable(a: &ArchiveType, indices: &[u64]) {
+    for idx in indices {
+        black_box(a.get(Identifier::Index(*idx)).await.unwrap().unwrap());
+    }
+}
+
+/// Read keys concurrently from a prunable archive.
+pub async fn read_concurrent_keys_prunable(a: &ArchiveType, reads: Vec<Key>) {
+    let futures = reads.iter().map(|k| a.get(Identifier::Key(k)));
+    black_box(try_join_all(futures).await.unwrap());
+}
+
+/// Read indices concurrently from a prunable archive.
+pub async fn read_concurrent_indices_prunable(a: &ArchiveType, indices: &[u64]) {
+    let mut futs = Vec::with_capacity(indices.len());
+    for idx in indices {
+        futs.push(a.get(Identifier::Index(*idx)));
+    }
+    black_box(try_join_all(futs).await.unwrap());
+}
+
+// === Reading Helpers for Immutable Archive ===
+
+/// Read keys serially from an immutable archive.
+pub async fn read_serial_keys_immutable(a: &mut ImmutableArchiveType, reads: &[Key]) {
+    for k in reads {
+        black_box(a.get(Identifier::Key(k)).await.unwrap().unwrap());
+    }
+}
+
+/// Read indices serially from an immutable archive.
+pub async fn read_serial_indices_immutable(a: &mut ImmutableArchiveType, indices: &[u64]) {
+    for idx in indices {
+        black_box(a.get(Identifier::Index(*idx)).await.unwrap().unwrap());
+    }
+}
+
+/// Read keys concurrently from an immutable archive.
+pub async fn read_concurrent_keys_immutable(a: &mut ImmutableArchiveType, reads: Vec<Key>) {
+    let futures = reads.iter().map(|k| a.get(Identifier::Key(k)));
+    black_box(try_join_all(futures).await.unwrap());
+}
+
+/// Read indices concurrently from an immutable archive.
+pub async fn read_concurrent_indices_immutable(a: &mut ImmutableArchiveType, indices: &[u64]) {
+    let mut futs = Vec::with_capacity(indices.len());
+    for idx in indices {
+        futs.push(a.get(Identifier::Index(*idx)));
+    }
+    black_box(try_join_all(futs).await.unwrap());
 }

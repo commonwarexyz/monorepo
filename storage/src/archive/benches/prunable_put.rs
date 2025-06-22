@@ -1,4 +1,4 @@
-use super::utils::{append_random, get_archive};
+use super::utils::{append_random, compression_label, create_benchmark_label, get_archive};
 use commonware_runtime::benchmarks::{context, tokio};
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
@@ -7,13 +7,12 @@ fn bench_prunable_put(c: &mut Criterion) {
     let runner = tokio::Runner::default();
     for compression in [None, Some(3)] {
         for items in [10_000, 50_000, 100_000] {
-            let label = format!(
-                "{}/items={} comp={}",
+            let label = create_benchmark_label(
                 module_path!(),
-                items,
-                compression
-                    .map(|l| l.to_string())
-                    .unwrap_or_else(|| "off".into()),
+                &[
+                    ("items", items.to_string()),
+                    ("comp", compression_label(compression)),
+                ],
             );
             c.bench_function(&label, |b| {
                 b.to_async(&runner).iter_custom(move |iters| async move {

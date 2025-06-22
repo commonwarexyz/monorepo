@@ -1,4 +1,4 @@
-use super::utils::{append_random, get_archive};
+use super::utils::{append_random, compression_label, create_benchmark_label, get_archive};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Config,
@@ -21,29 +21,26 @@ fn bench_prunable_restart(c: &mut Criterion) {
 
             // Run the benchmarks
             let runner = tokio::Runner::new(cfg.clone());
-            c.bench_function(
-                &format!(
-                    "{}/items={} comp={}",
-                    module_path!(),
-                    items,
-                    compression
-                        .map(|l| l.to_string())
-                        .unwrap_or_else(|| "off".into())
-                ),
-                |b| {
-                    b.to_async(&runner).iter_custom(|iters| async move {
-                        let ctx = context::get::<commonware_runtime::tokio::Context>();
-                        let mut total = Duration::ZERO;
-                        for _ in 0..iters {
-                            let start = Instant::now();
-                            let a = get_archive(ctx.clone(), compression).await; // replay happens inside init
-                            total += start.elapsed();
-                            a.close().await.unwrap();
-                        }
-                        total
-                    });
-                },
+            let label = create_benchmark_label(
+                module_path!(),
+                &[
+                    ("items", items.to_string()),
+                    ("comp", compression_label(compression)),
+                ],
             );
+            c.bench_function(&label, |b| {
+                b.to_async(&runner).iter_custom(|iters| async move {
+                    let ctx = context::get::<commonware_runtime::tokio::Context>();
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        let start = Instant::now();
+                        let a = get_archive(ctx.clone(), compression).await; // replay happens inside init
+                        total += start.elapsed();
+                        a.close().await.unwrap();
+                    }
+                    total
+                });
+            });
 
             // Tear down
             let cleaner = commonware_runtime::tokio::Runner::new(cfg.clone());
