@@ -3,7 +3,7 @@ use commonware_runtime::benchmarks::{context, tokio};
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 
-fn bench_put(c: &mut Criterion) {
+fn bench_prunable_put(c: &mut Criterion) {
     let runner = tokio::Runner::default();
     for compression in [None, Some(3)] {
         for items in [10_000, 50_000, 100_000] {
@@ -38,5 +38,5 @@ fn bench_put(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_put
+    targets = bench_prunable_put
 }

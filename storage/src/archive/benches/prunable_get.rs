@@ -6,7 +6,7 @@ use commonware_runtime::{
     tokio::Config,
     Runner,
 };
-use commonware_storage::Identifier;
+use commonware_storage::identifier::Identifier;
 use criterion::{black_box, criterion_group, Criterion};
 use futures::future::try_join_all;
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -58,7 +58,7 @@ async fn read_concurrent_indices(a: &ArchiveType, indices: &[u64]) {
     black_box(try_join_all(futs).await.unwrap());
 }
 
-fn bench_get(c: &mut Criterion) {
+fn bench_prunable_get(c: &mut Criterion) {
     // Create a config we can use across all benchmarks (with a fixed `storage_directory`).
     let cfg = Config::default();
     for compression in [None, Some(3)] {
@@ -149,5 +149,5 @@ fn bench_get(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_get
+    targets = bench_prunable_get
 }

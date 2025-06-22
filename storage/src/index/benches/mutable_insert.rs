@@ -1,6 +1,6 @@
 use commonware_cryptography::hash;
 use commonware_runtime::Metrics;
-use commonware_storage::{index::Index, translator::TwoCap};
+use commonware_storage::{index::mutable::Index, translator::TwoCap};
 use criterion::{criterion_group, Criterion};
 use prometheus_client::registry::Metric;
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
@@ -25,7 +25,7 @@ impl Metrics for DummyMetrics {
     fn register<N: Into<String>, H: Into<String>>(&self, _: N, _: H, _: impl Metric) {}
 }
 
-fn bench_insert(c: &mut Criterion) {
+fn bench_mutable_insert(c: &mut Criterion) {
     for items in [10_000, 50_000, 100_000, 500_000, 1_000_000] {
         let label = format!("{}/items={}", module_path!(), items,);
         c.bench_function(&label, |b| {
@@ -59,5 +59,5 @@ fn bench_insert(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_insert
+    targets = bench_mutable_insert
 }

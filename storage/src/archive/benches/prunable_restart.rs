@@ -7,7 +7,7 @@ use commonware_runtime::{
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 
-fn bench_restart(c: &mut Criterion) {
+fn bench_prunable_restart(c: &mut Criterion) {
     // Create a config we can use across all benchmarks (with a fixed `storage_directory`).
     let cfg = Config::default();
     for compression in [None, Some(3)] {
@@ -58,5 +58,5 @@ fn bench_restart(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_restart
+    targets = bench_prunable_restart
 }
