@@ -49,6 +49,15 @@ pub trait Archive {
         identifier: Identifier<'_, Self::Index, Self::Key>,
     ) -> Result<bool, Self::Error>;
 
+    /// Retrieve the end of the current range including `index` (inclusive) and
+    /// the start of the next range after `index` (if it exists).
+    ///
+    /// This is useful for driving backfill operations over the archive.
+    async fn next_gap(
+        &self,
+        index: Self::Index,
+    ) -> Result<(Option<Self::Index>, Option<Self::Index>), Self::Error>;
+
     /// Sync all pending writes.
     async fn sync(&mut self) -> Result<(), Self::Error>;
 

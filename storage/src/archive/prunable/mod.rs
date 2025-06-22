@@ -193,6 +193,7 @@ pub struct Config<T: Translator, C> {
 mod tests {
     use super::*;
     use crate::{
+        archive::Archive as _,
         identifier::Identifier,
         journal::Error as JournalError,
         translator::{FourCap, TwoCap},
@@ -842,7 +843,7 @@ mod tests {
                     assert_eq!(retrieved, data);
 
                     // Check range
-                    let (current_end, start_next) = archive.next_gap(index);
+                    let (current_end, start_next) = archive.next_gap(index).await.unwrap();
                     assert_eq!(current_end.unwrap(), num_keys as u64 - 1);
                     assert!(start_next.is_none());
                 } else {
@@ -854,7 +855,7 @@ mod tests {
                     removed += 1;
 
                     // Check range
-                    let (current_end, start_next) = archive.next_gap(index);
+                    let (current_end, start_next) = archive.next_gap(index).await.unwrap();
                     assert!(current_end.is_none());
                     assert_eq!(start_next.unwrap(), min);
                 }
@@ -920,27 +921,27 @@ mod tests {
             }
 
             // Check ranges
-            let (current_end, start_next) = archive.next_gap(0);
+            let (current_end, start_next) = archive.next_gap(0).await.unwrap();
             assert!(current_end.is_none());
             assert_eq!(start_next.unwrap(), 1);
 
-            let (current_end, start_next) = archive.next_gap(1);
+            let (current_end, start_next) = archive.next_gap(1).await.unwrap();
             assert_eq!(current_end.unwrap(), 1);
             assert_eq!(start_next.unwrap(), 10);
 
-            let (current_end, start_next) = archive.next_gap(10);
+            let (current_end, start_next) = archive.next_gap(10).await.unwrap();
             assert_eq!(current_end.unwrap(), 11);
             assert_eq!(start_next.unwrap(), 14);
 
-            let (current_end, start_next) = archive.next_gap(11);
+            let (current_end, start_next) = archive.next_gap(11).await.unwrap();
             assert_eq!(current_end.unwrap(), 11);
             assert_eq!(start_next.unwrap(), 14);
 
-            let (current_end, start_next) = archive.next_gap(12);
+            let (current_end, start_next) = archive.next_gap(12).await.unwrap();
             assert!(current_end.is_none());
             assert_eq!(start_next.unwrap(), 14);
 
-            let (current_end, start_next) = archive.next_gap(14);
+            let (current_end, start_next) = archive.next_gap(14).await.unwrap();
             assert_eq!(current_end.unwrap(), 14);
             assert!(start_next.is_none());
 
@@ -951,27 +952,27 @@ mod tests {
                 .expect("Failed to initialize archive");
 
             // Check ranges again
-            let (current_end, start_next) = archive.next_gap(0);
+            let (current_end, start_next) = archive.next_gap(0).await.unwrap();
             assert!(current_end.is_none());
             assert_eq!(start_next.unwrap(), 1);
 
-            let (current_end, start_next) = archive.next_gap(1);
+            let (current_end, start_next) = archive.next_gap(1).await.unwrap();
             assert_eq!(current_end.unwrap(), 1);
             assert_eq!(start_next.unwrap(), 10);
 
-            let (current_end, start_next) = archive.next_gap(10);
+            let (current_end, start_next) = archive.next_gap(10).await.unwrap();
             assert_eq!(current_end.unwrap(), 11);
             assert_eq!(start_next.unwrap(), 14);
 
-            let (current_end, start_next) = archive.next_gap(11);
+            let (current_end, start_next) = archive.next_gap(11).await.unwrap();
             assert_eq!(current_end.unwrap(), 11);
             assert_eq!(start_next.unwrap(), 14);
 
-            let (current_end, start_next) = archive.next_gap(12);
+            let (current_end, start_next) = archive.next_gap(12).await.unwrap();
             assert!(current_end.is_none());
             assert_eq!(start_next.unwrap(), 14);
 
-            let (current_end, start_next) = archive.next_gap(14);
+            let (current_end, start_next) = archive.next_gap(14).await.unwrap();
             assert_eq!(current_end.unwrap(), 14);
             assert!(start_next.is_none());
         });

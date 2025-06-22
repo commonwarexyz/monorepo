@@ -46,36 +46,6 @@ impl<E: Storage + Metrics + Clock, K: Array + Codec<Cfg = ()>, V: Codec> Archive
         })
     }
 
-    /// Store an item in `Archive`. Both indices and keys are assumed to be globally unique.
-    ///
-    /// If the index already exists, put does nothing and returns. If the same key is stored multiple times
-    /// at different indices (not recommended), any value associated with the key may be returned.
-    pub async fn put(&mut self, index: u64, key: K, data: V) -> Result<(), Error> {
-        self.puts.inc();
-
-        // Check if index already exists
-        if self.indices.has(index) {
-            return Ok(());
-        }
-
-        // Store key -> value mapping
-        self.keys.put(key.clone(), data).await?;
-
-        // Store index -> key mapping
-        self.indices.put(index, key)?;
-
-        Ok(())
-    }
-
-    /// Retrieve an item from `Archive`.
-    pub async fn get(&self, identifier: Identifier<'_, u64, K>) -> Result<Option<V>, Error> {
-        self.gets.inc();
-        match identifier {
-            Identifier::Index(index) => self.get_index(index).await,
-            Identifier::Key(key) => self.get_key(key).await,
-        }
-    }
-
     async fn get_index(&self, index: u64) -> Result<Option<V>, Error> {
         // Get key from index->key mapping
         let key = match self.indices.get(index).await? {
@@ -92,8 +62,45 @@ impl<E: Storage + Metrics + Clock, K: Array + Codec<Cfg = ()>, V: Codec> Archive
         self.keys.get(key).await.map_err(Error::Immutable)
     }
 
-    /// Check if an item exists in the `Archive`.
-    pub async fn has(&self, identifier: Identifier<'_, u64, K>) -> Result<bool, Error> {
+    async fn has_key(&self, key: &K) -> Result<bool, Error> {
+        Ok(self.keys.has(key).await?)
+    }
+}
+
+impl<E: Storage + Metrics + Clock, K: Array + Codec<Cfg = ()>, V: Codec> crate::archive::Archive
+    for Archive<E, K, V>
+{
+    type Index = u64;
+    type Key = K;
+    type Value = V;
+    type Error = Error;
+
+    async fn put(&mut self, index: u64, key: K, data: V) -> Result<(), Error> {
+        self.puts.inc();
+
+        // Check if index already exists
+        if self.indices.has(index) {
+            return Ok(());
+        }
+
+        // Store key -> value mapping
+        self.keys.put(key.clone(), data).await?;
+
+        // Store index -> key mapping
+        self.indices.put(index, key)?;
+
+        Ok(())
+    }
+
+    async fn get(&self, identifier: Identifier<'_, u64, K>) -> Result<Option<V>, Error> {
+        self.gets.inc();
+        match identifier {
+            Identifier::Index(index) => self.get_index(index).await,
+            Identifier::Key(key) => self.get_key(key).await,
+        }
+    }
+
+    async fn has(&self, identifier: Identifier<'_, u64, K>) -> Result<bool, Error> {
         self.has.inc();
         match identifier {
             Identifier::Index(index) => Ok(self.indices.has(index)),
@@ -101,12 +108,7 @@ impl<E: Storage + Metrics + Clock, K: Array + Codec<Cfg = ()>, V: Codec> Archive
         }
     }
 
-    async fn has_key(&self, key: &K) -> Result<bool, Error> {
-        Ok(self.keys.has(key).await?)
-    }
-
-    /// Forcibly sync all pending writes.
-    pub async fn sync(&mut self) -> Result<(), Error> {
+    async fn sync(&mut self) -> Result<(), Error> {
         // Sync immutable store
         self.keys.sync().await?;
 
@@ -116,18 +118,11 @@ impl<E: Storage + Metrics + Clock, K: Array + Codec<Cfg = ()>, V: Codec> Archive
         Ok(())
     }
 
-    /// Retrieve the end of the current range including `index` (inclusive) and
-    /// the start of the next range after `index` (if it exists).
-    ///
-    /// This is useful for driving backfill operations over the archive.
-    pub fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
-        self.indices.next_gap(index)
+    async fn next_gap(&self, index: u64) -> Result<(Option<u64>, Option<u64>), Error> {
+        Ok(self.indices.next_gap(index))
     }
 
-    /// Close `Archive` (and underlying storage).
-    ///
-    /// Any pending writes will be synced prior to closing.
-    pub async fn close(mut self) -> Result<(), Error> {
+    async fn close(mut self) -> Result<(), Error> {
         // Sync before closing
         self.sync().await?;
 
@@ -138,8 +133,7 @@ impl<E: Storage + Metrics + Clock, K: Array + Codec<Cfg = ()>, V: Codec> Archive
         Ok(())
     }
 
-    /// Remove all on-disk data created by this `Archive`.
-    pub async fn destroy(self) -> Result<(), Error> {
+    async fn destroy(self) -> Result<(), Error> {
         // Destroy underlying storage
         self.keys.destroy().await?;
         self.indices.destroy().await?;
