@@ -115,7 +115,7 @@
 //! use commonware_cryptography::hash;
 //! use commonware_storage::{
 //!     translator::FourCap,
-//!     archive::{self, prunable::{Archive, Config}},
+//!     archive::{Archive as _, prunable::{Archive, Config}},
 //! };
 //!
 //! let executor = deterministic::Runner::default();

@@ -76,7 +76,7 @@
 //! use commonware_runtime::{Spawner, Runner, deterministic};
 //! use commonware_storage::{
 //!     store::{immutable, ordinal},
-//!     archive::{self, Archive as ArchiveTrait, immutable::{Archive, Config}},
+//!     archive::{Archive as _, immutable::{Archive, Config}},
 //! };
 //! use commonware_utils::array::FixedBytes;
 //!
