@@ -132,7 +132,7 @@ mod tests {
     use super::*;
     use commonware_codec::DecodeExt;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Metrics, Runner};
+    use commonware_runtime::{deterministic, Metrics, Runner, Storage};
     use commonware_utils::array::FixedBytes;
 
     const DEFAULT_ITEMS_PER_BLOB: u64 = 1000;
@@ -155,7 +155,7 @@ mod tests {
                 .await
                 .expect("Failed to initialize store");
 
-            let value = FixedBytes::from([42u8; 32]);
+            let value = FixedBytes::new([42u8; 32]);
 
             // Check index doesn't exist
             assert!(!store.has(0));
@@ -210,11 +210,11 @@ mod tests {
 
             // Insert multiple values at different indices
             let indices = vec![
-                (0u64, FixedBytes::from([0u8; 32])),
-                (5u64, FixedBytes::from([5u8; 32])),
-                (10u64, FixedBytes::from([10u8; 32])),
-                (100u64, FixedBytes::from([100u8; 32])),
-                (1000u64, FixedBytes::from([200u8; 32])), // Different blob
+                (0u64, FixedBytes::new([0u8; 32])),
+                (5u64, FixedBytes::new([5u8; 32])),
+                (10u64, FixedBytes::new([10u8; 32])),
+                (100u64, FixedBytes::new([100u8; 32])),
+                (1000u64, FixedBytes::new([200u8; 32])), // Different blob
             ];
 
             for (index, value) in &indices {
@@ -256,10 +256,10 @@ mod tests {
 
             // Insert sparse values
             let indices = vec![
-                (0u64, FixedBytes::from([0u8; 32])),
-                (99u64, FixedBytes::from([99u8; 32])), // End of first blob
-                (100u64, FixedBytes::from([100u8; 32])), // Start of second blob
-                (500u64, FixedBytes::from([200u8; 32])), // Start of sixth blob
+                (0u64, FixedBytes::new([0u8; 32])),
+                (99u64, FixedBytes::new([99u8; 32])), // End of first blob
+                (100u64, FixedBytes::new([100u8; 32])), // Start of second blob
+                (500u64, FixedBytes::new([200u8; 32])), // Start of sixth blob
             ];
 
             for (index, value) in &indices {
@@ -305,10 +305,10 @@ mod tests {
                 .expect("Failed to initialize store");
 
             // Insert values with gaps
-            store.put(1, FixedBytes::from([1u8; 32])).unwrap();
-            store.put(10, FixedBytes::from([10u8; 32])).unwrap();
-            store.put(11, FixedBytes::from([11u8; 32])).unwrap();
-            store.put(14, FixedBytes::from([14u8; 32])).unwrap();
+            store.put(1, FixedBytes::new([1u8; 32])).unwrap();
+            store.put(10, FixedBytes::new([10u8; 32])).unwrap();
+            store.put(11, FixedBytes::new([11u8; 32])).unwrap();
+            store.put(14, FixedBytes::new([14u8; 32])).unwrap();
 
             // Check gaps
             let (current_end, start_next) = store.next_gap(0);
@@ -356,9 +356,9 @@ mod tests {
                     .expect("Failed to initialize store");
 
                 let values = vec![
-                    (0u64, FixedBytes::from([0u8; 32])),
-                    (100u64, FixedBytes::from([100u8; 32])),
-                    (1000u64, FixedBytes::from([200u8; 32])),
+                    (0u64, FixedBytes::new([0u8; 32])),
+                    (100u64, FixedBytes::new([100u8; 32])),
+                    (1000u64, FixedBytes::new([200u8; 32])),
                 ];
 
                 for (index, value) in &values {
@@ -377,9 +377,9 @@ mod tests {
                     .expect("Failed to initialize store");
 
                 let values = vec![
-                    (0u64, FixedBytes::from([0u8; 32])),
-                    (100u64, FixedBytes::from([100u8; 32])),
-                    (1000u64, FixedBytes::from([200u8; 32])),
+                    (0u64, FixedBytes::new([0u8; 32])),
+                    (100u64, FixedBytes::new([100u8; 32])),
+                    (1000u64, FixedBytes::new([200u8; 32])),
                 ];
 
                 for (index, value) in &values {
@@ -417,7 +417,7 @@ mod tests {
                     .await
                     .expect("Failed to initialize store");
 
-                store.put(0, FixedBytes::from([42u8; 32])).unwrap();
+                store.put(0, FixedBytes::new([42u8; 32])).unwrap();
                 store.close().await.expect("Failed to close store");
             }
 
@@ -491,8 +491,8 @@ mod tests {
                     .await
                     .expect("Failed to initialize store");
 
-                store.put(0, FixedBytes::from([0u8; 32])).unwrap();
-                store.put(1000, FixedBytes::from([100u8; 32])).unwrap();
+                store.put(0, FixedBytes::new([0u8; 32])).unwrap();
+                store.put(1000, FixedBytes::new([100u8; 32])).unwrap();
 
                 // Destroy the store
                 store.destroy().await.expect("Failed to destroy store");
