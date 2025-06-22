@@ -1,7 +1,7 @@
 use super::{Config, Error, Translator};
 use crate::{
     identifier::Identifier,
-    index::mutable::Index,
+    index::Index,
     journal::variable::{Config as JConfig, Journal},
     rmap::RMap,
 };

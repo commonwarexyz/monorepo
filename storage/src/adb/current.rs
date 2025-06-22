@@ -10,7 +10,7 @@ use crate::{
         operation::Operation,
         Error,
     },
-    index::mutable::Index,
+    index::Index,
     mmr::{
         bitmap::Bitmap,
         hasher::{Grafting, GraftingVerifier, Hasher, Standard},

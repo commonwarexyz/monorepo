@@ -8,7 +8,7 @@
 
 mod storage;
 
-use crate::index::{immutable, ordinal};
+use crate::store::{immutable, ordinal};
 pub use storage::Archive;
 use thiserror::Error;
 

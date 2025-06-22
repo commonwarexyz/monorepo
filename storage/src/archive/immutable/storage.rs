@@ -1,5 +1,8 @@
 use super::{Config, Error};
-use crate::{identifier::Identifier, index::immutable, index::ordinal};
+use crate::{
+    identifier::Identifier,
+    store::{immutable, ordinal},
+};
 use commonware_codec::Codec;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
