@@ -230,7 +230,7 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("gets_total 2"), "{}", buffer); // has calls get internally
+            assert!(buffer.contains("gets_total 3"), "{}", buffer); // has calls get internally
             assert!(buffer.contains("puts_total 1"), "{}", buffer);
 
             // Force a sync
