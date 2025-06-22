@@ -85,7 +85,7 @@ pub async fn get_immutable(ctx: Context, compression: Option<u8>) -> Immutable {
 }
 
 /// Append `count` random (index,key,value) triples and sync once.
-pub async fn append_random<A: Archive<Key = Key, Value = Val>>(
+pub async fn append_random<A: Archive<Index = u64, Key = Key, Value = Val>>(
     archive: &mut A,
     count: u64,
 ) -> Vec<Key> {
