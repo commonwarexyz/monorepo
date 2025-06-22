@@ -58,7 +58,7 @@ enum Phase<V: Eq> {
 
 /// A mutable iterator over the values associated with a translated key, allowing in-place modifications.
 ///
-/// The [Cursor] provides a way to traverse and modify the linked list of [Record]s while maintaining its
+/// The [Cursor] provides a way to traverse and modify the linked list of records while maintaining its
 /// structure. It supports:
 ///
 /// - Iteration via [Cursor::next()] to access values.
@@ -70,7 +70,7 @@ enum Phase<V: Eq> {
 ///
 /// - Must call [Cursor::next()] before [Cursor::update()], [Cursor::insert()], or [Cursor::delete()] to establish a valid position.
 /// - Once [Cursor::next()] returns `None`, only [Cursor::insert()] can be called.
-/// - Dropping the [Cursor] automatically restores the list structure by reattaching any detached [Record::next] nodes.
+/// - Dropping the [Cursor] automatically restores the list structure by reattaching any detached records.
 ///
 /// _If you don't need advanced functionality, just use [Index::insert()], [Index::insert_and_prune()], or [Index::remove()] instead._
 pub struct Cursor<'a, T: Translator, V: Eq> {
@@ -117,7 +117,7 @@ impl<'a, T: Translator, V: Eq> Cursor<'a, T, V> {
 
     /// Updates the value at the current position in the iteration.
     ///
-    /// Panics if called before [Cursor::next()] or after iteration is complete ([Phase::Done] phase).
+    /// Panics if called before [Cursor::next()] or after iteration is complete.
     pub fn update(&mut self, v: V) {
         match &mut self.phase {
             Phase::Initial => unreachable!("{MUST_CALL_NEXT}"),
