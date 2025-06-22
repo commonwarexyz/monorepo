@@ -88,18 +88,18 @@
 //!         write_buffer: 1024 * 1024,
 //!         target_journal_size: 100 * 1024 * 1024, // 100MB journals
 //!     };
-//!     let mut store = Store::<_, FixedBytes<32>, Vec<u8>>::init(context, cfg).await.unwrap();
+//!     let mut store = Store::<_, FixedBytes<32>, i32>::init(context, cfg).await.unwrap();
 //!
 //!     // Put a key-value pair
-//!     let key = FixedBytes::from([1u8; 32]);
-//!     store.put(key, vec![1, 2, 3, 4]).await.unwrap();
+//!     let key = FixedBytes::new([1u8; 32]);
+//!     store.put(key.clone(), 42).await.unwrap();
 //!
 //!     // Sync to disk
 //!     store.sync().await.unwrap();
 //!
 //!     // Get the value
 //!     let value = store.get(&key).await.unwrap().unwrap();
-//!     assert_eq!(value, vec![1, 2, 3, 4]);
+//!     assert_eq!(value, 42);
 //!
 //!     // Close the store
 //!     store.close().await.unwrap();

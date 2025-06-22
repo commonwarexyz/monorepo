@@ -76,7 +76,7 @@
 //! use commonware_runtime::{Spawner, Runner, deterministic};
 //! use commonware_storage::{
 //!     store::{immutable, ordinal},
-//!     archive::immutable::{Archive, Config},
+//!     archive::{self, Archive as ArchiveTrait, immutable::{Archive, Config}},
 //! };
 //! use commonware_utils::array::FixedBytes;
 //!
@@ -101,11 +101,11 @@
 //!             replay_buffer: 1024 * 1024,
 //!         },
 //!     };
-//!     let mut archive = Archive::<_, FixedBytes<32>, Vec<u8>>::init(context, cfg).await.unwrap();
+//!     let mut archive = Archive::<_, FixedBytes<32>, i32>::init(context, cfg).await.unwrap();
 //!
 //!     // Put a key-value pair
-//!     let key = FixedBytes::from([1u8; 32]);
-//!     archive.put(1, key, vec![1, 2, 3, 4]).await.unwrap();
+//!     let key = FixedBytes::new([1u8; 32]);
+//!     archive.put(1, key, 42).await.unwrap();
 //!
 //!     // Sync to disk
 //!     archive.sync().await.unwrap();

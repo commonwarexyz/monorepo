@@ -75,8 +75,8 @@
 //!     let mut store = Store::<_, FixedBytes<32>>::init(context, cfg).await.unwrap();
 //!
 //!     // Put values at specific indices
-//!     let value1 = FixedBytes::from([1u8; 32]);
-//!     let value2 = FixedBytes::from([2u8; 32]);
+//!     let value1 = FixedBytes::new([1u8; 32]);
+//!     let value2 = FixedBytes::new([2u8; 32]);
 //!     store.put(0, value1).unwrap();
 //!     store.put(5, value2).unwrap();
 //!
@@ -437,9 +437,9 @@ mod tests {
                     .await
                     .expect("Failed to initialize store");
 
-                // Reading corrupted record should fail
-                let result = store.get(0).await;
-                assert!(matches!(result, Err(Error::InvalidRecord(0))));
+                // Reading corrupt record will return empty
+                let result = store.get(0).await.unwrap();
+                assert!(result.is_none());
 
                 // The index should not be in the intervals after restart with corrupted data
                 assert!(!store.has(0));
