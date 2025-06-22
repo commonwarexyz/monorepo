@@ -83,7 +83,11 @@ impl<E: Storage + Metrics + Clock, V: Array> Store<E, V> {
     pub async fn init(context: E, config: Config) -> Result<Self, Error> {
         // Scan for all blobs in the partition
         let mut blobs = BTreeMap::new();
-        let stored_blobs = context.scan(&config.partition).await?;
+        let stored_blobs = match context.scan(&config.partition).await {
+            Ok(blobs) => blobs,
+            Err(commonware_runtime::Error::PartitionMissing(_)) => Vec::new(),
+            Err(err) => return Err(Error::Runtime(err)),
+        };
         for name in stored_blobs {
             let (blob, len) = context.open(&config.partition, &name).await?;
             let index = match name.try_into() {

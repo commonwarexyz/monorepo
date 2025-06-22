@@ -18,6 +18,7 @@ pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: Codec> {
 
     // Metrics
     gets: Counter,
+    has: Counter,
     puts: Counter,
 }
 
@@ -30,14 +31,17 @@ impl<E: Storage + Metrics + Clock, K: Array + Codec<Cfg = ()>, V: Codec> Archive
 
         // Initialize metrics
         let gets = Counter::default();
+        let has = Counter::default();
         let puts = Counter::default();
         context.register("gets", "Number of gets performed", gets.clone());
+        context.register("has", "Number of has performed", has.clone());
         context.register("puts", "Number of puts performed", puts.clone());
 
         Ok(Self {
             keys,
             indices,
             gets,
+            has,
             puts,
         })
     }
@@ -90,9 +94,10 @@ impl<E: Storage + Metrics + Clock, K: Array + Codec<Cfg = ()>, V: Codec> Archive
 
     /// Check if an item exists in the `Archive`.
     pub async fn has(&self, identifier: Identifier<'_, u64, K>) -> Result<bool, Error> {
+        self.has.inc();
         match identifier {
             Identifier::Index(index) => Ok(self.indices.has(index)),
-            Identifier::Key(key) => self.has_key(key).await,
+            Identifier::Key(key) => Ok(self.has_key(key).await?),
         }
     }
 

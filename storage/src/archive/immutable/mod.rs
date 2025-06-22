@@ -249,8 +249,9 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("gets 2"));
-            assert!(buffer.contains("puts 1"));
+            assert!(buffer.contains("gets_total 2"), "{}", buffer);
+            assert!(buffer.contains("has_total 4"), "{}", buffer);
+            assert!(buffer.contains("puts_total 1"), "{}", buffer);
 
             // Force a sync
             archive.sync().await.expect("Failed to sync data");
@@ -328,8 +329,8 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("gets 2"));
-            assert!(buffer.contains("puts 2")); // Both puts are counted, even though second is ignored
+            assert!(buffer.contains("gets_total 2"), "{}", buffer);
+            assert!(buffer.contains("puts_total 2"), "{}", buffer); // Both puts are counted, even though second is ignored
         });
     }
 
@@ -357,7 +358,7 @@ mod tests {
                     replay_buffer: DEFAULT_REPLAY_BUFFER,
                 },
             };
-            let mut archive = Archive::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
+            let archive = Archive::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -379,7 +380,7 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("gets 2"));
+            assert!(buffer.contains("gets_total 2"), "{}", buffer);
         });
     }
 
@@ -512,7 +513,7 @@ mod tests {
             archive.close().await.expect("Failed to close archive");
 
             // Reinitialize the archive
-            let mut archive =
+            let archive =
                 Archive::<_, FixedBytes<64>, FixedBytes<1024>>::init(context.clone(), cfg.clone())
                     .await
                     .expect("Failed to initialize archive");
