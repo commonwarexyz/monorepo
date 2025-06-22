@@ -159,12 +159,12 @@ pub enum Error {
     RecordTooLarge,
 }
 
-/// Configuration for `Archive` storage.
+/// Configuration for [Archive] storage.
 #[derive(Clone)]
 pub struct Config<T: Translator, C> {
     /// Logic to transform keys into their index representation.
     ///
-    /// `Archive` assumes that all internal keys are spread uniformly across the key space.
+    /// [Archive] assumes that all internal keys are spread uniformly across the key space.
     /// If that is not the case, lookups may be O(n) instead of O(1).
     pub translator: T,
 
