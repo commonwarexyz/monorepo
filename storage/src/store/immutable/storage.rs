@@ -245,7 +245,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Store<E, K, V> {
             let zero_buf = vec![0u8; TABLE_ENTRY_SIZE];
             for table_index in 0..config.table_size {
                 let offset = table_index as u64 * FULL_TABLE_ENTRY_SIZE as u64;
-                let result = table.read_at(vec![0u8; TABLE_ENTRY_SIZE], offset).await?;
+                let result = table
+                    .read_at(vec![0u8; FULL_TABLE_ENTRY_SIZE], offset)
+                    .await?;
 
                 let mut buf1 = &result.as_ref()[0..TABLE_ENTRY_SIZE];
                 let entry1 = TableEntry::read(&mut buf1)?;
