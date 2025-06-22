@@ -1,5 +1,5 @@
 use super::{Config, Error};
-use crate::{diskindex::DiskIndex, diskmap::DiskMap, Identifier};
+use crate::{identifier::Identifier, index::immutable, index::ordinal};
 use commonware_codec::Codec;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
@@ -8,10 +8,10 @@ use prometheus_client::metrics::counter::Counter;
 /// Implementation of `Freezer` storage using diskmap + diskindex.
 pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     // DiskMap for key->value storage
-    keys: DiskMap<E, K, V>,
+    keys: immutable::Index<E, K, V>,
 
     // DiskIndex for index->key mapping and interval tracking
-    indices: DiskIndex<E, K>,
+    indices: ordinal::Index<E, K>,
 
     // Metrics
     gets: Counter,
@@ -22,8 +22,8 @@ impl<E: Storage + Metrics + Clock, K: Array + Codec<Cfg = ()>, V: Codec> Archive
     /// Initialize a new `Freezer` instance.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Initialize diskmap for key->value storage
-        let keys = DiskMap::init(context.with_label("keys"), cfg.diskmap).await?;
-        let indices = DiskIndex::init(context.with_label("indices"), cfg.diskindex).await?;
+        let keys = immutable::Index::init(context.with_label("keys"), cfg.immutable).await?;
+        let indices = ordinal::Index::init(context.with_label("indices"), cfg.ordinal).await?;
 
         // Initialize metrics
         let gets = Counter::default();
@@ -77,12 +77,12 @@ impl<E: Storage + Metrics + Clock, K: Array + Codec<Cfg = ()>, V: Codec> Archive
         };
 
         // Get value from key->value mapping
-        self.keys.get(&key).await.map_err(Error::DiskMap)
+        self.keys.get(&key).await.map_err(Error::Immutable)
     }
 
     async fn get_key(&mut self, key: &K) -> Result<Option<V>, Error> {
         // Get value directly from key->value mapping
-        self.keys.get(key).await.map_err(Error::DiskMap)
+        self.keys.get(key).await.map_err(Error::Immutable)
     }
 
     /// Check if an item exists in the `Freezer`.

@@ -18,9 +18,9 @@ pub enum Error {
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
     #[error("immutable index error: {0}")]
-    ImmutableIndex(#[from] immutable::Error),
+    Immutable(#[from] immutable::Error),
     #[error("ordinal index error: {0}")]
-    OrdinalIndex(#[from] ordinal::Error),
+    Ordinal(#[from] ordinal::Error),
     #[error("record corrupted")]
     RecordCorrupted,
 }
