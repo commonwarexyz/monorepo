@@ -130,9 +130,8 @@ pub struct Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::DecodeExt;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Metrics, Runner, Storage};
+    use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
     use commonware_utils::array::FixedBytes;
 
     const DEFAULT_ITEMS_PER_BLOB: u64 = 1000;
