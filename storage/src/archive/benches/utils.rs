@@ -133,7 +133,7 @@ pub fn select_indices(count: usize, items: u64) -> Vec<u64> {
 }
 
 /// Read keys serially from an archive.
-pub async fn read_serial_keys<A: Archive<Key = Key, Value = Val>>(a: &mut A, reads: &[Key]) {
+pub async fn read_serial_keys<A: Archive<Key = Key, Value = Val>>(a: &A, reads: &[Key]) {
     for k in reads {
         black_box(a.get(Identifier::Key(k)).await.unwrap().unwrap());
     }
@@ -141,7 +141,7 @@ pub async fn read_serial_keys<A: Archive<Key = Key, Value = Val>>(a: &mut A, rea
 
 /// Read indices serially from an archive.
 pub async fn read_serial_indices<A: Archive<Index = u64, Key = Key, Value = Val>>(
-    a: &mut A,
+    a: &A,
     indices: &[u64],
 ) {
     for idx in indices {
@@ -150,19 +150,19 @@ pub async fn read_serial_indices<A: Archive<Index = u64, Key = Key, Value = Val>
 }
 
 /// Read keys concurrently from an archive.
-pub async fn read_concurrent_keys<A: Archive<Key = Key, Value = Val>>(a: &mut A, reads: Vec<Key>) {
+pub async fn read_concurrent_keys<A: Archive<Key = Key, Value = Val>>(a: &A, reads: Vec<Key>) {
     let futures = reads.iter().map(|k| a.get(Identifier::Key(k)));
     black_box(try_join_all(futures).await.unwrap());
 }
 
 /// Read indices concurrently from an archive.
 pub async fn read_concurrent_indices<A: Archive<Index = u64, Key = Key, Value = Val>>(
-    a: &mut A,
+    a: &A,
     indices: &[u64],
 ) {
-    let mut futs = Vec::with_capacity(indices.len());
+    let mut futures = Vec::with_capacity(indices.len());
     for idx in indices {
-        futs.push(a.get(Identifier::Index(*idx)));
+        futures.push(a.get(Identifier::Index(*idx)));
     }
-    black_box(try_join_all(futs).await.unwrap());
+    black_box(try_join_all(futures).await.unwrap());
 }
