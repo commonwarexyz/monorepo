@@ -4,10 +4,11 @@
 //! uniquely associated with both an `index` and a `key`. This is useful for storing ordered data either
 //! [for a limited time](crate::archive::prunable) or [indefinitely](crate::archive::immutable).
 
-use commonware_codec::Codec;
-use commonware_utils::Array;
+use std::future::Future;
 
 use crate::identifier::Identifier;
+use commonware_codec::Codec;
+use commonware_utils::Array;
 
 pub mod immutable;
 pub mod prunable;
@@ -30,12 +31,12 @@ pub trait Archive {
     ///
     /// If the index already exists, put does nothing and returns. If the same key is stored multiple times
     /// at different indices (not recommended), any value associated with the key may be returned.
-    async fn put(
+    fn put(
         &mut self,
-        index: u64,
+        index: Self::Index,
         key: Self::Key,
         value: Self::Value,
-    ) -> Result<(), Self::Error>;
+    ) -> impl Future<Output = Result<(), Self::Error>>;
 
     /// Retrieve an item from [Archive].
     async fn get(
