@@ -50,5 +50,5 @@ pub struct Config {
     pub write_buffer: usize,
 
     /// The size of the read buffer to use on restart.
-    pub read_buffer: usize,
+    pub replay_buffer: usize,
 }

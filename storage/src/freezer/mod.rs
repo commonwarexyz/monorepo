@@ -28,6 +28,9 @@ pub enum Error {
 /// Configuration for `Freezer` storage.
 #[derive(Clone)]
 pub struct Config<C> {
+    /// The configuration for the [diskmap::DiskMap].
     pub diskmap: diskmap::Config<C>,
+
+    /// The configuration for the [diskindex::DiskIndex].
     pub diskindex: diskindex::Config,
 }

@@ -106,7 +106,7 @@ impl<E: Storage + Metrics + Clock, V: Array> DiskIndex<E, V> {
         for (section, blob) in &blobs {
             // Initialize read buffer
             let size = blob.size().await;
-            let mut replay_blob = ReadBuffer::new(blob.clone(), size, config.read_buffer);
+            let mut replay_blob = ReadBuffer::new(blob.clone(), size, config.replay_buffer);
 
             // Iterate over all records in the blob
             let mut offset = 0;
