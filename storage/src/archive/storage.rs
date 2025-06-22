@@ -80,8 +80,7 @@ pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
     indices: BTreeMap<u64, Location>,
     intervals: RMap,
 
-    // Track the number of writes pending for a section to determine when to sync.
-    pending_writes: usize,
+    // Track the number of writes pending for a section.
     pending: BTreeMap<u64, usize>,
 
     items_tracked: Gauge,
@@ -163,7 +162,6 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
 
         // Return populated archive
         Ok(Self {
-            pending_writes: cfg.pending_writes,
             section_mask: cfg.section_mask,
             journal,
             oldest_allowed: None,
@@ -214,12 +212,6 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         // Update pending writes
         let pending_writes = self.pending.entry(section).or_default();
         *pending_writes += 1;
-        if *pending_writes > self.pending_writes {
-            self.journal.sync(section).await.map_err(Error::Journal)?;
-            trace!(section, mode = "pending", "synced section");
-            *pending_writes = 0;
-            self.syncs.inc();
-        }
 
         // Update metrics
         self.items_tracked.set(self.indices.len() as i64);

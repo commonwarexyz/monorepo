@@ -11,9 +11,6 @@ use rand::{rngs::StdRng, RngCore, SeedableRng};
 /// Partition used across all archive benchmarks.
 pub const PARTITION: &str = "archive_bench_partition";
 
-/// Number of buffered writes before a forced sync.
-const PENDING_WRITES: usize = 1_000;
-
 /// Number of bytes that can be buffered in a section before being written to disk.
 const WRITE_BUFFER: usize = 1024;
 
@@ -40,7 +37,6 @@ pub async fn get_archive(ctx: Context, compression: Option<u8>) -> ArchiveType {
         compression,
         codec_config: (),
         section_mask: SECTION_MASK,
-        pending_writes: PENDING_WRITES,
         write_buffer: WRITE_BUFFER,
         replay_buffer: REPLAY_BUFFER,
     };

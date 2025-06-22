@@ -182,11 +182,6 @@ pub struct Config<T: Translator, C> {
     /// This value is `index & section_mask`.
     pub section_mask: u64,
 
-    /// The number of writes to buffer in a section before forcing a sync in the journal.
-    ///
-    /// If set to 0, the journal will be synced each time a new item is stored.
-    pub pending_writes: usize,
-
     /// The amount of bytes that can be buffered in a section before being written to disk.
     pub write_buffer: usize,
 
@@ -209,7 +204,6 @@ mod tests {
     use std::collections::BTreeMap;
 
     const DEFAULT_SECTION_MASK: u64 = 0xffff_ffff_ffff_0000u64;
-    const DEFAULT_PENDING_WRITES: usize = 10;
     const DEFAULT_WRITE_BUFFER: usize = 1024;
     const DEFAULT_REPLAY_BUFFER: usize = 4096;
 
@@ -231,7 +225,6 @@ mod tests {
                 translator: FourCap,
                 compression,
                 codec_config: (),
-                pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
@@ -330,7 +323,6 @@ mod tests {
                 translator: FourCap,
                 codec_config: (),
                 compression: Some(3),
-                pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
@@ -357,7 +349,6 @@ mod tests {
                 translator: FourCap,
                 codec_config: (),
                 compression: None,
-                pending_writes: 10,
                 write_buffer: 1024,
                 replay_buffer: 4096,
                 section_mask: DEFAULT_SECTION_MASK,
@@ -381,7 +372,6 @@ mod tests {
                 translator: FourCap,
                 codec_config: (),
                 compression: None,
-                pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
@@ -421,7 +411,6 @@ mod tests {
                     translator: FourCap,
                     codec_config: (),
                     compression: None,
-                    pending_writes: DEFAULT_PENDING_WRITES,
                     write_buffer: DEFAULT_WRITE_BUFFER,
                     replay_buffer: DEFAULT_REPLAY_BUFFER,
                     section_mask: DEFAULT_SECTION_MASK,
@@ -449,7 +438,6 @@ mod tests {
                 translator: FourCap,
                 codec_config: (),
                 compression: None,
-                pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
@@ -508,7 +496,6 @@ mod tests {
                 translator: FourCap,
                 codec_config: (),
                 compression: None,
-                pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
@@ -552,7 +539,6 @@ mod tests {
                 translator: FourCap,
                 codec_config: (),
                 compression: None,
-                pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
@@ -615,7 +601,6 @@ mod tests {
                 translator: FourCap,
                 codec_config: (),
                 compression: None,
-                pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
@@ -672,7 +657,6 @@ mod tests {
                 translator: FourCap,
                 codec_config: (),
                 compression: None,
-                pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: 0xffff_ffff_ffff_ffffu64, // no mask
@@ -758,7 +742,6 @@ mod tests {
                 translator: TwoCap,
                 codec_config: (),
                 compression: None,
-                pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask,
@@ -816,7 +799,6 @@ mod tests {
                 translator: TwoCap,
                 codec_config: (),
                 compression: None,
-                pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask,
@@ -914,7 +896,6 @@ mod tests {
                 translator: FourCap,
                 codec_config: (),
                 compression: None,
-                pending_writes: DEFAULT_PENDING_WRITES,
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
                 section_mask: DEFAULT_SECTION_MASK,
