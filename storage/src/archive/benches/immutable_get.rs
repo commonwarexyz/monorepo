@@ -1,13 +1,15 @@
 //! Random key-lookup benchmark for Immutable Archive.
 
-use crate::utils::append_random;
-
-use super::utils::{compression_label, get_immutable, select_indices, select_keys};
+use super::utils::{
+    append_random, compression_label, get_immutable, read_concurrent_indices, read_concurrent_keys,
+    read_serial_indices, read_serial_keys, select_indices, select_keys,
+};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Config,
     Runner,
 };
+use commonware_storage::archive::Archive as _;
 use criterion::{criterion_group, Criterion};
 use std::time::Instant;
 
@@ -32,14 +34,13 @@ fn bench_immutable_get(c: &mut Criterion) {
         for mode in ["serial", "concurrent"] {
             for pattern in ["key", "index"] {
                 for reads in [1_000, 10_000, 50_000] {
-                    let label = create_benchmark_label(
+                    let label = format!(
+                        "{}/mode={} pattern={} comp={} reads={}",
                         module_path!(),
-                        &[
-                            ("mode", mode.to_string()),
-                            ("pattern", pattern.to_string()),
-                            ("comp", compression_label(compression)),
-                            ("reads", reads.to_string()),
-                        ],
+                        mode,
+                        pattern,
+                        compression_label(compression),
+                        reads
                     );
                     c.bench_function(&label, |b| {
                         let keys = keys.clone();
@@ -47,21 +48,17 @@ fn bench_immutable_get(c: &mut Criterion) {
                             let keys = keys.clone();
                             async move {
                                 let ctx = context::get::<commonware_runtime::tokio::Context>();
-                                let mut archive = get_immutable_archive(ctx, compression).await;
+                                let mut archive = get_immutable(ctx, compression).await;
                                 if pattern == "key" {
                                     let selected_keys = select_keys(&keys, reads, ITEMS);
                                     let start = Instant::now();
                                     for _ in 0..iters {
                                         match mode {
                                             "serial" => {
-                                                read_serial_keys_immutable(
-                                                    &mut archive,
-                                                    &selected_keys,
-                                                )
-                                                .await
+                                                read_serial_keys(&mut archive, &selected_keys).await
                                             }
                                             "concurrent" => {
-                                                read_concurrent_keys_immutable(
+                                                read_concurrent_keys(
                                                     &mut archive,
                                                     selected_keys.clone(),
                                                 )
@@ -77,14 +74,11 @@ fn bench_immutable_get(c: &mut Criterion) {
                                     for _ in 0..iters {
                                         match mode {
                                             "serial" => {
-                                                read_serial_indices_immutable(
-                                                    &mut archive,
-                                                    &selected_indices,
-                                                )
-                                                .await
+                                                read_serial_indices(&mut archive, &selected_indices)
+                                                    .await
                                             }
                                             "concurrent" => {
-                                                read_concurrent_indices_immutable(
+                                                read_concurrent_indices(
                                                     &mut archive,
                                                     &selected_indices,
                                                 )
@@ -105,7 +99,7 @@ fn bench_immutable_get(c: &mut Criterion) {
         // Clean up shared artifacts.
         let cleaner = commonware_runtime::tokio::Runner::new(cfg.clone());
         cleaner.start(|ctx| async move {
-            let a = get_immutable_archive(ctx, compression).await;
+            let a = get_immutable(ctx, compression).await;
             a.destroy().await.unwrap();
         });
     }
