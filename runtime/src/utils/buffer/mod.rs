@@ -1,5 +1,6 @@
 //! Buffers for reading and writing to [crate::Blob]s.
 
+pub mod pool;
 mod read;
 mod write;
 

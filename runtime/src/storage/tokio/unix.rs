@@ -33,7 +33,7 @@ impl crate::Blob for Blob {
             Ok(buf)
         })
         .await
-        .map_err(|_| Error::ReadFailed)?
+        .map_err(|e| Error::ReadFailed(e.into()))?
     }
 
     async fn write_at(&self, buf: impl Into<StableBuf> + Send, offset: u64) -> Result<(), Error> {

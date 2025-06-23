@@ -19,9 +19,11 @@ use crate::{
 };
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Hasher as CHasher;
-use commonware_runtime::{Clock, Metrics, Storage as RStorage, ThreadPool};
+use commonware_runtime::{
+    buffer::pool::BufferPool, Clock, Metrics, RwLock, Storage as RStorage, ThreadPool,
+};
 use commonware_utils::array::prefixed_u64::U64;
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 use tracing::{debug, error, warn};
 
 /// Configuration for a journal-backed MMR.
@@ -44,6 +46,9 @@ pub struct Config {
 
     /// Optional thread pool to use for parallelizing batch operations.
     pub pool: Option<ThreadPool>,
+
+    /// The buffer pool to use for caching data.
+    pub buffer_pool: Arc<RwLock<BufferPool>>,
 }
 
 /// A MMR backed by a fixed-item-length journal.
@@ -91,6 +96,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             partition: cfg.journal_partition,
             items_per_blob: cfg.items_per_blob,
             write_buffer: cfg.write_buffer,
+            buffer_pool: cfg.buffer_pool,
         };
         let mut journal =
             Journal::<E, H::Digest>::init(context.with_label("mmr_journal"), journal_cfg).await?;
@@ -578,6 +584,7 @@ mod tests {
             items_per_blob: 7,
             write_buffer: 1024,
             pool: None,
+            buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
         }
     }
 
@@ -858,6 +865,7 @@ mod tests {
                 items_per_blob: 7,
                 write_buffer: 1024,
                 pool: None,
+                buffer_pool: cfg_pruned.buffer_pool.clone(),
             };
             let mut mmr = Mmr::init(context.clone(), &mut hasher, cfg_unpruned)
                 .await

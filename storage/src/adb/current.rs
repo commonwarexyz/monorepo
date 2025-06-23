@@ -21,9 +21,12 @@ use crate::{
 };
 use commonware_codec::FixedSize;
 use commonware_cryptography::Hasher as CHasher;
-use commonware_runtime::{Clock, Metrics, Storage as RStorage, ThreadPool};
+use commonware_runtime::{
+    buffer::pool::BufferPool, Clock, Metrics, RwLock, Storage as RStorage, ThreadPool,
+};
 use commonware_utils::Array;
 use futures::future::try_join_all;
+use std::sync::Arc;
 use tracing::{debug, warn};
 
 /// Configuration for a [Current] authenticated db.
@@ -58,6 +61,9 @@ pub struct Config<T: Translator> {
 
     /// An optional thread pool to use for parallelizing batch operations.
     pub pool: Option<ThreadPool>,
+
+    /// The buffer pool to use for caching data.
+    pub buffer_pool: Arc<RwLock<BufferPool>>,
 }
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of whether
@@ -138,6 +144,7 @@ impl<
             log_write_buffer: config.log_write_buffer,
             translator: config.translator.clone(),
             pool: config.pool,
+            buffer_pool: config.buffer_pool,
         };
 
         let context = context.with_label("adb::current");
@@ -746,6 +753,7 @@ pub mod test {
             bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
             translator: TwoCap,
             pool: None,
+            buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
         }
     }
 
