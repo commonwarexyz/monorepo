@@ -246,9 +246,7 @@ where
                     op_count,
                     &operations,
                     &target_hash,
-                )
-                .await
-                {
+                ) {
                     Ok(true) => {}
                     Ok(false) => {
                         // TODO add retry logic
