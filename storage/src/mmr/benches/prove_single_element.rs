@@ -46,7 +46,6 @@ fn bench_prove_single_element(c: &mut Criterion) {
                                         pos,
                                         &root_digest,
                                     )
-                                    .await
                                     .unwrap());
                             }
                         });
