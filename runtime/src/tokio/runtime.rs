@@ -3,7 +3,7 @@ use crate::network::tokio::{Config as TokioNetworkConfig, Network as TokioNetwor
 #[cfg(feature = "iouring-storage")]
 use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage};
 #[cfg(not(feature = "iouring-storage"))]
-use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
+use crate::storage::positional::{Config as PositionalStorageConfig, Storage as PositionalStorage};
 #[cfg(feature = "iouring-network")]
 use crate::{
     iouring,
@@ -266,7 +266,7 @@ impl crate::Runner for Runner {
                 );
             } else {
                 let storage = MeteredStorage::new(
-                    TokioStorage::new(TokioStorageConfig::new(
+                    PositionalStorage::new(PositionalStorageConfig::new(
                         self.cfg.storage_directory.clone(),
                         self.cfg.maximum_buffer_size,
                     )),
@@ -338,7 +338,7 @@ cfg_if::cfg_if! {
     if #[cfg(feature = "iouring-storage")] {
         type Storage = MeteredStorage<IoUringStorage>;
     } else {
-        type Storage = MeteredStorage<TokioStorage>;
+        type Storage = MeteredStorage<PositionalStorage>;
     }
 }
 
