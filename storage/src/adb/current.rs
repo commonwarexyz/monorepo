@@ -468,7 +468,7 @@ impl<
 
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
     /// the log with the provided root.
-    pub async fn verify_range_proof(
+    pub fn verify_range_proof(
         hasher: &mut Standard<H>,
         proof: &Proof<H>,
         start_loc: u64,
@@ -508,7 +508,6 @@ impl<
         if op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS == 0 {
             return proof
                 .verify_range_inclusion(&mut verifier, digests, start_pos, end_pos, root_digest)
-                .await
                 .map_err(Error::MmrError);
         }
 
@@ -521,10 +520,7 @@ impl<
         let last_chunk_digest = proof.digests.pop().unwrap();
 
         // Reconstruct the MMR root.
-        let mmr_root = match proof
-            .reconstruct_root(&mut verifier, digests, start_pos, end_pos)
-            .await
-        {
+        let mmr_root = match proof.reconstruct_root(&mut verifier, digests, start_pos, end_pos) {
             Ok(root) => root,
             Err(MissingDigests) => {
                 debug!("Not enough digests in proof to reconstruct root");
@@ -626,7 +622,6 @@ impl<
         if op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS == 0 {
             return proof
                 .verify_element_inclusion(&mut verifier, &digest, pos, root_digest)
-                .await
                 .map_err(Error::MmrError);
         }
 
@@ -652,10 +647,7 @@ impl<
         }
 
         // Reconstruct the MMR root.
-        let mmr_root = match proof
-            .reconstruct_root(&mut verifier, &[digest], pos, pos)
-            .await
-        {
+        let mmr_root = match proof.reconstruct_root(&mut verifier, &[digest], pos, pos) {
             Ok(root) => root,
             Err(MissingDigests) => {
                 debug!("Not enough digests in proof to reconstruct root");
@@ -1061,7 +1053,6 @@ pub mod test {
                         &chunks,
                         &root
                     )
-                    .await
                     .unwrap(),
                     "failed to verify range at start_loc {start_loc}",
                 );
