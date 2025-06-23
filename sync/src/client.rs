@@ -34,13 +34,13 @@ pub enum ClientState<E: Storage + Clock + Metrics, K: Array, V: Array, H: Hasher
         target_hash: H::Digest,
     },
     /// Requesting proof and operations from server
-    FetchingProof {
+    FetchOps {
         db: Any<E, K, V, H, T>,
         target_hash: H::Digest,
         progress: SyncProgress,
     },
     /// Applying received operations to local database
-    ApplyingOperations {
+    ApplyOps {
         db: Any<E, K, V, H, T>,
         target_hash: H::Digest,
         proof: Proof<H>,
@@ -50,7 +50,7 @@ pub enum ClientState<E: Storage + Clock + Metrics, K: Array, V: Array, H: Hasher
     /// Sync completed successfully
     Done {
         db: Any<E, K, V, H, T>,
-        final_progress: SyncProgress,
+        progress: SyncProgress,
         root_hash: H::Digest,
     },
 }
@@ -112,17 +112,17 @@ where
     }
 
     /// Get current sync progress
-    fn _progress(&self) -> Option<SyncProgress> {
+    fn _progress(&self) -> Option<&SyncProgress> {
         match &self.state {
-            Some(ClientState::FetchingProof { progress, .. }) => Some(progress.clone()),
-            Some(ClientState::ApplyingOperations { progress, .. }) => Some(progress.clone()),
-            Some(ClientState::Done { final_progress, .. }) => Some(final_progress.clone()),
+            Some(ClientState::FetchOps { progress, .. }) => Some(progress),
+            Some(ClientState::ApplyOps { progress, .. }) => Some(progress),
+            Some(ClientState::Done { progress, .. }) => Some(progress),
             _ => None,
         }
     }
 
     /// Process the next step in the sync process
-    async fn step(&mut self) -> Result<bool, Error> {
+    async fn step(mut self) -> Result<Self, Error> {
         let current_state = self.state.take().ok_or(Error::InvalidState)?;
 
         match current_state {
@@ -138,62 +138,61 @@ where
                     current_ops: op_count,
                     target_ops,
                     operations_applied: 0,
-                    batches_processed: 0,
+                    batches_received: 0,
                 };
 
                 if op_count == target_ops {
                     // Already at exact target
                     let root_hash = db.root(&mut self.hasher);
-                    if root_hash == target_hash {
-                        self.state = Some(ClientState::Done {
-                            db,
-                            final_progress: progress,
-                            root_hash,
-                        });
-                        return Ok(true);
-                    } else {
+                    if root_hash != target_hash {
                         return Err(Error::HashMismatch {
                             expected: Box::new(target_hash),
                             actual: Box::new(root_hash),
                         });
+                    } else {
+                        self.state = Some(ClientState::Done {
+                            db,
+                            progress,
+                            root_hash,
+                        });
+                        Ok(self)
                     }
                 } else if op_count > target_ops {
                     // We're already past the target - this shouldn't happen
-                    return Err(Error::InvalidState);
+                    Err(Error::InvalidState)
                 } else {
                     // We're not at the target yet, so we need to fetch more operations
-                    self.state = Some(ClientState::FetchingProof {
+                    self.state = Some(ClientState::FetchOps {
                         db,
                         target_hash,
                         progress,
                     });
+                    Ok(self) // Continue
                 }
-                Ok(false) // Continue
             }
 
-            ClientState::FetchingProof {
+            ClientState::FetchOps {
                 db,
                 target_hash,
                 mut progress,
             } => {
                 // Calculate exactly how many operations we need
                 let op_count = db.op_count();
-                if op_count > progress.target_ops {
-                    return Err(Error::InvalidState);
-                }
+                let remaining_ops = progress
+                    .target_ops
+                    .checked_sub(op_count)
+                    .and_then(NonZeroU64::new)
+                    .ok_or(Error::InvalidState)?;
 
-                let operations_needed = NonZeroU64::new(progress.target_ops - op_count).unwrap();
-                let batch_size = std::cmp::min(self.config.max_ops_per_batch, operations_needed);
+                let batch_size = std::cmp::min(self.config.max_ops_per_batch, remaining_ops);
 
                 debug!(
                     op_count,
-                    progress.target_ops,
-                    operations_needed,
-                    batch_size,
-                    "Fetching proof and operations"
+                    progress.target_ops, remaining_ops, batch_size, "Fetching proof and operations"
                 );
 
                 let (proof, operations) = self.resolver.get_proof(op_count, batch_size).await?;
+                progress.batches_received += 1;
 
                 // Validate that we didn't get more operations than requested
                 if operations.len() as u64 > batch_size.get() {
@@ -209,19 +208,17 @@ where
                     "Received operations from resolver"
                 );
 
-                progress.batches_processed += 1;
-
-                self.state = Some(ClientState::ApplyingOperations {
+                self.state = Some(ClientState::ApplyOps {
                     db,
                     target_hash,
                     proof,
                     operations,
                     progress,
                 });
-                Ok(false) // Continue
+                Ok(self) // Continue
             }
 
-            ClientState::ApplyingOperations {
+            ClientState::ApplyOps {
                 mut db,
                 target_hash,
                 proof,
@@ -232,13 +229,13 @@ where
                 debug!("Verifying proof for operations");
 
                 // Ensure we won't exceed the target after applying these operations
-                let start_loc = db.op_count();
-                let expected_final_ops = start_loc + operations.len() as u64;
-                if expected_final_ops > progress.target_ops {
+                let op_count = db.op_count();
+                let new_op_count = op_count + operations.len() as u64;
+                if new_op_count > progress.target_ops {
                     return Err(Error::InvalidResolver(format!(
                         "Applying {} operations from index {} would exceed target ops {}",
                         operations.len(),
-                        start_loc,
+                        op_count,
                         progress.target_ops
                     )));
                 }
@@ -246,7 +243,7 @@ where
                 match Any::<E, K, V, H, T>::verify_proof(
                     &mut self.hasher,
                     &proof,
-                    start_loc,
+                    op_count,
                     &operations,
                     &target_hash,
                 )
@@ -254,6 +251,7 @@ where
                 {
                     Ok(true) => {}
                     Ok(false) => {
+                        // TODO add retry logic
                         return Err(Error::ProofVerificationFailed);
                     }
                     Err(e) => return Err(Error::ProofVerificationError(e)),
@@ -262,7 +260,7 @@ where
                 // Apply operations in batch
                 debug!(
                     operations_count = operations.len(),
-                    expected_final_ops, "Applying operations"
+                    new_op_count, "Applying operations"
                 );
 
                 for op in operations.iter() {
@@ -297,7 +295,7 @@ where
                     current_ops = progress.current_ops,
                     target_ops = progress.target_ops,
                     operations_applied = progress.operations_applied,
-                    batches_processed = progress.batches_processed,
+                    batches_processed = progress.batches_received,
                     completion_pct = progress.completion_percentage(),
                     "Applied operation batch"
                 );
@@ -305,36 +303,36 @@ where
                 // Check if we've reached exactly the target
                 if progress.current_ops == progress.target_ops {
                     // Verify the final hash matches the target
-                    let final_root = db.root(&mut self.hasher);
+                    let root_hash = db.root(&mut self.hasher);
 
-                    if final_root == target_hash {
+                    if root_hash == target_hash {
                         info!(
                             final_ops = progress.current_ops,
                             operations_applied = progress.operations_applied,
-                            batches_processed = progress.batches_processed,
+                            batches_processed = progress.batches_received,
                             "Sync completed successfully"
                         );
 
                         self.state = Some(ClientState::Done {
                             db,
-                            final_progress: progress,
-                            root_hash: final_root,
+                            progress,
+                            root_hash,
                         });
-                        Ok(true) // Done
+                        Ok(self) // Done
                     } else {
                         Err(Error::HashMismatch {
                             expected: Box::new(target_hash),
-                            actual: Box::new(final_root),
+                            actual: Box::new(root_hash),
                         })
                     }
                 } else {
                     // Need more operations to reach exactly the target
-                    self.state = Some(ClientState::FetchingProof {
+                    self.state = Some(ClientState::FetchOps {
                         db,
                         target_hash,
                         progress,
                     });
-                    Ok(false) // Continue
+                    Ok(self) // Continue
                 }
             }
 
@@ -343,27 +341,27 @@ where
     }
 
     /// Run the complete sync process
-    pub async fn sync(&mut self) -> Result<Any<E, K, V, H, T>, Error> {
+    pub async fn sync(mut self) -> Result<Any<E, K, V, H, T>, Error> {
         info!("Starting complete sync process");
 
         loop {
-            let is_done = self.step().await?;
-            if is_done {
+            self = self.step().await?;
+            if self.state.is_none() {
                 break;
             }
         }
 
         // Take ownership of the state to extract the database
-        match self.state.take() {
+        match self.state {
             Some(ClientState::Done {
                 db,
-                final_progress,
+                progress,
                 root_hash,
             }) => {
                 info!(
-                    final_ops = final_progress.current_ops,
-                    operations_applied = final_progress.operations_applied,
-                    batches_processed = final_progress.batches_processed,
+                    final_ops = progress.current_ops,
+                    operations_applied = progress.operations_applied,
+                    batches_processed = progress.batches_received,
                     root_hash = root_hash.to_string(),
                     "Sync completed successfully"
                 );
@@ -378,7 +376,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resolver::LocalResolver;
+    use crate::{resolver::LocalResolver, sync};
     use commonware_cryptography::{sha256::Digest, Digest as _, Sha256};
     use commonware_runtime::{
         deterministic::{self, Context},
@@ -433,23 +431,6 @@ mod tests {
         db
     }
 
-    /// Helper function to attempt sync and handle expected failures gracefully
-    async fn attempt_sync(
-        target_db: TestAny,
-        resolver: TestResolver,
-        target_ops: u64,
-        target_hash: <TestHash as Hasher>::Digest,
-    ) -> Result<TestAny, Error> {
-        let mut client = Client::new(
-            target_db,
-            resolver,
-            ClientConfig::default(),
-            target_ops,
-            target_hash,
-        )?;
-        client.sync().await
-    }
-
     #[test]
     fn test_client_configuration() {
         let config = ClientConfig::default();
@@ -494,7 +475,7 @@ mod tests {
             let resolver = TestResolver::_new(target_db);
             let sync_db = create_test_db(context).await;
 
-            let result = attempt_sync(sync_db, resolver, target_ops, target_hash)
+            let result = sync(sync_db, resolver, target_ops, target_hash)
                 .await
                 .unwrap();
             assert_eq!(result.root(&mut hasher), target_hash);
@@ -516,7 +497,7 @@ mod tests {
             let resolver = TestResolver::_new(target_db);
             let sync_db = create_test_db(context).await;
 
-            let result = attempt_sync(sync_db, resolver, target_ops, target_hash)
+            let result = sync(sync_db, resolver, target_ops, target_hash)
                 .await
                 .unwrap();
             assert_eq!(result.root(&mut hasher), target_hash);
@@ -541,7 +522,7 @@ mod tests {
             // Note we don't commit here because doing so would cause the histories of
             // the target and sync databases to diverge.
 
-            let result = attempt_sync(sync_db, resolver, target_ops, target_hash)
+            let result = sync(sync_db, resolver, target_ops, target_hash)
                 .await
                 .unwrap();
             assert_eq!(result.root(&mut hasher), target_hash);
@@ -567,7 +548,7 @@ mod tests {
             // Note we don't commit here because doing so would cause the histories of
             // the target and sync databases to diverge.
 
-            let result = attempt_sync(sync_db, resolver, target_ops, target_hash)
+            let result = sync(sync_db, resolver, target_ops, target_hash)
                 .await
                 .unwrap();
             assert_eq!(result.root(&mut hasher), target_hash);

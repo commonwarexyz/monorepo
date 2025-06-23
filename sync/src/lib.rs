@@ -15,7 +15,7 @@ pub struct SyncProgress {
     pub current_ops: u64,
     pub target_ops: u64,
     pub operations_applied: u64,
-    pub batches_processed: u64,
+    pub batches_received: u64,
 }
 
 impl SyncProgress {
@@ -40,9 +40,6 @@ pub enum Error {
     /// Database operation error
     #[error("Database error: {0}")]
     DatabaseError(commonware_storage::adb::Error),
-    /// MMR error
-    #[error("MMR error: {0}")]
-    MmrError(commonware_storage::mmr::Error),
     /// Proof verification failed
     #[error("Proof verification failed")]
     ProofVerificationFailed,
@@ -57,18 +54,12 @@ pub enum Error {
     /// Invalid target parameters
     #[error("Invalid target: current ops {current} is already >= target ops {target}")]
     InvalidTarget { current: u64, target: u64 },
-    /// Invalid configuration
-    #[error("Invalid configuration: {0}")]
-    InvalidConfig(String),
     /// Invalid client state
     #[error("Invalid client state")]
     InvalidState,
     /// Sync already completed
     #[error("Sync already completed")]
     AlreadyComplete,
-    /// Serialization error
-    #[error("Serialization error: {0}")]
-    SerializationError(String),
     /// Invalid resolver error
     #[error("Invalid resolver error: {0}")]
     InvalidResolver(String),
@@ -92,14 +83,13 @@ where
     T: Translator,
     R: Resolver<H, K, V>,
 {
-    let mut client = Client::new(
+    Client::new(
         db,
         resolver,
         ClientConfig::default(),
         target_ops,
         target_hash,
-    )?;
-
-    // The client.sync() method now returns the database directly
-    client.sync().await
+    )?
+    .sync()
+    .await
 }
