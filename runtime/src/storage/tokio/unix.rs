@@ -1,7 +1,7 @@
 use crate::Error;
 use commonware_utils::{hex, StableBuf};
-use std::{fs::File, os::unix::fs::FileExt, sync::Arc};
-use tokio::task;
+use std::{fs::File, io::Error as IoError, os::unix::fs::FileExt, sync::Arc};
+use tokio::task::{self, JoinError};
 
 #[derive(Clone)]
 pub struct Blob {
@@ -29,22 +29,24 @@ impl crate::Blob for Blob {
         let mut buf = buf.into();
         let file = self.file.clone();
         task::spawn_blocking(move || {
-            file.read_exact_at(buf.as_mut(), offset)?;
+            file.read_exact_at(buf.as_mut(), offset)
+                .map_err(Error::ReadFailed)?;
             Ok(buf)
         })
         .await
-        .map_err(|_| Error::ReadFailed)?
+        .map_err(|e: JoinError| Error::ReadFailed(IoError::other(e.to_string())))?
     }
 
     async fn write_at(&self, buf: impl Into<StableBuf> + Send, offset: u64) -> Result<(), Error> {
         let buf = buf.into();
         let file = self.file.clone();
         task::spawn_blocking(move || {
-            file.write_all_at(buf.as_ref(), offset)?;
+            file.write_all_at(buf.as_ref(), offset)
+                .map_err(Error::WriteFailed)?;
             Ok(())
         })
         .await
-        .map_err(|_| Error::WriteFailed)?
+        .map_err(|e: JoinError| Error::WriteFailed(IoError::other(e.to_string())))?
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {

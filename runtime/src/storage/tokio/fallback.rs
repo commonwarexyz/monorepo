@@ -37,10 +37,10 @@ impl crate::Blob for Blob {
         let mut buf = buf.into();
         file.seek(SeekFrom::Start(offset))
             .await
-            .map_err(|_| Error::ReadFailed)?;
+            .map_err(Error::ReadFailed)?;
         file.read_exact(buf.as_mut())
             .await
-            .map_err(|_| Error::ReadFailed)?;
+            .map_err(Error::ReadFailed)?;
         Ok(buf)
     }
 
@@ -48,10 +48,10 @@ impl crate::Blob for Blob {
         let mut file = self.file.lock().await;
         file.seek(SeekFrom::Start(offset))
             .await
-            .map_err(|_| Error::WriteFailed)?;
+            .map_err(Error::WriteFailed)?;
         file.write_all(buf.into().as_ref())
             .await
-            .map_err(|_| Error::WriteFailed)?;
+            .map_err(Error::WriteFailed)?;
         Ok(())
     }
 
