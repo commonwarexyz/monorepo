@@ -211,7 +211,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                                     self.received_messages
                                         .get_or_create(&metrics::Message::new_invalid(&peer))
                                         .inc();
-                                    return Err(Error::InvalidChannel);
+                                    return Err(Error::UnknownChannel);
                                 }
                             }
                         }
