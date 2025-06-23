@@ -263,15 +263,13 @@ where
                     new_op_count, "Applying operations"
                 );
 
-                for op in operations.iter() {
+                for op in operations {
                     match op {
                         Operation::Update(key, value) => {
-                            db.update(key.clone(), value.clone())
-                                .await
-                                .map_err(Error::DatabaseError)?;
+                            db.update(key, value).await.map_err(Error::DatabaseError)?;
                         }
                         Operation::Deleted(key) => {
-                            db.delete(key.clone()).await.map_err(Error::DatabaseError)?;
+                            db.delete(key).await.map_err(Error::DatabaseError)?;
                         }
                         Operation::Commit(_) => {
                             db.commit().await.map_err(Error::DatabaseError)?;
@@ -442,6 +440,7 @@ mod tests {
         assert_eq!(custom_config.max_ops_per_batch.get(), 5);
     }
 
+    // Test that the client returns an error if the target ops is less than the current ops.
     #[test]
     fn test_invalid_target_error() {
         let executor = deterministic::Runner::default();
