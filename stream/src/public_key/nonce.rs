@@ -13,11 +13,6 @@ pub struct Info {
 const OVERFLOW_VALUE: u128 = 1 << 96;
 
 impl Info {
-    /// Create a new nonce with the given counter value.
-    pub fn new(counter: u128) -> Self {
-        Self { counter }
-    }
-
     /// Encodes the nonce information into a 12-byte array and increments the nonce by 1 (to prevent
     /// reuse).
     ///

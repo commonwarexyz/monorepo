@@ -88,21 +88,12 @@ pub struct Connection<Si: Sink, St: Stream> {
 
     /// The cipher used for receiving messages.
     cipher_recv: ChaCha20Poly1305,
-
-    /// Nonce counter for sending messages.
-    nonce_send: nonce::Info,
-
-    /// Nonce counter for receiving messages.
-    nonce_recv: nonce::Info,
 }
 
 impl<Si: Sink, St: Stream> Connection<Si, St> {
     /// Create a new connection from pre-established components.
     ///
     /// This is useful in tests, or when upgrading a connection that has already been verified.
-    ///
-    /// The nonces are initialized to 1 since the 0 nonce is reserved for part of the handshake
-    /// authentication.
     pub fn from_preestablished(
         sink: Si,
         stream: St,
@@ -116,8 +107,6 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             max_message_size,
             cipher_send,
             cipher_recv,
-            nonce_send: nonce::Info::new(1),
-            nonce_recv: nonce::Info::new(1),
         }
     }
 
@@ -202,26 +191,21 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
 
         // Create ciphers
         let l2d_msg = signed_handshake.encode();
-        let (d2l_cipher, l2d_cipher) = cipher::derive(
+        let ciphers = cipher::derive_directional(
             shared_secret.as_bytes(),
-            &[&config.namespace, &d2l_msg, &l2d_msg],
+            &config.namespace,
+            &d2l_msg,
+            &l2d_msg,
         )?;
-
-        // Create nonce counters for each direction (starting at 0)
-        let mut d2l_nonce = nonce::Info::default();
-        let mut l2d_nonce = nonce::Info::default();
 
         // Verify listener's key confirmation (uses nonce 0)
         // Listener should have encrypted our (dialer's) ephemeral public key
-        let l2d_auth_nonce = l2d_nonce.next()?;
-        listener_key_confirmation.verify(&l2d_cipher, &l2d_auth_nonce, &dialer_ephemeral)?;
+        listener_key_confirmation.verify(&ciphers.l2d_confirmation, &dialer_ephemeral)?;
 
         // Create and send dialer confirmation (Message 3)
         // We encrypt the listener's ephemeral public key to prove we can derive the shared secret
-        let d2l_auth_nonce = d2l_nonce.next()?;
         let dialer_key_confirmation = handshake::KeyConfirmation::create(
-            &d2l_cipher,
-            &d2l_auth_nonce,
+            &ciphers.d2l_confirmation,
             &signed_handshake.ephemeral(),
         )?;
         let dialer_confirmation = handshake::DialerConfirmation::new(dialer_key_confirmation);
@@ -241,10 +225,8 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             sink,
             stream,
             max_message_size: config.max_message_size,
-            cipher_send: d2l_cipher,
-            cipher_recv: l2d_cipher,
-            nonce_send: d2l_nonce,
-            nonce_recv: l2d_nonce,
+            cipher_send: ciphers.d2l,
+            cipher_recv: ciphers.l2d,
         })
     }
 
@@ -286,19 +268,13 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         }
 
         // Create ciphers
-        let (d2l_cipher, l2d_cipher) =
-            cipher::derive(shared_secret.as_bytes(), &[&namespace, &d2l_msg, &l2d_msg])?;
-
-        // Create nonce counters for each direction (starting at 0)
-        let mut d2l_nonce = nonce::Info::default();
-        let mut l2d_nonce = nonce::Info::default();
+        let ciphers =
+            cipher::derive_directional(shared_secret.as_bytes(), &namespace, &d2l_msg, &l2d_msg)?;
 
         // Create key confirmation using the derived cipher (uses nonce 0)
         // We encrypt the dialer's ephemeral public key to prove we can derive the shared secret
-        let l2d_auth_nonce = l2d_nonce.next()?;
         let key_confirmation = handshake::KeyConfirmation::create(
-            &l2d_cipher,
-            &l2d_auth_nonce,
+            &ciphers.l2d_confirmation,
             &incoming.ephemeral_public_key,
         )?;
 
@@ -331,22 +307,17 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
 
         // Verify dialer's key confirmation
         // Dialer should have encrypted our (listener's) ephemeral public key
-        let d2l_auth_nonce = d2l_nonce.next()?;
-        dialer_confirmation.key_confirmation().verify(
-            &d2l_cipher,
-            &d2l_auth_nonce,
-            &listener_ephemeral,
-        )?;
+        dialer_confirmation
+            .key_confirmation()
+            .verify(&ciphers.d2l_confirmation, &listener_ephemeral)?;
 
         // Connection successfully established with mutual authentication
         Ok(Connection {
             sink,
             stream,
             max_message_size,
-            cipher_send: l2d_cipher,
-            cipher_recv: d2l_cipher,
-            nonce_send: l2d_nonce,
-            nonce_recv: d2l_nonce,
+            cipher_send: ciphers.l2d,
+            cipher_recv: ciphers.d2l,
         })
     }
 
@@ -360,13 +331,13 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
                 sink: self.sink,
                 max_message_size: self.max_message_size,
                 cipher: self.cipher_send,
-                nonce: self.nonce_send,
+                nonce: nonce::Info::default(),
             },
             Receiver {
                 stream: self.stream,
                 max_message_size: self.max_message_size,
                 cipher: self.cipher_recv,
-                nonce: self.nonce_recv,
+                nonce: nonce::Info::default(),
             },
         )
     }
@@ -714,13 +685,8 @@ mod tests {
 
                     // Create fake key confirmation (using wrong ephemeral key)
                     let fake_ephemeral = x25519::PublicKey::from_bytes([99u8; 32]);
-                    let nonce_zero = chacha20poly1305::Nonce::from_slice(&[0u8; 12]);
-                    let key_confirmation = handshake::KeyConfirmation::create(
-                        &mock_cipher,
-                        nonce_zero,
-                        &fake_ephemeral,
-                    )
-                    .unwrap();
+                    let key_confirmation =
+                        handshake::KeyConfirmation::create(&mock_cipher, &fake_ephemeral).unwrap();
                     let listener_response =
                         handshake::ListenerResponse::new(signed_handshake, key_confirmation);
 
@@ -797,13 +763,8 @@ mod tests {
 
                     // Create fake key confirmation and ListenerResponse (using wrong ephemeral key)
                     let fake_ephemeral = x25519::PublicKey::from_bytes([99u8; 32]);
-                    let nonce_zero = chacha20poly1305::Nonce::from_slice(&[0u8; 12]);
-                    let key_confirmation = handshake::KeyConfirmation::create(
-                        &mock_cipher,
-                        nonce_zero,
-                        &fake_ephemeral,
-                    )
-                    .unwrap();
+                    let key_confirmation =
+                        handshake::KeyConfirmation::create(&mock_cipher, &fake_ephemeral).unwrap();
                     let listener_response =
                         handshake::ListenerResponse::new(signed_handshake, key_confirmation);
 

@@ -225,12 +225,11 @@ impl KeyConfirmation {
     /// knowledge of the shared secret in a challenge-response fashion.
     pub fn create(
         cipher: &ChaCha20Poly1305,
-        nonce: &Nonce,
         ephemeral_key: &x25519::PublicKey,
     ) -> Result<Self, Error> {
         // Encrypt the confirmation
         let encrypted_proof = cipher
-            .encrypt(nonce, ephemeral_key.encode().as_ref())
+            .encrypt(&Nonce::default(), ephemeral_key.encode().as_ref())
             .map_err(|_| Error::EncryptionFailed)?;
 
         Ok(Self {
@@ -244,12 +243,11 @@ impl KeyConfirmation {
     pub fn verify(
         &self,
         cipher: &ChaCha20Poly1305,
-        nonce: &Nonce,
         ephemeral_key: &x25519::PublicKey,
     ) -> Result<(), Error> {
         // Decrypt the confirmation
         let decrypted = cipher
-            .decrypt(nonce, self.encrypted_proof.as_ref())
+            .decrypt(&Nonce::default(), self.encrypted_proof.as_ref())
             .map_err(|_| Error::DecryptionFailed)?;
 
         // Verify the confirmation content
@@ -705,23 +703,20 @@ mod tests {
         let ephemeral_key = x25519::PublicKey::from_bytes([42u8; 32]);
 
         // Create key confirmation
-        let nonce_zero = Nonce::from_slice(&[0u8; 12]);
-        let confirmation = KeyConfirmation::create(&cipher, nonce_zero, &ephemeral_key).unwrap();
+        let confirmation = KeyConfirmation::create(&cipher, &ephemeral_key).unwrap();
 
         // Verify the confirmation with the same parameters
-        confirmation
-            .verify(&cipher, nonce_zero, &ephemeral_key)
-            .unwrap();
+        confirmation.verify(&cipher, &ephemeral_key).unwrap();
 
         // Verify that confirmation fails with different ephemeral key
         let different_ephemeral = x25519::PublicKey::from_bytes([43u8; 32]);
-        let result = confirmation.verify(&cipher, nonce_zero, &different_ephemeral);
+        let result = confirmation.verify(&cipher, &different_ephemeral);
         assert!(matches!(result, Err(Error::InvalidKeyConfirmation)));
 
         // Verify that confirmation fails with different cipher
         let different_key = [2u8; 32];
         let different_cipher = ChaCha20Poly1305::new(&different_key.into());
-        let result = confirmation.verify(&different_cipher, nonce_zero, &ephemeral_key);
+        let result = confirmation.verify(&different_cipher, &ephemeral_key);
         assert!(matches!(result, Err(Error::DecryptionFailed)));
     }
 
@@ -735,15 +730,13 @@ mod tests {
         let ephemeral_key = x25519::PublicKey::from_bytes([42u8; 32]);
 
         // Create and encode confirmation
-        let nonce_zero = Nonce::from_slice(&[0u8; 12]);
-        let original_confirmation =
-            KeyConfirmation::create(&cipher, nonce_zero, &ephemeral_key).unwrap();
+        let original_confirmation = KeyConfirmation::create(&cipher, &ephemeral_key).unwrap();
         let encoded = original_confirmation.encode();
 
         // Decode and verify it matches
         let decoded_confirmation = KeyConfirmation::decode(encoded).unwrap();
         decoded_confirmation
-            .verify(&cipher, nonce_zero, &ephemeral_key)
+            .verify(&cipher, &ephemeral_key)
             .unwrap();
     }
 
@@ -769,9 +762,7 @@ mod tests {
 
         let key = [1u8; 32];
         let cipher = ChaCha20Poly1305::new(&key.into());
-        let nonce_zero = Nonce::from_slice(&[0u8; 12]);
-        let key_confirmation =
-            KeyConfirmation::create(&cipher, nonce_zero, &ephemeral_public_key).unwrap();
+        let key_confirmation = KeyConfirmation::create(&cipher, &ephemeral_public_key).unwrap();
 
         // Create and encode listener response
         let original_response = ListenerResponse::new(handshake, key_confirmation);
@@ -782,9 +773,8 @@ mod tests {
         let (decoded_handshake, decoded_confirmation) = decoded_response.into_parts();
 
         assert_eq!(decoded_handshake.signer(), sender.public_key());
-        let nonce_zero = Nonce::from_slice(&[0u8; 12]);
         decoded_confirmation
-            .verify(&cipher, nonce_zero, &ephemeral_public_key)
+            .verify(&cipher, &ephemeral_public_key)
             .unwrap();
     }
 
@@ -797,9 +787,7 @@ mod tests {
         let cipher = ChaCha20Poly1305::new(&key.into());
         let ephemeral_key = x25519::PublicKey::from_bytes([42u8; 32]);
 
-        let nonce_zero = Nonce::from_slice(&[0u8; 12]);
-        let key_confirmation =
-            KeyConfirmation::create(&cipher, nonce_zero, &ephemeral_key).unwrap();
+        let key_confirmation = KeyConfirmation::create(&cipher, &ephemeral_key).unwrap();
 
         // Create and encode dialer confirmation
         let original_confirmation = DialerConfirmation::new(key_confirmation);
@@ -809,7 +797,7 @@ mod tests {
         let decoded_confirmation = DialerConfirmation::decode(encoded).unwrap();
         decoded_confirmation
             .key_confirmation()
-            .verify(&cipher, nonce_zero, &ephemeral_key)
+            .verify(&cipher, &ephemeral_key)
             .unwrap();
     }
 
