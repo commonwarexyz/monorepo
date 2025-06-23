@@ -1,5 +1,6 @@
 use super::{cipher, handshake, nonce, x25519, Config, ENCRYPTION_TAG_LENGTH};
 use crate::{
+    public_key::cipher::DirectionalCipher,
     utils::codec::{recv_frame, send_frame},
     Error,
 };
@@ -191,7 +192,12 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
 
         // Create ciphers
         let l2d_msg = signed_handshake.encode();
-        let ciphers = cipher::derive_directional(
+        let DirectionalCipher {
+            l2d_confirmation,
+            d2l_confirmation,
+            l2d,
+            d2l,
+        } = cipher::derive_directional(
             shared_secret.as_bytes(),
             &config.namespace,
             &d2l_msg,
@@ -200,22 +206,23 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
 
         // Verify listener's key confirmation (uses nonce 0)
         // Listener should have encrypted our (dialer's) ephemeral public key
-        listener_key_confirmation.verify(&ciphers.l2d_confirmation, &dialer_ephemeral)?;
+        listener_key_confirmation.verify(l2d_confirmation, &dialer_ephemeral)?;
 
         // Create and send dialer confirmation (Message 3)
         // We encrypt the listener's ephemeral public key to prove we can derive the shared secret
-        let dialer_key_confirmation = handshake::KeyConfirmation::create(
-            &ciphers.d2l_confirmation,
-            &signed_handshake.ephemeral(),
-        )?;
-        let dialer_confirmation = handshake::DialerConfirmation::new(dialer_key_confirmation);
-        let confirmation_bytes = dialer_confirmation.encode();
+        let dialer_key_confirmation =
+            handshake::KeyConfirmation::create(d2l_confirmation, &signed_handshake.ephemeral())?;
+        let confirmation_bytes = dialer_key_confirmation.encode();
 
         select! {
             _ = context.sleep_until(deadline) => {
                 return Err(Error::HandshakeTimeout)
             },
-            result = send_frame(&mut sink, &confirmation_bytes, config.max_message_size) => {
+            result = send_frame(
+                &mut sink,
+                &confirmation_bytes,
+                config.max_message_size,
+            ) => {
                 result?;
             },
         }
@@ -225,8 +232,8 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             sink,
             stream,
             max_message_size: config.max_message_size,
-            cipher_send: ciphers.d2l,
-            cipher_recv: ciphers.l2d,
+            cipher_send: d2l,
+            cipher_recv: l2d,
         })
     }
 
@@ -268,15 +275,17 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         }
 
         // Create ciphers
-        let ciphers =
-            cipher::derive_directional(shared_secret.as_bytes(), &namespace, &d2l_msg, &l2d_msg)?;
+        let DirectionalCipher {
+            l2d_confirmation,
+            d2l_confirmation,
+            l2d,
+            d2l,
+        } = cipher::derive_directional(shared_secret.as_bytes(), &namespace, &d2l_msg, &l2d_msg)?;
 
         // Create key confirmation using the derived cipher (uses nonce 0)
         // We encrypt the dialer's ephemeral public key to prove we can derive the shared secret
-        let key_confirmation = handshake::KeyConfirmation::create(
-            &ciphers.l2d_confirmation,
-            &incoming.ephemeral_public_key,
-        )?;
+        let key_confirmation =
+            handshake::KeyConfirmation::create(l2d_confirmation, &incoming.ephemeral_public_key)?;
 
         // Create and send listener response (Message 2)
         let listener_response = handshake::ListenerResponse::new(l2d_handshake, key_confirmation);
@@ -302,22 +311,20 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         };
 
         // Decode and verify dialer confirmation
-        let dialer_confirmation = handshake::DialerConfirmation::decode(confirmation_msg.as_ref())
+        let dialer_confirmation = handshake::KeyConfirmation::decode(confirmation_msg.as_ref())
             .map_err(Error::UnableToDecode)?;
 
         // Verify dialer's key confirmation
         // Dialer should have encrypted our (listener's) ephemeral public key
-        dialer_confirmation
-            .key_confirmation()
-            .verify(&ciphers.d2l_confirmation, &listener_ephemeral)?;
+        dialer_confirmation.verify(d2l_confirmation, &listener_ephemeral)?;
 
         // Connection successfully established with mutual authentication
         Ok(Connection {
             sink,
             stream,
             max_message_size,
-            cipher_send: ciphers.l2d,
-            cipher_recv: ciphers.d2l,
+            cipher_send: l2d,
+            cipher_recv: d2l,
         })
     }
 
@@ -686,7 +693,7 @@ mod tests {
                     // Create fake key confirmation (using wrong ephemeral key)
                     let fake_ephemeral = x25519::PublicKey::from_bytes([99u8; 32]);
                     let key_confirmation =
-                        handshake::KeyConfirmation::create(&mock_cipher, &fake_ephemeral).unwrap();
+                        handshake::KeyConfirmation::create(mock_cipher, &fake_ephemeral).unwrap();
                     let listener_response =
                         handshake::ListenerResponse::new(signed_handshake, key_confirmation);
 
@@ -764,7 +771,7 @@ mod tests {
                     // Create fake key confirmation and ListenerResponse (using wrong ephemeral key)
                     let fake_ephemeral = x25519::PublicKey::from_bytes([99u8; 32]);
                     let key_confirmation =
-                        handshake::KeyConfirmation::create(&mock_cipher, &fake_ephemeral).unwrap();
+                        handshake::KeyConfirmation::create(mock_cipher, &fake_ephemeral).unwrap();
                     let listener_response =
                         handshake::ListenerResponse::new(signed_handshake, key_confirmation);
 
