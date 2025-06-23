@@ -35,6 +35,7 @@ use prometheus_client::registry::Registry;
 use std::{
     fs::{self, File},
     io::Error as IoError,
+    num::TryFromIntError,
     os::fd::AsRawFd,
     path::PathBuf,
     sync::Arc,
@@ -93,7 +94,10 @@ impl crate::Storage for Storage {
             .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e))?;
 
         // Get the file length
-        let len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
+        let len = file
+            .metadata()
+            .map_err(|e| Error::ReadFailed(e.to_string()))?
+            .len();
 
         Ok((
             Blob::new(partition.into(), name, file, self.io_sender.clone()),
@@ -121,8 +125,10 @@ impl crate::Storage for Storage {
 
         let mut blobs = Vec::new();
         for entry in entries {
-            let entry = entry.map_err(|_| Error::ReadFailed)?;
-            let file_type = entry.file_type().map_err(|_| Error::ReadFailed)?;
+            let entry = entry.map_err(|e| Error::ReadFailed(e.to_string()))?;
+            let file_type = entry
+                .file_type()
+                .map_err(|e| Error::ReadFailed(e.to_string()))?;
 
             if !file_type.is_file() {
                 return Err(Error::PartitionCorrupt(partition.into()));
@@ -211,17 +217,21 @@ impl crate::Blob for Blob {
                     buffer: Some(buf),
                 })
                 .await
-                .map_err(|_| Error::ReadFailed)?;
+                .map_err(|e| Error::ReadFailed(e.to_string()))?;
 
             // Wait for the result
-            let (result, got_buf) = receiver.await.map_err(|_| Error::ReadFailed)?;
+            let (result, got_buf) = receiver
+                .await
+                .map_err(|e| Error::ReadFailed(e.to_string()))?;
             buf = got_buf.unwrap();
             if should_retry(result) {
                 continue;
             }
 
             // A non-positive return value indicates an error.
-            let op_bytes_read: usize = result.try_into().map_err(|_| Error::ReadFailed)?;
+            let op_bytes_read: usize = result
+                .try_into()
+                .map_err(|e: TryFromIntError| Error::ReadFailed(e.to_string()))?;
             if op_bytes_read == 0 {
                 // A return value of 0 indicates EOF, which shouldn't happen because we
                 // aren't done reading into `buf`. See `man pread`.
@@ -262,18 +272,21 @@ impl crate::Blob for Blob {
                     buffer: Some(buf),
                 })
                 .await
-                .map_err(|_| Error::WriteFailed)?;
+                .map_err(|e| Error::WriteFailed(e.to_string()))?;
 
             // Wait for the result
-            let (return_value, got_buf) = receiver.await.map_err(|_| Error::WriteFailed)?;
+            let (return_value, got_buf) = receiver
+                .await
+                .map_err(|e| Error::WriteFailed(e.to_string()))?;
             buf = got_buf.unwrap();
             if should_retry(return_value) {
                 continue;
             }
 
             // A negative return value indicates an error.
-            let op_bytes_written: usize =
-                return_value.try_into().map_err(|_| Error::WriteFailed)?;
+            let op_bytes_written: usize = return_value
+                .try_into()
+                .map_err(|e: TryFromIntError| Error::WriteFailed(e.to_string()))?;
 
             bytes_written += op_bytes_written;
         }
