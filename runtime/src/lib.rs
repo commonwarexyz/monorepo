@@ -62,10 +62,10 @@ pub enum Error {
     BindFailed,
     #[error("connection failed")]
     ConnectionFailed,
-    #[error("write failed")]
-    WriteFailed,
-    #[error("read failed")]
-    ReadFailed,
+    #[error("write failed. error: {0}")]
+    WriteFailed(String),
+    #[error("read failed. error: {0}")]
+    ReadFailed(String),
     #[error("send failed")]
     SendFailed,
     #[error("recv failed")]
@@ -88,8 +88,6 @@ pub enum Error {
     BlobInsufficientLength,
     #[error("offset overflow")]
     OffsetOverflow,
-    #[error("io error: {0}")]
-    Io(#[from] IoError),
 }
 
 /// Interface that any task scheduler must implement to start
@@ -1708,7 +1706,7 @@ mod tests {
                     }
                     line.push(byte[0]);
                 }
-                String::from_utf8(line).map_err(|_| Error::ReadFailed)
+                String::from_utf8(line).map_err(|e| Error::ReadFailed(e.utf8_error().to_string()))
             }
 
             async fn read_headers<St: Stream>(
@@ -1733,7 +1731,8 @@ mod tests {
                 content_length: usize,
             ) -> Result<String, Error> {
                 let read = stream.recv(vec![0; content_length]).await?;
-                String::from_utf8(read.into()).map_err(|_| Error::ReadFailed)
+                String::from_utf8(read.as_ref().to_vec())
+                    .map_err(|err| Error::ReadFailed(err.utf8_error().to_string()))
             }
 
             // Simulate a client connecting to the server
