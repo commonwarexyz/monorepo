@@ -42,9 +42,9 @@ impl<D: Digest> PartialEq for Proof<D> {
 impl<D: Digest> Proof<D> {
     /// Return true if `proof` proves that `element` appears at position `element_pos` within the
     /// MMR with root `root_digest`.
-    pub async fn verify_element_inclusion<I: CHasher<Digest = D>, M: Hasher<I>>(
+    pub async fn verify_element_inclusion<I: CHasher<Digest = D>, H: Hasher<I>>(
         &self,
-        hasher: &mut M,
+        hasher: &mut H,
         element: &[u8],
         element_pos: u64,
         root_digest: &D,
@@ -56,9 +56,9 @@ impl<D: Digest> Proof<D> {
     /// Return true if `proof` proves that the `elements` appear consecutively between positions
     /// `start_element_pos` through `end_element_pos` (inclusive) within the MMR with root
     /// `root_digest`.
-    pub async fn verify_range_inclusion<I: CHasher<Digest = D>, M: Hasher<I>, T>(
+    pub async fn verify_range_inclusion<I: CHasher<Digest = D>, H: Hasher<I>, T>(
         &self,
-        hasher: &mut M,
+        hasher: &mut H,
         elements: T,
         start_element_pos: u64,
         end_element_pos: u64,
@@ -94,9 +94,9 @@ impl<D: Digest> Proof<D> {
 
     /// Reconstructs the root digest of the MMR from the digests in the proof and the provided range
     /// of elements.
-    pub async fn reconstruct_root<I: CHasher<Digest = D>, M: Hasher<I>, T>(
+    pub async fn reconstruct_root<I: CHasher<Digest = D>, H: Hasher<I>, T>(
         &self,
-        hasher: &mut M,
+        hasher: &mut H,
         elements: T,
         start_element_pos: u64,
         end_element_pos: u64,
@@ -337,19 +337,19 @@ impl<D: Digest> Proof<D> {
     }
 }
 
-async fn peak_digest_from_range<'a, H, M: Hasher<H>, I, S>(
-    hasher: &mut M,
+async fn peak_digest_from_range<'a, InnerHasher, H: Hasher<InnerHasher>, I, S>(
+    hasher: &mut H,
     pos: u64,           // current node position in the tree
     two_h: u64,         // 2^height of the current node
     leftmost_pos: u64,  // leftmost leaf in the tree to be traversed
     rightmost_pos: u64, // rightmost leaf in the tree to be traversed
     elements: &mut I,
     sibling_digests: &mut S,
-) -> Result<H::Digest, Error>
+) -> Result<InnerHasher::Digest, Error>
 where
-    H: CHasher,
+    InnerHasher: CHasher,
     I: Iterator<Item: AsRef<[u8]>>,
-    S: Iterator<Item = &'a H::Digest>,
+    S: Iterator<Item = &'a InnerHasher::Digest>,
 {
     assert_ne!(two_h, 0);
     if two_h == 1 {
@@ -360,8 +360,8 @@ where
         }
     }
 
-    let mut left_digest: Option<H::Digest> = None;
-    let mut right_digest: Option<H::Digest> = None;
+    let mut left_digest: Option<InnerHasher::Digest> = None;
+    let mut right_digest: Option<InnerHasher::Digest> = None;
 
     let left_pos = pos - two_h;
     let right_pos = left_pos + two_h - 1;

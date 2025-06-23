@@ -530,9 +530,9 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     /// # Warning
     ///
     /// Panics if there are unprocessed updates.
-    pub async fn proof<T: Hasher<H>>(
+    pub async fn proof(
         &self,
-        hasher: &mut T,
+        hasher: &mut impl Hasher<H>,
         bit_offset: u64,
     ) -> Result<(Proof<H::Digest>, [u8; N]), Error> {
         assert!(bit_offset < self.bit_count(), "out of bounds");

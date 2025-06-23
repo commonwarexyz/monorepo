@@ -532,7 +532,7 @@ mod tests {
         tests::{build_test_mmr, ROOTS},
         verification::Proof,
     };
-    use commonware_cryptography::{sha256, Hasher as CHasher, Sha256};
+    use commonware_cryptography::{sha256::Digest, Hasher as CHasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
     use commonware_utils::hex;
@@ -807,7 +807,7 @@ mod tests {
                 // Confirm we can generate and verify an inclusion proofs for each of the 4 leafs of the grafted MMR.
                 {
                     let pos = 0;
-                    let proof = Proof::<sha256::Digest>::range_proof(&grafted_mmr, pos, pos)
+                    let proof = Proof::<Digest>::range_proof(&grafted_mmr, pos, pos)
                         .await
                         .unwrap();
 
@@ -819,7 +819,7 @@ mod tests {
                         .unwrap());
 
                     let pos = 1;
-                    let proof = Proof::<sha256::Digest>::range_proof(&grafted_mmr, pos, pos)
+                    let proof = Proof::<Digest>::range_proof(&grafted_mmr, pos, pos)
                         .await
                         .unwrap();
                     assert!(proof
@@ -828,7 +828,7 @@ mod tests {
                         .unwrap());
 
                     let pos = 3;
-                    let proof = Proof::<sha256::Digest>::range_proof(&grafted_mmr, pos, pos)
+                    let proof = Proof::<Digest>::range_proof(&grafted_mmr, pos, pos)
                         .await
                         .unwrap();
                     let mut verifier =
@@ -839,7 +839,7 @@ mod tests {
                         .unwrap());
 
                     let pos = 4;
-                    let proof = Proof::<sha256::Digest>::range_proof(&grafted_mmr, pos, pos)
+                    let proof = Proof::<Digest>::range_proof(&grafted_mmr, pos, pos)
                         .await
                         .unwrap();
                     assert!(proof
@@ -852,7 +852,7 @@ mod tests {
                 {
                     // Valid proof of the last element.
                     let pos = 4;
-                    let proof = Proof::<sha256::Digest>::range_proof(&grafted_mmr, pos, pos)
+                    let proof = Proof::<Digest>::range_proof(&grafted_mmr, pos, pos)
                         .await
                         .unwrap();
                     let mut verifier =
@@ -900,7 +900,7 @@ mod tests {
                 // test range proving
                 {
                     // Confirm we can prove the entire range.
-                    let proof = Proof::<sha256::Digest>::range_proof(&grafted_mmr, 0, 4)
+                    let proof = Proof::<Digest>::range_proof(&grafted_mmr, 0, 4)
                         .await
                         .unwrap();
                     let range = vec![&b1, &b2, &b3, &b4];
@@ -932,7 +932,7 @@ mod tests {
             // Confirm we can generate and verify inclusion proofs for the "orphaned" leaf as well as an existing one.
             let grafted_storage_root = grafted_mmr.root(&mut standard).await.unwrap();
             let pos = 0;
-            let proof = Proof::<sha256::Digest>::range_proof(&grafted_mmr, pos, pos)
+            let proof = Proof::<Digest>::range_proof(&grafted_mmr, pos, pos)
                 .await
                 .unwrap();
 
@@ -944,7 +944,7 @@ mod tests {
 
             let mut verifier = GraftingVerifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![]);
             let pos = 7;
-            let proof = Proof::<sha256::Digest>::range_proof(&grafted_mmr, pos, pos)
+            let proof = Proof::<Digest>::range_proof(&grafted_mmr, pos, pos)
                 .await
                 .unwrap();
             assert!(proof
