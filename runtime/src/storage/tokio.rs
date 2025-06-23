@@ -243,8 +243,8 @@ impl crate::Blob for Blob {
 #[cfg(test)]
 mod tests {
     use crate::storage::{
-        positional::{Config, Storage},
         tests::run_storage_tests,
+        tokio::{Config, Storage},
     };
     use rand::{Rng as _, SeedableRng};
     use std::env;

@@ -5,7 +5,7 @@ pub mod iouring;
 pub mod memory;
 pub mod metered;
 #[cfg(all(not(target_arch = "wasm32"), not(feature = "iouring-storage")))]
-pub mod positional;
+pub mod tokio;
 
 #[cfg(test)]
 pub(crate) mod tests {
