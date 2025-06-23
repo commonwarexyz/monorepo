@@ -344,29 +344,24 @@ where
 
         loop {
             self = self.step().await?;
-            if self.state.is_none() {
-                break;
-            }
-        }
+            match self.state {
+                Some(ClientState::Done {
+                    db,
+                    progress,
+                    root_hash,
+                }) => {
+                    info!(
+                        final_ops = progress.current_ops,
+                        operations_applied = progress.operations_applied,
+                        batches_processed = progress.batches_received,
+                        root_hash = root_hash.to_string(),
+                        "Sync completed successfully"
+                    );
 
-        // Take ownership of the state to extract the database
-        match self.state {
-            Some(ClientState::Done {
-                db,
-                progress,
-                root_hash,
-            }) => {
-                info!(
-                    final_ops = progress.current_ops,
-                    operations_applied = progress.operations_applied,
-                    batches_processed = progress.batches_received,
-                    root_hash = root_hash.to_string(),
-                    "Sync completed successfully"
-                );
-
-                Ok(db)
+                    return Ok(db);
+                }
+                _ => {}
             }
-            _ => Err(Error::InvalidState),
         }
     }
 }
@@ -386,6 +381,7 @@ mod tests {
     };
     use commonware_utils::NZU64;
     use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
+    use test_case::test_case;
 
     type TestHash = Sha256;
     type TestKey = Digest;
@@ -446,11 +442,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let target_db = create_test_db(context.clone()).await;
-            let target_db = apply_test_ops(target_db, 10).await;
+            let mut target_db = apply_test_ops(target_db, 10).await;
+            target_db.commit().await.unwrap();
             let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
             let target_hash = target_db.root(&mut hasher);
             let sync_db = create_test_db(context.clone()).await;
-            let sync_db = apply_test_ops(sync_db, 9).await;
+            let mut sync_db = apply_test_ops(sync_db, 9).await;
+            sync_db.commit().await.unwrap();
 
             let resolver = TestResolver::_new(sync_db);
             let result = Client::new(target_db, resolver, ClientConfig::default(), 0, target_hash);
@@ -460,92 +458,23 @@ mod tests {
         });
     }
 
-    // Sync from empty
-    #[test]
-    fn test_sync_from_empty() {
+    #[test_case(0, 1)]
+    #[test_case(1, 2)]
+    #[test_case(0, 100)]
+    #[test_case(5, 100)]
+    #[test_case(99, 100)]
+    fn test_sync(sync_db_ops: usize, target_db_ops: usize) {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let target_db = create_test_db(context.clone()).await;
-            let mut target_db = apply_test_ops(target_db, 10).await;
+            let mut target_db = apply_test_ops(target_db, target_db_ops).await;
             target_db.commit().await.unwrap();
             let target_ops = target_db.op_count();
             let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
             let target_hash = target_db.root(&mut hasher);
             let resolver = TestResolver::_new(target_db);
             let sync_db = create_test_db(context).await;
-
-            let result = sync(sync_db, resolver, target_ops, target_hash)
-                .await
-                .unwrap();
-            assert_eq!(result.root(&mut hasher), target_hash);
-            assert_eq!(result.op_count(), target_ops);
-        });
-    }
-
-    // Sync from empty to single op
-    #[test]
-    fn test_sync_single_op_empty() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let target_db = create_test_db(context.clone()).await;
-            let mut target_db = apply_test_ops(target_db, 1).await;
-            target_db.commit().await.unwrap();
-            let target_ops = target_db.op_count();
-            let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
-            let target_hash = target_db.root(&mut hasher);
-            let resolver = TestResolver::_new(target_db);
-            let sync_db = create_test_db(context).await;
-
-            let result = sync(sync_db, resolver, target_ops, target_hash)
-                .await
-                .unwrap();
-            assert_eq!(result.root(&mut hasher), target_hash);
-            assert_eq!(result.op_count(), target_ops);
-        });
-    }
-
-    // Sync from non-empty database to database where only one op is missing
-    #[test]
-    fn test_sync_single_op_populated() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let target_db = create_test_db(context.clone()).await;
-            let mut target_db = apply_test_ops(target_db, 10).await;
-            target_db.commit().await.unwrap();
-            let target_ops = target_db.op_count();
-            let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
-            let target_hash = target_db.root(&mut hasher);
-            let resolver = TestResolver::_new(target_db);
-            let sync_db = create_test_db(context).await;
-            let sync_db = apply_test_ops(sync_db, 9).await;
-            // Note we don't commit here because doing so would cause the histories of
-            // the target and sync databases to diverge.
-
-            let result = sync(sync_db, resolver, target_ops, target_hash)
-                .await
-                .unwrap();
-            assert_eq!(result.root(&mut hasher), target_hash);
-            assert_eq!(result.op_count(), target_ops);
-        });
-    }
-
-    // Sync from partially populated database when the number of operations is large
-    // TODO update to use a larger number of operations once pruning is handled
-    #[test]
-    fn test_sync_large() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let target_db = create_test_db(context.clone()).await;
-            let mut target_db = apply_test_ops(target_db, 500).await;
-            target_db.commit().await.unwrap();
-            let target_ops = target_db.op_count();
-            let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
-            let target_hash = target_db.root(&mut hasher);
-            let resolver = TestResolver::_new(target_db);
-            let sync_db = create_test_db(context).await;
-            let sync_db = apply_test_ops(sync_db, 12).await;
-            // Note we don't commit here because doing so would cause the histories of
-            // the target and sync databases to diverge.
+            let sync_db = apply_test_ops(sync_db, sync_db_ops).await;
 
             let result = sync(sync_db, resolver, target_ops, target_hash)
                 .await

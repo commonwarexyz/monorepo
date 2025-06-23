@@ -23,5 +23,6 @@ rand = { workspace = true }
 
 [dev-dependencies]
 commonware-macros = { workspace = true }
+test-case = "2.0"
 
 [lib]
