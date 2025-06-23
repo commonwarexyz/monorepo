@@ -1,11 +1,7 @@
 use crate::Error;
 use commonware_utils::{from_hex, hex, StableBuf};
-use std::{io::SeekFrom, path::PathBuf, sync::Arc};
-use tokio::{
-    fs,
-    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
-    sync::Mutex as AsyncMutex,
-};
+use std::{fs::File, path::PathBuf, sync::Arc};
+use tokio::{fs, sync::Mutex, task};
 
 #[derive(Clone)]
 pub struct Config {
@@ -24,14 +20,14 @@ impl Config {
 
 #[derive(Clone)]
 pub struct Storage {
-    lock: Arc<AsyncMutex<()>>,
+    lock: Arc<Mutex<()>>,
     cfg: Config,
 }
 
 impl Storage {
     pub fn new(cfg: Config) -> Self {
         Self {
-            lock: AsyncMutex::new(()).into(),
+            lock: Arc::new(Mutex::new(())),
             cfg,
         }
     }
@@ -41,18 +37,15 @@ impl Storage {
 pub struct Blob {
     partition: String,
     name: Vec<u8>,
-    // Files must be seeked prior to any read or write operation and are thus
-    // not safe to concurrently interact with. If we switched to mapping files
-    // we could remove this lock.
-    file: Arc<AsyncMutex<fs::File>>,
+    file: Arc<File>,
 }
 
 impl Blob {
-    fn new(partition: String, name: &[u8], file: fs::File) -> Self {
+    fn new(partition: String, name: &[u8], file: File) -> Self {
         Self {
             partition,
             name: name.into(),
-            file: Arc::new(AsyncMutex::new(file)),
+            file: Arc::new(file),
         }
     }
 }
@@ -71,7 +64,7 @@ impl crate::Storage for Storage {
             None => return Err(Error::PartitionCreationFailed(partition.into())),
         };
 
-        // Create the partition directory if it does not exist
+        // Create the partition directory, if it does not exist
         fs::create_dir_all(parent)
             .await
             .map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
@@ -91,6 +84,9 @@ impl crate::Storage for Storage {
 
         // Get the file length
         let len = file.metadata().await.map_err(|_| Error::ReadFailed)?.len();
+
+        // Convert to a blocking std::fs::File to use positional IO.
+        let file = file.into_std().await;
 
         // Construct the blob
         Ok((Blob::new(partition.into(), name, file), len))
@@ -145,55 +141,98 @@ impl crate::Blob for Blob {
         buf: impl Into<StableBuf> + Send,
         offset: u64,
     ) -> Result<StableBuf, Error> {
-        // Ensure the read is within bounds
-        let mut file = self.file.lock().await;
+        let file = self.file.clone();
         let mut buf = buf.into();
-        // Perform the read
-        file.seek(SeekFrom::Start(offset))
-            .await
-            .map_err(|_| Error::ReadFailed)?;
-        file.read_exact(buf.as_mut())
-            .await
-            .map_err(|_| Error::ReadFailed)?;
-        Ok(buf)
+
+        task::spawn_blocking(move || {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::FileExt;
+                file.read_exact_at(buf.as_mut(), offset)
+                    .map_err(|_| Error::ReadFailed)?;
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::FileExt;
+                let mut read = 0;
+                while read < buf.len() {
+                    let n = file
+                        .seek_read(&mut buf.as_mut()[read..], offset + read as u64)
+                        .map_err(|_| Error::ReadFailed)?;
+                    if n == 0 {
+                        return Err(Error::BlobInsufficientLength);
+                    }
+                    read += n;
+                }
+            }
+            Ok(buf)
+        })
+        .await
+        .map_err(|_| Error::ReadFailed)?
     }
 
     async fn write_at(&self, buf: impl Into<StableBuf> + Send, offset: u64) -> Result<(), Error> {
-        // Perform the write
-        let mut file = self.file.lock().await;
-        file.seek(SeekFrom::Start(offset))
-            .await
-            .map_err(|_| Error::WriteFailed)?;
-        file.write_all(buf.into().as_ref())
-            .await
-            .map_err(|_| Error::WriteFailed)?;
-        Ok(())
+        let file = self.file.clone();
+        let buf = buf.into();
+
+        task::spawn_blocking(move || {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::FileExt;
+                file.write_all_at(buf.as_ref(), offset)
+                    .map_err(|_| Error::WriteFailed)?;
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::FileExt;
+                let mut written = 0;
+                while written < buf.len() {
+                    let n = file
+                        .seek_write(&buf.as_ref()[written..], offset + written as u64)
+                        .map_err(|_| Error::WriteFailed)?;
+                    written += n;
+                }
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| Error::WriteFailed)?
     }
 
     async fn truncate(&self, len: u64) -> Result<(), Error> {
-        // Perform the truncate
-        let file = self.file.lock().await;
-        file.set_len(len)
-            .await
-            .map_err(|e| Error::BlobTruncateFailed(self.partition.clone(), hex(&self.name), e))?;
-        Ok(())
+        let file = self.file.clone();
+        let partition = self.partition.clone();
+        let name = self.name.clone();
+        task::spawn_blocking(move || {
+            file.set_len(len)
+                .map_err(|e| Error::BlobTruncateFailed(partition, hex(&name), e))
+        })
+        .await
+        .map_err(|_| Error::WriteFailed)?
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        let file = self.file.lock().await;
-        file.sync_all()
-            .await
-            .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))
+        let file = self.file.clone();
+        let partition = self.partition.clone();
+        let name = self.name.clone();
+        task::spawn_blocking(move || {
+            file.sync_all()
+                .map_err(|e| Error::BlobSyncFailed(partition, hex(&name), e))
+        })
+        .await
+        .map_err(|_| {
+            Error::BlobSyncFailed(
+                self.partition.clone(),
+                hex(&self.name),
+                std::io::Error::other("join error"),
+            )
+        })?
     }
 
     async fn close(self) -> Result<(), Error> {
-        let mut file = self.file.lock().await;
-        file.sync_all()
-            .await
-            .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))?;
-        file.shutdown()
-            .await
-            .map_err(|e| Error::BlobCloseFailed(self.partition.clone(), hex(&self.name), e))
+        self.sync().await
+
+        // When the file is dropped, it will be closed.
     }
 }
 
