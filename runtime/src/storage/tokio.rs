@@ -26,6 +26,10 @@ pub struct Storage {
 
 impl Storage {
     pub fn new(cfg: Config) -> Self {
+        #[cfg(not(any(unix, windows)))]
+        {
+            unimplemented!("platform not supported");
+        }
         Self {
             lock: Arc::new(Mutex::new(())),
             cfg,
