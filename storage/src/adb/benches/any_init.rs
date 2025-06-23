@@ -1,9 +1,10 @@
 use commonware_cryptography::{hash, Hasher, Sha256};
 use commonware_runtime::{
     benchmarks::{context, tokio},
+    buffer::pool::BufferPool,
     create_pool,
     tokio::{Config, Context, Runner},
-    Runner as _, ThreadPool,
+    Runner as _, RwLock, ThreadPool,
 };
 use commonware_storage::{
     adb::any::{Any, Config as AConfig},
@@ -11,7 +12,7 @@ use commonware_storage::{
 };
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 use tracing::info;
 
 const NUM_ELEMENTS: u64 = 100_000;
@@ -37,6 +38,7 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap> {
         log_write_buffer: 1024,
         translator: EightCap,
         pool: Some(pool),
+        buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
     }
 }
 

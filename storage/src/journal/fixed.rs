@@ -50,8 +50,11 @@ use super::Error;
 use bytes::BufMut;
 use commonware_codec::{Codec, DecodeExt, FixedSize};
 use commonware_runtime::{
-    buffer::{Read, Write},
-    Blob, Error as RError, Metrics, Storage,
+    buffer::{
+        pool::{BufferPool, Immutable},
+        Read, Write,
+    },
+    Blob, Error as RError, Metrics, RwLock, Storage,
 };
 use commonware_utils::hex;
 use futures::{
@@ -62,6 +65,7 @@ use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{
     collections::{BTreeMap, HashMap},
     marker::PhantomData,
+    sync::Arc,
 };
 use tracing::{debug, trace, warn};
 
@@ -79,6 +83,9 @@ pub struct Config {
 
     /// The size of the write buffer to use for each blob.
     pub write_buffer: usize,
+
+    /// The buffer pool to use for caching data.
+    pub buffer_pool: Arc<RwLock<BufferPool>>,
 }
 
 /// Implementation of `Journal` storage.
@@ -93,7 +100,7 @@ pub struct Journal<E: Storage + Metrics, A> {
     /// - Indices are consecutive and without gaps.
     /// - Contains only full blobs.
     /// - Never contains the most recent blob.
-    blobs: BTreeMap<u64, E::Blob>,
+    blobs: BTreeMap<u64, Immutable<E::Blob>>,
 
     /// The most recent blob.
     ///
@@ -249,6 +256,19 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             tracked.inc();
         }
 
+        let blobs = futures::future::join_all(blobs.into_iter().map(|(index, blob)| {
+            let pool = cfg.buffer_pool.clone();
+            async move {
+                (
+                    index,
+                    Immutable::new(blob, cfg.items_per_blob * Self::CHUNK_SIZE_U64, pool).await,
+                )
+            }
+        }))
+        .await
+        .into_iter()
+        .collect();
+
         Ok(Self {
             context,
             cfg,
@@ -314,7 +334,16 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             // Sync the previous blob before taking it and inserting it into the blobs map.
             self.tail.sync().await?;
             let old_blob = std::mem::replace(&mut self.tail, next_blob).take_blob();
-            assert!(self.blobs.insert(self.tail_index, old_blob).is_none());
+            let immutable_blob = Immutable::new(
+                old_blob,
+                self.cfg.items_per_blob * Self::CHUNK_SIZE_U64,
+                self.cfg.buffer_pool.clone(),
+            )
+            .await;
+            assert!(self
+                .blobs
+                .insert(self.tail_index, immutable_blob,)
+                .is_none());
             self.tail_index = next_blob_index;
             self.tracked.inc();
         }
@@ -334,7 +363,10 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             std::cmp::Ordering::Less => {}
         }
         self.tail.sync().await?;
-        self.blobs.insert(self.tail_index, self.tail.clone_blob());
+        let size = self.tail.size().await;
+        let immutable_tail =
+            Immutable::new(self.tail.clone_blob(), size, self.cfg.buffer_pool.clone()).await;
+        self.blobs.insert(self.tail_index, immutable_tail);
 
         let rewind_to_blob_index = journal_size / self.cfg.items_per_blob;
         if rewind_to_blob_index < self.oldest_blob_index() {
@@ -357,15 +389,12 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             current_blob_index -= 1;
         }
 
-        // Truncate the rewind blob to the correct offset.
-        let Some(rewind_blob) = self.blobs.get_mut(&rewind_to_blob_index) else {
-            return Err(Error::MissingBlob(rewind_to_blob_index));
-        };
-        rewind_blob.resize(rewind_to_offset).await?;
-
+        // Set up the new tail blob and truncate it to the correct offset.
         let (tail_index, unbuffered_tail) = self.blobs.pop_last().unwrap();
+        let raw_blob = unbuffered_tail.take_blob();
+        raw_blob.resize(rewind_to_offset).await?;
         self.tail_index = tail_index;
-        self.tail = Write::new(unbuffered_tail, rewind_to_offset, self.cfg.write_buffer);
+        self.tail = Write::new(raw_blob, rewind_to_offset, self.cfg.write_buffer);
 
         Ok(())
     }
@@ -446,7 +475,10 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         self.tail.sync().await?;
         let tail_size = self.tail.size().await;
         let tail_blob = self.tail.clone_blob();
-        blob_plus.push((self.tail_index, tail_blob));
+        blob_plus.push((
+            self.tail_index,
+            Immutable::new(tail_blob, tail_size, self.cfg.buffer_pool.clone()).await,
+        ));
         let items_per_blob = self.cfg.items_per_blob;
         let start_offset = (start_pos % items_per_blob) * Self::CHUNK_SIZE_U64;
 
@@ -484,6 +516,9 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                         Ok(()) => {
                             let next_offset = offset + Self::CHUNK_SIZE_U64;
                             let result = Self::verify_integrity(&buf).map(|item| (item_pos, item));
+                            if result.is_err() {
+                                debug!("corrupted item at {item_pos}");
+                            }
                             Some((result, (buf, reader, next_offset)))
                         }
                         Err(err) => Some((Err(Error::Runtime(err)), (buf, reader, size))),
@@ -603,11 +638,13 @@ mod tests {
 
         // Start the test within the executor
         executor.start(|context| async move {
+            let buffer_pool = Arc::new(RwLock::new(BufferPool::new()));
             // Initialize the journal, allowing a max of 2 items per blob.
             let cfg = Config {
                 partition: "test_partition".into(),
                 items_per_blob: 2,
                 write_buffer: 1024,
+                buffer_pool: buffer_pool.clone(),
             };
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -631,6 +668,7 @@ mod tests {
                 partition: "test_partition".into(),
                 items_per_blob: 2,
                 write_buffer: 1024,
+                buffer_pool: buffer_pool.clone(),
             };
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -768,6 +806,7 @@ mod tests {
                 partition: "test_partition".into(),
                 items_per_blob: ITEMS_PER_BLOB,
                 write_buffer: 1024,
+                buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
             };
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -834,10 +873,12 @@ mod tests {
             let journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
+
+            // Make sure reading the corrupted item fails with appropriate error.
             let err = journal.read(corrupted_item_pos).await.unwrap_err();
             assert!(matches!(err, Error::ChecksumMismatch(x, _) if x == bad_checksum));
 
-            // Replay all items, making sure the checksum mismatch error is handled correctly
+            // Replay all items, making sure the checksum mismatch error is handled correctly.
             {
                 let stream = journal
                     .replay(1024, 0)
@@ -881,6 +922,7 @@ mod tests {
                 partition: "test_partition".into(),
                 items_per_blob: ITEMS_PER_BLOB,
                 write_buffer: 1024,
+                buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
             };
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -938,6 +980,7 @@ mod tests {
                 partition: "test_partition".into(),
                 items_per_blob: ITEMS_PER_BLOB,
                 write_buffer: 1024,
+                buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
             };
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -1006,6 +1049,7 @@ mod tests {
                 partition: "test_partition".into(),
                 items_per_blob: 3,
                 write_buffer: 1024,
+                buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
             };
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -1066,6 +1110,7 @@ mod tests {
                 partition: "test_partition".into(),
                 items_per_blob: 10,
                 write_buffer: 1024,
+                buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
             };
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -1116,6 +1161,7 @@ mod tests {
                 partition: "test_partition".into(),
                 items_per_blob: 10,
                 write_buffer: 1024,
+                buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
             };
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -1178,6 +1224,7 @@ mod tests {
                 partition: "test_partition".into(),
                 items_per_blob: 2,
                 write_buffer: 1024,
+                buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
             };
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -1245,6 +1292,7 @@ mod tests {
                 partition: "test_partition_2".into(),
                 items_per_blob: 3,
                 write_buffer: 1024,
+                buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
             };
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -1302,6 +1350,7 @@ mod tests {
                 partition: "test_partition".into(),
                 items_per_blob: 60,
                 write_buffer: 1024,
+                buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
             };
 
             // Initialize the journal
