@@ -74,6 +74,7 @@ pub async fn sync<E, K, V, H, T, R>(
     resolver: R,
     target_ops: u64,
     target_hash: H::Digest,
+    config: ClientConfig,
 ) -> Result<Any<E, K, V, H, T>, Error>
 where
     E: Storage + Clock + Metrics,
@@ -83,13 +84,7 @@ where
     T: Translator,
     R: Resolver<H, K, V>,
 {
-    Client::new(
-        db,
-        resolver,
-        ClientConfig::default(),
-        target_ops,
-        target_hash,
-    )?
-    .sync()
-    .await
+    Client::new(db, resolver, config, target_ops, target_hash)?
+        .sync()
+        .await
 }

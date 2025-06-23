@@ -413,13 +413,15 @@ mod tests {
     // Note that we don't commit after applying the updates.
     async fn apply_test_ops(mut db: TestAny, n: usize) -> TestAny {
         let mut rng = StdRng::seed_from_u64(1337);
+        let mut prev_key = TestKey::random(&mut rng);
         for i in 0..n {
             let key = TestKey::random(&mut rng);
-            if i % 10 == 0 {
-                db.delete(key).await.unwrap();
+            if i % 10 == 0 && i > 0 {
+                db.delete(prev_key).await.unwrap();
             } else {
                 let value = TestValue::random(&mut rng);
                 db.update(key, value).await.unwrap();
+                prev_key = key;
             }
         }
         db
@@ -458,12 +460,17 @@ mod tests {
         });
     }
 
-    #[test_case(0, 1)]
-    #[test_case(1, 2)]
-    #[test_case(0, 100)]
-    #[test_case(5, 100)]
-    #[test_case(99, 100)]
-    fn test_sync(sync_db_ops: usize, target_db_ops: usize) {
+    #[test_case(0, 1, NZU64!(1))]
+    #[test_case(0, 1, NZU64!(10))]
+    #[test_case(1, 2, NZU64!(1))]
+    #[test_case(1, 2, NZU64!(10))]
+    #[test_case(0, 100, NZU64!(1))]
+    #[test_case(0, 100, NZU64!(10))]
+    #[test_case(5, 100, NZU64!(1))]
+    #[test_case(5, 100, NZU64!(10))]
+    #[test_case(99, 100, NZU64!(1))]
+    #[test_case(99, 100, NZU64!(10))]
+    fn test_sync(sync_db_ops: usize, target_db_ops: usize, max_ops_per_batch: NonZeroU64) {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let target_db = create_test_db(context.clone()).await;
@@ -475,8 +482,9 @@ mod tests {
             let resolver = TestResolver::_new(target_db);
             let sync_db = create_test_db(context).await;
             let sync_db = apply_test_ops(sync_db, sync_db_ops).await;
+            let config = ClientConfig { max_ops_per_batch };
 
-            let result = sync(sync_db, resolver, target_ops, target_hash)
+            let result = sync(sync_db, resolver, target_ops, target_hash, config)
                 .await
                 .unwrap();
             assert_eq!(result.root(&mut hasher), target_hash);
