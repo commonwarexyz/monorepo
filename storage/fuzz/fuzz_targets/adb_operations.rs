@@ -28,7 +28,7 @@ struct FuzzData {
 }
 
 fuzz_target!(|data: FuzzData| {
-    if data.operations.len() == 0 || data.operations.len() > 4 {
+    if data.operations.is_empty() || data.operations.len() > 4 {
         return;
     }
     let runner = deterministic::Runner::default();
@@ -42,7 +42,7 @@ fuzz_target!(|data: FuzzData| {
             log_journal_partition: "test_adb_log_journal".into(),
             log_items_per_blob: 500000,
             log_write_buffer: 1024,
-            translator: EightCap::default(),
+            translator: EightCap,
             pool: None,
         };
 
