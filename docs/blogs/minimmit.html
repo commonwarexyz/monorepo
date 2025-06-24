@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    <link rel="icon" href="../favicon.ico" type="image/x-icon">
+
+    <title>commonware > Minimmit: Fast Finality with Even Faster Blocks</title>
+    <meta name="description" content="Over the last few months, there has been renewed interest in developing propose-and-vote consensus protocols that reach finality after just one round of voting (~100-200ms). 'Two-Phase' protocols, not without tradeoffs, only remain safe if a Byzantine adversary controls less than ~20% of stake (rather than the ~33% tolerance typically considered).">
+    <meta name="author" content="Patrick O'Grady, Brendan Chou">
+    <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto, minimmit, consensus">
+
+    <meta property="og:url" content="https://commonware.xyz/blogs/minimmit.html" />
+    <meta property="og:type" content="article" />
+    <meta property="og:site_name" content="commonware" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/minimmit.jpg" />
+    <meta property="og:title" content="Minimmit: Fast Finality with Even Faster Blocks" />
+    <meta property="og:description" content="Over the last few months, there has been renewed interest in developing propose-and-vote consensus protocols that reach finality after just one round of voting (~100-200ms). 'Two-Phase' protocols, not without tradeoffs, only remain safe if a Byzantine adversary controls less than ~20% of stake (rather than the ~33% tolerance typically considered).">
+    <meta property="article:author" content="https://x.com/_patrickogrady" />
+    <meta property="article:author" content="https://x.com/B_Chou" />
+    <meta property="article:published_time" content="2025-06-24T00:00:00Z" />
+    <meta property="article:modified_time" content="2025-06-24T00:00:00Z" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta property="twitter:domain" content="commonware.xyz" />
+    <meta property="twitter:url" content="https://commonware.xyz/blogs/minimmit.html" />
+    <meta property="twitter:title" content="Minimmit: Fast Finality with Even Faster Blocks" />
+    <meta property="twitter:description" content="Over the last few months, there has been renewed interest in developing propose-and-vote consensus protocols that reach finality after just one round of voting (~100-200ms). 'Two-Phase' protocols, not without tradeoffs, only remain safe if a Byzantine adversary controls less than ~20% of stake (rather than the ~33% tolerance typically considered).">
+    <meta property="twitter:image" content="https://commonware.xyz/imgs/minimmit.jpg" />
+    <meta property="twitter:site" content="@commonwarexyz" />
+    <meta property="twitter:creator" content="@_patrickogrady" />
+    <meta property="twitter:creator" content="@B_Chou" />
+
+    <link rel="stylesheet" type="text/css" href="../style.css">
+</head>
+
+<body>
+    <div id="logo-placeholder">
+        <div class="logo-line">
+            <span class="edge-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="edge-logo-symbol">*</span>
+        </div>
+        <div class="logo-line">
+            <span class="vertical-logo-symbol">|</span>
+            <span class="logo-text"> commonware </span>
+            <span class="vertical-logo-symbol"> </span>
+        </div>
+        <div class="logo-line">
+            <span class="edge-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="edge-logo-symbol">+</span>
+        </div>
+    </div>
+    <div class="content">
+        <h1>Minimmit: Fast Finality with Even Faster Blocks</h1>
+        <div class="meta">
+            <div class="author">By <a href="https://x.com/_patrickogrady">Patrick O'Grady</a> and <a href="https://x.com/B_Chou">Brendan Chou</a></div>
+            <div class="date">June 24, 2025</div>
+        </div>
+        <p>Over the last few months, there has been renewed interest in developing <i>propose-and-vote</i> consensus protocols that reach finality after just one round of voting (~100-200ms). "Two-Phase" protocols, not without tradeoff, only remain safe if a Byzantine adversary controls less than <i>~20%</i> of stake (rather than the <i>~33%</i> tolerance typically considered). Concerned primarily with addressing this drop in fault tolerance, recent constructions propose augmenting Byzantine fault tolerance with crash fault tolerance to retain some path to finality under a "blended" <i>~33%</i> assumption. Minimmit, a new <i>propose-and-vote</i> construction below, optimizes for a different goal: minimizing block time.</p>
+        <div class="image-container">
+            <img src="../imgs/phase-comparison.png" alt="Phase Comparison">
+            <div class="image-caption">Figure 1: Two-Phase protocols commit after just one round of voting.</div>
+        </div>
+        <h2>Background</h2>
+        <p>In March, Matter Labs released <a href="https://arxiv.org/abs/2503.15380">ChonkyBFT: Consensus Protocol of ZKsync</a>. In May, Offchain Labs released <a href="https://arxiv.org/abs/2505.08771">Kudzu: Fast and Simple High-Throughput BFT</a> and Anza Labs released <a href="https://www.anza.xyz/blog/alpenglow-a-new-consensus-for-solana">Alpenglow</a> at <a href="https://youtu.be/x1sxtm-dvyE?">Solana Accelerate</a>. And just a few days ago, Supra Research and Espresso Systems released <a href="https://eprint.iacr.org/2025/1112">Hydrangea: A Fast and Simple Consensus Protocol for High-Throughput Blockchains</a>.</p>
+        <p>All capable of <i>propose-and-vote</i> confirmation in ~100-200ms, this cohort of new constructions primarily differs in the technique employed to finalize blocks if faults exceed <i>~20%</i> of stake (when comprised of at most <i>f</i> Byzantine faults <b>and</b> <i>p</i> crash faults). Finalizing quickly via some "fast path" when replicas are honest and online, these constructions fallback to a "slow path" that resembles the "Three-Phase" protocols commonly deployed today.</p>
+        <div class="image-container">
+            <img src="../imgs/alpenglow-fallback.png" alt="Alpenglow Fallback">
+            <div class="image-caption">Figure 2: Alpenglow supports a "slow-finalization" path.</div>
+        </div>
+        <h2>Minimmit: Fast Finality with Even Faster Blocks</h2>
+        <p>Today, we are excited to share a different take on <i>propose-and-vote</i> consensus: <a href="https://github.com/commonwarexyz/monorepo/tree/main/pipeline/minimmit.md">Minimmit: Fast Finality with Even Faster Blocks</a>. Like the constructions above, Minimmit delivers minimal confirmation latency under the <i>~20%</i> Byzantine fault assumption. Unlike those constructions, however, it optimizes for view latency instead of <i>f+</i> confirmation robustness. In an <a href="https://alto.commonware.xyz">alto-like configuration</a> (with 50 uniformly distributed validators), we expect a Minimmit-powered blockchain to reach 130ms block time and 250ms finality. In a regionally-biased configuration, we expect Minimmit to deliver 50ms block time and 100ms finality.</p>
+        <div class="image-container">
+            <img src="../imgs/faster-blocks.png" alt="Faster Blocks">
+            <div class="image-caption">Figure 3: On a real network, messages can arrive at very different times and advancing to the next view after observing a <i>40%</i> quorum can be much faster than observing an <i>80%</i> quorum.</div>
+        </div>
+        <p>While not yet peer-reviewed or fully implemented, we are releasing Minimmit under both an MIT and Apache-2 license for others to build with and build upon. Below, we provide a high-level summary of the specification and share some intuition about its correctness:</p>
+        <h2>1. Introduction</h2>
+        <p>Minimmit is a responsive, leader-based consensus protocol designed for simplicity and speed, tolerant of a Byzantine adversary that controls fewer than <code>20%</code> of replicas. Minimmit advances to the next view when a <code>40%</code> quorum is reached and finalizes blocks when an <code>80%</code> quorum is reached (after only a single round of voting). Minimmit can be instantiated with a number of practical optimizations to improve performance when deployed in production.</p>
+
+        <h2>2. Model & Parameters</h2>
+        <ul>
+            <li>Byzantine replicas: <code>≤ f</code></li>
+            <li>Total replicas: <code>n ≥ 5f + 1</code></li>
+            <li>Partial synchrony: every message arrives within <code>Δ</code> after an unknown global stabilization time (GST).</li>
+        </ul>
+
+        <h2>3. Quorums</h2>
+        <ul>
+            <li><code>L = n - 3f</code> (<code>2f + 1</code>)</li>
+            <li><code>Q = n - f</code> (<code>4f + 1</code>)</li>
+        </ul>
+        <p><i>There exists <code>≥ 1</code> honest replica in any <code>Q</code>-set and <code>L</code>-set intersection.</i></p>
+
+        <h2>4. Message Types</h2>
+        <table>
+            <tr>
+                <th>Message</th>
+                <th>Purpose</th>
+            </tr>
+            <tr>
+                <td><code>genesis</code></td>
+                <td>The genesis block.</td>
+            </tr>
+            <tr>
+                <td><code>propose(c, v, (c', v'))</code></td>
+                <td>Leader's proposal <code>c</code> for view <code>v</code> with parent <code>c'</code> in view <code>v'</code>.</td>
+            </tr>
+            <tr>
+                <td><code>notarize(c, v)</code></td>
+                <td>Vote to finalize block <code>c</code> in view <code>v</code>.</td>
+            </tr>
+            <tr>
+                <td><code>nullify(v)</code></td>
+                <td>Vote to advance to view <code>v + 1</code>.</td>
+            </tr>
+            <tr>
+                <td><code>notarization(c, v)</code></td>
+                <td>Certificate of ≥ <code>L</code> <code>notarize(c, v)</code> messages for <code>(c, v)</code>.</td>
+            </tr>
+            <tr>
+                <td><code>nullification(v)</code></td>
+                <td>Certificate of ≥ <code>L</code> <code>nullify(v)</code> messages for view <code>v</code>.</td>
+            </tr>
+            <tr>
+                <td><code>proof(v)</code></td>
+                <td>Either a <code>notarization(*, v)</code> or a <code>nullification(v)</code> certificate.</td>
+            </tr>
+        </table>
+
+        <h2>5. Initial Replica State</h2>
+        <pre><code>view         = 0
+notarized    = ⊥         # the proposal this replica has notarized
+nullified    = false     # whether this replica has nullified this view
+timer        = None      # time until nullify if not yet nullified or notarized
+messages     = []        # list of messages this replica has seen
+proofs       = []        # list of proofs this replica has collected</code></pre>
+
+        <h2>6. External Functions</h2>
+        <pre><code>// Select the leader for view `v`
+fn leader(v) -> L;
+
+// Build a block on top of `c'`. This should pass `verify(c, c')`.
+fn build(c') -> c;
+
+// Verify whether `c` is valid given the parent `c'`. Anything produced by
+// `build(c')` should pass `verify(c, c')`.
+fn verify(c, c') -> bool;</code></pre>
+
+        <h2>7. Helpers</h2>
+        <pre><code>// Find a valid parent to build on
+fn select_parent(v) -> (c', v') {
+    let i = v - 1;
+    while i >= 0 {
+        if notarization(c', i) ∈ proofs[i] {
+            // If there are multiple, pick any.
+            return (c', i);
+        }
+        if nullification(i) ∈ proofs[i] {
+            i -= 1;
+            continue;
+        }
+        return ⊥;
+    }
+    return genesis;
+}
+
+// Ensure there are proofs for all views between `v` and `v'`
+fn valid_parent(v, (c', v')) -> bool {
+    let i = v - 1;
+    while i > v' {
+        if nullification(i) ∈ proofs[i] {
+            i -= 1;
+            continue;
+        }
+        return false;
+    }
+    return notarization(c', v') ∈ proofs[v']
+}
+
+// Enter view `next`
+fn enter_view(next) {
+    if view >= next {
+        return;
+    }
+    view = next;
+    notarized = ⊥;
+    nullified = false;
+    timer = 2Δ;
+}
+
+// Record a message from a `replica`
+fn record_message(replica, message) -> bool {
+    if replica ∉ messages[message.view] {
+        messages[message.view][replica] = [];
+    }
+    if message ∉ messages[message.view][replica] {
+        messages[message.view][replica].add(message);
+        return true;
+    }
+    return false;
+}
+
+// Prune data less than `view`
+fn prune(view) {
+    messages.remove(m => m.view < view);
+    proofs.remove(p => p.view < view);
+}</code></pre>
+
+        <h2>8. Protocol for View <code>v</code></h2>
+
+        <h3>8.1. Propose</h3>
+        <p><i>If the leader, propose.</i></p>
+        <ol>
+            <li>Upon entering view <code>v</code>, if identity is equal to <code>leader(v)</code>:
+                <ol>
+                    <li><code>(c', v') = select_parent(v)</code> (if <code>⊥</code>, return).</li>
+                    <li><code>c = build(c')</code>.</li>
+                    <li><code>notarized = c</code>.</li>
+                    <li>Broadcast <code>propose(c, v, (c', v'))</code>.</li>
+                </ol>
+            </li>
+        </ol>
+        <p><i>Treat <code>propose(c, v, (c', v'))</code> as a leader <code>l</code>'s <code>notarize(c, v)</code>.</i></p>
+
+        <h3>8.2. Notarize</h3>
+        <p><i>Upon receipt of a first valid block proposal from leader, broadcast <code>notarize(c, v)</code>.</i></p>
+        <ol>
+            <li>On receiving first <code>propose(c, v, (c', v'))</code> from <code>leader(v)</code>:
+                <ol>
+                    <li>If <code>notarized != ⊥</code> or <code>nullified</code>, return.</li>
+                    <li>If <code>!valid_parent(v, (c', v'))</code>, return.</li>
+                    <li>If <code>!verify(c, c')</code>, return.</li>
+                    <li><code>notarized = c</code>.</li>
+                    <li>Broadcast <code>notarize(c, v)</code>.</li>
+                </ol>
+            </li>
+        </ol>
+
+        <h3>8.3. Nullify by Timeout</h3>
+        <p><i>If <code>timer</code> expires, broadcast <code>nullify(v)</code> if not yet broadcasted <code>notarize(c, v)</code>.</i></p>
+        <ol>
+            <li>On <code>timer</code> expiry:
+                <ol>
+                    <li>If <code>notarized != ⊥</code> or <code>nullified</code>, return.</li>
+                    <li><code>nullified = true</code>.</li>
+                    <li>Broadcast <code>nullify(v)</code>.</li>
+                </ol>
+            </li>
+        </ol>
+
+        <h3>8.4. Notarization & Finalization</h3>
+        <p><i>After <code>L</code> messages, create and broadcast a <code>notarization(c, v)</code> certificate. After <code>Q</code> messages, finalize.</i></p>
+        <ol>
+            <li>On receiving <code>notarize(c, v)</code> from replica <code>r</code>:
+                <ol>
+                    <li>If <code>!record_message(r, notarize(c, v))</code>, return.</li>
+                </ol>
+            </li>
+            <li>On observing <code>≥ L</code> <code>notarize(c, v)</code> messages:
+                <ol>
+                    <li>Assemble <code>notarization(c, v)</code>.</li>
+                    <li>Add <code>notarization(c, v)</code> to <code>proofs</code>.</li>
+                    <li>Broadcast <code>notarization(c, v)</code>.</li>
+                    <li><code>enter_view(v + 1)</code>.</li>
+                </ol>
+            </li>
+            <li>On observing <code>≥ Q</code> <code>notarize(c, v)</code> messages:
+                <ol>
+                    <li>Finalize <code>c</code> and all of its ancestors.</li>
+                    <li><code>prune(v)</code>.</li>
+                </ol>
+            </li>
+        </ol>
+
+        <h3>8.5. Nullification</h3>
+        <p><i>After <code>L</code> messages, create and broadcast a <code>nullification(v)</code> certificate.</i></p>
+        <ol>
+            <li>On receiving <code>nullify(v)</code> from replica <code>r</code>:
+                <ol>
+                    <li>If <code>!record_message(r, nullify(v))</code>, return.</li>
+                </ol>
+            </li>
+            <li>On observing <code>≥ L</code> <code>nullify(v)</code> messages (or a single <code>nullification(v)</code> message):
+                <ol>
+                    <li>Assemble <code>nullification(v)</code>.</li>
+                    <li>Add <code>nullification(v)</code> to <code>proofs</code>.</li>
+                    <li>Broadcast <code>nullification(v)</code>.</li>
+                    <li><code>enter_view(v + 1)</code>.</li>
+                </ol>
+            </li>
+        </ol>
+
+        <h3>8.6 Nullify by Contradiction</h3>
+        <p><i>If you have already broadcast <code>notarize(c, v)</code> for a <code>c</code> that cannot be finalized directly, broadcast <code>nullify(v)</code> to ensure some <code>proof(v)</code> will exist in view <code>v</code>.</i></p>
+        <ol>
+            <li>On observing messages from <code>≥ L</code> replicas of either <code>nullify(v)</code> or <code>notarize(*, v)</code> (where <code>notarized != ⊥</code> and <code>notarized != *</code>):
+                <ol>
+                    <li><code>nullified = true</code>.</li>
+                    <li>Broadcast <code>nullify(v)</code>.</li>
+                </ol>
+            </li>
+        </ol>
+
+        <h2>9. Intuition</h2>
+
+        <h3>9.1 General</h3>
+        <ul>
+            <li>A leader selected in <code>v + 1</code> may propose any block <code>c</code> that extends some known <code>notarization(c', v')</code> as long as there exist <code>nullification(j)</code> proofs for all views in <code>(v', v]</code>. Notably, this means that leaders are never required to re-propose a block from an earlier view and can only skip some block proposed in an earlier view <code>v</code> if there exists some <code>nullification(v)</code>.</li>
+        </ul>
+
+        <h3>9.2 Safety</h3>
+        <ul>
+            <li>Honest replicas may not broadcast a <code>notarize(c, v)</code> after first broadcasting a <code>nullify(v)</code>.</li>
+            <li>Honest replicas may broadcast a <code>nullify(v)</code> after first broadcasting a <code>notarize(c, v)</code>.
+                <ul>
+                    <li>To broadcast both a <code>notarize(c, v)</code> and a <code>nullify(v)</code> message, a replica must first see that it is impossible for the proposal that it notarized to reach a quorum of <code>Q</code> <code>notarize(c, v)</code> messages. Otherwise, the replica is forbidden from broadcasting <code>nullify(v)</code>, no matter how much time has passed.</li>
+                    <li>A replica knows it is impossible for its notarized proposal <code>c</code> to reach the finalization quorum <code>Q</code> once it has observed <code>L</code> other replicas that conflict. A conflicting replica has broadcast either a <code>nullify(v)</code> message or a <code>notarize(*, v)</code> message for a different proposal <code>*</code>.</li>
+                    <li>If a replica has seen <code>L</code> conflicting votes, at least <code>L - f</code> (i.e. <code>f + 1</code>) are from honest replicas. Therefore, the maximum number of <code>notarize(c, v)</code> it can receive is <code>n - (f + 1)</code>, or <code>4f</code> (strictly less than <code>Q</code>).</li>
+                </ul>
+            </li>
+            <li>Suppose a correct leader broadcasts a block <code>c</code> and, after honest replicas broadcast <code>notarize(c, v)</code>, message delivery is disrupted, preventing any replica from receiving <code>L</code> such messages. In this state, replicas have locked on <code>c</code> for view <code>v</code> and cannot broadcast some <code>nullify(v)</code>. Progress is stalled until network conditions improve, allowing a <code>notarization(c, v)</code> to be assembled, which in turn allows replicas to enter view <code>v + 1</code>.</li>
+            <li>In any given view <code>v</code>, there may be multiple <code>notarization(*, v)</code> messages and one <code>nullification(v)</code>. If there are multiple <code>notarization(*, v)</code>s, no block <code>*</code> referenced by a <code>notarization(*, v)</code> can be finalized in <code>v</code>. If there exists some <code>nullification(v)</code>, no block can be finalized in <code>v</code>.</li>
+        </ul>
+
+        <h3>9.3 Liveness</h3>
+        <ul>
+            <li>There exists at least one <code>proof(v)</code> for every view <code>v</code>.</li>
+            <li>After GST, all views with honest leaders will emit a <code>notarization</code> message before the timer of any honest replica expires. To see this is true, consider the following:
+                <ul>
+                    <li>The first honest replica broadcasts some <code>proof(v - 1)</code> message to all replicas and enters view <code>v</code> at time <code>t_0</code>.</li>
+                    <li>The leader of view <code>v</code> will receive said <code>proof(v - 1)</code> message by <code>t_0 + Δ</code> and broadcast some <code>propose(c, v, (c', v'))</code> message to all replicas.</li>
+                    <li>All honest replicas will receive said <code>propose(c, v, (c', v'))</code> message by <code>t_0 + 2Δ</code> and broadcast some <code>notarize(c, v)</code> message.</li>
+                </ul>
+            </li>
+            <li>Replicas enter <code>v + 1</code> as soon as they see some <code>proof(v)</code> (as fast as <code>L</code> messages). If the network is partitioned in two, replicas in each half of the partition may continue to enter successive views (on different <code>proof(v)</code>s) but will never finalize conflicting blocks. To bound the depth of forks in a partition, replicas can wait to enter some view <code>v + k</code> until they have seen <code>Q</code> messages in view <code>v</code>.</li>
+            <li>A Byzantine leader could equivocate, sending a distinct proposal to each replica and causing them to broadcast a <code>notarize(*, v)</code> for different blocks. After a replica observes <code>≥ L</code> <code>notarize(*, v)</code> messages for some <code>* != c</code>, it will then choose to broadcast a <code>nullify(v)</code> message. Eventually, <code>L</code> <code>nullify(v)</code> messages will be received and honest replicas will enter <code>v + 1</code> (within <code>Δ</code> of the first honest replica).</li>
+            <li>Since at most <code>f</code> nodes are Byzantine or faulty, once an honest leader is assigned, it is possible for at least <code>Q</code> correct replicas to finalize a block (including all of its ancestors).</li>
+        </ul>
+
+        <h2>10. Extensions</h2>
+        <p>Minimmit can be instantiated in several different ways to tune performance when deployed to production. Some examples are below:</p>
+        <ul>
+            <li>Use block digests (i.e. <code>c = hash(block)</code>) in <code>propose(c, v, (c', v'))</code>, <code>notarize(c, v)</code>, and <code>notarization(c, v)</code> messages.</li>
+            <li>Employ BLS multi-signatures or BLS threshold signatures, like <a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/threshold_simplex/index.html">Threshold Simplex</a>, to cap <code>notarization(c, v)</code> and <code>nullification(v)</code> messages at a constant size regardless of the number of replicas.</li>
+            <li>Attach some recent set of <code>proof(v)</code> messages to each <code>propose(c, v, (c', v'))</code> message (to ensure honest replicas that are not yet aware of recent proofs can still broadcast a <code>notarize(c, v)</code> message for valid blocks).</li>
+            <li>If <code>≥ f + 1</code> <code>notarize(c, v)</code> messages are observed for some <code>proposal(c, v, (c', v'))</code> considered invalid, request the missing <code>notarization(c, v')</code> or <code>nullification(v')</code> not found in our <code>proofs</code> (that prohibited us from broadcasting a <code>notarize(c, v)</code>) from the peers that consider it valid.</li>
+            <li>If stuck in the same view <code>v</code> for time <code>t_s</code>, re-broadcast some <code>proof(v - 1)</code> (to ensure all correct replicas enter <code>v</code>) and re-broadcast <code>notarized</code> (if not <code>⊥</code>) and <code>nullified</code> (if not <code>false</code>).</li>
+            <li>Assemble and broadcast a <code>finalization(c, v)</code> message after finalizing some <code>c</code> (i.e. <code>≥ Q</code> <code>notarize(c, v)</code> messages). This can both help lagging replicas catch up to the finalized tip and make it easier for downstream services to integrate.</li>
+            <li>Disseminate blocks using <code>(k,d)</code>-erasure codes, like <a href="https://eprint.iacr.org/2023/1916">DispersedSimplex</a>, <a href="https://arxiv.org/abs/2505.08771">Kudzu</a>, and <a href="https://drive.google.com/file/d/1y_7ddr8oNOknTQYHzXeeMD2ProQ0WjMs/view">Alpenglow</a>, to avoid a leader broadcast bottleneck. Each <code>notarize</code> message would be augmented with the relevant fragment. <code>k</code> would be set to the number of replicas, and <code>d</code> can be set as <code>f+1</code> so that the replicas only have a bandwidth requirement of about ~5 times the size of the full block. If a <code>notarization</code> exists, then at least <code>f+1</code> honest nodes have been distributed a fragment. This prevents <code>Byzantine</code> nodes from constructing a <code>notarization</code> without honest nodes being able to reconstruct the block among themselves. <code>d</code> can be set at higher values like <code>2f+1</code> to halve the required bandwidth, but replicas would have to ignore any gossiped <code>notarization</code> messages, instead making sure to gather the <code>2f+1</code> <code>notarize</code> messages themselves.</li>
+            <li>To punish equivocating leaders, treat <code>propose</code> messages for different blocks in the same view as a slashable offense. To incentivize performant leaders, issue a reward for any block <code>c</code> included in the canonical chain.</li>
+        </ul>
+        <p>Have an idea to simplify, improve, or extend Minimmit? <a href="https://github.com/commonwarexyz/monorepo/tree/main/pipeline/minimmit.md">Open a PR</a> or reach out at <a href="mailto:minimmit@commonware.xyz">minimmit@commonware.xyz</a></p>
+    </div>
+
+    <div id="footer-placeholder"></div>
+    <script src="../shared.js"></script>
+    <script defer src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "07159b86f75b4af18e54dd0cda2fb4a7"}'></script>
+</body>
+
+</html>
