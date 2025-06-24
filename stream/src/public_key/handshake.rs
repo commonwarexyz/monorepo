@@ -1,6 +1,6 @@
 //! Operations over handshake messages.
 
-use super::{x25519, ENCRYPTION_TAG_LENGTH};
+use super::{x25519, AUTHENTICATION_TAG_LENGTH};
 use crate::Error;
 use bytes::{Buf, BufMut};
 use chacha20poly1305::{
@@ -245,7 +245,7 @@ impl KeyConfirmation {
 
 impl Write for KeyConfirmation {
     fn write(&self, buf: &mut impl BufMut) {
-        let tag_bytes: [u8; ENCRYPTION_TAG_LENGTH] = self.tag.into();
+        let tag_bytes: [u8; AUTHENTICATION_TAG_LENGTH] = self.tag.into();
         tag_bytes.write(buf);
     }
 }
@@ -254,13 +254,13 @@ impl Read for KeyConfirmation {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let tag = <[u8; ENCRYPTION_TAG_LENGTH]>::read_cfg(buf, &())?;
+        let tag = <[u8; AUTHENTICATION_TAG_LENGTH]>::read_cfg(buf, &())?;
         Ok(Self { tag: tag.into() })
     }
 }
 
 impl FixedSize for KeyConfirmation {
-    const SIZE: usize = ENCRYPTION_TAG_LENGTH;
+    const SIZE: usize = AUTHENTICATION_TAG_LENGTH;
 }
 
 /// Message 2 in the 3-message handshake protocol: Listener's response with key confirmation.

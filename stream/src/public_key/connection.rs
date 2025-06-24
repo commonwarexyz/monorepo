@@ -1,4 +1,4 @@
-use super::{cipher, handshake, nonce, x25519, Config, ENCRYPTION_TAG_LENGTH};
+use super::{cipher, handshake, nonce, x25519, Config, AUTHENTICATION_TAG_LENGTH};
 use crate::{
     public_key::cipher::DirectionalCipher,
     utils::codec::{recv_frame, send_frame},
@@ -384,7 +384,7 @@ impl<Si: Sink> crate::Sender for Sender<Si> {
         send_frame(
             &mut self.sink,
             &msg,
-            self.max_message_size + ENCRYPTION_TAG_LENGTH,
+            self.max_message_size + AUTHENTICATION_TAG_LENGTH,
         )
         .await?;
         Ok(())
@@ -404,7 +404,7 @@ impl<St: Stream> crate::Receiver for Receiver<St> {
         // Read data
         let msg = recv_frame(
             &mut self.stream,
-            self.max_message_size + ENCRYPTION_TAG_LENGTH,
+            self.max_message_size + AUTHENTICATION_TAG_LENGTH,
         )
         .await?;
 
@@ -475,7 +475,7 @@ mod tests {
             };
 
             let result = sender.send(message).await;
-            let expected_length = message.len() + ENCRYPTION_TAG_LENGTH;
+            let expected_length = message.len() + AUTHENTICATION_TAG_LENGTH;
             assert!(matches!(result, Err(Error::SendTooLarge(n)) if n == expected_length));
         });
     }
@@ -503,7 +503,7 @@ mod tests {
 
             sender.send(message).await.unwrap();
             let result = receiver.receive().await;
-            let expected_length = message.len() + ENCRYPTION_TAG_LENGTH;
+            let expected_length = message.len() + AUTHENTICATION_TAG_LENGTH;
             assert!(matches!(result, Err(Error::RecvTooLarge(n)) if n == expected_length));
         });
     }

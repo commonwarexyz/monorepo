@@ -11,10 +11,10 @@ const CHACHA_KEY_SIZE: usize = <ChaCha20Poly1305 as KeySizeUser>::KeySize::USIZE
 const BASE_KDF_PREFIX: &[u8] = b"commonware-stream/KDF/v1/";
 
 // Constant infos for directional ciphers.
-const D2L_TRAFFIC_INFO: &[u8] = b"l2d/traffic";
-const L2D_TRAFFIC_INFO: &[u8] = b"d2l/traffic";
-const D2L_CONFIRMATION_INFO: &[u8] = b"l2d/confirmation";
-const L2D_CONFIRMATION_INFO: &[u8] = b"d2l/confirmation";
+const TRAFFIC_INFO_D2L: &[u8] = b"d2l/traffic";
+const TRAFFIC_INFO_L2D: &[u8] = b"l2d/traffic";
+const CONFIRMATION_INFO_D2L: &[u8] = b"d2l/confirmation";
+const CONFIRMATION_INFO_L2D: &[u8] = b"l2d/confirmation";
 
 /// Return value when deriving directional ciphers.
 pub struct DirectionalCipher {
@@ -38,10 +38,10 @@ pub fn derive_directional(
     handshake_transcript: &[u8],
 ) -> Result<DirectionalCipher, Error> {
     let infos = [
-        D2L_TRAFFIC_INFO,
-        L2D_TRAFFIC_INFO,
-        D2L_CONFIRMATION_INFO,
-        L2D_CONFIRMATION_INFO,
+        TRAFFIC_INFO_D2L,
+        TRAFFIC_INFO_L2D,
+        CONFIRMATION_INFO_D2L,
+        CONFIRMATION_INFO_L2D,
     ];
     let salts = [namespace, handshake_transcript];
     let ciphers = derive::<4>(ikm, &salts, &infos)?;
@@ -505,10 +505,10 @@ mod tests {
     fn test_constants_are_unique() {
         // Ensure all constant info strings are different
         let constants = [
-            D2L_TRAFFIC_INFO,
-            L2D_TRAFFIC_INFO,
-            D2L_CONFIRMATION_INFO,
-            L2D_CONFIRMATION_INFO,
+            TRAFFIC_INFO_D2L,
+            TRAFFIC_INFO_L2D,
+            CONFIRMATION_INFO_D2L,
+            CONFIRMATION_INFO_L2D,
         ];
 
         for i in 0..constants.len() {
