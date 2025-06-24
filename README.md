@@ -39,6 +39,7 @@ _Sometimes, we opt to maintain software that is neither a primitive nor an examp
 
 * [docs](./docs): Access information about Commonware at https://commonware.xyz.
 * [macros](./macros/README.md): Augment the development of primitives with procedural macros.
+* [pipeline](./pipeline/README.md): Upcoming mechanisms under development.
 * [utils](./utils/README.md): Leverage common functionality across multiple primitives.
 
 ## Licensing
