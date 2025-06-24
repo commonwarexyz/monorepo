@@ -91,7 +91,7 @@
         <p>All capable of <i>propose-and-vote</i> confirmation in ~100-200ms, this cohort of new constructions primarily differs in the technique employed to finalize blocks if faults exceed <i>~20%</i> of stake (when comprised of at most <i>f</i> Byzantine faults <b>and</b> <i>p</i> crash faults). Finalizing quickly via some "fast path" when replicas are honest and online, these constructions fallback to a "slow path" that resembles the "Three-Phase" protocols commonly deployed today.</p>
         <div class="image-container">
             <img src="../imgs/alpenglow-fallback.png" alt="Alpenglow Fallback">
-            <div class="image-caption">Figure 2: Alpenglow supports a "slow-finalization" path.</div>
+            <div class="image-caption">Figure 2: Alpenglow supports a "slow-finalization" path. (<a href="https://drive.google.com/file/d/1y_7ddr8oNOknTQYHzXeeMD2ProQ0WjMs/view">source</a>)</div>
         </div>
         <h2>Minimmit: Fast Finality with Even Faster Blocks</h2>
         <p>Today, we are excited to share a different take on <i>propose-and-vote</i> consensus: <a href="https://github.com/commonwarexyz/monorepo/tree/main/pipeline/minimmit.md">Minimmit: Fast Finality with Even Faster Blocks</a>. Like the constructions above, Minimmit delivers minimal confirmation latency under the <i>~20%</i> Byzantine fault assumption. Unlike those constructions, however, it optimizes for view latency instead of <i>f+</i> confirmation robustness. In an <a href="https://alto.commonware.xyz">alto-like configuration</a> (with 50 uniformly distributed validators), we expect a Minimmit-powered blockchain to reach 130ms block time and 250ms finality. In a regionally-biased configuration, we expect Minimmit to deliver 50ms block time and 100ms finality.</p>
