@@ -1,7 +1,12 @@
 use crate::Error;
 use commonware_utils::{from_hex, hex, StableBuf};
-use std::{fs::File, path::PathBuf, sync::Arc};
-use tokio::{fs, sync::Mutex, task};
+use std::{fs::File, io::SeekFrom, path::PathBuf, sync::Arc};
+use tokio::{
+    fs,
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
+    sync::Mutex,
+    task,
+};
 
 #[derive(Clone)]
 pub struct Config {
@@ -26,10 +31,6 @@ pub struct Storage {
 
 impl Storage {
     pub fn new(cfg: Config) -> Self {
-        #[cfg(not(any(unix, windows)))]
-        {
-            unimplemented!("platform not supported");
-        }
         Self {
             lock: Arc::new(Mutex::new(())),
             cfg,
@@ -37,27 +38,14 @@ impl Storage {
     }
 }
 
-#[derive(Clone)]
-pub struct Blob {
-    partition: String,
-    name: Vec<u8>,
-    file: Arc<File>,
-}
-
-impl Blob {
-    fn new(partition: String, name: &[u8], file: File) -> Self {
-        Self {
-            partition,
-            name: name.into(),
-            file: Arc::new(file),
-        }
-    }
-}
-
 impl crate::Storage for Storage {
-    type Blob = Blob;
+    #[cfg(unix)]
+    type Blob = UnixBlob;
 
-    async fn open(&self, partition: &str, name: &[u8]) -> Result<(Blob, u64), Error> {
+    #[cfg(not(unix))]
+    type Blob = CompatibleBlob;
+
+    async fn open(&self, partition: &str, name: &[u8]) -> Result<(Self::Blob, u64), Error> {
         // Acquire the filesystem lock
         let _guard = self.lock.lock().await;
 
@@ -93,7 +81,7 @@ impl crate::Storage for Storage {
         let file = file.into_std().await;
 
         // Construct the blob
-        Ok((Blob::new(partition.into(), name, file), len))
+        Ok((Self::Blob::new(partition.into(), name, file), len))
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
@@ -139,36 +127,34 @@ impl crate::Storage for Storage {
     }
 }
 
-impl crate::Blob for Blob {
+#[derive(Clone)]
+pub struct UnixBlob {
+    partition: String,
+    name: Vec<u8>,
+    file: Arc<File>,
+}
+
+impl UnixBlob {
+    fn new(partition: String, name: &[u8], file: File) -> Self {
+        Self {
+            partition,
+            name: name.into(),
+            file: Arc::new(file),
+        }
+    }
+}
+
+impl crate::Blob for UnixBlob {
     async fn read_at(
         &self,
         buf: impl Into<StableBuf> + Send,
         offset: u64,
     ) -> Result<StableBuf, Error> {
-        let file = self.file.clone();
         let mut buf = buf.into();
-
+        let file = self.file.clone();
         task::spawn_blocking(move || {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::FileExt;
-                file.read_exact_at(buf.as_mut(), offset)
-                    .map_err(|_| Error::ReadFailed)?;
-            }
-            #[cfg(windows)]
-            {
-                use std::os::windows::fs::FileExt;
-                let mut read = 0;
-                while read < buf.len() {
-                    let n = file
-                        .seek_read(&mut buf.as_mut()[read..], offset + read as u64)
-                        .map_err(|_| Error::ReadFailed)?;
-                    if n == 0 {
-                        return Err(Error::BlobInsufficientLength);
-                    }
-                    read += n;
-                }
-            }
+            use std::os::unix::fs::FileExt;
+            file.read_exact_at(buf.as_mut(), offset)?;
             Ok(buf)
         })
         .await
@@ -176,27 +162,11 @@ impl crate::Blob for Blob {
     }
 
     async fn write_at(&self, buf: impl Into<StableBuf> + Send, offset: u64) -> Result<(), Error> {
-        let file = self.file.clone();
         let buf = buf.into();
-
+        let file = self.file.clone();
         task::spawn_blocking(move || {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::FileExt;
-                file.write_all_at(buf.as_ref(), offset)
-                    .map_err(|_| Error::WriteFailed)?;
-            }
-            #[cfg(windows)]
-            {
-                use std::os::windows::fs::FileExt;
-                let mut written = 0;
-                while written < buf.len() {
-                    let n = file
-                        .seek_write(&buf.as_ref()[written..], offset + written as u64)
-                        .map_err(|_| Error::WriteFailed)?;
-                    written += n;
-                }
-            }
+            use std::os::unix::fs::FileExt;
+            file.write_all_at(buf.as_ref(), offset)?;
             Ok(())
         })
         .await
@@ -205,38 +175,102 @@ impl crate::Blob for Blob {
 
     async fn truncate(&self, len: u64) -> Result<(), Error> {
         let file = self.file.clone();
-        let partition = self.partition.clone();
-        let name = self.name.clone();
-        task::spawn_blocking(move || {
-            file.set_len(len)
-                .map_err(|e| Error::BlobTruncateFailed(partition, hex(&name), e))
-        })
-        .await
-        .map_err(|_| Error::WriteFailed)?
+        task::spawn_blocking(move || file.set_len(len))
+            .await
+            .map_err(|e| e.into())
+            .and_then(|r| r)
+            .map_err(|e| Error::BlobTruncateFailed(self.partition.clone(), hex(&self.name), e))?;
+        Ok(())
     }
 
     async fn sync(&self) -> Result<(), Error> {
         let file = self.file.clone();
-        let partition = self.partition.clone();
-        let name = self.name.clone();
-        task::spawn_blocking(move || {
-            file.sync_all()
-                .map_err(|e| Error::BlobSyncFailed(partition, hex(&name), e))
-        })
-        .await
-        .map_err(|_| {
-            Error::BlobSyncFailed(
-                self.partition.clone(),
-                hex(&self.name),
-                std::io::Error::other("join error"),
-            )
-        })?
+        task::spawn_blocking(move || file.sync_all())
+            .await
+            .map_err(|e| e.into())
+            .and_then(|r| r)
+            .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))?;
+        Ok(())
     }
 
     async fn close(self) -> Result<(), Error> {
         self.sync().await
 
         // When the file is dropped, it will be closed.
+    }
+}
+
+#[derive(Clone)]
+pub struct CompatibleBlob {
+    partition: String,
+    name: Vec<u8>,
+    // Files must be seeked prior to any read or write operation and are thus
+    // not safe to concurrently interact with. If we switched to mapping files
+    // we could remove this lock.
+    file: Arc<Mutex<fs::File>>,
+}
+
+impl CompatibleBlob {
+    fn new(partition: String, name: &[u8], file: fs::File) -> Self {
+        Self {
+            partition,
+            name: name.into(),
+            file: Arc::new(Mutex::new(file)),
+        }
+    }
+}
+
+impl crate::Blob for CompatibleBlob {
+    async fn read_at(
+        &self,
+        buf: impl Into<StableBuf> + Send,
+        offset: u64,
+    ) -> Result<StableBuf, Error> {
+        let mut file = self.file.lock().await;
+        let mut buf = buf.into();
+        file.seek(SeekFrom::Start(offset))
+            .await
+            .map_err(|_| Error::ReadFailed)?;
+        file.read_exact(buf.as_mut())
+            .await
+            .map_err(|_| Error::ReadFailed)?;
+        Ok(buf)
+    }
+
+    async fn write_at(&self, buf: impl Into<StableBuf> + Send, offset: u64) -> Result<(), Error> {
+        let mut file = self.file.lock().await;
+        file.seek(SeekFrom::Start(offset))
+            .await
+            .map_err(|_| Error::WriteFailed)?;
+        file.write_all(buf.into().as_ref())
+            .await
+            .map_err(|_| Error::WriteFailed)?;
+        Ok(())
+    }
+
+    async fn truncate(&self, len: u64) -> Result<(), Error> {
+        let file = self.file.lock().await;
+        file.set_len(len)
+            .await
+            .map_err(|e| Error::BlobTruncateFailed(self.partition.clone(), hex(&self.name), e))?;
+        Ok(())
+    }
+
+    async fn sync(&self) -> Result<(), Error> {
+        let file = self.file.lock().await;
+        file.sync_all()
+            .await
+            .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))
+    }
+
+    async fn close(self) -> Result<(), Error> {
+        let mut file = self.file.lock().await;
+        file.sync_all()
+            .await
+            .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))?;
+        file.shutdown()
+            .await
+            .map_err(|e| Error::BlobCloseFailed(self.partition.clone(), hex(&self.name), e))
     }
 }
 
