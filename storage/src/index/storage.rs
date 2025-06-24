@@ -56,7 +56,20 @@ enum Phase<V: Eq> {
     PostInsert(Box<Record<V>>),
 }
 
-/// A mutable iterator over the values associated with a translated key, allowing in-place modifications.
+impl<V: Eq> std::fmt::Debug for Phase<V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Phase::Initial => write!(f, "Initial"),
+            Phase::Entry => write!(f, "Entry"),
+            Phase::Next(_rec) => write!(f, "Next"),
+            Phase::Done => write!(f, "Done"),
+            Phase::EntryDeleted => write!(f, "EntryDeleted"),
+            Phase::PostDeleteEntry => write!(f, "PostDeleteEntry"),
+            Phase::PostDeleteNext(_opt_rec) => write!(f, "PostDeleteNext"),
+            Phase::PostInsert(_rec) => write!(f, "PostInsert"),
+        }
+    }
+}
 ///
 /// The `Cursor` provides a way to traverse and modify the linked list of `Record`s while maintaining its
 /// structure. It supports:
@@ -106,6 +119,7 @@ impl<'a, T: Translator, V: Eq> Cursor<'a, T, V> {
 
     /// Pushes a `Record` to the past list, maintaining the linked list structure.
     fn past_push(&mut self, mut new: Box<Record<V>>) {
+        assert!(new.next.is_none());
         if self.past.is_none() {
             self.past = Some(new);
         } else {
@@ -282,14 +296,15 @@ where
         // Take the entry.
         let mut entry = self.entry.take().unwrap();
 
-        // If there is a dangling next, we should add it to past.
+        // Keep track of any next items so we don't leave them dangling.
+        let mut next = None;
+
         match std::mem::replace(&mut self.phase, Phase::Done) {
             Phase::Initial | Phase::Entry => {
                 // No action needed.
             }
-            Phase::Next(next) => {
-                // If there is a next, we should add it to past.
-                self.past_push(next);
+            Phase::Next(rec) => {
+                next = Some(rec);
             }
             Phase::Done => {
                 // No action needed.
@@ -303,20 +318,24 @@ where
             Phase::PostDeleteEntry => {
                 // No action needed.
             }
-            Phase::PostDeleteNext(Some(next)) => {
-                // If there is a stale record, we should add it to past.
-                self.past_push(next);
+            Phase::PostDeleteNext(Some(rec)) => {
+                next = Some(rec);
             }
             Phase::PostDeleteNext(None) => {
                 // No action needed.
             }
-            Phase::PostInsert(next) => {
-                // If there is a current record, we should add it to past.
-                self.past_push(next);
+            Phase::PostInsert(rec) => {
+                next = Some(rec);
             }
         }
 
-        // Attach the tip of past to the entry.
+        // Push all dangling next items on to the past list.
+        while let Some(mut unwrapped_next) = next {
+            next = unwrapped_next.next.take();
+            self.past_push(unwrapped_next);
+        }
+
+        // If there are past items, attach it to the entry.
         if let Some(past) = self.past.take() {
             entry.get_mut().next = Some(past);
         }
