@@ -63,7 +63,7 @@ fn verify(c, c') -> bool;
 fn select_parent(v) -> (c', v') {
     let i = v - 1;
     while i >= 0 {
-        if notarization(c', i) ∈ proofs[i] {
+        if ∃c': notarization(c', i) ∈ proofs[i] {
             // If there are multiple, pick any.
             return (c', i);
         }
@@ -102,6 +102,9 @@ fn enter_view(next) {
 
 // Record a message from a `replica`
 fn record_message(replica, message) -> bool {
+    if message.view ∉ messages {
+        messages[message.view] = {};
+    }
     if replica ∉ messages[message.view] {
         messages[message.view][replica] = [];
     }
@@ -131,7 +134,7 @@ _If the leader, propose._
    1. `notarized = c`.
    1. Broadcast `propose(c, v, (c', v'))`.
 
-_Treat `propose(c, v, (c', v'))` as a leader `l`'s `notarize(c, v)`._
+_Treat `propose(c, v, (c', v'))` as `leader(v)`'s `notarize(c, v)`._
 
 ### 8.2. Notarize
 
