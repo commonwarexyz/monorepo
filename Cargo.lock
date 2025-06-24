@@ -1245,6 +1245,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-storage-fuzz"
+version = "0.0.1"
+dependencies = [
+ "arbitrary",
+ "commonware-cryptography",
+ "commonware-runtime",
+ "commonware-storage",
+ "commonware-utils",
+ "libfuzzer-sys",
+]
+
+[[package]]
 name = "commonware-stream"
 version = "0.0.54"
 dependencies = [
