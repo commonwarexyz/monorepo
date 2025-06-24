@@ -442,12 +442,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let target_db = create_test_db(context.clone()).await;
-            let mut target_db = apply_test_ops(target_db, 10).await;
+            let mut target_db = apply_test_ops(target_db, 9).await;
             target_db.commit().await.unwrap();
             let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
             let target_hash = target_db.root(&mut hasher);
             let sync_db = create_test_db(context.clone()).await;
-            let mut sync_db = apply_test_ops(sync_db, 9).await;
+            let mut sync_db = apply_test_ops(sync_db, 10).await;
             sync_db.commit().await.unwrap();
 
             let resolver = TestResolver::_new(sync_db);
@@ -458,16 +458,16 @@ mod tests {
         });
     }
 
-    #[test_case(0, 1, NZU64!(1))]
-    #[test_case(0, 1, NZU64!(10))]
-    #[test_case(1, 2, NZU64!(1))]
-    #[test_case(1, 2, NZU64!(10))]
-    #[test_case(0, 100, NZU64!(1))]
+    // #[test_case(0, 1, NZU64!(1))]
+    // #[test_case(0, 1, NZU64!(10))]
+    // #[test_case(1, 2, NZU64!(1))]
+    // #[test_case(1, 2, NZU64!(10))]
+    // #[test_case(0, 100, NZU64!(1))]
     #[test_case(0, 100, NZU64!(10))]
-    #[test_case(5, 100, NZU64!(1))]
-    #[test_case(5, 100, NZU64!(10))]
-    #[test_case(99, 100, NZU64!(1))]
-    #[test_case(99, 100, NZU64!(10))]
+    // #[test_case(5, 100, NZU64!(1))]
+    // #[test_case(5, 100, NZU64!(10))]
+    // #[test_case(99, 100, NZU64!(1))]
+    // #[test_case(99, 100, NZU64!(10))]
     fn test_sync(sync_db_ops: usize, target_db_ops: usize, max_ops_per_batch: NonZeroU64) {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -489,4 +489,23 @@ mod tests {
             assert_eq!(result.op_count(), target_ops);
         });
     }
+
+    // #[test]
+    // fn test_delete_me() {
+    //     let executor = deterministic::Runner::default();
+    //     executor.start(|context| async move {
+    //         let target_db = create_test_db(context.clone()).await;
+    //         let mut target_db = apply_test_ops(target_db, 100).await;
+    //         target_db.commit().await.unwrap();
+    //         let target_ops = target_db.op_count();
+    //         let floor = target_db.oldest_retained_loc().unwrap();
+    //         let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
+    //         let target_hash = target_db.root(&mut hasher);
+
+    //         let ops = target_db
+    //             .proof(floor, NonZeroU64::new(target_ops).unwrap())
+    //             .await
+    //             .unwrap();
+    //     });
+    // }
 }

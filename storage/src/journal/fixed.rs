@@ -231,6 +231,110 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         })
     }
 
+    /// TODO comment
+    /// `size` is the total number of items in the journal, irrespective of any pruned items.
+    pub async fn init_sync(context: E, cfg: Config, size: u64) -> Result<Self, Error> {
+        // Iterate over blobs in partition
+        let mut blobs = BTreeMap::new();
+        let stored_blobs = match context.scan(&cfg.partition).await {
+            Ok(blobs) => blobs,
+            Err(RError::PartitionMissing(_)) => Vec::new(),
+            Err(err) => return Err(Error::Runtime(err)),
+        };
+        for name in stored_blobs {
+            context.remove(&cfg.partition, Some(&name)).await?;
+        }
+
+        let blob_index = size / cfg.items_per_blob;
+        let blob_elts = size % cfg.items_per_blob;
+        assert_eq!(0, blob_elts % Self::CHUNK_SIZE_U64);
+        let (blob, _) = context
+            .open(&cfg.partition, &blob_index.to_be_bytes())
+            .await?;
+        let blob = Write::new(blob, blob_elts, cfg.write_buffer);
+        blobs.insert(blob_index, blob);
+
+        // Initialize metrics
+        let tracked = Gauge::default();
+        let synced = Counter::default();
+        let pruned = Counter::default();
+        context.register("tracked", "Number of blobs", tracked.clone());
+        context.register("synced", "Number of syncs", synced.clone());
+        context.register("pruned", "Number of blobs pruned", pruned.clone());
+        tracked.set(blobs.len() as i64);
+
+        // Truncate the last blob if it's not the expected length, which might happen from unclean
+        // shutdown.
+        let mut truncated = false;
+        let newest_blob_index = *blobs.keys().last().unwrap();
+        let newest_blob = blobs.get_mut(&newest_blob_index).unwrap();
+        let mut size = newest_blob.size().await;
+        if size % Self::CHUNK_SIZE_U64 != 0 {
+            warn!(
+                blob = newest_blob_index,
+                invalid_size = size,
+                "last blob size is not a multiple of item size, truncating"
+            );
+            size -= size % Self::CHUNK_SIZE_U64;
+            newest_blob.truncate(size).await?;
+            truncated = true;
+        }
+
+        // Truncate any records with failing checksums. This can happen if the file system allocated
+        // extra space for a blob but there was a crash before any data was written to that space.
+        while size > 0 {
+            let offset = size - Self::CHUNK_SIZE_U64;
+            let read = newest_blob
+                .read_at(vec![0u8; Self::CHUNK_SIZE], offset)
+                .await?;
+            match Self::verify_integrity(read.as_ref()) {
+                Ok(_) => break, // Valid item found, we can stop truncating.
+                Err(Error::ChecksumMismatch(_, _)) => {
+                    warn!(
+                        blob = newest_blob_index,
+                        offset, "checksum mismatch: truncating",
+                    );
+                    size -= Self::CHUNK_SIZE_U64;
+                    newest_blob.truncate(size).await?;
+                    truncated = true;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        // If we truncated the blob, make sure to sync it.
+        if truncated {
+            newest_blob.sync().await?;
+        }
+
+        // If the blob is full, create a new one.
+        // TODO danlaine: handle this by not creating empty blob
+        if size == cfg.items_per_blob * Self::CHUNK_SIZE_U64 {
+            warn!(
+                blob = newest_blob_index,
+                "blob is full, creating a new empty one"
+            );
+            let next_blob_index = newest_blob_index + 1;
+            let (next_blob, size) = context
+                .open(&cfg.partition, &next_blob_index.to_be_bytes())
+                .await?;
+            let next_blob = Write::new(next_blob, size, cfg.write_buffer);
+            blobs.insert(next_blob_index, next_blob);
+            tracked.inc();
+        }
+
+        Ok(Self {
+            context,
+            cfg,
+            blobs,
+            tracked,
+            synced,
+            pruned,
+
+            _array: PhantomData,
+        })
+    }
+
     /// Sync any pending updates to disk.
     pub async fn sync(&mut self) -> Result<(), Error> {
         self.synced.inc();
@@ -247,6 +351,20 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         assert_eq!(size % Self::CHUNK_SIZE_U64, 0);
         let items_in_blob = size / Self::CHUNK_SIZE_U64;
         Ok(items_in_blob + self.cfg.items_per_blob * newest_blob_index)
+    }
+
+    /// TODO comment
+    pub async fn set_size(&mut self, size: u64) -> Result<(), Error> {
+        let blob_index = size / self.cfg.items_per_blob;
+        self.blobs = BTreeMap::new();
+        let (blob, size) = self
+            .context
+            .open(&self.cfg.partition, &blob_index.to_be_bytes())
+            .await?;
+        let blob_size = size % Self::CHUNK_SIZE_U64;
+        let blob = Write::new(blob, blob_size, self.cfg.write_buffer);
+        self.blobs.insert(blob_index, blob);
+        Ok(())
     }
 
     /// Append a new item to the journal. Return the item's position in the journal, or error if the

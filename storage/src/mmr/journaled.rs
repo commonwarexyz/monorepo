@@ -46,6 +46,12 @@ pub struct Config {
     pub pool: Option<ThreadPool>,
 }
 
+pub struct SyncConfig {
+    pub inner: Config,
+    pub inactivity_floor_pos: u64,
+    pub journal_size: u64,
+}
+
 /// A MMR backed by a fixed-item-length journal.
 pub struct Mmr<E: RStorage + Clock + Metrics, H: CHasher> {
     /// A memory resident MMR used to build the MMR structure and cache updates.
@@ -203,6 +209,69 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             s.sync(hasher).await?;
             assert_eq!(s.size(), s.journal.size().await?);
         }
+
+        Ok(s)
+    }
+
+    /// Initialize a new `Mmr` instance.
+    pub async fn init_sync(context: E, cfg: SyncConfig) -> Result<Self, Error> {
+        let journal_cfg = JConfig {
+            partition: cfg.inner.journal_partition,
+            items_per_blob: cfg.inner.items_per_blob,
+            write_buffer: cfg.inner.write_buffer,
+        };
+        let journal = Journal::<E, H::Digest>::init_sync(
+            context.with_label("mmr_journal"),
+            journal_cfg,
+            cfg.journal_size,
+        )
+        .await?;
+
+        // Reset persisted metadata state.
+        let metadata_cfg = MConfig {
+            partition: cfg.inner.metadata_partition,
+        };
+        let metadata =
+            Metadata::init(context.with_label("mmr_metadata"), metadata_cfg.clone()).await?;
+        metadata.destroy().await?;
+        let metadata = Metadata::init(context.with_label("mmr_metadata"), metadata_cfg).await?;
+
+        if cfg.journal_size == 0 {
+            return Ok(Self {
+                mem_mmr: MemMmr::init(MemConfig {
+                    nodes: vec![],
+                    pruned_to_pos: 0,
+                    pinned_nodes: vec![],
+                    pool: cfg.inner.pool,
+                }),
+                journal,
+                journal_size: cfg.journal_size,
+                metadata,
+                pruned_to_pos: 0,
+            });
+        }
+
+        // Initialize the mem_mmr's pinned nodes.
+        let mut pinned_nodes = Vec::new();
+        for pos in Proof::<H>::nodes_to_pin(cfg.inactivity_floor_pos) {
+            let digest =
+                Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
+            pinned_nodes.push(digest);
+        }
+        let mem_mmr = MemMmr::init(MemConfig {
+            nodes: vec![],
+            pruned_to_pos: cfg.inactivity_floor_pos,
+            pinned_nodes,
+            pool: cfg.inner.pool,
+        });
+
+        let s = Self {
+            mem_mmr,
+            journal,
+            journal_size: cfg.journal_size,
+            metadata,
+            pruned_to_pos: cfg.inactivity_floor_pos,
+        };
 
         Ok(s)
     }

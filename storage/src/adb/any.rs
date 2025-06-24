@@ -17,7 +17,7 @@ use crate::{
         bitmap::Bitmap,
         hasher::{Hasher, Standard},
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
-        journaled::{Config as MmrConfig, Mmr},
+        journaled::{Config as MmrConfig, Mmr, SyncConfig},
         verification::Proof,
     },
 };
@@ -168,6 +168,55 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         Ok(db)
     }
 
+    pub async fn init_sync(
+        context: E,
+        cfg: Config<T>,
+        inactivity_floor_loc: u64,
+        max_loc: u64,
+    ) -> Result<Self, Error> {
+        let mut snapshot: Index<T, u64> =
+            Index::init(context.with_label("snapshot"), cfg.translator.clone());
+        let mut hasher = Standard::<H>::new();
+        let (mmr, log) = Self::init_mmr_and_log_sync(
+            context,
+            Config {
+                mmr_journal_partition: cfg.mmr_journal_partition,
+                mmr_metadata_partition: cfg.mmr_metadata_partition,
+                mmr_items_per_blob: cfg.mmr_items_per_blob,
+                mmr_write_buffer: cfg.mmr_write_buffer,
+                log_journal_partition: cfg.log_journal_partition,
+                log_items_per_blob: cfg.log_items_per_blob,
+                log_write_buffer: cfg.log_write_buffer,
+                translator: cfg.translator,
+                pool: cfg.pool,
+            },
+            &mut hasher,
+            inactivity_floor_loc,
+            max_loc,
+        )
+        .await?;
+
+        let start_leaf_num = leaf_pos_to_num(mmr.pruned_to_pos()).unwrap();
+        let inactivity_floor_loc = Self::build_snapshot_from_log(
+            start_leaf_num,
+            &log,
+            &mut snapshot,
+            None::<&mut Bitmap<H, UNUSED_N>>,
+        )
+        .await?;
+
+        let db = Any {
+            ops: mmr,
+            log,
+            snapshot,
+            inactivity_floor_loc,
+            uncommitted_ops: 0,
+            hasher,
+        };
+
+        Ok(db)
+    }
+
     /// Initialize and return the mmr and log from the given config, correcting any inconsistencies
     /// between them. Any uncommitted operations in the log will be rolled back and the state of the
     /// db will be as of the last committed operation.
@@ -196,6 +245,86 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 items_per_blob: cfg.log_items_per_blob,
                 write_buffer: cfg.log_write_buffer,
             },
+        )
+        .await?;
+
+        // Back up over / discard any uncommitted operations in the log.
+        let mut log_size = log.size().await?;
+        let mut rewind_leaf_num = log_size;
+        while rewind_leaf_num > 0 {
+            if let Operation::Commit(_) = log.read(rewind_leaf_num - 1).await? {
+                break;
+            }
+            rewind_leaf_num -= 1;
+        }
+        if rewind_leaf_num != log_size {
+            let op_count = log_size - rewind_leaf_num;
+            warn!(op_count, "rewinding over uncommitted log operations");
+            log.rewind(rewind_leaf_num).await?;
+            log_size = rewind_leaf_num;
+        }
+
+        // Pop any MMR elements that are ahead of the last log commit point.
+        let mut next_mmr_leaf_num = leaf_pos_to_num(mmr.size()).unwrap();
+        if next_mmr_leaf_num > log_size {
+            let op_count = next_mmr_leaf_num - log_size;
+            warn!(op_count, "popping uncommitted MMR operations");
+            mmr.pop(op_count as usize).await?;
+            next_mmr_leaf_num = log_size;
+        }
+
+        // If the MMR is behind, replay log operations to catch up.
+        if next_mmr_leaf_num < log_size {
+            let op_count = log_size - next_mmr_leaf_num;
+            warn!(op_count, "MMR lags behind log, replaying log to catch up");
+            while next_mmr_leaf_num < log_size {
+                let op = log.read(next_mmr_leaf_num).await?;
+                let digest = Self::op_digest(hasher, &op);
+                mmr.add_batched(hasher, &digest).await?;
+                next_mmr_leaf_num += 1;
+            }
+            mmr.sync(hasher).await.map_err(Error::MmrError)?;
+        }
+
+        // At this point the MMR and log should be consistent.
+        assert_eq!(log.size().await?, leaf_pos_to_num(mmr.size()).unwrap());
+
+        Ok((mmr, log))
+    }
+
+    pub(super) async fn init_mmr_and_log_sync(
+        context: E,
+        cfg: Config<T>,
+        hasher: &mut Standard<H>,
+        inactivity_floor_loc: u64,
+        max_loc: u64,
+    ) -> Result<(Mmr<E, H>, Journal<E, Operation<K, V>>), Error> {
+        let mut mmr = Mmr::init_sync(
+            context.with_label("mmr"),
+            SyncConfig {
+                inner: MmrConfig {
+                    journal_partition: cfg.mmr_journal_partition,
+                    metadata_partition: cfg.mmr_metadata_partition,
+                    items_per_blob: cfg.mmr_items_per_blob,
+                    write_buffer: cfg.mmr_write_buffer,
+                    pool: cfg.pool,
+                },
+                inactivity_floor_pos: leaf_pos_to_num(inactivity_floor_loc).unwrap(),
+                journal_size: leaf_pos_to_num(max_loc).unwrap(),
+            },
+        )
+        .await?;
+
+        // mmr.prune_all(hasher).await?;
+
+        let mut log = Journal::init_sync(
+            context.with_label("log"),
+            JConfig {
+                partition: cfg.log_journal_partition,
+                items_per_blob: cfg.log_items_per_blob,
+                write_buffer: cfg.log_write_buffer,
+            },
+            max_loc,
         )
         .await?;
 
