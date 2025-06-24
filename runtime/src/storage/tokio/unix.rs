@@ -1,12 +1,7 @@
 use crate::Error;
 use commonware_utils::{from_hex, hex, StableBuf};
-use std::{fs::File, io::SeekFrom, path::PathBuf, sync::Arc};
-use tokio::{
-    fs,
-    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
-    sync::Mutex,
-    task,
-};
+use std::{fs::File, path::PathBuf, sync::Arc};
+use tokio::{fs, sync::Mutex, task};
 
 #[derive(Clone)]
 pub struct Config {
@@ -39,11 +34,7 @@ impl Storage {
 }
 
 impl crate::Storage for Storage {
-    #[cfg(unix)]
-    type Blob = UnixBlob;
-
-    #[cfg(not(unix))]
-    type Blob = CompatibleBlob;
+    type Blob = Blob;
 
     async fn open(&self, partition: &str, name: &[u8]) -> Result<(Self::Blob, u64), Error> {
         // Acquire the filesystem lock
@@ -128,13 +119,13 @@ impl crate::Storage for Storage {
 }
 
 #[derive(Clone)]
-pub struct UnixBlob {
+pub struct Blob {
     partition: String,
     name: Vec<u8>,
     file: Arc<File>,
 }
 
-impl UnixBlob {
+impl Blob {
     fn new(partition: String, name: &[u8], file: File) -> Self {
         Self {
             partition,
@@ -144,7 +135,7 @@ impl UnixBlob {
     }
 }
 
-impl crate::Blob for UnixBlob {
+impl crate::Blob for Blob {
     async fn read_at(
         &self,
         buf: impl Into<StableBuf> + Send,
@@ -200,86 +191,10 @@ impl crate::Blob for UnixBlob {
     }
 }
 
-#[derive(Clone)]
-pub struct CompatibleBlob {
-    partition: String,
-    name: Vec<u8>,
-    // Files must be seeked prior to any read or write operation and are thus
-    // not safe to concurrently interact with. If we switched to mapping files
-    // we could remove this lock.
-    file: Arc<Mutex<fs::File>>,
-}
-
-impl CompatibleBlob {
-    fn new(partition: String, name: &[u8], file: fs::File) -> Self {
-        Self {
-            partition,
-            name: name.into(),
-            file: Arc::new(Mutex::new(file)),
-        }
-    }
-}
-
-impl crate::Blob for CompatibleBlob {
-    async fn read_at(
-        &self,
-        buf: impl Into<StableBuf> + Send,
-        offset: u64,
-    ) -> Result<StableBuf, Error> {
-        let mut file = self.file.lock().await;
-        let mut buf = buf.into();
-        file.seek(SeekFrom::Start(offset))
-            .await
-            .map_err(|_| Error::ReadFailed)?;
-        file.read_exact(buf.as_mut())
-            .await
-            .map_err(|_| Error::ReadFailed)?;
-        Ok(buf)
-    }
-
-    async fn write_at(&self, buf: impl Into<StableBuf> + Send, offset: u64) -> Result<(), Error> {
-        let mut file = self.file.lock().await;
-        file.seek(SeekFrom::Start(offset))
-            .await
-            .map_err(|_| Error::WriteFailed)?;
-        file.write_all(buf.into().as_ref())
-            .await
-            .map_err(|_| Error::WriteFailed)?;
-        Ok(())
-    }
-
-    async fn truncate(&self, len: u64) -> Result<(), Error> {
-        let file = self.file.lock().await;
-        file.set_len(len)
-            .await
-            .map_err(|e| Error::BlobTruncateFailed(self.partition.clone(), hex(&self.name), e))?;
-        Ok(())
-    }
-
-    async fn sync(&self) -> Result<(), Error> {
-        let file = self.file.lock().await;
-        file.sync_all()
-            .await
-            .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))
-    }
-
-    async fn close(self) -> Result<(), Error> {
-        let mut file = self.file.lock().await;
-        file.sync_all()
-            .await
-            .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))?;
-        file.shutdown()
-            .await
-            .map_err(|e| Error::BlobCloseFailed(self.partition.clone(), hex(&self.name), e))
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::storage::{
-        tests::run_storage_tests,
-        tokio::{Config, Storage},
-    };
+    use crate::storage::tests::run_storage_tests;
+    use crate::storage::tokio::unix::{Config, Storage};
     use rand::{Rng as _, SeedableRng};
     use std::env;
 

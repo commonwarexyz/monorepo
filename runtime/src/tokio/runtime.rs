@@ -2,8 +2,13 @@
 use crate::network::tokio::{Config as TokioNetworkConfig, Network as TokioNetwork};
 #[cfg(feature = "iouring-storage")]
 use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage};
-#[cfg(not(feature = "iouring-storage"))]
-use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
+cfg_if::cfg_if! {
+    if #[cfg(all(not(feature = "iouring-storage"), target_family = "unix"))] {
+        use crate::storage::tokio::unix::{Config as TokioStorageConfig, Storage as TokioStorage};
+    } else if #[cfg(not(feature = "iouring-storage"))] {
+        use crate::storage::tokio::fallback::{Config as TokioStorageConfig, Storage as TokioStorage};
+    }
+}
 #[cfg(feature = "iouring-network")]
 use crate::{
     iouring,
@@ -337,8 +342,10 @@ impl crate::Runner for Runner {
 cfg_if::cfg_if! {
     if #[cfg(feature = "iouring-storage")] {
         type Storage = MeteredStorage<IoUringStorage>;
+    } else if #[cfg(target_family = "unix")] {
+        type Storage = MeteredStorage<crate::storage::tokio::unix::Storage>;
     } else {
-        type Storage = MeteredStorage<TokioStorage>;
+        type Storage = MeteredStorage<crate::storage::tokio::fallback::Storage>;
     }
 }
 
