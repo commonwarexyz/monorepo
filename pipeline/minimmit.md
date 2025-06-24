@@ -4,6 +4,8 @@
 
 Minimmit is a responsive, leader-based consensus protocol designed for simplicity and speed, tolerant of a Byzantine adversary that controls fewer than `20%` of replicas. Minimmit advances to the next view when a `40%` quorum is reached and finalizes blocks when an `80%` quorum is reached (after only a single round of voting). Minimmit can be instantiated with a number of practical optimizations to improve performance when deployed in production.
 
+_Minimmit is so-named for "mini + commit"._
+
 ## 2. Model & Parameters
 
 - Byzantine replicas: `≤ f`
