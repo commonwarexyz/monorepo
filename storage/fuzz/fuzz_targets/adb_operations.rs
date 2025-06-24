@@ -4,11 +4,11 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{deterministic, Runner};
 use commonware_storage::{
     adb::any::{Any, Config},
+    index::translator::TwoCap,
 };
 use commonware_utils::array::FixedBytes;
 use libfuzzer_sys::fuzz_target;
 use std::collections::{HashMap, HashSet};
-use commonware_storage::index::translator::TwoCap;
 
 type Key = FixedBytes<32>;
 type Value = FixedBytes<64>;
