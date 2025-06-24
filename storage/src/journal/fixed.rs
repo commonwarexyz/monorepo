@@ -280,10 +280,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                 .await
                 .map_err(Error::Runtime)?;
             let blob = Write::new(blob, actual_size, cfg.write_buffer);
-            if actual_size != 0 {
-                blob.truncate(0).await?;
-                blob.sync().await?;
-            }
+            assert_eq!(actual_size, 0, "we just emptied all blobs");
             let mut blobs = BTreeMap::new();
             blobs.insert(0, blob);
 
