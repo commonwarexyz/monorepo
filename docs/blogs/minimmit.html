@@ -84,20 +84,20 @@
         <p>Over the last few months, there has been renewed interest in developing <i>propose-and-vote</i> consensus protocols that reach finality after just one round of voting (~100-200ms). "Two-Phase" protocols, not without tradeoff, only remain safe if a Byzantine adversary controls less than <i>~20%</i> of stake (rather than the <i>~33%</i> tolerance typically considered). Concerned primarily with addressing this drop in fault tolerance, recent constructions propose augmenting Byzantine fault tolerance with crash fault tolerance to retain some path to finality under a "blended" <i>~33%</i> assumption. Minimmit, a new <i>propose-and-vote</i> construction below, optimizes for a different goal: minimizing block time.</p>
         <div class="image-container">
             <img src="../imgs/phase-comparison.png" alt="Phase Comparison">
-            <div class="image-caption">Figure 1: Two-Phase protocols commit after just one round of voting</div>
+            <div class="image-caption">Figure 1: Two-Phase protocols commit after just one round of voting.</div>
         </div>
         <h2>Background</h2>
         <p>In March, Matter Labs released <a href="https://arxiv.org/abs/2503.15380">ChonkyBFT: Consensus Protocol of ZKsync</a>. In May, Offchain Labs released <a href="https://arxiv.org/abs/2505.08771">Kudzu: Fast and Simple High-Throughput BFT</a> and Anza Labs released <a href="https://www.anza.xyz/blog/alpenglow-a-new-consensus-for-solana">Alpenglow</a> at <a href="https://youtu.be/x1sxtm-dvyE?">Solana Accelerate</a>. And just a few days ago, Supra Research and Espresso Systems released <a href="https://eprint.iacr.org/2025/1112">Hydrangea: A Fast and Simple Consensus Protocol for High-Throughput Blockchains</a>.</p>
         <p>All capable of <i>propose-and-vote</i> confirmation in ~100-200ms, this cohort of new constructions primarily differs in the technique employed to finalize blocks if faults exceed <i>~20%</i> of stake (when comprised of at most <i>f</i> Byzantine faults <b>and</b> <i>p</i> crash faults). Finalizing quickly via some "fast path" when replicas are honest and online, these constructions fallback to a "slow path" that resembles the "Three-Phase" protocols commonly deployed today.</p>
         <div class="image-container">
             <img src="../imgs/alpenglow-fallback.png" alt="Alpenglow Fallback">
-            <div class="image-caption">Figure 2: Alpenglow supports a "slow-finalization" path</div>
+            <div class="image-caption">Figure 2: Alpenglow supports a "slow-finalization" path.</div>
         </div>
         <h2>Minimmit: Fast Finality with Even Faster Blocks</h2>
         <p>Today, we are excited to share a different take on <i>propose-and-vote</i> consensus: <a href="https://github.com/commonwarexyz/monorepo/tree/main/pipeline/minimmit.md">Minimmit: Fast Finality with Even Faster Blocks</a>. Like the constructions above, Minimmit delivers minimal confirmation latency under the <i>~20%</i> Byzantine fault assumption. Unlike those constructions, however, it optimizes for view latency instead of <i>f+</i> confirmation robustness. In an <a href="https://alto.commonware.xyz">alto-like configuration</a> (with 50 uniformly distributed validators), we expect a Minimmit-powered blockchain to reach 130ms block time and 250ms finality. In a regionally-biased configuration, we expect Minimmit to deliver 50ms block time and 100ms finality.</p>
         <div class="image-container">
             <img src="../imgs/faster-blocks.png" alt="Faster Blocks">
-            <div class="image-caption">Figure 3: Minimmit replicas enter the next view after observing a <i>40%</i> quorum</div>
+            <div class="image-caption">Figure 3: Minimmit replicas enter the next view after observing a <i>40%</i> quorum.</div>
         </div>
         <p>While not yet peer-reviewed or fully implemented, we are releasing Minimmit under both an MIT and Apache-2 license for others to build with and build upon. Below, we provide a high-level summary of the specification and share some intuition about its correctness:</p>
         <p>TODO</p>
