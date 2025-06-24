@@ -40,8 +40,8 @@ async fn bench_run(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, buffer: us
 /// number of items.
 fn bench_fixed_replay(c: &mut Criterion) {
     for items in [1_000, 10_000, 100_000, 500_000] {
-        // Create a config we can use across all benchmarks (with a fixed `storage_directory`), allowing the
-        // same test file to be re-used.
+        // Create a config we can use across all benchmarks (with a fixed
+        // `storage_directory`), allowing the same test file to be re-used.
         let cfg = Config::default();
 
         // Generate a large temp journal with random data.

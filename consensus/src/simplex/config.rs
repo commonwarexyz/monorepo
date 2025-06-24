@@ -65,9 +65,11 @@ pub struct Config<
 
     /// Maximum number of participants to track in a single round.
     ///
-    /// This is used to limit the size of notarization, nullification, and finalization messages,
-    /// which include up to one signature per participant. This number can be set to a reasonably high
-    /// value that we never expect to reach (it is just how many signatures we are willing to parse, not verify).
+    /// This is used to limit the size of notarization, nullification, and
+    /// finalization messages, which include up to one signature per
+    /// participant. This number can be set to a reasonably high value that
+    /// we never expect to reach (it is just how many signatures we are willing
+    /// to parse, not verify).
     pub max_participants: usize,
 
     /// Move to nullify immediately if the selected leader has been inactive
@@ -80,7 +82,8 @@ pub struct Config<
     /// Timeout to wait for a peer to respond to a request.
     pub fetch_timeout: Duration,
 
-    /// Maximum number of notarizations/nullifications to request/respond with at once.
+    /// Maximum number of notarizations/nullifications to request/respond with
+    /// at once.
     pub max_fetch_count: usize,
 
     /// Maximum rate of requests to send to a given peer.

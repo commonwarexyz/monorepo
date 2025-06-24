@@ -4,9 +4,10 @@
 //!
 //! - Ranges are stored in ascending order of their start points.
 //! - Ranges are disjoint; there are no overlapping ranges.
-//! - Adjacent ranges are merged (e.g., inserting `5` into `[0,4]` and then inserting `4` results in `[0,5]`).
-//! - Each key in the [BTreeMap] represents the inclusive start of a range, and its
-//!   corresponding value represents the inclusive end of that range.
+//! - Adjacent ranges are merged (e.g., inserting `5` into `[0,4]` and then
+//!   inserting `4` results in `[0,5]`).
+//! - Each key in the [BTreeMap] represents the inclusive start of a range, and
+//!   its corresponding value represents the inclusive end of that range.
 
 use std::collections::BTreeMap;
 
@@ -29,16 +30,19 @@ impl RMap {
     /// # Behavior
     ///
     /// - Create a new range `[value, value]` if `value` is isolated.
-    /// - Extend an existing range if `value` is adjacent to it (e.g., inserting `5` into `[1, 4]` results in `[1, 5]`).
-    /// - Merge two ranges if `value` bridges them (e.g., inserting `3` into a map with `[1, 2]` and `[4, 5]` results in `[1, 5]`).
+    /// - Extend an existing range if `value` is adjacent to it (e.g., inserting
+    ///   `5` into `[1, 4]` results in `[1, 5]`).
+    /// - Merge two ranges if `value` bridges them (e.g., inserting `3` into a
+    ///   map with `[1, 2]` and `[4, 5]` results in `[1, 5]`).
     /// - Do nothing if `value` is already covered by an existing range.
     ///
     /// # Complexity
     ///
-    /// The time complexity is typically O(log N) due to `BTreeMap` lookups and insertions,
-    /// where N is the number of disjoint ranges in the map. In scenarios involving merges,
-    /// a few extra map operations (removals, insertions) might occur, but the overall
-    /// complexity remains logarithmic.
+    /// The time complexity is typically O(log N) due to `BTreeMap` lookups and
+    /// insertions, where N is the number of disjoint ranges in the map. In
+    /// scenarios involving merges, a few extra map operations (removals,
+    /// insertions) might occur, but the overall complexity remains
+    /// logarithmic.
     ///
     /// # Example
     ///
@@ -136,20 +140,26 @@ impl RMap {
     ///
     /// # Behavior
     ///
-    /// - If the removal range completely covers an existing range, the existing range is removed.
-    /// - If the removal range is a sub-range of an existing range, the existing range may be split
-    ///   into two (e.g., removing `[3, 4]` from `[1, 6]` results in `[1, 2]` and `[5, 6]`).
-    /// - If the removal range overlaps with the start or end of an existing range, the existing
-    ///   range is truncated (e.g., removing `[1, 2]` from `[1, 5]` results in `[3, 5]`).
-    /// - If the removal range covers multiple existing ranges, all such ranges are affected or removed.
+    /// - If the removal range completely covers an existing range, the existing
+    ///   range is removed.
+    /// - If the removal range is a sub-range of an existing range, the existing
+    ///   range may be split into two (e.g., removing `[3, 4]` from `[1, 6]`
+    ///   results in `[1, 2]` and `[5, 6]`).
+    /// - If the removal range overlaps with the start or end of an existing
+    ///   range, the existing range is truncated (e.g., removing `[1, 2]` from
+    ///   `[1, 5]` results in `[3, 5]`).
+    /// - If the removal range covers multiple existing ranges, all such ranges
+    ///   are affected or removed.
     /// - If `start > end`, the method does nothing.
-    /// - If the removal range does not overlap with any existing range, the map remains unchanged.
+    /// - If the removal range does not overlap with any existing range, the map
+    ///   remains unchanged.
     ///
     /// # Complexity
     ///
-    /// The time complexity is O(M + K log N), where N is the total number of ranges in the map,
-    /// M is the number of ranges that overlap with the removal range (iterate part), and K is the number of
-    /// new ranges created or ranges removed (at most 2 additions and M removals).
+    /// The time complexity is O(M + K log N), where N is the total number of
+    /// ranges in the map, M is the number of ranges that overlap with the
+    /// removal range (iterate part), and K is the number of new ranges
+    /// created or ranges removed (at most 2 additions and M removals).
     ///
     /// # Example
     ///
@@ -171,12 +181,14 @@ impl RMap {
             return;
         }
 
-        // Iterate over ranges that could possibly overlap with the removal range `[start, end]`.
-        // A range (r_start, r_end) overlaps if r_start <= end AND r_end >= start.
+        // Iterate over ranges that could possibly overlap with the removal range
+        // `[start, end]`. A range (r_start, r_end) overlaps if r_start <= end
+        // AND r_end >= start.
         //
-        // We optimize the BTreeMap iteration by only looking at ranges whose start (r_start)
-        // is less than or equal to the `end` of the removal range. If r_start > end,
-        // then (r_start, r_end) cannot overlap with [start, end].
+        // We optimize the BTreeMap iteration by only looking at ranges whose start
+        // (r_start) is less than or equal to the `end` of the removal range. If
+        // r_start > end, then (r_start, r_end) cannot overlap with [start,
+        // end].
         let mut to_add = Vec::new();
         let mut to_remove = Vec::new();
 
@@ -255,15 +267,20 @@ impl RMap {
     }
 
     /// Finds the end of the range containing `value` and the start of the
-    /// range succeeding `value`. This method is useful for identifying gaps around a given point.
+    /// range succeeding `value`. This method is useful for identifying gaps
+    /// around a given point.
     ///
     /// # Behavior
     ///
-    /// - If `value` falls within an existing range `[r_start, r_end]`, `current_range_end` will be `Some(r_end)`.
-    /// - If `value` falls in a gap between two ranges `[..., prev_end]` and `[next_start, ...]`,
-    ///   `current_range_end` will be `None` and `next_range_start` will be `Some(next_start)`.
-    /// - If `value` is before all ranges in the map, `current_range_end` will be `None`.
-    /// - If `value` is after all ranges in the map (or within the last range), `next_range_start` will be `None`.
+    /// - If `value` falls within an existing range `[r_start, r_end]`,
+    ///   `current_range_end` will be `Some(r_end)`.
+    /// - If `value` falls in a gap between two ranges `[..., prev_end]` and
+    ///   `[next_start, ...]`, `current_range_end` will be `None` and
+    ///   `next_range_start` will be `Some(next_start)`.
+    /// - If `value` is before all ranges in the map, `current_range_end` will
+    ///   be `None`.
+    /// - If `value` is after all ranges in the map (or within the last range),
+    ///   `next_range_start` will be `None`.
     /// - If the map is empty, both will be `None`.
     ///
     /// # Arguments
@@ -273,12 +290,17 @@ impl RMap {
     /// # Returns
     ///
     /// A tuple `(Option<u64>, Option<u64>)` where:
-    /// - The first element (`current_range_end`) is `Some(end)` of the range that contains `value`. It's `None` if `value` is before all ranges, the map is empty, or `value` is not in any range.
-    /// - The second element (`next_range_start`) is `Some(start)` of the first range that begins strictly after `value`. It's `None` if no range starts after `value` or the map is empty.
+    /// - The first element (`current_range_end`) is `Some(end)` of the range
+    ///   that contains `value`. It's `None` if `value` is before all ranges,
+    ///   the map is empty, or `value` is not in any range.
+    /// - The second element (`next_range_start`) is `Some(start)` of the first
+    ///   range that begins strictly after `value`. It's `None` if no range
+    ///   starts after `value` or the map is empty.
     ///
     /// # Complexity
     ///
-    /// O(log N) due to `BTreeMap::range` lookups, where N is the number of ranges.
+    /// O(log N) due to `BTreeMap::range` lookups, where N is the number of
+    /// ranges.
     ///
     /// # Example
     ///

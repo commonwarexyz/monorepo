@@ -26,14 +26,16 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
     /// The domain separator tag (DST) for a message.
     const MESSAGE: DST;
 
-    /// Verify the signature from the provided public key and pre-hashed message.
+    /// Verify the signature from the provided public key and pre-hashed
+    /// message.
     fn verify(
         public: &Self::Public,
         hm: &Self::Signature,
         signature: &Self::Signature,
     ) -> Result<(), Error>;
 
-    /// Verify a batch of signatures from the provided public keys and pre-hashed messages.
+    /// Verify a batch of signatures from the provided public keys and
+    /// pre-hashed messages.
     fn batch_verify<R: RngCore + CryptoRng>(
         rng: &mut R,
         publics: &[Self::Public],
@@ -53,8 +55,9 @@ impl Variant for MinPk {
     const PROOF_OF_POSSESSION: DST = G2_PROOF_OF_POSSESSION;
     const MESSAGE: DST = G2_MESSAGE;
 
-    /// Verifies that `e(hm,pk)` is equal to `e(sig,G1::one())` using a single product check with
-    /// a negated G1 generator (`e(hm,pk) * e(sig,-G1::one()) == 1`).
+    /// Verifies that `e(hm,pk)` is equal to `e(sig,G1::one())` using a single
+    /// product check with a negated G1 generator (`e(hm,pk) *
+    /// e(sig,-G1::one()) == 1`).
     fn verify(
         public: &Self::Public,
         hm: &Self::Signature,
@@ -62,7 +65,8 @@ impl Variant for MinPk {
     ) -> Result<(), Error> {
         // Create a pairing context
         //
-        // We only handle pre-hashed messages, so we leave the domain separator tag (`DST`) empty.
+        // We only handle pre-hashed messages, so we leave the domain separator tag
+        // (`DST`) empty.
         let mut pairing = blst_pairing::new(false, &[]);
 
         // Convert `sig` into affine and aggregate `e(sig,-G1::one())`
@@ -80,8 +84,8 @@ impl Variant for MinPk {
 
         // Finalize the pairing accumulation and verify the result
         //
-        // If `finalverify()` returns `true`, it means `e(hm,pk) * e(sig,-G1::one()) == 1`. This
-        // is equivalent to `e(hm,pk) == e(sig,G1::one())`.
+        // If `finalverify()` returns `true`, it means `e(hm,pk) * e(sig,-G1::one()) ==
+        // 1`. This is equivalent to `e(hm,pk) == e(sig,G1::one())`.
         pairing.commit();
         if !pairing.finalverify(None) {
             return Err(Error::InvalidSignature);
@@ -89,29 +93,35 @@ impl Variant for MinPk {
         Ok(())
     }
 
-    /// Verifies a set of signatures against their respective public keys and pre-hashed messages.
+    /// Verifies a set of signatures against their respective public keys and
+    /// pre-hashed messages.
     ///
-    /// This method is outperforms individual signature verification (`2` pairings per signature) by
-    /// verifying a random linear combination of the public keys and signatures (`n+1` pairings and
+    /// This method is outperforms individual signature verification (`2`
+    /// pairings per signature) by verifying a random linear combination of
+    /// the public keys and signatures (`n+1` pairings and
     /// `2n` multiplications for `n` signatures).
     ///
     /// The verification equation for each signature `i` is:
     /// `e(hm_i,pk_i) == e(sig_i,G1::one())`,
-    /// which is equivalent to checking if `e(hm_i,pk_i) * e(sig_i,-G1::one()) == 1`.
+    /// which is equivalent to checking if `e(hm_i,pk_i) * e(sig_i,-G1::one())
+    /// == 1`.
     ///
-    /// To batch verify `n` such equations, we introduce random non-zero scalars `r_i` (for `i=1..n`).
-    /// The batch verification checks if the product of these individual equations, each raised to the power
+    /// To batch verify `n` such equations, we introduce random non-zero scalars
+    /// `r_i` (for `i=1..n`). The batch verification checks if the product
+    /// of these individual equations, each raised to the power
     /// of its respective `r_i`, equals one:
     /// `prod_i((e(hm_i,pk_i) * e(sig_i,-G1::one()))^{r_i}) == 1`
     ///
-    /// Using the bilinearity of pairings, this can be rewritten (by moving `r_i` inside the pairings):
-    /// `prod_i(e(hm_i,r_i * pk_i) * e(r_i * sig_i,-G1::one())) == 1`
+    /// Using the bilinearity of pairings, this can be rewritten (by moving
+    /// `r_i` inside the pairings): `prod_i(e(hm_i,r_i * pk_i) * e(r_i *
+    /// sig_i,-G1::one())) == 1`
     ///
-    /// The second term `e(r_i * sig_i,-G1::one())` can be computed efficiently with Multi-Scalar Multiplication:
-    /// `e(sum_i(r_i * sig_i),-G1::one())`
+    /// The second term `e(r_i * sig_i,-G1::one())` can be computed efficiently
+    /// with Multi-Scalar Multiplication: `e(sum_i(r_i * sig_i),-G1::one())`
     ///
-    /// Finally, we aggregate all pairings `e(hm_i,r_i * pk_i)` (`n`) and `e(sum_i(r_i * sig_i),-G1::one())` (`1`)
-    /// into a single product in the target group `G_T`. If the result is the identity element in `G_T`,
+    /// Finally, we aggregate all pairings `e(hm_i,r_i * pk_i)` (`n`) and
+    /// `e(sum_i(r_i * sig_i),-G1::one())` (`1`) into a single product in
+    /// the target group `G_T`. If the result is the identity element in `G_T`,
     /// the batch verification succeeds.
     ///
     /// Source: <https://ethresear.ch/t/security-of-bls-batch-verification/10748>
@@ -150,7 +160,8 @@ impl Variant for MinPk {
             pairing.raw_aggregate(&s_agg_affine, &BLS12_381_NEG_G1);
         }
 
-        // Aggregate the `n` terms corresponding to public keys and messages: e(r_i * pk_i,hm_i)
+        // Aggregate the `n` terms corresponding to public keys and messages: e(r_i *
+        // pk_i,hm_i)
         for i in 0..publics.len() {
             let mut scaled_pk = publics[i];
             scaled_pk.mul(&scalars[i]);
@@ -185,8 +196,9 @@ impl Variant for MinSig {
     const PROOF_OF_POSSESSION: DST = G1_PROOF_OF_POSSESSION;
     const MESSAGE: DST = G1_MESSAGE;
 
-    /// Verifies that `e(pk,hm)` is equal to `e(G2::one(),sig)` using a single product check with
-    /// a negated G2 generator (`e(pk,hm) * e(-G2::one(),sig) == 1`).
+    /// Verifies that `e(pk,hm)` is equal to `e(G2::one(),sig)` using a single
+    /// product check with a negated G2 generator (`e(pk,hm) *
+    /// e(-G2::one(),sig) == 1`).
     fn verify(
         public: &Self::Public,
         hm: &Self::Signature,
@@ -194,7 +206,8 @@ impl Variant for MinSig {
     ) -> Result<(), Error> {
         // Create a pairing context
         //
-        // We only handle pre-hashed messages, so we leave the domain separator tag (`DST`) empty.
+        // We only handle pre-hashed messages, so we leave the domain separator tag
+        // (`DST`) empty.
         let mut pairing = blst_pairing::new(false, &[]);
 
         // Convert `sig` into affine and aggregate `e(-G2::one(), sig)`
@@ -212,8 +225,8 @@ impl Variant for MinSig {
 
         // Finalize the pairing accumulation and verify the result
         //
-        // If `finalverify()` returns `true`, it means `e(pk,hm) * e(-G2::one(),sig) == 1`. This
-        // is equivalent to `e(pk,hm) == e(G2::one(),sig)`.
+        // If `finalverify()` returns `true`, it means `e(pk,hm) * e(-G2::one(),sig) ==
+        // 1`. This is equivalent to `e(pk,hm) == e(G2::one(),sig)`.
         pairing.commit();
         if !pairing.finalverify(None) {
             return Err(Error::InvalidSignature);
@@ -221,29 +234,35 @@ impl Variant for MinSig {
         Ok(())
     }
 
-    /// Verifies a set of signatures against their respective public keys and pre-hashed messages.
+    /// Verifies a set of signatures against their respective public keys and
+    /// pre-hashed messages.
     ///
-    /// This method outperforms individual signature verification (`2` pairings per signature) by
-    /// verifying a random linear combination of the public keys and signatures (`n+1` pairings and
-    /// `2n` multiplications for `n` signatures).
+    /// This method outperforms individual signature verification (`2` pairings
+    /// per signature) by verifying a random linear combination of the
+    /// public keys and signatures (`n+1` pairings and `2n` multiplications
+    /// for `n` signatures).
     ///
     /// The verification equation for each signature `i` is:
     /// `e(pk_i,hm_i) == e(G2::one(),sig_i)`,
-    /// which is equivalent to checking if `e(pk_i,hm_i) * e(-G2::one(),sig_i) == 1`.
+    /// which is equivalent to checking if `e(pk_i,hm_i) * e(-G2::one(),sig_i)
+    /// == 1`.
     ///
-    /// To batch verify `n` such equations, we introduce random non-zero scalars `r_i` (for `i=1..n`).
-    /// The batch verification checks if the product of these individual equations, each effectively
-    /// raised to the power of its respective `r_i`, equals one:
-    /// `prod_i((e(pk_i,hm_i) * e(-G2::one(),sig_i))^{r_i}) == 1`
+    /// To batch verify `n` such equations, we introduce random non-zero scalars
+    /// `r_i` (for `i=1..n`). The batch verification checks if the product
+    /// of these individual equations, each effectively raised to the power
+    /// of its respective `r_i`, equals one: `prod_i((e(pk_i,hm_i) *
+    /// e(-G2::one(),sig_i))^{r_i}) == 1`
     ///
-    /// Using the bilinearity of pairings, this can be rewritten (by moving `r_i` inside the pairings):
-    /// `prod_i(e(r_i * pk_i,hm_i) * e(-G2::one(),r_i * sig_i)) == 1`
+    /// Using the bilinearity of pairings, this can be rewritten (by moving
+    /// `r_i` inside the pairings): `prod_i(e(r_i * pk_i,hm_i) *
+    /// e(-G2::one(),r_i * sig_i)) == 1`
     ///
-    /// The second term `e(-G2::one(),r_i * sig_i)` can be computed efficiently with Multi-Scalar Multiplication:
-    /// `e(-G2::one(),sum_i(r_i * sig_i))`
+    /// The second term `e(-G2::one(),r_i * sig_i)` can be computed efficiently
+    /// with Multi-Scalar Multiplication: `e(-G2::one(),sum_i(r_i * sig_i))`
     ///
-    /// Finally, we aggregate all pairings `e(r_i * pk_i,hm_i)` (`n`) and `e(-G2::one(),sum_i(r_i * sig_i))` (`1`)
-    /// into a single product in the target group `G_T`. If the result is the identity element in `G_T`,
+    /// Finally, we aggregate all pairings `e(r_i * pk_i,hm_i)` (`n`) and
+    /// `e(-G2::one(),sum_i(r_i * sig_i))` (`1`) into a single product in
+    /// the target group `G_T`. If the result is the identity element in `G_T`,
     /// the batch verification succeeds.
     ///
     /// Source: <https://ethresear.ch/t/security-of-bls-batch-verification/10748>
@@ -282,7 +301,8 @@ impl Variant for MinSig {
             pairing.raw_aggregate(&BLS12_381_NEG_G2, &s_agg_affine);
         }
 
-        // Aggregate the `n` terms corresponding to public keys and messages: e(hm_i, r_i * pk_i)
+        // Aggregate the `n` terms corresponding to public keys and messages: e(hm_i,
+        // r_i * pk_i)
         for i in 0..publics.len() {
             let mut scaled_pk = publics[i];
             scaled_pk.mul(&scalars[i]);

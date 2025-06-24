@@ -60,10 +60,10 @@ type Dialable = mpsc::UnboundedSender<(
 
 /// Deterministic implementation of [crate::Network].
 ///
-/// When a dialer connects to a listener, the listener is given a new ephemeral port
-/// from the range `32768..61000`. To keep things simple, it is not possible to
-/// bind to an ephemeral port. Likewise, if ports are not reused and when exhausted,
-/// the runtime will panic.
+/// When a dialer connects to a listener, the listener is given a new ephemeral
+/// port from the range `32768..61000`. To keep things simple, it is not
+/// possible to bind to an ephemeral port. Likewise, if ports are not reused and
+/// when exhausted, the runtime will panic.
 #[derive(Clone)]
 pub struct Network {
     ephemeral: Arc<Mutex<u16>>,

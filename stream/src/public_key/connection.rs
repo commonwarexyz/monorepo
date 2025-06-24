@@ -97,7 +97,8 @@ pub struct Connection<Si: Sink, St: Stream> {
 impl<Si: Sink, St: Stream> Connection<Si, St> {
     /// Create a new connection from pre-established components.
     ///
-    /// This is useful in tests, or when upgrading a connection that has already been verified.
+    /// This is useful in tests, or when upgrading a connection that has already
+    /// been verified.
     pub fn from_preestablished(
         sink: Si,
         stream: St,
@@ -197,7 +198,8 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             &[&config.namespace, &d2l_msg, &l2d_msg],
         )?;
 
-        // We keep track of dialer to determine who adds a bit to their nonce (to prevent reuse)
+        // We keep track of dialer to determine who adds a bit to their nonce (to
+        // prevent reuse)
         Ok(Self {
             sink,
             stream,
@@ -260,7 +262,8 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let (d2l_cipher, l2d_cipher) =
             cipher::derive(shared_secret.as_bytes(), &[&namespace, &d2l_msg, &l2d_msg])?;
 
-        // Track whether or not we are the dialer to ensure we send correctly formatted nonces.
+        // Track whether or not we are the dialer to ensure we send correctly formatted
+        // nonces.
         Ok(Connection {
             sink,
             stream,
@@ -608,7 +611,8 @@ mod tests {
             };
             let peer_config = dialer_config.clone();
 
-            // Spawn a mock peer that responds with its own handshake without checking recipient
+            // Spawn a mock peer that responds with its own handshake without checking
+            // recipient
             context.with_label("mock_peer").spawn({
                 move |mut context| async move {
                     // Read the handshake from dialer
@@ -669,7 +673,8 @@ mod tests {
                 handshake_timeout: Duration::from_secs(5),
             };
 
-            // Spawn a mock peer that responds with a handshake containing an all-zero ephemeral key
+            // Spawn a mock peer that responds with a handshake containing an all-zero
+            // ephemeral key
             context.with_label("mock_peer").spawn({
                 let namespace = dialer_config.namespace.clone();
                 let recipient = dialer_config.crypto.public_key();

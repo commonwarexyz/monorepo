@@ -1,7 +1,8 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-/// is_global is a reimplementation of the `is_global` method from the `std::net` crate.
-/// Once the method is no longer experimental, this function should be removed.
+/// is_global is a reimplementation of the `is_global` method from the
+/// `std::net` crate. Once the method is no longer experimental, this function
+/// should be removed.
 pub const fn is_global(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => is_global_v4(ip),

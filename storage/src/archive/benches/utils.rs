@@ -14,7 +14,8 @@ pub const PARTITION: &str = "archive_bench_partition";
 /// Number of buffered writes before a forced sync.
 const PENDING_WRITES: usize = 1_000;
 
-/// Number of bytes that can be buffered in a section before being written to disk.
+/// Number of bytes that can be buffered in a section before being written to
+/// disk.
 const WRITE_BUFFER: usize = 1024;
 
 /// Section-mask that yields reasonably small blobs for local testing.

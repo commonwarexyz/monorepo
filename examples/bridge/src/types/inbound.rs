@@ -9,7 +9,8 @@ use commonware_cryptography::{
 
 /// Enum representing incoming messages from validators to the indexer.
 ///
-/// Used to interact with the indexer's storage of blocks and finality certificates.
+/// Used to interact with the indexer's storage of blocks and finality
+/// certificates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::large_enum_variant)]
 pub enum Inbound<D: Digest> {
@@ -19,7 +20,8 @@ pub enum Inbound<D: Digest> {
     GetBlock(GetBlock<D>),
     /// Request to store a finality certificate in the indexer's storage.
     PutFinalization(PutFinalization<D>),
-    /// Request to retrieve the latest finality certificate from the indexer's storage.
+    /// Request to retrieve the latest finality certificate from the indexer's
+    /// storage.
     GetFinalization(GetFinalization),
 }
 
@@ -181,7 +183,8 @@ impl<D: Digest> EncodeSize for PutFinalization<D> {
     }
 }
 
-/// Message to retrieve the latest finality certificate from the indexer's storage.
+/// Message to retrieve the latest finality certificate from the indexer's
+/// storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GetFinalization {
     /// The network identifier for which to retrieve the finality certificate.

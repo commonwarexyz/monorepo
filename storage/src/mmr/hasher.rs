@@ -1,4 +1,5 @@
-//! Decorator for a cryptographic hasher that implements the MMR-specific hashing logic.
+//! Decorator for a cryptographic hasher that implements the MMR-specific
+//! hashing logic.
 
 use crate::mmr::{
     iterator::{leaf_num_to_pos, leaf_pos_to_num, pos_to_height},
@@ -12,14 +13,16 @@ use tracing::debug;
 
 /// A trait for computing the various digests of an MMR.
 pub trait Hasher<H: CHasher>: Send + Sync {
-    /// Computes the digest for a leaf given its position and the element it represents.
+    /// Computes the digest for a leaf given its position and the element it
+    /// represents.
     fn leaf_digest(&mut self, pos: u64, element: &[u8]) -> H::Digest;
 
-    /// Computes the digest for a node given its position and the digests of its children.
+    /// Computes the digest for a node given its position and the digests of its
+    /// children.
     fn node_digest(&mut self, pos: u64, left: &H::Digest, right: &H::Digest) -> H::Digest;
 
-    /// Computes the root for an MMR given its size and an iterator over the digests of its peaks in
-    /// decreasing order of height.
+    /// Computes the root for an MMR given its size and an iterator over the
+    /// digests of its peaks in decreasing order of height.
     fn root_digest<'a>(
         &mut self,
         size: u64,
@@ -32,14 +35,15 @@ pub trait Hasher<H: CHasher>: Send + Sync {
     /// Access the inner [CHasher] hasher.
     fn inner(&mut self) -> &mut H;
 
-    /// Fork the hasher to provide equivalent functionality in another thread. This is different
-    /// than [Clone::clone] because the forked hasher need not be a deep copy, and may share non-mutable
-    /// state with the hasher from which it was forked.
+    /// Fork the hasher to provide equivalent functionality in another thread.
+    /// This is different than [Clone::clone] because the forked hasher need
+    /// not be a deep copy, and may share non-mutable state with the hasher
+    /// from which it was forked.
     fn fork(&self) -> impl Hasher<H>;
 }
 
-/// The standard hasher to use with an MMR for computing leaf, node and root digests. Leverages no
-/// external data.
+/// The standard hasher to use with an MMR for computing leaf, node and root
+/// digests. Leverages no external data.
 pub struct Standard<H: CHasher> {
     hasher: H,
 }
@@ -113,27 +117,30 @@ impl<H: CHasher> Hasher<H> for Standard<H> {
     }
 }
 
-/// Hasher for computing leaf, node and root digests when the tree is being _grafted_ onto another
-/// MMR.
+/// Hasher for computing leaf, node and root digests when the tree is being
+/// _grafted_ onto another MMR.
 ///
 /// ## Terminology
 ///
 /// * **Peak Tree**: The MMR or Merkle tree that is being grafted.
-/// * **Base MMR**: The MMR onto which we are grafting (cannot be a Merkle tree).
+/// * **Base MMR**: The MMR onto which we are grafting (cannot be a Merkle
+///   tree).
 ///
-/// Grafting involves mapping the leaves of the peak tree to corresponding nodes in the base MMR. It
-/// allows for shorter inclusion proofs over the combined trees compared to treating them as
-/// independent.
+/// Grafting involves mapping the leaves of the peak tree to corresponding nodes
+/// in the base MMR. It allows for shorter inclusion proofs over the combined
+/// trees compared to treating them as independent.
 ///
-/// One example use case is the [crate::adb::current::Current] authenticated database,
-/// where a MMR is built over a log of operations, and a merkle tree over a bitmap indicating the
-/// activity state of each operation. If we were to treat the two trees as independent, then an
-/// inclusion proof for an operation and its activity state would involve a full branch from each
-/// structure. When using grafting, we can trim the branch from the base MMR at the point it "flows"
-/// up into the peak tree, reducing the size of the proof by a constant factor up to 2.
+/// One example use case is the [crate::adb::current::Current] authenticated
+/// database, where a MMR is built over a log of operations, and a merkle tree
+/// over a bitmap indicating the activity state of each operation. If we were to
+/// treat the two trees as independent, then an inclusion proof for an operation
+/// and its activity state would involve a full branch from each structure. When
+/// using grafting, we can trim the branch from the base MMR at the point it
+/// "flows" up into the peak tree, reducing the size of the proof by a constant
+/// factor up to 2.
 ///
-/// For concreteness, let's assume we have a base MMR over a log of 8 operations represented by the
-/// 8 leaves:
+/// For concreteness, let's assume we have a base MMR over a log of 8 operations
+/// represented by the 8 leaves:
 ///
 /// ```text
 ///    Height
@@ -149,9 +156,9 @@ impl<H: CHasher> Hasher<H> for Standard<H> {
 ///      0   0   1 3   4  7   8 10  11
 /// ```
 ///
-/// Let's assume each leaf in our peak tree corresponds to 4 leaves in the base MMR. The structure
-/// of the peak tree can be obtained by chopping off the bottom log2(4)=2 levels of the base MMR
-/// structure:
+/// Let's assume each leaf in our peak tree corresponds to 4 leaves in the base
+/// MMR. The structure of the peak tree can be obtained by chopping off the
+/// bottom log2(4)=2 levels of the base MMR structure:
 ///
 ///
 /// ```text
@@ -164,20 +171,22 @@ impl<H: CHasher> Hasher<H> for Standard<H> {
 ///      0        0 (was 6)    1 (was 13)
 /// ```
 ///
-/// The inverse of this procedure provides our algorithm for mapping a peak tree leaf's position to
-/// a base MMR node position: take the leaf's position in the peak tree, map it to any of the
-/// corresponding leaves in the base MMR, then walk up the base MMR structure exactly the number of
-/// levels we removed.
+/// The inverse of this procedure provides our algorithm for mapping a peak tree
+/// leaf's position to a base MMR node position: take the leaf's position in the
+/// peak tree, map it to any of the corresponding leaves in the base MMR, then
+/// walk up the base MMR structure exactly the number of levels we removed.
 ///
-/// In this example, leaf 0 in the peak tree corresponds to leaves \[0,1,3,4\] in the base MMR.
-/// Walking up two levels from any of these base MMR leaves produces node 6 of the base MMR, which
-/// is thus its grafting point. Leaf 1 in the peak tree corresponds to leaves \[7,8,10,11\] in the
-/// base MMR, yielding node 13 as its grafting point.
+/// In this example, leaf 0 in the peak tree corresponds to leaves \[0,1,3,4\]
+/// in the base MMR. Walking up two levels from any of these base MMR leaves
+/// produces node 6 of the base MMR, which is thus its grafting point. Leaf 1 in
+/// the peak tree corresponds to leaves \[7,8,10,11\] in the base MMR, yielding
+/// node 13 as its grafting point.
 pub struct Grafting<'a, H: CHasher> {
     hasher: &'a mut Standard<H>,
     height: u32,
 
-    /// Maps a leaf's position to the digest of the node on which the leaf is grafted.
+    /// Maps a leaf's position to the digest of the node on which the leaf is
+    /// grafted.
     grafted_digests: HashMap<u64, H::Digest>,
 }
 
@@ -195,9 +204,10 @@ impl<'a, H: CHasher> Grafting<'a, H> {
         self.hasher
     }
 
-    /// Loads the grafted digests for the specified leaves into the internal map. Does not clear out
-    /// any previously loaded digests. This method must be used to provide grafted digests for any
-    /// leaf whose `leaf_digest` needs to be computed.
+    /// Loads the grafted digests for the specified leaves into the internal
+    /// map. Does not clear out any previously loaded digests. This method
+    /// must be used to provide grafted digests for any leaf whose
+    /// `leaf_digest` needs to be computed.
     ///
     /// # Warning
     ///
@@ -225,27 +235,27 @@ impl<'a, H: CHasher> Grafting<'a, H> {
         Ok(())
     }
 
-    /// Compute the position of the leaf in the base tree onto which we should graft the leaf at
-    /// position `pos` in the source tree.
+    /// Compute the position of the leaf in the base tree onto which we should
+    /// graft the leaf at position `pos` in the source tree.
     fn destination_pos(&self, pos: u64) -> u64 {
         destination_pos(pos, self.height)
     }
 }
 
-/// A lightweight, short-lived shallow copy of a Grafting hasher that can be used in parallel
-/// computations.
+/// A lightweight, short-lived shallow copy of a Grafting hasher that can be
+/// used in parallel computations.
 pub struct GraftingFork<'a, H: CHasher> {
     hasher: Standard<H>,
     height: u32,
     grafted_digests: &'a HashMap<u64, H::Digest>,
 }
 
-/// Compute the position of the node in the base tree onto which we should graft the node at
-/// position `pos` in the source tree.
+/// Compute the position of the node in the base tree onto which we should graft
+/// the node at position `pos` in the source tree.
 ///
-/// This algorithm performs walks down corresponding branches of the peak and base trees. When we
-/// find the node in the peak tree we are looking for, we return the position of the corresponding
-/// node reached in the base tree.
+/// This algorithm performs walks down corresponding branches of the peak and
+/// base trees. When we find the node in the peak tree we are looking for, we
+/// return the position of the corresponding node reached in the base tree.
 fn destination_pos(peak_node_pos: u64, height: u32) -> u64 {
     let leading_zeros = (peak_node_pos + 1).leading_zeros();
     let mut peak_pos = u64::MAX >> leading_zeros;
@@ -276,8 +286,9 @@ fn destination_pos(peak_node_pos: u64, height: u32) -> u64 {
     base_pos
 }
 
-/// Inverse computation of destination_pos, with an analogous implementation involving walks down
-/// corresponding branches of both trees. Returns none if there is no corresponding node.
+/// Inverse computation of destination_pos, with an analogous implementation
+/// involving walks down corresponding branches of both trees. Returns none if
+/// there is no corresponding node.
 pub(super) fn source_pos(base_node_pos: u64, height: u32) -> Option<u64> {
     if pos_to_height(base_node_pos) < height {
         // Nodes below the grafting height do not have a corresponding peak tree node.
@@ -321,8 +332,8 @@ impl<H: CHasher> Hasher<H> for Grafting<'_, H> {
             panic!("missing grafted digest for leaf_pos {}", pos);
         };
 
-        // We do not include position in the digest material here since the position information is
-        // already captured in the grafted_digest.
+        // We do not include position in the digest material here since the position
+        // information is already captured in the grafted_digest.
         self.hasher.update_with_element(element);
         self.hasher.update_with_digest(grafted_digest);
 
@@ -372,8 +383,8 @@ impl<H: CHasher> Hasher<H> for GraftingFork<'_, H> {
             panic!("missing grafted digest for leaf_pos {}", pos);
         };
 
-        // We do not include position in the digest material here since the position information is
-        // already captured in the base_node_digest.
+        // We do not include position in the digest material here since the position
+        // information is already captured in the base_node_digest.
         self.hasher.update_with_element(element);
         self.hasher.update_with_digest(grafted_digest);
 
@@ -469,8 +480,8 @@ impl<H: CHasher> Hasher<H> for GraftingVerifier<'_, H> {
             return digest;
         }
 
-        // This base tree node corresponds to a peak-tree leaf, so we need to perform the peak-tree
-        // leaf digest computation.
+        // This base tree node corresponds to a peak-tree leaf, so we need to perform
+        // the peak-tree leaf digest computation.
         let source_pos = source_pos(pos, self.height);
         let Some(source_pos) = source_pos else {
             // malformed proof input
@@ -655,8 +666,8 @@ mod tests {
         );
     }
 
-    /// For a variety of grafting heights and node positions, check that destination_pos and
-    /// source_pos are inverse functions.
+    /// For a variety of grafting heights and node positions, check that
+    /// destination_pos and source_pos are inverse functions.
     #[test]
     fn test_hasher_dest_source_pos_conversion() {
         for grafting_height in 1..10 {
@@ -703,10 +714,11 @@ mod tests {
                 .unwrap();
 
             {
-                // Build another MMR with the same elements only using a grafting hasher, using the
-                // previous mmr as the base.
+                // Build another MMR with the same elements only using a grafting hasher, using
+                // the previous mmr as the base.
 
-                // Since we're grafting 1-1, the destination position computation should be the identity function.
+                // Since we're grafting 1-1, the destination position computation should be the
+                // identity function.
                 assert_eq!(hasher.destination_pos(0), 0);
                 let rand_leaf_pos = leaf_num_to_pos(1234234);
                 assert_eq!(hasher.destination_pos(rand_leaf_pos), rand_leaf_pos);
@@ -718,8 +730,9 @@ mod tests {
                 assert!(hex(&root) != expected_root);
             }
 
-            // Try grafting at a height of 1 instead of 0, which requires we double the # of leaves in the base
-            // tree to maintain the corresponding # of segments.
+            // Try grafting at a height of 1 instead of 0, which requires we double the # of
+            // leaves in the base tree to maintain the corresponding # of
+            // segments.
             build_test_mmr(&mut standard, &mut base_mmr).await;
             {
                 let mut hasher: Grafting<Sha256> = Grafting::new(&mut standard, 1);
@@ -728,8 +741,8 @@ mod tests {
                     .await
                     .unwrap();
 
-                // Confirm we're now grafting leaves to the positions of their immediate parent in
-                // an MMR.
+                // Confirm we're now grafting leaves to the positions of their immediate parent
+                // in an MMR.
                 assert_eq!(hasher.destination_pos(leaf_num_to_pos(0)), 2);
                 assert_eq!(hasher.destination_pos(leaf_num_to_pos(1)), 5);
                 assert_eq!(hasher.destination_pos(leaf_num_to_pos(2)), 9);
@@ -776,7 +789,8 @@ mod tests {
             let p1 = Sha256::fill(0xF1);
             let p2 = Sha256::fill(0xF2);
 
-            // Since we are using grafting height of 1, peak tree must have half the leaves of the base (2).
+            // Since we are using grafting height of 1, peak tree must have half the leaves
+            // of the base (2).
             let mut peak_tree: Mmr<Sha256> = Mmr::new();
             {
                 let mut grafter = Grafting::new(&mut standard, GRAFTING_HEIGHT);
@@ -799,12 +813,13 @@ mod tests {
                 let grafted_storage_root = grafted_mmr.root(&mut standard).await.unwrap();
                 assert_ne!(grafted_storage_root, base_root);
 
-                // Grafted storage root uses the size of the base MMR in its digest, so it will differ
-                // than the peak tree root even though these particular trees would otherwise produce
-                // the same root.
+                // Grafted storage root uses the size of the base MMR in its digest, so it will
+                // differ than the peak tree root even though these particular
+                // trees would otherwise produce the same root.
                 assert_ne!(grafted_storage_root, peak_root);
 
-                // Confirm we can generate and verify an inclusion proofs for each of the 4 leafs of the grafted MMR.
+                // Confirm we can generate and verify an inclusion proofs for each of the 4
+                // leafs of the grafted MMR.
                 {
                     let pos = 0;
                     let proof = Proof::<Sha256>::range_proof(&grafted_mmr, pos, pos)
@@ -846,7 +861,8 @@ mod tests {
                         .unwrap());
                 }
 
-                // Confirm element inclusion proof verification fails for various manipulations of the input.
+                // Confirm element inclusion proof verification fails for various manipulations
+                // of the input.
                 {
                     // Valid proof of the last element.
                     let pos = 4;
@@ -914,15 +930,17 @@ mod tests {
                 }
             }
 
-            // Add one more leaf to our base MMR, which will not have any corresponding peak tree
-            // leaf since it will have no ancestors at or above the grafting height.
+            // Add one more leaf to our base MMR, which will not have any corresponding peak
+            // tree leaf since it will have no ancestors at or above the
+            // grafting height.
             let b5 = Sha256::fill(0x05);
             base_mmr.add(&mut standard, &b5);
 
             let grafted_mmr = GStorage::new(&peak_tree, &base_mmr, GRAFTING_HEIGHT);
             assert_eq!(grafted_mmr.size(), base_mmr.size());
 
-            // Confirm we can generate and verify inclusion proofs for the "orphaned" leaf as well as an existing one.
+            // Confirm we can generate and verify inclusion proofs for the "orphaned" leaf
+            // as well as an existing one.
             let grafted_storage_root = grafted_mmr.root(&mut standard).await.unwrap();
             let pos = 0;
             let proof = Proof::<Sha256>::range_proof(&grafted_mmr, pos, pos)

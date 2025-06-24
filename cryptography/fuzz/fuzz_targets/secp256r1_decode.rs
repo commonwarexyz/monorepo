@@ -37,8 +37,9 @@ fn test_private_key(data: &[u8]) {
 
     // The reference P256 implements the following policy:
     // Deserialize secret key from an encoded secret scalar passed as a byte slice.
-    // The slice is expected to be a minimum of 24-bytes (192-bits) and at most C::FieldBytesSize bytes in length.
-    // Byte slices shorter than the field size are handled by zero padding the input.
+    // The slice is expected to be a minimum of 24-bytes (192-bits) and at most
+    // C::FieldBytesSize bytes in length. Byte slices shorter than the field
+    // size are handled by zero padding the input.
 
     match data.len() {
         24..32 => {

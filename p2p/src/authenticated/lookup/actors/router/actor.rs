@@ -98,9 +98,9 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
         self.context.spawn_ref()(self.run(routing))
     }
 
-    /// Runs the [Actor] event loop, processing incoming messages control messages
-    /// ([Message::Ready], [Message::Release]) and content messages ([Message::Content]).
-    /// Returns when the `control` channel is closed.
+    /// Runs the [Actor] event loop, processing incoming messages control
+    /// messages ([Message::Ready], [Message::Release]) and content messages
+    /// ([Message::Content]). Returns when the `control` channel is closed.
     async fn run(mut self, routing: Channels<P>) {
         while let Some(msg) = self.control.next().await {
             match msg {

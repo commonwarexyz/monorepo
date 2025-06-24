@@ -4,7 +4,8 @@
 ///
 /// This macro returns a tuple `(Label, Gauge)`:
 /// - `Label`: A label representing the task's metrics.
-/// - `Gauge`: A gauge tracking the number of running tasks with the given label.
+/// - `Gauge`: A gauge tracking the number of running tasks with the given
+///   label.
 #[macro_export]
 macro_rules! spawn_metrics {
     // Handle future tasks

@@ -1,4 +1,5 @@
-//! Byzantine participant that sends impersonated (and invalid) notarize/finalize messages.
+//! Byzantine participant that sends impersonated (and invalid)
+//! notarize/finalize messages.
 
 use crate::{
     threshold_simplex::types::{Finalize, Notarize, View, Viewable, Voter},

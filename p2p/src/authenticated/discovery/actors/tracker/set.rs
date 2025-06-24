@@ -84,9 +84,9 @@ mod tests {
 
     fn expected_sorted_peers() -> Vec<ed25519::PublicKey> {
         vec![
-            ed25519::PrivateKey::from_seed(2).public_key(), // 191fc38f134aaf1b7fdb1f86330b9d03e94bd4ba884f490389de964448e89b3f
-            ed25519::PrivateKey::from_seed(3).public_key(), // c5bbbb60e412879bbec7bb769804fa8e36e68af10d5477280b63deeaca931bed
-            ed25519::PrivateKey::from_seed(1).public_key(), // ff87a0b0a3c7c0ce827e9cada5ff79e75a44a0633bfcb5b50f99307ddb26b337
+            ed25519::PrivateKey::from_seed(2).public_key(), /* 191fc38f134aaf1b7fdb1f86330b9d03e94bd4ba884f490389de964448e89b3f */
+            ed25519::PrivateKey::from_seed(3).public_key(), /* c5bbbb60e412879bbec7bb769804fa8e36e68af10d5477280b63deeaca931bed */
+            ed25519::PrivateKey::from_seed(1).public_key(), /* ff87a0b0a3c7c0ce827e9cada5ff79e75a44a0633bfcb5b50f99307ddb26b337 */
         ]
     }
 

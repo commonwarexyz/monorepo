@@ -67,20 +67,21 @@ pub struct Config {
     /// In the io_uring event loop (`run`), wait at most this long for a new
     /// completion before checking for new work to submit to the io_ring.
     ///
-    /// If None, wait indefinitely. In this case, caller must ensure that operations
-    /// submitted to the io_uring complete so that they don't block the event loop
-    /// and cause a deadlock.
+    /// If None, wait indefinitely. In this case, caller must ensure that
+    /// operations submitted to the io_uring complete so that they don't
+    /// block the event loop and cause a deadlock.
     ///
     /// To illustrate the possibility of deadlock when this field is None,
     /// consider a common network pattern.
-    /// In one task, a client sends a message to the server and recvs a response.
-    /// In another task, the server recvs a message from the client and sends a response.
-    /// If the client submits its recv operation to the io_uring, and the
-    /// io_uring event loop begins to await its completion (i.e. it parks in
-    /// `submit_and_wait`) before the server submits its recv operation, there is a
-    /// deadlock. The client's recv can't complete until the server sends its message,
-    /// but the server can't send its message until the io_uring event loop wakes up
-    /// to process the completion of the client's recv operation.
+    /// In one task, a client sends a message to the server and recvs a
+    /// response. In another task, the server recvs a message from the
+    /// client and sends a response. If the client submits its recv
+    /// operation to the io_uring, and the io_uring event loop begins to
+    /// await its completion (i.e. it parks in `submit_and_wait`) before the
+    /// server submits its recv operation, there is a deadlock. The client's
+    /// recv can't complete until the server sends its message,
+    /// but the server can't send its message until the io_uring event loop
+    /// wakes up to process the completion of the client's recv operation.
     /// Note that in this example, the server and client are both using the same
     /// io_uring instance. If they aren't, this situation can't occur.
     pub force_poll: Option<Duration>,
@@ -90,11 +91,12 @@ pub struct Config {
     /// If Some, each submitted operation will time out after this duration.
     /// If an operation times out, its result will be -[libc::ETIMEDOUT].
     pub op_timeout: Option<Duration>,
-    /// The maximum time the io_uring event loop will wait for in-flight operations
-    /// to complete before abandoning them during shutdown.
+    /// The maximum time the io_uring event loop will wait for in-flight
+    /// operations to complete before abandoning them during shutdown.
     /// If None, the event loop will wait indefinitely for in-flight operations
-    /// to complete before shutting down. In this case, the caller should be careful
-    /// to ensure that the operations submitted to the io_uring will eventually complete.
+    /// to complete before shutting down. In this case, the caller should be
+    /// careful to ensure that the operations submitted to the io_uring will
+    /// eventually complete.
     pub shutdown_timeout: Option<Duration>,
 }
 
@@ -178,9 +180,9 @@ fn handle_cqe(
     }
 }
 
-/// Creates a new io_uring instance that listens for incoming work on `receiver`.
-/// This function will block until `receiver` is closed or an error occurs.
-/// It should be run in a separate task.
+/// Creates a new io_uring instance that listens for incoming work on
+/// `receiver`. This function will block until `receiver` is closed or an error
+/// occurs. It should be run in a separate task.
 pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::Receiver<Op>) {
     let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
     let mut next_work_id: u64 = 0;
@@ -306,7 +308,8 @@ async fn drain(
     cfg: &Config,
 ) {
     if let Some(timeout) = cfg.shutdown_timeout {
-        // Create a timeout that will fire if we can't clear all the inflight operations.
+        // Create a timeout that will fire if we can't clear all the inflight
+        // operations.
         let timeout = Timespec::new()
             .sec(timeout.as_secs())
             .nsec(timeout.subsec_nanos());

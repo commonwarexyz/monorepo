@@ -1,6 +1,6 @@
-//! This crate contains all logic typically implemented by an application developer.
-//! This includes things like how to produce/verify blocks and how to identify which
-//! participants are active at a given view.
+//! This crate contains all logic typically implemented by an application
+//! developer. This includes things like how to produce/verify blocks and how to
+//! identify which participants are active at a given view.
 
 use commonware_cryptography::{Hasher, PublicKey};
 

@@ -102,7 +102,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     ///
     /// # Panics
     ///
-    /// Panics if the peer is not tracked or if the peer is not in the reserved state.
+    /// Panics if the peer is not tracked or if the peer is not in the reserved
+    /// state.
     pub fn connect(&mut self, peer: &C) {
         // Set the record as connected
         let record = self.peers.get_mut(peer).unwrap();
@@ -151,12 +152,14 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         }
 
         // Attempt to remove any old records from the rate limiter.
-        // This is a best-effort attempt to prevent memory usage from growing indefinitely.
+        // This is a best-effort attempt to prevent memory usage from growing
+        // indefinitely.
         self.rate_limiter.shrink_to_fit();
         deleted_peers
     }
 
-    /// Returns a vector of dialable peers. That is, unconnected peers for which we have a socket.
+    /// Returns a vector of dialable peers. That is, unconnected peers for which
+    /// we have a socket.
     pub fn dialable(&self) -> Vec<C> {
         // Collect peers with known addresses
         let mut result: Vec<_> = self
@@ -204,7 +207,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
 
     /// Attempt to reserve a peer.
     ///
-    /// Returns `Some(Reservation)` if the peer was successfully reserved, `None` otherwise.
+    /// Returns `Some(Reservation)` if the peer was successfully reserved,
+    /// `None` otherwise.
     fn reserve(&mut self, metadata: Metadata<C>) -> Option<Reservation<E, C>> {
         let peer = metadata.public_key();
 

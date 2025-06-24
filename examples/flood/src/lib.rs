@@ -16,7 +16,8 @@
 //! cargo run --bin setup -- --peers 3 --bootstrappers 1 --regions us-west-2,us-east-1,eu-west-1 --instance-type c7g.xlarge --storage-size 10 --storage-class gp3 --worker-threads 4 --message-size 1024 --message-backlog 16384 --mailbox-size 16384 --dashboard dashboard.json --output assets
 //! ```
 //!
-//! _We use 3 peers (instead of the 2 required to test connection performance) to demonstrate that peer discovery works._
+//! _We use 3 peers (instead of the 2 required to test connection performance)
+//! to demonstrate that peer discovery works._
 //!
 //! ## Build Flood Binary
 //!
@@ -45,7 +46,8 @@
 //!
 //! Visit `http://<monitoring-ip>:3000/d/flood`
 //!
-//! _This dashboard is only accessible from the IP used to deploy the infrastructure._
+//! _This dashboard is only accessible from the IP used to deploy the
+//! infrastructure._
 //!
 //! ## (Optional) Update Flood Binary
 //!
@@ -71,7 +73,8 @@
 //!
 //! ## Missing AWS Credentials
 //!
-//! If `commonware-deployer` can't detect your AWS credentials, you'll see a "Request has expired." error:
+//! If `commonware-deployer` can't detect your AWS credentials, you'll see a
+//! "Request has expired." error:
 //!
 //! ```txt
 //! 2025-03-05T01:36:47.550105Z  INFO deployer::ec2::create: created EC2 client region="eu-west-1"
@@ -80,8 +83,9 @@
 //!
 //! ## EC2 Throttling
 //!
-//! EC2 instances may throttle network traffic if a workload exceeds the allocation for a particular instance type. To check
-//! if an instance is throttled, SSH into the instance and run:
+//! EC2 instances may throttle network traffic if a workload exceeds the
+//! allocation for a particular instance type. To check if an instance is
+//! throttled, SSH into the instance and run:
 //!
 //! ```bash
 //! ethtool -S ens5 | grep "allowance"

@@ -7,7 +7,8 @@ use commonware_codec::{EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
 /// The byte overhead is calculated as the sum of the following:
 /// - 1: Message enum discriminant
 /// - 5: Channel varint
-/// - 5: Message length varint (lengths longer than 32 bits are forbidden by the codec)
+/// - 5: Message length varint (lengths longer than 32 bits are forbidden by the
+///   codec)
 pub const MAX_PAYLOAD_DATA_OVERHEAD: usize = 1 + 5 + 5;
 
 /// Prefix that identifies the message as a Ping message.

@@ -72,7 +72,8 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
                     let _ = response.send(digest);
                 }
                 Message::Propose { index, response } => {
-                    // Either propose a random message (prefix=0) or include a consensus certificate (prefix=1)
+                    // Either propose a random message (prefix=0) or include a consensus certificate
+                    // (prefix=1)
                     let block = match self.context.gen_bool(0.5) {
                         true => {
                             // Generate a random message

@@ -29,7 +29,8 @@ pub enum Error<E: StdError + Send + Sync + 'static> {
 /// from an untrusted network connection. Once parsed, these types are assumed
 /// to be well-formed (which prevents duplicate validation).
 ///
-/// If a byte sequencer is not properly formatted, `TryFrom` must return an error.
+/// If a byte sequencer is not properly formatted, `TryFrom` must return an
+/// error.
 pub trait Array:
     Clone
     + Send

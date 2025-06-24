@@ -20,9 +20,10 @@ pub enum Message<P: PublicKey, M: Committable + Digestible> {
 
     /// Subscribe to receive a message by digest.
     ///
-    /// The responder will be sent the first message for an commitment when it is available; either
-    /// instantly (if cached) or when it is received from the network. The request can be canceled
-    /// by dropping the responder.
+    /// The responder will be sent the first message for an commitment when it
+    /// is available; either instantly (if cached) or when it is received
+    /// from the network. The request can be canceled by dropping the
+    /// responder.
     Subscribe {
         peer: Option<P>,
         commitment: M::Commitment,
@@ -52,11 +53,13 @@ impl<P: PublicKey, M: Committable + Digestible + Codec> Mailbox<P, M> {
 }
 
 impl<P: PublicKey, M: Committable + Digestible + Codec> Mailbox<P, M> {
-    /// Subscribe to a message by peer (optionally), commitment, and digest (optionally).
+    /// Subscribe to a message by peer (optionally), commitment, and digest
+    /// (optionally).
     ///
-    /// The responder will be sent the first message for an commitment when it is available; either
-    /// instantly (if cached) or when it is received from the network. The request can be canceled
-    /// by dropping the responder.
+    /// The responder will be sent the first message for an commitment when it
+    /// is available; either instantly (if cached) or when it is received
+    /// from the network. The request can be canceled by dropping the
+    /// responder.
     pub async fn subscribe(
         &mut self,
         peer: Option<P>,
@@ -76,12 +79,13 @@ impl<P: PublicKey, M: Committable + Digestible + Codec> Mailbox<P, M> {
         receiver
     }
 
-    /// Subscribe to a message by peer (optionally), commitment, and digest (optionally) with an
-    /// externally prepared responder.
+    /// Subscribe to a message by peer (optionally), commitment, and digest
+    /// (optionally) with an externally prepared responder.
     ///
-    /// The responder will be sent the first message for an commitment when it is available; either
-    /// instantly (if cached) or when it is received from the network. The request can be canceled
-    /// by dropping the responder.
+    /// The responder will be sent the first message for an commitment when it
+    /// is available; either instantly (if cached) or when it is received
+    /// from the network. The request can be canceled by dropping the
+    /// responder.
     pub async fn subscribe_prepared(
         &mut self,
         peer: Option<P>,

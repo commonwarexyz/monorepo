@@ -6,10 +6,11 @@ use std::{net::SocketAddr, time::Duration};
 /// Configuration for the peer-to-peer instance.
 ///
 /// # Warning
-/// It is recommended to synchronize this configuration across peers in the network (with the
-/// exception of `crypto`, `listen`, `allow_private_ips`, and `mailbox_size`).
-/// If this is not synchronized, connections could be unnecessarily dropped, messages could be parsed incorrectly,
-/// and/or peers will rate limit each other during normal operation.
+/// It is recommended to synchronize this configuration across peers in the
+/// network (with the exception of `crypto`, `listen`, `allow_private_ips`, and
+/// `mailbox_size`). If this is not synchronized, connections could be
+/// unnecessarily dropped, messages could be parsed incorrectly, and/or peers
+/// will rate limit each other during normal operation.
 #[derive(Clone)]
 pub struct Config<C: Signer> {
     /// Cryptographic primitives.
@@ -29,8 +30,9 @@ pub struct Config<C: Signer> {
 
     /// Maximum size allowed for messages over any connection.
     ///
-    /// The actual size of the network message will be higher due to overhead from the protocol;
-    /// this may include additional metadata, data from the codec, and/or cryptographic signatures.
+    /// The actual size of the network message will be higher due to overhead
+    /// from the protocol; this may include additional metadata, data from
+    /// the codec, and/or cryptographic signatures.
     pub max_message_size: usize,
 
     /// Message backlog allowed for internal actors.
@@ -39,7 +41,8 @@ pub struct Config<C: Signer> {
     /// sending a message will be blocked until the mailbox is processed.
     pub mailbox_size: usize,
 
-    /// Time into the future that a timestamp can be and still be considered valid.
+    /// Time into the future that a timestamp can be and still be considered
+    /// valid.
     pub synchrony_bound: Duration,
 
     /// Duration after which a handshake message is considered stale.
@@ -47,8 +50,8 @@ pub struct Config<C: Signer> {
 
     /// Timeout for the handshake process.
     ///
-    /// This is often set to some value less than the connection read timeout to prevent
-    /// unauthenticated peers from holding open connection.
+    /// This is often set to some value less than the connection read timeout to
+    /// prevent unauthenticated peers from holding open connection.
     pub handshake_timeout: Duration,
 
     /// Quota for connection attempts per peer (incoming or outgoing).
@@ -63,12 +66,14 @@ pub struct Config<C: Signer> {
     /// Quota for ping messages received from a peer.
     pub allowed_ping_rate: Quota,
 
-    /// Average frequency at which we make a single dial attempt across all peers.
+    /// Average frequency at which we make a single dial attempt across all
+    /// peers.
     pub dial_frequency: Duration,
 
     /// Average frequency at which we will fetch a new list of dialable peers.
     ///
-    /// This value also limits the rate at which we attempt to re-dial any single peer.
+    /// This value also limits the rate at which we attempt to re-dial any
+    /// single peer.
     pub query_frequency: Duration,
 
     /// Number of peer sets to track.
@@ -83,7 +88,8 @@ pub struct Config<C: Signer> {
 }
 
 impl<C: Signer> Config<C> {
-    /// Generates a configuration with reasonable defaults for usage in production.
+    /// Generates a configuration with reasonable defaults for usage in
+    /// production.
     pub fn recommended(
         crypto: C,
         namespace: &[u8],

@@ -139,7 +139,8 @@ pub async fn create_and_attach_igw(
     Ok(igw_id)
 }
 
-/// Creates a route table for the VPC and sets up a default route to the Internet Gateway
+/// Creates a route table for the VPC and sets up a default route to the
+/// Internet Gateway
 pub async fn create_route_table(
     client: &Ec2Client,
     vpc_id: &str,
@@ -200,7 +201,8 @@ pub async fn create_subnet(
     Ok(subnet_id)
 }
 
-/// Creates a security group for the monitoring instance with access from the deployer IP
+/// Creates a security group for the monitoring instance with access from the
+/// deployer IP
 pub async fn create_security_group_monitoring(
     client: &Ec2Client,
     vpc_id: &str,
@@ -237,7 +239,8 @@ pub async fn create_security_group_monitoring(
     Ok(sg_id)
 }
 
-/// Creates a security group for binary instances with access from deployer, monitoring, and custom ports
+/// Creates a security group for binary instances with access from deployer,
+/// monitoring, and custom ports
 pub async fn create_security_group_binary(
     client: &Ec2Client,
     vpc_id: &str,
@@ -382,7 +385,8 @@ pub async fn launch_instances(
         .collect())
 }
 
-/// Waits for instances to reach the "running" state and returns their public IPs
+/// Waits for instances to reach the "running" state and returns their public
+/// IPs
 pub async fn wait_for_instances_running(
     client: &Ec2Client,
     instance_ids: &[String],
@@ -904,7 +908,8 @@ pub async fn find_availability_zone(
         }
     }
 
-    // Convert the required instance types to a HashSet for efficient subset checking
+    // Convert the required instance types to a HashSet for efficient subset
+    // checking
     let required_instance_types: HashSet<String> = instance_types.iter().cloned().collect();
 
     // Find an availability zone that supports all required instance types
@@ -921,7 +926,8 @@ pub async fn find_availability_zone(
     ))))
 }
 
-/// Waits until all network interfaces associated with a security group are deleted
+/// Waits until all network interfaces associated with a security group are
+/// deleted
 pub async fn wait_for_enis_deleted(ec2_client: &Ec2Client, sg_id: &str) -> Result<(), Ec2Error> {
     loop {
         let resp = ec2_client

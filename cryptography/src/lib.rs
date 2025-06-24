@@ -1,9 +1,11 @@
-//! Generate keys, sign arbitrary messages, and deterministically verify signatures.
+//! Generate keys, sign arbitrary messages, and deterministically verify
+//! signatures.
 //!
 //! # Status
 //!
-//! `commonware-cryptography` is **ALPHA** software and is not yet recommended for production use. Developers should
-//! expect breaking changes and occasional instability.
+//! `commonware-cryptography` is **ALPHA** software and is not yet recommended
+//! for production use. Developers should expect breaking changes and occasional
+//! instability.
 
 use commonware_codec::{Encode, ReadExt};
 use commonware_utils::Array;
@@ -15,7 +17,8 @@ pub mod sha256;
 pub use sha256::{hash, CoreSha256, Sha256};
 pub mod secp256r1;
 
-/// Produces [Signature]s over messages that can be verified with a corresponding [PublicKey].
+/// Produces [Signature]s over messages that can be verified with a
+/// corresponding [PublicKey].
 pub trait Signer: Send + Sync + Clone + 'static {
     /// The type of [Signature] produced by this [Signer].
     type Signature: Signature;
@@ -28,14 +31,16 @@ pub trait Signer: Send + Sync + Clone + 'static {
 
     /// Sign a message with the given namespace.
     ///
-    /// The message should not be hashed prior to calling this function. If a particular scheme
-    /// requires a payload to be hashed before it is signed, it will be done internally.
+    /// The message should not be hashed prior to calling this function. If a
+    /// particular scheme requires a payload to be hashed before it is
+    /// signed, it will be done internally.
     ///
-    /// A namespace should be used to prevent cross-domain attacks (where a signature can be reused
-    /// in a different context). It must be prepended to the message so that a signature meant for
-    /// one context cannot be used unexpectedly in another (i.e. signing a message on the network
-    /// layer can't accidentally spend funds on the execution layer). See
-    /// [commonware_utils::union_unique] for details.
+    /// A namespace should be used to prevent cross-domain attacks (where a
+    /// signature can be reused in a different context). It must be
+    /// prepended to the message so that a signature meant for one context
+    /// cannot be used unexpectedly in another (i.e. signing a message on the
+    /// network layer can't accidentally spend funds on the execution
+    /// layer). See [commonware_utils::union_unique] for details.
     fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Self::Signature;
 }
 
@@ -66,11 +71,12 @@ pub trait Verifier {
 
     /// Verify that a [Signature] is a valid over a given message.
     ///
-    /// The message should not be hashed prior to calling this function. If a particular
-    /// scheme requires a payload to be hashed before it is signed, it will be done internally.
+    /// The message should not be hashed prior to calling this function. If a
+    /// particular scheme requires a payload to be hashed before it is
+    /// signed, it will be done internally.
     ///
-    /// Because namespace is prepended to message before signing, the namespace provided here must
-    /// match the namespace provided during signing.
+    /// Because namespace is prepended to message before signing, the namespace
+    /// provided here must match the namespace provided during signing.
     fn verify(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Self::Signature) -> bool;
 }
 
@@ -80,20 +86,23 @@ pub trait PublicKey: Verifier + Sized + ReadExt + Encode + PartialEq + Array {}
 /// A [Signature] over a message.
 pub trait Signature: Sized + Clone + ReadExt + Encode + PartialEq + Array {}
 
-/// Verifies whether all [Signature]s are correct or that some [Signature] is incorrect.
+/// Verifies whether all [Signature]s are correct or that some [Signature] is
+/// incorrect.
 pub trait BatchVerifier<K: PublicKey> {
     /// Create a new batch verifier.
     fn new() -> Self;
 
     /// Append item to the batch.
     ///
-    /// The message should not be hashed prior to calling this function. If a particular scheme
-    /// requires a payload to be hashed before it is signed, it will be done internally.
+    /// The message should not be hashed prior to calling this function. If a
+    /// particular scheme requires a payload to be hashed before it is
+    /// signed, it will be done internally.
     ///
-    /// A namespace should be used to prevent replay attacks. It will be prepended to the message so
-    /// that a signature meant for one context cannot be used unexpectedly in another (i.e. signing
-    /// a message on the network layer can't accidentally spend funds on the execution layer). See
-    /// [commonware_utils::union_unique] for details.
+    /// A namespace should be used to prevent replay attacks. It will be
+    /// prepended to the message so that a signature meant for one context
+    /// cannot be used unexpectedly in another (i.e. signing a message on
+    /// the network layer can't accidentally spend funds on the execution
+    /// layer). See [commonware_utils::union_unique] for details.
     fn add(
         &mut self,
         namespace: Option<&[u8]>,
@@ -108,18 +117,19 @@ pub trait BatchVerifier<K: PublicKey> {
     ///
     /// # Why Randomness?
     ///
-    /// When performing batch verification, it is often important to add some randomness
-    /// to prevent an attacker from constructing a malicious batch of signatures that pass
-    /// batch verification but are invalid individually. Abstractly, think of this as
-    /// there existing two valid signatures (`c_1` and `c_2`) and an attacker proposing
-    /// (`c_1 + d` and `c_2 - d`).
+    /// When performing batch verification, it is often important to add some
+    /// randomness to prevent an attacker from constructing a malicious
+    /// batch of signatures that pass batch verification but are invalid
+    /// individually. Abstractly, think of this as there existing two valid
+    /// signatures (`c_1` and `c_2`) and an attacker proposing (`c_1 + d`
+    /// and `c_2 - d`).
     ///
     /// You can read more about this [here](https://ethresear.ch/t/security-of-bls-batch-verification/10748#the-importance-of-randomness-4).
     fn verify<R: RngCore + CryptoRng>(self, rng: &mut R) -> bool;
 }
 
-/// Specializes the [commonware_utils::Array] trait with the Copy trait for cryptographic digests
-/// (which should be cheap to clone).
+/// Specializes the [commonware_utils::Array] trait with the Copy trait for
+/// cryptographic digests (which should be cheap to clone).
 pub trait Digest: Array + Copy {
     /// Generate a random [Digest].
     ///
@@ -149,9 +159,10 @@ pub trait Committable: Digestible + Clone + Sized + Send + Sync + 'static {
 
     /// Returns the unique commitment of the object as a [Digest].
     ///
-    /// For simple objects (like a block), this is often just the digest of the object
-    /// itself. For more complex objects, however, this may represent some root or base
-    /// of a proof structure (where many unique objects map to the same commitment).
+    /// For simple objects (like a block), this is often just the digest of the
+    /// object itself. For more complex objects, however, this may represent
+    /// some root or base of a proof structure (where many unique objects
+    /// map to the same commitment).
     ///
     /// # Warning
     ///
@@ -167,13 +178,13 @@ pub trait Committable: Digestible + Clone + Sized + Send + Sync + 'static {
 /// Hash functions in commonware primitives are not typically hardcoded
 /// to a specific algorithm (e.g. SHA-256) because different hash functions
 /// may work better with different cryptographic schemes, may be more efficient
-/// to use in STARK/SNARK proofs, or provide different levels of security (with some
-/// performance/size penalty).
+/// to use in STARK/SNARK proofs, or provide different levels of security (with
+/// some performance/size penalty).
 ///
 /// This trait is required to implement the `Clone` trait because it is often
-/// part of a struct that is cloned. In practice, implementations do not actually
-/// clone the hasher state but users should not rely on this behavior and call `reset`
-/// after cloning.
+/// part of a struct that is cloned. In practice, implementations do not
+/// actually clone the hasher state but users should not rely on this behavior
+/// and call `reset` after cloning.
 pub trait Hasher: Clone + Send + Sync + 'static {
     /// Digest generated by the hasher.
     type Digest: Digest;

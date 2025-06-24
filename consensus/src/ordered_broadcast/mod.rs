@@ -2,21 +2,25 @@
 //!
 //! # Concepts
 //!
-//! The system has two types of network participants: `sequencers` and `validators`. Their sets may
-//! overlap and are defined by the current `epoch`, a monotonically increasing integer. This module
-//! can handle reconfiguration of these sets across different epochs.
+//! The system has two types of network participants: `sequencers` and
+//! `validators`. Their sets may overlap and are defined by the current `epoch`,
+//! a monotonically increasing integer. This module can handle reconfiguration
+//! of these sets across different epochs.
 //!
-//! Sequencers broadcast data. The smallest unit of data is a `chunk`. Sequencers broadcast `node`s
-//! that contain a chunk and a threshold signature over the previous chunk, forming a linked chain
-//! of nodes from each sequencer.
+//! Sequencers broadcast data. The smallest unit of data is a `chunk`.
+//! Sequencers broadcast `node`s that contain a chunk and a threshold signature
+//! over the previous chunk, forming a linked chain of nodes from each
+//! sequencer.
 //!
-//! Validators verify and sign chunks using partial signatures. These can be combined to recover a
-//! threshold signature, ensuring a quorum verifies each chunk. The threshold signature allows
-//! external parties to confirm that the chunk was reliably broadcast.
+//! Validators verify and sign chunks using partial signatures. These can be
+//! combined to recover a threshold signature, ensuring a quorum verifies each
+//! chunk. The threshold signature allows external parties to confirm that the
+//! chunk was reliably broadcast.
 //!
-//! Network participants persist any new nodes to a journal. This enables recovery from crashes and
-//! ensures that sequencers do not broadcast conflicting chunks and that validators do not sign
-//! them. "Conflicting" chunks are chunks from the same sequencer at the same height with different
+//! Network participants persist any new nodes to a journal. This enables
+//! recovery from crashes and ensures that sequencers do not broadcast
+//! conflicting chunks and that validators do not sign them. "Conflicting"
+//! chunks are chunks from the same sequencer at the same height with different
 //! payloads.
 //!
 //! # Design
@@ -255,7 +259,8 @@ mod tests {
         for (reporter, mailbox) in reporters.iter() {
             // Spawn a watcher for the reporter.
             for sequencer in sequencers.iter() {
-                // Create a oneshot channel to signal when the reporter has reached the threshold.
+                // Create a oneshot channel to signal when the reporter has reached the
+                // threshold.
                 let (tx, rx) = oneshot::channel();
                 receivers.push(rx);
 

@@ -1,5 +1,6 @@
-//! Defines the inclusion `Proof` structure, functions for generating them from any MMR implementing
-//! the `Storage` trait, and functions for verifying them against a root digest.
+//! Defines the inclusion `Proof` structure, functions for generating them from
+//! any MMR implementing the `Storage` trait, and functions for verifying them
+//! against a root digest.
 
 use crate::mmr::{
     iterator::{leaf_pos_to_num, PathIterator, PeakIterator},
@@ -14,22 +15,24 @@ use commonware_cryptography::Hasher as CHasher;
 use futures::future::try_join_all;
 use tracing::debug;
 
-/// Contains the information necessary for proving the inclusion of an element, or some range of
-/// elements, in the MMR from its root digest.
+/// Contains the information necessary for proving the inclusion of an element,
+/// or some range of elements, in the MMR from its root digest.
 ///
 /// The `digests` vector contains:
 ///
-/// 1: the digests of each peak corresponding to a mountain containing no elements from the element
-/// range being proven in decreasing order of height, followed by:
+/// 1: the digests of each peak corresponding to a mountain containing no
+/// elements from the element range being proven in decreasing order of height,
+/// followed by:
 ///
-/// 2: the nodes in the remaining mountains necessary for reconstructing their peak digests from the
-/// elements within the range, ordered by the position of their parent.
+/// 2: the nodes in the remaining mountains necessary for reconstructing their
+/// peak digests from the elements within the range, ordered by the position of
+/// their parent.
 #[derive(Clone, Debug, Eq)]
 pub struct Proof<H: CHasher> {
     /// The total number of nodes in the MMR.
     pub size: u64,
-    /// The digests necessary for proving the inclusion of an element, or range of elements, in the
-    /// MMR.
+    /// The digests necessary for proving the inclusion of an element, or range
+    /// of elements, in the MMR.
     pub digests: Vec<H::Digest>,
 }
 
@@ -40,8 +43,8 @@ impl<H: CHasher> PartialEq for Proof<H> {
 }
 
 impl<H: CHasher> Proof<H> {
-    /// Return true if `proof` proves that `element` appears at position `element_pos` within the
-    /// MMR with root `root_digest`.
+    /// Return true if `proof` proves that `element` appears at position
+    /// `element_pos` within the MMR with root `root_digest`.
     pub async fn verify_element_inclusion<M: Hasher<H>>(
         &self,
         hasher: &mut M,
@@ -53,9 +56,9 @@ impl<H: CHasher> Proof<H> {
             .await
     }
 
-    /// Return true if `proof` proves that the `elements` appear consecutively between positions
-    /// `start_element_pos` through `end_element_pos` (inclusive) within the MMR with root
-    /// `root_digest`.
+    /// Return true if `proof` proves that the `elements` appear consecutively
+    /// between positions `start_element_pos` through `end_element_pos`
+    /// (inclusive) within the MMR with root `root_digest`.
     pub async fn verify_range_inclusion<M: Hasher<H>, T>(
         &self,
         hasher: &mut M,
@@ -92,8 +95,8 @@ impl<H: CHasher> Proof<H> {
         }
     }
 
-    /// Reconstructs the root digest of the MMR from the digests in the proof and the provided range
-    /// of elements.
+    /// Reconstructs the root digest of the MMR from the digests in the proof
+    /// and the provided range of elements.
     pub async fn reconstruct_root<M: Hasher<H>, T>(
         &self,
         hasher: &mut M,
@@ -111,9 +114,10 @@ impl<H: CHasher> Proof<H> {
         Ok(hasher.root_digest(self.size, peak_digests.iter()))
     }
 
-    /// Reconstruct the peak digests of the MMR that produced this proof, returning `MissingDigests`
-    /// error if there are not enough proof digests, or `ExtraDigests` error if not all proof
-    /// digests were used in the reconstruction.
+    /// Reconstruct the peak digests of the MMR that produced this proof,
+    /// returning `MissingDigests` error if there are not enough proof
+    /// digests, or `ExtraDigests` error if not all proof digests were used
+    /// in the reconstruction.
     async fn reconstruct_peak_digests<T>(
         &self,
         hasher: &mut impl Hasher<H>,
@@ -128,8 +132,9 @@ impl<H: CHasher> Proof<H> {
         let mut siblings_iter = self.digests.iter().rev();
         let mut elements_iter = elements.into_iter();
 
-        // Include peak digests only for trees that have no elements from the range, and keep track
-        // of the starting and ending trees of those that do contain some.
+        // Include peak digests only for trees that have no elements from the range, and
+        // keep track of the starting and ending trees of those that do contain
+        // some.
         let mut peak_digests: Vec<H::Digest> = Vec::new();
         let mut proof_digests_used = 0;
         for (peak_pos, height) in PeakIterator::new(self.size) {
@@ -179,9 +184,9 @@ impl<H: CHasher> Proof<H> {
     ///    [8-...): raw bytes of each hash, each of length `H::len()`
     /// ```
     pub fn serialize(&self) -> Vec<u8> {
-        // A proof should never contain more digests than the depth of the MMR, thus a single byte
-        // for encoding the length of the digests array still allows serializing MMRs up to 2^255
-        // elements.
+        // A proof should never contain more digests than the depth of the MMR, thus a
+        // single byte for encoding the length of the digests array still allows
+        // serializing MMRs up to 2^255 elements.
         assert!(
             self.digests.len() <= u8::MAX as usize,
             "too many digests in proof"
@@ -198,7 +203,8 @@ impl<H: CHasher> Proof<H> {
         bytes.to_vec()
     }
 
-    /// Deserializes a canonically encoded `Proof`. See `serialize` for the serialization format.
+    /// Deserializes a canonically encoded `Proof`. See `serialize` for the
+    /// serialization format.
     pub fn deserialize(bytes: &[u8]) -> Option<Self> {
         let mut buf = bytes;
         if buf.len() < u64::SIZE {
@@ -206,7 +212,8 @@ impl<H: CHasher> Proof<H> {
         }
         let size = buf.get_u64();
 
-        // A proof should divide neatly into the hash length and not contain more than 255 digests.
+        // A proof should divide neatly into the hash length and not contain more than
+        // 255 digests.
         let buf_remaining = buf.remaining();
         let digests_len = buf_remaining / H::Digest::SIZE;
         if buf_remaining % H::Digest::SIZE != 0 || digests_len > u8::MAX as usize {
@@ -220,24 +227,26 @@ impl<H: CHasher> Proof<H> {
         Some(Self { size, digests })
     }
 
-    /// Return the list of pruned (pos < `start_pos`) node positions that are still required for
-    /// proving any retained node.
+    /// Return the list of pruned (pos < `start_pos`) node positions that are
+    /// still required for proving any retained node.
     ///
-    /// This set consists of every pruned node that is either (1) a peak, or (2) has no descendent
-    /// in the retained section, but its immediate parent does. (A node meeting condition (2) can be
-    /// shown to always be the left-child of its parent.)
+    /// This set consists of every pruned node that is either (1) a peak, or (2)
+    /// has no descendent in the retained section, but its immediate parent
+    /// does. (A node meeting condition (2) can be shown to always be the
+    /// left-child of its parent.)
     ///
-    /// This set of nodes does not change with the MMR's size, only the pruning boundary. For a
-    /// given pruning boundary that happens to be a valid MMR size, one can prove that this set is
-    /// exactly the set of peaks for an MMR whose size equals the pruning boundary. If the pruning
-    /// boundary is not a valid MMR size, then the set corresponds to the peaks of the largest MMR
-    /// whose size is less than the pruning boundary.
+    /// This set of nodes does not change with the MMR's size, only the pruning
+    /// boundary. For a given pruning boundary that happens to be a valid
+    /// MMR size, one can prove that this set is exactly the set of peaks
+    /// for an MMR whose size equals the pruning boundary. If the pruning
+    /// boundary is not a valid MMR size, then the set corresponds to the peaks
+    /// of the largest MMR whose size is less than the pruning boundary.
     pub fn nodes_to_pin(start_pos: u64) -> impl Iterator<Item = u64> {
         PeakIterator::new(PeakIterator::to_nearest_size(start_pos)).map(|(pos, _)| pos)
     }
 
-    /// Return the list of node positions required by the range proof for the specified range of
-    /// elements, inclusive of both endpoints.
+    /// Return the list of node positions required by the range proof for the
+    /// specified range of elements, inclusive of both endpoints.
     pub fn nodes_required_for_range_proof(
         size: u64,
         start_element_pos: u64,
@@ -245,8 +254,9 @@ impl<H: CHasher> Proof<H> {
     ) -> Vec<u64> {
         let mut positions = Vec::new();
 
-        // Find the mountains that contain no elements from the range. The peaks of these mountains
-        // are required to prove the range, so they are added to the result.
+        // Find the mountains that contain no elements from the range. The peaks of
+        // these mountains are required to prove the range, so they are added to
+        // the result.
         let mut start_tree_with_element = (u64::MAX, 0);
         let mut end_tree_with_element = (u64::MAX, 0);
         let mut peak_iterator = PeakIterator::new(size);
@@ -274,9 +284,10 @@ impl<H: CHasher> Proof<H> {
         assert!(start_tree_with_element.0 != u64::MAX);
         assert!(end_tree_with_element.0 != u64::MAX);
 
-        // Include the positions of any left-siblings of each node on the path from peak to
-        // leftmost-leaf, and right-siblings for the path from peak to rightmost-leaf. These are
-        // added in order of decreasing parent position.
+        // Include the positions of any left-siblings of each node on the path from peak
+        // to leftmost-leaf, and right-siblings for the path from peak to
+        // rightmost-leaf. These are added in order of decreasing parent
+        // position.
         let left_path_iter = PathIterator::new(
             start_element_pos,
             start_tree_with_element.0,
@@ -285,8 +296,8 @@ impl<H: CHasher> Proof<H> {
 
         let mut siblings = Vec::new();
         if start_element_pos == end_element_pos {
-            // For the (common) case of a single element range, the right and left path are the
-            // same so no need to process each independently.
+            // For the (common) case of a single element range, the right and left path are
+            // the same so no need to process each independently.
             siblings.extend(left_path_iter);
         } else {
             let right_path_iter = PathIterator::new(
@@ -299,8 +310,9 @@ impl<H: CHasher> Proof<H> {
             // filter the left path for left siblings only
             siblings.extend(left_path_iter.filter(|(parent_pos, pos)| *parent_pos != *pos + 1));
 
-            // If the range spans more than one tree, then the digests must already be in the correct
-            // order. Otherwise, we enforce the desired order through sorting.
+            // If the range spans more than one tree, then the digests must already be in
+            // the correct order. Otherwise, we enforce the desired order
+            // through sorting.
             if start_tree_with_element.0 == end_tree_with_element.0 {
                 siblings.sort_by(|a, b| b.0.cmp(&a.0));
             }
@@ -309,8 +321,9 @@ impl<H: CHasher> Proof<H> {
         positions
     }
 
-    /// Return an inclusion proof for the specified range of elements, inclusive of both endpoints. Returns
-    /// ElementPruned error if some element needed to generate the proof has been pruned.
+    /// Return an inclusion proof for the specified range of elements, inclusive
+    /// of both endpoints. Returns ElementPruned error if some element
+    /// needed to generate the proof has been pruned.
     pub async fn range_proof<S: Storage<H::Digest>>(
         mmr: &S,
         start_element_pos: u64,
@@ -674,7 +687,8 @@ mod tests {
                     .unwrap(),
                 "mangled range proof should fail verification"
             );
-            // inserting elements into the proof should also cause it to fail (malleability check)
+            // inserting elements into the proof should also cause it to fail (malleability
+            // check)
             for i in 0..range_proof.digests.len() {
                 let mut invalid_proof = range_proof.clone();
                 invalid_proof.digests.insert(i, test_digest(0));
@@ -753,7 +767,8 @@ mod tests {
                 element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
             }
 
-            // Confirm we can successfully prove all retained elements in the MMR after pruning.
+            // Confirm we can successfully prove all retained elements in the MMR after
+            // pruning.
             let root = mmr.root(&mut hasher);
             for i in 1..mmr.size() {
                 mmr.prune_to_pos(i);

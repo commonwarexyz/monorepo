@@ -1,14 +1,15 @@
 //! Bit-vector implementation
 //!
-//! The bit-vector is a compact representation of a sequence of bits, using [u8] "blocks" for a
-//! more-efficient memory layout than doing a [`Vec<bool>`]. Thus, if the length of the bit-vector
-//! is not a multiple of 8, the last block will contain some bits that are not part of the vector.
-//! An invariant of the implementation is that any bits in the last block that are not part of the
+//! The bit-vector is a compact representation of a sequence of bits, using [u8]
+//! "blocks" for a more-efficient memory layout than doing a [`Vec<bool>`].
+//! Thus, if the length of the bit-vector is not a multiple of 8, the last block
+//! will contain some bits that are not part of the vector. An invariant of the
+//! implementation is that any bits in the last block that are not part of the
 //! vector are set to 0.
 //!
-//! The implementation is focused on being compact when encoding small bit vectors, so [u8] is
-//! used over more performant types like [usize] or [u64]. Such types would result in more
-//! complex encoding and decoding logic.
+//! The implementation is focused on being compact when encoding small bit
+//! vectors, so [u8] is used over more performant types like [usize] or [u64].
+//! Such types would result in more complex encoding and decoding logic.
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -157,7 +158,8 @@ impl BitVec {
         Some(self.get_bit_unchecked(index))
     }
 
-    /// Gets the value of the bit at the specified index without bounds checking.
+    /// Gets the value of the bit at the specified index without bounds
+    /// checking.
     ///
     /// # Safety
     ///
@@ -372,7 +374,8 @@ impl BitVec {
         }
     }
 
-    /// Clears any bits in storage beyond the last valid bit. Returns true if any bits were cleared.
+    /// Clears any bits in storage beyond the last valid bit. Returns true if
+    /// any bits were cleared.
     #[inline]
     fn clear_trailing_bits(&mut self) -> bool {
         let bit_offset = Self::bit_offset(self.num_bits);
@@ -531,7 +534,8 @@ impl BitXor for &BitVec {
 
 impl Write for BitVec {
     fn write(&self, buf: &mut impl BufMut) {
-        // Prefix with the number of bits, which is generally larger than the length of the storage
+        // Prefix with the number of bits, which is generally larger than the length of
+        // the storage
         self.num_bits.write(buf);
 
         // Write full blocks

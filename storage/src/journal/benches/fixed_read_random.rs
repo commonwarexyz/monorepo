@@ -33,7 +33,8 @@ async fn bench_run_serial(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, ite
     }
 }
 
-/// Concurrently read (via try_join_all) `items_to_read` random items from the given `journal`.
+/// Concurrently read (via try_join_all) `items_to_read` random items from the
+/// given `journal`.
 async fn bench_run_concurrent(
     journal: &Journal<Context, FixedBytes<ITEM_SIZE>>,
     items_to_read: usize,
@@ -48,8 +49,8 @@ async fn bench_run_concurrent(
 }
 
 fn bench_fixed_read_random(c: &mut Criterion) {
-    // Create a config we can use across all benchmarks (with a fixed `storage_directory`), allowing the
-    // same test file to be re-used.
+    // Create a config we can use across all benchmarks (with a fixed
+    // `storage_directory`), allowing the same test file to be re-used.
     let cfg = Config::default();
 
     // Generate a large temp journal with random data.

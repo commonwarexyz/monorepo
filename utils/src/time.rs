@@ -16,8 +16,9 @@ pub trait SystemTimeExt {
     /// Saturates at `u64::MAX`.
     fn epoch_millis(&self) -> u64;
 
-    /// Adds a random `Duration` to the current time between `0` and `jitter * 2` and returns the
-    /// resulting `SystemTime`. The random duration is generated using the provided `context`.
+    /// Adds a random `Duration` to the current time between `0` and `jitter *
+    /// 2` and returns the resulting `SystemTime`. The random duration is
+    /// generated using the provided `context`.
     fn add_jittered(&self, rng: &mut impl Rng, jitter: Duration) -> SystemTime;
 }
 

@@ -5,8 +5,8 @@ use bytes::{Buf, BufMut, BytesMut};
 
 /// Trait for types with a known, fixed encoded size.
 ///
-/// Implementing this trait signifies that the encoded representation of this type *always* has the
-/// same byte length, regardless of the specific value.
+/// Implementing this trait signifies that the encoded representation of this
+/// type *always* has the same byte length, regardless of the specific value.
 ///
 /// This automatically provides an implementation of [EncodeSize].
 pub trait FixedSize {
@@ -16,9 +16,9 @@ pub trait FixedSize {
 
 /// Trait for types that can provide their encoded size in bytes.
 ///
-/// This must be implemented by all encodable types. For types implementing [FixedSize], this
-/// trait is implemented automatically. For variable-size types, this requires calculating the size
-/// based on the value.
+/// This must be implemented by all encodable types. For types implementing
+/// [FixedSize], this trait is implemented automatically. For variable-size
+/// types, this requires calculating the size based on the value.
 pub trait EncodeSize {
     /// Returns the encoded size of this value (in bytes).
     fn encode_size(&self) -> usize;
@@ -41,38 +41,41 @@ pub trait Write {
 
 /// Trait for types that can be read (decoded) from a byte buffer.
 pub trait Read: Sized {
-    /// The `Cfg` type parameter allows passing configuration during the read process. This is
-    /// crucial for safely decoding untrusted data, for example, by providing size limits for
-    /// collections or strings.
+    /// The `Cfg` type parameter allows passing configuration during the read
+    /// process. This is crucial for safely decoding untrusted data, for
+    /// example, by providing size limits for collections or strings.
     ///
     /// Use `Cfg = ()` if no configuration is needed for a specific type.
     type Cfg: Clone + Send + 'static;
 
     /// Reads a value from the buffer using the provided configuration `cfg`.
     ///
-    /// Implementations should consume the exact number of bytes required from `buf` to reconstruct
-    /// the value.
+    /// Implementations should consume the exact number of bytes required from
+    /// `buf` to reconstruct the value.
     ///
-    /// Returns [Error] if decoding fails due to invalid data, insufficient bytes in the buffer,
-    /// or violation of constraints imposed by the `cfg`.
+    /// Returns [Error] if decoding fails due to invalid data, insufficient
+    /// bytes in the buffer, or violation of constraints imposed by the
+    /// `cfg`.
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error>;
 }
 
-/// Trait combining [Write] and [EncodeSize] for types that can be fully encoded.
+/// Trait combining [Write] and [EncodeSize] for types that can be fully
+/// encoded.
 ///
 /// This trait provides the convenience [Encode::encode] method which handles
 /// buffer allocation, writing, and size assertion in one go.
 pub trait Encode: Write + EncodeSize {
     /// Encodes `self` into a new [BytesMut] buffer.
     ///
-    /// This method calculates the required size using [EncodeSize::encode_size], allocates a
-    /// buffer of that exact capacity, writes the value using [Write::write], and performs a
+    /// This method calculates the required size using
+    /// [EncodeSize::encode_size], allocates a buffer of that exact
+    /// capacity, writes the value using [Write::write], and performs a
     /// sanity check assertion.
     ///
     /// # Panics
     ///
-    /// Panics if `encode_size()` does not return the same number of bytes actually written by
-    /// `write()`
+    /// Panics if `encode_size()` does not return the same number of bytes
+    /// actually written by `write()`
     fn encode(&self) -> BytesMut {
         let len = self.encode_size();
         let mut buffer = BytesMut::with_capacity(len);
@@ -82,17 +85,20 @@ pub trait Encode: Write + EncodeSize {
     }
 }
 
-// Automatically implement `Encode` for types that implement `Write` and `EncodeSize`.
+// Automatically implement `Encode` for types that implement `Write` and
+// `EncodeSize`.
 impl<T: Write + EncodeSize> Encode for T {}
 
 /// Trait combining [Read] with a check for remaining bytes.
 ///
-/// Ensures that *all* bytes from the input buffer were consumed during decoding.
+/// Ensures that *all* bytes from the input buffer were consumed during
+/// decoding.
 pub trait Decode: Read {
-    /// Decodes a value from `buf` using `cfg`, ensuring the entire buffer is consumed.
+    /// Decodes a value from `buf` using `cfg`, ensuring the entire buffer is
+    /// consumed.
     ///
-    /// Returns [Error] if decoding fails via [Read::read_cfg] or if there are leftover bytes in
-    /// `buf` after reading.
+    /// Returns [Error] if decoding fails via [Read::read_cfg] or if there are
+    /// leftover bytes in `buf` after reading.
     fn decode_cfg(mut buf: impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let result = Self::read_cfg(&mut buf, cfg)?;
 
@@ -114,20 +120,23 @@ impl<T: Read> Decode for T {}
 /// Represents types that can be both fully encoded and decoded.
 pub trait Codec: Encode + Decode {}
 
-/// Automatically implement `Codec` for types that implement `Encode` and `Decode`.
+/// Automatically implement `Codec` for types that implement `Encode` and
+/// `Decode`.
 impl<T: Encode + Decode> Codec for T {}
 
-/// Convenience trait for [FixedSize] types that can be encoded directly into a fixed-size array.
+/// Convenience trait for [FixedSize] types that can be encoded directly into a
+/// fixed-size array.
 pub trait EncodeFixed: Write + FixedSize {
     /// Encodes `self` into a fixed-size byte array `[u8; N]`.
     ///
     /// # Panics
     ///
     /// Panics if `N` is not equal to `<Self as FixedSize>::SIZE`.
-    /// Also panics if the `write()` implementation does not write exactly `N` bytes.
+    /// Also panics if the `write()` implementation does not write exactly `N`
+    /// bytes.
     fn encode_fixed<const N: usize>(&self) -> [u8; N] {
-        // Ideally this is a compile-time check, but we can't do that in the current Rust version
-        // without adding a new generic parameter to the trait.
+        // Ideally this is a compile-time check, but we can't do that in the current
+        // Rust version without adding a new generic parameter to the trait.
         assert_eq!(
             N,
             Self::SIZE,
@@ -144,7 +153,8 @@ pub trait EncodeFixed: Write + FixedSize {
     }
 }
 
-// Automatically implement `EncodeFixed` for types that implement `Write` and `FixedSize`.
+// Automatically implement `EncodeFixed` for types that implement `Write` and
+// `FixedSize`.
 impl<T: Write + FixedSize> EncodeFixed for T {}
 
 #[cfg(test)]

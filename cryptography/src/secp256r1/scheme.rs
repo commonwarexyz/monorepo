@@ -634,7 +634,8 @@ mod tests {
         // We use SEC 1-encoded public keys (only include y-parity) whereas vectors
         // assume public keys are uncompressed (both x and y packed in encoding).
         //
-        // For this reason, test vector 2 (y out of range) and 11 (y not on curve) are skipped.
+        // For this reason, test vector 2 (y out of range) and 11 (y not on curve) are
+        // skipped.
         let cases = [
             (1, vector_public_key_validation_1()),
             (3, vector_public_key_validation_3()),

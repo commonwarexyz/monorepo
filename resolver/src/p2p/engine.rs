@@ -38,7 +38,8 @@ struct Serve<E: Clock, P: PublicKey> {
     result: Result<Bytes, oneshot::Canceled>,
 }
 
-/// Manages incoming and outgoing P2P requests, coordinating fetch and serve operations.
+/// Manages incoming and outgoing P2P requests, coordinating fetch and serve
+/// operations.
 pub struct Engine<
     E: Clock + GClock + Spawner + Rng + Metrics,
     P: PublicKey,
@@ -292,7 +293,8 @@ impl<
         }
     }
 
-    /// Handles the case where the application responds to a request from an external peer.
+    /// Handles the case where the application responds to a request from an
+    /// external peer.
     async fn handle_serve(
         &mut self,
         sender: &mut WrappedSender<NetS, wire::Message<Key>>,

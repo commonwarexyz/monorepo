@@ -5,17 +5,19 @@ use std::hash::{BuildHasher, Hasher};
 
 /// A “do-nothing” hasher for `uint`.
 ///
-/// [super::Index] typically stores keys that are **already hashed** (shortened by the [Translator]).
-/// Re-hashing them with SipHash (by [std::collections::HashMap]) would waste CPU, so we give `HashMap`
+/// [super::Index] typically stores keys that are **already hashed** (shortened
+/// by the [Translator]). Re-hashing them with SipHash (by
+/// [std::collections::HashMap]) would waste CPU, so we give `HashMap`
 /// this identity hasher instead:
 ///
-/// * `write_u8`, `write_u16`, `write_u32`, `write_u64` copies the input into an internal field;
+/// * `write_u8`, `write_u16`, `write_u32`, `write_u64` copies the input into an
+///   internal field;
 /// * `finish()` returns that value unchanged.
 ///
 /// # Warning
 ///
-/// This hasher is not suitable for general use. If the hasher is called over some type that is not
-/// `u8`, `u16`, `u32` or `u64`, it will panic.
+/// This hasher is not suitable for general use. If the hasher is called over
+/// some type that is not `u8`, `u16`, `u32` or `u64`, it will panic.
 #[derive(Default, Clone)]
 pub struct UintIdentity {
     value: u64,

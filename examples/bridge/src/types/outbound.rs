@@ -6,7 +6,8 @@ use commonware_cryptography::{bls12381::primitives::variant::MinSig, Digest};
 
 /// Enum representing responses from the indexer to validators.
 ///
-/// These responses correspond to the results of the operations requested by `Inbound` messages.
+/// These responses correspond to the results of the operations requested by
+/// `Inbound` messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::large_enum_variant)]
 pub enum Outbound<D: Digest> {
@@ -15,7 +16,8 @@ pub enum Outbound<D: Digest> {
     Success(bool),
     /// Contains the requested block data in response to a `GetBlock` message.
     Block(BlockFormat<D>),
-    /// Contains the requested finality certificate in response to a `GetFinalization` message.
+    /// Contains the requested finality certificate in response to a
+    /// `GetFinalization` message.
     Finalization(Finalization<MinSig, D>),
 }
 

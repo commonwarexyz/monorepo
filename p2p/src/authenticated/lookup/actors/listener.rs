@@ -82,8 +82,9 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 
         // Wait for the peer to send us their public key
         //
-        // IncomingConnection limits how long we will wait for the peer to send us their public key
-        // to ensure an adversary can't force us to hold many pending connections open.
+        // IncomingConnection limits how long we will wait for the peer to send us their
+        // public key to ensure an adversary can't force us to hold many pending
+        // connections open.
         let incoming = match IncomingConnection::verify(&context, stream_cfg, sink, stream)
             .instrument(debug_span!("verify"))
             .await

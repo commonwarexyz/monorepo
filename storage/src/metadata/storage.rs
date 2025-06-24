@@ -135,8 +135,8 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
 
         // Extract data
         //
-        // If the checksum is correct, we assume data is correctly packed and we don't perform
-        // length checks on the cursor.
+        // If the checksum is correct, we assume data is correctly packed and we don't
+        // perform length checks on the cursor.
         let mut data = BTreeMap::new();
         let mut cursor = u128::SIZE;
         while cursor < checksum_index {
@@ -167,8 +167,8 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         self.data.get(key)
     }
 
-    /// Clear all values from `Metadata`. The new state will not be persisted until `sync` is
-    /// called.
+    /// Clear all values from `Metadata`. The new state will not be persisted
+    /// until `sync` is called.
     pub fn clear(&mut self) {
         self.data.clear();
         self.keys.set(0);
@@ -209,12 +209,14 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         let past_timestamp = &self.blobs[self.cursor].2;
         let mut next_timestamp = self.context.current().epoch().as_nanos();
         if next_timestamp <= *past_timestamp {
-            // While it is possible that extremely high-frequency updates to `Metadata` (more than
-            // one update per nanosecond) could cause an eventual overflow of the timestamp, this
-            // is not treated as a serious concern (as any call to `sync` will take longer than this).
+            // While it is possible that extremely high-frequency updates to `Metadata`
+            // (more than one update per nanosecond) could cause an eventual
+            // overflow of the timestamp, this is not treated as a serious
+            // concern (as any call to `sync` will take longer than this).
             //
-            // The nice benefit of this is that we also can provide the caller with some timestamp
-            // of the last update, which can be useful for a variety of things.
+            // The nice benefit of this is that we also can provide the caller with some
+            // timestamp of the last update, which can be useful for a variety
+            // of things.
             trace!(
                 past = *past_timestamp,
                 next = next_timestamp,

@@ -14,16 +14,17 @@ type PooledFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 ///
 /// Futures can be added to the pool, and removed from the pool as they resolve.
 ///
-/// **Note:** This pool is not thread-safe and should not be used across threads without external
-/// synchronization.
+/// **Note:** This pool is not thread-safe and should not be used across threads
+/// without external synchronization.
 pub struct Pool<T> {
     pool: FuturesUnordered<PooledFuture<T>>,
 }
 
 impl<T: Send> Default for Pool<T> {
     fn default() -> Self {
-        // Insert a dummy future (that never resolves) to prevent the stream from being empty.
-        // Else, the `select_next_some()` function returns `None` instantly.
+        // Insert a dummy future (that never resolves) to prevent the stream from being
+        // empty. Else, the `select_next_some()` function returns `None`
+        // instantly.
         let pool = FuturesUnordered::new();
         pool.push(Self::create_dummy_future());
         Self { pool }
@@ -44,12 +45,14 @@ impl<T: Send> Pool<T> {
 
     /// Adds a future to the pool.
     ///
-    /// The future must be `'static` and `Send` to ensure it can be safely stored and executed.
+    /// The future must be `'static` and `Send` to ensure it can be safely
+    /// stored and executed.
     pub fn push(&mut self, future: impl Future<Output = T> + Send + 'static) {
         self.pool.push(Box::pin(future));
     }
 
-    /// Returns a futures that resolves to the next future in the pool that resolves.
+    /// Returns a futures that resolves to the next future in the pool that
+    /// resolves.
     ///
     /// If the pool is empty, the future will never resolve.
     pub fn next_completed(&mut self) -> SelectNextSome<FuturesUnordered<PooledFuture<T>>> {

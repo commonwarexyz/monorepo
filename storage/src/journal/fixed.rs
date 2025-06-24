@@ -1,16 +1,17 @@
 //! An append-only log for storing fixed length items on disk.
 //!
-//! In addition to replay, stored items can be fetched directly by their `position` in the journal,
-//! where position is defined as the item's order of insertion starting from 0, unaffected by
-//! pruning.
+//! In addition to replay, stored items can be fetched directly by their
+//! `position` in the journal, where position is defined as the item's order of
+//! insertion starting from 0, unaffected by pruning.
 //!
-//! _See [crate::journal::variable] for a journal that supports variable length items._
+//! _See [crate::journal::variable] for a journal that supports variable length
+//! items._
 //!
 //! # Format
 //!
-//! Data stored in a `fixed::Journal` is persisted in one of many Blobs within a caller-provided
-//! `partition`. Each `Blob` contains a configurable maximum of `items_per_blob`, with each item
-//! followed by its checksum (CRC32):
+//! Data stored in a `fixed::Journal` is persisted in one of many Blobs within a
+//! caller-provided `partition`. Each `Blob` contains a configurable maximum of
+//! `items_per_blob`, with each item followed by its checksum (CRC32):
 //!
 //! ```text
 //! +--------+-----------+--------+-----------+--------+----------+-------------+
@@ -20,27 +21,30 @@
 //! n = config.items_per_blob, C = CRC32
 //! ```
 //!
-//! The most recent blob may not necessarily be full, in which case it will contain fewer than the
-//! maximum number of items.
+//! The most recent blob may not necessarily be full, in which case it will
+//! contain fewer than the maximum number of items.
 //!
-//! A fetched or replayed item's checksum is always computed and checked against the stored value
-//! before it is returned. If the checksums do not match, an error is returned instead.
+//! A fetched or replayed item's checksum is always computed and checked against
+//! the stored value before it is returned. If the checksums do not match, an
+//! error is returned instead.
 //!
 //! # Open Blobs
 //!
-//! All `Blobs` in a given `partition` are kept open during the lifetime of `Journal`. You can limit
-//! the number of open blobs by using a higher number of `items_per_blob` or pruning old items.
+//! All `Blobs` in a given `partition` are kept open during the lifetime of
+//! `Journal`. You can limit the number of open blobs by using a higher number
+//! of `items_per_blob` or pruning old items.
 //!
 //! # Sync
 //!
-//! Data written to `Journal` may not be immediately persisted to `Storage`. It is up to the caller
-//! to determine when to force pending data to be written to `Storage` using the `sync` method. When
-//! calling `close`, all pending data is automatically synced and any open blobs are closed.
+//! Data written to `Journal` may not be immediately persisted to `Storage`. It
+//! is up to the caller to determine when to force pending data to be written to
+//! `Storage` using the `sync` method. When calling `close`, all pending data is
+//! automatically synced and any open blobs are closed.
 //!
 //! # Pruning
 //!
-//! The `prune` method allows the `Journal` to prune blobs consisting entirely of items prior to a
-//! given point in history.
+//! The `prune` method allows the `Journal` to prune blobs consisting entirely
+//! of items prior to a given point in history.
 //!
 //! # Replay
 //!
@@ -65,7 +69,8 @@ use tracing::{debug, trace, warn};
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
 pub struct Config {
-    /// The `commonware-runtime::Storage` partition to use for storing journal blobs.
+    /// The `commonware-runtime::Storage` partition to use for storing journal
+    /// blobs.
     pub partition: String,
 
     /// The maximum number of journal items to store in each blob.
@@ -103,14 +108,16 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
 
     /// Initialize a new `Journal` instance.
     ///
-    /// All backing blobs are opened but not read during initialization. The `replay` method can be
-    /// used to iterate over all items in the `Journal`.
+    /// All backing blobs are opened but not read during initialization. The
+    /// `replay` method can be used to iterate over all items in the
+    /// `Journal`.
     ///
     /// # Repair
     ///
     /// Like [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
     /// and [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
-    /// the first invalid data read will be considered the new end of the journal (and the underlying [Blob] will be truncated to the last
+    /// the first invalid data read will be considered the new end of the
+    /// journal (and the underlying [Blob] will be truncated to the last
     /// valid item).
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
         // Iterate over blobs in partition
@@ -134,7 +141,8 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             blobs.insert(index, blob);
         }
         if !blobs.is_empty() {
-            // Check that there are no gaps in the blob numbering, which would indicate missing data.
+            // Check that there are no gaps in the blob numbering, which would indicate
+            // missing data.
             let mut it = blobs.keys();
             let mut previous_index = *it.next().unwrap();
             for index in it {
@@ -160,8 +168,8 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         context.register("pruned", "Number of blobs pruned", pruned.clone());
         tracked.set(blobs.len() as i64);
 
-        // Truncate the last blob if it's not the expected length, which might happen from unclean
-        // shutdown.
+        // Truncate the last blob if it's not the expected length, which might happen
+        // from unclean shutdown.
         let mut truncated = false;
         let newest_blob_index = *blobs.keys().last().unwrap();
         let newest_blob = blobs.get_mut(&newest_blob_index).unwrap();
@@ -177,8 +185,9 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             truncated = true;
         }
 
-        // Truncate any records with failing checksums. This can happen if the file system allocated
-        // extra space for a blob but there was a crash before any data was written to that space.
+        // Truncate any records with failing checksums. This can happen if the file
+        // system allocated extra space for a blob but there was a crash before
+        // any data was written to that space.
         while size > 0 {
             let offset = size - Self::CHUNK_SIZE_U64;
             let read = newest_blob
@@ -239,8 +248,9 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         newest_blob.sync().await.map_err(Error::Runtime)
     }
 
-    /// Return the total number of items in the journal, irrespective of pruning. The next value
-    /// appended to the journal will be at this position.
+    /// Return the total number of items in the journal, irrespective of
+    /// pruning. The next value appended to the journal will be at this
+    /// position.
     pub async fn size(&self) -> Result<u64, Error> {
         let (newest_blob_index, blob) = self.newest_blob();
         let size = blob.size().await;
@@ -249,8 +259,8 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         Ok(items_in_blob + self.cfg.items_per_blob * newest_blob_index)
     }
 
-    /// Append a new item to the journal. Return the item's position in the journal, or error if the
-    /// operation fails.
+    /// Append a new item to the journal. Return the item's position in the
+    /// journal, or error if the operation fails.
     pub async fn append(&mut self, item: A) -> Result<u64, Error> {
         // Get the newest blob and its index
         let newest_blob_index = *self.blobs.keys().last().expect("no blobs found");
@@ -277,8 +287,8 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
 
         // If the blob is now full, create a new one
         if size == self.cfg.items_per_blob * Self::CHUNK_SIZE_U64 {
-            // Newest blob is now full so we need to create a new empty one to fulfill the invariant
-            // that the newest blob always has room for a new element.
+            // Newest blob is now full so we need to create a new empty one to fulfill the
+            // invariant that the newest blob always has room for a new element.
             let next_blob_index = newest_blob_index + 1;
             // Always sync the previous blob before creating a new one
             newest_blob.sync().await?;
@@ -337,9 +347,11 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         Ok(())
     }
 
-    /// Return the position of the oldest item in the journal that remains readable.
+    /// Return the position of the oldest item in the journal that remains
+    /// readable.
     ///
-    /// Note that this value could be older than the `min_item_pos` last passed to prune.
+    /// Note that this value could be older than the `min_item_pos` last passed
+    /// to prune.
     pub async fn oldest_retained_pos(&self) -> Result<Option<u64>, Error> {
         let (oldest_blob_index, blob) = self.oldest_blob();
         if blob.size().await == 0 {
@@ -372,7 +384,8 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         Self::verify_integrity(read.as_ref())
     }
 
-    /// Verify the integrity of the Array + checksum in `buf`, returning the array if it is valid.
+    /// Verify the integrity of the Array + checksum in `buf`, returning the
+    /// array if it is valid.
     fn verify_integrity(buf: &[u8]) -> Result<A, Error> {
         let stored_checksum = u32::from_be_bytes(buf[A::SIZE..].try_into().unwrap());
         let checksum = crc32fast::hash(&buf[..A::SIZE]);
@@ -382,7 +395,8 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         Ok(A::decode(&buf[..A::SIZE]).unwrap())
     }
 
-    /// Returns an ordered stream of all items in the journal with position >= `start_pos`.
+    /// Returns an ordered stream of all items in the journal with position >=
+    /// `start_pos`.
     ///
     /// # Integrity
     ///
@@ -396,9 +410,9 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         let start_blob = start_pos / self.cfg.items_per_blob;
         let blobs = self.blobs.range(start_blob..).collect::<Vec<_>>();
 
-        // We gather the sizes outside the closure since flat_map doesn't allow async. We could
-        // instead gather a Reader per blob here, but that would result in a buffer-per-blob being
-        // allocated up front.
+        // We gather the sizes outside the closure since flat_map doesn't allow async.
+        // We could instead gather a Reader per blob here, but that would result
+        // in a buffer-per-blob being allocated up front.
         let mut sizes = Vec::with_capacity(blobs.len());
         for b in blobs.iter() {
             sizes.push(b.1.size().await);
@@ -413,11 +427,11 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         let items_per_blob = self.cfg.items_per_blob;
         let start_offset = (start_pos % items_per_blob) * Self::CHUNK_SIZE_U64;
 
-        // Replay all blobs in order and stream items as they are read (to avoid occupying too much
-        // memory with buffered data).
+        // Replay all blobs in order and stream items as they are read (to avoid
+        // occupying too much memory with buffered data).
         let stream = stream::iter(blob_plus).flat_map(move |(i, blob_index, blob, size)| {
-            // Create a new reader and buffer for each blob. Preallocating the buffer here to avoid
-            // a per-iteration allocation improves performance by ~20%.
+            // Create a new reader and buffer for each blob. Preallocating the buffer here
+            // to avoid a per-iteration allocation improves performance by ~20%.
             let mut reader = Read::new(blob, size, buffer);
             let buf = vec![0u8; Self::CHUNK_SIZE];
             let initial_offset = if i == 0 {
@@ -456,7 +470,8 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         Ok(stream)
     }
 
-    /// Return the blob containing the most recently appended items and its index.
+    /// Return the blob containing the most recently appended items and its
+    /// index.
     fn newest_blob(&self) -> (&u64, &Write<E::Blob>) {
         self.blobs.last_key_value().expect("no blobs found")
     }
@@ -466,13 +481,15 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         self.blobs.first_key_value().expect("no blobs found")
     }
 
-    /// Allow the journal to prune items older than `min_item_pos`. The journal may not prune all
-    /// such items in order to preserve blob boundaries, but the amount of such items will always be
-    /// less than the configured number of items per blob. The result will contain the actual
-    /// pruning position.
+    /// Allow the journal to prune items older than `min_item_pos`. The journal
+    /// may not prune all such items in order to preserve blob boundaries,
+    /// but the amount of such items will always be less than the configured
+    /// number of items per blob. The result will contain the actual pruning
+    /// position.
     ///
-    /// Note that this operation may NOT be atomic, however it's guaranteed not to leave gaps in the
-    /// event of failure as items are always pruned in order from oldest to newest.
+    /// Note that this operation may NOT be atomic, however it's guaranteed not
+    /// to leave gaps in the event of failure as items are always pruned in
+    /// order from oldest to newest.
     pub async fn prune(&mut self, min_item_pos: u64) -> Result<u64, Error> {
         let (oldest_blob_index, _) = self.oldest_blob();
         let mut new_oldest_blob = min_item_pos / self.cfg.items_per_blob;
@@ -669,8 +686,8 @@ mod tests {
             assert_eq!(*journal.newest_blob().0, 5);
             assert!(buffer.contains("tracked 1"));
             assert!(buffer.contains("pruned_total 5"));
-            // Since the size of the journal is currently a multiple of items_per_blob, the newest blob
-            // will be empty, and there will be no retained items.
+            // Since the size of the journal is currently a multiple of items_per_blob, the
+            // newest blob will be empty, and there will be no retained items.
             assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
 
             {
@@ -778,7 +795,8 @@ mod tests {
             let err = journal.read(corrupted_item_pos).await.unwrap_err();
             assert!(matches!(err, Error::ChecksumMismatch(x, _) if x == bad_checksum));
 
-            // Replay all items, making sure the checksum mismatch error is handled correctly
+            // Replay all items, making sure the checksum mismatch error is handled
+            // correctly
             {
                 let stream = journal
                     .replay(1024, 0)
@@ -808,8 +826,8 @@ mod tests {
             }
             journal.close().await.expect("Failed to close journal");
 
-            // Manually truncate one blob to force a partial-read error and make sure it's handled
-            // as expected.
+            // Manually truncate one blob to force a partial-read error and make sure it's
+            // handled as expected.
             let (blob, _) = context
                 .open(&cfg.partition, &40u64.to_be_bytes())
                 .await
@@ -873,8 +891,8 @@ mod tests {
     #[test_traced]
     fn test_fixed_journal_partial_replay() {
         const ITEMS_PER_BLOB: u64 = 7;
-        // 53 % 7 = 4, which will trigger a non-trivial seek in the starting blob to reach the
-        // starting position.
+        // 53 % 7 = 4, which will trigger a non-trivial seek in the starting blob to
+        // reach the starting position.
         const START_POS: u64 = 53;
 
         // Initialize the deterministic context
@@ -991,8 +1009,9 @@ mod tests {
             assert!(buffer.contains("tracked 2"));
             journal.close().await.expect("Failed to close journal");
 
-            // Delete the last blob to simulate a sync() that wrote the last blob at the point it
-            // was entirely full, but a crash happened before the next empty blob could be created.
+            // Delete the last blob to simulate a sync() that wrote the last blob at the
+            // point it was entirely full, but a crash happened before the next
+            // empty blob could be created.
             context
                 .remove(&cfg.partition, Some(&1u64.to_be_bytes()))
                 .await
@@ -1045,8 +1064,8 @@ mod tests {
                 .await
                 .expect("Failed to re-initialize journal");
 
-            // Since there was only a single item appended which we then corrupted, recovery should
-            // leave us in the state of an empty journal.
+            // Since there was only a single item appended which we then corrupted, recovery
+            // should leave us in the state of an empty journal.
             assert_eq!(journal.size().await.unwrap(), 0);
             assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
             // Make sure journal still works for appending.
@@ -1082,9 +1101,9 @@ mod tests {
             assert_eq!(journal.size().await.unwrap(), 1);
             journal.close().await.expect("Failed to close journal");
 
-            // Manually extend the blob by an amount at least some multiple of the chunk size to
-            // simulate a failure where the file was extended, but no bytes were written due to
-            // failure.
+            // Manually extend the blob by an amount at least some multiple of the chunk
+            // size to simulate a failure where the file was extended, but no
+            // bytes were written due to failure.
             let (blob, size) = context
                 .open(&cfg.partition, &0u64.to_be_bytes())
                 .await

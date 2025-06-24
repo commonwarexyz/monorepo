@@ -59,7 +59,8 @@ async fn read_concurrent_indices(a: &ArchiveType, indices: &[u64]) {
 }
 
 fn bench_get(c: &mut Criterion) {
-    // Create a config we can use across all benchmarks (with a fixed `storage_directory`).
+    // Create a config we can use across all benchmarks (with a fixed
+    // `storage_directory`).
     let cfg = Config::default();
     for compression in [None, Some(3)] {
         // Create a shared on-disk archive once so later setup is fast.

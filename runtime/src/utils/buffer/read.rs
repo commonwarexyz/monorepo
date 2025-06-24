@@ -48,7 +48,8 @@ pub struct Read<B: Blob> {
 }
 
 impl<B: Blob> Read<B> {
-    /// Creates a new `Read` that reads from the given blob with the specified buffer size.
+    /// Creates a new `Read` that reads from the given blob with the specified
+    /// buffer size.
     ///
     /// # Panics
     ///
@@ -99,8 +100,9 @@ impl<B: Blob> Read<B> {
         // Calculate how much to read (minimum of buffer size and remaining bytes)
         let bytes_to_read = std::cmp::min(self.buffer_size as u64, blob_remaining) as usize;
 
-        // Read the data - we only need a single read operation since we know exactly how much data is available
-        // Note that the last refill may cause `self.buffer` to have length < `self.buffer_size`
+        // Read the data - we only need a single read operation since we know exactly
+        // how much data is available Note that the last refill may cause
+        // `self.buffer` to have length < `self.buffer_size`
         // because `bytes_to_read` < `self.buffer_size`.
         let mut buffer = std::mem::take(&mut self.buffer);
         buffer.truncate(bytes_to_read);

@@ -32,10 +32,12 @@ enum SendError<S: Sender> {
 ///
 /// Requests are called fetches. Fetches may be in one of two states:
 /// - Active: Sent to a peer and is waiting for a response.
-/// - Pending: Not successfully sent to a peer. Waiting to be retried by timeout.
+/// - Pending: Not successfully sent to a peer. Waiting to be retried by
+///   timeout.
 ///
-/// Both types of requests will be retried after a timeout if not resolved (i.e. a response or a
-/// cancellation). Upon retry, requests may either be placed in active or pending state again.
+/// Both types of requests will be retried after a timeout if not resolved (i.e.
+/// a response or a cancellation). Upon retry, requests may either be placed in
+/// active or pending state again.
 pub struct Fetcher<
     E: Clock + GClock + Rng + Metrics,
     P: PublicKey,
@@ -44,14 +46,17 @@ pub struct Fetcher<
 > {
     context: E,
 
-    /// Helps find peers to fetch from and tracks which peers are assigned to which request ids.
+    /// Helps find peers to fetch from and tracks which peers are assigned to
+    /// which request ids.
     requester: Requester<E, P>,
 
-    /// Manages active requests. If a fetch is sent to a peer, it is added to this map.
+    /// Manages active requests. If a fetch is sent to a peer, it is added to
+    /// this map.
     active: BiHashMap<ID, Key>,
 
-    /// Manages pending requests. If fetches fail to make a request to a peer, they are instead
-    /// added to this map and are retried after the deadline.
+    /// Manages pending requests. If fetches fail to make a request to a peer,
+    /// they are instead added to this map and are retried after the
+    /// deadline.
     pending: PrioritySet<Key, SystemTime>,
 
     /// How long fetches remain in the pending queue before being retried
@@ -157,7 +162,8 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Array, NetS: Sender<P
 
         // Do not remove the requester entry.
         // It is useful for measuring performance if the peer ever responds.
-        // If the peer never responds, the requester entry will be removed by timeout.
+        // If the peer never responds, the requester entry will be removed by
+        // timeout.
     }
 
     /// Adds a key to the pending queue.
@@ -208,7 +214,8 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Array, NetS: Sender<P
     /// Returns the key that was fetched if the response was valid.
     /// Returns None if the response was invalid or not needed.
     pub fn pop_by_id(&mut self, id: ID, peer: &P, has_response: bool) -> Option<Key> {
-        // Pop the request from requester if the peer was assigned to this id, otherwise return none
+        // Pop the request from requester if the peer was assigned to this id, otherwise
+        // return none
         let request = self.requester.handle(peer, id)?;
 
         // Update the peer's performance, treating a lack of response as a timeout

@@ -1,11 +1,12 @@
-//! An authenticated database (ADB) that provides succinct proofs of _any_ value ever associated
-//! with a key. Its implementation is based on an [Mmr] over a log of state-change operations backed
-//! by a [Journal].
+//! An authenticated database (ADB) that provides succinct proofs of _any_ value
+//! ever associated with a key. Its implementation is based on an [Mmr] over a
+//! log of state-change operations backed by a [Journal].
 //!
-//! In the [Any] db, it is not possible to prove whether the value of a key is the currently active
-//! one, only that it was associated with the key at some point in the past. This type of
-//! authenticated database is most useful for applications involving keys that are given values once
-//! and cannot be updated after.
+//! In the [Any] db, it is not possible to prove whether the value of a key is
+//! the currently active one, only that it was associated with the key at some
+//! point in the past. This type of authenticated database is most useful for
+//! applications involving keys that are given values once and cannot be updated
+//! after.
 
 use crate::{
     adb::{operation::Operation, Error},
@@ -33,8 +34,8 @@ use tracing::{debug, warn};
 /// needed if the caller is providing the optional bitmap.
 const UNUSED_N: usize = 0;
 
-/// The size of the read buffer to use for replaying the operations log when rebuilding the
-/// snapshot.
+/// The size of the read buffer to use for replaying the operations log when
+/// rebuilding the snapshot.
 const SNAPSHOT_READ_BUFFER_SIZE: usize = 1 << 16;
 
 /// Configuration for an `Any` authenticated db.
@@ -52,7 +53,8 @@ pub struct Config<T: Translator> {
     /// The name of the [RStorage] partition used for the MMR's metadata.
     pub mmr_metadata_partition: String,
 
-    /// The name of the [RStorage] partition used to persist the (pruned) log of operations.
+    /// The name of the [RStorage] partition used to persist the (pruned) log of
+    /// operations.
     pub log_journal_partition: String,
 
     /// The items per blob configuration value used by the log journal.
@@ -68,34 +70,37 @@ pub struct Config<T: Translator> {
     pub pool: Option<ThreadPool>,
 }
 
-/// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
-/// value ever associated with a key.
+/// A key-value ADB based on an MMR over its log of operations, supporting
+/// authentication of any value ever associated with a key.
 pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translator> {
     /// An MMR over digests of the operations applied to the db.
     ///
     /// # Invariant
     ///
-    /// The number of leaves in this MMR always equals the number of operations in the unpruned
-    /// `log`.
+    /// The number of leaves in this MMR always equals the number of operations
+    /// in the unpruned `log`.
     pub(super) ops: Mmr<E, H>,
 
-    /// A (pruned) log of all operations applied to the db in order of occurrence. The position of
-    /// each operation in the log is called its _location_, which is a stable identifier. Pruning is
-    /// indicated by a non-zero value for `pruned_loc`, which provides the location of the first
-    /// operation in the log.
+    /// A (pruned) log of all operations applied to the db in order of
+    /// occurrence. The position of each operation in the log is called its
+    /// _location_, which is a stable identifier. Pruning is indicated by a
+    /// non-zero value for `pruned_loc`, which provides the location of the
+    /// first operation in the log.
     ///
     /// # Invariant
     ///
-    /// An operation's location is always equal to the number of the MMR leaf storing the digest of
-    /// the operation.
+    /// An operation's location is always equal to the number of the MMR leaf
+    /// storing the digest of the operation.
     pub(super) log: Journal<E, Operation<K, V>>,
 
-    /// A location before which all operations are "inactive" (that is, operations before this point
-    /// are over keys that have been updated by some operation at or after this point).
+    /// A location before which all operations are "inactive" (that is,
+    /// operations before this point are over keys that have been updated by
+    /// some operation at or after this point).
     pub(super) inactivity_floor_loc: u64,
 
-    /// A snapshot of all currently active operations in the form of a map from each key to the
-    /// location in the log containing its most recent update.
+    /// A snapshot of all currently active operations in the form of a map from
+    /// each key to the location in the log containing its most recent
+    /// update.
     ///
     /// # Invariant
     ///
@@ -105,7 +110,8 @@ pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T:
     /// The number of operations that are pending commit.
     pub(super) uncommitted_ops: u64,
 
-    /// Cryptographic hasher to re-use within mutable operations requiring digest computation.
+    /// Cryptographic hasher to re-use within mutable operations requiring
+    /// digest computation.
     pub(super) hasher: Standard<H>,
 }
 
@@ -113,7 +119,8 @@ pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T:
 pub enum UpdateResult {
     /// Tried to set a key to its current value.
     NoOp,
-    /// Key was not previously in the snapshot & its new loc is the wrapped value.
+    /// Key was not previously in the snapshot & its new loc is the wrapped
+    /// value.
     Inserted(u64),
     /// Key was previously in the snapshot & its (old, new) loc pair is wrapped.
     Updated(u64, u64),
@@ -122,8 +129,9 @@ pub enum UpdateResult {
 impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translator>
     Any<E, K, V, H, T>
 {
-    /// Returns any `Any` adb initialized from `cfg`. Any uncommitted log operations will be
-    /// discarded and the state of the db will be as of the last committed operation.
+    /// Returns any `Any` adb initialized from `cfg`. Any uncommitted log
+    /// operations will be discarded and the state of the db will be as of
+    /// the last committed operation.
     pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
         let mut snapshot: Index<T, u64> =
             Index::init(context.with_label("snapshot"), cfg.translator.clone());
@@ -166,9 +174,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         Ok(db)
     }
 
-    /// Initialize and return the mmr and log from the given config, correcting any inconsistencies
-    /// between them. Any uncommitted operations in the log will be rolled back and the state of the
-    /// db will be as of the last committed operation.
+    /// Initialize and return the mmr and log from the given config, correcting
+    /// any inconsistencies between them. Any uncommitted operations in the
+    /// log will be rolled back and the state of the db will be as of the
+    /// last committed operation.
     pub(super) async fn init_mmr_and_log(
         context: E,
         cfg: Config<T>,
@@ -241,13 +250,15 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         Ok((mmr, log))
     }
 
-    /// Builds the database's snapshot by replaying the log starting at `start_leaf_num`.
+    /// Builds the database's snapshot by replaying the log starting at
+    /// `start_leaf_num`.
     ///
-    /// If a bitmap is provided, then a bit is appended for each operation in the operation log,
-    /// with its value reflecting its activity status. The bitmap is expected to already have a
-    /// number of bits corresponding to the portion of the database below the inactivity floor, and
-    /// this method will panic otherwise. The caller is responsible for syncing any changes made to
-    /// the bitmap.
+    /// If a bitmap is provided, then a bit is appended for each operation in
+    /// the operation log, with its value reflecting its activity status.
+    /// The bitmap is expected to already have a number of bits
+    /// corresponding to the portion of the database below the inactivity floor,
+    /// and this method will panic otherwise. The caller is responsible for
+    /// syncing any changes made to the bitmap.
     pub(super) async fn build_snapshot_from_log<const N: usize>(
         start_leaf_num: u64,
         log: &Journal<E, Operation<K, V>>,
@@ -298,8 +309,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                         Operation::Commit(loc) => inactivity_floor_loc = loc,
                     }
                     if let Some(ref mut bitmap) = bitmap {
-                        // If we reach this point and a bit hasn't been added for the operation, then it's
-                        // an inactive operation and we need to tag it as such in the bitmap.
+                        // If we reach this point and a bit hasn't been added for the operation,
+                        // then it's an inactive operation and we need to
+                        // tag it as such in the bitmap.
                         if bitmap.bit_count() == i {
                             bitmap.append(false);
                         }
@@ -311,9 +323,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         Ok(inactivity_floor_loc)
     }
 
-    /// Update the location of `key` to `new_loc` in the snapshot and return its old location, or
-    /// insert it if the key isn't already present. If a `value` is provided, then it is used to see
-    /// if the key is already assigned that value, in which case there is no update and
+    /// Update the location of `key` to `new_loc` in the snapshot and return its
+    /// old location, or insert it if the key isn't already present. If a
+    /// `value` is provided, then it is used to see if the key is already
+    /// assigned that value, in which case there is no update and
     /// UpdateResult::NoOp is returned.
     async fn update_loc(
         snapshot: &mut Index<T, u64>,
@@ -322,8 +335,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         value: Option<&V>,
         new_loc: u64,
     ) -> Result<UpdateResult, Error> {
-        // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
-        // cursor to look for the key.
+        // If the translated key is not in the snapshot, insert the new location.
+        // Otherwise, get a cursor to look for the key.
         let Some(mut cursor) = snapshot.get_mut_or_insert(&key, new_loc) else {
             return Ok(UpdateResult::Inserted(new_loc));
         };
@@ -356,9 +369,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     ///
     /// # Warning
     ///
-    /// Panics if the location does not reference an update operation. This should never happen
-    /// unless the snapshot is buggy, or this method is being used to look up an operation
-    /// independent of the snapshot contents.
+    /// Panics if the location does not reference an update operation. This
+    /// should never happen unless the snapshot is buggy, or this method is
+    /// being used to look up an operation independent of the snapshot
+    /// contents.
     async fn get_update_op(log: &Journal<E, Operation<K, V>>, loc: u64) -> Result<(K, V), Error> {
         let Operation::Update(k, v) = log.read(loc).await? else {
             panic!("location does not reference update operation. loc={}", loc);
@@ -377,8 +391,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         Ok(self.get_with_loc(key).await?.map(|(v, _)| v))
     }
 
-    /// Get the value & location of the active operation for `key` in the db, or None if it has no
-    /// value.
+    /// Get the value & location of the active operation for `key` in the db, or
+    /// None if it has no value.
     pub(super) async fn get_with_loc(&self, key: &K) -> Result<Option<(V, u64)>, Error> {
         for &loc in self.snapshot.get(key) {
             let (k, v) = Self::get_update_op(&self.log, loc).await?;
@@ -390,8 +404,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         Ok(None)
     }
 
-    /// Get the number of operations that have been applied to this db, including those that are not
-    /// yet committed.
+    /// Get the number of operations that have been applied to this db,
+    /// including those that are not yet committed.
     pub fn op_count(&self) -> u64 {
         leaf_pos_to_num(self.ops.size()).unwrap()
     }
@@ -403,9 +417,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             .map(|pos| leaf_pos_to_num(pos).unwrap())
     }
 
-    /// Updates `key` to have value `value`. If the key already has this same value, then this is a
-    /// no-op. The operation is reflected in the snapshot, but will be subject to rollback until the
-    /// next successful `commit`.
+    /// Updates `key` to have value `value`. If the key already has this same
+    /// value, then this is a no-op. The operation is reflected in the
+    /// snapshot, but will be subject to rollback until the next successful
+    /// `commit`.
     pub async fn update(&mut self, key: K, value: V) -> Result<UpdateResult, Error> {
         let new_loc = self.op_count();
         let res = Any::<_, _, _, H, _>::update_loc(
@@ -431,9 +446,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         Ok(res)
     }
 
-    /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
-    /// The operation is reflected in the snapshot, but will be subject to rollback until the next
-    /// successful `commit`. Returns the location of the deleted value for the key (if any).
+    /// Delete `key` and its value from the db. Deleting a key that already has
+    /// no value is a no-op. The operation is reflected in the snapshot, but
+    /// will be subject to rollback until the next successful `commit`.
+    /// Returns the location of the deleted value for the key (if any).
     pub async fn delete(&mut self, key: K) -> Result<Option<u64>, Error> {
         let loc = self.op_count();
         let r = Self::delete_key(&mut self.snapshot, &self.log, &key, loc).await?;
@@ -444,8 +460,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         Ok(r)
     }
 
-    /// Delete `key` from the snapshot if it exists, returning the location that was previously
-    /// associated with it.
+    /// Delete `key` from the snapshot if it exists, returning the location that
+    /// was previously associated with it.
     async fn delete_key(
         snapshot: &mut Index<T, u64>,
         log: &Journal<E, Operation<K, V>>,
@@ -483,8 +499,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         self.ops.root(hasher)
     }
 
-    /// Update the operations MMR with the given operation, and append the operation to the log. The
-    /// `commit` method must be called to make any applied operation persistent & recoverable.
+    /// Update the operations MMR with the given operation, and append the
+    /// operation to the log. The `commit` method must be called to make any
+    /// applied operation persistent & recoverable.
     pub(super) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<u64, Error> {
         // Update the ops MMR.
         let digest = Self::op_digest(&mut self.hasher, &op);
@@ -496,8 +513,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     }
 
     /// Generate and return:
-    ///  1. a proof of all operations applied to the db in the range starting at (and including)
-    ///     location `start_loc`, and ending at the first of either:
+    ///  1. a proof of all operations applied to the db in the range starting at
+    ///     (and including) location `start_loc`, and ending at the first of
+    ///     either:
     ///     - the last operation performed, or
     ///     - the operation `max_ops` from the start.
     ///  2. the operations corresponding to the leaves in this range.
@@ -533,8 +551,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         Ok((proof, ops))
     }
 
-    /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
-    /// the log with the provided root.
+    /// Return true if the given sequence of `ops` were applied starting at
+    /// location `start_loc` in the log with the provided root.
     pub async fn verify_proof(
         hasher: &mut Standard<H>,
         proof: &Proof<H>,
@@ -557,26 +575,28 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             .map_err(Error::MmrError)
     }
 
-    /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
-    /// upon return from this function. Also raises the inactivity floor according to the schedule,
-    /// and prunes those operations below it. Batch operations will be parallelized if a thread pool
-    /// is provided.
+    /// Commit any pending operations to the db, ensuring they are persisted to
+    /// disk & recoverable upon return from this function. Also raises the
+    /// inactivity floor according to the schedule, and prunes those
+    /// operations below it. Batch operations will be parallelized if a thread
+    /// pool is provided.
     pub async fn commit(&mut self) -> Result<(), Error> {
-        // Raise the inactivity floor by the # of uncommitted operations, plus 1 to account for the
-        // commit op that will be appended.
+        // Raise the inactivity floor by the # of uncommitted operations, plus 1 to
+        // account for the commit op that will be appended.
         self.raise_inactivity_floor(self.uncommitted_ops + 1)
             .await?;
         self.uncommitted_ops = 0;
         self.sync().await?;
 
-        // TODO: Make the frequency with which we prune known inactive items configurable in case
-        // this turns out to be a significant part of commit overhead, or the user wants to ensure
-        // the log is backed up externally before discarding.
+        // TODO: Make the frequency with which we prune known inactive items
+        // configurable in case this turns out to be a significant part of
+        // commit overhead, or the user wants to ensure the log is backed up
+        // externally before discarding.
         self.prune_inactive().await
     }
 
-    /// Sync the db to disk ensuring the current state is persisted. Batch operations will be
-    /// parallelized if a thread pool is provided.
+    /// Sync the db to disk ensuring the current state is persisted. Batch
+    /// operations will be parallelized if a thread pool is provided.
     pub(super) async fn sync(&mut self) -> Result<(), Error> {
         try_join!(
             self.log.sync().map_err(Error::JournalError),
@@ -586,15 +606,16 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         Ok(())
     }
 
-    // Moves the given operation to the tip of the log if it is active, rendering its old location
-    // inactive. If the operation was not active, then this is a no-op. Returns the old location
-    // of the operation if it was active.
+    // Moves the given operation to the tip of the log if it is active, rendering
+    // its old location inactive. If the operation was not active, then this is
+    // a no-op. Returns the old location of the operation if it was active.
     pub(super) async fn move_op_if_active(
         &mut self,
         op: Operation<K, V>,
         old_loc: u64,
     ) -> Result<Option<u64>, Error> {
-        // If the translated key is not in the snapshot, get a cursor to look for the key.
+        // If the translated key is not in the snapshot, get a cursor to look for the
+        // key.
         let Some(key) = op.to_key() else {
             // `op` is a commit
             return Ok(None);
@@ -621,12 +642,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         Ok(None)
     }
 
-    /// Raise the inactivity floor by exactly `max_steps` steps, followed by applying a commit
-    /// operation. Each step either advances over an inactive operation, or re-applies an active
-    /// operation to the tip and then advances over it.
+    /// Raise the inactivity floor by exactly `max_steps` steps, followed by
+    /// applying a commit operation. Each step either advances over an
+    /// inactive operation, or re-applies an active operation to the tip and
+    /// then advances over it.
     ///
-    /// This method does not change the state of the db's snapshot, but it always changes the root
-    /// since it applies at least one operation.
+    /// This method does not change the state of the db's snapshot, but it
+    /// always changes the root since it applies at least one operation.
     pub(super) async fn raise_inactivity_floor(&mut self, max_steps: u64) -> Result<(), Error> {
         for _ in 0..max_steps {
             if self.inactivity_floor_loc == self.op_count() {
@@ -644,8 +666,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         Ok(())
     }
 
-    /// Prune any historical operations that are known to be inactive (those preceding the
-    /// inactivity floor). This does not affect the db's root or current snapshot.
+    /// Prune any historical operations that are known to be inactive (those
+    /// preceding the inactivity floor). This does not affect the db's root
+    /// or current snapshot.
     pub(super) async fn prune_inactive(&mut self) -> Result<(), Error> {
         let Some(oldest_retained_loc) = self.log.oldest_retained_pos().await? else {
             return Ok(());
@@ -657,14 +680,15 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         }
         debug!(pruned = pruned_ops, "pruning inactive ops");
 
-        // Prune the MMR, whose pruning boundary serves as the "source of truth" for proving.
+        // Prune the MMR, whose pruning boundary serves as the "source of truth" for
+        // proving.
         let prune_to_pos = leaf_num_to_pos(self.inactivity_floor_loc);
         self.ops
             .prune_to_pos(&mut self.hasher, prune_to_pos)
             .await?;
 
-        // Because the log's pruning boundary will be blob-size aligned, we cannot use it as a
-        // source of truth for the min provable element.
+        // Because the log's pruning boundary will be blob-size aligned, we cannot use
+        // it as a source of truth for the min provable element.
         self.log.prune(self.inactivity_floor_loc).await?;
 
         Ok(())
@@ -695,8 +719,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         Ok(())
     }
 
-    /// Simulate a failed commit that successfully writes the log to the commit point, but without
-    /// fully committing the MMR's cached elements to trigger MMR node recovery on reopening.
+    /// Simulate a failed commit that successfully writes the log to the commit
+    /// point, but without fully committing the MMR's cached elements to
+    /// trigger MMR node recovery on reopening.
     #[cfg(test)]
     pub async fn simulate_failed_commit_mmr(mut self, write_limit: usize) -> Result<(), Error> {
         self.apply_op(Operation::Commit(self.inactivity_floor_loc))
@@ -709,14 +734,16 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         Ok(())
     }
 
-    /// Simulate a failed commit that successfully writes the MMR to the commit point, but without
-    /// fully committing the log, requiring rollback of the MMR and log upon reopening.
+    /// Simulate a failed commit that successfully writes the MMR to the commit
+    /// point, but without fully committing the log, requiring rollback of
+    /// the MMR and log upon reopening.
     #[cfg(test)]
     pub async fn simulate_failed_commit_log(mut self) -> Result<(), Error> {
         self.apply_op(Operation::Commit(self.inactivity_floor_loc))
             .await?;
         self.ops.close(&mut self.hasher).await?;
-        // Rewind the operation log over the commit op to force rollback to the previous commit.
+        // Rewind the operation log over the commit op to force rollback to the previous
+        // commit.
         self.log.rewind(self.log.size().await? - 1).await?;
         self.log.close().await?;
 
@@ -780,7 +807,8 @@ mod test {
             assert!(matches!(db.prune_inactive().await, Ok(())));
             assert_eq!(db.root(&mut hasher), MemMmr::default().root(&mut hasher));
 
-            // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
+            // Make sure closing/reopening gets us back to the same state, even after adding
+            // an uncommitted op.
             let d1 = Sha256::fill(1u8);
             let d2 = Sha256::fill(2u8);
             let root = db.root(&mut hasher);
@@ -798,7 +826,8 @@ mod test {
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.root(&mut hasher), root);
 
-            // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
+            // Confirm the inactivity floor doesn't fall endlessly behind with multiple
+            // commits.
             for _ in 1..100 {
                 db.commit().await.unwrap();
                 assert_eq!(db.op_count() - 1, db.inactivity_floor_loc);
@@ -812,8 +841,8 @@ mod test {
     pub fn test_any_db_build_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Build a db with 2 keys and make sure updates and deletions of those keys work as
-            // expected.
+            // Build a db with 2 keys and make sure updates and deletions of those keys work
+            // as expected.
             let mut hasher = Standard::<Sha256>::new();
             let mut db = open_db(context.clone()).await;
 
@@ -931,8 +960,8 @@ mod test {
             assert_eq!(db.root(&mut hasher), root);
             assert_eq!(db.snapshot.keys(), 2);
 
-            // Commit will raise the inactivity floor, which won't affect state but will affect the
-            // root.
+            // Commit will raise the inactivity floor, which won't affect state but will
+            // affect the root.
             db.commit().await.unwrap();
 
             assert!(db.root(&mut hasher) != root);
@@ -951,8 +980,9 @@ mod test {
     #[test_traced("WARN")]
     pub fn test_any_db_build_and_authenticate() {
         let executor = deterministic::Runner::default();
-        // Build a db with 1000 keys, some of which we update and some of which we delete, and
-        // confirm that the end state of the db matches that of an identically updated hashmap.
+        // Build a db with 1000 keys, some of which we update and some of which we
+        // delete, and confirm that the end state of the db matches that of an
+        // identically updated hashmap.
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
             let mut hasher = Standard::<Sha256>::new();
@@ -999,7 +1029,8 @@ mod test {
             assert_eq!(db.oldest_retained_loc().unwrap(), 1478);
             assert_eq!(db.snapshot.keys(), 857);
 
-            // Close & reopen the db, making sure the re-opened db has exactly the same state.
+            // Close & reopen the db, making sure the re-opened db has exactly the same
+            // state.
             let root_digest = db.root(&mut hasher);
             db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
@@ -1008,16 +1039,18 @@ mod test {
             assert_eq!(db.inactivity_floor_loc, 1478);
             assert_eq!(db.snapshot.keys(), 857);
 
-            // Raise the inactivity floor to the point where all inactive operations can be pruned.
+            // Raise the inactivity floor to the point where all inactive operations can be
+            // pruned.
             db.raise_inactivity_floor(3000).await.unwrap();
             db.prune_inactive().await.unwrap();
             assert_eq!(db.inactivity_floor_loc, 4478);
-            // Inactivity floor should be 858 operations from tip since 858 operations are active
-            // (counting the floor op itself).
+            // Inactivity floor should be 858 operations from tip since 858 operations are
+            // active (counting the floor op itself).
             assert_eq!(db.op_count(), 4478 + 858);
             assert_eq!(db.snapshot.keys(), 857);
 
-            // Confirm the db's state matches that of the separate map we computed independently.
+            // Confirm the db's state matches that of the separate map we computed
+            // independently.
             for i in 0u64..1000 {
                 let k = hash(&i.to_be_bytes());
                 if let Some(map_value) = map.get(&k) {
@@ -1036,7 +1069,8 @@ mod test {
             let end_loc = db.op_count();
             let start_pos = db.ops.pruned_to_pos();
             let start_loc = leaf_pos_to_num(start_pos).unwrap();
-            // Raise the inactivity floor and make sure historical inactive operations are still provable.
+            // Raise the inactivity floor and make sure historical inactive operations are
+            // still provable.
             db.raise_inactivity_floor(100).await.unwrap();
             db.sync().await.unwrap();
             let root = db.root(&mut hasher);
@@ -1085,8 +1119,8 @@ mod test {
                 db.update(k, v).await.unwrap();
             }
 
-            // We partially write 101 of the cached MMR nodes to simulate a failure that leaves the
-            // MMR in a state with an orphaned leaf.
+            // We partially write 101 of the cached MMR nodes to simulate a failure that
+            // leaves the MMR in a state with an orphaned leaf.
             db.simulate_failed_commit_mmr(101).await.unwrap();
 
             // Journaled MMR recovery should read the orphaned leaf & its parents, then log
@@ -1096,7 +1130,8 @@ mod test {
             let root = db.root(&mut hasher);
             assert_ne!(root, halfway_root);
 
-            // Write some additional nodes, simulate failed log commit, and test we recover to the previous commit point.
+            // Write some additional nodes, simulate failed log commit, and test we recover
+            // to the previous commit point.
             for i in 0u64..100 {
                 let k = hash(&i.to_be_bytes());
                 let v = hash(&((i + 2) * 10000).to_be_bytes());
@@ -1141,8 +1176,8 @@ mod test {
         });
     }
 
-    // Test that replaying multiple updates of the same key on startup doesn't leave behind old data
-    // in the snapshot.
+    // Test that replaying multiple updates of the same key on startup doesn't leave
+    // behind old data in the snapshot.
     #[test_traced("WARN")]
     pub fn test_any_db_log_replay() {
         let executor = deterministic::Runner::default();
@@ -1161,7 +1196,8 @@ mod test {
             let root = db.root(&mut hasher);
             db.close().await.unwrap();
 
-            // Simulate a failed commit and test that the log replay doesn't leave behind old data.
+            // Simulate a failed commit and test that the log replay doesn't leave behind
+            // old data.
             let db = open_db(context.clone()).await;
             let iter = db.snapshot.get(&k);
             assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
@@ -1198,7 +1234,8 @@ mod test {
             db.commit().await.unwrap();
             assert!(db.get(&k).await.unwrap().is_none());
 
-            // Close & reopen the db, making sure the re-opened db has exactly the same state.
+            // Close & reopen the db, making sure the re-opened db has exactly the same
+            // state.
             let root_digest = db.root(&mut hasher);
             db.close().await.unwrap();
             let db = open_db(context.clone()).await;
@@ -1209,8 +1246,9 @@ mod test {
         });
     }
 
-    /// This test builds a random database, and makes sure that its state can be replayed by
-    /// `build_snapshot_from_log` with a bitmap to correctly capture the active operations.
+    /// This test builds a random database, and makes sure that its state can be
+    /// replayed by `build_snapshot_from_log` with a bitmap to correctly
+    /// capture the active operations.
     #[test_traced("WARN")]
     pub fn test_any_db_build_snapshot_with_bitmap() {
         // Number of elements to initially insert into the db.
@@ -1233,8 +1271,8 @@ mod test {
                 db.update(k, v).await.unwrap();
             }
 
-            // Randomly update / delete them. We use a delete frequency that is 1/7th of the update
-            // frequency.
+            // Randomly update / delete them. We use a delete frequency that is 1/7th of the
+            // update frequency.
             for _ in 0u64..ELEMENTS * 10 {
                 let rand_key = hash(&(rng.next_u64() % ELEMENTS).to_be_bytes());
                 if rng.next_u32() % 7 == 0 {
@@ -1272,7 +1310,8 @@ mod test {
             .unwrap();
             let start_leaf_num = leaf_pos_to_num(mmr.pruned_to_pos()).unwrap();
 
-            // Replay log to populate the bitmap. Use a TwoCap instead of EightCap here so we exercise some collisions.
+            // Replay log to populate the bitmap. Use a TwoCap instead of EightCap here so
+            // we exercise some collisions.
             let mut snapshot: Index<TwoCap, u64> =
                 Index::init(context.with_label("snapshot"), TwoCap);
             let inactivity_floor_loc = Any::<_, _, _, Sha256, TwoCap>::build_snapshot_from_log::<

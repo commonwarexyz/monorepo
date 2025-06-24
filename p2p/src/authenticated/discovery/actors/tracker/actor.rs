@@ -33,8 +33,8 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
     /// Whether to allow private IPs.
     allow_private_ips: bool,
 
-    /// The time bound for synchrony. Messages with timestamps greater than this far into the
-    /// future will be considered malformed.
+    /// The time bound for synchrony. Messages with timestamps greater than this
+    /// far into the future will be considered malformed.
     synchrony_bound: Duration,
 
     /// The maximum number of peers in a set.
@@ -110,16 +110,18 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
     /// Handle an incoming list of peer information.
     ///
-    /// Returns an error if the list itself or any entries can be considered malformed.
+    /// Returns an error if the list itself or any entries can be considered
+    /// malformed.
     fn validate(&mut self, infos: &Vec<types::PeerInfo<C::PublicKey>>) -> Result<(), Error> {
         // Ensure there aren't too many peers sent
         if infos.len() > self.peer_gossip_max_count {
             return Err(Error::TooManyPeers(infos.len()));
         }
 
-        // We allow peers to be sent in any order when responding to a bit vector (allows
-        // for selecting a random subset of peers when there are too many) and allow
-        // for duplicates (no need to create an additional set to check this)
+        // We allow peers to be sent in any order when responding to a bit vector
+        // (allows for selecting a random subset of peers when there are too
+        // many) and allow for duplicates (no need to create an additional set
+        // to check this)
         let my_public_key = self.crypto.public_key();
         for info in infos {
             // Check if IP is allowed
@@ -244,8 +246,9 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                     // Block the peer
                     self.directory.block(&public_key);
 
-                    // We don't have to kill the peer now. It will be sent a `Kill` message the next
-                    // time it sends the `Connect` or `Construct` message to the tracker.
+                    // We don't have to kill the peer now. It will be sent a
+                    // `Kill` message the next time it sends
+                    // the `Connect` or `Construct` message to the tracker.
                 }
                 Message::Release { metadata } => {
                     // Release the peer
@@ -267,7 +270,8 @@ mod tests {
             types,
         },
         Blocker,
-        // Blocker is implicitly available via oracle.block() due to Oracle implementing crate::Blocker
+        // Blocker is implicitly available via oracle.block() due to Oracle implementing
+        // crate::Blocker
     };
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
@@ -342,8 +346,8 @@ mod tests {
         }
     }
 
-    // Mock a connection to a peer by reserving it as if it had dialed us and the `peer` actor had
-    // sent an initialization.
+    // Mock a connection to a peer by reserving it as if it had dialed us and the
+    // `peer` actor had sent an initialization.
     async fn connect_to_peer(
         mailbox: &mut Mailbox<Message<Context, PublicKey>>,
         peer: &PublicKey,
@@ -1237,7 +1241,8 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             // Peer1 was only in set 0, which is now evicted.
-            // Construct for peer1 should now result in Kill because it's not in any active tracked set.
+            // Construct for peer1 should now result in Kill because it's not in any active
+            // tracked set.
             mailbox
                 .construct(peer1_pk.clone(), peer_mailbox1.clone())
                 .await;

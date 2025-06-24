@@ -1,14 +1,15 @@
 //! An append-only log for storing arbitrary variable length items.
 //!
-//! `variable::Journal` is an append-only log for storing arbitrary variable length data on disk. In
-//! addition to replay, stored items can be directly retrieved given their section number and offset
-//! within the section.
+//! `variable::Journal` is an append-only log for storing arbitrary variable
+//! length data on disk. In addition to replay, stored items can be directly
+//! retrieved given their section number and offset within the section.
 //!
 //! # Format
 //!
-//! Data stored in `Journal` is persisted in one of many Blobs within a caller-provided `partition`.
-//! The particular `Blob` in which data is stored is identified by a `section` number (`u64`).
-//! Within a `section`, data is appended as an `item` with the following format:
+//! Data stored in `Journal` is persisted in one of many Blobs within a
+//! caller-provided `partition`. The particular `Blob` in which data is stored
+//! is identified by a `section` number (`u64`). Within a `section`, data is
+//! appended as an `item` with the following format:
 //!
 //! ```text
 //! +---+---+---+---+---+---+---+---+---+---+---+
@@ -20,59 +21,64 @@
 //! C = CRC32(Size | Data)
 //! ```
 //!
-//! _To ensure data returned by `Journal` is correct, a checksum (CRC32) is stored at the end of
-//! each item. If the checksum of the read data does not match the stored checksum, an error is
-//! returned. This checksum is only verified when data is accessed and not at startup (which would
+//! _To ensure data returned by `Journal` is correct, a checksum (CRC32) is
+//! stored at the end of each item. If the checksum of the read data does not
+//! match the stored checksum, an error is returned. This checksum is only
+//! verified when data is accessed and not at startup (which would
 //! require reading all data in `Journal`)._
 //!
 //! # Open Blobs
 //!
-//! `Journal` uses 1 `commonware-storage::Blob` per `section` to store data. All `Blobs` in a given
-//! `partition` are kept open during the lifetime of `Journal`. If the caller wishes to bound the
-//! number of open `Blobs`, they can group data into fewer `sections` and/or prune unused
-//! `sections`.
+//! `Journal` uses 1 `commonware-storage::Blob` per `section` to store data. All
+//! `Blobs` in a given `partition` are kept open during the lifetime of
+//! `Journal`. If the caller wishes to bound the number of open `Blobs`, they
+//! can group data into fewer `sections` and/or prune unused `sections`.
 //!
 //! # Offset Alignment
 //!
-//! In practice, `Journal` users won't store `u64::MAX` bytes of data in a given `section` (the max
-//! `Offset` provided by `Blob`). To reduce the memory usage for tracking offsets within `Journal`,
-//! offsets are thus `u32` (4 bytes) and aligned to 16 bytes. This means that the maximum size of
-//! any `section` is `u32::MAX * 17 = ~70GB` bytes (the last offset item can store up to `u32::MAX`
-//! bytes). If more data is written to a `section` past this max, an `OffsetOverflow` error is
-//! returned.
+//! In practice, `Journal` users won't store `u64::MAX` bytes of data in a given
+//! `section` (the max `Offset` provided by `Blob`). To reduce the memory usage
+//! for tracking offsets within `Journal`, offsets are thus `u32` (4 bytes) and
+//! aligned to 16 bytes. This means that the maximum size of any `section` is
+//! `u32::MAX * 17 = ~70GB` bytes (the last offset item can store up to
+//! `u32::MAX` bytes). If more data is written to a `section` past this max, an
+//! `OffsetOverflow` error is returned.
 //!
 //! # Sync
 //!
-//! Data written to `Journal` may not be immediately persisted to `Storage`. It is up to the caller
-//! to determine when to force pending data to be written to `Storage` using the `sync` method. When
-//! calling `close`, all pending data is automatically synced and any open blobs are closed.
+//! Data written to `Journal` may not be immediately persisted to `Storage`. It
+//! is up to the caller to determine when to force pending data to be written to
+//! `Storage` using the `sync` method. When calling `close`, all pending data is
+//! automatically synced and any open blobs are closed.
 //!
 //! # Pruning
 //!
-//! All data appended to `Journal` must be assigned to some `section` (`u64`). This assignment
-//! allows the caller to prune data from `Journal` by specifying a minimum `section` number. This
-//! could be used, for example, by some blockchain application to prune old blocks.
+//! All data appended to `Journal` must be assigned to some `section` (`u64`).
+//! This assignment allows the caller to prune data from `Journal` by specifying
+//! a minimum `section` number. This could be used, for example, by some
+//! blockchain application to prune old blocks.
 //!
 //! # Replay
 //!
-//! During application initialization, it is very common to replay data from `Journal` to recover
-//! some in-memory state. `Journal` is heavily optimized for this pattern and provides a `replay`
-//! method to produce a stream of all items in the `Journal` in order of their `section` and
-//! `offset`.
+//! During application initialization, it is very common to replay data from
+//! `Journal` to recover some in-memory state. `Journal` is heavily optimized
+//! for this pattern and provides a `replay` method to produce a stream of all
+//! items in the `Journal` in order of their `section` and `offset`.
 //!
 //! # Exact Reads
 //!
-//! To allow for items to be fetched in a single disk operation, `Journal` allows callers to specify
-//! an `exact` parameter to the `get` method. This `exact` parameter must be cached by the caller
-//! (provided during `replay`) and usage of an incorrect `exact` value will result in undefined
-//! behavior.
+//! To allow for items to be fetched in a single disk operation, `Journal`
+//! allows callers to specify an `exact` parameter to the `get` method. This
+//! `exact` parameter must be cached by the caller (provided during `replay`)
+//! and usage of an incorrect `exact` value will result in undefined behavior.
 //!
 //! # Compression
 //!
-//! `Journal` supports optional compression using `zstd`. This can be enabled by setting the
-//! `compression` field in the `Config` struct to a valid `zstd` compression level. This setting can
-//! be changed between initializations of `Journal`, however, it must remain populated if any data
-//! was written with compression enabled.
+//! `Journal` supports optional compression using `zstd`. This can be enabled by
+//! setting the `compression` field in the `Config` struct to a valid `zstd`
+//! compression level. This setting can be changed between initializations of
+//! `Journal`, however, it must remain populated if any data was written with
+//! compression enabled.
 //!
 //! # Example
 //!
@@ -123,7 +129,8 @@ pub struct Config<C> {
     /// for storing journal blobs.
     pub partition: String,
 
-    /// Optional compression level (using `zstd`) to apply to data before storing.
+    /// Optional compression level (using `zstd`) to apply to data before
+    /// storing.
     pub compression: Option<u8>,
 
     /// The codec configuration to use for encoding and decoding items.
@@ -382,7 +389,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     ///
     /// Like [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
     /// and [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
-    /// the first invalid data read will be considered the new end of the journal (and the underlying [Blob] will be truncated to the last
+    /// the first invalid data read will be considered the new end of the
+    /// journal (and the underlying [Blob] will be truncated to the last
     /// valid item).
     pub async fn replay(
         &self,
@@ -405,8 +413,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             ));
         }
 
-        // Replay all blobs in order and stream items as they are read (to avoid occupying too much
-        // memory with buffered data)
+        // Replay all blobs in order and stream items as they are read (to avoid
+        // occupying too much memory with buffered data)
         Ok(
             stream::iter(blobs).flat_map(
                 move |(section, blob, max_offset, blob_size, codec_config, compressed)| {
@@ -453,8 +461,9 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                     ))
                                 }
                                 Err(Error::ChecksumMismatch(expected, found)) => {
-                                    // If we encounter corruption, we prune to the last valid item. This
-                                    // can happen during an unclean file close (where pending data is not
+                                    // If we encounter corruption, we prune to the last valid item.
+                                    // This can happen during an
+                                    // unclean file close (where pending data is not
                                     // fully synced to disk).
                                     warn!(
                                         blob = section,
@@ -469,8 +478,9 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                 }
                                 Err(Error::Runtime(RError::BlobInsufficientLength)) => {
                                     // If we encounter trailing bytes, we prune to the last
-                                    // valid item. This can happen during an unclean file close (where
-                                    // pending data is not fully synced to disk).
+                                    // valid item. This can happen during an unclean file close
+                                    // (where pending data is
+                                    // not fully synced to disk).
                                     warn!(
                                         blob = section,
                                         new_offset = offset,
@@ -481,7 +491,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                     None
                                 }
                                 Err(err) => {
-                                    // If we encounter an unexpected error, return it without attempting
+                                    // If we encounter an unexpected error, return it without
+                                    // attempting
                                     // to fix anything.
                                     warn!(
                                         blob = section,
@@ -510,16 +521,18 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     }
 
     /// Appends an item to `Journal` in a given `section`, returning the offset
-    /// where the item was written and the size of the item (which may now be smaller
-    /// than the encoded size from the codec, if compression is enabled).
+    /// where the item was written and the size of the item (which may now be
+    /// smaller than the encoded size from the codec, if compression is
+    /// enabled).
     ///
     /// # Warning
     ///
-    /// If there exist trailing bytes in the `Blob` of a particular `section` and
-    /// `replay` is not called before this, it is likely that subsequent data added
-    /// to the `Blob` will be considered corrupted (as the trailing bytes will fail
-    /// the checksum verification). It is recommended to call `replay` before calling
-    /// `append` to prevent this.
+    /// If there exist trailing bytes in the `Blob` of a particular `section`
+    /// and `replay` is not called before this, it is likely that subsequent
+    /// data added to the `Blob` will be considered corrupted (as the
+    /// trailing bytes will fail the checksum verification). It is
+    /// recommended to call `replay` before calling `append` to prevent
+    /// this.
     pub async fn append(&mut self, section: u64, item: V) -> Result<(u32, u32), Error> {
         // Check last pruned
         self.prune_guard(section, false)?;
@@ -588,7 +601,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         Ok(Some(item))
     }
 
-    /// Retrieves an item from `Journal` at a given `section` and `offset` with a given size.
+    /// Retrieves an item from `Journal` at a given `section` and `offset` with
+    /// a given size.
     pub async fn get_exact(
         &self,
         section: u64,
@@ -613,7 +627,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         Ok(Some(item))
     }
 
-    /// Ensures that all data in a given `section` is synced to the underlying store.
+    /// Ensures that all data in a given `section` is synced to the underlying
+    /// store.
     ///
     /// If the `section` does not exist, no error will be returned.
     pub async fn sync(&self, section: u64) -> Result<(), Error> {
@@ -1620,8 +1635,8 @@ mod tests {
         }
     }
 
-    // Define the `INDEX_ALIGNMENT` again explicitly to ensure we catch any accidental
-    // changes to the value
+    // Define the `INDEX_ALIGNMENT` again explicitly to ensure we catch any
+    // accidental changes to the value
     const INDEX_ALIGNMENT: u64 = 16;
 
     #[test_traced]
@@ -1637,7 +1652,8 @@ mod tests {
                 write_buffer: 1024,
             };
             let context = MockStorage {
-                len: u32::MAX as u64 * INDEX_ALIGNMENT, // can store up to u32::Max at the last offset
+                len: u32::MAX as u64 * INDEX_ALIGNMENT, /* can store up to u32::Max at the last
+                                                         * offset */
             };
             let mut journal = Journal::init(context, cfg).await.unwrap();
 

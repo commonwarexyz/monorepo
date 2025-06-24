@@ -56,9 +56,10 @@ fn extract_panic_message(err: &(dyn Any + Send)) -> String {
 /// A one-time broadcast that can be awaited by many tasks. It is often used for
 /// coordinating shutdown across many tasks.
 ///
-/// To minimize the overhead of tracking outstanding signals (which only return once),
-/// it is recommended to wait on a reference to it (i.e. `&mut signal`) instead of
-/// cloning it multiple times in a given task (i.e. in each iteration of a loop).
+/// To minimize the overhead of tracking outstanding signals (which only return
+/// once), it is recommended to wait on a reference to it (i.e. `&mut signal`)
+/// instead of cloning it multiple times in a given task (i.e. in each iteration
+/// of a loop).
 pub type Signal = Shared<oneshot::Receiver<i32>>;
 
 /// Coordinates a one-time signal across many tasks.
@@ -132,7 +133,8 @@ pub struct Signaler {
 impl Signaler {
     /// Create a new `Signaler`.
     ///
-    /// Returns a `Signaler` and a `Signal` that will resolve when `signal` is called.
+    /// Returns a `Signaler` and a `Signal` that will resolve when `signal` is
+    /// called.
     pub fn new() -> (Self, Signal) {
         let (tx, rx) = oneshot::channel();
         (Self { tx: Some(tx) }, rx.shared())
@@ -149,14 +151,16 @@ impl Signaler {
 /// A clone-able wrapper around a [rayon]-compatible thread pool.
 pub type ThreadPool = Arc<RThreadPool>;
 
-/// Creates a clone-able [rayon]-compatible thread pool with [Spawner::spawn_blocking].
+/// Creates a clone-able [rayon]-compatible thread pool with
+/// [Spawner::spawn_blocking].
 ///
 /// # Arguments
 /// - `context`: The runtime context implementing the [Spawner] trait.
 /// - `concurrency`: The number of tasks to execute concurrently in the pool.
 ///
 /// # Returns
-/// A `Result` containing the configured [rayon::ThreadPool] or a [rayon::ThreadPoolBuildError] if the pool cannot be built.
+/// A `Result` containing the configured [rayon::ThreadPool] or a
+/// [rayon::ThreadPoolBuildError] if the pool cannot be built.
 pub fn create_pool<S: Spawner + Metrics>(
     context: S,
     concurrency: usize,
@@ -178,8 +182,9 @@ pub fn create_pool<S: Spawner + Metrics>(
 
 /// Async reader–writer lock.
 ///
-/// Powered by [async_lock::RwLock], `RwLock` provides both fair writer acquisition
-/// and `try_read` / `try_write` without waiting (without any runtime-specific dependencies).
+/// Powered by [async_lock::RwLock], `RwLock` provides both fair writer
+/// acquisition and `try_read` / `try_write` without waiting (without any
+/// runtime-specific dependencies).
 ///
 /// Usage:
 /// ```rust

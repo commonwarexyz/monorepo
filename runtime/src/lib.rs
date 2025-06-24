@@ -8,14 +8,16 @@
 //!
 //! # Terminology
 //!
-//! Each runtime is typically composed of an `Executor` and a `Context`. The `Executor` implements the
-//! `Runner` trait and drives execution of a runtime. The `Context` implements any number of the
-//! other traits to provide core functionality.
+//! Each runtime is typically composed of an `Executor` and a `Context`. The
+//! `Executor` implements the `Runner` trait and drives execution of a runtime.
+//! The `Context` implements any number of the other traits to provide core
+//! functionality.
 //!
 //! # Status
 //!
-//! `commonware-runtime` is **ALPHA** software and is not yet recommended for production use. Developers should
-//! expect breaking changes and occasional instability.
+//! `commonware-runtime` is **ALPHA** software and is not yet recommended for
+//! production use. Developers should expect breaking changes and occasional
+//! instability.
 
 use commonware_utils::StableBuf;
 use prometheus_client::registry::Metric;
@@ -113,11 +115,12 @@ pub trait Runner {
 pub trait Spawner: Clone + Send + Sync + 'static {
     /// Enqueue a task to be executed.
     ///
-    /// Unlike a future, a spawned task will start executing immediately (even if the caller
-    /// does not await the handle).
+    /// Unlike a future, a spawned task will start executing immediately (even
+    /// if the caller does not await the handle).
     ///
-    /// Spawned tasks consume the context used to create them. This ensures that context cannot
-    /// be shared between tasks and that a task's context always comes from somewhere.
+    /// Spawned tasks consume the context used to create them. This ensures that
+    /// context cannot be shared between tasks and that a task's context
+    /// always comes from somewhere.
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -130,8 +133,8 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     ///
     /// # Warning
     ///
-    /// If this function is used to spawn multiple tasks from the same context, the runtime will panic
-    /// to prevent accidental misuse.
+    /// If this function is used to spawn multiple tasks from the same context,
+    /// the runtime will panic to prevent accidental misuse.
     fn spawn_ref<F, T>(&mut self) -> impl FnOnce(F) -> Handle<T> + 'static
     where
         F: Future<Output = T> + Send + 'static,
@@ -139,17 +142,19 @@ pub trait Spawner: Clone + Send + Sync + 'static {
 
     /// Enqueue a blocking task to be executed.
     ///
-    /// This method is designed for synchronous, potentially long-running operations. Tasks can either
-    /// be executed in a shared thread (tasks that are expected to finish on their own) or a dedicated
+    /// This method is designed for synchronous, potentially long-running
+    /// operations. Tasks can either be executed in a shared thread (tasks
+    /// that are expected to finish on their own) or a dedicated
     /// thread (tasks that are expected to run indefinitely).
     ///
-    /// The task starts executing immediately, and the returned handle can be awaited to retrieve the
-    /// result.
+    /// The task starts executing immediately, and the returned handle can be
+    /// awaited to retrieve the result.
     ///
     /// # Motivation
     ///
-    /// Most runtimes allocate a limited number of threads for executing async tasks, running whatever
-    /// isn't waiting. If blocking tasks are spawned this way, they can dramatically reduce the efficiency
+    /// Most runtimes allocate a limited number of threads for executing async
+    /// tasks, running whatever isn't waiting. If blocking tasks are spawned
+    /// this way, they can dramatically reduce the efficiency
     /// of said runtimes.
     ///
     /// # Warning
@@ -177,17 +182,18 @@ pub trait Spawner: Clone + Send + Sync + 'static {
         T: Send + 'static;
 
     /// Signals the runtime to stop execution and that all outstanding tasks
-    /// should perform any required cleanup and exit. This method is idempotent and
-    /// can be called multiple times.
+    /// should perform any required cleanup and exit. This method is idempotent
+    /// and can be called multiple times.
     ///
-    /// This method does not actually kill any tasks but rather signals to them, using
-    /// the `Signal` returned by `stopped`, that they should exit.
+    /// This method does not actually kill any tasks but rather signals to them,
+    /// using the `Signal` returned by `stopped`, that they should exit.
     fn stop(&self, value: i32);
 
     /// Returns an instance of a `Signal` that resolves when `stop` is called by
     /// any task.
     ///
-    /// If `stop` has already been called, the returned `Signal` will resolve immediately.
+    /// If `stop` has already been called, the returned `Signal` will resolve
+    /// immediately.
     fn stopped(&self) -> Signal;
 }
 
@@ -196,13 +202,13 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     /// Get the current label of the context.
     fn label(&self) -> String;
 
-    /// Create a new instance of `Metrics` with the given label appended to the end
-    /// of the current `Metrics` label.
+    /// Create a new instance of `Metrics` with the given label appended to the
+    /// end of the current `Metrics` label.
     ///
     /// This is commonly used to create a nested context for `register`.
     ///
-    /// It is not permitted for any implementation to use `METRICS_PREFIX` as the start of a
-    /// label (reserved for metrics for the runtime).
+    /// It is not permitted for any implementation to use `METRICS_PREFIX` as
+    /// the start of a label (reserved for metrics for the runtime).
     fn with_label(&self, label: &str) -> Self;
 
     /// Prefix the given label with the current context's label.
@@ -223,7 +229,8 @@ pub trait Metrics: Clone + Send + Sync + 'static {
 
     /// Register a metric with the runtime.
     ///
-    /// Any registered metric will include (as a prefix) the label of the current context.
+    /// Any registered metric will include (as a prefix) the label of the
+    /// current context.
     fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric);
 
     /// Encode all metrics into a buffer.
@@ -324,11 +331,12 @@ pub trait Stream: Sync + Send + 'static {
 ///
 /// Storage can be backed by a local filesystem, cloud storage, etc.
 pub trait Storage: Clone + Send + Sync + 'static {
-    /// The readable/writeable storage buffer that can be opened by this Storage.
+    /// The readable/writeable storage buffer that can be opened by this
+    /// Storage.
     type Blob: Blob;
 
-    /// Open an existing blob in a given partition or create a new one, returning
-    /// the blob and its length.
+    /// Open an existing blob in a given partition or create a new one,
+    /// returning the blob and its length.
     ///
     /// Multiple instances of the same blob can be opened concurrently, however,
     /// writing to the same blob concurrently may lead to undefined behavior.
@@ -1013,9 +1021,10 @@ mod tests {
 
             // Abort the task
             //
-            // If there was an `.await` prior to sending a message over the oneshot, this test
-            // could deadlock (depending on the runtime implementation) because the blocking task
-            // would never yield (preventing send from being called).
+            // If there was an `.await` prior to sending a message over the oneshot, this
+            // test could deadlock (depending on the runtime implementation)
+            // because the blocking task would never yield (preventing send from
+            // being called).
             handle.abort();
             sender.send(()).unwrap();
 
@@ -1482,7 +1491,8 @@ mod tests {
                         match context.dial(address).await {
                             Ok((sink, stream)) => break (sink, stream),
                             Err(e) => {
-                                // The client may be polled before the server is ready, that's alright!
+                                // The client may be polled before the server is ready, that's
+                                // alright!
                                 error!(err =?e, "failed to connect");
                                 context.sleep(Duration::from_millis(10)).await;
                             }

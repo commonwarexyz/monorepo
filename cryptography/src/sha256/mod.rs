@@ -63,8 +63,8 @@ impl Clone for Sha256 {
 }
 
 impl Sha256 {
-    /// Convenience function for testing that creates an easily recognizable digest by repeating a
-    /// single byte.
+    /// Convenience function for testing that creates an easily recognizable
+    /// digest by repeating a single byte.
     pub fn fill(b: u8) -> <Self as Hasher>::Digest {
         <Self as Hasher>::Digest::decode(vec![b; DIGEST_LENGTH].as_ref()).unwrap()
     }

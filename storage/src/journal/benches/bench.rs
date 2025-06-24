@@ -18,7 +18,8 @@ criterion_main!(
     fixed_replay::benches,
 );
 
-/// Open and return a temp journal with the given config parameters and items of size ITEM_SIZE.
+/// Open and return a temp journal with the given config parameters and items of
+/// size ITEM_SIZE.
 async fn get_journal<const ITEM_SIZE: usize>(
     context: Context,
     partition_name: &str,
@@ -33,7 +34,8 @@ async fn get_journal<const ITEM_SIZE: usize>(
     Journal::init(context, journal_config).await.unwrap()
 }
 
-/// Append `items_to_write` random items to the given journal, syncing the changes before returning.
+/// Append `items_to_write` random items to the given journal, syncing the
+/// changes before returning.
 async fn append_random_data<const ITEM_SIZE: usize>(
     journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>,
     items_to_write: u64,

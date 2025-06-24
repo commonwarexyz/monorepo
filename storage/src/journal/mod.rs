@@ -1,8 +1,9 @@
 //! An append-only log for storing arbitrary data.
 //!
-//! Journals provide append-only logging for persisting arbitrary data with fast replay, historical
-//! pruning, and rudimentary support for fetching individual items. A journal can be used on its own
-//! to serve as a backing store for some in-memory data structure, or as a building block for a more
+//! Journals provide append-only logging for persisting arbitrary data with fast
+//! replay, historical pruning, and rudimentary support for fetching individual
+//! items. A journal can be used on its own to serve as a backing store for some
+//! in-memory data structure, or as a building block for a more
 //! complex construction that prescribes some meaning to items in the log.
 
 use thiserror::Error;

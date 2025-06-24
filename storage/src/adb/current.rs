@@ -1,7 +1,8 @@
-//! An authenticated database (ADB) that provides succinct proofs of _any_ value ever associated
-//! with a key, and also whether that value is the _current_ value associated with it. Its
-//! implementation is based on an [Any] authenticated database combined with an authenticated
-//! [Bitmap] over the activity status of each operation. The two structures are "grafted" together
+//! An authenticated database (ADB) that provides succinct proofs of _any_ value
+//! ever associated with a key, and also whether that value is the _current_
+//! value associated with it. Its implementation is based on an [Any]
+//! authenticated database combined with an authenticated [Bitmap] over the
+//! activity status of each operation. The two structures are "grafted" together
 //! to minimize proof sizes.
 
 use crate::{
@@ -42,7 +43,8 @@ pub struct Config<T: Translator> {
     /// The name of the [RStorage] partition used for the MMR's metadata.
     pub mmr_metadata_partition: String,
 
-    /// The name of the [RStorage] partition used to persist the (pruned) log of operations.
+    /// The name of the [RStorage] partition used to persist the (pruned) log of
+    /// operations.
     pub log_journal_partition: String,
 
     /// The items per blob configuration value used by the log journal.
@@ -61,12 +63,13 @@ pub struct Config<T: Translator> {
     pub pool: Option<ThreadPool>,
 }
 
-/// A key-value ADB based on an MMR over its log of operations, supporting authentication of whether
-/// a key ever had a specific value, and whether the key currently has that value.
+/// A key-value ADB based on an MMR over its log of operations, supporting
+/// authentication of whether a key ever had a specific value, and whether the
+/// key currently has that value.
 ///
-/// Note: The generic parameter N is not really generic, and must be manually set to double the size
-/// of the hash digest being produced by the hasher. A compile-time assertion is used to prevent any
-/// other setting.
+/// Note: The generic parameter N is not really generic, and must be manually
+/// set to double the size of the hash digest being produced by the hasher. A
+/// compile-time assertion is used to prevent any other setting.
 pub struct Current<
     E: RStorage + Clock + Metrics,
     K: Array,
@@ -75,12 +78,13 @@ pub struct Current<
     T: Translator,
     const N: usize,
 > {
-    /// An [Any] authenticated database that provides the ability to prove whether a key ever had a
-    /// specific value.
+    /// An [Any] authenticated database that provides the ability to prove
+    /// whether a key ever had a specific value.
     pub any: Any<E, K, V, H, T>,
 
-    /// The bitmap over the activity status of each operation. Supports augmenting [Any] proofs in
-    /// order to further prove whether a key _currently_ has a specific value.
+    /// The bitmap over the activity status of each operation. Supports
+    /// augmenting [Any] proofs in order to further prove whether a key
+    /// _currently_ has a specific value.
     pub status: Bitmap<H, N>,
 
     context: E,
@@ -100,7 +104,8 @@ pub struct KeyValueProofInfo<K, V, const N: usize> {
     /// The location of the operation that assigned this value to the key.
     pub loc: u64,
 
-    /// The status bitmap chunk that contains the bit corresponding the operation's location.
+    /// The status bitmap chunk that contains the bit corresponding the
+    /// operation's location.
     pub chunk: [u8; N],
 }
 
@@ -113,20 +118,23 @@ impl<
         const N: usize,
     > Current<E, K, V, H, T, N>
 {
-    // A compile-time assertion that the chunk size is some multiple of digest size. A multiple of 1 is optimal with
-    // respect to proof size, but a higher multiple allows for a smaller (RAM resident) merkle tree over the structure.
+    // A compile-time assertion that the chunk size is some multiple of digest size.
+    // A multiple of 1 is optimal with respect to proof size, but a higher
+    // multiple allows for a smaller (RAM resident) merkle tree over the structure.
     const _CHUNK_SIZE_ASSERT: () = assert!(
         N % H::Digest::SIZE == 0,
         "chunk size must be some multiple of the digest size",
     );
 
-    // A compile-time assertion that chunk size is a power of 2, which is necessary to allow the status bitmap tree to
-    // be aligned with the underlying operations MMR.
+    // A compile-time assertion that chunk size is a power of 2, which is necessary
+    // to allow the status bitmap tree to be aligned with the underlying
+    // operations MMR.
     const _CHUNK_SIZE_IS_POW_OF_2_ASSERT: () =
         assert!(N.is_power_of_two(), "chunk size must be a power of 2");
 
-    /// Initializes a [Current] authenticated database from the given `config`. Leverages parallel
-    /// Merkleization to initialize the bitmap MMR if a thread pool is provided.
+    /// Initializes a [Current] authenticated database from the given `config`.
+    /// Leverages parallel Merkleization to initialize the bitmap MMR if a
+    /// thread pool is provided.
     pub async fn init(context: E, config: Config<T>) -> Result<Self, Error> {
         // Initialize the MMR journal and metadata.
         let cfg = AConfig {
@@ -174,26 +182,29 @@ impl<
 
         let mut grafter = Grafting::new(&mut hasher, Self::grafting_height());
         if bitmap_pruned_pos < mmr_pruned_pos {
-            // The bitmap should never be behind the mmr more than one chunk's worth of bits, since
-            // the mmr is always pruned after it.
+            // The bitmap should never be behind the mmr more than one chunk's worth of
+            // bits, since the mmr is always pruned after it.
             let chunk_bits = Bitmap::<H, N>::CHUNK_SIZE_BITS;
             assert!(
                 mmr_pruned_leaves <= chunk_bits || pruned_bits >= mmr_pruned_leaves - chunk_bits
             );
-            // Prepend the missing (inactive) bits needed to align the bitmap, which can only be
-            // pruned to a chunk boundary, with the MMR's pruning boundary.
+            // Prepend the missing (inactive) bits needed to align the bitmap, which can
+            // only be pruned to a chunk boundary, with the MMR's pruning
+            // boundary.
             for _ in pruned_bits..mmr_pruned_leaves {
                 status.append(false);
             }
-            // Load the digests of the grafting destination nodes from `mmr` into the grafting
-            // hasher so the new leaf digests can be computed during sync.
+            // Load the digests of the grafting destination nodes from `mmr` into the
+            // grafting hasher so the new leaf digests can be computed during
+            // sync.
             grafter
                 .load_grafted_digests(&status.dirty_chunks(), &mmr)
                 .await?;
             status.sync(&mut grafter).await?;
         }
 
-        // Replay the log to generate the snapshot & populate the retained portion of the bitmap.
+        // Replay the log to generate the snapshot & populate the retained portion of
+        // the bitmap.
         let mut snapshot = Index::init(context.with_label("snapshot"), config.translator);
         let inactivity_floor_loc =
             Any::build_snapshot_from_log(start_leaf_num, &log, &mut snapshot, Some(&mut status))
@@ -209,7 +220,8 @@ impl<
         );
 
         if inactivity_floor_loc > start_leaf_num {
-            // Advanced the pruning boundary if we failed to prune to the inactivity floor for any reason.
+            // Advanced the pruning boundary if we failed to prune to the inactivity floor
+            // for any reason.
             warn!(
                 inactivity_floor_loc,
                 "pruning any db to the current inactivity floor"
@@ -235,8 +247,8 @@ impl<
         })
     }
 
-    /// Get the number of operations that have been applied to this db, including those that are not
-    /// yet committed.
+    /// Get the number of operations that have been applied to this db,
+    /// including those that are not yet committed.
     pub fn op_count(&self) -> u64 {
         self.any.op_count()
     }
@@ -253,15 +265,16 @@ impl<
 
     /// Get the level of the base MMR into which we are grafting.
     ///
-    /// This value is log2 of the chunk size in bits. Since we assume the chunk size is a power of
-    /// 2, we compute this from trailing_zeros.
+    /// This value is log2 of the chunk size in bits. Since we assume the chunk
+    /// size is a power of 2, we compute this from trailing_zeros.
     const fn grafting_height() -> u32 {
         Bitmap::<H, N>::CHUNK_SIZE_BITS.trailing_zeros()
     }
 
-    /// Updates `key` to have value `value`. If the key already has this same value, then this is a
-    /// no-op. The operation is reflected in the snapshot, but will be subject to rollback until the
-    /// next successful `commit`.
+    /// Updates `key` to have value `value`. If the key already has this same
+    /// value, then this is a no-op. The operation is reflected in the
+    /// snapshot, but will be subject to rollback until the next successful
+    /// `commit`.
     pub async fn update(&mut self, key: K, value: V) -> Result<UpdateResult, Error> {
         let update_result = self.any.update(key, value).await?;
         match update_result {
@@ -276,9 +289,9 @@ impl<
         Ok(update_result)
     }
 
-    /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
-    /// The operation is reflected in the snapshot, but will be subject to rollback until the next
-    /// successful `commit`.
+    /// Delete `key` and its value from the db. Deleting a key that already has
+    /// no value is a no-op. The operation is reflected in the snapshot, but
+    /// will be subject to rollback until the next successful `commit`.
     pub async fn delete(&mut self, key: K) -> Result<(), Error> {
         let Some(old_loc) = self.any.delete(key).await? else {
             return Ok(());
@@ -290,24 +303,26 @@ impl<
         Ok(())
     }
 
-    /// Commit pending operations to the adb::any and sync it to disk. Leverages parallel
-    /// Merkleization of the any-db if a thread pool is provided.
+    /// Commit pending operations to the adb::any and sync it to disk. Leverages
+    /// parallel Merkleization of the any-db if a thread pool is provided.
     async fn commit_ops(&mut self) -> Result<(), Error> {
-        // Raise the inactivity floor by the # of uncommitted operations, plus 1 to account for the
-        // commit op that will be appended.
+        // Raise the inactivity floor by the # of uncommitted operations, plus 1 to
+        // account for the commit op that will be appended.
         self.raise_inactivity_floor(self.any.uncommitted_ops + 1)
             .await?;
         self.any.uncommitted_ops = 0;
         self.any.sync().await
     }
 
-    /// Raise the inactivity floor by exactly `max_steps` steps, followed by applying a commit
-    /// operation. Each step either advances over an inactive operation, or re-applies an active
-    /// operation to the tip and then advances over it. An active bit will be added to the status
-    /// bitmap for any moved operation, with its old location in the bitmap flipped to false.
+    /// Raise the inactivity floor by exactly `max_steps` steps, followed by
+    /// applying a commit operation. Each step either advances over an
+    /// inactive operation, or re-applies an active operation to the tip and
+    /// then advances over it. An active bit will be added to the status
+    /// bitmap for any moved operation, with its old location in the bitmap
+    /// flipped to false.
     ///
-    /// This method does not change the state of the db's snapshot, but it always changes the root
-    /// since it applies at least one operation.
+    /// This method does not change the state of the db's snapshot, but it
+    /// always changes the root since it applies at least one operation.
     async fn raise_inactivity_floor(&mut self, max_steps: u64) -> Result<(), Error> {
         for _ in 0..max_steps {
             if self.any.inactivity_floor_loc == self.op_count() {
@@ -333,15 +348,17 @@ impl<
         Ok(())
     }
 
-    /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
-    /// upon return from this function. Also raises the inactivity floor according to the schedule,
-    /// and prunes those operations below it. Leverages parallel Merkleization of the MMR structures
-    /// if a thread pool is provided.
+    /// Commit any pending operations to the db, ensuring they are persisted to
+    /// disk & recoverable upon return from this function. Also raises the
+    /// inactivity floor according to the schedule, and prunes those
+    /// operations below it. Leverages parallel Merkleization of the MMR
+    /// structures if a thread pool is provided.
     pub async fn commit(&mut self) -> Result<(), Error> {
-        // Failure recovery relies on this specific order of these three disk-based operations:
-        //  (1) commit/sync the any db to disk (which raises the inactivity floor).
-        //  (2) prune the bitmap to the updated inactivity floor and write its state to disk.
-        //  (3) prune the any db of inactive operations.
+        // Failure recovery relies on this specific order of these three disk-based
+        // operations:  (1) commit/sync the any db to disk (which raises the
+        // inactivity floor).  (2) prune the bitmap to the updated inactivity
+        // floor and write its state to disk.  (3) prune the any db of inactive
+        // operations.
         self.commit_ops().await?; // (1)
 
         let mut grafter = Grafting::new(&mut self.any.hasher, Self::grafting_height());
@@ -358,8 +375,9 @@ impl<
             )
             .await?; // (2)
 
-        // Prune inactive elements from the any db. We do this last, because bitmap recovery could
-        // require access to the hashes of these inactive nodes due to node grafting.
+        // Prune inactive elements from the any db. We do this last, because bitmap
+        // recovery could require access to the hashes of these inactive nodes
+        // due to node grafting.
         self.any.prune_inactive().await?; // (3)
 
         Ok(())
@@ -380,18 +398,19 @@ impl<
         let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, ops, height);
         let mmr_root = grafted_mmr.root(hasher).await?;
 
-        // The digest contains all information from the base mmr, and all information from the peak
-        // tree except for the partial chunk, if any.  If we are at a chunk boundary, then this is
-        // all the information we need.
+        // The digest contains all information from the base mmr, and all information
+        // from the peak tree except for the partial chunk, if any.  If we are
+        // at a chunk boundary, then this is all the information we need.
         let last_chunk = self.status.last_chunk();
         if last_chunk.1 == 0 {
             return Ok(mmr_root);
         }
 
-        // There are bits in an uncommitted (partial) chunk, so we need to incorporate that
-        // information into the root digest. We do so by computing a root in the same format as an
-        // unaligned [Bitmap] root, which involves additionally hashing in the number of bits within
-        // the last chunk and the digest of the last chunk.
+        // There are bits in an uncommitted (partial) chunk, so we need to incorporate
+        // that information into the root digest. We do so by computing a root
+        // in the same format as an unaligned [Bitmap] root, which involves
+        // additionally hashing in the number of bits within the last chunk and
+        // the digest of the last chunk.
         hasher.inner().update(last_chunk.0);
         let last_chunk_digest = hasher.inner().finalize();
 
@@ -403,9 +422,10 @@ impl<
         ))
     }
 
-    /// Returns a proof that the specified range of operations are part of the database, along with
-    /// the operations from the range. A truncated range (from hitting the max) can be detected by
-    /// looking at the length of the returned operations vector. Also returns the bitmap chunks
+    /// Returns a proof that the specified range of operations are part of the
+    /// database, along with the operations from the range. A truncated
+    /// range (from hitting the max) can be detected by looking at the
+    /// length of the returned operations vector. Also returns the bitmap chunks
     /// required to verify the proof.
     ///
     /// # Warning
@@ -466,8 +486,8 @@ impl<
         Ok((proof, ops, chunks))
     }
 
-    /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
-    /// the log with the provided root.
+    /// Return true if the given sequence of `ops` were applied starting at
+    /// location `start_loc` in the log with the provided root.
     pub async fn verify_range_proof(
         hasher: &mut Standard<H>,
         proof: &Proof<H>,
@@ -548,9 +568,9 @@ impl<
         Ok(reconstructed_root == *root_digest)
     }
 
-    /// Generate and return a proof of the current value of `key`, along with the other
-    /// [KeyValueProofInfo] required to verify the proof. Returns KeyNotFound error if the key is
-    /// not currently assigned any value.
+    /// Generate and return a proof of the current value of `key`, along with
+    /// the other [KeyValueProofInfo] required to verify the proof. Returns
+    /// KeyNotFound error if the key is not currently assigned any value.
     ///
     /// # Warning
     ///
@@ -592,8 +612,8 @@ impl<
         ))
     }
 
-    /// Return true if the proof authenticates that `key` currently has value `value` in the db with
-    /// the given root.
+    /// Return true if the proof authenticates that `key` currently has value
+    /// `value` in the db with the given root.
     pub async fn verify_key_value_proof(
         hasher: &mut H,
         proof: &Proof<H>,
@@ -605,8 +625,8 @@ impl<
             return Ok(false);
         };
 
-        // Make sure that the bit for the operation in the bitmap chunk is actually a 1 (indicating
-        // the operation is indeed active).
+        // Make sure that the bit for the operation in the bitmap chunk is actually a 1
+        // (indicating the operation is indeed active).
         if !Bitmap::<H, N>::get_bit_from_chunk(&info.chunk, info.loc) {
             debug!(
                 loc = info.loc,
@@ -639,9 +659,9 @@ impl<
         let mut proof = proof.clone();
         let last_chunk_digest = proof.digests.pop().unwrap();
 
-        // If the proof is over an operation in the partial chunk, we need to verify the last chunk
-        // digest from the proof matches the digest of info.chunk, since these bits are not part of
-        // the mmr.
+        // If the proof is over an operation in the partial chunk, we need to verify the
+        // last chunk digest from the proof matches the digest of info.chunk,
+        // since these bits are not part of the mmr.
         if info.loc / Bitmap::<H, N>::CHUNK_SIZE_BITS == op_count / Bitmap::<H, N>::CHUNK_SIZE_BITS
         {
             let expected_last_chunk_digest = verifier.digest(&info.chunk);
@@ -686,7 +706,8 @@ impl<
     }
 
     #[cfg(test)]
-    /// Generate an inclusion proof for any operation regardless of its activity state.
+    /// Generate an inclusion proof for any operation regardless of its activity
+    /// state.
     async fn operation_inclusion_proof(
         &self,
         hasher: &mut H,
@@ -711,23 +732,26 @@ impl<
     }
 
     #[cfg(test)]
-    /// Simulate a crash that prevents any data from being written to disk, which involves simply
-    /// consuming the db before it can be cleanly closed.
+    /// Simulate a crash that prevents any data from being written to disk,
+    /// which involves simply consuming the db before it can be cleanly
+    /// closed.
     fn simulate_commit_failure_before_any_writes(self) {
         // Don't successfully complete any of the commit operations.
     }
 
     #[cfg(test)]
-    /// Simulate a crash that happens during commit and prevents the any db from being pruned of
-    /// inactive operations, and bitmap state from being written/pruned.
+    /// Simulate a crash that happens during commit and prevents the any db from
+    /// being pruned of inactive operations, and bitmap state from being
+    /// written/pruned.
     async fn simulate_commit_failure_after_any_db_commit(mut self) -> Result<(), Error> {
         // Only successfully complete operation (1) of the commit process.
         self.commit_ops().await
     }
 
     #[cfg(test)]
-    /// Simulate a crash that happens during commit after the bitmap has been pruned & written, but
-    /// before the any db is pruned of inactive elements.
+    /// Simulate a crash that happens during commit after the bitmap has been
+    /// pruned & written, but before the any db is pruned of inactive
+    /// elements.
     async fn simulate_commit_failure_after_bitmap_written(mut self) -> Result<(), Error> {
         // Only successfully complete operations (1) and (2) of the commit process.
         self.commit_ops().await?; // (1)
@@ -786,7 +810,8 @@ pub mod test {
         .unwrap()
     }
 
-    /// Build a small database, then close and reopen it and ensure state is preserved.
+    /// Build a small database, then close and reopen it and ensure state is
+    /// preserved.
     #[test_traced("DEBUG")]
     pub fn test_current_db_build_small_close_reopen() {
         let executor = deterministic::Runner::default();
@@ -843,9 +868,10 @@ pub mod test {
         });
     }
 
-    /// Build a tiny database and make sure we can't convince the verifier that some old value of a
-    /// key is active. We specifically test over the partial chunk case, since these bits are yet to
-    /// be committed to the underlying MMR.
+    /// Build a tiny database and make sure we can't convince the verifier that
+    /// some old value of a key is active. We specifically test over the
+    /// partial chunk case, since these bits are yet to be committed to the
+    /// underlying MMR.
     #[test_traced("DEBUG")]
     pub fn test_current_db_verify_proof_over_bits_in_uncommitted_chunk() {
         let executor = deterministic::Runner::default();
@@ -963,9 +989,10 @@ pub mod test {
                 .unwrap()
             );
 
-            // Attempt #2 to "fool" the verifier: Modify the chunk in the proof info to make it look
-            // like the operation is active by flipping its corresponding bit to 1. This should not
-            // fool the verifier if we are correctly incorporating the partial chunk information
+            // Attempt #2 to "fool" the verifier: Modify the chunk in the proof info to make
+            // it look like the operation is active by flipping its
+            // corresponding bit to 1. This should not fool the verifier if we
+            // are correctly incorporating the partial chunk information
             // into the root computation.
             let mut modified_chunk = proof_inactive.3;
             let bit_pos = proof_inactive.2;
@@ -990,8 +1017,8 @@ pub mod test {
         });
     }
 
-    /// Apply random operations to the given db, committing them (randomly & at the end) only if
-    /// `commit_changes` is true.
+    /// Apply random operations to the given db, committing them (randomly & at
+    /// the end) only if `commit_changes` is true.
     async fn apply_random_ops<E: RStorage + Clock + Metrics>(
         num_elements: u64,
         commit_changes: bool,
@@ -1008,8 +1035,8 @@ pub mod test {
             db.update(k, v).await.unwrap();
         }
 
-        // Randomly update / delete them. We use a delete frequency that is 1/7th of the update
-        // frequency.
+        // Randomly update / delete them. We use a delete frequency that is 1/7th of the
+        // update frequency.
         for _ in 0u64..num_elements * 10 {
             let rand_key = hash(&(rng.next_u64() % num_elements).to_be_bytes());
             if rng.next_u32() % 7 == 0 {
@@ -1155,8 +1182,8 @@ pub mod test {
         });
     }
 
-    /// This test builds a random database, and makes sure that its state is correctly restored
-    /// after closing and re-opening.
+    /// This test builds a random database, and makes sure that its state is
+    /// correctly restored after closing and re-opening.
     #[test_traced("WARN")]
     pub fn test_current_db_build_random_close_reopen() {
         // Number of elements to initially insert into the db.
@@ -1184,8 +1211,8 @@ pub mod test {
         });
     }
 
-    /// Repeatedly update the same key to a new value and ensure we can prove its current value
-    /// after each update.
+    /// Repeatedly update the same key to a new value and ensure we can prove
+    /// its current value after each update.
     #[test_traced("WARN")]
     pub fn test_current_db_proving_repeated_updates() {
         let executor = deterministic::Runner::default();
@@ -1242,8 +1269,8 @@ pub mod test {
         });
     }
 
-    /// This test builds a random database and simulates we can recover from 3 different types of
-    /// failure scenarios.
+    /// This test builds a random database and simulates we can recover from 3
+    /// different types of failure scenarios.
     #[test_traced("WARN")]
     pub fn test_current_db_simulate_write_failures() {
         // Number of elements to initially insert into the db.
@@ -1266,8 +1293,8 @@ pub mod test {
                 .await
                 .unwrap();
 
-            // SCENARIO #1: Simulate a crash that happens before any writes. Upon reopening, the
-            // state of the DB should be as of the last commit.
+            // SCENARIO #1: Simulate a crash that happens before any writes. Upon reopening,
+            // the state of the DB should be as of the last commit.
             db.simulate_commit_failure_before_any_writes();
             let mut db = open_db(context.clone(), partition).await;
             assert_eq!(db.root(&mut hasher).await.unwrap(), committed_root);
@@ -1278,20 +1305,22 @@ pub mod test {
                 .await
                 .unwrap();
 
-            // SCENARIO #2: Simulate a crash that happens after the any db has been committed, but
-            // before the state of the pruned bitmap can be written to disk.
+            // SCENARIO #2: Simulate a crash that happens after the any db has been
+            // committed, but before the state of the pruned bitmap can be
+            // written to disk.
             db.simulate_commit_failure_after_any_db_commit()
                 .await
                 .unwrap();
 
-            // We should be able to recover, so the root should differ from the previous commit, and
-            // the op count should be greater than before.
+            // We should be able to recover, so the root should differ from the previous
+            // commit, and the op count should be greater than before.
             let db = open_db(context.clone(), partition).await;
             let scenario_2_root = db.root(&mut hasher).await.unwrap();
             let scenario_2_pruning_loc = db.any.oldest_retained_loc().unwrap();
 
-            // To confirm the second committed hash is correct we'll re-build the DB in a new
-            // partition, but without any failures. They should have the exact same state.
+            // To confirm the second committed hash is correct we'll re-build the DB in a
+            // new partition, but without any failures. They should have the
+            // exact same state.
             let fresh_partition = "build_random_fail_commit_fresh";
             let mut db = open_db(context.clone(), fresh_partition).await;
             apply_random_ops(ELEMENTS, true, rng_seed, &mut db)
@@ -1301,15 +1330,17 @@ pub mod test {
                 .await
                 .unwrap();
             db.commit().await.unwrap();
-            // State & pruning boundary from scenario #2 should match that of a successful commit.
+            // State & pruning boundary from scenario #2 should match that of a successful
+            // commit.
             assert_eq!(db.root(&mut hasher).await.unwrap(), scenario_2_root);
             let successful_pruning_loc = db.any.oldest_retained_loc().unwrap();
             assert_eq!(successful_pruning_loc, scenario_2_pruning_loc);
             db.close().await.unwrap();
 
-            // SCENARIO #3: Simulate a crash that happens after the any db has been committed and
-            // the bitmap is written, but before the any db is pruned. Full state restoration should
-            // remain possible, and pruning point should match a successful commit.
+            // SCENARIO #3: Simulate a crash that happens after the any db has been
+            // committed and the bitmap is written, but before the any db is
+            // pruned. Full state restoration should remain possible, and
+            // pruning point should match a successful commit.
             let fresh_partition = "build_random_fail_commit_fresh_2";
             let mut db = open_db(context.clone(), fresh_partition).await;
             apply_random_ops(ELEMENTS, true, rng_seed, &mut db)

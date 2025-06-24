@@ -28,16 +28,17 @@ pub struct Config<C: Signer> {
     /// Configuration for the stream.
     pub stream_cfg: StreamConfig<C>,
 
-    /// The frequency at which to dial a single peer from the queue. This also limits the rate at
-    /// which we attempt to dial peers in general.
+    /// The frequency at which to dial a single peer from the queue. This also
+    /// limits the rate at which we attempt to dial peers in general.
     pub dial_frequency: Duration,
 
-    /// The frequency at which to refresh the list of dialable peers if there are no more peers in
-    /// the queue. This also limits the rate at which any single peer is dialed multiple times.
+    /// The frequency at which to refresh the list of dialable peers if there
+    /// are no more peers in the queue. This also limits the rate at which
+    /// any single peer is dialed multiple times.
     ///
-    /// This approach attempts to help ensure that the connection rate-limiter is not maxed out for
-    /// a single peer by preventing dialing it as fast as possible. This should make it easier for
-    /// other peers to dial us.
+    /// This approach attempts to help ensure that the connection rate-limiter
+    /// is not maxed out for a single peer by preventing dialing it as fast
+    /// as possible. This should make it easier for other peers to dial us.
     pub query_frequency: Duration,
 }
 

@@ -126,9 +126,10 @@ impl<C: PublicKey> Signed<C> {
     ) -> Result<(), Error> {
         // Verify that the signature is for us
         //
-        // If we didn't verify this, it would be trivial for any peer to impersonate another peer (even though
-        // they would not be able to decrypt any messages from the shared secret). This would prevent us
-        // from making a legitimate connection to the intended peer.
+        // If we didn't verify this, it would be trivial for any peer to impersonate
+        // another peer (even though they would not be able to decrypt any
+        // messages from the shared secret). This would prevent us from making a
+        // legitimate connection to the intended peer.
         if *crypto != self.info.recipient {
             return Err(Error::HandshakeNotForUs);
         }
@@ -414,7 +415,8 @@ mod tests {
             let (sink, _stream) = mocks::Channel::init();
             let (_sink, stream) = mocks::Channel::init();
 
-            // Call the verify function for one peer, but never send the handshake from the other
+            // Call the verify function for one peer, but never send the handshake from the
+            // other
             let config = Config {
                 crypto: PrivateKey::from_seed(1),
                 namespace: TEST_NAMESPACE.to_vec(),

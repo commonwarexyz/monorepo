@@ -285,7 +285,8 @@ impl<
         // and attempt to rebroadcast if necessary.
         self.journal_prepare(&self.crypto.public_key()).await;
         if let Err(err) = self.rebroadcast(&mut node_sender).await {
-            // Rebroadcasting may return a non-critical error, so log the error and continue.
+            // Rebroadcasting may return a non-critical error, so log the error and
+            // continue.
             info!(?err, "initial rebroadcast failed");
         }
 
@@ -544,11 +545,12 @@ impl<
         Ok(())
     }
 
-    /// Handles a threshold, either received from a `Node` from the network or generated locally.
+    /// Handles a threshold, either received from a `Node` from the network or
+    /// generated locally.
     ///
     /// The threshold must already be verified.
-    /// If the threshold is new, it is stored and the proof is emitted to the committer.
-    /// If the threshold is already known, it is ignored.
+    /// If the threshold is new, it is stored and the proof is emitted to the
+    /// committer. If the threshold is already known, it is ignored.
     async fn handle_threshold(
         &mut self,
         chunk: &Chunk<C::PublicKey, D>,
@@ -577,7 +579,8 @@ impl<
     /// Handles an ack
     ///
     /// Returns an error if the ack is invalid, or can be ignored
-    /// (e.g. already exists, threshold already exists, is outside the epoch bounds, etc.).
+    /// (e.g. already exists, threshold already exists, is outside the epoch
+    /// bounds, etc.).
     async fn handle_ack(&mut self, ack: &Ack<C::PublicKey, V, D>) -> Result<(), Error> {
         // Get the quorum
         let Some(polynomial) = self.validators.polynomial(ack.epoch) else {
@@ -643,9 +646,11 @@ impl<
     // Proposing
     ////////////////////////////////////////
 
-    /// Returns a `Context` if the engine should request a proposal from the automaton.
+    /// Returns a `Context` if the engine should request a proposal from the
+    /// automaton.
     ///
-    /// Should only be called if the engine is not already waiting for a proposal.
+    /// Should only be called if the engine is not already waiting for a
+    /// proposal.
     fn should_propose(&self) -> Option<Context<C::PublicKey>> {
         let me = self.crypto.public_key();
 
@@ -671,7 +676,8 @@ impl<
     /// Propose a new chunk to the network.
     ///
     /// The result is returned to the caller via the provided channel.
-    /// The proposal is only successful if the parent Chunk and threshold signature are known.
+    /// The proposal is only successful if the parent Chunk and threshold
+    /// signature are known.
     async fn propose(
         &mut self,
         context: Context<C::PublicKey>,
@@ -735,12 +741,14 @@ impl<
         Ok(())
     }
 
-    /// Attempt to rebroadcast the highest-height chunk of this sequencer to all validators.
+    /// Attempt to rebroadcast the highest-height chunk of this sequencer to all
+    /// validators.
     ///
     /// This is only done if:
     /// - this instance is the sequencer for the current epoch.
     /// - this instance has a chunk to rebroadcast.
-    /// - this instance has not yet collected the threshold signature for the chunk.
+    /// - this instance has not yet collected the threshold signature for the
+    ///   chunk.
     async fn rebroadcast(
         &mut self,
         node_sender: &mut WrappedSender<NetS, Node<C::PublicKey, V, D>>,
@@ -814,8 +822,8 @@ impl<
 
     /// Takes a raw `Node` (from sender) from the p2p network and validates it.
     ///
-    /// If valid (and not already the tracked tip for the sender), returns the implied
-    /// parent chunk and its threshold signature.
+    /// If valid (and not already the tracked tip for the sender), returns the
+    /// implied parent chunk and its threshold signature.
     /// Else returns an error if the `Node` is invalid.
     fn validate_node(
         &mut self,
@@ -863,7 +871,8 @@ impl<
             return Err(Error::PeerMismatch);
         }
 
-        // Spam prevention: If the ack is for an epoch that is too old or too new, ignore.
+        // Spam prevention: If the ack is for an epoch that is too old or too new,
+        // ignore.
         {
             let (eb_lo, eb_hi) = self.epoch_bounds;
             let bound_lo = self.epoch.saturating_sub(eb_lo);
@@ -873,7 +882,8 @@ impl<
             }
         }
 
-        // Spam prevention: If the ack is for a height that is too old or too new, ignore.
+        // Spam prevention: If the ack is for a height that is too old or too new,
+        // ignore.
         {
             let bound_lo = self
                 .tip_manager
@@ -902,7 +912,8 @@ impl<
         Ok(())
     }
 
-    /// Takes a raw chunk from the p2p network and validates it against the epoch.
+    /// Takes a raw chunk from the p2p network and validates it against the
+    /// epoch.
     ///
     /// Returns the chunk if the chunk is valid.
     /// Returns an error if the chunk is invalid.
@@ -1014,7 +1025,8 @@ impl<
         self.journals.insert(sequencer.clone(), journal);
     }
 
-    /// Write a `Node` to the appropriate journal, which contains the tip `Chunk` for the sequencer.
+    /// Write a `Node` to the appropriate journal, which contains the tip
+    /// `Chunk` for the sequencer.
     ///
     /// To prevent ever writing two conflicting `Chunk`s at the same height,
     /// the journal must already be open and replayed.
@@ -1028,7 +1040,8 @@ impl<
             .expect("unable to append to journal");
     }
 
-    /// Syncs (ensures all data is written to disk) and prunes the journal for the given sequencer and height.
+    /// Syncs (ensures all data is written to disk) and prunes the journal for
+    /// the given sequencer and height.
     async fn journal_sync(&mut self, sequencer: &C::PublicKey, height: u64) {
         let section = self.get_journal_section(height);
 

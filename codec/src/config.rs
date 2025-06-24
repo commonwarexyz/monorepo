@@ -4,7 +4,8 @@ use std::ops::{Bound, RangeBounds};
 
 /// Configuration for limiting the range of a [usize] value.
 ///
-/// This is often used to configure length limits for variable-length types or collections.
+/// This is often used to configure length limits for variable-length types or
+/// collections.
 ///
 /// # Example
 ///
@@ -52,7 +53,8 @@ impl RangeCfg {
     }
 }
 
-// Allow conversion from any type that implements `RangeBounds<usize>` to `RangeCfg`.
+// Allow conversion from any type that implements `RangeBounds<usize>` to
+// `RangeCfg`.
 impl<R: RangeBounds<usize>> From<R> for RangeCfg {
     fn from(r: R) -> Self {
         fn own(b: Bound<&usize>) -> Bound<usize> {

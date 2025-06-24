@@ -17,15 +17,16 @@ const ITEMS_PER_BLOB: u64 = 100_000;
 /// Size of each journal item in bytes.
 const ITEM_SIZE: usize = 32;
 
-/// Sequentially read `items_to_read` items in the given `journal` starting from item 0.
+/// Sequentially read `items_to_read` items in the given `journal` starting from
+/// item 0.
 async fn bench_run(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, items_to_read: u64) {
     for pos in 0..items_to_read {
         black_box(journal.read(pos).await.expect("failed to read data"));
     }
 }
 
-/// Benchmark the sequential read of items from a journal containing exactly that
-/// number of items.
+/// Benchmark the sequential read of items from a journal containing exactly
+/// that number of items.
 fn bench_fixed_read_sequential(c: &mut Criterion) {
     let runner = tokio::Runner::default();
     for items in [1_000, 10_000, 100_000, 500_000] {

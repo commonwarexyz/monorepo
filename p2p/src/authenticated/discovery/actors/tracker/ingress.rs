@@ -22,14 +22,15 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
     Register { index: u64, peers: Vec<C> },
 
     // ---------- Used by blocker ----------
-    /// Block a peer, disconnecting them if currently connected and preventing future connections
-    /// for as long as the peer remains in at least one active peer set.
+    /// Block a peer, disconnecting them if currently connected and preventing
+    /// future connections for as long as the peer remains in at least one
+    /// active peer set.
     Block { public_key: C },
 
     // ---------- Used by peer ----------
-    /// Notify the tracker that a peer has been successfully connected, and that a
-    /// [types::Payload::Peers] message (containing solely the local node's information) should be
-    /// sent to the peer.
+    /// Notify the tracker that a peer has been successfully connected, and that
+    /// a [types::Payload::Peers] message (containing solely the local
+    /// node's information) should be sent to the peer.
     Connect {
         /// The public key of the peer.
         public_key: C,
@@ -41,8 +42,8 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
         peer: Mailbox<peer::Message<C>>,
     },
 
-    /// Ready to send a [types::Payload::BitVec] message to a peer. This message doubles as a
-    /// keep-alive signal to the peer.
+    /// Ready to send a [types::Payload::BitVec] message to a peer. This message
+    /// doubles as a keep-alive signal to the peer.
     ///
     /// This request is formed on a recurring interval.
     Construct {
@@ -53,9 +54,11 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
         peer: Mailbox<peer::Message<C>>,
     },
 
-    /// Notify the tracker that a [types::Payload::BitVec] message has been received from a peer.
+    /// Notify the tracker that a [types::Payload::BitVec] message has been
+    /// received from a peer.
     ///
-    /// The tracker will construct a [types::Payload::Peers] message in response.
+    /// The tracker will construct a [types::Payload::Peers] message in
+    /// response.
     BitVec {
         /// The bit vector received.
         bit_vec: types::BitVec,
@@ -64,7 +67,8 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
         peer: Mailbox<peer::Message<C>>,
     },
 
-    /// Notify the tracker that a [types::Payload::Peers] message has been received from a peer.
+    /// Notify the tracker that a [types::Payload::Peers] message has been
+    /// received from a peer.
     Peers {
         /// The list of peers received.
         peers: Vec<types::PeerInfo<C>>,
@@ -82,9 +86,9 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
 
     /// Request a reservation for a particular peer to dial.
     ///
-    /// The tracker will respond with an [Option<Reservation<E, C>>], which will be `None` if the
-    /// reservation cannot be granted (e.g., if the peer is already connected, blocked or already
-    /// has an active reservation).
+    /// The tracker will respond with an [Option<Reservation<E, C>>], which will
+    /// be `None` if the reservation cannot be granted (e.g., if the peer is
+    /// already connected, blocked or already has an active reservation).
     Dial {
         /// The public key of the peer to reserve.
         public_key: C,
@@ -96,9 +100,9 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
     // ---------- Used by listener ----------
     /// Request a reservation for a particular peer.
     ///
-    /// The tracker will respond with an [Option<Reservation<E, C>>], which will be `None` if  the
-    /// reservation cannot be granted (e.g., if the peer is already connected, blocked or already
-    /// has an active reservation).
+    /// The tracker will respond with an [Option<Reservation<E, C>>], which will
+    /// be `None` if  the reservation cannot be granted (e.g., if the peer
+    /// is already connected, blocked or already has an active reservation).
     Listen {
         /// The public key of the peer to reserve.
         public_key: C,
@@ -192,7 +196,8 @@ impl<E: Spawner + Metrics, C: PublicKey> Releaser<E, C> {
 
     /// Try to release a reservation.
     ///
-    /// Returns `true` if the reservation was released, `false` if the mailbox is full.
+    /// Returns `true` if the reservation was released, `false` if the mailbox
+    /// is full.
     pub fn try_release(&mut self, metadata: Metadata<C>) -> bool {
         let Err(e) = self.sender.try_send(Message::Release { metadata }) else {
             return true;
@@ -232,15 +237,17 @@ impl<E: Spawner + Metrics, C: PublicKey> Oracle<E, C> {
 
     /// Register a set of authorized peers at a given index.
     ///
-    /// These peer sets are used to construct a bit vector (sorted by public key)
-    /// to share knowledge about dialable IPs. If a peer does not yet have an index
-    /// associated with a bit vector, the discovery message will be dropped.
+    /// These peer sets are used to construct a bit vector (sorted by public
+    /// key) to share knowledge about dialable IPs. If a peer does not yet
+    /// have an index associated with a bit vector, the discovery message
+    /// will be dropped.
     ///
     /// # Parameters
     ///
-    /// * `index` - Index of the set of authorized peers (like a blockchain height).
-    ///   Should be monotonically increasing.
-    /// * `peers` - Vector of authorized peers at an `index` (does not need to be sorted).
+    /// * `index` - Index of the set of authorized peers (like a blockchain
+    ///   height). Should be monotonically increasing.
+    /// * `peers` - Vector of authorized peers at an `index` (does not need to
+    ///   be sorted).
     pub async fn register(&mut self, index: u64, peers: Vec<C>) {
         let _ = self.sender.send(Message::Register { index, peers }).await;
     }

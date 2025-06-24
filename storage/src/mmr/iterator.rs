@@ -1,11 +1,11 @@
-//! Iterators for traversing MMRs of a given size, and functions for computing various MMR
-//! properties from their output.
+//! Iterators for traversing MMRs of a given size, and functions for computing
+//! various MMR properties from their output.
 
-/// A PeakIterator returns a (position, height) tuple for each peak in an MMR with the given size,
-/// in decreasing order of height.
+/// A PeakIterator returns a (position, height) tuple for each peak in an MMR
+/// with the given size, in decreasing order of height.
 ///
-/// For the example MMR depicted at the top of this file, the PeakIterator would yield:
-/// ```text
+/// For the example MMR depicted at the top of this file, the PeakIterator would
+/// yield: ```text
 /// [(14, 3), (17, 1), (18, 0)]
 /// ```
 #[derive(Default)]
@@ -16,14 +16,16 @@ pub(crate) struct PeakIterator {
 }
 
 impl PeakIterator {
-    /// Return a new PeakIterator over the peaks of a MMR with the given number of nodes.
+    /// Return a new PeakIterator over the peaks of a MMR with the given number
+    /// of nodes.
     pub(crate) fn new(size: u64) -> PeakIterator {
         if size == 0 {
             return PeakIterator::default();
         }
-        // Compute the position at which to start the search for peaks. This starting position will
-        // not be in the MMR unless it happens to be a single perfect binary tree, but that's OK as
-        // we will descend leftward until we find the first peak.
+        // Compute the position at which to start the search for peaks. This starting
+        // position will not be in the MMR unless it happens to be a single
+        // perfect binary tree, but that's OK as we will descend leftward until
+        // we find the first peak.
         let start = u64::MAX >> size.leading_zeros();
         let two_h = 1 << start.trailing_ones();
         PeakIterator {
@@ -47,8 +49,9 @@ impl PeakIterator {
 
     /// Return if an MMR of the given `size` has a valid structure.
     ///
-    /// The implementation verifies that peaks in the MMR of the given size have strictly decreasing
-    /// height, which is a necessary condition for MMR validity.
+    /// The implementation verifies that peaks in the MMR of the given size have
+    /// strictly decreasing height, which is a necessary condition for MMR
+    /// validity.
     pub(crate) const fn check_validity(size: u64) -> bool {
         if size == 0 {
             return true;
@@ -112,9 +115,10 @@ impl Iterator for PeakIterator {
     }
 }
 
-/// Returns the set of peaks that will require a new parent after adding the next leaf to an MMR
-/// with the given peaks. This set is non-empty only if there is a height-0 (leaf) peak in the MMR.
-/// The result will contain this leaf peak plus the other MMR peaks with contiguously increasing
+/// Returns the set of peaks that will require a new parent after adding the
+/// next leaf to an MMR with the given peaks. This set is non-empty only if
+/// there is a height-0 (leaf) peak in the MMR. The result will contain this
+/// leaf peak plus the other MMR peaks with contiguously increasing
 /// height. Nodes in the result are ordered by decreasing height.
 pub(crate) fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<u64> {
     let mut peaks = Vec::new();
@@ -158,8 +162,8 @@ pub(crate) const fn leaf_pos_to_num(leaf_pos: u64) -> Option<u64> {
         let left_pos = cur_node - two_h;
         two_h >>= 1;
         if leaf_pos > left_pos {
-            // The leaf is in the right subtree, so we must account for the leaves in the left
-            // subtree all of which precede it.
+            // The leaf is in the right subtree, so we must account for the leaves in the
+            // left subtree all of which precede it.
             leaf_num_floor += two_h;
             cur_node -= 1; // move to the right child
         } else {
@@ -179,15 +183,16 @@ pub(crate) const fn leaf_num_to_pos(leaf_num: u64) -> u64 {
         return 0;
     }
 
-    // The following won't underflow because any sane leaf number would have several leading zeros.
+    // The following won't underflow because any sane leaf number would have several
+    // leading zeros.
     let mut pos = u64::MAX >> (leaf_num.leading_zeros() - 1);
     let mut two_h = (pos >> 2) + 1;
     pos -= 1;
 
-    // `pos` is the position of the peak of the lowest mountain that includes both the very first
-    // leaf and the given leaf. We descend from this peak to the leaf level by descending left or
-    // right depending on the relevant bit of `leaf_num`. The position we arrive at is the position
-    // of the leaf.
+    // `pos` is the position of the peak of the lowest mountain that includes both
+    // the very first leaf and the given leaf. We descend from this peak to the
+    // leaf level by descending left or right depending on the relevant bit of
+    // `leaf_num`. The position we arrive at is the position of the leaf.
     while two_h != 0 {
         if leaf_num & two_h != 0 {
             // descend right
@@ -218,14 +223,15 @@ pub(crate) const fn pos_to_height(mut pos: u64) -> u32 {
     pos as u32
 }
 
-/// A PathIterator returns a (parent_pos, sibling_pos) tuple for the sibling of each node along the
-/// path from a given perfect binary tree peak to a designated leaf, not including the peak itself.
+/// A PathIterator returns a (parent_pos, sibling_pos) tuple for the sibling of
+/// each node along the path from a given perfect binary tree peak to a
+/// designated leaf, not including the peak itself.
 ///
-/// For example, consider the tree below and the path from the peak to leaf node 3. Nodes on the
-/// path are [6, 5, 3] and tagged with '*' in the diagram):
+/// For example, consider the tree below and the path from the peak to leaf node
+/// 3. Nodes on the path are [6, 5, 3] and tagged with '*' in the diagram):
 ///
 /// ```text
-///
+/// 
 ///          6*
 ///        /   \
 ///       2     5*
@@ -243,9 +249,9 @@ pub(crate) struct PathIterator {
 }
 
 impl PathIterator {
-    /// Return a PathIterator over the siblings of nodes along the path from peak to leaf in the
-    /// perfect binary tree with peak `peak_pos` and having height `height`, not including the peak
-    /// itself.
+    /// Return a PathIterator over the siblings of nodes along the path from
+    /// peak to leaf in the perfect binary tree with peak `peak_pos` and
+    /// having height `height`, not including the peak itself.
     pub(crate) fn new(leaf_pos: u64, peak_pos: u64, height: u32) -> PathIterator {
         PathIterator {
             leaf_pos,
@@ -291,8 +297,8 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            // Build MMR with 1000 leaves and make sure we can correctly convert each leaf position to
-            // its number and back again.
+            // Build MMR with 1000 leaves and make sure we can correctly convert each leaf
+            // position to its number and back again.
             let mut mmr: Mmr<Sha256> = Mmr::new();
             let mut hasher = Standard::new();
             let mut num_to_pos = Vec::new();

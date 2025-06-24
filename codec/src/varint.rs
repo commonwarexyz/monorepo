@@ -2,14 +2,16 @@
 //!
 //! # Overview
 //!
-//! This module implements Google's Protocol Buffers variable-length integer encoding.
-//! Each byte uses:
+//! This module implements Google's Protocol Buffers variable-length integer
+//! encoding. Each byte uses:
 //! - 7 bits for the value
 //! - 1 "continuation" bit to indicate if more bytes follow
 //!
-//! `u8` and `i8` are omitted since those types do not benefit from varint encoding.
+//! `u8` and `i8` are omitted since those types do not benefit from varint
+//! encoding.
 //!
-//! `usize` and `isize` are omitted to prevent behavior from depending on the target architecture.
+//! `usize` and `isize` are omitted to prevent behavior from depending on the
+//! target architecture.
 //!
 //! # Usage Example
 //!
@@ -96,24 +98,27 @@ mod sealed {
     impl_uint!(u64);
     impl_uint!(u128);
 
-    /// A trait for signed integer primitives that can be converted to and from unsigned integer
-    /// primitives of the equivalent size.
+    /// A trait for signed integer primitives that can be converted to and from
+    /// unsigned integer primitives of the equivalent size.
     ///
-    /// When converted to unsigned integers, the encoding is done using ZigZag encoding, which moves the
-    /// sign bit to the least significant bit (shifting all other bits to the left by one). This allows
-    /// for more efficient encoding of numbers that are close to zero, even if they are negative.
+    /// When converted to unsigned integers, the encoding is done using ZigZag
+    /// encoding, which moves the sign bit to the least significant bit
+    /// (shifting all other bits to the left by one). This allows
+    /// for more efficient encoding of numbers that are close to zero, even if
+    /// they are negative.
     pub trait SPrim: Copy + Sized + FixedSize + PartialOrd + Debug {
         /// The unsigned equivalent type of the signed integer.
         /// This type must be the same size as the signed integer type.
         type UnsignedEquivalent: UPrim;
 
-        /// Compile-time assertion to ensure that the size of the signed integer is equal to the size of
-        /// the unsigned integer.
+        /// Compile-time assertion to ensure that the size of the signed integer
+        /// is equal to the size of the unsigned integer.
         #[doc(hidden)]
         const _COMMIT_OP_ASSERT: () =
             assert!(std::mem::size_of::<Self>() == std::mem::size_of::<Self::UnsignedEquivalent>());
 
-        /// Converts the signed integer to an unsigned integer using ZigZag encoding.
+        /// Converts the signed integer to an unsigned integer using ZigZag
+        /// encoding.
         fn as_zigzag(&self) -> Self::UnsignedEquivalent;
 
         /// Converts a (ZigZag'ed) unsigned integer back to a signed integer.
@@ -146,8 +151,8 @@ mod sealed {
 
 // ---------- Structs ----------
 
-/// An ergonomic wrapper to allow for encoding and decoding of primitive unsigned integers as
-/// varints rather than the default fixed-width integers.
+/// An ergonomic wrapper to allow for encoding and decoding of primitive
+/// unsigned integers as varints rather than the default fixed-width integers.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct UInt<U: UPrim>(pub U);
 
@@ -185,8 +190,8 @@ impl<U: UPrim> EncodeSize for UInt<U> {
     }
 }
 
-/// An ergonomic wrapper to allow for encoding and decoding of primitive signed integers as
-/// varints rather than the default fixed-width integers.
+/// An ergonomic wrapper to allow for encoding and decoding of primitive signed
+/// integers as varints rather than the default fixed-width integers.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SInt<S: SPrim>(pub S);
 
@@ -262,21 +267,22 @@ fn read<T: UPrim>(buf: &mut impl Buf) -> Result<T, Error> {
         }
         let byte = buf.get_u8();
 
-        // If this is not the first byte, but the byte is completely zero, we have an invalid
-        // varint. This is because this byte has no data bits and no continuation, so there was no
-        // point in continuing to this byte in the first place. While the output could still result
-        // in a valid value, we ensure that every value has exactly one unique, valid encoding.
+        // If this is not the first byte, but the byte is completely zero, we have an
+        // invalid varint. This is because this byte has no data bits and no
+        // continuation, so there was no point in continuing to this byte in the
+        // first place. While the output could still result in a valid value, we
+        // ensure that every value has exactly one unique, valid encoding.
         if byte == 0 && bits_read > 0 {
             return Err(Error::InvalidVarint(T::SIZE));
         }
 
-        // If this must be the last byte, check for overflow (i.e. set bits beyond the size of T).
-        // Because the continuation bit is the most-significant bit, this check also happens to
-        // check for an invalid continuation bit.
+        // If this must be the last byte, check for overflow (i.e. set bits beyond the
+        // size of T). Because the continuation bit is the most-significant bit,
+        // this check also happens to check for an invalid continuation bit.
         //
-        // If we have reached what must be the last byte, this check prevents continuing to read
-        // from the buffer by ensuring that the conditional (`if byte & CONTINUATION_BIT_MASK == 0`)
-        // always evaluates to true.
+        // If we have reached what must be the last byte, this check prevents continuing
+        // to read from the buffer by ensuring that the conditional (`if byte &
+        // CONTINUATION_BIT_MASK == 0`) always evaluates to true.
         let remaining_bits = max_bits.checked_sub(bits_read).unwrap();
         if remaining_bits <= DATA_BITS_PER_BYTE {
             let relevant_bits = BITS_PER_BYTE - byte.leading_zeros() as usize;
@@ -297,7 +303,8 @@ fn read<T: UPrim>(buf: &mut impl Buf) -> Result<T, Error> {
     }
 }
 
-/// Calculates the number of bytes needed to encode an unsigned integer as a varint.
+/// Calculates the number of bytes needed to encode an unsigned integer as a
+/// varint.
 fn size<T: UPrim>(value: T) -> usize {
     let total_bits = std::mem::size_of::<T>() * 8;
     let leading_zeros = value.leading_zeros() as usize;
@@ -315,7 +322,8 @@ fn read_signed<S: SPrim>(buf: &mut impl Buf) -> Result<S, Error> {
     Ok(S::un_zigzag(read(buf)?))
 }
 
-/// Calculates the number of bytes needed to encode a signed integer as a varint.
+/// Calculates the number of bytes needed to encode a signed integer as a
+/// varint.
 fn size_signed<S: SPrim>(value: S) -> usize {
     size(value.as_zigzag())
 }

@@ -15,7 +15,8 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    /// Initialize the `Metrics` struct and register the metrics in the provided registry.
+    /// Initialize the `Metrics` struct and register the metrics in the provided
+    /// registry.
     fn new(registry: &mut Registry) -> Self {
         let metrics = Self {
             open_blobs: Gauge::default(),
@@ -214,7 +215,8 @@ mod tests {
         );
     }
 
-    /// Test that metrics are updated correctly when multiple blobs are opened and closed.
+    /// Test that metrics are updated correctly when multiple blobs are opened
+    /// and closed.
     #[tokio::test]
     async fn test_metered_blob_multiple_blobs() {
         let mut registry = Registry::default();

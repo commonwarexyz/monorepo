@@ -19,7 +19,8 @@ pub enum Address<C: PublicKey> {
 
     /// Discovered this peer's address from other peers.
     ///
-    /// The `usize` indicates the number of times dialing this record has failed.
+    /// The `usize` indicates the number of times dialing this record has
+    /// failed.
     Discovered(PeerInfo<C>, usize),
 
     /// Peer is blocked.
@@ -34,8 +35,9 @@ pub enum Status {
     /// Will be upgraded to [Status::Reserved] when a reservation is made.
     Inert,
 
-    /// The peer connection is reserved by an actor that is attempting to establish a connection.
-    /// Will either be upgraded to [Status::Active] or downgraded to [Status::Inert].
+    /// The peer connection is reserved by an actor that is attempting to
+    /// establish a connection. Will either be upgraded to [Status::Active]
+    /// or downgraded to [Status::Inert].
     Reserved,
 
     /// The peer is connected.
@@ -55,7 +57,8 @@ pub struct Record<C: PublicKey> {
     /// Number of peer sets this peer is part of.
     sets: usize,
 
-    /// If `true`, the record should persist even if the peer is not part of any peer sets.
+    /// If `true`, the record should persist even if the peer is not part of any
+    /// peer sets.
     persistent: bool,
 }
 
@@ -128,7 +131,8 @@ impl<C: PublicKey> Record<C> {
     /// Attempt to mark the peer as blocked.
     ///
     /// Returns `true` if the peer was newly blocked.
-    /// Returns `false` if the peer was already blocked or is the local node (unblockable).
+    /// Returns `false` if the peer was already blocked or is the local node
+    /// (unblockable).
     pub fn block(&mut self) -> bool {
         if matches!(self.address, Address::Blocked | Address::Myself(_)) {
             return false;
@@ -180,8 +184,9 @@ impl<C: PublicKey> Record<C> {
         self.status = Status::Inert;
     }
 
-    /// Indicate that there was a dial failure for this peer using the given `socket`, which is
-    /// checked against the existing record to ensure that we correctly attribute the failure.
+    /// Indicate that there was a dial failure for this peer using the given
+    /// `socket`, which is checked against the existing record to ensure
+    /// that we correctly attribute the failure.
     pub fn dial_failure(&mut self, socket: SocketAddr) {
         if let Address::Discovered(info, fails) = &mut self.address {
             if info.socket == socket {
@@ -192,9 +197,10 @@ impl<C: PublicKey> Record<C> {
 
     /// Indicate that a dial succeeded for this peer.
     ///
-    /// Due to race conditions, it's possible that we connected using a socket that is now ejected
-    /// from the record. However, in this case, the record would already have the `fails` set to 0,
-    /// so we can avoid checking against the socket.
+    /// Due to race conditions, it's possible that we connected using a socket
+    /// that is now ejected from the record. However, in this case, the
+    /// record would already have the `fails` set to 0, so we can avoid
+    /// checking against the socket.
     pub fn dial_success(&mut self) {
         if let Address::Discovered(_, fails) = &mut self.address {
             *fails = 0;
@@ -233,8 +239,8 @@ impl<C: PublicKey> Record<C> {
         }
     }
 
-    /// Get the peer information if it is sharable. The information is considered sharable if it is
-    /// known and we are connected to the peer.
+    /// Get the peer information if it is sharable. The information is
+    /// considered sharable if it is known and we are connected to the peer.
     pub fn sharable(&self) -> Option<PeerInfo<C>> {
         match &self.address {
             Address::Unknown => None,
@@ -247,17 +253,19 @@ impl<C: PublicKey> Record<C> {
     }
 
     /// Returns `true` if the peer is reserved (or active).
-    /// This is used to determine if we should attempt to reserve the peer again.
+    /// This is used to determine if we should attempt to reserve the peer
+    /// again.
     pub fn reserved(&self) -> bool {
         matches!(self.status, Status::Reserved | Status::Active)
     }
 
-    /// Returns `true` if we want to ask for updated peer information for this peer.
+    /// Returns `true` if we want to ask for updated peer information for this
+    /// peer.
     ///
     /// - Returns `false` for `Myself` and `Blocked` addresses.
     /// - Returns `true` for addresses for which we don't have peer info.
-    /// - Returns true for addresses for which we do have peer info if-and-only-if we have failed to
-    ///   dial at least `min_fails` times.
+    /// - Returns true for addresses for which we do have peer info
+    ///   if-and-only-if we have failed to dial at least `min_fails` times.
     pub fn want(&self, min_fails: usize) -> bool {
         // Ignore how many sets the peer is part of.
         // If the peer is not in any sets, this function is not called anyway.
@@ -492,8 +500,9 @@ mod tests {
 
     #[test]
     fn test_update_with_different_public_key() {
-        // While unlikely in normal operation (update uses PeerInfo tied to a specific record),
-        // the `update` method itself doesn't check the public key matches.
+        // While unlikely in normal operation (update uses PeerInfo tied to a specific
+        // record), the `update` method itself doesn't check the public key
+        // matches.
         let socket = test_socket();
         let mut record = Record::<secp256r1::PublicKey>::unknown();
 
@@ -505,7 +514,8 @@ mod tests {
             matches!(&record.address, Address::Discovered(info, 0) if peer_info_contents_are_equal(info, &peer_info_pk1_ts1000))
         );
 
-        // Update should succeed based on newer timestamp, even if PK differs (though context matters)
+        // Update should succeed based on newer timestamp, even if PK differs (though
+        // context matters)
         assert!(
             record.update(peer_info_pk2_ts2000.clone()),
             "Update should succeed based on newer timestamp"
@@ -592,7 +602,8 @@ mod tests {
         assert!(matches!(record_disc.address, Address::Blocked));
         assert!(!record_disc.persistent);
 
-        // Block a Discovered record that came from a Bootstrapper (initially persistent)
+        // Block a Discovered record that came from a Bootstrapper (initially
+        // persistent)
         let mut record_disc_from_boot = Record::<secp256r1::PublicKey>::bootstrapper(test_socket());
         assert!(record_disc_from_boot.update(sample_peer_info.clone()));
         assert!(record_disc_from_boot.persistent);
@@ -880,7 +891,8 @@ mod tests {
         record.decrement(); // sets = 0
         assert!(record.deletable()); // sets = 0, !persistent, Inert
 
-        // Blocking makes a record non-persistent, but deletability still depends on sets/status
+        // Blocking makes a record non-persistent, but deletability still depends on
+        // sets/status
         let mut record_blocked = Record::<secp256r1::PublicKey>::bootstrapper(test_socket());
         assert!(record_blocked.persistent);
         record_blocked.increment(); // sets = 1
@@ -901,7 +913,8 @@ mod tests {
         assert!(!record_blocked.allowed());
         assert!(!Record::myself(peer_info.clone()).allowed());
 
-        // Persistent records (Bootstrapper, Myself before blocking) are allowed even with sets=0
+        // Persistent records (Bootstrapper, Myself before blocking) are allowed even
+        // with sets=0
         assert!(Record::<secp256r1::PublicKey>::bootstrapper(test_socket()).allowed());
         let mut record_pers = Record::<secp256r1::PublicKey>::bootstrapper(test_socket());
         assert!(record_pers.update(peer_info.clone()));

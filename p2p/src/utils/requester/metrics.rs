@@ -37,7 +37,8 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    /// Create and return a new set of metrics, registered with the given registry.
+    /// Create and return a new set of metrics, registered with the given
+    /// registry.
     pub fn init<M: commonware_runtime::Metrics>(registry: M) -> Self {
         let metrics = Self {
             created: status::Counter::default(),

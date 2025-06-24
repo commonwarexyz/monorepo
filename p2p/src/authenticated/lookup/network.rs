@@ -45,8 +45,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
     ///
     /// # Returns
     ///
-    /// * A tuple containing the network instance and the oracle that
-    ///   can be used by a developer to configure which peers are authorized.
+    /// * A tuple containing the network instance and the oracle that can be
+    ///   used by a developer to configure which peers are authorized.
     pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<E, C::PublicKey>) {
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
             context.with_label("tracker"),
@@ -88,13 +88,15 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
     ///
     /// * `channel` - Unique identifier for the channel.
     /// * `rate` - Rate at which messages can be received over the channel.
-    /// * `backlog` - Maximum number of messages that can be queued on the channel before blocking.
+    /// * `backlog` - Maximum number of messages that can be queued on the
+    ///   channel before blocking.
     ///
     /// # Returns
     ///
-    /// * A tuple containing the sender and receiver for the channel (how to communicate
-    ///   with external peers on the network). It is safe to close either the sender or receiver
-    ///   without impacting the ability to process messages on other channels.
+    /// * A tuple containing the sender and receiver for the channel (how to
+    ///   communicate with external peers on the network). It is safe to close
+    ///   either the sender or receiver without impacting the ability to process
+    ///   messages on other channels.
     pub fn register(
         &mut self,
         channel: Channel,

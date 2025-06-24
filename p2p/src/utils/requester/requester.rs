@@ -28,9 +28,9 @@ pub type ID = u64;
 /// Send rate-limited requests to peers prioritized by performance.
 ///
 /// Requester attempts to saturate the bandwidth (inferred by rate limit)
-/// of the most performant peers (based on our latency observations). To encourage
-/// exploration, set the value of `initial` to less than the expected latency of
-/// performant peers and/or periodically set `shuffle` in `request`.
+/// of the most performant peers (based on our latency observations). To
+/// encourage exploration, set the value of `initial` to less than the expected
+/// latency of performant peers and/or periodically set `shuffle` in `request`.
 pub struct Requester<E: Clock + GClock + Rng + Metrics, P: PublicKey> {
     context: E,
     public_key: P,
@@ -58,9 +58,9 @@ pub struct Requester<E: Clock + GClock + Rng + Metrics, P: PublicKey> {
 /// Request responded from handling an ID.
 ///
 /// When handling a request, the requester will remove the request and return
-/// this struct in case we want to `resolve` or `timeout` the request. This approach
-/// makes it impossible to forget to remove a handled request if it doesn't warrant
-/// updating the performance of the participant.
+/// this struct in case we want to `resolve` or `timeout` the request. This
+/// approach makes it impossible to forget to remove a handled request if it
+/// doesn't warrant updating the performance of the participant.
 pub struct Request<P: PublicKey> {
     /// Unique identifier for the request.
     pub id: ID,
@@ -113,8 +113,8 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
     /// Ask for a participant to handle a request.
     ///
     /// If `shuffle` is true, the order of participants is shuffled before
-    /// a request is made. This is typically used when a request to the preferred
-    /// participant fails.
+    /// a request is made. This is typically used when a request to the
+    /// preferred participant fails.
     pub fn request(&mut self, shuffle: bool) -> Option<(P, ID)> {
         // Prepare participant iterator
         let participant_iter = if shuffle {

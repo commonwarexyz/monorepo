@@ -28,7 +28,8 @@ pub struct Metrics<E: RuntimeMetrics + Clock> {
 }
 
 impl<E: RuntimeMetrics + Clock> Metrics<E> {
-    /// Create and return a new set of metrics, registered with the given context.
+    /// Create and return a new set of metrics, registered with the given
+    /// context.
     pub fn init(context: E) -> Self {
         let clock = Arc::new(context.clone());
         let serve_duration = Histogram::new(histogram::Buckets::LOCAL.into_iter());

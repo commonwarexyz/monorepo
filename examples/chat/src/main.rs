@@ -3,17 +3,20 @@
 //!
 //! # Offline Friends
 //!
-//! `commonware-chat` only sends messages to connected friends. If a friend is offline at the time a message is sent,
-//! `commonware-p2p::authenticated` will drop the message. You can confirm you are connected to all your friends by
-//! checking the value of `p2p_connections` in the "Metrics Panel" in the right corner of the window. This metric should
-//! be equal to `count(friends)- 1` (you don't connect to yourself).
+//! `commonware-chat` only sends messages to connected friends. If a friend is
+//! offline at the time a message is sent, `commonware-p2p::authenticated` will
+//! drop the message. You can confirm you are connected to all your friends by
+//! checking the value of `p2p_connections` in the "Metrics Panel" in the right
+//! corner of the window. This metric should be equal to `count(friends)- 1`
+//! (you don't connect to yourself).
 //!
 //! # Synchronized Friends
 //!
-//! `commonware-p2p::authenticated` requires all friends to have the same set of friends for friend discovery to work
-//! correctly. If you do not synchronize friends, you may be able to form connections between specific friends but may
-//! not be able to form connections with all friends. You can learn more about why
-//! this is [here](https://docs.rs/commonware-p2p/latest/commonware_p2p/authenticated/index.html#discovery). Other
+//! `commonware-p2p::authenticated` requires all friends to have the same set of
+//! friends for friend discovery to work correctly. If you do not synchronize
+//! friends, you may be able to form connections between specific friends but
+//! may not be able to form connections with all friends. You can learn more
+//! about why this is [here](https://docs.rs/commonware-p2p/latest/commonware_p2p/authenticated/index.html#discovery). Other
 //! dialects of `commonware-p2p` may not have this requirement.
 //!
 //! # Usage (4 Friends)
@@ -168,8 +171,8 @@ fn main() {
 
         // Provide authorized peers
         //
-        // In a real-world scenario, this would be updated as new peer sets are created (like when
-        // the composition of a validator set changes).
+        // In a real-world scenario, this would be updated as new peer sets are created
+        // (like when the composition of a validator set changes).
         oracle.register(0, recipients).await;
 
         // Initialize chat

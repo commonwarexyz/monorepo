@@ -110,8 +110,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
     /// Returns (and increments) the next available socket address.
     ///
-    /// The port number is incremented for each call, and the IP address is incremented if the port
-    /// number overflows.
+    /// The port number is incremented for each call, and the IP address is
+    /// incremented if the port number overflows.
     fn get_next_socket(&mut self) -> SocketAddr {
         let result = self.next_addr;
 
@@ -138,9 +138,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     ///
     /// This method is called when a message is received from the oracle.
     async fn handle_ingress(&mut self, message: ingress::Message<P>) {
-        // It is important to ensure that no failed receipt of a message will cause us to exit.
-        // This could happen if the caller drops the `Oracle` after updating the network topology.
-        // Thus, we create a helper function to send the result to the oracle and log any errors.
+        // It is important to ensure that no failed receipt of a message will cause us
+        // to exit. This could happen if the caller drops the `Oracle` after
+        // updating the network topology. Thus, we create a helper function to
+        // send the result to the oracle and log any errors.
         fn send_result<T: std::fmt::Debug>(
             result: oneshot::Sender<Result<T, Error>>,
             value: Result<T, Error>,
@@ -168,14 +169,16 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     self.peers.insert(public_key.clone(), peer);
                 }
 
-                // Create a receiver that allows receiving messages from the network for a certain channel
+                // Create a receiver that allows receiving messages from the network for a
+                // certain channel
                 let peer = self.peers.get_mut(&public_key).unwrap();
                 let receiver = match peer.register(channel).await {
                     Ok(receiver) => Receiver { receiver },
                     Err(err) => return send_result(result, Err(err)),
                 };
 
-                // Create a sender that allows sending messages to the network for a certain channel
+                // Create a sender that allows sending messages to the network for a certain
+                // channel
                 let sender = Sender::new(
                     self.context.clone(),
                     public_key,
@@ -240,8 +243,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
     /// Handle a task.
     ///
-    /// This method is called when a task is received from the sender, which can come from
-    /// any peer in the network.
+    /// This method is called when a task is received from the sender, which can
+    /// come from any peer in the network.
     fn handle_task(&mut self, task: Task<P>) {
         // Collect recipients
         let (channel, origin, recipients, message, reply) = task;
@@ -278,8 +281,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 }
             };
 
-            // Record sent message as soon as we determine there is a link with recipient (approximates
-            // having an open connection)
+            // Record sent message as soon as we determine there is a link with recipient
+            // (approximates having an open connection)
             self.sent_messages
                 .get_or_create(&metrics::Message::new(&origin, &recipient, channel))
                 .inc();
@@ -352,8 +355,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
     /// Run the simulated network.
     ///
-    /// It is not necessary to invoke this method before modifying the network topology, however,
-    /// no messages will be sent until this method is called.
+    /// It is not necessary to invoke this method before modifying the network
+    /// topology, however, no messages will be sent until this method is
+    /// called.
     pub fn start(mut self) -> Handle<()> {
         self.context.spawn_ref()(self.run())
     }
@@ -486,7 +490,8 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
 
 /// A peer in the simulated network.
 ///
-/// The peer can register channels, which allows it to receive messages sent to the channel from other peers.
+/// The peer can register channels, which allows it to receive messages sent to
+/// the channel from other peers.
 struct Peer<P: PublicKey> {
     // Socket address that the peer is listening on
     socket: SocketAddr,
@@ -498,8 +503,9 @@ struct Peer<P: PublicKey> {
 impl<P: PublicKey> Peer<P> {
     /// Create and return a new peer.
     ///
-    /// The peer will listen for incoming connections on the given `socket` address.
-    /// `max_size` is the maximum size of a message that can be sent to the peer.
+    /// The peer will listen for incoming connections on the given `socket`
+    /// address. `max_size` is the maximum size of a message that can be
+    /// sent to the peer.
     fn new<E: Spawner + RNetwork + Metrics>(
         context: &mut E,
         public_key: P,
@@ -507,11 +513,13 @@ impl<P: PublicKey> Peer<P> {
         max_size: usize,
     ) -> Self {
         // The control is used to register channels.
-        // There is exactly one mailbox created for each channel that the peer is registered for.
+        // There is exactly one mailbox created for each channel that the peer is
+        // registered for.
         let (control_sender, mut control_receiver) = mpsc::unbounded();
 
         // Whenever a message is received from a peer, it is placed in the inbox.
-        // The router polls the inbox and forwards the message to the appropriate mailbox.
+        // The router polls the inbox and forwards the message to the appropriate
+        // mailbox.
         let (inbox_sender, mut inbox_receiver) = mpsc::unbounded();
 
         // Spawn router
@@ -571,7 +579,8 @@ impl<P: PublicKey> Peer<P> {
             }
         });
 
-        // Spawn a task that accepts new connections and spawns a task for each connection
+        // Spawn a task that accepts new connections and spawns a task for each
+        // connection
         context.with_label("listener").spawn({
             let inbox_sender = inbox_sender.clone();
             move |context| async move {
@@ -597,7 +606,8 @@ impl<P: PublicKey> Peer<P> {
                                 return;
                             };
 
-                            // Continually receive messages from the dialer and send them to the inbox
+                            // Continually receive messages from the dialer and send them to the
+                            // inbox
                             while let Ok(data) = recv_frame(&mut stream, max_size).await {
                                 let channel = Channel::from_be_bytes(
                                     data[..Channel::SIZE].try_into().unwrap(),
@@ -627,7 +637,8 @@ impl<P: PublicKey> Peer<P> {
     /// Register a channel with the peer.
     ///
     /// This allows the peer to receive messages sent to the channel.
-    /// Returns a receiver that can be used to receive messages sent to the channel.
+    /// Returns a receiver that can be used to receive messages sent to the
+    /// channel.
     async fn register(&mut self, channel: Channel) -> MessageReceiverResult<P> {
         let (sender, receiver) = oneshot::channel();
         self.control
@@ -639,7 +650,8 @@ impl<P: PublicKey> Peer<P> {
 }
 
 // A unidirectional link between two peers.
-// Messages can be sent over the link with a given latency, jitter, and success rate.
+// Messages can be sent over the link with a given latency, jitter, and success
+// rate.
 #[derive(Clone)]
 struct Link {
     sampler: Normal<f64>,
@@ -663,8 +675,8 @@ impl Link {
             inbox,
         };
 
-        // Spawn a task that will wait for messages to be sent to the link and then send them
-        // over the network.
+        // Spawn a task that will wait for messages to be sent to the link and then send
+        // them over the network.
         context
             .clone()
             .with_label("link")

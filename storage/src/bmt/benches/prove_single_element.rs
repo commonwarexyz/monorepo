@@ -19,7 +19,8 @@ fn bench_prove_single_element(c: &mut Criterion) {
         let tree = builder.build();
         let root = tree.root();
 
-        // Select SAMPLE_SIZE random elements without replacement and create/verify proofs
+        // Select SAMPLE_SIZE random elements without replacement and create/verify
+        // proofs
         c.bench_function(
             &format!("{}/n={} samples={}", module_path!(), n, SAMPLE_SIZE),
             |b| {

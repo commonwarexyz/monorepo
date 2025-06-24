@@ -1,20 +1,23 @@
 //! Commit to a secret log and agree to its hash.
 //!
-//! This example demonstrates how to build an application that employs [commonware_consensus::simplex].
-//! Whenever it is a participant's turn to build a block, they randomly generate a 16-byte secret message and send the
-//! hashed message to other participants. Participants use consensus to ensure everyone agrees on the same hash in the same
-//! view.
+//! This example demonstrates how to build an application that employs
+//! [commonware_consensus::simplex]. Whenever it is a participant's turn to
+//! build a block, they randomly generate a 16-byte secret message and send the
+//! hashed message to other participants. Participants use consensus to ensure
+//! everyone agrees on the same hash in the same view.
 //!
 //! # Persistence
 //!
-//! All consensus data is persisted to disk in the `storage-dir` directory. If you shutdown (whether unclean or not),
-//! consensus will resume where it left off when you restart.
+//! All consensus data is persisted to disk in the `storage-dir` directory. If
+//! you shutdown (whether unclean or not), consensus will resume where it left
+//! off when you restart.
 //!
 //! # Broadcast and Backfilling
 //!
-//! This example demonstrates how [commonware_consensus::simplex] can minimally be used. It purposely avoids introducing
-//! logic to handle broadcasting secret messages and/or backfilling old hashes/messages. Think of this as an exercise
-//! for the reader.
+//! This example demonstrates how [commonware_consensus::simplex] can minimally
+//! be used. It purposely avoids introducing logic to handle broadcasting secret
+//! messages and/or backfilling old hashes/messages. Think of this as an
+//! exercise for the reader.
 //!
 //! # Usage (Run at Least 3 to Make Progress)
 //!
@@ -161,14 +164,14 @@ fn main() {
 
         // Provide authorized peers
         //
-        // In a real-world scenario, this would be updated as new peer sets are created (like when
-        // the composition of a validator set changes).
+        // In a real-world scenario, this would be updated as new peer sets are created
+        // (like when the composition of a validator set changes).
         oracle.register(0, validators.clone()).await;
 
         // Register consensus channels
         //
-        // If you want to maximize the number of views per second, increase the rate limit
-        // for this channel.
+        // If you want to maximize the number of views per second, increase the rate
+        // limit for this channel.
         let (voter_sender, voter_receiver) = network.register(
             0,
             Quota::per_second(NZU32!(10)),

@@ -92,9 +92,9 @@ impl<Key: Array> Read for Payload<Key> {
             1 => {
                 // The maximum length of a message is already bounded by the P2P connection.
                 // Since the Bytes type will not allocate more memory than the buffer size,
-                // we can safely read the bytes with no limit. If an attacker encodes the length of
-                // the bytes with a value greater than the buffer size, the read will fail without
-                // allocating more memory.
+                // we can safely read the bytes with no limit. If an attacker encodes the length
+                // of the bytes with a value greater than the buffer size, the
+                // read will fail without allocating more memory.
                 let data = Bytes::read_cfg(buf, &(..).into())?;
                 Ok(Payload::Response(data))
             }

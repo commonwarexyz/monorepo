@@ -12,7 +12,8 @@ fn roundtrip_socket(socket: SocketAddr) {
         .expect("Failed to decode a successfully encoded input!");
 
     // Check encoding length was correct
-    // NOTE: We add 1 to the length here since this is a full `SocketAddr`, the first byte represents the address type (e.g. IPv4 or IPv6)
+    // NOTE: We add 1 to the length here since this is a full `SocketAddr`, the
+    // first byte represents the address type (e.g. IPv4 or IPv6)
     match socket {
         SocketAddr::V4(_) => {
             assert_eq!(encoded.len(), 6 + 1);
@@ -159,7 +160,10 @@ fuzz_target!(|input_data: FuzzInput| {
     match input_data {
         FuzzInput::Socket(it) => roundtrip_socket(it.0),
         FuzzInput::Bytes(it) => roundtrip_bytes(Bytes::from(it.to_vec())),
-        FuzzInput::Map(it) => roundtrip_map(&it, (..).into(), (), ()), // TODO this needs proper length specifiers for the type if doing dynamic lengths!
+        FuzzInput::Map(it) => roundtrip_map(&it, (..).into(), (), ()), /* TODO this needs proper
+                                                                         * length specifiers for
+                                                                         * the type if doing
+                                                                         * dynamic lengths! */
         FuzzInput::Vec(it) => roundtrip_vec(it),
 
         // Primitive roundtrips

@@ -1002,7 +1002,8 @@ mod tests {
             assert_eq!(writer.size().await, 7);
             // Buffer contains "INITIAL", inner.position = 0
 
-            // Non-contiguous write, forces flush of "INITIAL" and direct write of "NONCONTIG"
+            // Non-contiguous write, forces flush of "INITIAL" and direct write of
+            // "NONCONTIG"
             writer.write_at(b"NONCONTIG".to_vec(), 20).await.unwrap();
             assert_eq!(writer.size().await, 29);
             writer.sync().await.unwrap();

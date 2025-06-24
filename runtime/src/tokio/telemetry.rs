@@ -96,8 +96,9 @@ pub fn init(
 
                 // Serve the metrics over HTTP.
                 //
-                // `serve` will spawn its own tasks using `tokio::spawn` (and there is no way to specify
-                // it to do otherwise). These tasks will not be tracked like metrics spawned using `Spawner`.
+                // `serve` will spawn its own tasks using `tokio::spawn` (and there is no way to
+                // specify it to do otherwise). These tasks will not be tracked
+                // like metrics spawned using `Spawner`.
                 serve(listener, app.into_make_service())
                     .await
                     .expect("Could not serve metrics");

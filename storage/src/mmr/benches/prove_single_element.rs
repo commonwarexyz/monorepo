@@ -22,7 +22,8 @@ fn bench_prove_single_element(c: &mut Criterion) {
         });
         let root_digest = mmr.root(&mut hasher);
 
-        // Select SAMPLE_SIZE random elements without replacement and create/verify proofs
+        // Select SAMPLE_SIZE random elements without replacement and create/verify
+        // proofs
         c.bench_function(
             &format!("{}/n={} samples={}", module_path!(), n, SAMPLE_SIZE),
             |b| {

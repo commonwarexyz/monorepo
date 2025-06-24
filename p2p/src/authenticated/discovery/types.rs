@@ -7,12 +7,14 @@ use commonware_cryptography::{PublicKey, Signer};
 use commonware_utils::BitVec as UtilsBitVec;
 use std::net::SocketAddr;
 
-/// The maximum overhead (in bytes) when encoding a `message` into a [Payload::Data].
+/// The maximum overhead (in bytes) when encoding a `message` into a
+/// [Payload::Data].
 ///
 /// The byte overhead is calculated as the sum of the following:
 /// - 1: Payload enum value
 /// - 5: Channel varint
-/// - 5: Message length varint (lengths longer than 32 bits are forbidden by the codec)
+/// - 5: Message length varint (lengths longer than 32 bits are forbidden by the
+///   codec)
 pub const MAX_PAYLOAD_DATA_OVERHEAD: usize = 1 + 5 + 5;
 
 /// Prefix byte used to identify a [Payload] with variant BitVec.
@@ -106,9 +108,11 @@ impl<C: PublicKey> Read for Payload<C> {
     }
 }
 
-/// BitVec is a bit vector that represents the peers a peer knows about at a given index.
+/// BitVec is a bit vector that represents the peers a peer knows about at a
+/// given index.
 ///
-/// A peer should respond with a `Peers` message if they know of any peers that the sender does not.
+/// A peer should respond with a `Peers` message if they know of any peers that
+/// the sender does not.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BitVec {
     /// The index that the bit vector applies to.
@@ -141,10 +145,11 @@ impl Read for BitVec {
     }
 }
 
-/// A signed message from a peer attesting to its own socket address and public key at a given time.
+/// A signed message from a peer attesting to its own socket address and public
+/// key at a given time.
 ///
-/// This is used to share the peer's socket address and public key with other peers in a verified
-/// manner.
+/// This is used to share the peer's socket address and public key with other
+/// peers in a verified manner.
 #[derive(Clone, Debug)]
 pub struct PeerInfo<C: PublicKey> {
     /// The socket address of the peer.

@@ -1,49 +1,57 @@
-//! Communicate with a fixed set of authenticated peers with known addresses over encrypted connections.
+//! Communicate with a fixed set of authenticated peers with known addresses
+//! over encrypted connections.
 //!
 //! `lookup` provides multiplexed communication between fully-connected peers
-//! identified by a developer-specified cryptographic identity (i.e. BLS, ed25519, etc.).
-//! Unlike `discovery`, peers in `lookup` don't use a discovery mechanism to find each other;
-//! each peer's address is supplied by the application layer.
+//! identified by a developer-specified cryptographic identity (i.e. BLS,
+//! ed25519, etc.). Unlike `discovery`, peers in `lookup` don't use a discovery
+//! mechanism to find each other; each peer's address is supplied by the
+//! application layer.
 //!
 //! # Features
 //!
 //! - Configurable Cryptography Scheme for Peer Identities (BLS, ed25519, etc.)
-//! - Multiplexing With Configurable Rate Limiting Per Channel and Send Prioritization
+//! - Multiplexing With Configurable Rate Limiting Per Channel and Send
+//!   Prioritization
 //!
 //! # Design
 //!
 //! ## Discovery
 //!
-//! This module operates under the assumption that all peers are aware of and synchronized on
-//! the composition of peer sets at specific, user-provided indices (`u64`). Each index maps to a
-//! list of peer `PublicKey`/`SocketAddr` pairs (`(u64, Vec<(PublicKey, SocketAddr)>)`).
+//! This module operates under the assumption that all peers are aware of and
+//! synchronized on the composition of peer sets at specific, user-provided
+//! indices (`u64`). Each index maps to a list of peer `PublicKey`/`SocketAddr`
+//! pairs (`(u64, Vec<(PublicKey, SocketAddr)>)`).
 //!
-//! On startup, the application supplies the initial set of peers. The `Oracle` actor allows
-//! the application to update peer --> address mappings so that peers can find each other.
+//! On startup, the application supplies the initial set of peers. The `Oracle`
+//! actor allows the application to update peer --> address mappings so that
+//! peers can find each other.
 //!
 //! ## Messages
 //!
-//! Application-level data is exchanged using the `Data` message type. This structure contains:
-//! - `channel`: A `u32` identifier used to route the message to the correct application handler.
+//! Application-level data is exchanged using the `Data` message type. This
+//! structure contains:
+//! - `channel`: A `u32` identifier used to route the message to the correct
+//!   application handler.
 //! - `message`: The arbitrary application payload as `Bytes`.
 //!
 //! The size of the `message` bytes must not exceed the configured
 //! `max_message_size`. If it does, the sending operation will fail with
-//! [Error::MessageTooLarge]. Messages can be sent with `priority`, allowing certain
-//! communications to potentially bypass lower-priority messages waiting in send queues across all
-//! channels. Each registered channel ([Sender], [Receiver]) handles its own message queuing
-//! and rate limiting.
+//! [Error::MessageTooLarge]. Messages can be sent with `priority`, allowing
+//! certain communications to potentially bypass lower-priority messages waiting
+//! in send queues across all channels. Each registered channel ([Sender],
+//! [Receiver]) handles its own message queuing and rate limiting.
 //!
 //! ## Compression
 //!
-//! Stream compression is not provided at the transport layer to avoid inadvertently
-//! enabling known attacks such as BREACH and CRIME. These attacks exploit the interaction
-//! between compression and encryption by analyzing patterns in the resulting data.
-//! By compressing secrets alongside attacker-controlled content, these attacks can infer
-//! sensitive information through compression ratio analysis. Applications that choose
-//! to compress data should do so with full awareness of these risks and implement
-//! appropriate mitigations (such as ensuring no attacker-controlled data is compressed
-//! alongside sensitive information).
+//! Stream compression is not provided at the transport layer to avoid
+//! inadvertently enabling known attacks such as BREACH and CRIME. These attacks
+//! exploit the interaction between compression and encryption by analyzing
+//! patterns in the resulting data. By compressing secrets alongside
+//! attacker-controlled content, these attacks can infer sensitive information
+//! through compression ratio analysis. Applications that choose to compress
+//! data should do so with full awareness of these risks and implement
+//! appropriate mitigations (such as ensuring no attacker-controlled data is
+//! compressed alongside sensitive information).
 //!
 //! # Example
 //!
@@ -193,8 +201,8 @@ mod tests {
 
     /// Test connectivity between `n` peers.
     ///
-    /// We set a unique `base_port` for each test to avoid "address already in use"
-    /// errors when tests are run immediately after each other.
+    /// We set a unique `base_port` for each test to avoid "address already in
+    /// use" errors when tests are run immediately after each other.
     async fn run_network(
         context: impl Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics,
         max_message_size: usize,
@@ -268,7 +276,8 @@ mod tests {
                         }
                         complete_sender.send(()).await.unwrap();
 
-                        // Process messages until all finished (or else sender loops could get stuck as a peer may drop)
+                        // Process messages until all finished (or else sender loops could get stuck
+                        // as a peer may drop)
                         loop {
                             receiver.recv().await.unwrap();
                         }

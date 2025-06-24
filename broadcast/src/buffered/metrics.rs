@@ -32,13 +32,14 @@ pub struct Metrics {
     pub subscribe: status::Counter,
     /// Number of `get` requests by status
     pub get: status::Counter,
-    /// Number of digests being awaited. May be less than the number of waiters since there may be
-    /// multiple waiters for the same digest.
+    /// Number of digests being awaited. May be less than the number of waiters
+    /// since there may be multiple waiters for the same digest.
     pub waiters: Gauge,
 }
 
 impl Metrics {
-    /// Create and return a new set of metrics, registered with the given context.
+    /// Create and return a new set of metrics, registered with the given
+    /// context.
     pub fn init<E: RuntimeMetrics>(context: E) -> Self {
         let metrics = Metrics::default();
         context.register(

@@ -18,12 +18,13 @@ pub struct Config<
     /// The cryptographic scheme used if the engine is a sequencer.
     pub crypto: C,
 
-    /// Tracks the current state of consensus (to determine which participants should
-    /// be involved in the current broadcast attempt).
+    /// Tracks the current state of consensus (to determine which participants
+    /// should be involved in the current broadcast attempt).
     pub monitor: M,
 
     /// Manages the set of validators and the group polynomial.
-    /// Also manages the cryptographic partial share if the engine is a validator.
+    /// Also manages the cryptographic partial share if the engine is a
+    /// validator.
     pub validators: TSu,
 
     /// Manages the set of sequencers.
@@ -48,7 +49,8 @@ pub struct Config<
     /// Whether acks are sent as priority.
     pub priority_acks: bool,
 
-    /// How often a proposal is rebroadcast to all validators if no threshold is reached.
+    /// How often a proposal is rebroadcast to all validators if no threshold is
+    /// reached.
     pub rebroadcast_timeout: Duration,
 
     /// A tuple representing the epochs to keep in memory.
@@ -68,7 +70,8 @@ pub struct Config<
     pub height_bound: u64,
 
     /// A prefix for the journal names.
-    /// The rest of the name is the hex-encoded public keys of the relevant sequencer.
+    /// The rest of the name is the hex-encoded public keys of the relevant
+    /// sequencer.
     pub journal_name_prefix: String,
 
     /// The number of entries to keep per journal section.

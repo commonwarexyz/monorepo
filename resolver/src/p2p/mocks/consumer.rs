@@ -66,7 +66,8 @@ impl<K: Array, V: Clone + PartialEq + Send + 'static> crate::Consumer for Consum
 
     /// Deliver data to the consumer.
     ///
-    /// Returns `true` if the value is expected for the key or if there is no expected value.
+    /// Returns `true` if the value is expected for the key or if there is no
+    /// expected value.
     async fn deliver(&mut self, key: Self::Key, value: Self::Value) -> bool {
         let valid = self.expected.get(&key).is_none_or(|v| v == &value);
         if valid {

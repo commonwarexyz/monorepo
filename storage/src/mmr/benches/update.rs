@@ -18,9 +18,9 @@ enum Strategy {
     BatchedParallel,
 }
 
-/// Threads (cores) to use for parallelization. We pick 8 since our benchmarking pipeline is
-/// configured to provide 8 cores. More threads may be faster on machines with more cores, but
-/// returns start diminishing.
+/// Threads (cores) to use for parallelization. We pick 8 since our benchmarking
+/// pipeline is configured to provide 8 cores. More threads may be faster on
+/// machines with more cores, but returns start diminishing.
 const THREADS: usize = 8;
 
 /// Benchmark the performance of randomly updating leaves in an MMR.
@@ -92,7 +92,8 @@ fn bench_update(c: &mut Criterion) {
                                     }
                                 }
                                 _ => {
-                                    // Collect the map into a Vec of (position, element) pairs for batched updates
+                                    // Collect the map into a Vec of (position, element) pairs for
+                                    // batched updates
                                     let updates: Vec<(
                                         u64,
                                         commonware_cryptography::sha256::Digest,

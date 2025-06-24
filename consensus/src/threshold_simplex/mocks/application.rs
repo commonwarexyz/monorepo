@@ -108,8 +108,9 @@ pub struct Config<H: Hasher, P: PublicKey> {
 
     /// The public key of the participant.
     ///
-    /// It is common to use multiple instances of an application in a single simulation, this
-    /// helps to identify the source of both progress and errors.
+    /// It is common to use multiple instances of an application in a single
+    /// simulation, this helps to identify the source of both progress and
+    /// errors.
     pub participant: P,
 
     pub propose_latency: Latency,
@@ -179,8 +180,9 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         digest
     }
 
-    /// When proposing a block, we do not care if the parent is verified (or even in our possession).
-    /// Backfilling verification dependencies is considered out-of-scope for consensus.
+    /// When proposing a block, we do not care if the parent is verified (or
+    /// even in our possession). Backfilling verification dependencies is
+    /// considered out-of-scope for consensus.
     async fn propose(&mut self, context: Context<H::Digest>) -> H::Digest {
         // Simulate the propose latency
         let duration = self.propose_latency.sample(&mut self.context);

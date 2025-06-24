@@ -7,8 +7,9 @@
 //!
 //! Ensure that points are checked to belong to the correct subgroup
 //! (G1 or G2) to prevent small subgroup attacks. This is particularly important
-//! when handling deserialized points or points received from untrusted sources. This
-//! is already taken care of for you if you use the provided `deserialize` function.
+//! when handling deserialized points or points received from untrusted sources.
+//! This is already taken care of for you if you use the provided `deserialize`
+//! function.
 
 use super::variant::Variant;
 use blst::{
@@ -66,7 +67,8 @@ pub trait Point: Element {
     /// Maps the provided data to a group element.
     fn map(&mut self, dst: DST, message: &[u8]);
 
-    /// Performs a multi‑scalar multiplication of the provided points and scalars.
+    /// Performs a multi‑scalar multiplication of the provided points and
+    /// scalars.
     fn msm(points: &[Self], scalars: &[Scalar]) -> Self;
 }
 
@@ -101,8 +103,8 @@ const SCALAR_BITS: usize = 255;
 /// BLS12-381 finite field, ensuring that arithmetic is carried out within the
 /// correct modulo.
 ///
-/// `R = 2^256 mod q` in little-endian Montgomery form which is equivalent to 1 in little-endian
-/// non-Montgomery form:
+/// `R = 2^256 mod q` in little-endian Montgomery form which is equivalent to 1
+/// in little-endian non-Montgomery form:
 ///
 /// ```txt
 /// mod(2^256, 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001) = 0x1824b159acc5056f998c4fefecbc4ff55884b7fa0003480200000001fffffffe
@@ -126,15 +128,17 @@ pub struct G1(blst_p1);
 /// The size in bytes of an encoded G1 element.
 pub const G1_ELEMENT_BYTE_LENGTH: usize = 48;
 
-/// Domain separation tag for hashing a proof of possession (compressed G2) to G1.
+/// Domain separation tag for hashing a proof of possession (compressed G2) to
+/// G1.
 pub const G1_PROOF_OF_POSSESSION: DST = b"BLS_POP_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_";
 
 /// Domain separation tag for hashing a message to G1.
 ///
-/// We use the `POP` scheme for hashing all messages because this crate is expected to be
-/// used in a Byzantine environment (where any player may attempt a rogue key attack) and
-/// any message could be aggregated into a multi-signature (which requires a proof-of-possession
-/// to be safely deployed in this environment).
+/// We use the `POP` scheme for hashing all messages because this crate is
+/// expected to be used in a Byzantine environment (where any player may attempt
+/// a rogue key attack) and any message could be aggregated into a
+/// multi-signature (which requires a proof-of-possession to be safely deployed
+/// in this environment).
 pub const G1_MESSAGE: DST = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_";
 
 /// A point on the BLS12-381 G2 curve.
@@ -145,15 +149,17 @@ pub struct G2(blst_p2);
 /// The size in bytes of an encoded G2 element.
 pub const G2_ELEMENT_BYTE_LENGTH: usize = 96;
 
-/// Domain separation tag for hashing a proof of possession (compressed G1) to G2.
+/// Domain separation tag for hashing a proof of possession (compressed G1) to
+/// G2.
 pub const G2_PROOF_OF_POSSESSION: DST = b"BLS_POP_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
 
 /// Domain separation tag for hashing a message to G2.
 ///
-/// We use the `POP` scheme for hashing all messages because this crate is expected to be
-/// used in a Byzantine environment (where any player may attempt a rogue key attack) and
-/// any message could be aggregated into a multi-signature (which requires a proof-of-possession
-/// to be safely deployed in this environment).
+/// We use the `POP` scheme for hashing all messages because this crate is
+/// expected to be used in a Byzantine environment (where any player may attempt
+/// a rogue key attack) and any message could be aggregated into a
+/// multi-signature (which requires a proof-of-possession to be safely deployed
+/// in this environment).
 pub const G2_MESSAGE: DST = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
 
 /// The target group of the BLS12-381 pairing.
@@ -274,8 +280,8 @@ impl Read for Scalar {
             // We use `blst_sk_check` instead of `blst_scalar_fr_check` because the former
             // performs a non-zero check.
             //
-            // The IETF BLS12-381 specification allows for zero scalars up to (inclusive) Draft 3
-            // but disallows them after.
+            // The IETF BLS12-381 specification allows for zero scalars up to (inclusive)
+            // Draft 3 but disallows them after.
             //
             // References:
             // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-03#section-2.3
@@ -525,8 +531,8 @@ impl Point for G1 {
         }
     }
 
-    /// Performs multi-scalar multiplication (MSM) on G1 points using Pippenger's algorithm.
-    /// Computes `sum(scalars[i] * points[i])`.
+    /// Performs multi-scalar multiplication (MSM) on G1 points using
+    /// Pippenger's algorithm. Computes `sum(scalars[i] * points[i])`.
     ///
     /// Filters out pairs where the point is the identity element (infinity).
     /// Returns an error if the lengths of the input slices mismatch.
@@ -734,8 +740,8 @@ impl Point for G2 {
         }
     }
 
-    /// Performs multi-scalar multiplication (MSM) on G2 points using Pippenger's algorithm.
-    /// Computes `sum(scalars[i] * points[i])`.
+    /// Performs multi-scalar multiplication (MSM) on G2 points using
+    /// Pippenger's algorithm. Computes `sum(scalars[i] * points[i])`.
     ///
     /// Filters out pairs where the point is the identity element (infinity).
     /// Returns an error if the lengths of the input slices mismatch.
@@ -743,7 +749,8 @@ impl Point for G2 {
         // Assert input validity
         assert_eq!(points.len(), scalars.len(), "mismatched lengths");
 
-        // Prepare points (affine) and scalars (raw blst_scalar), filtering identity points
+        // Prepare points (affine) and scalars (raw blst_scalar), filtering identity
+        // points
         let mut points_filtered = Vec::with_capacity(points.len());
         let mut scalars_filtered = Vec::with_capacity(scalars.len());
         for (point, scalar) in points.iter().zip(scalars.iter()) {
@@ -1125,7 +1132,8 @@ mod tests {
         let shares: Vec<_> = share_set.iter().collect();
         assert!(shares.windows(2).all(|w| w[0] <= w[1]));
 
-        // Test that we can use these types as keys in hash maps, which relies on `Hash` and `Eq`.
+        // Test that we can use these types as keys in hash maps, which relies on `Hash`
+        // and `Eq`.
         let scalar_map: HashMap<_, _> = scalar_set.iter().cloned().zip(0..).collect();
         let g1_map: HashMap<_, _> = g1_set.iter().cloned().zip(0..).collect();
         let g2_map: HashMap<_, _> = g2_set.iter().cloned().zip(0..).collect();

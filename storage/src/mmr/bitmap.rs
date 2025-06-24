@@ -1,14 +1,16 @@
 //! An authenticated bitmap.
 //!
-//! The authenticated bitmap is an in-memory data structure that does not persist its contents other
-//! than the data corresponding to its "pruned" section, allowing full restoration by "replaying"
-//! all retained elements.
+//! The authenticated bitmap is an in-memory data structure that does not
+//! persist its contents other than the data corresponding to its "pruned"
+//! section, allowing full restoration by "replaying" all retained elements.
 //!
-//! Authentication is provided by a Merkle tree that is maintained over the bitmap, with each leaf
-//! covering a chunk of N bytes. This Merkle tree isn't balanced, but instead mimics the structure
-//! of an MMR with an equivalent number of leaves. This structure reduces overhead of updating the
-//! most recently added elements, and (more importantly) simplifies aligning the bitmap with an MMR
-//! over elements whose activity state is reflected by the bitmap.
+//! Authentication is provided by a Merkle tree that is maintained over the
+//! bitmap, with each leaf covering a chunk of N bytes. This Merkle tree isn't
+//! balanced, but instead mimics the structure of an MMR with an equivalent
+//! number of leaves. This structure reduces overhead of updating the
+//! most recently added elements, and (more importantly) simplifies aligning the
+//! bitmap with an MMR over elements whose activity state is reflected by the
+//! bitmap.
 
 use crate::{
     metadata::{Config as MConfig, Metadata},
@@ -30,47 +32,53 @@ use tracing::{debug, error, warn};
 
 /// A bitmap supporting inclusion proofs through Merkelization.
 ///
-/// Merkelization of the bitmap is performed over chunks of N bytes. If the goal is to minimize
-/// proof sizes, choose an N that is equal to the size or double the size of the hasher's digest.
+/// Merkelization of the bitmap is performed over chunks of N bytes. If the goal
+/// is to minimize proof sizes, choose an N that is equal to the size or double
+/// the size of the hasher's digest.
 ///
 /// # Warning
 ///
-/// Even though we use u64 identifiers for bits, on 32-bit machines, the maximum addressable bit is
-/// limited to (u32::MAX * N * 8).
+/// Even though we use u64 identifiers for bits, on 32-bit machines, the maximum
+/// addressable bit is limited to (u32::MAX * N * 8).
 pub struct Bitmap<H: CHasher, const N: usize> {
-    /// The bitmap itself, in chunks of size N bytes. The number of valid bits in the last chunk is
-    /// given by `self.next_bit`. Within each byte, lowest order bits are treated as coming before
-    /// higher order bits in the bit ordering.
+    /// The bitmap itself, in chunks of size N bytes. The number of valid bits
+    /// in the last chunk is given by `self.next_bit`. Within each byte,
+    /// lowest order bits are treated as coming before higher order bits in
+    /// the bit ordering.
     ///
-    /// Invariant: The last chunk in the bitmap always has room for at least one more bit. This
-    /// implies there is always at least one chunk in the bitmap, it's just empty if no bits have
-    /// been added yet.
+    /// Invariant: The last chunk in the bitmap always has room for at least one
+    /// more bit. This implies there is always at least one chunk in the
+    /// bitmap, it's just empty if no bits have been added yet.
     bitmap: VecDeque<[u8; N]>,
 
     /// The length of the bitmap range that is currently included in the `mmr`.
     authenticated_len: usize,
 
-    /// The position within the last chunk of the bitmap where the next bit is to be appended.
+    /// The position within the last chunk of the bitmap where the next bit is
+    /// to be appended.
     ///
     /// Invariant: This value is always in the range [0, N * 8).
     next_bit: u64,
 
-    /// A Merkle tree with each leaf representing an N*8 bit "chunk" of the bitmap.
+    /// A Merkle tree with each leaf representing an N*8 bit "chunk" of the
+    /// bitmap.
     ///
-    /// After calling `sync` all chunks are guaranteed to be included in the Merkle tree. The last
-    /// chunk of the bitmap is never part of the tree.
+    /// After calling `sync` all chunks are guaranteed to be included in the
+    /// Merkle tree. The last chunk of the bitmap is never part of the tree.
     ///
-    /// Because leaf elements can be updated when bits in the bitmap are flipped, this tree, while
-    /// based on an MMR structure, is not an MMR but a Merkle tree. The MMR structure results in
-    /// reduced update overhead for elements being appended or updated near the tip compared to a
-    /// more typical balanced Merkle tree.
+    /// Because leaf elements can be updated when bits in the bitmap are
+    /// flipped, this tree, while based on an MMR structure, is not an MMR
+    /// but a Merkle tree. The MMR structure results in reduced update
+    /// overhead for elements being appended or updated near the tip compared to
+    /// a more typical balanced Merkle tree.
     mmr: Mmr<H>,
 
     /// The number of bitmap chunks that have been pruned.
     pruned_chunks: usize,
 
-    /// Chunks that have been modified but not yet synced. Each dirty chunk is identified by its
-    /// "chunk index" (the index of the chunk in `self.bitmap`).
+    /// Chunks that have been modified but not yet synced. Each dirty chunk is
+    /// identified by its "chunk index" (the index of the chunk in
+    /// `self.bitmap`).
     ///
     /// Invariant: Indices are always in the range [0,`authenticated_len`).
     dirty_chunks: HashSet<usize>,
@@ -117,11 +125,12 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         self.mmr.get_node(position)
     }
 
-    /// Restore the fully pruned state of a bitmap from the metadata in the given partition. (The
-    /// caller must still replay retained elements to restore its full state.)
+    /// Restore the fully pruned state of a bitmap from the metadata in the
+    /// given partition. (The caller must still replay retained elements to
+    /// restore its full state.)
     ///
-    /// The metadata must store the number of pruned chunks and the pinned digests corresponding to
-    /// that pruning boundary.
+    /// The metadata must store the number of pruned chunks and the pinned
+    /// digests corresponding to that pruning boundary.
     pub async fn restore_pruned<C: RStorage + Metrics + Clock>(
         context: C,
         partition: &str,
@@ -186,9 +195,9 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         })
     }
 
-    /// Write the information necessary to restore the bitmap in its fully pruned state at its last
-    /// pruning boundary. Restoring the entire bitmap state is then possible by replaying the
-    /// retained elements.
+    /// Write the information necessary to restore the bitmap in its fully
+    /// pruned state at its last pruning boundary. Restoring the entire
+    /// bitmap state is then possible by replaying the retained elements.
     pub async fn write_pruned<C: RStorage + Metrics + Clock>(
         &self,
         context: C,
@@ -215,7 +224,8 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         metadata.close().await.map_err(MetadataError)
     }
 
-    /// Return the number of bits currently stored in the bitmap, irrespective of any pruning.
+    /// Return the number of bits currently stored in the bitmap, irrespective
+    /// of any pruning.
     #[inline]
     pub fn bit_count(&self) -> u64 {
         (self.pruned_chunks + self.bitmap.len()) as u64 * Self::CHUNK_SIZE_BITS
@@ -228,11 +238,13 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         self.pruned_chunks as u64 * Self::CHUNK_SIZE_BITS
     }
 
-    /// Prune the bitmap to the most recent chunk boundary that contains the referenced bit.
+    /// Prune the bitmap to the most recent chunk boundary that contains the
+    /// referenced bit.
     ///
     /// # Warning
     ///
-    /// - Panics if the referenced bit is greater than the number of bits in the bitmap.
+    /// - Panics if the referenced bit is greater than the number of bits in the
+    ///   bitmap.
     ///
     /// - Panics if there are unprocessed updates.
     pub fn prune_to_bit(&mut self, bit_offset: u64) {
@@ -251,8 +263,8 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         self.mmr.prune_to_pos(mmr_pos);
     }
 
-    /// Return the last chunk of the bitmap and its size in bits. The size can be 0 (meaning the
-    /// last chunk is empty).
+    /// Return the last chunk of the bitmap and its size in bits. The size can
+    /// be 0 (meaning the last chunk is empty).
     #[inline]
     pub fn last_chunk(&self) -> (&[u8; N], u64) {
         (self.bitmap.back().unwrap(), self.next_bit)
@@ -274,8 +286,8 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         &self.bitmap[self.chunk_index(bit_offset)]
     }
 
-    /// Prepares the next chunk of the bitmap to preserve the invariant that there is always room
-    /// for one more bit.
+    /// Prepares the next chunk of the bitmap to preserve the invariant that
+    /// there is always room for one more bit.
     fn prepare_next_chunk(&mut self) {
         self.next_bit = 0;
         self.bitmap.push_back([0u8; N]);
@@ -287,7 +299,8 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     ///
     /// - The update will not impact the root until `sync` is called.
     ///
-    /// - Assumes we are at a chunk boundary (that is, `self.next_bit` is 0) and panics otherwise.
+    /// - Assumes we are at a chunk boundary (that is, `self.next_bit` is 0) and
+    ///   panics otherwise.
     pub fn append_chunk_unchecked(&mut self, chunk: &[u8; N]) {
         assert!(
             self.next_bit == 0,
@@ -345,20 +358,23 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         1 << (bit_offset % 8)
     }
 
-    /// Convert a bit offset into the offset of the byte within a chunk containing the bit.
+    /// Convert a bit offset into the offset of the byte within a chunk
+    /// containing the bit.
     #[inline]
     pub(crate) fn chunk_byte_offset(bit_offset: u64) -> usize {
         (bit_offset / 8) as usize % Self::CHUNK_SIZE
     }
 
-    /// Convert a bit offset into the position of the Merkle tree leaf it belongs to.
+    /// Convert a bit offset into the position of the Merkle tree leaf it
+    /// belongs to.
     #[inline]
     pub(crate) fn leaf_pos(bit_offset: u64) -> u64 {
         leaf_num_to_pos(Self::chunk_num(bit_offset) as u64)
     }
 
     #[inline]
-    /// Convert a bit offset into the index of the chunk it belongs to within self.bitmap.
+    /// Convert a bit offset into the index of the chunk it belongs to within
+    /// self.bitmap.
     ///
     /// # Warning
     ///
@@ -429,12 +445,14 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         }
     }
 
-    /// Whether there are any updates that are not yet reflected in this bitmap's root.
+    /// Whether there are any updates that are not yet reflected in this
+    /// bitmap's root.
     pub fn is_dirty(&self) -> bool {
         !self.dirty_chunks.is_empty() || self.authenticated_len < self.bitmap.len() - 1
     }
 
-    /// The chunks (identified by their number) that have been modified or added since the last `sync`.
+    /// The chunks (identified by their number) that have been modified or added
+    /// since the last `sync`.
     pub fn dirty_chunks(&self) -> Vec<u64> {
         let mut chunks: Vec<u64> = self
             .dirty_chunks
@@ -479,9 +497,10 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     ///
     /// # Format
     ///
-    /// The root digest is simply that of the underlying MMR whenever the bit count falls on a chunk
-    /// boundary. Otherwise, the root is computed as follows in order to capture the bits that are
-    /// not yet part of the MMR:
+    /// The root digest is simply that of the underlying MMR whenever the bit
+    /// count falls on a chunk boundary. Otherwise, the root is computed as
+    /// follows in order to capture the bits that are not yet part of the
+    /// MMR:
     ///
     /// hash(mmr_root || next_bit as u64 be_bytes || last_chunk_digest)
     ///
@@ -508,8 +527,8 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         ))
     }
 
-    /// Returns a root digest that incorporates bits that aren't part of the MMR yet because they
-    /// belong to the last (unfilled) chunk.
+    /// Returns a root digest that incorporates bits that aren't part of the MMR
+    /// yet because they belong to the last (unfilled) chunk.
     pub fn partial_chunk_root(
         hasher: &mut H,
         mmr_root: &H::Digest,
@@ -524,8 +543,9 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         hasher.finalize()
     }
 
-    /// Return an inclusion proof for the specified bit, along with the chunk of the bitmap
-    /// containing that bit. The proof can be used to prove any bit in the chunk.
+    /// Return an inclusion proof for the specified bit, along with the chunk of
+    /// the bitmap containing that bit. The proof can be used to prove any
+    /// bit in the chunk.
     ///
     /// # Warning
     ///
@@ -546,8 +566,8 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 
         if leaf_pos == self.mmr.size() {
             assert!(self.next_bit > 0);
-            // Proof is over a bit in the partial chunk. In this case only a single digest is
-            // required in the proof: the mmr's root.
+            // Proof is over a bit in the partial chunk. In this case only a single digest
+            // is required in the proof: the mmr's root.
             return Ok((
                 Proof {
                     size: self.bit_count(),
@@ -564,16 +584,16 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
             return Ok((proof, *chunk));
         }
 
-        // Since the bitmap wasn't chunk aligned, we'll need to include the digest of the last chunk
-        // in the proof to be able to re-derive the root.
+        // Since the bitmap wasn't chunk aligned, we'll need to include the digest of
+        // the last chunk in the proof to be able to re-derive the root.
         let last_chunk_digest = hasher.digest(self.last_chunk().0);
         proof.digests.push(last_chunk_digest);
 
         Ok((proof, *chunk))
     }
 
-    /// Verify whether `proof` proves that the `chunk` containing the referenced bit belongs to the
-    /// bitmap corresponding to `root_digest`.
+    /// Verify whether `proof` proves that the `chunk` containing the referenced
+    /// bit belongs to the bitmap corresponding to `root_digest`.
     pub async fn verify_bit_inclusion(
         hasher: &mut impl Hasher<H>,
         proof: &Proof<H>,
@@ -606,9 +626,10 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         let last_digest = mmr_proof.digests.pop().unwrap();
 
         if mmr_proof.size == leaf_pos {
-            // The proof is over a bit in the partial chunk. In this case the proof's only digest
-            // should be the MMR's root, otherwise it is invalid. Since we've popped off the last
-            // digest already, there should be no remaining digests.
+            // The proof is over a bit in the partial chunk. In this case the proof's only
+            // digest should be the MMR's root, otherwise it is invalid. Since
+            // we've popped off the last digest already, there should be no
+            // remaining digests.
             if !mmr_proof.digests.is_empty() {
                 debug!(
                     digests = mmr_proof.digests.len() + 1,
@@ -627,8 +648,8 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
             return Ok(reconstructed_root == *root_digest);
         };
 
-        // For the case where the proof is over a bit in a full chunk, `last_digest` contains the
-        // digest of that chunk.
+        // For the case where the proof is over a bit in a full chunk, `last_digest`
+        // contains the digest of that chunk.
         let mmr_root = match mmr_proof
             .reconstruct_root(hasher, &[chunk], leaf_pos, leaf_pos)
             .await
@@ -769,8 +790,8 @@ mod tests {
 
     #[test_traced]
     fn test_bitmap_building() {
-        // Build the same bitmap with 2 chunks worth of bits in multiple ways and make sure they are
-        // equivalent based on their roots.
+        // Build the same bitmap with 2 chunks worth of bits in multiple ways and make
+        // sure they are equivalent based on their roots.
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let test_chunk = test_chunk(b"test");
@@ -794,8 +815,8 @@ mod tests {
             assert_eq!(root, inner_root);
 
             {
-                // Repeat the above MMR build only using append_chunk_unchecked instead, and make
-                // sure root digests match.
+                // Repeat the above MMR build only using append_chunk_unchecked instead, and
+                // make sure root digests match.
                 let mut bitmap = Bitmap::<_, SHA256_SIZE>::default();
                 bitmap.append_chunk_unchecked(&test_chunk);
                 bitmap.append_chunk_unchecked(&test_chunk);
@@ -881,7 +902,8 @@ mod tests {
 
             let root = bitmap.root(&mut hasher).await.unwrap();
 
-            // Confirm that root changes if we add a 1 bit, even though we won't fill a chunk.
+            // Confirm that root changes if we add a 1 bit, even though we won't fill a
+            // chunk.
             bitmap.append(true);
             bitmap.sync(&mut hasher).await.unwrap();
             let new_root = bitmap.root(&mut hasher).await.unwrap();
@@ -898,7 +920,8 @@ mod tests {
             }
             assert_eq!(bitmap.mmr.size(), 4); // chunk we filled should have been added to mmr
 
-            // Confirm the root changes when we add the next 0 bit since it's part of a new chunk.
+            // Confirm the root changes when we add the next 0 bit since it's part of a new
+            // chunk.
             bitmap.append(false);
             assert_eq!(bitmap.bit_count(), 256 * 3 + 1);
             bitmap.sync(&mut hasher).await.unwrap();
@@ -933,8 +956,8 @@ mod tests {
             bitmap.sync(&mut hasher).await.unwrap();
             let root = bitmap.root(&mut hasher).await.unwrap();
 
-            // Flip each bit and confirm the root changes, then flip it back to confirm it is safely
-            // restored.
+            // Flip each bit and confirm the root changes, then flip it back to confirm it
+            // is safely restored.
             for bit_pos in (0..bitmap.bit_count()).rev() {
                 let bit = bitmap.get_bit(bit_pos);
                 bitmap.set_bit(bit_pos, !bit);
@@ -1000,8 +1023,9 @@ mod tests {
             bitmap.sync(&mut hasher).await.unwrap();
             let root = bitmap.root(&mut hasher).await.unwrap();
 
-            // Make sure every bit is provable, even after pruning in intervals of 251 bits (251 is
-            // the largest prime that is less than the size of one 32-byte chunk in bits).
+            // Make sure every bit is provable, even after pruning in intervals of 251 bits
+            // (251 is the largest prime that is less than the size of one
+            // 32-byte chunk in bits).
             for prune_to_bit in (0..bitmap.bit_count()).step_by(251) {
                 assert_eq!(bitmap.root(&mut hasher).await.unwrap(), root);
                 bitmap.prune_to_bit(prune_to_bit);
@@ -1067,7 +1091,8 @@ mod tests {
             bitmap.sync(&mut hasher).await.unwrap();
             let root = bitmap.root(&mut hasher).await.unwrap();
 
-            // prune 10 chunks at a time and make sure replay will restore the bitmap every time.
+            // prune 10 chunks at a time and make sure replay will restore the bitmap every
+            // time.
             for i in (10..=FULL_CHUNK_COUNT).step_by(10) {
                 bitmap.prune_to_bit(i as u64 * Bitmap::<Sha256, SHA256_SIZE>::CHUNK_SIZE_BITS);
                 bitmap

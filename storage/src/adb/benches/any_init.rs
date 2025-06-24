@@ -21,9 +21,10 @@ const DELETE_FREQUENCY: u32 = 10; // 1/10th of the updates will be deletes.
 const ITEMS_PER_BLOB: u64 = 500_000;
 const PARTITION_SUFFIX: &str = "any_bench_partition";
 
-/// Threads (cores) to use for parallelization. We pick 8 since our benchmarking pipeline is
-/// configured to provide 8 cores. This speeds up benchmark setup, but doesn't affect the benchmark
-/// timing itself since any::init is single threaded.
+/// Threads (cores) to use for parallelization. We pick 8 since our benchmarking
+/// pipeline is configured to provide 8 cores. This speeds up benchmark setup,
+/// but doesn't affect the benchmark timing itself since any::init is single
+/// threaded.
 const THREADS: usize = 8;
 
 fn any_cfg(pool: ThreadPool) -> AConfig<EightCap> {
@@ -40,10 +41,11 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap> {
     }
 }
 
-/// Generate a large any db with random data. The function seeds the db with exactly `num_elements`
-/// elements by inserting them in order, each with a new random value. Then, it performs
-/// `num_operations` over these elements, each selected uniformly at random for each operation. The
-/// ratio of updates to deletes is configured with `DELETE_FREQUENCY`. The database is committed
+/// Generate a large any db with random data. The function seeds the db with
+/// exactly `num_elements` elements by inserting them in order, each with a new
+/// random value. Then, it performs `num_operations` over these elements, each
+/// selected uniformly at random for each operation. The ratio of updates to
+/// deletes is configured with `DELETE_FREQUENCY`. The database is committed
 /// after every `COMMIT_FREQUENCY` operations.
 fn gen_random_any(cfg: Config, num_elements: u64, num_operations: u64) {
     let runner = Runner::new(cfg.clone());

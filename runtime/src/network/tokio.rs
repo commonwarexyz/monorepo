@@ -92,19 +92,23 @@ impl crate::Listener for Listener {
     }
 }
 
-/// Configuration for the tokio [Network] implementation of the [crate::Network] trait.
+/// Configuration for the tokio [Network] implementation of the [crate::Network]
+/// trait.
 #[derive(Clone, Debug)]
 pub struct Config {
     /// Whether or not to disable Nagle's algorithm.
     ///
-    /// The algorithm combines a series of small network packets into a single packet
-    /// before sending to reduce overhead of sending multiple small packets which might not
-    /// be efficient on slow, congested networks. However, to do so the algorithm introduces
-    /// a slight delay as it waits to accumulate more data. Latency-sensitive networks should
-    /// consider disabling it to send the packets as soon as possible to reduce latency.
+    /// The algorithm combines a series of small network packets into a single
+    /// packet before sending to reduce overhead of sending multiple small
+    /// packets which might not be efficient on slow, congested networks.
+    /// However, to do so the algorithm introduces a slight delay as it
+    /// waits to accumulate more data. Latency-sensitive networks should
+    /// consider disabling it to send the packets as soon as possible to reduce
+    /// latency.
     ///
-    /// Note: Make sure that your compile target has and allows this configuration otherwise
-    /// panics or unexpected behaviours are possible.
+    /// Note: Make sure that your compile target has and allows this
+    /// configuration otherwise panics or unexpected behaviours are
+    /// possible.
     tcp_nodelay: Option<bool>,
     /// Read timeout for connections, after which the connection will be closed
     read_timeout: Duration,

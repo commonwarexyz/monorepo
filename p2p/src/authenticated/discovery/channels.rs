@@ -33,8 +33,9 @@ impl<P: PublicKey> crate::Sender for Sender<P> {
     ///
     /// # Offline Recipients
     ///
-    /// If a recipient is offline at the time a message is sent, the message will be dropped.
-    /// It is up to the application to handle retries (if necessary).
+    /// If a recipient is offline at the time a message is sent, the message
+    /// will be dropped. It is up to the application to handle retries (if
+    /// necessary).
     ///
     /// # Parameters
     ///
@@ -45,9 +46,11 @@ impl<P: PublicKey> crate::Sender for Sender<P> {
     ///
     /// # Returns
     ///
-    /// A vector of recipients that the message was sent to, or an error if the message is too large.
+    /// A vector of recipients that the message was sent to, or an error if the
+    /// message is too large.
     ///
-    /// Note: a successful send does not guarantee that the recipient will receive the message.
+    /// Note: a successful send does not guarantee that the recipient will
+    /// receive the message.
     async fn send(
         &mut self,
         recipients: Recipients<Self::PublicKey>,

@@ -1,4 +1,5 @@
-//! Byzantine participant that sends nullify and finalize messages for the same view.
+//! Byzantine participant that sends nullify and finalize messages for the same
+//! view.
 
 use crate::{
     threshold_simplex::types::{Finalize, Nullify, View, Viewable, Voter},

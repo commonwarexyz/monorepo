@@ -1,12 +1,16 @@
 //! Send succinct consensus certificates between two networks.
 //!
-//! This example demonstrates how to build an application that employs [commonware_consensus::threshold_simplex].
-//! Whenever it is a participant's turn to build a block, they either randomly generate a 16-byte message or
-//! include a succinct consensus certificate from the other network (if available). They then upload the block to an
-//! `indexer` and send a digest of the block to other participants. Participants in the network will fetch the block
-//! from the `indexer` and verify it contains a 16-byte message or a valid consensus certificate from the other network.
-//! Once a block is finalized, all participants attempt to post the emitted succinct consensus certificate to the `indexer`.
-//! Leader election is performed using the embedded VRF provided by [commonware_consensus::threshold_simplex].
+//! This example demonstrates how to build an application that employs
+//! [commonware_consensus::threshold_simplex]. Whenever it is a participant's
+//! turn to build a block, they either randomly generate a 16-byte message or
+//! include a succinct consensus certificate from the other network (if
+//! available). They then upload the block to an `indexer` and send a digest of
+//! the block to other participants. Participants in the network will fetch the
+//! block from the `indexer` and verify it contains a 16-byte message or a valid
+//! consensus certificate from the other network. Once a block is finalized, all
+//! participants attempt to post the emitted succinct consensus certificate to
+//! the `indexer`. Leader election is performed using the embedded VRF provided
+//! by [commonware_consensus::threshold_simplex].
 //!
 //! # Architecture
 //!
@@ -30,15 +34,18 @@
 //!
 //! # Persistence
 //!
-//! All consensus data is persisted to disk in the `storage-dir` directory. If you shutdown (whether unclean or not),
-//! consensus will resume where it left off when you restart.
+//! All consensus data is persisted to disk in the `storage-dir` directory. If
+//! you shutdown (whether unclean or not), consensus will resume where it left
+//! off when you restart.
 //!
 //! # Broadcast and Backfilling
 //!
-//! This example demonstrates how [commonware_consensus::threshold_simplex] can minimally be used to efficiently power
-//! interoperability between two networks. To simplify the example, an `indexer` is used both to distribute blocks
-//! and to collect finality certificates. A production-grade implementation would likely replace the `indexer` with
-//! a p2p broadcast mechanism.
+//! This example demonstrates how [commonware_consensus::threshold_simplex] can
+//! minimally be used to efficiently power interoperability between two
+//! networks. To simplify the example, an `indexer` is used both to distribute
+//! blocks and to collect finality certificates. A production-grade
+//! implementation would likely replace the `indexer` with a p2p broadcast
+//! mechanism.
 //!
 //! # Usage
 //!
@@ -46,11 +53,14 @@
 //!
 //! ## Generate Shared Secrets
 //!
-//! _A production-grade implementation should use a DKG (and Resharing during reconfiguration). For example, you could use [commonware_cryptography::bls12381::dkg]_
+//! _A production-grade implementation should use a DKG (and Resharing during
+//! reconfiguration). For example, you could use
+//! [commonware_cryptography::bls12381::dkg]_
 //!
-//! We assign shares to validators based on their order in the sorted list of participants (by public key).
-//! The assignments seen below are just the indices used to derive the shares and as such do not necessarily
-//! align with the share indices.
+//! We assign shares to validators based on their order in the sorted list of
+//! participants (by public key). The assignments seen below are just the
+//! indices used to derive the shares and as such do not necessarily align with
+//! the share indices.
 //!
 //! ### Network 1
 //!
@@ -84,8 +94,9 @@
 //!
 //! ## Start Indexer
 //!
-//! The `indexer` is a simple service that uses [commonware_stream::public_key] to accept blocks and finality certificates from a known set of participants outside
-//! of the p2p instances maintained by each network.
+//! The `indexer` is a simple service that uses [commonware_stream::public_key]
+//! to accept blocks and finality certificates from a known set of participants
+//! outside of the p2p instances maintained by each network.
 //!
 //! ```sh
 //! cargo run --release --bin indexer -- --me 0@3000 --participants 1,2,3,4,5,6,7,8 --networks a4a1b4b8a3fb2c11f4dba5c6c57743554f746d2211cd519c3c980b8d8019f8fa328b97e44e19dcc6150688da5f38fbcd,a311e2573501053c4b0dc00b64462d5d47c787d143a5b3cfe22c16a9023b89734074356ea0ce70ab71fe2042c2e426f5
@@ -93,8 +104,11 @@
 //!
 //! ## Start Validators
 //!
-//! Each network has an `identity` (the group polynomial generated above) and each validator has a `share` that can be used to create partial signatures that can be verified on said `identity`. The `other-public` is the public
-//! key (constant term) of the other network's group polynomial. This value would remain static across a reshare (not implemented in this demo).
+//! Each network has an `identity` (the group polynomial generated above) and
+//! each validator has a `share` that can be used to create partial signatures
+//! that can be verified on said `identity`. The `other-public` is the public
+//! key (constant term) of the other network's group polynomial. This value
+//! would remain static across a reshare (not implemented in this demo).
 //!
 //! ### Network 1 (Run at Least 3 to Make Progress)
 //!

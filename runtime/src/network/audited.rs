@@ -117,7 +117,8 @@ pub struct Network<N: crate::Network> {
 }
 
 impl<N: crate::Network> Network<N> {
-    /// Creates a new audited network that wraps the provided network implementation.
+    /// Creates a new audited network that wraps the provided network
+    /// implementation.
     pub fn new(inner: N, auditor: Arc<Auditor>) -> Self {
         Self { auditor, inner }
     }

@@ -1,32 +1,44 @@
-//! Generate bias-resistant randomness with untrusted contributors using commonware-cryptography and commonware-p2p.
+//! Generate bias-resistant randomness with untrusted contributors using
+//! commonware-cryptography and commonware-p2p.
 //!
-//! Contributors to this VRF connect to each other over commonware-p2p (using ED25519 identities), perform an initial
-//! Distributed Key Generation (DKG) to generate a static public key, and then perform a proactive Resharing every 10
-//! seconds. After a successful DKG and/or Reshare, contributors generate partial signatures over the round number and
-//! gossip them to others in the group (again using commonware-p2p). These partial signatures, when aggregated, form
-//! a threshold signature that was not knowable by any contributor prior to collecting `2f + 1` partial signatures.
+//! Contributors to this VRF connect to each other over commonware-p2p (using
+//! ED25519 identities), perform an initial Distributed Key Generation (DKG) to
+//! generate a static public key, and then perform a proactive Resharing every
+//! 10 seconds. After a successful DKG and/or Reshare, contributors generate
+//! partial signatures over the round number and gossip them to others in the
+//! group (again using commonware-p2p). These partial signatures, when
+//! aggregated, form a threshold signature that was not knowable by any
+//! contributor prior to collecting `2f + 1` partial signatures.
 //!
-//! To demonstrate how malicious contributors are handled, the CLI also lets you behave as a "rogue" dealer that generates
-//! invalid dealings, a "lazy" dealer only distributes `2f` dealings (force reveal `f`), and/or a "forger" dealer that
-//! forges a signature for all contributors.
+//! To demonstrate how malicious contributors are handled, the CLI also lets you
+//! behave as a "rogue" dealer that generates invalid dealings, a "lazy" dealer
+//! only distributes `2f` dealings (force reveal `f`), and/or a "forger" dealer
+//! that forges a signature for all contributors.
 //!
 //! # Joining After a DKG
 //!
-//! If a new contributor joins the group after a successful DKG, the new contributor will become a player during the next resharing
-//! (waiting for dealings on the previous group polynomial). As long as `2f + 1` contributors are online and honest at a time,
-//! the new contributor will be able to recover the group public polynomial and generate a share that can be used to generate valid
-//! partial signatures. They will also be able to participate (share commitment/shares) in future resharings.
+//! If a new contributor joins the group after a successful DKG, the new
+//! contributor will become a player during the next resharing (waiting for
+//! dealings on the previous group polynomial). As long as `2f + 1` contributors
+//! are online and honest at a time, the new contributor will be able to recover
+//! the group public polynomial and generate a share that can be used to
+//! generate valid partial signatures. They will also be able to participate
+//! (share commitment/shares) in future resharings.
 //!
 //! # Trust Assumptions
 //!
-//! In this example, the arbiter is trusted. It tracks commitments, acknowledgements, and reveals submitted
-//! by contributors. As alluded to in the arbiter docs, production deployments of the arbiter should be run by all
-//! contributors over a replicated log (commonly instantiated with a BFT consensus algorithm). This ensures that all
-//! correct contributors have the same view of the arbiter's state at the end of a round.
+//! In this example, the arbiter is trusted. It tracks commitments,
+//! acknowledgements, and reveals submitted by contributors. As alluded to in
+//! the arbiter docs, production deployments of the arbiter should be run by all
+//! contributors over a replicated log (commonly instantiated with a BFT
+//! consensus algorithm). This ensures that all correct contributors have the
+//! same view of the arbiter's state at the end of a round.
 //!
-//! `2f + 1` contributors are assumed to be honest and online and any `2f + 1` partial signatures can be used to construct
-//! a threshold signature. `f` contributors can behave arbitrarily and will not be able to interrupt a DKG, Resharing, or Threshold
-//! Signature. Incorrect contributors will be identified by the arbiter and reported at the end of each DKG/Resharing.
+//! `2f + 1` contributors are assumed to be honest and online and any `2f + 1`
+//! partial signatures can be used to construct a threshold signature. `f`
+//! contributors can behave arbitrarily and will not be able to interrupt a DKG,
+//! Resharing, or Threshold Signature. Incorrect contributors will be identified
+//! by the arbiter and reported at the end of each DKG/Resharing.
 //!
 //! # Usage (3 of 4 Threshold)
 //!
@@ -226,8 +238,8 @@ fn main() {
 
         // Provide authorized peers
         //
-        // In a real-world scenario, this would be updated as new peer sets are created (like when
-        // the composition of a validator set changes).
+        // In a real-world scenario, this would be updated as new peer sets are created
+        // (like when the composition of a validator set changes).
         oracle.register(0, recipients).await;
 
         // Parse contributors

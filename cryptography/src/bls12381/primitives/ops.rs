@@ -1,11 +1,12 @@
-//! Digital signatures over the BLS12-381 curve using G1 as the Public Key (48 bytes)
-//! and G2 as the Signature (96 bytes).
+//! Digital signatures over the BLS12-381 curve using G1 as the Public Key (48
+//! bytes) and G2 as the Signature (96 bytes).
 //!
 //! # Domain Separation Tag (DST)
 //!
-//! All signatures use the `POP` (Proof of Possession) scheme during signing. For Proof-of-Possession (POP) signatures,
-//! the domain separation tag is `BLS_POP_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_`. For signatures over other messages, the
-//! domain separation tag is `BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_`. You can read more about DSTs [here](https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-05#section-4.2).
+//! All signatures use the `POP` (Proof of Possession) scheme during signing.
+//! For Proof-of-Possession (POP) signatures, the domain separation tag is
+//! `BLS_POP_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_`. For signatures over other
+//! messages, the domain separation tag is `BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_`. You can read more about DSTs [here](https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-05#section-4.2).
 
 use super::{
     group::{self, Element, Point, Scalar, Share, DST},
@@ -42,8 +43,8 @@ pub fn hash_message<V: Variant>(dst: DST, message: &[u8]) -> V::Signature {
     hm
 }
 
-/// Hashes the provided message with the domain separation tag (DST) and namespace to
-/// the curve.
+/// Hashes the provided message with the domain separation tag (DST) and
+/// namespace to the curve.
 pub fn hash_message_namespace<V: Variant>(
     dst: DST,
     namespace: &[u8],
@@ -200,9 +201,10 @@ pub fn partial_verify_message<V: Variant>(
 ///
 /// # Warning
 ///
-/// This function assumes a group check was already performed on each `signature` and
-/// that each `signature` is unique. If any of these assumptions are violated, an attacker can
-/// exploit this function to verify an incorrect aggregate signature.
+/// This function assumes a group check was already performed on each
+/// `signature` and that each `signature` is unique. If any of these assumptions
+/// are violated, an attacker can exploit this function to verify an incorrect
+/// aggregate signature.
 pub fn partial_aggregate_signatures<'a, V, I>(partials: I) -> Option<(u32, V::Signature)>
 where
     V: Variant,
@@ -221,12 +223,13 @@ where
     Some((index, s))
 }
 
-/// Verifies the signatures from multiple partial signatures over multiple unique messages from a single
-/// signer.
+/// Verifies the signatures from multiple partial signatures over multiple
+/// unique messages from a single signer.
 ///
 /// # Warning
 ///
-/// This function assumes a group check was already performed on each `signature`.
+/// This function assumes a group check was already performed on each
+/// `signature`.
 pub fn partial_verify_multiple_messages<'a, V, I, J>(
     public: &poly::Public<V>,
     index: u32,
@@ -311,12 +314,13 @@ where
     Ok(())
 }
 
-/// Attempts to verify multiple [PartialSignature]s over the same message as a single
-/// aggregate signature (or returns any invalid signature found).
+/// Attempts to verify multiple [PartialSignature]s over the same message as a
+/// single aggregate signature (or returns any invalid signature found).
 ///
-/// Unlike `partial_verify_multiple_public_keys`, this function requires the public keys
-/// of all partial signatures to be precomputed (avoids a significant amount of compute
-/// evaluating each signer on the public polynomial).
+/// Unlike `partial_verify_multiple_public_keys`, this function requires the
+/// public keys of all partial signatures to be precomputed (avoids a
+/// significant amount of compute evaluating each signer on the public
+/// polynomial).
 pub fn partial_verify_multiple_public_keys_precomputed<'a, V, I>(
     polynomial: &[V::Public],
     namespace: Option<&[u8]>,
@@ -342,12 +346,13 @@ where
     partial_verify_multiple_public_keys_bisect::<V, _>(&pending, invalid, namespace, message)
 }
 
-/// Attempts to verify multiple [PartialSignature]s over the same message as a single
-/// aggregate signature (or returns any invalid signature found).
+/// Attempts to verify multiple [PartialSignature]s over the same message as a
+/// single aggregate signature (or returns any invalid signature found).
 ///
 /// # Warning
 ///
-/// This function assumes a group check was already performed on each `signature`.
+/// This function assumes a group check was already performed on each
+/// `signature`.
 pub fn partial_verify_multiple_public_keys<'a, V, I>(
     public: &poly::Public<V>,
     namespace: Option<&[u8]>,
@@ -507,7 +512,8 @@ where
     Ok(signatures)
 }
 
-/// Recovers a pair of signatures from two sets of at least `threshold` partial signatures.
+/// Recovers a pair of signatures from two sets of at least `threshold` partial
+/// signatures.
 ///
 /// This is just a wrapper around `threshold_signature_recover_multiple`.
 pub fn threshold_signature_recover_pair<'a, V, I>(
@@ -530,10 +536,11 @@ where
 ///
 /// # Warning
 ///
-/// This function assumes a group check was already performed on all `public_keys`,
-/// that each `public_key` is unique, and that the caller has a Proof-of-Possession (PoP)
-/// for each `public_key`. If any of these assumptions are violated, an attacker can
-/// exploit this function to verify an incorrect aggregate signature.
+/// This function assumes a group check was already performed on all
+/// `public_keys`, that each `public_key` is unique, and that the caller has a
+/// Proof-of-Possession (PoP) for each `public_key`. If any of these assumptions
+/// are violated, an attacker can exploit this function to verify an incorrect
+/// aggregate signature.
 pub fn aggregate_public_keys<'a, V, I>(public_keys: I) -> V::Public
 where
     V: Variant,
@@ -551,9 +558,10 @@ where
 ///
 /// # Warning
 ///
-/// This function assumes a group check was already performed on each `signature` and
-/// that each `signature` is unique. If any of these assumptions are violated, an attacker can
-/// exploit this function to verify an incorrect aggregate signature.
+/// This function assumes a group check was already performed on each
+/// `signature` and that each `signature` is unique. If any of these assumptions
+/// are violated, an attacker can exploit this function to verify an incorrect
+/// aggregate signature.
 pub fn aggregate_signatures<'a, V, I>(signatures: I) -> V::Signature
 where
     V: Variant,
@@ -567,13 +575,15 @@ where
     s
 }
 
-/// Verifies the aggregate signature over a single message from multiple public keys.
+/// Verifies the aggregate signature over a single message from multiple public
+/// keys.
 ///
 /// # Warning
 ///
-/// This function assumes the caller has performed a group check and collected a proof-of-possession
-/// for all provided `public`. This function assumes a group check was already performed on the
-/// `signature`. It is not safe to provide duplicate public keys.
+/// This function assumes the caller has performed a group check and collected a
+/// proof-of-possession for all provided `public`. This function assumes a group
+/// check was already performed on the `signature`. It is not safe to provide
+/// duplicate public keys.
 pub fn aggregate_verify_multiple_public_keys<'a, V, I>(
     public: I,
     namespace: Option<&[u8]>,
@@ -587,27 +597,33 @@ where
 {
     // Aggregate public keys
     //
-    // We can take advantage of the bilinearity property of pairings to aggregate public keys
-    // that have all signed the same message (as long as all public keys are unique).
+    // We can take advantage of the bilinearity property of pairings to aggregate
+    // public keys that have all signed the same message (as long as all public
+    // keys are unique).
     let agg_public = aggregate_public_keys::<V, _>(public);
 
     // Verify the signature
     verify_message::<V>(&agg_public, namespace, message, signature)
 }
 
-/// Verifies the aggregate signature over multiple unique messages from a single public key.
+/// Verifies the aggregate signature over multiple unique messages from a single
+/// public key.
 ///
 /// # Warning
 ///
-/// This function assumes a group check was already performed on `public` and `signature`. It is not
-/// safe to provide an aggregate public key or to provide duplicate messages.
+/// This function assumes a group check was already performed on `public` and
+/// `signature`. It is not safe to provide an aggregate public key or to provide
+/// duplicate messages.
 ///
 /// ## Why not aggregate public keys?
 ///
-/// We rely on bilinearity to reduce pairing operations in this function, like in `aggregate_verify_multiple_public_keys`,
-/// and sum hashed messages together before performing a single pairing operation (instead of summing `len(messages)` pairings of
-/// hashed message and public key). If the public key itself is an aggregate of multiple public keys, an attacker can exploit
-/// this optimization to cause this function to return that an aggregate signature is valid when it really isn't.
+/// We rely on bilinearity to reduce pairing operations in this function, like
+/// in `aggregate_verify_multiple_public_keys`, and sum hashed messages together
+/// before performing a single pairing operation (instead of summing
+/// `len(messages)` pairings of hashed message and public key). If the public
+/// key itself is an aggregate of multiple public keys, an attacker can exploit
+/// this optimization to cause this function to return that an aggregate
+/// signature is valid when it really isn't.
 pub fn aggregate_verify_multiple_messages<'a, V, I>(
     public: &V::Public,
     messages: I,
@@ -715,7 +731,8 @@ mod tests {
         codec::<MinSig>();
     }
 
-    /// Verify that a given proof-of-possession signature is valid according to `blst`.
+    /// Verify that a given proof-of-possession signature is valid according to
+    /// `blst`.
     fn blst_verify_proof_of_possession<V: Variant>(
         public: &V::Public,
         signature: &V::Signature,
@@ -1668,7 +1685,8 @@ mod tests {
             .map(|s| partial_sign_message::<MinSig>(s, namespace, msg))
             .collect();
 
-        // Attempt verification and expect failure with bisection identifying the invalid signature
+        // Attempt verification and expect failure with bisection identifying the
+        // invalid signature
         let result_1 =
             partial_verify_multiple_public_keys::<MinSig, _>(&public, namespace, msg, &partials);
         let polynomial = evaluate_all::<MinSig>(&public, n);
@@ -1716,7 +1734,8 @@ mod tests {
             .map(|s| partial_sign_message::<MinSig>(s, namespace, msg))
             .collect();
 
-        // Attempt verification and expect failure with bisection identifying invalid signatures
+        // Attempt verification and expect failure with bisection identifying invalid
+        // signatures
         let result_1 =
             partial_verify_multiple_public_keys::<MinSig, _>(&public, namespace, msg, &partials);
         let polynomial = evaluate_all::<MinSig>(&public, n);
@@ -1765,7 +1784,8 @@ mod tests {
         // Corrupt partial signature index
         partials[0].index = 100;
 
-        // Attempt verification and expect failure with bisection identifying the invalid signature
+        // Attempt verification and expect failure with bisection identifying the
+        // invalid signature
         let polynomial = evaluate_all::<MinSig>(&public, n);
         let result = partial_verify_multiple_public_keys_precomputed::<MinSig, _>(
             &polynomial,
@@ -2375,7 +2395,8 @@ mod tests {
     }
 
     fn threshold_derive_missing_partials<V: Variant>() {
-        // Helper to compute the Lagrange basis polynomial l_i(x) evaluated at a specific point `eval_at_x`.
+        // Helper to compute the Lagrange basis polynomial l_i(x) evaluated at a
+        // specific point `eval_at_x`.
         fn lagrange_coeff(eval_at_x: u32, i_x: u32, x_coords: &[u32]) -> Scalar {
             // Initialize the numerator and denominator.
             let mut num = Scalar::one();

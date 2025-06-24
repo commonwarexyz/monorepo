@@ -1,4 +1,5 @@
-//! Service configuration for Prometheus, Loki, Grafana, Promtail, and a caller-provided binary
+//! Service configuration for Prometheus, Loki, Grafana, Promtail, and a
+//! caller-provided binary
 
 /// Version of Prometheus to download and install
 pub const PROMETHEUS_VERSION: &str = "3.2.0";
@@ -218,7 +219,8 @@ compactor:
     compaction_cycle: 1h
 "#;
 
-/// Command to install monitoring services (Prometheus, Loki, Grafana) on the monitoring instance
+/// Command to install monitoring services (Prometheus, Loki, Grafana) on the
+/// monitoring instance
 pub fn install_monitoring_cmd(
     prometheus_version: &str,
     grafana_version: &str,
@@ -447,7 +449,8 @@ sudo systemctl enable promtail
     )
 }
 
-/// Generates Promtail configuration with the monitoring instance's private IP and instance name
+/// Generates Promtail configuration with the monitoring instance's private IP
+/// and instance name
 pub fn promtail_config(
     monitoring_private_ip: &str,
     instance_name: &str,

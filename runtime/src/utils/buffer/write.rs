@@ -13,26 +13,30 @@ struct Inner<B: Blob> {
     buffer: Vec<u8>,
     /// The offset in the blob where the buffered data starts.
     ///
-    /// This represents the logical position in the blob where `buffer[0]` would be written.
-    /// The buffer is maintained at the "tip" to support efficient size calculation and appends.
+    /// This represents the logical position in the blob where `buffer[0]` would
+    /// be written. The buffer is maintained at the "tip" to support
+    /// efficient size calculation and appends.
     position: u64,
     /// The maximum size of the buffer.
     capacity: usize,
 }
 
 impl<B: Blob> Inner<B> {
-    /// Returns the current logical size of the blob including any buffered data.
+    /// Returns the current logical size of the blob including any buffered
+    /// data.
     fn size(&self) -> u64 {
         self.position + self.buffer.len() as u64
     }
 
-    /// Appends bytes to the internal buffer, maintaining the "buffer at tip" invariant.
+    /// Appends bytes to the internal buffer, maintaining the "buffer at tip"
+    /// invariant.
     ///
-    /// If the buffer capacity would be exceeded, it is flushed first. If the data
-    /// is larger than the buffer capacity, it is written directly to the blob.
+    /// If the buffer capacity would be exceeded, it is flushed first. If the
+    /// data is larger than the buffer capacity, it is written directly to
+    /// the blob.
     ///
-    /// Returns an error if the write to the underlying [Blob] fails (may be due to a `flush` of data not
-    /// related to the data being written).
+    /// Returns an error if the write to the underlying [Blob] fails (may be due
+    /// to a `flush` of data not related to the data being written).
     async fn write<S: Into<StableBuf>>(&mut self, buf: S) -> Result<(), Error> {
         // If the buffer capacity will be exceeded, flush the buffer first
         let buf = buf.into();
@@ -55,7 +59,8 @@ impl<B: Blob> Inner<B> {
         Ok(())
     }
 
-    /// Flushes buffered data to the underlying [Blob] and advances the position.
+    /// Flushes buffered data to the underlying [Blob] and advances the
+    /// position.
     ///
     /// After flushing, the buffer is reset and positioned at the new tip.
     /// Does nothing if the buffer is empty.
@@ -80,7 +85,8 @@ impl<B: Blob> Inner<B> {
         Ok(())
     }
 
-    /// Flushes buffered data and ensures it is durably persisted to the underlying [Blob].
+    /// Flushes buffered data and ensures it is durably persisted to the
+    /// underlying [Blob].
     ///
     /// Returns an error if either the flush or sync operation fails.
     async fn sync(&mut self) -> Result<(), Error> {
@@ -88,7 +94,8 @@ impl<B: Blob> Inner<B> {
         self.blob.sync().await
     }
 
-    /// Closes the writer and ensures all buffered data is durably persisted to the underlying [Blob].
+    /// Closes the writer and ensures all buffered data is durably persisted to
+    /// the underlying [Blob].
     ///
     /// Returns an error if the close operation fails.
     async fn close(&mut self) -> Result<(), Error> {
@@ -97,8 +104,9 @@ impl<B: Blob> Inner<B> {
 
         // Close the underlying blob.
         //
-        // We use clone here to ensure we retain the close semantics of the blob provided (if
-        // called multiple times, the blob determines whether to error).
+        // We use clone here to ensure we retain the close semantics of the blob
+        // provided (if called multiple times, the blob determines whether to
+        // error).
         self.blob.clone().close().await
     }
 }
@@ -141,7 +149,8 @@ pub struct Write<B: Blob> {
 }
 
 impl<B: Blob> Write<B> {
-    /// Creates a new `Write` that buffers writes to a [Blob] with the provided size and buffer capacity.
+    /// Creates a new `Write` that buffers writes to a [Blob] with the provided
+    /// size and buffer capacity.
     ///
     /// # Panics
     ///
@@ -159,9 +168,11 @@ impl<B: Blob> Write<B> {
         }
     }
 
-    /// Returns the current logical size of the blob including any buffered data.
+    /// Returns the current logical size of the blob including any buffered
+    /// data.
     ///
-    /// This represents the total size of data that would be present after flushing.
+    /// This represents the total size of data that would be present after
+    /// flushing.
     #[allow(clippy::len_without_is_empty)]
     pub async fn size(&self) -> u64 {
         let inner = self.inner.read().await;
@@ -277,7 +288,8 @@ impl<B: Blob> Blob for Write<B> {
 
         // Update position to maintain "buffer at tip" invariant.
         //
-        // Position should advance to the end of this write if it extends the logical blob
+        // Position should advance to the end of this write if it extends the logical
+        // blob
         let write_end = offset + data_len as u64;
         if write_end > inner.position {
             inner.position = write_end;

@@ -22,13 +22,14 @@ use std::{
     hash::Hash,
 };
 
-/// View is a monotonically increasing counter that represents the current focus of consensus.
-/// Each View corresponds to a round in the consensus protocol where validators attempt to agree
-/// on a block to commit.
+/// View is a monotonically increasing counter that represents the current focus
+/// of consensus. Each View corresponds to a round in the consensus protocol
+/// where validators attempt to agree on a block to commit.
 pub type View = u64;
 
 /// Context is a collection of metadata from consensus about a given payload.
-/// It provides information about the current view and the parent payload that new proposals are built on.
+/// It provides information about the current view and the parent payload that
+/// new proposals are built on.
 #[derive(Clone)]
 pub struct Context<D: Digest> {
     /// Current view (round) of consensus.
@@ -36,15 +37,17 @@ pub struct Context<D: Digest> {
 
     /// Parent the payload is built on.
     ///
-    /// If there is a gap between the current view and the parent view, the participant
-    /// must possess a nullification for each discarded view to safely vote on the proposed
-    /// payload (any view without a nullification may eventually be finalized and skipping
+    /// If there is a gap between the current view and the parent view, the
+    /// participant must possess a nullification for each discarded view to
+    /// safely vote on the proposed payload (any view without a
+    /// nullification may eventually be finalized and skipping
     /// it would result in a fork).
     pub parent: (View, D),
 }
 
 /// Viewable is a trait that provides access to the view (round) number.
-/// Any consensus message or object that is associated with a specific view should implement this.
+/// Any consensus message or object that is associated with a specific view
+/// should implement this.
 pub trait Viewable {
     /// Returns the view associated with this object.
     fn view(&self) -> View;
@@ -57,7 +60,8 @@ pub trait Attributable {
     fn signer(&self) -> u32;
 }
 
-/// Seedable is a trait that provides access to the seed associated with a message.
+/// Seedable is a trait that provides access to the seed associated with a
+/// message.
 pub trait Seedable<V: Variant> {
     /// Returns the seed associated with this object.
     fn seed(&self) -> Seed<V>;
@@ -104,15 +108,18 @@ pub fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, FINALIZE_SUFFIX)
 }
 
-/// `BatchVerifier` is a utility for tracking and batch verifying consensus messages.
+/// `BatchVerifier` is a utility for tracking and batch verifying consensus
+/// messages.
 ///
-/// In consensus, verifying multiple signatures at the same time can be much more efficient
-/// than verifying them one by one. This struct collects messages from participants in consensus
-/// and signals they are ready to be verified when certain conditions are met (e.g., enough messages
-/// to potentially reach a quorum, or when a leader's message is received).
+/// In consensus, verifying multiple signatures at the same time can be much
+/// more efficient than verifying them one by one. This struct collects messages
+/// from participants in consensus and signals they are ready to be verified
+/// when certain conditions are met (e.g., enough messages to potentially reach
+/// a quorum, or when a leader's message is received).
 ///
-/// To avoid unnecessary verification, it also tracks the number of already verified messages (ensuring
-/// we no longer attempt to verify messages after a quorum of valid messages have already been verified).
+/// To avoid unnecessary verification, it also tracks the number of already
+/// verified messages (ensuring we no longer attempt to verify messages after a
+/// quorum of valid messages have already been verified).
 pub struct BatchVerifier<V: Variant, D: Digest> {
     quorum: Option<usize>,
 
@@ -157,8 +164,8 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
         }
     }
 
-    /// Clears any pending messages that are not for the leader's proposal and forces
-    /// the notarizes to be verified.
+    /// Clears any pending messages that are not for the leader's proposal and
+    /// forces the notarizes to be verified.
     ///
     /// We force verification because we need to know the leader's proposal
     /// to begin verifying it.
@@ -176,20 +183,21 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
 
     /// Adds a [Voter] message to the batch for later verification.
     ///
-    /// If the message has already been verified (e.g., we built it), it increments
-    /// the count of verified messages directly. Otherwise, it adds the message to
-    /// the appropriate pending queue.
+    /// If the message has already been verified (e.g., we built it), it
+    /// increments the count of verified messages directly. Otherwise, it
+    /// adds the message to the appropriate pending queue.
     ///
-    /// If a leader is known and the message is a [Voter::Notarize] from that leader,
-    /// this method may trigger `set_leader_proposal`.
+    /// If a leader is known and the message is a [Voter::Notarize] from that
+    /// leader, this method may trigger `set_leader_proposal`.
     ///
-    /// Recovered messages (e.g., [Voter::Notarization], [Voter::Nullification], [Voter::Finalization])
-    /// are not expected here and will cause a panic.
+    /// Recovered messages (e.g., [Voter::Notarization], [Voter::Nullification],
+    /// [Voter::Finalization]) are not expected here and will cause a panic.
     ///
     /// # Arguments
     ///
     /// * `msg` - The [Voter] message to add.
-    /// * `verified` - A boolean indicating if the message has already been verified.
+    /// * `verified` - A boolean indicating if the message has already been
+    ///   verified.
     pub fn add(&mut self, msg: Voter<V, D>, verified: bool) {
         match msg {
             Voter::Notarize(notarize) => {
@@ -243,9 +251,9 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
 
     /// Sets the leader for the current consensus view.
     ///
-    /// If the leader is found, we may call `set_leader_proposal` to clear any pending
-    /// messages that are not for the leader's proposal and to force verification of said
-    /// proposal.
+    /// If the leader is found, we may call `set_leader_proposal` to clear any
+    /// pending messages that are not for the leader's proposal and to force
+    /// verification of said proposal.
     ///
     /// # Arguments
     ///
@@ -266,8 +274,8 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
 
     /// Verifies a batch of pending [Voter::Notarize] messages.
     ///
-    /// It uses `Notarize::verify_multiple` for efficient batch verification against
-    /// the provided `polynomial`.
+    /// It uses `Notarize::verify_multiple` for efficient batch verification
+    /// against the provided `polynomial`.
     ///
     /// # Arguments
     ///
@@ -277,7 +285,8 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
     /// # Returns
     ///
     /// A tuple containing:
-    /// * A `Vec<Voter<V, D>>` of successfully verified [Voter::Notarize] messages (wrapped as [Voter]).
+    /// * A `Vec<Voter<V, D>>` of successfully verified [Voter::Notarize]
+    ///   messages (wrapped as [Voter]).
     /// * A `Vec<u32>` of signer indices for whom verification failed.
     pub fn verify_notarizes(
         &mut self,
@@ -291,18 +300,20 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
         (notarizes.into_iter().map(Voter::Notarize).collect(), failed)
     }
 
-    /// Checks if there are [Voter::Notarize] messages ready for batch verification.
+    /// Checks if there are [Voter::Notarize] messages ready for batch
+    /// verification.
     ///
     /// Verification is considered "ready" if:
     /// 1. `notarizes_force` is true (e.g., after a leader's proposal is set).
-    /// 2. A leader and their proposal are known, and:
-    ///    a. The quorum (if set) has not yet been met by verified messages.
-    ///    b. The sum of verified and pending messages is enough to potentially reach the quorum.
+    /// 2. A leader and their proposal are known, and: a. The quorum (if set)
+    ///    has not yet been met by verified messages. b. The sum of verified and
+    ///    pending messages is enough to potentially reach the quorum.
     /// 3. There are pending [Voter::Notarize] messages to verify.
     ///
     /// # Returns
     ///
-    /// `true` if [Voter::Notarize] messages should be verified, `false` otherwise.
+    /// `true` if [Voter::Notarize] messages should be verified, `false`
+    /// otherwise.
     pub fn ready_notarizes(&self) -> bool {
         // If there are no pending notarizes, there is nothing to do.
         if self.notarizes.is_empty() {
@@ -335,14 +346,15 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
             }
         }
 
-        // If there is no required quorum and we have pending notarizes, we should verify.
+        // If there is no required quorum and we have pending notarizes, we should
+        // verify.
         true
     }
 
     /// Verifies a batch of pending [Voter::Nullify] messages.
     ///
-    /// It uses `Nullify::verify_multiple` for efficient batch verification against
-    /// the provided `polynomial`.
+    /// It uses `Nullify::verify_multiple` for efficient batch verification
+    /// against the provided `polynomial`.
     ///
     /// # Arguments
     ///
@@ -352,7 +364,8 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
     /// # Returns
     ///
     /// A tuple containing:
-    /// * A `Vec<Voter<V, D>>` of successfully verified [Voter::Nullify] messages (wrapped as [Voter]).
+    /// * A `Vec<Voter<V, D>>` of successfully verified [Voter::Nullify]
+    ///   messages (wrapped as [Voter]).
     /// * A `Vec<u32>` of signer indices for whom verification failed.
     pub fn verify_nullifies(
         &mut self,
@@ -365,16 +378,19 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
         (nullifies.into_iter().map(Voter::Nullify).collect(), failed)
     }
 
-    /// Checks if there are [Voter::Nullify] messages ready for batch verification.
+    /// Checks if there are [Voter::Nullify] messages ready for batch
+    /// verification.
     ///
     /// Verification is considered "ready" if:
     /// 1. The quorum (if set) has not yet been met by verified messages.
-    /// 2. The sum of verified and pending messages is enough to potentially reach the quorum.
+    /// 2. The sum of verified and pending messages is enough to potentially
+    ///    reach the quorum.
     /// 3. There are pending [Voter::Nullify] messages to verify.
     ///
     /// # Returns
     ///
-    /// `true` if [Voter::Nullify] messages should be verified, `false` otherwise.
+    /// `true` if [Voter::Nullify] messages should be verified, `false`
+    /// otherwise.
     pub fn ready_nullifies(&self) -> bool {
         // If there are no pending nullifies, there is nothing to do.
         if self.nullifies.is_empty() {
@@ -394,14 +410,15 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
             }
         }
 
-        // If there is no required quorum and we have pending nullifies, we should verify.
+        // If there is no required quorum and we have pending nullifies, we should
+        // verify.
         true
     }
 
     /// Verifies a batch of pending [Voter::Finalize] messages.
     ///
-    /// It uses `Finalize::verify_multiple` for efficient batch verification against
-    /// the provided `polynomial`.
+    /// It uses `Finalize::verify_multiple` for efficient batch verification
+    /// against the provided `polynomial`.
     ///
     /// # Arguments
     ///
@@ -411,7 +428,8 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
     /// # Returns
     ///
     /// A tuple containing:
-    /// * A `Vec<Voter<V, D>>` of successfully verified [Voter::Finalize] messages (wrapped as [Voter]).
+    /// * A `Vec<Voter<V, D>>` of successfully verified [Voter::Finalize]
+    ///   messages (wrapped as [Voter]).
     /// * A `Vec<u32>` of signer indices for whom verification failed.
     pub fn verify_finalizes(
         &mut self,
@@ -424,17 +442,21 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
         (finalizes.into_iter().map(Voter::Finalize).collect(), failed)
     }
 
-    /// Checks if there are [Voter::Finalize] messages ready for batch verification.
+    /// Checks if there are [Voter::Finalize] messages ready for batch
+    /// verification.
     ///
     /// Verification is considered "ready" if:
-    /// 1. A leader and their proposal are known (finalizes are proposal-specific).
+    /// 1. A leader and their proposal are known (finalizes are
+    ///    proposal-specific).
     /// 2. The quorum (if set) has not yet been met by verified messages.
-    /// 3. The sum of verified and pending messages is enough to potentially reach the quorum.
+    /// 3. The sum of verified and pending messages is enough to potentially
+    ///    reach the quorum.
     /// 4. There are pending [Voter::Finalize] messages to verify.
     ///
     /// # Returns
     ///
-    /// `true` if [Voter::Finalize] messages should be verified, `false` otherwise.
+    /// `true` if [Voter::Finalize] messages should be verified, `false`
+    /// otherwise.
     pub fn ready_finalizes(&self) -> bool {
         // If there are no pending finalizes, there is nothing to do.
         if self.finalizes.is_empty() {
@@ -459,7 +481,8 @@ impl<V: Variant, D: Digest> BatchVerifier<V, D> {
             }
         }
 
-        // If there is no required quorum and we have pending finalizes, we should verify.
+        // If there is no required quorum and we have pending finalizes, we should
+        // verify.
         true
     }
 }
@@ -472,7 +495,8 @@ pub enum Voter<V: Variant, D: Digest> {
     Notarize(Notarize<V, D>),
     /// A recovered threshold signature for a notarization
     Notarization(Notarization<V, D>),
-    /// A single validator nullify to skip the current view (usually when leader is unresponsive)
+    /// A single validator nullify to skip the current view (usually when leader
+    /// is unresponsive)
     Nullify(Nullify<V>),
     /// A recovered threshold signature for a nullification
     Nullification(Nullification<V>),
@@ -578,19 +602,22 @@ impl<V: Variant, D: Digest> Viewable for Voter<V, D> {
 }
 
 /// Proposal represents a proposed block in the protocol.
-/// It includes the view number, the parent view, and the actual payload (typically a digest of block data).
+/// It includes the view number, the parent view, and the actual payload
+/// (typically a digest of block data).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Proposal<D: Digest> {
     /// The view (round) in which this proposal is made
     pub view: View,
     /// The view of the parent proposal that this one builds upon
     pub parent: View,
-    /// The actual payload/content of the proposal (typically a digest of the block data)
+    /// The actual payload/content of the proposal (typically a digest of the
+    /// block data)
     pub payload: D,
 }
 
 impl<D: Digest> Proposal<D> {
-    /// Creates a new proposal with the specified view, parent view, and payload.
+    /// Creates a new proposal with the specified view, parent view, and
+    /// payload.
     pub fn new(view: View, parent: View, payload: D) -> Self {
         Proposal {
             view,
@@ -636,15 +663,17 @@ impl<D: Digest> Viewable for Proposal<D> {
 }
 
 /// Notarize represents a validator's vote to notarize a proposal.
-/// In threshold_simplex, it contains a partial signature on the proposal and a partial signature for the seed.
-/// The seed is used for leader election and as a source of randomness.
+/// In threshold_simplex, it contains a partial signature on the proposal and a
+/// partial signature for the seed. The seed is used for leader election and as
+/// a source of randomness.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Notarize<V: Variant, D: Digest> {
     /// The proposal that is being notarized
     pub proposal: Proposal<D>,
     /// The validator's partial signature on the proposal
     pub proposal_signature: PartialSignature<V>,
-    /// The validator's partial signature on the seed (for leader election/randomness)
+    /// The validator's partial signature on the seed (for leader
+    /// election/randomness)
     pub seed_signature: PartialSignature<V>,
 }
 
@@ -691,10 +720,11 @@ impl<V: Variant, D: Digest> Notarize<V, D> {
         .is_ok()
     }
 
-    /// Verifies a batch of [Notarize] messages using BLS aggregate verification.
+    /// Verifies a batch of [Notarize] messages using BLS aggregate
+    /// verification.
     ///
-    /// This function verifies a batch of [Notarize] messages using BLS aggregate verification.
-    /// It returns a tuple containing:
+    /// This function verifies a batch of [Notarize] messages using BLS
+    /// aggregate verification. It returns a tuple containing:
     /// * A vector of successfully verified [Notarize] messages.
     /// * A vector of signer indices for whom verification failed.
     pub fn verify_multiple(
@@ -824,21 +854,24 @@ impl<V: Variant, D: Digest> EncodeSize for Notarize<V, D> {
     }
 }
 
-/// Notarization represents a recovered threshold signature certifying a proposal.
-/// When a proposal is notarized, it means at least 2f+1 validators have voted for it.
-/// The threshold signatures provide compact verification compared to collecting individual signatures.
+/// Notarization represents a recovered threshold signature certifying a
+/// proposal. When a proposal is notarized, it means at least 2f+1 validators
+/// have voted for it. The threshold signatures provide compact verification
+/// compared to collecting individual signatures.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Notarization<V: Variant, D: Digest> {
     /// The proposal that has been notarized
     pub proposal: Proposal<D>,
     /// The recovered threshold signature on the proposal
     pub proposal_signature: V::Signature,
-    /// The recovered threshold signature on the seed (for leader election/randomness)
+    /// The recovered threshold signature on the seed (for leader
+    /// election/randomness)
     pub seed_signature: V::Signature,
 }
 
 impl<V: Variant, D: Digest> Notarization<V, D> {
-    /// Creates a new notarization with the given proposal and aggregated signatures.
+    /// Creates a new notarization with the given proposal and aggregated
+    /// signatures.
     pub fn new(
         proposal: Proposal<D>,
         proposal_signature: V::Signature,
@@ -854,7 +887,8 @@ impl<V: Variant, D: Digest> Notarization<V, D> {
     /// Verifies the threshold signatures on this [Notarization].
     ///
     /// This ensures that:
-    /// 1. The notarization signature is a valid threshold signature for the proposal
+    /// 1. The notarization signature is a valid threshold signature for the
+    ///    proposal
     /// 2. The seed signature is a valid threshold signature for the view
     pub fn verify(&self, namespace: &[u8], identity: &V::Public) -> bool {
         let notarize_namespace = notarize_namespace(namespace);
@@ -919,15 +953,16 @@ impl<V: Variant, D: Digest> Seedable<V> for Notarization<V, D> {
 }
 
 /// Nullify represents a validator's vote to skip the current view.
-/// This is typically used when the leader is unresponsive or fails to propose a valid block.
-/// It contains partial signatures for the view and seed.
+/// This is typically used when the leader is unresponsive or fails to propose a
+/// valid block. It contains partial signatures for the view and seed.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Nullify<V: Variant> {
     /// The view to be nullified (skipped)
     pub view: View,
     /// The validator's partial signature on the view
     pub view_signature: PartialSignature<V>,
-    /// The validator's partial signature on the seed (for leader election/randomness)
+    /// The validator's partial signature on the seed (for leader
+    /// election/randomness)
     pub seed_signature: PartialSignature<V>,
 }
 
@@ -973,8 +1008,8 @@ impl<V: Variant> Nullify<V> {
 
     /// Verifies a batch of [Nullify] messages using BLS aggregate verification.
     ///
-    /// This function verifies a batch of [Nullify] messages using BLS aggregate verification.
-    /// It returns a tuple containing:
+    /// This function verifies a batch of [Nullify] messages using BLS aggregate
+    /// verification. It returns a tuple containing:
     /// * A vector of successfully verified [Nullify] messages.
     /// * A vector of signer indices for whom verification failed.
     pub fn verify_multiple(
@@ -1101,20 +1136,23 @@ impl<V: Variant> EncodeSize for Nullify<V> {
 }
 
 /// Nullification represents a recovered threshold signature to skip a view.
-/// When a view is nullified, the consensus moves to the next view without finalizing a block.
-/// The threshold signatures provide compact verification compared to collecting individual signatures.
+/// When a view is nullified, the consensus moves to the next view without
+/// finalizing a block. The threshold signatures provide compact verification
+/// compared to collecting individual signatures.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Nullification<V: Variant> {
     /// The view that has been nullified
     pub view: View,
     /// The recovered threshold signature on the view
     pub view_signature: V::Signature,
-    /// The recovered threshold signature on the seed (for leader election/randomness)
+    /// The recovered threshold signature on the seed (for leader
+    /// election/randomness)
     pub seed_signature: V::Signature,
 }
 
 impl<V: Variant> Nullification<V> {
-    /// Creates a new nullification with the given view and aggregated signatures.
+    /// Creates a new nullification with the given view and aggregated
+    /// signatures.
     pub fn new(view: View, view_signature: V::Signature, seed_signature: V::Signature) -> Self {
         Nullification {
             view,
@@ -1189,8 +1227,9 @@ impl<V: Variant> Seedable<V> for Nullification<V> {
 }
 
 /// Finalize represents a validator's vote to finalize a proposal.
-/// This happens after a proposal has been notarized, confirming it as the canonical block for this view.
-/// It contains a partial signature on the proposal.
+/// This happens after a proposal has been notarized, confirming it as the
+/// canonical block for this view. It contains a partial signature on the
+/// proposal.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Finalize<V: Variant, D: Digest> {
     /// The proposal to be finalized
@@ -1226,10 +1265,11 @@ impl<V: Variant, D: Digest> Finalize<V, D> {
         .is_ok()
     }
 
-    /// Verifies a batch of [Finalize] messages using BLS aggregate verification.
+    /// Verifies a batch of [Finalize] messages using BLS aggregate
+    /// verification.
     ///
-    /// This function verifies a batch of [Finalize] messages using BLS aggregate verification.
-    /// It returns a tuple containing:
+    /// This function verifies a batch of [Finalize] messages using BLS
+    /// aggregate verification. It returns a tuple containing:
     /// * A vector of successfully verified [Finalize] messages.
     /// * A vector of signer indices for whom verification failed.
     pub fn verify_multiple(
@@ -1324,21 +1364,24 @@ impl<V: Variant, D: Digest> EncodeSize for Finalize<V, D> {
     }
 }
 
-/// Finalization represents a recovered threshold signature to finalize a proposal.
-/// When a proposal is finalized, it becomes the canonical block for its view.
-/// The threshold signatures provide compact verification compared to collecting individual signatures.
+/// Finalization represents a recovered threshold signature to finalize a
+/// proposal. When a proposal is finalized, it becomes the canonical block for
+/// its view. The threshold signatures provide compact verification compared to
+/// collecting individual signatures.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Finalization<V: Variant, D: Digest> {
     /// The proposal that has been finalized
     pub proposal: Proposal<D>,
     /// The recovered threshold signature on the proposal
     pub proposal_signature: V::Signature,
-    /// The recovered threshold signature on the seed (for leader election/randomness)
+    /// The recovered threshold signature on the seed (for leader
+    /// election/randomness)
     pub seed_signature: V::Signature,
 }
 
 impl<V: Variant, D: Digest> Finalization<V, D> {
-    /// Creates a new finalization with the given proposal and aggregated signatures.
+    /// Creates a new finalization with the given proposal and aggregated
+    /// signatures.
     pub fn new(
         proposal: Proposal<D>,
         proposal_signature: V::Signature,
@@ -1354,7 +1397,8 @@ impl<V: Variant, D: Digest> Finalization<V, D> {
     /// Verifies the threshold signatures on this [Finalization].
     ///
     /// This ensures that:
-    /// 1. The proposal signature is a valid threshold signature for the proposal
+    /// 1. The proposal signature is a valid threshold signature for the
+    ///    proposal
     /// 2. The seed signature is a valid threshold signature for the view
     pub fn verify(&self, namespace: &[u8], identity: &V::Public) -> bool {
         let finalize_namespace = finalize_namespace(namespace);
@@ -1418,8 +1462,9 @@ impl<V: Variant, D: Digest> Seedable<V> for Finalization<V, D> {
     }
 }
 
-/// Backfiller is a message type for requesting and receiving missing consensus artifacts.
-/// This is used to synchronize validators that have fallen behind or just joined the network.
+/// Backfiller is a message type for requesting and receiving missing consensus
+/// artifacts. This is used to synchronize validators that have fallen behind or
+/// just joined the network.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Backfiller<V: Variant, D: Digest> {
     /// Request for missing notarizations and nullifications
@@ -1547,8 +1592,8 @@ impl Read for Request {
     }
 }
 
-/// Response is a message containing the requested notarizations and nullifications.
-/// This is sent in response to a Request message.
+/// Response is a message containing the requested notarizations and
+/// nullifications. This is sent in response to a Request message.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Response<V: Variant, D: Digest> {
     /// Identifier matching the original request
@@ -1560,7 +1605,8 @@ pub struct Response<V: Variant, D: Digest> {
 }
 
 impl<V: Variant, D: Digest> Response<V, D> {
-    /// Creates a new response with the given id, notarizations, and nullifications.
+    /// Creates a new response with the given id, notarizations, and
+    /// nullifications.
     pub fn new(
         id: u64,
         notarizations: Vec<Notarization<V, D>>,
@@ -1573,7 +1619,8 @@ impl<V: Variant, D: Digest> Response<V, D> {
         }
     }
 
-    /// Verifies the signatures on this response using BLS aggregate verification.
+    /// Verifies the signatures on this response using BLS aggregate
+    /// verification.
     pub fn verify(&self, namespace: &[u8], identity: &V::Public) -> bool {
         // Prepare to verify
         if self.notarizations.is_empty() && self.nullifications.is_empty() {
@@ -1695,19 +1742,21 @@ impl<V: Variant, D: Digest> Read for Response<V, D> {
     }
 }
 
-/// Activity represents all possible activities that can occur in the consensus protocol.
-/// This includes both regular consensus messages and fault evidence.
+/// Activity represents all possible activities that can occur in the consensus
+/// protocol. This includes both regular consensus messages and fault evidence.
 ///
-/// Some activities issued by consensus are not verified. To determine if an activity has been verified,
-/// use the `verified` method.
+/// Some activities issued by consensus are not verified. To determine if an
+/// activity has been verified, use the `verified` method.
 ///
 /// # Warning
 ///
-/// After collecting `t` [PartialSignature]s for the same [Activity], an attacker can derive
-/// the [PartialSignature] for the `n-t` remaining participants.
+/// After collecting `t` [PartialSignature]s for the same [Activity], an
+/// attacker can derive the [PartialSignature] for the `n-t` remaining
+/// participants.
 ///
-/// For this reason, it is not sound to use [PartialSignature]-backed [Activity] to reward participants
-/// for their contributions (as an attacker, for example, could forge contributions from offline participants).
+/// For this reason, it is not sound to use [PartialSignature]-backed [Activity]
+/// to reward participants for their contributions (as an attacker, for example,
+/// could forge contributions from offline participants).
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub enum Activity<V: Variant, D: Digest> {
     /// A single validator notarize over a proposal
@@ -1722,11 +1771,14 @@ pub enum Activity<V: Variant, D: Digest> {
     Finalize(Finalize<V, D>),
     /// A threshold signature for a finalization
     Finalization(Finalization<V, D>),
-    /// Evidence of a validator sending conflicting notarizes (Byzantine behavior)
+    /// Evidence of a validator sending conflicting notarizes (Byzantine
+    /// behavior)
     ConflictingNotarize(ConflictingNotarize<V, D>),
-    /// Evidence of a validator sending conflicting finalizes (Byzantine behavior)
+    /// Evidence of a validator sending conflicting finalizes (Byzantine
+    /// behavior)
     ConflictingFinalize(ConflictingFinalize<V, D>),
-    /// Evidence of a validator sending both nullify and finalize for the same view (Byzantine behavior)
+    /// Evidence of a validator sending both nullify and finalize for the same
+    /// view (Byzantine behavior)
     NullifyFinalize(NullifyFinalize<V, D>),
 }
 
@@ -1924,8 +1976,9 @@ impl<V: Variant> EncodeSize for Seed<V> {
     }
 }
 
-/// ConflictingNotarize represents evidence of a Byzantine validator sending conflicting notarizes.
-/// This is used to prove that a validator has equivocated (voted for different proposals in the same view).
+/// ConflictingNotarize represents evidence of a Byzantine validator sending
+/// conflicting notarizes. This is used to prove that a validator has
+/// equivocated (voted for different proposals in the same view).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ConflictingNotarize<V: Variant, D: Digest> {
     /// The view in which the conflict occurred
@@ -1945,7 +1998,8 @@ pub struct ConflictingNotarize<V: Variant, D: Digest> {
 }
 
 impl<V: Variant, D: Digest> ConflictingNotarize<V, D> {
-    /// Creates a new conflicting notarize evidence from two conflicting notarizes.
+    /// Creates a new conflicting notarize evidence from two conflicting
+    /// notarizes.
     pub fn new(notarize_1: Notarize<V, D>, notarize_2: Notarize<V, D>) -> Self {
         assert_eq!(notarize_1.view(), notarize_2.view());
         assert_eq!(notarize_1.signer(), notarize_2.signer());
@@ -1968,7 +2022,8 @@ impl<V: Variant, D: Digest> ConflictingNotarize<V, D> {
         )
     }
 
-    /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
+    /// Verifies that both conflicting signatures are valid, proving Byzantine
+    /// behavior.
     pub fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
         let (proposal_1, proposal_2) = self.proposals();
         let notarize_namespace = notarize_namespace(namespace);
@@ -2062,8 +2117,8 @@ impl<V: Variant, D: Digest> EncodeSize for ConflictingNotarize<V, D> {
     }
 }
 
-/// ConflictingFinalize represents evidence of a Byzantine validator sending conflicting finalizes.
-/// Similar to ConflictingNotarize, but for finalizes.
+/// ConflictingFinalize represents evidence of a Byzantine validator sending
+/// conflicting finalizes. Similar to ConflictingNotarize, but for finalizes.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ConflictingFinalize<V: Variant, D: Digest> {
     /// The view in which the conflict occurred
@@ -2083,7 +2138,8 @@ pub struct ConflictingFinalize<V: Variant, D: Digest> {
 }
 
 impl<V: Variant, D: Digest> ConflictingFinalize<V, D> {
-    /// Creates a new conflicting finalize evidence from two conflicting finalizes.
+    /// Creates a new conflicting finalize evidence from two conflicting
+    /// finalizes.
     pub fn new(finalize_1: Finalize<V, D>, finalize_2: Finalize<V, D>) -> Self {
         assert_eq!(finalize_1.view(), finalize_2.view());
         assert_eq!(finalize_1.signer(), finalize_2.signer());
@@ -2106,7 +2162,8 @@ impl<V: Variant, D: Digest> ConflictingFinalize<V, D> {
         )
     }
 
-    /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
+    /// Verifies that both conflicting signatures are valid, proving Byzantine
+    /// behavior.
     pub fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
         let (proposal_1, proposal_2) = self.proposals();
         let finalize_namespace = finalize_namespace(namespace);
@@ -2200,9 +2257,10 @@ impl<V: Variant, D: Digest> EncodeSize for ConflictingFinalize<V, D> {
     }
 }
 
-/// NullifyFinalize represents evidence of a Byzantine validator sending both a nullify and finalize
-/// for the same view, which is contradictory behavior (a validator should either try to skip a view OR
-/// finalize a proposal, not both).
+/// NullifyFinalize represents evidence of a Byzantine validator sending both a
+/// nullify and finalize for the same view, which is contradictory behavior (a
+/// validator should either try to skip a view OR finalize a proposal, not
+/// both).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct NullifyFinalize<V: Variant, D: Digest> {
     /// The proposal that the validator tried to finalize
@@ -2225,7 +2283,8 @@ impl<V: Variant, D: Digest> NullifyFinalize<V, D> {
         }
     }
 
-    /// Verifies that both the nullify and finalize signatures are valid, proving Byzantine behavior.
+    /// Verifies that both the nullify and finalize signatures are valid,
+    /// proving Byzantine behavior.
     pub fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
         let nullify_namespace = nullify_namespace(namespace);
         let nullify_message = view_message(self.proposal.view);
@@ -2877,7 +2936,8 @@ mod tests {
         // Now create invalid evidence with different validators
         let nullify2 = Nullify::<MinSig>::sign(NAMESPACE, &shares[1], view);
 
-        // Compile but verification should fail because signatures are from different validators
+        // Compile but verification should fail because signatures are from different
+        // validators
         let invalid_conflict: NullifyFinalize<MinSig, Sha256> = NullifyFinalize {
             proposal: finalize.proposal.clone(),
             view_signature: conflict.view_signature.clone(),
@@ -3066,7 +3126,8 @@ mod tests {
             &notarize_s0.proposal
         );
         assert!(verifier.notarizes_force); // Force verification
-        assert_eq!(verifier.notarizes.len(), 2); // Both notarizes present (assuming same proposal)
+        assert_eq!(verifier.notarizes.len(), 2); // Both notarizes present
+                                                 // (assuming same proposal)
     }
 
     #[test]
@@ -3083,13 +3144,15 @@ mod tests {
         let notarize_s2 = Notarize::<MinSig, _>::sign(NAMESPACE, &shares[2], proposal.clone());
         let notarize_s3 = Notarize::<MinSig, _>::sign(NAMESPACE, &shares[3], proposal.clone()); // Enough for quorum
 
-        // Not ready - no leader/proposal (This specific check is now in test_ready_notarizes_without_leader_or_proposal)
+        // Not ready - no leader/proposal (This specific check is now in
+        // test_ready_notarizes_without_leader_or_proposal)
         assert!(!verifier.ready_notarizes());
 
         // Set leader and add leader's notarize
         verifier.set_leader(shares[0].index);
         verifier.add(Voter::Notarize(notarize_s0.clone()), false);
-        assert!(verifier.ready_notarizes()); // notarizes_force is true (Covered by test_ready_notarizes_behavior_with_force_flag)
+        assert!(verifier.ready_notarizes()); // notarizes_force is true (Covered by
+                                             // test_ready_notarizes_behavior_with_force_flag)
         assert_eq!(verifier.notarizes.len(), 1);
 
         let (verified_n, failed_n) = verifier.verify_notarizes(NAMESPACE, &polynomial);
@@ -3114,7 +3177,8 @@ mod tests {
         assert_eq!(verifier.notarizes_verified, 1 + 3); // 1 previous + 3 new
         assert!(verifier.notarizes.is_empty());
 
-        // Not ready - quorum met by verified (Covered by test_ready_notarizes_quorum_already_met_by_verified)
+        // Not ready - quorum met by verified (Covered by
+        // test_ready_notarizes_quorum_already_met_by_verified)
         assert!(!verifier.ready_notarizes());
 
         // Scenario: Verification with a faulty signature
@@ -3218,7 +3282,8 @@ mod tests {
         assert_eq!(verifier.finalizes.len(), 2); // Both are present
 
         // Set leader and leader proposal to Proposal A
-        // This specific call to set_leader won't set leader_proposal because no notarize from leader exists.
+        // This specific call to set_leader won't set leader_proposal because no
+        // notarize from leader exists.
         verifier.set_leader(shares[0].index);
         assert!(verifier.leader_proposal.is_none());
         // Manually set leader_proposal for finalize_s0_propA
@@ -3233,7 +3298,8 @@ mod tests {
         assert_eq!(verifier.finalizes.len(), 1); // Still finalize_s0_propA
         assert_eq!(verifier.finalizes_verified, 1); // Verified count increased
 
-        // Add finalize_s1_propB (unverified) - should be dropped as it doesn't match leader proposal
+        // Add finalize_s1_propB (unverified) - should be dropped as it doesn't match
+        // leader proposal
         verifier.add(Voter::Finalize(finalize_s1_prop_b.clone()), false);
         assert_eq!(verifier.finalizes.len(), 1); // Should still be 1 (finalize_s0_propA)
         assert_eq!(verifier.finalizes_verified, 1);
@@ -3256,12 +3322,14 @@ mod tests {
         let finalize_s3 =
             Finalize::<MinSig, _>::sign(NAMESPACE, &shares[3], leader_proposal.clone());
 
-        // Not ready - no leader/proposal set (Covered by test_ready_finalizes_without_leader_or_proposal)
+        // Not ready - no leader/proposal set (Covered by
+        // test_ready_finalizes_without_leader_or_proposal)
         assert!(!verifier.ready_finalizes());
 
         // Set leader and leader proposal
         verifier.set_leader(shares[0].index); // Leader is s0
-                                              // Manually set leader proposal, as set_leader won't do it without a notarize from leader.
+                                              // Manually set leader proposal, as set_leader won't do it without a notarize
+                                              // from leader.
         verifier.set_leader_proposal(leader_proposal.clone());
 
         // Add some (verified and unverified)
@@ -3284,7 +3352,8 @@ mod tests {
         assert_eq!(verifier.finalizes_verified, 1 + 3);
         assert!(verifier.finalizes.is_empty());
 
-        // Not ready, quorum met (Covered by test_ready_finalizes_quorum_already_met_by_verified)
+        // Not ready, quorum met (Covered by
+        // test_ready_finalizes_quorum_already_met_by_verified)
         assert!(!verifier.ready_finalizes());
     }
 
@@ -3361,8 +3430,8 @@ mod tests {
         assert_eq!(verifier.finalizes.len(), 2);
 
         // Set leader proposal to proposal_A
-        // To make set_leader_proposal get called from set_leader, a notarize from the leader must exist.
-        // Or, call it directly.
+        // To make set_leader_proposal get called from set_leader, a notarize from the
+        // leader must exist. Or, call it directly.
         verifier.set_leader(shares[0].index);
 
         assert!(verifier.notarizes_force);
@@ -3389,7 +3458,8 @@ mod tests {
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
         let notarization = create_notarization(1, 0, 1, &shares, threshold);
-        verifier.add(Voter::Notarization(notarization), false); // This should panic
+        verifier.add(Voter::Notarization(notarization), false); // This should
+                                                                // panic
     }
 
     #[test]

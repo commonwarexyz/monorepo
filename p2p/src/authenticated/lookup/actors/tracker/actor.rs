@@ -145,7 +145,8 @@ mod tests {
     use crate::{
         authenticated::lookup::actors::peer,
         Blocker,
-        // Blocker is implicitly available via oracle.block() due to Oracle implementing crate::Blocker
+        // Blocker is implicitly available via oracle.block() due to Oracle implementing
+        // crate::Blocker
     };
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},

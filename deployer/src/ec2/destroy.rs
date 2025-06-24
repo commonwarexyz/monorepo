@@ -38,7 +38,8 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
         all_regions.insert(instance.region.clone());
     }
 
-    // First pass: Delete instances, security groups, subnets, route tables, peering, IGWs, and key pairs
+    // First pass: Delete instances, security groups, subnets, route tables,
+    // peering, IGWs, and key pairs
     info!(regions=?all_regions, "removing resources");
     let mut jobs = Vec::with_capacity(all_regions.len());
     for region in all_regions.clone() {
@@ -224,7 +225,8 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
     // Write destruction file
     File::create(destroyed_file)?;
 
-    // We don't delete the temporary directory to prevent re-deployment of the same tag
+    // We don't delete the temporary directory to prevent re-deployment of the same
+    // tag
     info!(tag = tag.as_str(), "destruction complete");
     Ok(())
 }

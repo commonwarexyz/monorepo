@@ -12,24 +12,24 @@ pub struct Buckets;
 impl Buckets {
     /// For resolving items over a network.
     ///
-    /// These tasks could either be between two peers or require multiple hops, rounds, retries,
-    /// etc.
+    /// These tasks could either be between two peers or require multiple hops,
+    /// rounds, retries, etc.
     pub const NETWORK: [f64; 13] = [
         0.010, 0.020, 0.050, 0.100, 0.200, 0.500, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 300.0,
     ];
 
     /// For resolving items locally.
     ///
-    /// These tasks are expected to be fast and not require network access, but might require
-    /// expensive computation, disk access, etc.
+    /// These tasks are expected to be fast and not require network access, but
+    /// might require expensive computation, disk access, etc.
     pub const LOCAL: [f64; 12] = [
         3e-6, 1e-5, 3e-5, 1e-4, 3e-4, 0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0,
     ];
 
     /// For cryptographic operations.
     ///
-    /// These operations are expected to be fast and not require network access, but might
-    /// require expensive computation.
+    /// These operations are expected to be fast and not require network access,
+    /// but might require expensive computation.
     pub const CRYPTOGRAPHY: [f64; 16] = [
         3e-6, 1e-5, 3e-5, 1e-4, 3e-4, 0.001, 0.002, 0.003, 0.005, 0.01, 0.015, 0.02, 0.025, 0.03,
         0.1, 0.2,
@@ -105,7 +105,8 @@ impl<C: Clock> Timer<C> {
         self.histogram.observe_between(self.start, end);
     }
 
-    /// Cancel the timer, preventing the duration from being recorded when dropped.
+    /// Cancel the timer, preventing the duration from being recorded when
+    /// dropped.
     pub fn cancel(mut self) {
         self.canceled = true;
     }

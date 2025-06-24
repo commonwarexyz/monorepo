@@ -36,23 +36,25 @@ pub fn from_hex(hex: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// Converts a hexadecimal string to bytes, stripping whitespace and/or a `0x` prefix. Commonly used
-/// in testing to encode external test vectors without modification.
+/// Converts a hexadecimal string to bytes, stripping whitespace and/or a `0x`
+/// prefix. Commonly used in testing to encode external test vectors without
+/// modification.
 pub fn from_hex_formatted(hex: &str) -> Option<Vec<u8>> {
     let hex = hex.replace(['\t', '\n', '\r', ' '], "");
     let res = hex.strip_prefix("0x").unwrap_or(&hex);
     from_hex(res)
 }
 
-/// Compute the maximum number of `f` (faults) that can be tolerated for a given set of `n`
-/// participants. This is the maximum integer `f` such that `n >= 3*f + 1`. `f` may be zero.
+/// Compute the maximum number of `f` (faults) that can be tolerated for a given
+/// set of `n` participants. This is the maximum integer `f` such that `n >= 3*f
+/// + 1`. `f` may be zero.
 pub fn max_faults(n: u32) -> u32 {
     n.saturating_sub(1) / 3
 }
 
-/// Compute the quorum size for a given set of `n` participants. This is the minimum integer `q`
-/// such that `3*q >= 2*n + 1`. It is also equal to `n - f`, where `f` is the maximum number of
-/// faults.
+/// Compute the quorum size for a given set of `n` participants. This is the
+/// minimum integer `q` such that `3*q >= 2*n + 1`. It is also equal to `n - f`,
+/// where `f` is the maximum number of faults.
 ///
 /// # Panics
 ///
@@ -70,9 +72,11 @@ pub fn union(a: &[u8], b: &[u8]) -> Vec<u8> {
     union
 }
 
-/// Concatenate a namespace and a message, prepended by a varint encoding of the namespace length.
+/// Concatenate a namespace and a message, prepended by a varint encoding of the
+/// namespace length.
 ///
-/// This produces a unique byte sequence (i.e. no collisions) for each `(namespace, msg)` pair.
+/// This produces a unique byte sequence (i.e. no collisions) for each
+/// `(namespace, msg)` pair.
 pub fn union_unique(namespace: &[u8], msg: &[u8]) -> Vec<u8> {
     let len_prefix = namespace.len();
     let mut buf = BytesMut::with_capacity(len_prefix.encode_size() + namespace.len() + msg.len());
@@ -84,7 +88,8 @@ pub fn union_unique(namespace: &[u8], msg: &[u8]) -> Vec<u8> {
 
 /// Compute the modulo of bytes interpreted as a big-endian integer.
 ///
-/// This function is used to select a random entry from an array when the bytes are a random seed.
+/// This function is used to select a random entry from an array when the bytes
+/// are a random seed.
 ///
 /// # Panics
 ///
@@ -103,32 +108,38 @@ pub fn modulo(bytes: &[u8], n: u64) -> u64 {
     result as u64
 }
 
-/// A macro to create a `NonZeroUsize` from a value, panicking if the value is zero.
+/// A macro to create a `NonZeroUsize` from a value, panicking if the value is
+/// zero.
 #[macro_export]
 macro_rules! NZUsize {
     ($val:expr) => {
         // This will panic at runtime if $val is zero.
-        // For literals, the compiler *might* optimize, but the check is still conceptually there.
+        // For literals, the compiler *might* optimize, but the check is still
+        // conceptually there.
         std::num::NonZeroUsize::new($val).expect("value must be non-zero")
     };
 }
 
-/// A macro to create a `NonZeroU32` from a value, panicking if the value is zero.
+/// A macro to create a `NonZeroU32` from a value, panicking if the value is
+/// zero.
 #[macro_export]
 macro_rules! NZU32 {
     ($val:expr) => {
         // This will panic at runtime if $val is zero.
-        // For literals, the compiler *might* optimize, but the check is still conceptually there.
+        // For literals, the compiler *might* optimize, but the check is still
+        // conceptually there.
         std::num::NonZeroU32::new($val).expect("value must be non-zero")
     };
 }
 
-/// A macro to create a `NonZeroU64` from a value, panicking if the value is zero.
+/// A macro to create a `NonZeroU64` from a value, panicking if the value is
+/// zero.
 #[macro_export]
 macro_rules! NZU64 {
     ($val:expr) => {
         // This will panic at runtime if $val is zero.
-        // For literals, the compiler *might* optimize, but the check is still conceptually there.
+        // For literals, the compiler *might* optimize, but the check is still
+        // conceptually there.
         std::num::NonZeroU64::new($val).expect("value must be non-zero")
     };
 }

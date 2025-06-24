@@ -275,7 +275,8 @@ impl<
     async fn notarizable(&mut self, threshold: u32, force: bool) -> Option<Notarization<V, D>> {
         // Ensure we haven't already broadcast
         if !force && (self.broadcast_notarization || self.broadcast_nullification) {
-            // We want to broadcast a notarization, even if we haven't yet verified a proposal.
+            // We want to broadcast a notarization, even if we haven't yet verified a
+            // proposal.
             return None;
         }
 
@@ -353,7 +354,8 @@ impl<
     async fn finalizable(&mut self, threshold: u32, force: bool) -> Option<Finalization<V, D>> {
         // Ensure we haven't already broadcast
         if !force && self.broadcast_finalization {
-            // We want to broadcast a finalization, even if we haven't yet verified a proposal.
+            // We want to broadcast a finalization, even if we haven't yet verified a
+            // proposal.
             return None;
         }
 
@@ -384,8 +386,8 @@ impl<
             );
         }
 
-        // There should never exist enough finalizes for multiple proposals, so it doesn't
-        // matter which one we choose.
+        // There should never exist enough finalizes for multiple proposals, so it
+        // doesn't matter which one we choose.
         debug!(
             ?proposal,
             verified = self.verified_proposal,
@@ -410,7 +412,8 @@ impl<
         Some(finalization)
     }
 
-    /// Returns whether at least one honest participant has notarized a proposal.
+    /// Returns whether at least one honest participant has notarized a
+    /// proposal.
     pub fn at_least_one_honest(&self) -> Option<View> {
         let at_least_one_honest = (self.quorum - 1) / 2 + 1;
         if self.notarizes.len() < at_least_one_honest as usize {
@@ -645,7 +648,8 @@ impl<
 
             // If have finalization, return
             //
-            // We never want to build on some view less than finalized and this prevents that
+            // We never want to build on some view less than finalized and this prevents
+            // that
             let parent = self.is_finalized(cursor);
             if let Some(parent) = parent {
                 return Ok((cursor, *parent));
@@ -1768,7 +1772,8 @@ impl<
         }
         self.journal = Some(journal);
 
-        // Update current view and immediately move to timeout (very unlikely we restarted and still within timeout)
+        // Update current view and immediately move to timeout (very unlikely we
+        // restarted and still within timeout)
         let end = self.context.current();
         let elapsed = end.duration_since(start).unwrap_or_default();
         let observed_view = self.view;
@@ -2047,7 +2052,8 @@ impl<
                     .update(self.view, leader.clone(), self.last_finalized)
                     .await;
 
-                // If the leader is not active (and not us), we should reduce leader timeout to now
+                // If the leader is not active (and not us), we should reduce leader timeout to
+                // now
                 if !is_active && leader != &self.crypto.public_key() {
                     debug!(view, ?leader, "skipping leader timeout due to inactivity");
                     self.skipped_views.inc();

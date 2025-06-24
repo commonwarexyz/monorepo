@@ -11,7 +11,8 @@ impl<T> Relay<T> {
         Self { low, high }
     }
 
-    /// Sends the given `message` to the appropriate channel based on `priority`.
+    /// Sends the given `message` to the appropriate channel based on
+    /// `priority`.
     pub async fn send(&mut self, message: T, priority: bool) -> Result<(), mpsc::SendError> {
         let sender = if priority {
             &mut self.high

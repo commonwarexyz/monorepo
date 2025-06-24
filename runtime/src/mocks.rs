@@ -1,4 +1,5 @@
-//! A mock implementation of a channel that implements the Sink and Stream traits.
+//! A mock implementation of a channel that implements the Sink and Stream
+//! traits.
 
 use crate::{Error, Sink as SinkTrait, Stream as StreamTrait};
 use bytes::Bytes;
@@ -27,7 +28,8 @@ pub struct Channel {
 }
 
 impl Channel {
-    /// Returns an async-safe Sink/Stream pair that share an underlying buffer of bytes.
+    /// Returns an async-safe Sink/Stream pair that share an underlying buffer
+    /// of bytes.
     pub fn init() -> (Sink, Stream) {
         let channel = Arc::new(Mutex::new(Channel {
             buffer: VecDeque::new(),
@@ -239,7 +241,8 @@ mod tests {
             // Send some bytes
             assert!(sink.send(b"7 bytes".to_vec()).await.is_ok());
 
-            // Spawn a task to initiate recv's where the first one will succeed and then will drop.
+            // Spawn a task to initiate recv's where the first one will succeed and then
+            // will drop.
             let handle = context.clone().spawn(|_| async move {
                 let _ = stream.recv(vec![0; 5]).await;
                 let _ = stream.recv(vec![0; 5]).await;

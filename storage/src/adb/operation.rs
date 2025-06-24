@@ -1,7 +1,7 @@
 //! Operations that can be applied to an authenticated database.
 //!
-//! The `Operation` enum implements the `Array` trait, allowing for a persistent log of operations
-//! based on a `crate::Journal`.
+//! The `Operation` enum implements the `Array` trait, allowing for a persistent
+//! log of operations based on a `crate::Journal`.
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{util::at_least, Error as CodecError, FixedSize, Read, ReadExt, Write};
@@ -39,8 +39,9 @@ pub enum Operation<K: Array, V: Array> {
     /// Indicates the key now has the wrapped value.
     Update(K, V),
 
-    /// Indicates all prior operations are no longer subject to rollback, and the floor on inactive
-    /// operations has been raised to the wrapped value.
+    /// Indicates all prior operations are no longer subject to rollback, and
+    /// the floor on inactive operations has been raised to the wrapped
+    /// value.
     Commit(u64),
 }
 
@@ -53,16 +54,16 @@ impl<K: Array, V: Array> Operation<K, V> {
     const UPDATE_CONTEXT: u8 = 1;
     const COMMIT_CONTEXT: u8 = 2;
 
-    // A compile-time assertion that operation's array size is large enough to handle the commit
-    // operation, which requires 9 bytes.
+    // A compile-time assertion that operation's array size is large enough to
+    // handle the commit operation, which requires 9 bytes.
     const _MIN_OPERATION_LEN: usize = 9;
     const _COMMIT_OP_ASSERT: () = assert!(
         Self::SIZE >= Self::_MIN_OPERATION_LEN,
         "array size too small for commit op"
     );
 
-    /// If this is a [Operation::Update] or [Operation::Deleted] operation, returns the key.
-    /// Otherwise, returns None.
+    /// If this is a [Operation::Update] or [Operation::Deleted] operation,
+    /// returns the key. Otherwise, returns None.
     pub fn to_key(&self) -> Option<&K> {
         match self {
             Operation::Deleted(key) => Some(key),

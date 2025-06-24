@@ -195,7 +195,8 @@ impl<
         )
     }
 
-    /// Concurrent indicates whether we should send a new request (only if we see a request for the first time)
+    /// Concurrent indicates whether we should send a new request (only if we
+    /// see a request for the first time)
     async fn send<Sr: Sender<PublicKey = C>>(
         &mut self,
         shuffle: bool,
@@ -204,15 +205,17 @@ impl<
         // Clear retry
         self.retry = None;
 
-        // We try to send as many requests as possible at the same time for unfulfilled notarizations and nullifications.
+        // We try to send as many requests as possible at the same time for unfulfilled
+        // notarizations and nullifications.
         loop {
             // If we have too many requests outstanding, return
             if self.requester.len() >= self.fetch_concurrent {
                 return;
             }
 
-            // We assume nothing about the usefulness (or existence) of any given entry, so we sample
-            // the iterator to ensure we eventually try to fetch everything requested.
+            // We assume nothing about the usefulness (or existence) of any given entry, so
+            // we sample the iterator to ensure we eventually try to fetch
+            // everything requested.
             let entries = self
                 .required
                 .iter()

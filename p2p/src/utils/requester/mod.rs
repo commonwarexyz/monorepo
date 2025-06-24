@@ -1,4 +1,5 @@
-//! Make concurrent requests to peers limited by rate and prioritized by performance.
+//! Make concurrent requests to peers limited by rate and prioritized by
+//! performance.
 
 mod config;
 mod metrics;

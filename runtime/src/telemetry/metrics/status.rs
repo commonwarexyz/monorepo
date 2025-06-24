@@ -54,8 +54,9 @@ impl CounterExt for Counter {
 
 /// Increments a `Counter` metric when dropped.
 ///
-/// Can be used to ensure that counters are incremented regardless of the control flow. For example,
-/// if a function returns early, the metric will still be incremented.
+/// Can be used to ensure that counters are incremented regardless of the
+/// control flow. For example, if a function returns early, the metric will
+/// still be incremented.
 pub struct CounterGuard {
     /// The metric to increment.
     metric: Counter,

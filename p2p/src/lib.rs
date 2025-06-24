@@ -2,8 +2,9 @@
 //!
 //! # Status
 //!
-//! `commonware-p2p` is **ALPHA** software and is not yet recommended for production use. Developers should
-//! expect breaking changes and occasional instability.
+//! `commonware-p2p` is **ALPHA** software and is not yet recommended for
+//! production use. Developers should expect breaking changes and occasional
+//! instability.
 
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
@@ -66,6 +67,7 @@ pub trait Blocker: Clone + Send + 'static {
     /// Public key type used to identify peers.
     type PublicKey: PublicKey;
 
-    /// Block a peer, disconnecting them if currently connected and preventing future connections.
+    /// Block a peer, disconnecting them if currently connected and preventing
+    /// future connections.
     fn block(&mut self, peer: Self::PublicKey) -> impl Future<Output = ()> + Send;
 }

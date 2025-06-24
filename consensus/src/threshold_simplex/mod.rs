@@ -1,15 +1,19 @@
-//! [Simplex](crate::simplex)-like BFT agreement with an embedded VRF and succinct consensus certificates.
+//! [Simplex](crate::simplex)-like BFT agreement with an embedded VRF and
+//! succinct consensus certificates.
 //!
 //! Inspired by [Simplex Consensus](https://eprint.iacr.org/2023/463), `threshold-simplex` provides
-//! simple and fast BFT agreement with network-speed view (i.e. block time) latency and optimal finalization
-//! latency in a partially synchronous setting. Unlike Simplex Consensus, however, `threshold-simplex` employs threshold
-//! cryptography (specifically BLS12-381 threshold signatures with a `2f+1` of `3f+1` quorum) to generate both
-//! a bias-resistant beacon (for leader election and post-facto execution randomness) and succinct consensus certificates
-//! (any certificate can be verified with just the static public key of the consensus instance) for each view
-//! with zero message overhead (natively integrated).
+//! simple and fast BFT agreement with network-speed view (i.e. block time)
+//! latency and optimal finalization latency in a partially synchronous setting.
+//! Unlike Simplex Consensus, however, `threshold-simplex` employs threshold
+//! cryptography (specifically BLS12-381 threshold signatures with a `2f+1` of
+//! `3f+1` quorum) to generate both a bias-resistant beacon (for leader election
+//! and post-facto execution randomness) and succinct consensus certificates
+//! (any certificate can be verified with just the static public key of the
+//! consensus instance) for each view with zero message overhead (natively
+//! integrated).
 //!
-//! _If you wish to deploy Simplex Consensus but can't employ threshold signatures, see
-//! [crate::simplex]._
+//! _If you wish to deploy Simplex Consensus but can't employ threshold
+//! signatures, see [crate::simplex]._
 //!
 //! # Features
 //!
@@ -20,20 +24,26 @@
 //! * Lazy Message Verification
 //! * Flexible Block Format
 //! * Embedded VRF for Leader Election and Post-Facto Execution Randomness
-//! * Succinct Consensus Certificates for Notarization, Nullification, and Finality
+//! * Succinct Consensus Certificates for Notarization, Nullification, and
+//!   Finality
 //!
 //! # Design
 //!
 //! ## Architecture
 //!
-//! All logic is split into four components: the `Batcher`, the `Voter`, the `Resolver`, and the `Application` (provided by the user).
-//! The `Batcher` is responsible for collecting messages from peers and lazily verifying them when a quorum is met. The `Voter`
-//! is responsible for directing participation in the current view. Lastly, the `Resolver` is responsible for
-//! fetching artifacts from previous views required to verify proposed blocks in the latest view.
+//! All logic is split into four components: the `Batcher`, the `Voter`, the
+//! `Resolver`, and the `Application` (provided by the user). The `Batcher` is
+//! responsible for collecting messages from peers and lazily verifying them
+//! when a quorum is met. The `Voter` is responsible for directing participation
+//! in the current view. Lastly, the `Resolver` is responsible for
+//! fetching artifacts from previous views required to verify proposed blocks in
+//! the latest view.
 //!
-//! To drive great performance, all interactions between `Batcher`, `Voter`, `Resolver`, and `Application` are
-//! non-blocking. This means that, for example, the `Voter` can continue processing messages while the
-//! `Application` verifies a proposed block or the `Resolver` verifies a notarization.
+//! To drive great performance, all interactions between `Batcher`, `Voter`,
+//! `Resolver`, and `Application` are non-blocking. This means that, for
+//! example, the `Voter` can continue processing messages while the
+//! `Application` verifies a proposed block or the `Resolver` verifies a
+//! notarization.
 //!
 //! ```txt
 //!                            +------------+          +++++++++++++++
@@ -65,27 +75,33 @@
 //!
 //! ## Joining Consensus
 //!
-//! As soon as `2f+1` notarizes, nullifies, or finalizes are observed for some view `v`, the `Voter` will
-//! enter `v+1`. This means that a new participant joining consensus will immediately jump ahead to the
-//! latest view and begin participating in consensus (assuming it can verify blocks).
+//! As soon as `2f+1` notarizes, nullifies, or finalizes are observed for some
+//! view `v`, the `Voter` will enter `v+1`. This means that a new participant
+//! joining consensus will immediately jump ahead to the latest view and begin
+//! participating in consensus (assuming it can verify blocks).
 //!
 //! ## Persistence
 //!
-//! The `Voter` caches all data required to participate in consensus to avoid any disk reads on
-//! on the critical path. To enable recovery, the `Voter` writes valid messages it receives from
-//! consensus and messages it generates to a write-ahead log (WAL) implemented by [commonware_storage::journal::variable::Journal].
-//! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
+//! The `Voter` caches all data required to participate in consensus to avoid
+//! any disk reads on on the critical path. To enable recovery, the `Voter`
+//! writes valid messages it receives from consensus and messages it generates
+//! to a write-ahead log (WAL) implemented by
+//! [commonware_storage::journal::variable::Journal]. Before sending a message,
+//! the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
 //! on restart (especially in the case of unclean shutdown).
 //!
 //! ## Batched Verification
 //!
-//! Unlike other consensus constructions that verify all incoming messages received from peers,
-//! `threshold-simplex` lazily verifies messages (only when a quorum is met). If an invalid signature
-//! is detected, the `Batcher` will perform repeated bisections over collected messages to find the
-//! offending message (and block the peer(s) that sent it via [commonware_p2p::Blocker]).
+//! Unlike other consensus constructions that verify all incoming messages
+//! received from peers, `threshold-simplex` lazily verifies messages (only when
+//! a quorum is met). If an invalid signature is detected, the `Batcher` will
+//! perform repeated bisections over collected messages to find the
+//! offending message (and block the peer(s) that sent it via
+//! [commonware_p2p::Blocker]).
 //!
-//! _If using a p2p implementation that is not authenticated, it is not safe to employ this optimization
-//! as any attacking peer could simply reconnect from a different address. We recommend [commonware_p2p::authenticated]._
+//! _If using a p2p implementation that is not authenticated, it is not safe to
+//! employ this optimization as any attacking peer could simply reconnect from a
+//! different address. We recommend [commonware_p2p::authenticated]._
 //!
 //! ## Protocol Description
 //!
@@ -96,73 +112,95 @@
 //! * Set timer for leader proposal `t_l = 2Δ` and advance `t_a = 3Δ`
 //!     * If leader `l` has not been active in last `r` views, set `t_l` to 0.
 //! * If leader `l`, broadcast `(part(v), notarize(c,v))`
-//!   * If can't propose container in view `v` because missing notarization/nullification for a
-//!     previous view `v_m`, request `v_m`
+//!   * If can't propose container in view `v` because missing
+//!     notarization/nullification for a previous view `v_m`, request `v_m`
 //!
 //! Upon receiving first `(part(v), notarize(c,v))` from `l`:
 //! * Cancel `t_l`
-//! * If the container's parent `c_parent` is notarized at `v_parent` and we have nullifications for all views
-//!   between `v` and `v_parent`, verify `c` and broadcast `(part(v), notarize(c,v))`
+//! * If the container's parent `c_parent` is notarized at `v_parent` and we
+//!   have nullifications for all views between `v` and `v_parent`, verify `c`
+//!   and broadcast `(part(v), notarize(c,v))`
 //!
 //! Upon receiving `2f+1` `(part(v), notarize(c,v))`:
 //! * Cancel `t_a`
 //! * Mark `c` as notarized
-//! * Broadcast `(seed(v), notarization(c,v))` (even if we have not verified `c`)
+//! * Broadcast `(seed(v), notarization(c,v))` (even if we have not verified
+//!   `c`)
 //! * If have not broadcast `(part(v), nullify(v))`, broadcast `finalize(c,v)`
 //! * Enter `v+1`
 //!
 //! Upon receiving `2f+1` `(part(v), nullify(v))`:
 //! * Broadcast `(seed(v), nullification(v))`
-//!     * If observe `>= f+1` `notarize(c,v)` for some `c`, request `notarization(c_parent, v_parent)` and any missing
-//!       `nullification(*)` between `v_parent` and `v`. If `c_parent` is than last finalized, broadcast last finalization
-//!       instead.
+//!     * If observe `>= f+1` `notarize(c,v)` for some `c`, request
+//!       `notarization(c_parent, v_parent)` and any missing `nullification(*)`
+//!       between `v_parent` and `v`. If `c_parent` is than last finalized,
+//!       broadcast last finalization instead.
 //! * Enter `v+1`
 //!
 //! Upon receiving `2f+1` `finalize(c,v)`:
 //! * Mark `c` as finalized (and recursively finalize its parents)
-//! * Broadcast `(seed(v), finalization(c,v))` (even if we have not verified `c`)
+//! * Broadcast `(seed(v), finalization(c,v))` (even if we have not verified
+//!   `c`)
 //!
 //! Upon `t_l` or `t_a` firing:
 //! * Broadcast `(part(v), nullify(v))`
-//! * Every `t_r` after `(part(v), nullify(v))` broadcast that we are still in view `v`:
-//!    * Rebroadcast `(part(v), nullify(v))` and either `(seed(v-1), notarization(v-1))` or `(seed(v-1), nullification(v-1))`
+//! * Every `t_r` after `(part(v), nullify(v))` broadcast that we are still in
+//!   view `v`:
+//!    * Rebroadcast `(part(v), nullify(v))` and either `(seed(v-1),
+//!      notarization(v-1))` or `(seed(v-1), nullification(v-1))`
 //!
 //! #### Embedded VRF
 //!
-//! When broadcasting any `notarize(c,v)` or `nullify(v)` message, a participant must also include a `part(v)` message (a partial
-//! signature over the view `v`). After `2f+1` `notarize(c,v)` or `nullify(v)` messages are collected from unique participants,
-//! `seed(v)` can be recovered. Because `part(v)` is only over the view `v`, the seed derived for a given view `v` is the same regardless of
-//! whether or not a block was notarized in said view `v`.
+//! When broadcasting any `notarize(c,v)` or `nullify(v)` message, a participant
+//! must also include a `part(v)` message (a partial signature over the view
+//! `v`). After `2f+1` `notarize(c,v)` or `nullify(v)` messages are collected
+//! from unique participants, `seed(v)` can be recovered. Because `part(v)` is
+//! only over the view `v`, the seed derived for a given view `v` is the same
+//! regardless of whether or not a block was notarized in said view `v`.
 //!
-//! Because the value of `seed(v)` cannot be known prior to message broadcast by any participant (including the leader) in view `v`
-//! and cannot be manipulated by any participant (deterministic for any `2f+1` signers at a given view `v`), it can be used both as a beacon
-//! for leader election (where `seed(v)` determines the leader for `v+1`) and a source of randomness in execution (where `seed(v)`
-//! is used as a seed in `v`).
+//! Because the value of `seed(v)` cannot be known prior to message broadcast by
+//! any participant (including the leader) in view `v` and cannot be manipulated
+//! by any participant (deterministic for any `2f+1` signers at a given view
+//! `v`), it can be used both as a beacon for leader election (where `seed(v)`
+//! determines the leader for `v+1`) and a source of randomness in execution
+//! (where `seed(v)` is used as a seed in `v`).
 //!
 //! #### Succinct Consensus Certificates
 //!
-//! All broadcast consensus messages (`notarize(c,v)`, `nullify(v)`, `finalize(c,v)`) contain partial signatures for a static
-//! public key (derived from a group polynomial that can be recomputed during reconfiguration using [dkg](commonware_cryptography::bls12381::dkg)).
-//! As soon as `2f+1` messages are collected, a threshold signature over `notarization(c,v)`, `nullification(v)`, and `finalization(c,v)`
-//! can be recovered, respectively. Because the public key is static, any of these certificates can be verified by an external
-//! process without following the consensus instance and/or tracking the current set of participants (as is typically required
+//! All broadcast consensus messages (`notarize(c,v)`, `nullify(v)`,
+//! `finalize(c,v)`) contain partial signatures for a static public key (derived
+//! from a group polynomial that can be recomputed during reconfiguration using
+//! [dkg](commonware_cryptography::bls12381::dkg)). As soon as `2f+1` messages
+//! are collected, a threshold signature over `notarization(c,v)`,
+//! `nullification(v)`, and `finalization(c,v)` can be recovered, respectively.
+//! Because the public key is static, any of these certificates can be verified
+//! by an external process without following the consensus instance and/or
+//! tracking the current set of participants (as is typically required
 //! to operate a lite client).
 //!
-//! These threshold signatures over `notarization(c,v)`, `nullification(v)`, and `finalization(c,v)` (i.e. the consensus certificates)
-//! can be used to secure interoperability between different consensus instances and user interactions with an infrastructure provider
-//! (where any data served can be proven to derive from some finalized block of some consensus instance with a known static public key).
+//! These threshold signatures over `notarization(c,v)`, `nullification(v)`, and
+//! `finalization(c,v)` (i.e. the consensus certificates) can be used to secure
+//! interoperability between different consensus instances and user interactions
+//! with an infrastructure provider (where any data served can be proven to
+//! derive from some finalized block of some consensus instance with a known
+//! static public key).
 //!
 //! ### Deviations from Simplex Consensus
 //!
-//! * Fetch missing notarizations/nullifications as needed rather than assuming each proposal contains
-//!   a set of all notarizations/nullifications for all historical blocks.
-//! * Introduce distinct messages for `notarize` and `nullify` rather than referring to both as a `vote` for
-//!   either a "block" or a "dummy block", respectively.
-//! * Introduce a "leader timeout" to trigger early view transitions for unresponsive leaders.
-//! * Skip "leader timeout" and "notarization timeout" if a designated leader hasn't participated in
-//!   some number of views (again to trigger early view transition for an unresponsive leader).
-//! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
-//!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
+//! * Fetch missing notarizations/nullifications as needed rather than assuming
+//!   each proposal contains a set of all notarizations/nullifications for all
+//!   historical blocks.
+//! * Introduce distinct messages for `notarize` and `nullify` rather than
+//!   referring to both as a `vote` for either a "block" or a "dummy block",
+//!   respectively.
+//! * Introduce a "leader timeout" to trigger early view transitions for
+//!   unresponsive leaders.
+//! * Skip "leader timeout" and "notarization timeout" if a designated leader
+//!   hasn't participated in some number of views (again to trigger early view
+//!   transition for an unresponsive leader).
+//! * Introduce message rebroadcast to continue making progress if messages from
+//!   a given view are dropped (only way to ensure messages are reliably
+//!   delivered is with a heavyweight reliable broadcast protocol).
 
 use types::View;
 
@@ -275,9 +313,10 @@ mod tests {
 
     /// Links (or unlinks) validators using the oracle.
     ///
-    /// The `action` parameter determines the action (e.g. link, unlink) to take.
-    /// The `restrict_to` function can be used to restrict the linking to certain connections,
-    /// otherwise all validators will be linked to all other validators.
+    /// The `action` parameter determines the action (e.g. link, unlink) to
+    /// take. The `restrict_to` function can be used to restrict the linking
+    /// to certain connections, otherwise all validators will be linked to
+    /// all other validators.
     async fn link_validators<P: PublicKey>(
         oracle: &mut Oracle<P>,
         validators: &[P],
@@ -487,8 +526,8 @@ mod tests {
                         notarized.insert(view, *digest);
 
                         if notarizers.len() < threshold as usize {
-                            // We can't verify that everyone participated at every view because some nodes may
-                            // have started later.
+                            // We can't verify that everyone participated at every view because some
+                            // nodes may have started later.
                             panic!("view: {}", view);
                         }
                     }
@@ -526,8 +565,8 @@ mod tests {
 
                         // Ensure everyone participating
                         if finalizers.len() < threshold as usize {
-                            // We can't verify that everyone participated at every view because some nodes may
-                            // have started later.
+                            // We can't verify that everyone participated at every view because some
+                            // nodes may have started later.
                             panic!("view: {}", view);
                         }
 
@@ -1452,7 +1491,8 @@ mod tests {
                     assert_eq!(*invalid, 0);
                 }
 
-                // Ensure slow node never emits a notarize or finalize (will never finish verification in a timely manner)
+                // Ensure slow node never emits a notarize or finalize (will never finish
+                // verification in a timely manner)
                 {
                     let notarizes = supervisor.notarizes.lock().unwrap();
                     for (view, payloads) in notarizes.iter() {
@@ -1670,8 +1710,8 @@ mod tests {
 
                 // Ensure quick recovery.
                 //
-                // If the skip timeout isn't implemented correctly, we may go many views before participants
-                // start to consider a validator's proposal.
+                // If the skip timeout isn't implemented correctly, we may go many views before
+                // participants start to consider a validator's proposal.
                 {
                     // Ensure nearly all views around latest finalize
                     let mut found = 0;

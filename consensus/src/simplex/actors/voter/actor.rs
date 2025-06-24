@@ -196,7 +196,8 @@ impl<
 
     fn notarizable(&mut self, threshold: u32, force: bool) -> Notarizable<C::Signature, D> {
         if !force && (self.broadcast_notarization || self.broadcast_nullification) {
-            // We want to broadcast a notarization, even if we haven't yet verified a proposal.
+            // We want to broadcast a notarization, even if we haven't yet verified a
+            // proposal.
             return None;
         }
         for (proposal, notarizes) in self.notarized_proposals.iter() {
@@ -204,8 +205,8 @@ impl<
                 continue;
             }
 
-            // There should never exist enough notarizes for multiple proposals, so it doesn't
-            // matter which one we choose.
+            // There should never exist enough notarizes for multiple proposals, so it
+            // doesn't matter which one we choose.
             debug!(
                 view = self.view,
                 proposal = ?proposal,
@@ -272,7 +273,8 @@ impl<
 
     fn finalizable(&mut self, threshold: u32, force: bool) -> Finalizable<C::Signature, D> {
         if !force && self.broadcast_finalization {
-            // We want to broadcast a finalization, even if we haven't yet verified a proposal.
+            // We want to broadcast a finalization, even if we haven't yet verified a
+            // proposal.
             return None;
         }
         for (proposal, finalizes) in self.finalized_proposals.iter() {
@@ -280,8 +282,8 @@ impl<
                 continue;
             }
 
-            // There should never exist enough finalizes for multiple proposals, so it doesn't
-            // matter which one we choose.
+            // There should never exist enough finalizes for multiple proposals, so it
+            // doesn't matter which one we choose.
             debug!(
                 view = self.view,
                 proposal = ?proposal,
@@ -504,7 +506,8 @@ impl<
 
             // If have finalization, return
             //
-            // We never want to build on some view less than finalized and this prevents that
+            // We never want to build on some view less than finalized and this prevents
+            // that
             let parent = self.is_finalized(cursor);
             if let Some(parent) = parent {
                 return Ok((cursor, parent.payload));
@@ -1776,7 +1779,8 @@ impl<
         }
         self.journal = Some(journal);
 
-        // Update current view and immediately move to timeout (very unlikely we restarted and still within timeout)
+        // Update current view and immediately move to timeout (very unlikely we
+        // restarted and still within timeout)
         let end = self.context.current();
         let elapsed = end.duration_since(start).unwrap_or_default();
         debug!(

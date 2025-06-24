@@ -150,11 +150,13 @@ pub struct Config {
     /// Seed for the random number generator.
     seed: u64,
 
-    /// The cycle duration determines how much time is advanced after each iteration of the event
-    /// loop. This is useful to prevent starvation if some task never yields.
+    /// The cycle duration determines how much time is advanced after each
+    /// iteration of the event loop. This is useful to prevent starvation if
+    /// some task never yields.
     cycle: Duration,
 
-    /// If the runtime is still executing at this point (i.e. a test hasn't stopped), panic.
+    /// If the runtime is still executing at this point (i.e. a test hasn't
+    /// stopped), panic.
     timeout: Option<Duration>,
 }
 
@@ -257,7 +259,8 @@ impl From<Context> for Runner {
 }
 
 impl Runner {
-    /// Initialize a new `deterministic` runtime with the given seed and cycle duration.
+    /// Initialize a new `deterministic` runtime with the given seed and cycle
+    /// duration.
     pub fn new(cfg: Config) -> Self {
         // Ensure config is valid
         cfg.assert();
@@ -339,8 +342,9 @@ impl crate::Runner for Runner {
             // Run all snapshotted tasks
             //
             // This approach is more efficient than randomly selecting a task one-at-a-time
-            // because it ensures we don't pull the same pending task multiple times in a row (without
-            // processing a different task required for other tasks to make progress).
+            // because it ensures we don't pull the same pending task multiple times in a
+            // row (without processing a different task required for other tasks
+            // to make progress).
             trace!(iter, tasks = tasks.len(), "starting loop");
             for task in tasks {
                 // Record task for auditing
@@ -388,8 +392,8 @@ impl crate::Runner for Runner {
 
             // Advance time by cycle
             //
-            // This approach prevents starvation if some task never yields (to approximate this,
-            // duration can be set to 1ns).
+            // This approach prevents starvation if some task never yields (to approximate
+            // this, duration can be set to 1ns).
             let mut current;
             {
                 let mut time = executor.time.lock().unwrap();
@@ -477,7 +481,8 @@ impl ArcWake for Task {
     }
 }
 
-/// A task queue that is used to manage the tasks that are being executed by the runtime.
+/// A task queue that is used to manage the tasks that are being executed by the
+/// runtime.
 struct Tasks {
     /// The current task counter.
     counter: Mutex<u128>,
@@ -628,16 +633,19 @@ impl Context {
         }
     }
 
-    /// Recover the inner state (deadline, metrics, auditor, rng, synced storage, etc.) from the
-    /// current runtime and use it to initialize a new instance of the runtime. A recovered runtime
-    /// does not inherit the current runtime's pending tasks, unsynced storage, network connections, nor
-    /// its shutdown signaler.
+    /// Recover the inner state (deadline, metrics, auditor, rng, synced
+    /// storage, etc.) from the current runtime and use it to initialize a
+    /// new instance of the runtime. A recovered runtime does not inherit
+    /// the current runtime's pending tasks, unsynced storage, network
+    /// connections, nor its shutdown signaler.
     ///
-    /// This is useful for performing a deterministic simulation that spans multiple runtime instantiations,
-    /// like simulating unclean shutdown (which involves repeatedly halting the runtime at unexpected intervals).
+    /// This is useful for performing a deterministic simulation that spans
+    /// multiple runtime instantiations, like simulating unclean shutdown
+    /// (which involves repeatedly halting the runtime at unexpected intervals).
     ///
-    /// It is only permitted to call this method after the runtime has finished (i.e. once `start` returns)
-    /// and only permitted to do once (otherwise multiple recovered runtimes will share the same inner state).
+    /// It is only permitted to call this method after the runtime has finished
+    /// (i.e. once `start` returns) and only permitted to do once (otherwise
+    /// multiple recovered runtimes will share the same inner state).
     /// If either one of these conditions is violated, this method will panic.
     pub fn recover(self) -> Self {
         // Ensure we are finished

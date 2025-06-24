@@ -43,7 +43,8 @@ impl<I: Ord + Hash + Clone, P: Ord + Copy> PrioritySet<I, P> {
         }
     }
 
-    /// Insert an item with a priority, overwriting the previous priority if it exists.
+    /// Insert an item with a priority, overwriting the previous priority if it
+    /// exists.
     pub fn put(&mut self, item: I, priority: P) {
         // Remove old entry, if it exists
         let entry = if let Some(old_priority) = self.keys.remove(&item) {
@@ -129,7 +130,8 @@ impl<I: Ord + Hash + Clone, P: Ord + Copy> PrioritySet<I, P> {
         })
     }
 
-    /// Returns an iterator over all items in the set in priority-ascending order.
+    /// Returns an iterator over all items in the set in priority-ascending
+    /// order.
     pub fn iter(&self) -> impl Iterator<Item = (&I, &P)> {
         self.entries
             .iter()

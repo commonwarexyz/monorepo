@@ -88,13 +88,15 @@ mod tests {
             )
         }
 
-        /// Generates a deterministic public key for testing using the provided seed.
+        /// Generates a deterministic public key for testing using the provided
+        /// seed.
         pub fn deterministic_public_key(seed: u64) -> PublicKey {
             let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
             PrivateKey::from_rng(&mut rng).public_key()
         }
 
-        /// Inserts a tip into the given TipManager and returns the inserted node.
+        /// Inserts a tip into the given TipManager and returns the inserted
+        /// node.
         pub fn insert_tip<V: Variant>(
             manager: &mut TipManager<PublicKey, V, Digest>,
             key: PublicKey,
@@ -107,7 +109,8 @@ mod tests {
         }
     }
 
-    /// Different payloads for the same sequencer and height produce distinct thresholds.
+    /// Different payloads for the same sequencer and height produce distinct
+    /// thresholds.
     fn put_new_tip<V: Variant>() {
         let mut manager = TipManager::<PublicKey, V, Digest>::new();
         let key = helpers::deterministic_public_key(1);
@@ -216,7 +219,8 @@ mod tests {
         multiple_sequencers::<MinSig>();
     }
 
-    /// Multiple updates for the same sequencer yield the tip with the highest height.
+    /// Multiple updates for the same sequencer yield the tip with the highest
+    /// height.
     fn put_multiple_updates<V: Variant>() {
         let mut manager = TipManager::<PublicKey, V, Digest>::new();
         let key = helpers::deterministic_public_key(7);

@@ -11,8 +11,8 @@ use commonware_cryptography::{
 use commonware_utils::quorum;
 use std::collections::HashMap;
 
-/// Represents a top-level message for the Distributed Key Generation (DKG) protocol,
-/// typically sent over a dedicated DKG communication channel.
+/// Represents a top-level message for the Distributed Key Generation (DKG)
+/// protocol, typically sent over a dedicated DKG communication channel.
 ///
 /// It encapsulates a specific round number and a payload containing the actual
 /// DKG protocol message content.
@@ -48,12 +48,14 @@ impl<S: Signature> EncodeSize for Dkg<S> {
 /// Defines the different types of messages exchanged during the DKG protocol.
 ///
 /// This enum is used as the `payload` field within the [Dkg] message struct.
-/// The generic parameter `Sig` represents the type used for signatures in acknowledgments.
+/// The generic parameter `Sig` represents the type used for signatures in
+/// acknowledgments.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Payload<S: Signature> {
     /// Message sent by the arbiter to initiate a DKG round.
     ///
-    /// Optionally includes a pre-existing group public key if reforming a group.
+    /// Optionally includes a pre-existing group public key if reforming a
+    /// group.
     Start {
         /// Optional existing group public polynomial commitment.
         group: Option<poly::Public<MinSig>>,
@@ -61,8 +63,8 @@ pub enum Payload<S: Signature> {
 
     /// Message sent by a dealer node to a player node.
     ///
-    /// Contains the dealer's public commitment to their polynomial and the specific
-    /// share calculated for the receiving player.
+    /// Contains the dealer's public commitment to their polynomial and the
+    /// specific share calculated for the receiving player.
     Share {
         /// The dealer's public commitment (coefficients of the polynomial).
         commitment: poly::Public<MinSig>,
@@ -77,37 +79,46 @@ pub enum Payload<S: Signature> {
     Ack {
         /// The public key identifier of the player sending the acknowledgment.
         public_key: u32,
-        /// A signature covering the DKG round, dealer ID, and the dealer's commitment.
-        /// This confirms the player received and validated the correct share.
+        /// A signature covering the DKG round, dealer ID, and the dealer's
+        /// commitment. This confirms the player received and validated
+        /// the correct share.
         signature: S,
     },
 
     /// Message sent by a dealer node to the arbiter.
     ///
-    /// Sent after the dealer has collected a sufficient number of [Payload::Ack] messages
-    /// from players. Contains the dealer's commitment, the collected acknowledgments,
-    /// and potentially revealed shares (e.g., for handling unresponsive players).
+    /// Sent after the dealer has collected a sufficient number of
+    /// [Payload::Ack] messages from players. Contains the dealer's
+    /// commitment, the collected acknowledgments, and potentially revealed
+    /// shares (e.g., for handling unresponsive players).
     Commitment {
         /// The dealer's public commitment.
         commitment: poly::Public<MinSig>,
-        /// A map of player public key identifiers to their corresponding acknowledgment signatures.
+        /// A map of player public key identifiers to their corresponding
+        /// acknowledgment signatures.
         acks: HashMap<u32, S>,
-        /// A vector of shares revealed by the dealer, potentially for players who did not acknowledge.
+        /// A vector of shares revealed by the dealer, potentially for players
+        /// who did not acknowledge.
         reveals: Vec<group::Share>,
     },
 
-    /// Message sent by the arbiter to player nodes upon successful completion of a DKG round.
+    /// Message sent by the arbiter to player nodes upon successful completion
+    /// of a DKG round.
     ///
-    /// Contains the final aggregated commitments and revealed shares from all participating dealers.
+    /// Contains the final aggregated commitments and revealed shares from all
+    /// participating dealers.
     Success {
-        /// A map of dealer public key identifiers to their final public commitments.
+        /// A map of dealer public key identifiers to their final public
+        /// commitments.
         commitments: HashMap<u32, poly::Public<MinSig>>,
-        /// A map of player public key identifiers to their corresponding revealed shares,
-        /// aggregated from all dealers' [Payload::Commitment] messages.
+        /// A map of player public key identifiers to their corresponding
+        /// revealed shares, aggregated from all dealers'
+        /// [Payload::Commitment] messages.
         reveals: HashMap<u32, group::Share>,
     },
 
-    /// Message broadcast by the arbiter to all player nodes if the DKG round fails or is aborted.
+    /// Message broadcast by the arbiter to all player nodes if the DKG round
+    /// fails or is aborted.
     Abort,
 }
 
@@ -228,13 +239,14 @@ impl<S: Signature> EncodeSize for Payload<S> {
 /// Represents a message containing a Verifiable Random Function (VRF) output,
 /// typically sent over a dedicated VRF communication channel.
 ///
-/// It includes the round number for which the VRF was computed and the resulting
-/// evaluated signature (VRF proof).
+/// It includes the round number for which the VRF was computed and the
+/// resulting evaluated signature (VRF proof).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Vrf {
     /// The round number associated with this VRF output.
     pub round: u64,
-    /// The VRF signature/proof, represented as an evaluation of a threshold signature.
+    /// The VRF signature/proof, represented as an evaluation of a threshold
+    /// signature.
     pub signature: Eval<<MinSig as Variant>::Signature>,
 }
 

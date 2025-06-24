@@ -1,5 +1,5 @@
-//! Defines the abstraction allowing MMRs with differing backends and representations to be
-//! uniformly accessed.
+//! Defines the abstraction allowing MMRs with differing backends and
+//! representations to be uniformly accessed.
 
 use crate::mmr::{
     bitmap::Bitmap,
@@ -56,8 +56,8 @@ impl<H: CHasher, const N: usize> Storage<H::Digest> for Bitmap<H, N> {
     }
 }
 
-/// A [Storage] implementation that makes grafted trees look like a single MMR for conveniently
-/// generating inclusion proofs.
+/// A [Storage] implementation that makes grafted trees look like a single MMR
+/// for conveniently generating inclusion proofs.
 pub struct Grafting<'a, H: CHasher, S1: Storage<H::Digest>, S2: Storage<H::Digest>> {
     peak_tree: &'a S1,
     base_mmr: &'a S2,

@@ -87,15 +87,17 @@ pub struct Engine<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + D
     /// when receiving duplicate messages.
     items: HashMap<M::Commitment, HashMap<M::Digest, M>>,
 
-    /// A LRU cache of the latest received identities and digests from each peer.
+    /// A LRU cache of the latest received identities and digests from each
+    /// peer.
     ///
     /// This is used to limit the number of digests stored per peer.
-    /// At most `deque_size` digests are stored per peer. This value is expected to be small, so
-    /// membership checks are done in linear time.
+    /// At most `deque_size` digests are stored per peer. This value is expected
+    /// to be small, so membership checks are done in linear time.
     #[allow(clippy::type_complexity)]
     deques: HashMap<P, VecDeque<Pair<M::Commitment, M::Digest>>>,
 
-    /// The number of times each digest (globally unique) exists in one of the deques.
+    /// The number of times each digest (globally unique) exists in one of the
+    /// deques.
     ///
     /// Multiple peers can send the same message and we only want to store
     /// the message once.
@@ -280,8 +282,9 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
 
     /// Handles a `subscribe` request from the application.
     ///
-    /// If the message is already in the cache, the responder is immediately sent the message.
-    /// Otherwise, the responder is stored in the waiters list.
+    /// If the message is already in the cache, the responder is immediately
+    /// sent the message. Otherwise, the responder is stored in the waiters
+    /// list.
     async fn handle_subscribe(
         &mut self,
         peer: Option<P>,
@@ -333,8 +336,9 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
 
     /// Inserts a message into the cache.
     ///
-    /// Returns `true` if the message was inserted, `false` if it was already present.
-    /// Updates the deque, item count, and message cache, potentially evicting an old message.
+    /// Returns `true` if the message was inserted, `false` if it was already
+    /// present. Updates the deque, item count, and message cache,
+    /// potentially evicting an old message.
     fn insert_message(&mut self, peer: P, msg: M) -> bool {
         // Get the commitment and digest of the message
         let pair = Pair {
@@ -342,7 +346,8 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
             digest: msg.digest(),
         };
 
-        // Send the message to the waiters, if any, ignoring errors (as the receiver may have dropped)
+        // Send the message to the waiters, if any, ignoring errors (as the receiver may
+        // have dropped)
         if let Some(mut waiters) = self.waiters.remove(&pair.commitment) {
             let mut i = 0;
             while i < waiters.len() {

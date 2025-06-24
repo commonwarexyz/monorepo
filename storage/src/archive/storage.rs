@@ -73,9 +73,9 @@ pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
     // Oldest allowed section to read from. This is updated when `prune` is called.
     oldest_allowed: Option<u64>,
 
-    // To efficiently serve `get` and `has` requests, we map a translated representation of each key
-    // to its corresponding index. To avoid iterating over this keys map during pruning, we map said
-    // indexes to their locations in the journal.
+    // To efficiently serve `get` and `has` requests, we map a translated representation of each
+    // key to its corresponding index. To avoid iterating over this keys map during pruning, we
+    // map said indexes to their locations in the journal.
     keys: Index<T, u64>,
     indices: BTreeMap<u64, Location>,
     intervals: RMap,
@@ -180,10 +180,12 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         })
     }
 
-    /// Store an item in `Archive`. Both indices and keys are assumed to both be globally unique.
+    /// Store an item in `Archive`. Both indices and keys are assumed to both be
+    /// globally unique.
     ///
-    /// If the index already exists, put does nothing and returns. If the same key is stored multiple times
-    /// at different indices (not recommended), any value associated with the key may be returned.
+    /// If the index already exists, put does nothing and returns. If the same
+    /// key is stored multiple times at different indices (not recommended),
+    /// any value associated with the key may be returned.
     pub async fn put(&mut self, index: u64, key: K, data: V) -> Result<(), Error> {
         // Check last pruned
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);

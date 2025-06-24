@@ -7,11 +7,13 @@ use commonware_codec::{
 use commonware_cryptography::{Digest, Signature as CSignature, Signer, Verifier};
 use commonware_utils::{quorum, union};
 
-/// View is a monotonically increasing counter that represents the current focus of consensus.
+/// View is a monotonically increasing counter that represents the current focus
+/// of consensus.
 pub type View = u64;
 
 /// Context is a collection of metadata from consensus about a given payload.
-/// It provides information about the current view and the parent payload that new proposals are built on.
+/// It provides information about the current view and the parent payload that
+/// new proposals are built on.
 #[derive(Clone)]
 pub struct Context<D: Digest> {
     /// Current view (round) of consensus.
@@ -19,15 +21,17 @@ pub struct Context<D: Digest> {
 
     /// Parent the payload is built on.
     ///
-    /// If there is a gap between the current view and the parent view, the participant
-    /// must possess a nullification for each discarded view to safely vote on the proposed
-    /// payload (any view without a nullification may eventually be finalized and skipping
+    /// If there is a gap between the current view and the parent view, the
+    /// participant must possess a nullification for each discarded view to
+    /// safely vote on the proposed payload (any view without a
+    /// nullification may eventually be finalized and skipping
     /// it would result in a fork).
     pub parent: (View, D),
 }
 
 /// Viewable is a trait that provides access to the view (round) number.
-/// Any consensus message or object that is associated with a specific view should implement this.
+/// Any consensus message or object that is associated with a specific view
+/// should implement this.
 pub trait Viewable {
     /// Returns the view associated with this object.
     fn view(&self) -> View;
@@ -88,7 +92,8 @@ pub enum Voter<S: CSignature, D: Digest> {
     Notarize(Notarize<S, D>),
     /// An aggregated set of validator notarizes that meets quorum
     Notarization(Notarization<S, D>),
-    /// A single validator nullify to skip the current view (usually when leader is unresponsive)
+    /// A single validator nullify to skip the current view (usually when leader
+    /// is unresponsive)
     Nullify(Nullify<S>),
     /// An aggregated set of validator nullifies that meets quorum
     Nullification(Nullification<S>),
@@ -186,12 +191,14 @@ pub struct Proposal<D: Digest> {
     pub view: View,
     /// The view of the parent proposal that this one builds upon
     pub parent: View,
-    /// The actual payload/content of the proposal (typically a digest of the block data)
+    /// The actual payload/content of the proposal (typically a digest of the
+    /// block data)
     pub payload: D,
 }
 
 impl<D: Digest> Proposal<D> {
-    /// Creates a new proposal with the specified view, parent view, and payload.
+    /// Creates a new proposal with the specified view, parent view, and
+    /// payload.
     pub fn new(view: View, parent: View, payload: D) -> Self {
         Self {
             view,
@@ -236,8 +243,9 @@ impl<D: Digest> Viewable for Proposal<D> {
     }
 }
 
-/// Signature represents a validator's cryptographic signature with their identifier.
-/// This combines the validator's public key index with their actual signature.
+/// Signature represents a validator's cryptographic signature with their
+/// identifier. This combines the validator's public key index with their actual
+/// signature.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Signature<S: CSignature> {
     /// Index of the validator's public key in the validator set
@@ -247,7 +255,8 @@ pub struct Signature<S: CSignature> {
 }
 
 impl<S: CSignature> Signature<S> {
-    /// Creates a new signature with the given public key index and signature data.
+    /// Creates a new signature with the given public key index and signature
+    /// data.
     pub fn new(public_key: u32, signature: S) -> Self {
         Self {
             public_key,
@@ -308,7 +317,8 @@ impl<S: CSignature, D: Digest> Notarize<S, D> {
 
     /// Verifies the signature on this notarize using the provided verifier.
     ///
-    /// This ensures that the notarize was actually produced by the claimed validator.
+    /// This ensures that the notarize was actually produced by the claimed
+    /// validator.
     pub fn verify<K: Verifier<Signature = S>>(&self, namespace: &[u8], public_key: &K) -> bool {
         let notarize_namespace = notarize_namespace(namespace);
         let message = self.proposal.encode();
@@ -374,8 +384,9 @@ impl<S: CSignature, D: Digest> Attributable for Notarize<S, D> {
     }
 }
 
-/// Notarization represents an aggregated set of notarizes that meets the quorum threshold.
-/// It includes the proposal and the set of signatures from validators.
+/// Notarization represents an aggregated set of notarizes that meets the quorum
+/// threshold. It includes the proposal and the set of signatures from
+/// validators.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Notarization<S: CSignature, D: Digest> {
     /// The proposal that has been notarized
@@ -385,7 +396,8 @@ pub struct Notarization<S: CSignature, D: Digest> {
 }
 
 impl<S: CSignature, D: Digest> Notarization<S, D> {
-    /// Creates a new notarization with the given proposal and set of signatures.
+    /// Creates a new notarization with the given proposal and set of
+    /// signatures.
     ///
     /// # Warning
     ///
@@ -397,14 +409,16 @@ impl<S: CSignature, D: Digest> Notarization<S, D> {
         }
     }
 
-    /// Verifies all signatures in this notarization using the provided verifier.
+    /// Verifies all signatures in this notarization using the provided
+    /// verifier.
     ///
     /// This ensures that:
     /// 1. There are at least threshold valid signatures
     /// 2. All signatures are valid
     /// 3. All signers are in the validator set
     ///
-    /// In `read_cfg`, we ensure that the signatures are sorted by public key index and are unique.
+    /// In `read_cfg`, we ensure that the signatures are sorted by public key
+    /// index and are unique.
     pub fn verify<K: Verifier<Signature = S>>(&self, namespace: &[u8], participants: &[K]) -> bool {
         // Get allowed signers
         let (threshold, count) = threshold(participants);
@@ -480,7 +494,8 @@ impl<S: CSignature, D: Digest> Viewable for Notarization<S, D> {
 }
 
 /// Nullify represents a validator's nullify to skip the current view.
-/// This is typically used when the leader is unresponsive or fails to propose a valid block.
+/// This is typically used when the leader is unresponsive or fails to propose a
+/// valid block.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Nullify<S: CSignature> {
     /// The view to be nullified (skipped)
@@ -558,8 +573,9 @@ impl<S: CSignature> Attributable for Nullify<S> {
     }
 }
 
-/// Nullification represents an aggregated set of nullifies that meets the quorum threshold.
-/// When a view is nullified, the consensus moves to the next view.
+/// Nullification represents an aggregated set of nullifies that meets the
+/// quorum threshold. When a view is nullified, the consensus moves to the next
+/// view.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Nullification<S: CSignature> {
     /// The view that has been nullified
@@ -578,9 +594,11 @@ impl<S: CSignature> Nullification<S> {
         Self { view, signatures }
     }
 
-    /// Verifies all signatures in this nullification using the provided verifier.
+    /// Verifies all signatures in this nullification using the provided
+    /// verifier.
     ///
-    /// Similar to Notarization::verify, ensures quorum of valid signatures from validators.
+    /// Similar to Notarization::verify, ensures quorum of valid signatures from
+    /// validators.
     pub fn verify<K: Verifier<Signature = S>>(&self, namespace: &[u8], participants: &[K]) -> bool {
         // Get allowed signers
         let (threshold, count) = threshold(participants);
@@ -653,8 +671,8 @@ impl<S: CSignature> Viewable for Nullification<S> {
 }
 
 /// Finalize represents a validator's finalize over a proposal.
-/// This happens after a proposal has been notarized, confirming it as the canonical block
-/// for this view.
+/// This happens after a proposal has been notarized, confirming it as the
+/// canonical block for this view.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Finalize<S: CSignature, D: Digest> {
     /// The proposal to be finalized
@@ -738,8 +756,9 @@ impl<S: CSignature, D: Digest> Attributable for Finalize<S, D> {
     }
 }
 
-/// Finalization represents an aggregated set of finalizes that meets the quorum threshold.
-/// When a proposal is finalized, it becomes the canonical block for its view.
+/// Finalization represents an aggregated set of finalizes that meets the quorum
+/// threshold. When a proposal is finalized, it becomes the canonical block for
+/// its view.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Finalization<S: CSignature, D: Digest> {
     /// The proposal that has been finalized
@@ -749,7 +768,8 @@ pub struct Finalization<S: CSignature, D: Digest> {
 }
 
 impl<S: CSignature, D: Digest> Finalization<S, D> {
-    /// Creates a new finalization with the given proposal and set of signatures.
+    /// Creates a new finalization with the given proposal and set of
+    /// signatures.
     ///
     /// # Warning
     ///
@@ -761,9 +781,11 @@ impl<S: CSignature, D: Digest> Finalization<S, D> {
         }
     }
 
-    /// Verifies all signatures in this finalization using the provided verifier.
+    /// Verifies all signatures in this finalization using the provided
+    /// verifier.
     ///
-    /// Similar to Notarization::verify, ensures quorum of valid signatures from validators.
+    /// Similar to Notarization::verify, ensures quorum of valid signatures from
+    /// validators.
     pub fn verify<V: Verifier<Signature = S>>(&self, namespace: &[u8], participants: &[V]) -> bool {
         // Get allowed signers
         let (threshold, count) = threshold(participants);
@@ -838,8 +860,9 @@ impl<S: CSignature, D: Digest> Viewable for Finalization<S, D> {
     }
 }
 
-/// Backfiller is a message type for requesting and receiving missing consensus artifacts.
-/// This is used to synchronize validators that have fallen behind or just joined the network.
+/// Backfiller is a message type for requesting and receiving missing consensus
+/// artifacts. This is used to synchronize validators that have fallen behind or
+/// just joined the network.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Backfiller<S: CSignature, D: Digest> {
     /// Request for missing notarizations and nullifications
@@ -945,8 +968,8 @@ impl EncodeSize for Request {
     }
 }
 
-/// Response is a message containing the requested notarizations and nullifications.
-/// This is sent in response to a Request message.
+/// Response is a message containing the requested notarizations and
+/// nullifications. This is sent in response to a Request message.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Response<S: CSignature, D: Digest> {
     /// Identifier matching the original request
@@ -958,7 +981,8 @@ pub struct Response<S: CSignature, D: Digest> {
 }
 
 impl<S: CSignature, D: Digest> Response<S, D> {
-    /// Creates a new response with the given id, notarizations, and nullifications.
+    /// Creates a new response with the given id, notarizations, and
+    /// nullifications.
     pub fn new(
         id: u64,
         notarizations: Vec<Notarization<S, D>>,
@@ -1006,8 +1030,8 @@ impl<S: CSignature, D: Digest> EncodeSize for Response<S, D> {
     }
 }
 
-/// Activity represents all possible activities that can occur in the consensus protocol.
-/// This includes both regular consensus messages and fault evidence.
+/// Activity represents all possible activities that can occur in the consensus
+/// protocol. This includes both regular consensus messages and fault evidence.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub enum Activity<S: CSignature, D: Digest> {
     /// A single notarize over a proposal
@@ -1022,11 +1046,14 @@ pub enum Activity<S: CSignature, D: Digest> {
     Finalize(Finalize<S, D>),
     /// An aggregated set of validator finalizes that meets quorum
     Finalization(Finalization<S, D>),
-    /// Evidence of a validator sending conflicting notarizes (Byzantine behavior)
+    /// Evidence of a validator sending conflicting notarizes (Byzantine
+    /// behavior)
     ConflictingNotarize(ConflictingNotarize<S, D>),
-    /// Evidence of a validator sending conflicting finalizes (Byzantine behavior)
+    /// Evidence of a validator sending conflicting finalizes (Byzantine
+    /// behavior)
     ConflictingFinalize(ConflictingFinalize<S, D>),
-    /// Evidence of a validator sending both nullify and finalize for the same view (Byzantine behavior)
+    /// Evidence of a validator sending both nullify and finalize for the same
+    /// view (Byzantine behavior)
     NullifyFinalize(NullifyFinalize<S, D>),
 }
 
@@ -1144,8 +1171,9 @@ impl<S: CSignature, D: Digest> Viewable for Activity<S, D> {
     }
 }
 
-/// ConflictingNotarize represents evidence of a Byzantine validator sending conflicting notarizes.
-/// This is used to prove that a validator has equivocated (voted for different proposals in the same view).
+/// ConflictingNotarize represents evidence of a Byzantine validator sending
+/// conflicting notarizes. This is used to prove that a validator has
+/// equivocated (voted for different proposals in the same view).
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct ConflictingNotarize<S: CSignature, D: Digest> {
     /// The view in which the conflict occurred
@@ -1165,7 +1193,8 @@ pub struct ConflictingNotarize<S: CSignature, D: Digest> {
 }
 
 impl<S: CSignature, D: Digest> ConflictingNotarize<S, D> {
-    /// Creates a new conflicting notarize evidence from two conflicting notarizes.
+    /// Creates a new conflicting notarize evidence from two conflicting
+    /// notarizes.
     pub fn new(notarize_1: Notarize<S, D>, notarize_2: Notarize<S, D>) -> Self {
         assert_eq!(notarize_1.view(), notarize_2.view());
         assert_eq!(notarize_1.signer(), notarize_2.signer());
@@ -1194,7 +1223,8 @@ impl<S: CSignature, D: Digest> ConflictingNotarize<S, D> {
         )
     }
 
-    /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
+    /// Verifies that both conflicting signatures are valid, proving Byzantine
+    /// behavior.
     pub fn verify<V: Verifier<Signature = S>>(&self, namespace: &[u8], public_key: &V) -> bool {
         let (notarize_1, notarize_2) = self.notarizes();
         notarize_1.verify(namespace, public_key) && notarize_2.verify(namespace, public_key)
@@ -1266,8 +1296,8 @@ impl<S: CSignature, D: Digest> Attributable for ConflictingNotarize<S, D> {
     }
 }
 
-/// ConflictingFinalize represents evidence of a Byzantine validator sending conflicting finalizes.
-/// Similar to ConflictingNotarize, but for finalizes.
+/// ConflictingFinalize represents evidence of a Byzantine validator sending
+/// conflicting finalizes. Similar to ConflictingNotarize, but for finalizes.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct ConflictingFinalize<S: CSignature, D: Digest> {
     /// The view in which the conflict occurred
@@ -1287,7 +1317,8 @@ pub struct ConflictingFinalize<S: CSignature, D: Digest> {
 }
 
 impl<S: CSignature, D: Digest> ConflictingFinalize<S, D> {
-    /// Creates a new conflicting finalize evidence from two conflicting finalizes.
+    /// Creates a new conflicting finalize evidence from two conflicting
+    /// finalizes.
     pub fn new(finalize_1: Finalize<S, D>, finalize_2: Finalize<S, D>) -> Self {
         assert_eq!(finalize_1.view(), finalize_2.view());
         assert_eq!(finalize_1.signer(), finalize_2.signer());
@@ -1316,7 +1347,8 @@ impl<S: CSignature, D: Digest> ConflictingFinalize<S, D> {
         )
     }
 
-    /// Verifies that both conflicting signatures are valid, proving Byzantine behavior.
+    /// Verifies that both conflicting signatures are valid, proving Byzantine
+    /// behavior.
     pub fn verify<V: Verifier<Signature = S>>(&self, namespace: &[u8], public_key: &V) -> bool {
         let (finalize_1, finalize_2) = self.finalizes();
         finalize_1.verify(namespace, public_key) && finalize_2.verify(namespace, public_key)
@@ -1388,9 +1420,10 @@ impl<S: CSignature, D: Digest> Attributable for ConflictingFinalize<S, D> {
     }
 }
 
-/// NullifyFinalize represents evidence of a Byzantine validator sending both a nullify and finalize
-/// for the same view, which is contradictory behavior (a validator should either try to skip a view OR
-/// finalize a proposal, not both).
+/// NullifyFinalize represents evidence of a Byzantine validator sending both a
+/// nullify and finalize for the same view, which is contradictory behavior (a
+/// validator should either try to skip a view OR finalize a proposal, not
+/// both).
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct NullifyFinalize<S: CSignature, D: Digest> {
     /// The proposal that the validator tried to finalize
@@ -1413,7 +1446,8 @@ impl<S: CSignature, D: Digest> NullifyFinalize<S, D> {
         }
     }
 
-    /// Verifies that both the nullify and finalize signatures are valid, proving Byzantine behavior.
+    /// Verifies that both the nullify and finalize signatures are valid,
+    /// proving Byzantine behavior.
     pub fn verify<V: Verifier<Signature = S>>(&self, namespace: &[u8], public_key: &V) -> bool {
         let nullify = Nullify::new(self.proposal.view(), self.view_signature.clone());
         let finalize = Finalize::new(self.proposal.clone(), self.finalize_signature.clone());
@@ -1712,7 +1746,8 @@ mod tests {
         let invalid_sig =
             super::Signature::new(3, scheme_2.sign(Some(NAMESPACE), &proposal.encode()));
 
-        // Create a notarization with an invalid signature (refers to index 3, but there are only 2 validators)
+        // Create a notarization with an invalid signature (refers to index 3, but there
+        // are only 2 validators)
         let signatures = vec![notarize_1.signature.clone(), invalid_sig];
         let notarization = Notarization::new(proposal.clone(), signatures);
 
@@ -1745,7 +1780,8 @@ mod tests {
         let mut scheme2 = sample_scheme(1);
         let invalid_notarize = Notarize::sign(NAMESPACE, &mut scheme2, 1, proposal1.clone());
 
-        // This will compile but should fail verification since the signatures are from different validators
+        // This will compile but should fail verification since the signatures are from
+        // different validators
         let (_, n2) = conflict.notarizes();
         let invalid_conflict = ConflictingNotarize {
             view: n2.view(),
@@ -1757,7 +1793,8 @@ mod tests {
             signature_2: invalid_notarize.signature,
         };
 
-        // Verify should fail with either key because the signatures are from different validators
+        // Verify should fail with either key because the signatures are from different
+        // validators
         assert!(!invalid_conflict.verify::<PublicKey>(NAMESPACE, &scheme.public_key()));
         assert!(!invalid_conflict.verify::<PublicKey>(NAMESPACE, &scheme2.public_key()));
     }

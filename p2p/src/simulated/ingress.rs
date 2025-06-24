@@ -46,10 +46,12 @@ pub struct Link {
     /// Mean latency for the delivery of a message in milliseconds.
     pub latency: f64,
 
-    /// Standard deviation of the latency for the delivery of a message in milliseconds.
+    /// Standard deviation of the latency for the delivery of a message in
+    /// milliseconds.
     pub jitter: f64,
 
-    /// Probability of a message being delivered successfully (in range \[0,1\]).
+    /// Probability of a message being delivered successfully (in range
+    /// \[0,1\]).
     pub success_rate: f64,
 }
 
@@ -68,7 +70,8 @@ impl<P: PublicKey> Oracle<P> {
         Self { sender }
     }
 
-    /// Spawn an individual control interface for a peer in the simulated network.
+    /// Spawn an individual control interface for a peer in the simulated
+    /// network.
     pub fn control(&self, me: P) -> Control<P> {
         Control {
             me,
@@ -86,10 +89,11 @@ impl<P: PublicKey> Oracle<P> {
         r.await.map_err(|_| Error::NetworkClosed)?
     }
 
-    /// Register a new peer with the network that can interact over a given channel.
+    /// Register a new peer with the network that can interact over a given
+    /// channel.
     ///
-    /// By default, the peer will not be linked to any other peers. If a peer is already
-    /// registered on a given channel, it will return an error.
+    /// By default, the peer will not be linked to any other peers. If a peer is
+    /// already registered on a given channel, it will return an error.
     pub async fn register(
         &mut self,
         public_key: P,
@@ -109,8 +113,8 @@ impl<P: PublicKey> Oracle<P> {
 
     /// Create a unidirectional link between two peers.
     ///
-    /// Link can be called multiple times for the same sender/receiver. The latest
-    /// setting will be used.
+    /// Link can be called multiple times for the same sender/receiver. The
+    /// latest setting will be used.
     pub async fn add_link(&mut self, sender: P, receiver: P, config: Link) -> Result<(), Error> {
         // Sanity checks
         if sender == receiver {

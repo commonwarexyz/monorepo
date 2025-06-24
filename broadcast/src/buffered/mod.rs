@@ -9,15 +9,16 @@
 //!
 //! # Details
 //!
-//! The engine receives messages from other peers and caches them. The cache is a bounded queue of
-//! messages per peer. When the cache is full, the oldest message is removed to make room for the
-//! new one.
+//! The engine receives messages from other peers and caches them. The cache is
+//! a bounded queue of messages per peer. When the cache is full, the oldest
+//! message is removed to make room for the new one.
 //!
 //! The [Mailbox] is used to make requests to the [Engine]. It implements the
-//! [crate::Broadcaster] trait. This is used to have the engine send a message to all
-//! other peers in the network in a best-effort manner. It also has a method to request a message by
-//! digest. The engine will return the message immediately if it is in the cache, or wait for it to
-//! be received over the network if it is not.
+//! [crate::Broadcaster] trait. This is used to have the engine send a message
+//! to all other peers in the network in a best-effort manner. It also has a
+//! method to request a message by digest. The engine will return the message
+//! immediately if it is in the cache, or wait for it to be received over the
+//! network if it is not.
 
 mod config;
 pub use config::Config;
@@ -51,8 +52,8 @@ mod tests {
     // Number of messages to cache per sender
     const CACHE_SIZE: usize = 10;
 
-    // Enough time to receive a cached message. Cannot be instantaneous as the test runtime
-    // requires some time to switch context.
+    // Enough time to receive a cached message. Cannot be instantaneous as the test
+    // runtime requires some time to switch context.
     const A_JIFFY: Duration = Duration::from_millis(10);
 
     // Network speed for the simulated network

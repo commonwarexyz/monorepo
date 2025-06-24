@@ -68,8 +68,8 @@ impl<C: Element> EncodeSize for Eval<C> {
 // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L24-L28
 pub struct Poly<C>(Vec<C>);
 
-/// Returns a new scalar polynomial of the given degree where each coefficients is
-/// sampled at random using kernel randomness.
+/// Returns a new scalar polynomial of the given degree where each coefficients
+/// is sampled at random using kernel randomness.
 ///
 /// In the context of secret sharing, the threshold is the degree + 1.
 pub fn new(degree: u32) -> Poly<Scalar> {
@@ -121,12 +121,12 @@ where
 
 /// Computes Barycentric Weights for Lagrange interpolation at x=0.
 ///
-/// These weights can be reused for multiple interpolations with the same set of points,
-/// which significantly improves performance when recovering a group polynomial or multiple
-/// signatures.
+/// These weights can be reused for multiple interpolations with the same set of
+/// points, which significantly improves performance when recovering a group
+/// polynomial or multiple signatures.
 ///
-/// The `indices` of the points used for interpolation (x = index + 1). These indices
-/// should be of length `threshold`, deduped, and sorted.
+/// The `indices` of the points used for interpolation (x = index + 1). These
+/// indices should be of length `threshold`, deduped, and sorted.
 pub fn compute_weights(indices: Vec<u32>) -> Result<BTreeMap<u32, Weight>, Error> {
     // Compute weights for all provided evaluation indices
     let mut weights = BTreeMap::new();
@@ -156,7 +156,8 @@ pub fn compute_weights(indices: Vec<u32>) -> Result<BTreeMap<u32, Weight>, Error
             den.mul(&diff);
         }
 
-        // Compute the inverse of the denominator product; fails if den is zero (e.g., duplicate `xj`)
+        // Compute the inverse of the denominator product; fails if den is zero (e.g.,
+        // duplicate `xj`)
         let inv = den.inverse().ok_or(Error::NoInverse)?;
 
         // Compute `l_i(0) = num * inv`, the Lagrange basis coefficient at `x=0`
@@ -266,23 +267,27 @@ impl<C: Element> Poly<C> {
         }
     }
 
-    /// Recovers the constant term of a polynomial of degree less than `t` using `t` evaluations of the polynomial
-    /// and precomputed Barycentric Weights.
+    /// Recovers the constant term of a polynomial of degree less than `t` using
+    /// `t` evaluations of the polynomial and precomputed Barycentric
+    /// Weights.
     ///
-    /// This function uses Lagrange interpolation to compute the constant term (i.e., the value of the polynomial at `x=0`)
-    /// given at least `t` distinct evaluations of the polynomial. Each evaluation is assumed to have a unique index,
-    /// which is mapped to a unique x-value as `x = index + 1`.
+    /// This function uses Lagrange interpolation to compute the constant term
+    /// (i.e., the value of the polynomial at `x=0`) given at least `t`
+    /// distinct evaluations of the polynomial. Each evaluation is assumed to
+    /// have a unique index, which is mapped to a unique x-value as `x =
+    /// index + 1`.
     ///
     /// # References
     ///
     /// This implementation is based on [J.-P. Berrut and L. N.
-    /// Trefethen, “Barycentric Lagrange Interpolation,” SIAM Rev., vol. 46, no. 3,
-    /// pp. 501–517, 2004](https://people.maths.ox.ac.uk/trefethen/barycentric.pdf).
+    /// Trefethen, “Barycentric Lagrange Interpolation,” SIAM Rev., vol. 46, no.
+    /// 3, pp. 501–517, 2004](https://people.maths.ox.ac.uk/trefethen/barycentric.pdf).
     ///
     /// # Warning
     ///
-    /// This function assumes that each evaluation has a unique index. If there are duplicate indices, the function may
-    /// fail with an error when attempting to compute the inverse of zero.
+    /// This function assumes that each evaluation has a unique index. If there
+    /// are duplicate indices, the function may fail with an error when
+    /// attempting to compute the inverse of zero.
     pub fn recover_with_weights<'a, I>(
         weights: &BTreeMap<u32, Weight>,
         evals: I,
@@ -310,23 +315,26 @@ impl<C: Element> Poly<C> {
         Ok(result)
     }
 
-    /// Recovers the constant term of a polynomial of degree less than `t` using at least `t` evaluations of
-    /// the polynomial.
+    /// Recovers the constant term of a polynomial of degree less than `t` using
+    /// at least `t` evaluations of the polynomial.
     ///
-    /// This function uses Lagrange interpolation to compute the constant term (i.e., the value of the polynomial at `x=0`)
-    /// given at least `t` distinct evaluations of the polynomial. Each evaluation is assumed to have a unique index,
-    /// which is mapped to a unique x-value as `x = index + 1`.
+    /// This function uses Lagrange interpolation to compute the constant term
+    /// (i.e., the value of the polynomial at `x=0`) given at least `t`
+    /// distinct evaluations of the polynomial. Each evaluation is assumed to
+    /// have a unique index, which is mapped to a unique x-value as `x =
+    /// index + 1`.
     ///
     /// # References
     ///
     /// This implementation is based on [J.-P. Berrut and L. N.
-    /// Trefethen, “Barycentric Lagrange Interpolation,” SIAM Rev., vol. 46, no. 3,
-    /// pp. 501–517, 2004](https://people.maths.ox.ac.uk/trefethen/barycentric.pdf).
+    /// Trefethen, “Barycentric Lagrange Interpolation,” SIAM Rev., vol. 46, no.
+    /// 3, pp. 501–517, 2004](https://people.maths.ox.ac.uk/trefethen/barycentric.pdf).
     ///
     /// # Warning
     ///
-    /// This function assumes that each evaluation has a unique index. If there are duplicate indices, the function may
-    /// fail with an error when attempting to compute the inverse of zero.
+    /// This function assumes that each evaluation has a unique index. If there
+    /// are duplicate indices, the function may fail with an error when
+    /// attempting to compute the inverse of zero.
     pub fn recover<'a, I>(t: u32, evals: I) -> Result<C, Error>
     where
         C: 'a,

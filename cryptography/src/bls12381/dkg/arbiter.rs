@@ -4,37 +4,42 @@
 //!
 //! ## Recommended: All Participants Run the Arbiter
 //!
-//! Each participant should run its own instance of the arbiter over a replicated log (deterministic
-//! order of events across all dealers) of commitments, acknowledgements, and reveals.
-//! All correct participants, when given the same log, will arrive at the same result (will recover
-//! the same group polynomial and a share that can generate partial signatures over it). Using a
-//! replicated log allows us to provide both reliable broadcast (all honest dealers see all messages from
-//! all other honest dealers) and to enforce a "timeout" (using log index).
+//! Each participant should run its own instance of the arbiter over a
+//! replicated log (deterministic order of events across all dealers) of
+//! commitments, acknowledgements, and reveals. All correct participants, when
+//! given the same log, will arrive at the same result (will recover
+//! the same group polynomial and a share that can generate partial signatures
+//! over it). Using a replicated log allows us to provide both reliable
+//! broadcast (all honest dealers see all messages from all other honest
+//! dealers) and to enforce a "timeout" (using log index).
 //!
 //! ## Alternative: Trusted Process
 //!
 //! It is possible to run the arbiter as a standalone process that dealers
-//! must trust to track commitments, acknowledgements, and reveals and then notify
-//! all parties which commitments and shares to use to generate the group public key and shares.
+//! must trust to track commitments, acknowledgements, and reveals and then
+//! notify all parties which commitments and shares to use to generate the group
+//! public key and shares.
 //!
 //! _For an example of this approach, refer to <https://docs.rs/commonware-vrf>._
 //!
 //! # Disqualification on Attributable Faults
 //!
-//! Submitting duplicate and/or unnecessary information (i.e. a dealer submitting the same commitment twice
-//! or submitting an acknowledgement for a disqualified dealer) will throw an error but not disqualify the
-//! dealer. It may not be possible for dealers to know the latest state of the arbiter when submitting
-//! information and penalizing them for this is not helpful.
+//! Submitting duplicate and/or unnecessary information (i.e. a dealer
+//! submitting the same commitment twice or submitting an acknowledgement for a
+//! disqualified dealer) will throw an error but not disqualify the dealer. It
+//! may not be possible for dealers to know the latest state of the arbiter when
+//! submitting information and penalizing them for this is not helpful.
 //!
-//! Submitting invalid information (invalid commitment) qualifies as an attributable fault that disqualifies a
-//! dealer from a round of DKG/Resharing. A developer can additionally handle such a fault as they see
+//! Submitting invalid information (invalid commitment) qualifies as an
+//! attributable fault that disqualifies a dealer from a round of DKG/Resharing.
+//! A developer can additionally handle such a fault as they see
 //! fit (may warrant additional punishment).
 //!
 //! # Warning
 //!
-//! It is up to the developer to authorize interaction with the arbiter. This is purposely
-//! not provided by the arbiter because this authorization function is highly dependent on
-//! the context in which the dealer is being used.
+//! It is up to the developer to authorize interaction with the arbiter. This is
+//! purposely not provided by the arbiter because this authorization function is
+//! highly dependent on the context in which the dealer is being used.
 
 use crate::{
     bls12381::{
@@ -103,12 +108,14 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
         }
     }
 
-    /// Disqualify a participant from the DKG for external reason (i.e. sending invalid messages).
+    /// Disqualify a participant from the DKG for external reason (i.e. sending
+    /// invalid messages).
     pub fn disqualify(&mut self, participant: P) {
         self.disqualified.insert(participant);
     }
 
-    /// Verify and track a commitment, acknowledgements, and reveals collected by a dealer.
+    /// Verify and track a commitment, acknowledgements, and reveals collected
+    /// by a dealer.
     pub fn commitment(
         &mut self,
         dealer: P,
@@ -211,7 +218,8 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
         self.commitments.len() >= self.dealer_threshold as usize
     }
 
-    /// Recover the group polynomial and return `2f + 1` commitments and reveals from dealers.
+    /// Recover the group polynomial and return `2f + 1` commitments and reveals
+    /// from dealers.
     ///
     /// Return the disqualified dealers.
     pub fn finalize(mut self) -> (Result<Output<V>, Error>, HashSet<P>) {

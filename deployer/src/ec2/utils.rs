@@ -117,7 +117,8 @@ pub async fn poll_service_active(key_file: &str, ip: &str, service: &str) -> Res
     Err(Error::ServiceTimeout(ip.to_string(), service.to_string()))
 }
 
-/// Polls the status of a systemd service on a remote instance until it becomes inactive
+/// Polls the status of a systemd service on a remote instance until it becomes
+/// inactive
 pub async fn poll_service_inactive(key_file: &str, ip: &str, service: &str) -> Result<(), Error> {
     for _ in 0..MAX_POLL_ATTEMPTS {
         let output = Command::new("ssh")

@@ -254,12 +254,13 @@ mod tests {
     /// Process an interesting view below the oldest tracked view:
     ///
     /// 1. Advance last_finalized to a view 50.
-    /// 2. Ensure self.views contains a view V_A (45) which is interesting,
-    ///    and becomes the 'oldest' view when prune_views runs, setting the journal floor.
-    ///    Crucially, ensure there's a "gap" so that V_A is not LF - activity_timeout.
+    /// 2. Ensure self.views contains a view V_A (45) which is interesting, and
+    ///    becomes the 'oldest' view when prune_views runs, setting the journal
+    ///    floor. Crucially, ensure there's a "gap" so that V_A is not LF -
+    ///    activity_timeout.
     /// 3. Let prune_views run, setting the journal floor to V_A.
-    /// 4. Inject a message for V_B such that V_B < V_A but V_B is still "interesting"
-    ///    relative to the current last_finalized.
+    /// 4. Inject a message for V_B such that V_B < V_A but V_B is still
+    ///    "interesting" relative to the current last_finalized.
     #[test_traced]
     fn test_append_old_interesting_view() {
         let n = 5;
@@ -415,7 +416,8 @@ mod tests {
                 _ => panic!("unexpected backfiller message"),
             }
 
-            // Send a Notarization for `journal_floor_target` to ensure it's in `actor.views`
+            // Send a Notarization for `journal_floor_target` to ensure it's in
+            // `actor.views`
             let proposal = Proposal::new(
                 journal_floor_target,
                 journal_floor_target - 1,

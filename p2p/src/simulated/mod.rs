@@ -1,13 +1,16 @@
-//! Simulate networking between peers with configurable link behavior (i.e. drops, latency, corruption, etc.).
+//! Simulate networking between peers with configurable link behavior (i.e.
+//! drops, latency, corruption, etc.).
 //!
-//! Both peer and link modification can be performed dynamically over the lifetime of the simulated network. This
-//! can be used to mimic transient network partitions, offline nodes (that later connect), and/or degrading link
-//! quality.
+//! Both peer and link modification can be performed dynamically over the
+//! lifetime of the simulated network. This can be used to mimic transient
+//! network partitions, offline nodes (that later connect), and/or degrading
+//! link quality.
 //!
 //! # Determinism
 //!
-//! `commonware-p2p::simulated` can be run deterministically when paired with `commonware-runtime::deterministic`.
-//! This makes it possible to reproduce an arbitrary order of delivered/dropped messages with a given seed.
+//! `commonware-p2p::simulated` can be run deterministically when paired with
+//! `commonware-runtime::deterministic`. This makes it possible to reproduce an
+//! arbitrary order of delivered/dropped messages with a given seed.
 //!
 //! # Example
 //!
@@ -164,7 +167,8 @@ mod tests {
                         }
                         agent_sender.send(i).await.unwrap();
 
-                        // Exiting early here tests the case where the recipient end of an agent is dropped
+                        // Exiting early here tests the case where the recipient
+                        // end of an agent is dropped
                     });
             }
 

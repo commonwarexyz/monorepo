@@ -69,7 +69,8 @@ fn fuzz(input: FuzzInput) {
         2 => test_pubkey_diff_validate(&input.variable_data), // Variable length pubkey
         3 => test_signature_diff_validate(&input.variable_data), // Variable length signature
         4 => test_pubkey_decode_encode(&input.variable_data), // Pubkey encode/encode roundtrip
-        5 => test_signature_decode_encode(&input.variable_data), // Signature decode/encode roundtrip
+        5 => test_signature_decode_encode(&input.variable_data), /* Signature decode/encode
+                                                                   * roundtrip */
         _ => unreachable!(),
     }
 }

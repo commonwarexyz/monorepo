@@ -23,8 +23,8 @@ pub struct Config {
     /// The maximum number of peer sets to track.
     pub max_sets: usize,
 
-    /// The minimum number of times we should fail to dial a peer before attempting to ask other
-    /// peers for its peer info again.
+    /// The minimum number of times we should fail to dial a peer before
+    /// attempting to ask other peers for its peer info again.
     pub dial_fail_limit: usize,
 
     /// The rate limit for allowing reservations per-peer.
@@ -39,8 +39,8 @@ pub struct Directory<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Publ
     /// The maximum number of peer sets to track.
     max_sets: usize,
 
-    /// The minimum number of times we should fail to dial a peer before attempting to ask other
-    /// peers for its peer info again.
+    /// The minimum number of times we should fail to dial a peer before
+    /// attempting to ask other peers for its peer info again.
     dial_fail_limit: usize,
 
     // ---------- State ----------
@@ -64,7 +64,8 @@ pub struct Directory<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Publ
 }
 
 impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
-    /// Create a new set of records using the given bootstrappers and local node information.
+    /// Create a new set of records using the given bootstrappers and local node
+    /// information.
     pub fn init(
         context: E,
         bootstrappers: Vec<(C, SocketAddr)>,
@@ -126,7 +127,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     ///
     /// # Panics
     ///
-    /// Panics if the peer is not tracked or if the peer is not in the reserved state.
+    /// Panics if the peer is not tracked or if the peer is not in the reserved
+    /// state.
     pub fn connect(&mut self, peer: &C, dialer: bool) {
         // Set the record as connected
         let record = self.peers.get_mut(peer).unwrap();
@@ -142,7 +144,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         }
     }
 
-    /// Using a list of (already-validated) peer information, update the records.
+    /// Using a list of (already-validated) peer information, update the
+    /// records.
     pub fn update_peers(&mut self, infos: Vec<types::PeerInfo<C>>) {
         for info in infos {
             // Update peer address
@@ -210,11 +213,13 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         }
 
         // Attempt to remove any old records from the rate limiter.
-        // This is a best-effort attempt to prevent memory usage from growing indefinitely.
+        // This is a best-effort attempt to prevent memory usage from growing
+        // indefinitely.
         self.rate_limiter.shrink_to_fit();
     }
 
-    /// Returns a vector of dialable peers. That is, unconnected peers for which we have a socket.
+    /// Returns a vector of dialable peers. That is, unconnected peers for which
+    /// we have a socket.
     pub fn dialable(&self) -> Vec<C> {
         // Collect peers with known addresses
         let mut result: Vec<_> = self
@@ -294,10 +299,11 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
             .filter_map(|(i, b)| {
                 let peer = (!b).then_some(&set[i])?; // Only consider peers that the requester wants
                 let info = self.peers.get(peer).and_then(|r| r.sharable());
-                // We may have information signed over a timestamp greater than the current time,
-                // but within our synchrony bound. Avoid sharing this information as it could get us
-                // blocked by other peers due to clock skew. Consider timestamps earlier than the
-                // current time to be safe enough to share.
+                // We may have information signed over a timestamp greater than the current
+                // time, but within our synchrony bound. Avoid sharing this
+                // information as it could get us blocked by other peers due to
+                // clock skew. Consider timestamps earlier than the current time
+                // to be safe enough to share.
                 info.filter(|i| i.timestamp <= self.context.current().epoch_millis())
             })
             .collect();
@@ -314,7 +320,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
 
     /// Attempt to reserve a peer.
     ///
-    /// Returns `Some(Reservation)` if the peer was successfully reserved, `None` otherwise.
+    /// Returns `Some(Reservation)` if the peer was successfully reserved,
+    /// `None` otherwise.
     fn reserve(&mut self, metadata: Metadata<C>) -> Option<Reservation<E, C>> {
         let peer = metadata.public_key();
 

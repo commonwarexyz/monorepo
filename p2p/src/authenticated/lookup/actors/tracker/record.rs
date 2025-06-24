@@ -22,8 +22,9 @@ pub enum Status {
     /// Will be upgraded to [Status::Reserved] when a reservation is made.
     Inert,
 
-    /// The peer connection is reserved by an actor that is attempting to establish a connection.
-    /// Will either be upgraded to [Status::Active] or downgraded to [Status::Inert].
+    /// The peer connection is reserved by an actor that is attempting to
+    /// establish a connection. Will either be upgraded to [Status::Active]
+    /// or downgraded to [Status::Inert].
     Reserved,
 
     /// The peer is connected.
@@ -43,7 +44,8 @@ pub struct Record {
     /// Number of peer sets this peer is part of.
     sets: usize,
 
-    /// If `true`, the record should persist even if the peer is not part of any peer sets.
+    /// If `true`, the record should persist even if the peer is not part of any
+    /// peer sets.
     persistent: bool,
 }
 
@@ -74,7 +76,8 @@ impl Record {
     /// Attempt to mark the peer as blocked.
     ///
     /// Returns `true` if the peer was newly blocked.
-    /// Returns `false` if the peer was already blocked or is the local node (unblockable).
+    /// Returns `false` if the peer was already blocked or is the local node
+    /// (unblockable).
     pub fn block(&mut self) -> bool {
         if matches!(self.address, Address::Blocked | Address::Myself(_)) {
             return false;
@@ -158,7 +161,8 @@ impl Record {
     }
 
     /// Returns `true` if the peer is reserved (or active).
-    /// This is used to determine if we should attempt to reserve the peer again.
+    /// This is used to determine if we should attempt to reserve the peer
+    /// again.
     pub fn reserved(&self) -> bool {
         matches!(self.status, Status::Reserved | Status::Active)
     }

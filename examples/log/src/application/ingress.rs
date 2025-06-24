@@ -52,7 +52,8 @@ impl<D: Digest> Au for Mailbox<D> {
         _: Context<Self::Digest>,
         _: Self::Digest,
     ) -> oneshot::Receiver<bool> {
-        // Digests are already verified by consensus, so we don't need to check they are valid.
+        // Digests are already verified by consensus, so we don't need to check they are
+        // valid.
         //
         // If we linked payloads to their parent, we would verify
         // the parent included in the payload matches the provided `Context`.

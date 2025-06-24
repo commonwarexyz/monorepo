@@ -178,9 +178,9 @@ impl<P: PublicKey, V: Variant, D: Digest> Reporter for Supervisor<P, V, D> {
     type Activity = Activity<V, D>;
 
     async fn report(&mut self, activity: Self::Activity) {
-        // We check signatures for all messages to ensure that the prover is working correctly
-        // but in production this isn't necessary (as signatures are already verified in
-        // consensus).
+        // We check signatures for all messages to ensure that the prover is working
+        // correctly but in production this isn't necessary (as signatures are
+        // already verified in consensus).
         let verified = activity.verified();
         match activity {
             Activity::Notarize(notarize) => {

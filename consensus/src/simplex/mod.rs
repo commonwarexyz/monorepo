@@ -1,11 +1,11 @@
 //! Simple and fast BFT agreement inspired by Simplex Consensus.
 //!
 //! Inspired by [Simplex Consensus](https://eprint.iacr.org/2023/463), `simplex` provides
-//! simple and fast BFT agreement with network-speed view (i.e. block time) latency and optimal
-//! finalization latency in a partially synchronous setting.
+//! simple and fast BFT agreement with network-speed view (i.e. block time)
+//! latency and optimal finalization latency in a partially synchronous setting.
 //!
-//! _If your application would benefit from succinct consensus certificates or a bias-resistant
-//! VRF, see [crate::threshold_simplex]._
+//! _If your application would benefit from succinct consensus certificates or a
+//! bias-resistant VRF, see [crate::threshold_simplex]._
 //!
 //! # Features
 //!
@@ -19,13 +19,16 @@
 //!
 //! ## Architecture
 //!
-//! All logic is split into three components: the `Voter`, the `Resolver`, and the `Application` (provided by the user).
-//! The `Voter` is responsible for participating in the latest view and the `Resolver` is responsible for fetching artifacts
-//! from previous views required to verify proposed blocks in the latest view.
+//! All logic is split into three components: the `Voter`, the `Resolver`, and
+//! the `Application` (provided by the user). The `Voter` is responsible for
+//! participating in the latest view and the `Resolver` is responsible for
+//! fetching artifacts from previous views required to verify proposed blocks in
+//! the latest view.
 //!
-//! To provide great performance, all interactions between `Voter`, `Resolver`, and `Application` are
-//! non-blocking. This means that, for example, the `Voter` can continue processing messages while the
-//! `Application` verifies a proposed block or the `Resolver` verifies a notarization.
+//! To provide great performance, all interactions between `Voter`, `Resolver`,
+//! and `Application` are non-blocking. This means that, for example, the
+//! `Voter` can continue processing messages while the `Application` verifies a
+//! proposed block or the `Resolver` verifies a notarization.
 //!
 //! ```txt
 //! +---------------+           +---------+            +++++++++++++++
@@ -45,21 +48,24 @@
 //!                            +------------+          +++++++++++++++
 //! ```
 //!
-//! _Application is usually a single object that implements the `Automaton`, `Relay`, `Committer`,
-//! and `Supervisor` traits._
+//! _Application is usually a single object that implements the `Automaton`,
+//! `Relay`, `Committer`, and `Supervisor` traits._
 //!
 //! ## Joining Consensus
 //!
-//! As soon as `2f+1` notarizes, nullifies, or finalizes are observed for some view `v`, the `Voter`
-//! will enter `v+1`. This means that a new participant joining consensus will immediately jump
-//! ahead to the latest view and begin participating in consensus (assuming it can verify blocks).
+//! As soon as `2f+1` notarizes, nullifies, or finalizes are observed for some
+//! view `v`, the `Voter` will enter `v+1`. This means that a new participant
+//! joining consensus will immediately jump ahead to the latest view and begin
+//! participating in consensus (assuming it can verify blocks).
 //!
 //! ## Persistence
 //!
-//! The `Voter` caches all data required to participate in consensus to avoid any disk reads on
-//! on the critical path. To enable recovery, the `Voter` writes valid messages it receives from
-//! consensus and messages it generates to a write-ahead log (WAL) implemented by [commonware_storage::journal::variable::Journal].
-//! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
+//! The `Voter` caches all data required to participate in consensus to avoid
+//! any disk reads on on the critical path. To enable recovery, the `Voter`
+//! writes valid messages it receives from consensus and messages it generates
+//! to a write-ahead log (WAL) implemented by
+//! [commonware_storage::journal::variable::Journal]. Before sending a message,
+//! the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
 //! on restart (especially in the case of unclean shutdown).
 //!
 //! ## Protocol Description
@@ -71,13 +77,14 @@
 //! * Set timer for leader proposal `t_l = 2Δ` and advance `t_a = 3Δ`
 //!     * If leader `l` has not been active in last `r` views, set `t_l` to 0.
 //! * If leader `l`, broadcast `notarize(c,v)`
-//!   * If can't propose container in view `v` because missing notarization/nullification for a
-//!     previous view `v_m`, request `v_m`
+//!   * If can't propose container in view `v` because missing
+//!     notarization/nullification for a previous view `v_m`, request `v_m`
 //!
 //! Upon receiving first `notarize(c,v)` from `l`:
 //! * Cancel `t_l`
-//! * If the container's parent `c_parent` is notarized at `v_parent` and we have nullifications for all views
-//!   between `v` and `v_parent`, verify `c` and broadcast `notarize(c,v)`
+//! * If the container's parent `c_parent` is notarized at `v_parent` and we
+//!   have nullifications for all views between `v` and `v_parent`, verify `c`
+//!   and broadcast `notarize(c,v)`
 //!
 //! Upon receiving `2f+1` `notarize(c,v)`:
 //! * Cancel `t_a`
@@ -88,9 +95,10 @@
 //!
 //! Upon receiving `2f+1` `nullify(v)`:
 //! * Broadcast `nullification(v)`
-//!     * If observe `>= f+1` `notarize(c,v)` for some `c`, request `notarization(c_parent, v_parent)` and any missing
-//!       `nullification(*)` between `v_parent` and `v`. If `c_parent` is than last finalized, broadcast last finalization
-//!       instead.
+//!     * If observe `>= f+1` `notarize(c,v)` for some `c`, request
+//!       `notarization(c_parent, v_parent)` and any missing `nullification(*)`
+//!       between `v_parent` and `v`. If `c_parent` is than last finalized,
+//!       broadcast last finalization instead.
 //! * Enter `v+1`
 //!
 //! Upon receiving `2f+1` `finalize(c,v)`:
@@ -100,19 +108,25 @@
 //! Upon `t_l` or `t_a` firing:
 //! * Broadcast `nullify(v)`
 //! * Every `t_r` after `nullify(v)` broadcast that we are still in view `v`:
-//!    * Rebroadcast `nullify(v)` and either `notarization(v-1)` or `nullification(v-1)`
+//!    * Rebroadcast `nullify(v)` and either `notarization(v-1)` or
+//!      `nullification(v-1)`
 //!
 //! ### Deviations from Simplex Consensus
 //!
-//! * Fetch missing notarizations/nullifications as needed rather than assuming each proposal contains
-//!   a set of all notarizations/nullifications for all historical blocks.
-//! * Introduce distinct messages for `notarize` and `nullify` rather than referring to both as a `vote` for
-//!   either a "block" or a "dummy block", respectively.
-//! * Introduce a "leader timeout" to trigger early view transitions for unresponsive leaders.
-//! * Skip "leader timeout" and "notarization timeout" if a designated leader hasn't participated in
-//!   some number of views (again to trigger early view transition for an unresponsive leader).
-//! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
-//!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
+//! * Fetch missing notarizations/nullifications as needed rather than assuming
+//!   each proposal contains a set of all notarizations/nullifications for all
+//!   historical blocks.
+//! * Introduce distinct messages for `notarize` and `nullify` rather than
+//!   referring to both as a `vote` for either a "block" or a "dummy block",
+//!   respectively.
+//! * Introduce a "leader timeout" to trigger early view transitions for
+//!   unresponsive leaders.
+//! * Skip "leader timeout" and "notarization timeout" if a designated leader
+//!   hasn't participated in some number of views (again to trigger early view
+//!   transition for an unresponsive leader).
+//! * Introduce message rebroadcast to continue making progress if messages from
+//!   a given view are dropped (only way to ensure messages are reliably
+//!   delivered is with a heavyweight reliable broadcast protocol).
 
 pub mod types;
 
@@ -186,9 +200,10 @@ mod tests {
 
     /// Links (or unlinks) validators using the oracle.
     ///
-    /// The `action` parameter determines the action (e.g. link, unlink) to take.
-    /// The `restrict_to` function can be used to restrict the linking to certain connections,
-    /// otherwise all validators will be linked to all other validators.
+    /// The `action` parameter determines the action (e.g. link, unlink) to
+    /// take. The `restrict_to` function can be used to restrict the linking
+    /// to certain connections, otherwise all validators will be linked to
+    /// all other validators.
     async fn link_validators<P: CPublicKey>(
         oracle: &mut Oracle<P>,
         validators: &[P],
@@ -376,8 +391,8 @@ mod tests {
                         notarized.insert(view, *digest);
 
                         if notarizers.len() < threshold as usize {
-                            // We can't verify that everyone participated at every view because some nodes may
-                            // have started later.
+                            // We can't verify that everyone participated at every view because some
+                            // nodes may have started later.
                             panic!("view: {}", view);
                         }
                         if notarizers.len() != n as usize {
@@ -421,8 +436,8 @@ mod tests {
 
                         // Ensure everyone participating
                         if finalizers.len() < threshold as usize {
-                            // We can't verify that everyone participated at every view because some nodes may
-                            // have started later.
+                            // We can't verify that everyone participated at every view because some
+                            // nodes may have started later.
                             panic!("view: {}", view);
                         }
                         if finalizers.len() != n as usize {
@@ -1236,7 +1251,8 @@ mod tests {
                     assert!(faults.is_empty());
                 }
 
-                // Ensure slow node is never active (will never process anything fast enough to nullify)
+                // Ensure slow node is never active (will never process anything fast enough to
+                // nullify)
                 {
                     let notarizes = supervisor.notarizes.lock().unwrap();
                     for (view, payloads) in notarizes.iter() {
@@ -1438,8 +1454,8 @@ mod tests {
 
                 // Ensure quick recovery.
                 //
-                // If the skip timeout isn't implemented correctly, we may go many views before participants
-                // start to consider a validator's proposal.
+                // If the skip timeout isn't implemented correctly, we may go many views before
+                // participants start to consider a validator's proposal.
                 {
                     // Ensure nearly all views around latest finalize
                     let mut found = 0;

@@ -270,7 +270,8 @@ mod tests {
         let result = BTreeSet::<u32>::decode_cfg(encoded, &config_tuple);
         assert!(matches!(
             result,
-            Err(Error::Invalid("BTreeSet", "Items must ascend")) // Note: Error message uses HashSet currently
+            Err(Error::Invalid("BTreeSet", "Items must ascend")) /* Note: Error message uses
+                                                                  * HashSet currently */
         ));
     }
 
@@ -285,7 +286,8 @@ mod tests {
         let result = BTreeSet::<u32>::decode_cfg(encoded, &config_tuple);
         assert!(matches!(
             result,
-            Err(Error::Invalid("BTreeSet", "Duplicate item")) // Note: Error message uses HashSet currently
+            Err(Error::Invalid("BTreeSet", "Duplicate item")) /* Note: Error message uses
+                                                               * HashSet currently */
         ));
     }
 
@@ -401,7 +403,8 @@ mod tests {
         set.insert(5u32);
         set.insert(2u32);
         round_trip_hash(&set, (..).into(), ());
-        // Size calculation: varint len + size of each item (order doesn't matter for size)
+        // Size calculation: varint len + size of each item (order doesn't matter for
+        // size)
         assert_eq!(set.encode_size(), 1 + 3 * u32::SIZE);
         // Encoding check: items must be sorted (1, 2, 5)
         let mut expected = BytesMut::new();

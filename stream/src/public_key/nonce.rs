@@ -1,20 +1,21 @@
 use crate::Error;
 use chacha20poly1305::Nonce;
 
-/// A struct that holds the nonce information. Holds a counter value that is incremented each time
-/// the nonce is used. Is able to be incremented up-to 96 bits (12 bytes) before overflowing.
+/// A struct that holds the nonce information. Holds a counter value that is
+/// incremented each time the nonce is used. Is able to be incremented up-to 96
+/// bits (12 bytes) before overflowing.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Info {
     counter: u128,
 }
 
-/// If the counter is greater-than-or-equal to this value, it is considered to have overflowed.
-/// This is 2^96 or, in binary, one followed by 96 zeros.
+/// If the counter is greater-than-or-equal to this value, it is considered to
+/// have overflowed. This is 2^96 or, in binary, one followed by 96 zeros.
 const OVERFLOW_VALUE: u128 = 1 << 96;
 
 impl Info {
-    /// Encodes the nonce information into a 12-byte array and increments the nonce by 1 (to prevent
-    /// reuse).
+    /// Encodes the nonce information into a 12-byte array and increments the
+    /// nonce by 1 (to prevent reuse).
     ///
     /// An error is returned if-and-only-if the nonce cannot be encoded.
     pub fn next(&mut self) -> Result<Nonce, Error> {
@@ -25,8 +26,9 @@ impl Info {
 
     /// Increments the nonce by 1.
     ///
-    /// Silently fails (does not increment) once the nonce has already overflowed 96 bits. This
-    /// prevents the nonce from overflowing back to 0.
+    /// Silently fails (does not increment) once the nonce has already
+    /// overflowed 96 bits. This prevents the nonce from overflowing back to
+    /// 0.
     fn inc(&mut self) {
         // If the nonce has already overflowed, do not increment it.
         if self.counter >= OVERFLOW_VALUE {

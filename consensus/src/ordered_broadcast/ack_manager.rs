@@ -58,7 +58,8 @@ impl<P: PublicKey, V: Variant, D: Digest> AckManager<P, V, D> {
 
     /// Adds a partial signature to the evidence.
     ///
-    /// If-and-only-if the quorum is newly-reached, the threshold signature is returned.
+    /// If-and-only-if the quorum is newly-reached, the threshold signature is
+    /// returned.
     pub fn add_ack(&mut self, ack: &Ack<P, V, D>, quorum: u32) -> Option<V::Signature> {
         let evidence = self
             .acks
@@ -97,7 +98,8 @@ impl<P: PublicKey, V: Variant, D: Digest> AckManager<P, V, D> {
         }
     }
 
-    /// Returns a tuple of (Epoch, Threshold), if it exists, for the given sequencer and height.
+    /// Returns a tuple of (Epoch, Threshold), if it exists, for the given
+    /// sequencer and height.
     ///
     /// If multiple epochs have thresholds, the highest epoch is returned.
     pub fn get_threshold(&self, sequencer: &P, height: u64) -> Option<(Epoch, V::Signature)> {
@@ -114,7 +116,8 @@ impl<P: PublicKey, V: Variant, D: Digest> AckManager<P, V, D> {
     }
 
     /// Sets the threshold for the given sequencer, height, and epoch.
-    /// Returns `true` if the threshold was newly set, `false` if it already existed.
+    /// Returns `true` if the threshold was newly set, `false` if it already
+    /// existed.
     pub fn add_threshold(
         &mut self,
         sequencer: &P,
@@ -137,9 +140,11 @@ impl<P: PublicKey, V: Variant, D: Digest> AckManager<P, V, D> {
 
         // Prune all entries with height less than the parent
         //
-        // This approach ensures we don't accidentally notify the application of a threshold signature multiple
-        // times (which could otherwise occur if we recover the threshold signature for some chunk at tip and then
-        // receive a duplicate broadcast of said chunk before a sequencer sends one at a new height).
+        // This approach ensures we don't accidentally notify the application of a
+        // threshold signature multiple times (which could otherwise occur if we
+        // recover the threshold signature for some chunk at tip and then
+        // receive a duplicate broadcast of said chunk before a sequencer sends one at a
+        // new height).
         if let Some(m) = self.acks.get_mut(sequencer) {
             let min_height = height.saturating_sub(1);
             m.retain(|&h, _| h >= min_height);
@@ -201,7 +206,8 @@ mod tests {
             ops::threshold_signature_recover::<V, _>(quorum, &partials).unwrap()
         }
 
-        /// Generate a threshold signature directly from the shares specified by `indices`.
+        /// Generate a threshold signature directly from the shares specified by
+        /// `indices`.
         pub fn generate_threshold_from_indices<V: Variant>(
             shares: &[Share],
             chunk: &Chunk<PublicKey, sha256::Digest>,
@@ -327,7 +333,8 @@ mod tests {
         sequencer_different_heights::<MinSig>();
     }
 
-    /// Adding thresholds for contiguous heights prunes entries older than the immediate parent.
+    /// Adding thresholds for contiguous heights prunes entries older than the
+    /// immediate parent.
     fn sequencer_contiguous_heights<V: Variant>() {
         let num_validators = 4;
         let quorum = 3;
@@ -396,7 +403,8 @@ mod tests {
         sequencer_contiguous_heights::<MinSig>();
     }
 
-    /// For the same sequencer and height, the highest epoch's threshold is returned.
+    /// For the same sequencer and height, the highest epoch's threshold is
+    /// returned.
     fn chunk_different_epochs<V: Variant>() {
         let num_validators = 4;
         let quorum = 3;

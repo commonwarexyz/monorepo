@@ -1,4 +1,5 @@
-//! Distributed Key Generation (DKG), Resharing, Signatures, and Threshold Signatures over the BLS12-381 curve.
+//! Distributed Key Generation (DKG), Resharing, Signatures, and Threshold
+//! Signatures over the BLS12-381 curve.
 //!
 //! # Features
 //!

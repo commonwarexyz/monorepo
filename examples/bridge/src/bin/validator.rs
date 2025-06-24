@@ -182,14 +182,14 @@ fn main() {
 
         // Provide authorized peers
         //
-        // In a real-world scenario, this would be updated as new peer sets are created (like when
-        // the composition of a validator set changes).
+        // In a real-world scenario, this would be updated as new peer sets are created
+        // (like when the composition of a validator set changes).
         oracle.register(0, validators.clone()).await;
 
         // Register consensus channels
         //
-        // If you want to maximize the number of views per second, increase the rate limit
-        // for this channel.
+        // If you want to maximize the number of views per second, increase the rate
+        // limit for this channel.
         let (pending_sender, pending_receiver) = network.register(
             0,
             Quota::per_second(NZU32!(10)),

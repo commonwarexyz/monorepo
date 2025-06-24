@@ -2,31 +2,37 @@
 //!
 //! # Overview
 //!
-//! The `p2p` module enables resolving data by fixed-length keys in a P2P network. Central to the
-//! module is the `peer` actor which manages the fetch-request lifecycle. Its mailbox allows
-//! initiation and cancellation of fetch requests via the `Resolver` interface.
+//! The `p2p` module enables resolving data by fixed-length keys in a P2P
+//! network. Central to the module is the `peer` actor which manages the
+//! fetch-request lifecycle. Its mailbox allows initiation and cancellation of
+//! fetch requests via the `Resolver` interface.
 //!
-//! The peer handles an arbitrarily large number of concurrent fetch requests by sending requests
-//! to other peers and processing their responses. It uses [commonware_p2p::utils::requester] to
-//! select peers based on performance, retrying with another peer if one fails or provides invalid
-//! data. Requests persist until canceled or fulfilled, delivering data to the `Consumer` for
+//! The peer handles an arbitrarily large number of concurrent fetch requests by
+//! sending requests to other peers and processing their responses. It uses
+//! [commonware_p2p::utils::requester] to select peers based on performance,
+//! retrying with another peer if one fails or provides invalid data. Requests
+//! persist until canceled or fulfilled, delivering data to the `Consumer` for
 //! verification.
 //!
-//! The `Consumer` checks data integrity and authenticity (critical in an adversarial environment)
-//! and returns `true` if valid, completing the fetch, or `false` to retry.
+//! The `Consumer` checks data integrity and authenticity (critical in an
+//! adversarial environment) and returns `true` if valid, completing the fetch,
+//! or `false` to retry.
 //!
-//! The peer also serves data to other peers, forwarding network requests to the `Producer`. The
-//! `Producer` provides data asynchronously (e.g., from storage). If it fails, the peer sends an
-//! empty response, prompting the requester to retry elsewhere. Each message between peers contains
-//! an ID. Each request is sent with a unique ID, and each response includes the ID of the request
-//! it responds to.
+//! The peer also serves data to other peers, forwarding network requests to the
+//! `Producer`. The `Producer` provides data asynchronously (e.g., from
+//! storage). If it fails, the peer sends an empty response, prompting the
+//! requester to retry elsewhere. Each message between peers contains
+//! an ID. Each request is sent with a unique ID, and each response includes the
+//! ID of the request it responds to.
 //!
-//! Lastly, the `Coordinator` manages the set of peers that can be used to fetch data.
+//! Lastly, the `Coordinator` manages the set of peers that can be used to fetch
+//! data.
 //!
 //! # Performance Considerations
 //!
-//! The peer supports arbitrarily many concurrent fetch requests, but resource usage generally
-//! depends on the rate-limiting configuration of the `Requester` and of the underlying P2P network.
+//! The peer supports arbitrarily many concurrent fetch requests, but resource
+//! usage generally depends on the rate-limiting configuration of the
+//! `Requester` and of the underlying P2P network.
 
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
@@ -68,9 +74,10 @@ pub trait Coordinator: Clone + Send + Sync + 'static {
 
     /// Returns an identifier for the peer set.
     ///
-    /// Used as a low-overhead way to check if the list of peers has changed, this value must change
-    /// to a novel value whenever the list of peers changes. For example, it could be an
-    /// incrementing counter, or an epoch.
+    /// Used as a low-overhead way to check if the list of peers has changed,
+    /// this value must change to a novel value whenever the list of peers
+    /// changes. For example, it could be an incrementing counter, or an
+    /// epoch.
     fn peer_set_id(&self) -> u64;
 }
 
@@ -190,9 +197,10 @@ mod tests {
         mailbox
     }
 
-    /// Tests that fetching a key from another peer succeeds when data is available.
-    /// This test sets up two peers, where Peer 1 requests data that Peer 2 has,
-    /// and verifies that the data is correctly delivered to Peer 1's consumer.
+    /// Tests that fetching a key from another peer succeeds when data is
+    /// available. This test sets up two peers, where Peer 1 requests data
+    /// that Peer 2 has, and verifies that the data is correctly delivered
+    /// to Peer 1's consumer.
     #[test_traced]
     fn test_fetch_success() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
@@ -244,7 +252,8 @@ mod tests {
 
     /// Tests that canceling a fetch request results in a failure event.
     /// This test initiates a fetch request and immediately cancels it,
-    /// verifying that the consumer receives a failure notification instead of data.
+    /// verifying that the consumer receives a failure notification instead of
+    /// data.
     #[test_traced]
     fn test_cancel_fetch() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
@@ -281,9 +290,9 @@ mod tests {
     }
 
     /// Tests fetching data from a peer when some peers lack the data.
-    /// This test sets up three peers, where Peer 1 requests data that only Peer 3 has.
-    /// It verifies that the resolver retries with another peer and successfully
-    /// delivers the data to Peer 1's consumer.
+    /// This test sets up three peers, where Peer 1 requests data that only Peer
+    /// 3 has. It verifies that the resolver retries with another peer and
+    /// successfully delivers the data to Peer 1's consumer.
     #[test_traced]
     fn test_peer_no_data() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
@@ -390,7 +399,8 @@ mod tests {
 
     /// Tests that concurrent fetch requests are handled correctly.
     /// Also tests that the peer can recover from having no peers available.
-    /// Also tests that the peer can get data from multiple peers that have different sets of data.
+    /// Also tests that the peer can get data from multiple peers that have
+    /// different sets of data.
     #[test_traced]
     fn test_concurrent_fetch_requests() {
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
@@ -442,7 +452,8 @@ mod tests {
             add_link(&mut oracle, LINK_UNRELIABLE.clone(), &peers, 0, 1).await;
             add_link(&mut oracle, LINK_UNRELIABLE.clone(), &peers, 0, 2).await;
 
-            // Run the fetches multiple times to ensure that the peer tries both of its peers
+            // Run the fetches multiple times to ensure that the peer tries both of its
+            // peers
             for _ in 0..10 {
                 // Initiate concurrent fetch requests
                 mailbox1.fetch(key2.clone()).await;
@@ -660,9 +671,9 @@ mod tests {
         });
     }
 
-    /// Tests that duplicate fetch requests for the same key are handled properly.
-    /// The test verifies that when the same key is requested multiple times,
-    /// the data is correctly delivered once without errors.
+    /// Tests that duplicate fetch requests for the same key are handled
+    /// properly. The test verifies that when the same key is requested
+    /// multiple times, the data is correctly delivered once without errors.
     #[test_traced]
     fn test_duplicate_fetch_request() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
@@ -725,9 +736,10 @@ mod tests {
         });
     }
 
-    /// Tests that changing peer sets is handled correctly using the update channel.
-    /// This test verifies that when the peer set changes from peer A to peer B,
-    /// the resolver correctly adapts and fetches from the new peer.
+    /// Tests that changing peer sets is handled correctly using the update
+    /// channel. This test verifies that when the peer set changes from peer
+    /// A to peer B, the resolver correctly adapts and fetches from the new
+    /// peer.
     #[test_traced]
     fn test_changing_peer_sets() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
