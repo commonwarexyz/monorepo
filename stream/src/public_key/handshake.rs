@@ -209,46 +209,35 @@ impl<C: PublicKey> EncodeSize for Signed<C> {
 /// Cryptographic proof that a party can correctly derive the shared secret.
 ///
 /// This is used in the 3-message handshake protocol to ensure mutual authentication.
-/// Each party encrypts the peer's ephemeral public key using the derived shared secret,
-/// producing an AEAD tag that serves as proof of knowledge of the correct key material.
+/// Each party encrypts the handshake transcript using the derived shared secret,
+/// producing an AEAD tag that serves as proof of knowledge of the correct key material
+/// and binds the confirmation to the complete handshake exchange.
 pub struct KeyConfirmation {
     /// AEAD tag of the encrypted proof demonstrating knowledge of the shared secret.
     tag: Tag<ChaCha20Poly1305>,
 }
 
 impl KeyConfirmation {
-    /// Create a new key confirmation using the provided cipher and ephemeral public key.
+    /// Create a new key confirmation using the provided cipher and handshake transcript.
     ///
-    /// The confirmation encrypts the ephemeral public key of the peer to demonstrate
-    /// knowledge of the shared secret in a challenge-response fashion.
-    pub fn create(
-        mut cipher: ChaCha20Poly1305,
-        ephemeral_key: &x25519::PublicKey,
-    ) -> Result<Self, Error> {
-        // Encrypt the confirmation
+    /// The confirmation encrypts the handshake transcript to demonstrate
+    /// knowledge of the shared secret and bind the confirmation to the entire handshake exchange.
+    pub fn create(mut cipher: ChaCha20Poly1305, transcript: &[u8]) -> Result<Self, Error> {
+        // Encrypt the confirmation using the transcript as associated data
         let tag = cipher
-            .encrypt_in_place_detached(&Nonce::default(), ephemeral_key.encode().as_ref(), &mut [])
+            .encrypt_in_place_detached(&Nonce::default(), transcript, &mut [])
             .map_err(|_| Error::KeyConfirmationFailed)?;
 
         Ok(Self { tag })
     }
 
-    /// Verify the key confirmation using the provided cipher and ephemeral public key.
+    /// Verify the key confirmation using the provided cipher and handshake transcript.
     ///
     /// Returns Ok(()) if the confirmation is valid, otherwise returns an error.
-    pub fn verify(
-        &self,
-        mut cipher: ChaCha20Poly1305,
-        ephemeral_key: &x25519::PublicKey,
-    ) -> Result<(), Error> {
-        // Decrypt the confirmation
+    pub fn verify(&self, mut cipher: ChaCha20Poly1305, transcript: &[u8]) -> Result<(), Error> {
+        // Decrypt the confirmation using the transcript as associated data
         cipher
-            .decrypt_in_place_detached(
-                &Nonce::default(),
-                ephemeral_key.encode().as_ref(),
-                &mut [],
-                &self.tag,
-            )
+            .decrypt_in_place_detached(&Nonce::default(), transcript, &mut [], &self.tag)
             .map_err(|_| Error::InvalidKeyConfirmation)?;
         Ok(())
     }
@@ -651,25 +640,25 @@ mod tests {
 
         let key = [1u8; 32];
         let cipher = ChaCha20Poly1305::new(&key.into());
-        let ephemeral_key = x25519::PublicKey::from_bytes([42u8; 32]);
+        let transcript = b"test_transcript_data";
 
         // Create key confirmation
-        let confirmation = KeyConfirmation::create(cipher, &ephemeral_key).unwrap();
+        let confirmation = KeyConfirmation::create(cipher, transcript).unwrap();
 
         // Verify the confirmation with the same parameters
         let cipher = ChaCha20Poly1305::new(&key.into());
-        confirmation.verify(cipher, &ephemeral_key).unwrap();
+        confirmation.verify(cipher, transcript).unwrap();
 
-        // Verify that confirmation fails with different ephemeral key
-        let different_ephemeral = x25519::PublicKey::from_bytes([43u8; 32]);
+        // Verify that confirmation fails with different transcript
+        let different_transcript = b"different_transcript_data";
         let cipher = ChaCha20Poly1305::new(&key.into());
-        let result = confirmation.verify(cipher, &different_ephemeral);
+        let result = confirmation.verify(cipher, different_transcript);
         assert!(matches!(result, Err(Error::InvalidKeyConfirmation)));
 
         // Verify that confirmation fails with different cipher
         let different_key = [2u8; 32];
         let different_cipher = ChaCha20Poly1305::new(&different_key.into());
-        let result = confirmation.verify(different_cipher, &ephemeral_key);
+        let result = confirmation.verify(different_cipher, transcript);
         assert!(matches!(result, Err(Error::InvalidKeyConfirmation)));
     }
 
@@ -680,16 +669,16 @@ mod tests {
 
         let key = [1u8; 32];
         let cipher = ChaCha20Poly1305::new(&key.into());
-        let ephemeral_key = x25519::PublicKey::from_bytes([42u8; 32]);
+        let transcript = b"test_transcript_for_encoding";
 
         // Create and encode confirmation
-        let original_confirmation = KeyConfirmation::create(cipher, &ephemeral_key).unwrap();
+        let original_confirmation = KeyConfirmation::create(cipher, transcript).unwrap();
         let encoded = original_confirmation.encode();
 
         // Decode and verify it matches
         let decoded_confirmation = KeyConfirmation::decode(encoded).unwrap();
         let cipher = ChaCha20Poly1305::new(&key.into());
-        decoded_confirmation.verify(cipher, &ephemeral_key).unwrap();
+        decoded_confirmation.verify(cipher, transcript).unwrap();
     }
 
     #[test]
@@ -714,7 +703,8 @@ mod tests {
 
         let key = [1u8; 32];
         let cipher = ChaCha20Poly1305::new(&key.into());
-        let key_confirmation = KeyConfirmation::create(cipher, &ephemeral_public_key).unwrap();
+        let transcript = b"test_transcript_for_listener_response";
+        let key_confirmation = KeyConfirmation::create(cipher, transcript).unwrap();
 
         // Create and encode listener response
         let original_response = ListenerResponse::new(handshake, key_confirmation);
@@ -726,9 +716,7 @@ mod tests {
 
         assert_eq!(decoded_handshake.signer(), sender.public_key());
         let cipher = ChaCha20Poly1305::new(&key.into());
-        decoded_confirmation
-            .verify(cipher, &ephemeral_public_key)
-            .unwrap();
+        decoded_confirmation.verify(cipher, transcript).unwrap();
     }
 
     #[test]

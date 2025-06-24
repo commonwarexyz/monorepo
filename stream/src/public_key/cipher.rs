@@ -29,14 +29,13 @@ pub struct DirectionalCipher {
 }
 
 /// Derive directional ChaCha20Poly1305 ciphers from a given input key material, a unique
-/// application namespace, and the dialer and listener handshake messages.
+/// application namespace, and the handshake transcript.
 ///
 /// Returns a DirectionalCipher struct containing the four directional ciphers.
 pub fn derive_directional(
     ikm: &[u8],
     namespace: &[u8],
-    dialer_handshake: &[u8],
-    listener_handshake: &[u8],
+    handshake_transcript: &[u8],
 ) -> Result<DirectionalCipher, Error> {
     let infos = [
         D2L_TRAFFIC_INFO,
@@ -44,7 +43,7 @@ pub fn derive_directional(
         D2L_CONFIRMATION_INFO,
         L2D_CONFIRMATION_INFO,
     ];
-    let salts = [namespace, dialer_handshake, listener_handshake];
+    let salts = [namespace, handshake_transcript];
     let ciphers = derive::<4>(ikm, &salts, &infos)?;
     let [d2l, l2d, d2l_confirmation, l2d_confirmation] = ciphers;
     Ok(DirectionalCipher {
@@ -385,10 +384,9 @@ mod tests {
     fn test_derive_directional_functionality() {
         let ikm = b"directional_test_ikm";
         let namespace = b"test_namespace";
-        let dialer_handshake = b"dialer_message";
-        let listener_handshake = b"listener_message";
+        let transcript = b"test_handshake_transcript_data";
 
-        let result = derive_directional(ikm, namespace, dialer_handshake, listener_handshake);
+        let result = derive_directional(ikm, namespace, transcript);
         assert!(result.is_ok(), "derive_directional should succeed");
 
         let directional = result.unwrap();
@@ -426,13 +424,10 @@ mod tests {
     fn test_derive_directional_consistency() {
         let ikm = b"consistency_ikm";
         let namespace = b"consistency_namespace";
-        let dialer_handshake = b"consistency_dialer";
-        let listener_handshake = b"consistency_listener";
+        let transcript = b"consistency_test_transcript";
 
-        let dir1 =
-            derive_directional(ikm, namespace, dialer_handshake, listener_handshake).unwrap();
-        let dir2 =
-            derive_directional(ikm, namespace, dialer_handshake, listener_handshake).unwrap();
+        let dir1 = derive_directional(ikm, namespace, transcript).unwrap();
+        let dir2 = derive_directional(ikm, namespace, transcript).unwrap();
 
         let nonce = Default::default();
         let plaintext = b"consistency_check";
@@ -454,22 +449,16 @@ mod tests {
     fn test_derive_directional_input_sensitivity() {
         let base_ikm = b"base_ikm";
         let base_namespace = b"base_namespace";
-        let base_dialer = b"base_dialer";
-        let base_listener = b"base_listener";
+        let base_transcript = b"base_test_transcript";
 
-        let base_dir =
-            derive_directional(base_ikm, base_namespace, base_dialer, base_listener).unwrap();
+        let base_dir = derive_directional(base_ikm, base_namespace, base_transcript).unwrap();
 
-        // Test sensitivity to each parameter
+        // Test sensitivity to each parameter by changing one at a time
         let variants = [
-            derive_directional(b"different_ikm", base_namespace, base_dialer, base_listener)
-                .unwrap(),
-            derive_directional(base_ikm, b"different_namespace", base_dialer, base_listener)
-                .unwrap(),
-            derive_directional(base_ikm, base_namespace, b"different_dialer", base_listener)
-                .unwrap(),
-            derive_directional(base_ikm, base_namespace, base_dialer, b"different_listener")
-                .unwrap(),
+            derive_directional(b"different_ikm", base_namespace, base_transcript).unwrap(),
+            derive_directional(base_ikm, b"different_namespace", base_transcript).unwrap(),
+            derive_directional(base_ikm, base_namespace, b"different_transcript_1").unwrap(),
+            derive_directional(base_ikm, base_namespace, b"different_transcript_2").unwrap(),
         ];
 
         let nonce = Default::default();
@@ -491,10 +480,9 @@ mod tests {
         // Test with realistic sizes for production use
         let ikm = [42u8; 32]; // Typical ECDH shared secret size
         let namespace = b"production-app-v2.1.0";
-        let dialer_handshake = [0u8; 64]; // Realistic handshake message size
-        let listener_handshake = [1u8; 64];
 
-        let result = derive_directional(&ikm, namespace, &dialer_handshake, &listener_handshake);
+        let transcript = b"realistic_test_transcript_with_reasonable_length_for_testing";
+        let result = derive_directional(&ikm, namespace, transcript);
         assert!(result.is_ok(), "Realistic inputs should work correctly");
 
         let directional = result.unwrap();
