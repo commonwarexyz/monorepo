@@ -1,3 +1,7 @@
 # Imports
 imports_granularity = "Crate"
 group_imports = "One"
+
+# Code
+max_width = 100
+wrap_comments = true
