@@ -814,7 +814,6 @@ mod tests {
                     let mut verifier = GraftingVerifier::new(GRAFTING_HEIGHT, 0, vec![&p1]);
                     assert!(proof
                         .verify_element_inclusion(&mut verifier, &b1, pos, &grafted_storage_root)
-                        .await
                         .unwrap());
 
                     let pos = 1;
@@ -823,7 +822,6 @@ mod tests {
                         .unwrap();
                     assert!(proof
                         .verify_element_inclusion(&mut verifier, &b2, pos, &grafted_storage_root)
-                        .await
                         .unwrap());
 
                     let pos = 3;
@@ -833,7 +831,6 @@ mod tests {
                     let mut verifier = GraftingVerifier::new(GRAFTING_HEIGHT, 1, vec![&p2]);
                     assert!(proof
                         .verify_element_inclusion(&mut verifier, &b3, pos, &grafted_storage_root)
-                        .await
                         .unwrap());
 
                     let pos = 4;
@@ -842,7 +839,6 @@ mod tests {
                         .unwrap();
                     assert!(proof
                         .verify_element_inclusion(&mut verifier, &b4, pos, &grafted_storage_root)
-                        .await
                         .unwrap());
                 }
 
@@ -856,39 +852,33 @@ mod tests {
                     let mut verifier = GraftingVerifier::new(GRAFTING_HEIGHT, 1, vec![&p2]);
                     assert!(proof
                         .verify_element_inclusion(&mut verifier, &b4, pos, &grafted_storage_root)
-                        .await
                         .unwrap());
 
                     // Proof should fail if we try to verify the wrong leaf element.
                     assert!(!proof
                         .verify_element_inclusion(&mut verifier, &b3, pos, &grafted_storage_root)
-                        .await
                         .unwrap());
 
                     // Proof should fail if we use the wrong root.
                     assert!(!proof
                         .verify_element_inclusion(&mut verifier, &b4, pos, &peak_root)
-                        .await
                         .unwrap());
 
                     // Proof should fail if we use the wrong position
                     assert!(!proof
                         .verify_element_inclusion(&mut verifier, &b4, 3, &grafted_storage_root)
-                        .await
                         .unwrap());
 
                     // Proof should fail if we inject the wrong peak element into the verifier.
                     let mut verifier = GraftingVerifier::new(GRAFTING_HEIGHT, 1, vec![&p1]);
                     assert!(!proof
                         .verify_element_inclusion(&mut verifier, &b4, pos, &grafted_storage_root)
-                        .await
                         .unwrap());
 
                     // Proof should fail if we give the verifier the wrong peak tree leaf number.
                     let mut verifier = GraftingVerifier::new(GRAFTING_HEIGHT, 2, vec![&p1]);
                     assert!(!proof
                         .verify_element_inclusion(&mut verifier, &b4, pos, &grafted_storage_root)
-                        .await
                         .unwrap());
                 }
 
@@ -902,14 +892,12 @@ mod tests {
                     let mut verifier = GraftingVerifier::new(GRAFTING_HEIGHT, 0, vec![&p1, &p2]);
                     assert!(proof
                         .verify_range_inclusion(&mut verifier, &range, 0, 4, &grafted_storage_root)
-                        .await
                         .unwrap());
 
                     // Confirm same proof fails with shortened verifier range.
                     let mut verifier = GraftingVerifier::new(GRAFTING_HEIGHT, 0, vec![&p1]);
                     assert!(!proof
                         .verify_range_inclusion(&mut verifier, &range, 0, 4, &grafted_storage_root)
-                        .await
                         .unwrap());
                 }
             }
@@ -932,7 +920,6 @@ mod tests {
             let mut verifier = GraftingVerifier::new(GRAFTING_HEIGHT, 0, vec![&p1]);
             assert!(proof
                 .verify_element_inclusion(&mut verifier, &b1, pos, &grafted_storage_root)
-                .await
                 .unwrap());
 
             let mut verifier = GraftingVerifier::new(GRAFTING_HEIGHT, 0, vec![]);
@@ -942,7 +929,6 @@ mod tests {
                 .unwrap();
             assert!(proof
                 .verify_element_inclusion(&mut verifier, &b5, pos, &grafted_storage_root)
-                .await
                 .unwrap());
         });
     }

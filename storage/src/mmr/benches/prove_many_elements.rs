@@ -66,7 +66,6 @@ fn bench_prove_many_elements(c: &mut Criterion) {
                                             end_pos,
                                             &root_digest,
                                         )
-                                        .await
                                         .unwrap());
                                 }
                             })

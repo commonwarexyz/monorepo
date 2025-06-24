@@ -724,7 +724,6 @@ mod tests {
                     test_element_pos,
                     &root,
                 )
-                .await
                 .unwrap());
 
             // Sync the MMR, make sure it flushes the in-mem MMR as expected.
@@ -752,7 +751,6 @@ mod tests {
                     last_element_pos,
                     &root
                 )
-                .await
                 .unwrap());
 
             mmr.destroy().await.unwrap();

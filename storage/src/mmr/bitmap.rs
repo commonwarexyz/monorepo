@@ -594,9 +594,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         };
 
         if bit_count % Self::CHUNK_SIZE_BITS == 0 {
-            return mmr_proof
-                .verify_element_inclusion(hasher, chunk, leaf_pos, root_digest)
-                .await;
+            return mmr_proof.verify_element_inclusion(hasher, chunk, leaf_pos, root_digest);
         }
 
         if proof.digests.is_empty() {
@@ -629,10 +627,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 
         // For the case where the proof is over a bit in a full chunk, `last_digest` contains the
         // digest of that chunk.
-        let mmr_root = match mmr_proof
-            .reconstruct_root(hasher, &[chunk], leaf_pos, leaf_pos)
-            .await
-        {
+        let mmr_root = match mmr_proof.reconstruct_root(hasher, &[chunk], leaf_pos, leaf_pos) {
             Ok(root) => root,
             Err(MissingDigests) => {
                 debug!("Not enough digests in proof to reconstruct root");
