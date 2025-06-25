@@ -506,7 +506,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_insert_and_prune_vacant() {
+    fn test_index_insert_and_prune_vacant() {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx.clone(), TwoCap);
 
@@ -520,7 +520,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_insert_and_prune_replace_one() {
+    fn test_index_insert_and_prune_replace_one() {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx.clone(), TwoCap);
 
@@ -535,7 +535,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_insert_and_prune_dead_insert() {
+    fn test_index_insert_and_prune_dead_insert() {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx.clone(), TwoCap);
 
@@ -556,7 +556,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_cursor_delete_then_next_returns_next() {
+    fn test_index_cursor_delete_then_next_returns_next() {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx, TwoCap);
 
@@ -575,7 +575,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_cursor_insert_after_done_appends() {
+    fn test_index_cursor_insert_after_done_appends() {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx, TwoCap);
 
@@ -595,7 +595,7 @@ mod tests {
 
     #[test_traced]
     #[should_panic(expected = "must call Cursor::next()")]
-    fn test_cursor_update_before_next_panics() {
+    fn test_index_cursor_update_before_next_panics() {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx, TwoCap);
         index.insert(b"key", 123);
@@ -607,7 +607,7 @@ mod tests {
 
     #[test_traced]
     #[should_panic(expected = "must call Cursor::next()")]
-    fn test_cursor_delete_before_next_panics() {
+    fn test_index_cursor_delete_before_next_panics() {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx, TwoCap);
         index.insert(b"key", 123);
@@ -619,7 +619,7 @@ mod tests {
 
     #[test_traced]
     #[should_panic(expected = "no active item in Cursor")]
-    fn test_cursor_update_after_done() {
+    fn test_index_cursor_update_after_done() {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx, TwoCap);
         index.insert(b"key", 123);
@@ -634,7 +634,7 @@ mod tests {
 
     #[test_traced]
     #[should_panic(expected = "must call Cursor::next()")]
-    fn test_cursor_insert_before_next() {
+    fn test_index_cursor_insert_before_next() {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx, TwoCap);
         index.insert(b"key", 123);
@@ -647,7 +647,7 @@ mod tests {
 
     #[test_traced]
     #[should_panic(expected = "no active item in Cursor")]
-    fn test_cursor_delete_after_done() {
+    fn test_index_cursor_delete_after_done() {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx, TwoCap);
         index.insert(b"key", 123);
@@ -661,7 +661,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_cursor_insert_with_next() {
+    fn test_index_cursor_insert_with_next() {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx, TwoCap);
         index.insert(b"key", 123);
@@ -689,7 +689,7 @@ mod tests {
 
     #[test_traced]
     #[should_panic(expected = "must call Cursor::next()")]
-    fn test_cursor_double_delete() {
+    fn test_index_cursor_double_delete() {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx, TwoCap);
         index.insert(b"key", 123);
@@ -704,7 +704,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_cursor_delete_last_then_next() {
+    fn test_index_cursor_delete_last_then_next() {
         let context = deterministic::Context::default();
         let mut index = Index::init(context.clone(), TwoCap);
 
@@ -733,7 +733,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_delete_in_middle_then_continue() {
+    fn test_index_delete_in_middle_then_continue() {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx, TwoCap);
 
@@ -752,7 +752,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_delete_first() {
+    fn test_index_delete_first() {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx, TwoCap);
 
@@ -775,7 +775,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_delete_first_and_insert() {
+    fn test_index_delete_first_and_insert() {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx, TwoCap);
 
@@ -808,7 +808,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_insert_at_entry_then_next() {
+    fn test_index_insert_at_entry_then_next() {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx, TwoCap);
 
@@ -826,7 +826,7 @@ mod tests {
 
     #[test_traced]
     #[should_panic(expected = "must call Cursor::next()")]
-    fn test_insert_at_entry_then_delete_head() {
+    fn test_index_insert_at_entry_then_delete_head() {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx.clone(), TwoCap);
 
@@ -843,7 +843,7 @@ mod tests {
 
     #[test_traced]
     #[should_panic(expected = "must call Cursor::next()")]
-    fn test_delete_then_insert_without_next() {
+    fn test_index_delete_then_insert_without_next() {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx.clone(), TwoCap);
 
@@ -861,7 +861,7 @@ mod tests {
 
     #[test_traced]
     #[should_panic(expected = "must call Cursor::next()")]
-    fn test_inserts_without_next() {
+    fn test_index_inserts_without_next() {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx.clone(), TwoCap);
 
@@ -877,7 +877,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_delete_last_then_insert_while_done() {
+    fn test_index_delete_last_then_insert_while_done() {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx.clone(), TwoCap);
 
@@ -901,7 +901,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_drop_mid_iteration_relinks() {
+    fn test_index_drop_mid_iteration_relinks() {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx, TwoCap);
         for i in 0..5 {
@@ -924,7 +924,7 @@ mod tests {
 
     #[test_traced]
     #[should_panic(expected = "must call Cursor::next()")]
-    fn test_update_before_next_panics() {
+    fn test_index_update_before_next_panics() {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx, TwoCap);
         index.insert(b"p", 1);
@@ -933,7 +933,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_entry_replacement_not_a_collision() {
+    fn test_index_entry_replacement_not_a_collision() {
         let ctx = deterministic::Context::default();
         let mut index = Index::init(ctx.clone(), TwoCap);
 
