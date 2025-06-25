@@ -1194,7 +1194,7 @@ mod tests {
                 "sync_metadata_partition".into(),
                 pinned_nodes,
                 PRUNED_TO_POS,
-                operations.clone()[PRUNED_OPS as usize..].to_vec(),
+                operations.clone()[PRUNED_OPS..].to_vec(),
             );
             let synced_mmr = Mmr::init_sync(context.clone(), &mut hasher, sync_config)
                 .await
