@@ -13,13 +13,14 @@ runs:
     - name: Cache cargo registry
       uses: actions/cache@v4
       with:
-        path: ~/.cargo/registry
-        key: ${{ runner.os }}-cargo-registry
-    - name: Cache cargo git
-      uses: actions/cache@v4
-      with:
-        path: ~/.cargo/git
-        key: ${{ runner.os }}-cargo-git
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          ~/AppData/Local/cargo/registry
+          ~/AppData/Local/cargo/git
+        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-registry-
     - name: Get Rust version
       id: rust-version
       shell: bash
@@ -28,10 +29,17 @@ runs:
       id: cargo-cache-cache
       uses: actions/cache@v4
       with:
-        path: ~/.cargo/bin/cargo-cache
+        path: |
+          ~/.cargo/bin/cargo-cache
+          ~/AppData/Local/cargo/bin/cargo-cache.exe
         key: ${{ runner.os }}-cargo-cache-${{ steps.rust-version.outputs.rust_version }}
+    - name: Install cargo-cache if not cached
+      if: steps.cargo-cache-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: cargo install cargo-cache
     - name: Maintain cargo cache
       shell: bash
       run: |
-        cargo install cargo-cache || true
-        cargo cache --autoclean
+        if command -v cargo-cache &> /dev/null; then
+          cargo cache --autoclean
+        fi
