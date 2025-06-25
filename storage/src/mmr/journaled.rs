@@ -1238,10 +1238,8 @@ mod tests {
         });
     }
 
-    // Test init_sync with no operations after pruning boundary
-    // This tests the edge case where everything is pruned.
     #[test_traced]
-    fn test_init_sync_empty_operations() {
+    fn test_init_sync_prune_all() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = Standard::<Sha256>::new();
@@ -1257,24 +1255,21 @@ mod tests {
             source_mmr.sync(&mut hasher).await.unwrap();
 
             // Prune everything (prune to the end)
-            let total_size = source_mmr.size();
+            let source_mmr_size = source_mmr.size();
             source_mmr
-                .prune_to_pos(&mut hasher, total_size)
+                .prune_to_pos(&mut hasher, source_mmr_size)
                 .await
                 .unwrap();
-
             let source_root = source_mmr.root(&mut hasher);
             let pinned_nodes = source_mmr.mem_mmr.pinned_nodes.clone();
-
-            source_mmr.destroy().await.unwrap();
 
             // Initialize synced MMR with empty operations
             let sync_config = test_sync_config(
                 "sync_empty_journal".into(),
                 "sync_empty_metadata".into(),
                 pinned_nodes,
-                total_size, // Everything is pruned
-                Vec::new(), // No operations should remain after pruning everything
+                source_mmr_size, // Everything is pruned
+                Vec::new(),      // No operations should remain after pruning everything
             );
 
             let synced_mmr = Mmr::init_sync(context.clone(), &mut hasher, sync_config)
@@ -1283,11 +1278,12 @@ mod tests {
 
             // Verify the synced MMR matches the fully pruned source
             assert_eq!(synced_mmr.root(&mut hasher), source_root);
-            assert_eq!(synced_mmr.size(), total_size);
-            assert_eq!(synced_mmr.pruned_to_pos(), total_size);
-            assert_eq!(synced_mmr.oldest_retained_pos(), None); // Nothing retained
+            assert_eq!(synced_mmr.size(), source_mmr_size);
+            assert_eq!(synced_mmr.pruned_to_pos(), source_mmr_size);
+            assert_eq!(synced_mmr.oldest_retained_pos(), None);
 
             synced_mmr.destroy().await.unwrap();
+            source_mmr.destroy().await.unwrap();
         });
     }
 }
