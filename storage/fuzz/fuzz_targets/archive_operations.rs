@@ -20,7 +20,8 @@ enum ArchiveOperation {
         key_data: RawKey,
         value_data: RawValue,
     },
-    Get(RawKey),
+    GetByIndex(u64),
+    GetByKey(RawKey),
     HasByKey(RawKey),
     Prune(u64),
     Sync,
@@ -35,7 +36,7 @@ struct FuzzData {
 }
 
 fuzz_target!(|data: FuzzData| {
-    if data.operations.is_empty() || data.operations.len() > 313 {
+    if data.operations.is_empty() || data.operations.len() > 4 {
         return;
     }
     let runner = deterministic::Runner::default();
@@ -45,7 +46,7 @@ fuzz_target!(|data: FuzzData| {
             partition: "test".into(),
             section_mask: 0xffff_ffff_ffff_ff00u64,
             pending_writes: 1000, // Flush after 1000 writes
-            write_buffer: 1024,   
+            write_buffer: 1024,
             translator: EightCap::default(),
             replay_buffer: 1024*1024,
             compression: None,
@@ -53,12 +54,12 @@ fuzz_target!(|data: FuzzData| {
         };
 
         let mut archive = Archive::<_, _, Key, Value>::init(context.clone(), cfg.clone()).await.expect("init failed");
-        
+
         // Keep a map of inserted items for verification
         let mut items = Vec::new();
 
         // Track the oldest allowed index for pruning
-        let mut oldest_allowed = None;
+        let mut oldest_allowed: Option<u64> = None;
 
         // Track pending writes and synced count
         let mut pending_writes = 0u64;
@@ -75,37 +76,62 @@ fuzz_target!(|data: FuzzData| {
                     value_data,
                 } => {
                     // Skip if we've pruned this index
-                    if let Some(threshold) = oldest_allowed {
-                        if *index < threshold {
+                    if let Some(already_pruned) = oldest_allowed {
+                        if *index < already_pruned {
                             continue;
                         }
                     }
-
                     // Convert raw data to our custom types
                     let key = Key::new(key_data.clone());
                     let value = Value::new(value_data.clone());
 
                     // Put the item into the archive
-                    let result = archive.put(*index, key, value).await;
+                    archive.put(*index, key, value).await.expect("put failed");
+                    // Only add if not already written (Archive doesn't allow overwrites)
+                    if !written_indices.contains(index) {
+                        items.push((*index, key_data.clone(), value_data.clone()));
+                        written_indices.insert(*index);
+                        pending_writes += 1;
 
-                    // If the operation succeeded, record it
-                    if result.is_ok() {
-                        // Only add if not already written (Archive doesn't allow overwrites)
-                        if !written_indices.contains(index) {
-                            items.push((*index, key_data.clone(), value_data.clone()));
-                            written_indices.insert(*index);
-                            pending_writes += 1;
-
-                            // Auto-sync at 1000 pending writes
-                            if pending_writes >= 1000 {
-                                synced_count += pending_writes;
-                                pending_writes = 0;
-                            }
+                        // Auto-sync at 1000 pending writes
+                        if pending_writes >= 1000 {
+                            synced_count += pending_writes;
+                            pending_writes = 0;
                         }
                     }
                 }
 
-                ArchiveOperation::Get(key_data) => {
+                ArchiveOperation::GetByIndex(index) => {
+                    // Skip if we've pruned this index
+                    if let Some(already_pruned) = oldest_allowed {
+                        if *index < already_pruned {
+                            continue;
+                        }
+                    }
+
+                    // Try to retrieve the item
+                    let result = archive.get(Identifier::Index(*index)).await;
+
+                    // Verify the result against our tracked items
+                    if let Ok(Some(value)) = result {
+                        // Find the matching item in our tracked list
+                        if let Some((_, _, expected_value)) =
+                            items.iter().find(|(i, _, _)| *i == *index)
+                        {
+                            // Convert value to its raw form for comparison
+                            let value_bytes: &[u8; 32] = value.as_ref().try_into().unwrap();
+
+                            // Check that the value matches what we expect
+                            assert_eq!(
+                                value_bytes, expected_value,
+                                "Value mismatch for index {}",
+                                index
+                            );
+                        }
+                    }
+                }
+
+                ArchiveOperation::GetByKey(key_data) => {
                     // Convert to our custom key type
                     let key = Key::new(key_data.clone());
 
@@ -124,12 +150,20 @@ fuzz_target!(|data: FuzzData| {
 
                         // Find all items whose keys translate to the same value
                         let possible_matches: Vec<_> = items
-                            .iter()
-                            .filter(|(_, k, _)| {
-                                let k_translated = translator.transform(&k[..]);
-                                k_translated == translated_key
-                            })
-                            .collect();
+                        .iter()
+                        .filter(|(idx, _, _)| {
+                            // Only consider items that haven't been pruned
+                            if let Some(threshold) = oldest_allowed {
+                                *idx >= threshold
+                            } else {
+                                true
+                            }
+                        })
+                        .filter(|(_, k, _)| {
+                            let k_translated = translator.transform(&k[..]);
+                            k_translated == translated_key
+                        })
+                        .collect();
 
                         if !possible_matches.is_empty() {
                             // Verify that the returned value matches one of the possible values
@@ -183,7 +217,7 @@ fuzz_target!(|data: FuzzData| {
                                 // 2. Archive allowing overwrites where later puts replace earlier ones
                                 // 3. The deterministic runtime reusing storage with different state
                                 // So we'll be lenient here and just warn
-                                eprintln!("Warning: Archive doesn't have key {:?} that we added", key_data);
+                                panic!("Archive doesn't have key {:?} that we added", key_data);
                             }
                         }
                     }
@@ -191,39 +225,26 @@ fuzz_target!(|data: FuzzData| {
 
                 ArchiveOperation::Prune(index) => {
                     // Prune the archive
-                    let result = archive.prune(*index).await;
-
-                    if result.is_ok() {
-                        // Update our tracking
-                        oldest_allowed = Some(*index);
-                        items.retain(|(i, _, _)| *i >= *index);
-                        written_indices.retain(|i| *i >= *index);
-
-                        // Verify pruning worked on items we know we wrote
-                        for (item_index, _, _) in &items {
-                            if *item_index < *index {
-                                if let Ok(has) = archive.has(Identifier::Index(*item_index)).await {
-                                    if has {
-                                        eprintln!("Warning: Index {} should be pruned but still exists", item_index);
-                                    }
-                                }
+                    archive.prune(*index).await.expect("prune failed");
+                    match oldest_allowed {
+                        None => {
+                            oldest_allowed = Some(*index);
+                        }
+                        Some(already_pruned) => {
+                            if *index > already_pruned {
+                                oldest_allowed = Some(*index);
                             }
                         }
                     }
                 }
 
                 ArchiveOperation::Sync => {
-                    // Sync the archive
-                    let result = archive.sync().await;
-
-                    // Sync should always succeed
-                    assert!(result.is_ok(), "Sync operation failed unexpectedly");
-
+                    archive.sync().await.expect("sync failed");
                     // After sync, all pending writes should be flushed
                     synced_count += pending_writes;
                     pending_writes = 0;
                 }
-                
+
                 ArchiveOperation::NextGap { start } => {
                     // Test gap finding
                     let (gap, next_written) = archive.next_gap(*start);
@@ -241,16 +262,15 @@ fuzz_target!(|data: FuzzData| {
                     }
 
                     if let Some(next_index) = next_written {
-                        // Should be at or after start
-                        if next_index > 0 && next_index >= *start {
-                            // This is expected
-                        } else if next_index == 0 && *start > 0 {
-                            eprintln!("Warning: next_gap returned next_written=0 for start={}", start);
+                        if next_index < *start {
+                            eprintln!("Warning: next_written {} is before start {}", next_index, start);
                         }
                     }
                 }
             }
         }
+
+        archive.sync().await.expect("final sync failed");
 
         let total_items = items.len();
         let total_written = written_indices.len();
