@@ -216,8 +216,14 @@ pub struct KeyConfirmation {
 impl KeyConfirmation {
     /// Create a new key confirmation using the provided cipher and handshake transcript.
     ///
-    /// The confirmation encrypts the handshake transcript to demonstrate
-    /// knowledge of the shared secret and bind the confirmation to the entire handshake exchange.
+    /// The confirmation encrypts the handshake transcript to demonstrate knowledge of the shared
+    /// secret and bind the confirmation to the entire handshake exchange.
+    ///
+    /// # Security
+    ///
+    /// To prevent nonce-reuse, the cipher should **not** be the same cipher used for future
+    /// encrypted messages, but should be generated from the same shared secret. The function takes
+    /// ownership of the cipher to help prevent this.
     pub fn create(mut cipher: ChaCha20Poly1305, transcript: &[u8]) -> Result<Self, Error> {
         // Encrypt the confirmation using the transcript as associated data
         let tag = cipher

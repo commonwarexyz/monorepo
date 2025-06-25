@@ -35,7 +35,6 @@
 //! - Public keys are well-formatted
 //! - Timestamp is valid (not too old, not too far in the future)
 //! - Signature is valid
-//! - It is not already connected to or dialing this peer
 //!
 //! If all checks pass, the listener:
 //!
