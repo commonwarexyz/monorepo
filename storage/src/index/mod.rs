@@ -267,9 +267,8 @@ mod tests {
         index.insert(b"key", 3);
         index.insert(b"key", 4);
 
-        let mut values = index.get(b"key").copied().collect::<Vec<_>>();
-        values.sort();
-        assert_eq!(values, vec![1, 2, 3, 4]);
+        let values = index.get(b"key").copied().collect::<Vec<_>>();
+        assert_eq!(values, vec![1, 4, 3, 2]);
 
         {
             let mut cursor = index.get_mut(b"key").unwrap();
@@ -280,9 +279,8 @@ mod tests {
             cursor.update(99);
         }
 
-        let mut values = index.get(b"key").copied().collect::<Vec<_>>();
-        values.sort();
-        assert_eq!(values, vec![1, 2, 4, 99]);
+        let values = index.get(b"key").copied().collect::<Vec<_>>();
+        assert_eq!(values, vec![1, 4, 99, 2]);
     }
 
     #[test_traced]
