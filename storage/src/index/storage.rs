@@ -289,7 +289,21 @@ where
             }
             Phase::Next(next) => {
                 // If there is a next, we should add it to past.
-                self.past_push(next);
+                // However, we need to preserve any unvisited chain attached to it.
+                // Instead of using past_push which overwrites next.next, we'll handle this specially.
+                if let Some(mut past_head) = self.past.take() {
+                    // Find the tail of the past chain
+                    let mut tail = &mut past_head;
+                    while tail.next.is_some() {
+                        tail = tail.next.as_mut().unwrap();
+                    }
+                    // Attach the current record (with its unvisited chain intact) to the tail
+                    tail.next = Some(next);
+                    self.past = Some(past_head);
+                } else {
+                    // No past, so next becomes past
+                    self.past = Some(next);
+                }
             }
             Phase::Done => {
                 // No action needed.
