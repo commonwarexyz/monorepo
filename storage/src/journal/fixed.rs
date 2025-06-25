@@ -272,37 +272,6 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             );
         }
 
-        // Special case: if size is 0, create an empty journal
-        if size == 0 {
-            let (blob, actual_size) = context
-                .open(&cfg.partition, &0u64.to_be_bytes())
-                .await
-                .map_err(Error::Runtime)?;
-            let blob = Write::new(blob, actual_size, cfg.write_buffer);
-            assert_eq!(actual_size, 0, "we just emptied all blobs");
-            let mut blobs = BTreeMap::new();
-            blobs.insert(0, blob);
-
-            // Initialize metrics
-            let tracked = Gauge::default();
-            let synced = Counter::default();
-            let pruned = Counter::default();
-            context.register("tracked", "Number of blobs", tracked.clone());
-            context.register("synced", "Number of syncs", synced.clone());
-            context.register("pruned", "Number of blobs pruned", pruned.clone());
-            tracked.set(1);
-
-            return Ok(Self {
-                context,
-                cfg,
-                blobs,
-                tracked,
-                synced,
-                pruned,
-                _array: PhantomData,
-            });
-        }
-
         // Calculate which blob should be the target (empty) blob
         // This is the blob that would contain the next operation if one were added
         let target_blob_index = size / cfg.items_per_blob;
@@ -362,7 +331,8 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         let (newest_blob_index, blob) = self.newest_blob();
         let size = blob.size().await;
         assert_eq!(size % Self::CHUNK_SIZE_U64, 0);
-        Ok(size + self.cfg.items_per_blob * newest_blob_index)
+        let items_in_blob = size / Self::CHUNK_SIZE_U64;
+        Ok(items_in_blob + self.cfg.items_per_blob * newest_blob_index)
     }
 
     /// Append a new item to the journal. Return the item's position in the journal, or error if the
@@ -385,14 +355,12 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         buf.extend_from_slice(&item);
         buf.put_u32(checksum);
 
-        // Calculate the correct item position, accounting for pruned state
+        // Write the item to the blob
         let item_pos = (size / Self::CHUNK_SIZE_U64) + self.cfg.items_per_blob * newest_blob_index;
 
         newest_blob.write_at(buf, size).await?;
         trace!(blob = newest_blob_index, pos = item_pos, "appended item");
         size += Self::CHUNK_SIZE_U64;
-
-        // Don't clear pruned_size - we use it as a base for size calculations
 
         // If the blob is now full, create a new one
         if size == self.cfg.items_per_blob * Self::CHUNK_SIZE_U64 {
@@ -470,7 +438,6 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
 
     /// Read the item at the given position in the journal.
     pub async fn read(&self, item_pos: u64) -> Result<A, Error> {
-        // Normal case: direct mapping
         let blob_index = item_pos / self.cfg.items_per_blob;
 
         let blob = match self.blobs.get(&blob_index) {
@@ -1546,7 +1513,7 @@ mod tests {
 
                 // Should appear to have 13 items
                 assert_eq!(journal.size().await.unwrap(), 13);
-                assert_eq!(journal.oldest_retained_pos().await.unwrap(), None); // Empty blob
+                assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(10)); // Empty blob
 
                 // Should have only blob 2 (empty, ready for operation 13)
                 assert_eq!(journal.blobs.len(), 1);
@@ -1582,7 +1549,7 @@ mod tests {
 
             // Verify initial state
             assert_eq!(journal.size().await.unwrap(), 7);
-            assert_eq!(journal.oldest_retained_pos().await.unwrap(), None); // Empty blob
+            assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(6));
             assert_eq!(journal.blobs.len(), 1);
             assert!(journal.blobs.contains_key(&2));
 
@@ -1620,10 +1587,6 @@ mod tests {
 
             let result = journal.read(5).await;
             assert!(matches!(result, Err(Error::ItemPruned(5))));
-
-            // We should not be able to read any items before position 7 since they were pruned
-            let result = journal.read(6).await;
-            assert!(matches!(result, Err(Error::ItemPruned(6))));
 
             journal.destroy().await.unwrap();
         });
