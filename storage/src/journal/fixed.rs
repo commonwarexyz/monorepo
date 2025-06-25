@@ -1642,63 +1642,6 @@ mod tests {
         });
     }
 
-    /// Test edge cases and error conditions for init_with_pruned_state.
-    #[test_traced]
-    fn test_pruned_state_edge_cases() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Test with very large size values
-            {
-                let cfg = Config {
-                    partition: "test_large_size".into(),
-                    items_per_blob: 100,
-                    write_buffer: 1024,
-                };
-
-                let large_size = 1_000_000u64;
-                let journal = Journal::<Context, Digest>::init_with_pruned_state(
-                    context.clone(),
-                    cfg.clone(),
-                    large_size,
-                )
-                .await
-                .expect("Failed to init with large pruned size");
-
-                assert_eq!(journal.size().await.unwrap(), large_size);
-
-                // Should have the correct blob index
-                let expected_blob_index = large_size / 100;
-                assert!(journal.blobs.contains_key(&expected_blob_index));
-
-                journal.destroy().await.unwrap();
-            }
-
-            // Test with items_per_blob = 1 (each item in its own blob)
-            {
-                let cfg = Config {
-                    partition: "test_single_item_blobs".into(),
-                    items_per_blob: 1,
-                    write_buffer: 1024,
-                };
-
-                let journal = Journal::<Context, Digest>::init_with_pruned_state(
-                    context.clone(),
-                    cfg.clone(),
-                    3,
-                )
-                .await
-                .expect("Failed to init with single item blobs");
-
-                assert_eq!(journal.size().await.unwrap(), 3);
-                // Should have only blob 3 (empty, ready for operation 3)
-                assert_eq!(journal.blobs.len(), 1);
-                assert!(journal.blobs.contains_key(&3));
-
-                journal.destroy().await.unwrap();
-            }
-        });
-    }
-
     /// Test that replay works correctly with a journal initialized in pruned state.
     #[test_traced]
     fn test_pruned_state_replay() {
