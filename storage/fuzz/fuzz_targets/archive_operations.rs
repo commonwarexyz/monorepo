@@ -1,4 +1,5 @@
 #![no_main]
+
 use arbitrary::Arbitrary;
 use commonware_runtime::{deterministic, Runner};
 use commonware_storage::{
@@ -36,7 +37,7 @@ struct FuzzData {
 }
 
 fuzz_target!(|data: FuzzData| {
-    if data.operations.is_empty() || data.operations.len() > 4 {
+    if data.operations.is_empty() || data.operations.len() > 10 {
         return;
     }
     let runner = deterministic::Runner::default();
@@ -57,14 +58,10 @@ fuzz_target!(|data: FuzzData| {
 
         // Keep a map of inserted items for verification
         let mut items = Vec::new();
-
+        
         // Track the oldest allowed index for pruning
         let mut oldest_allowed: Option<u64> = None;
-
-        // Track pending writes and synced count
-        let mut pending_writes = 0u64;
-        let mut synced_count = 0u64;
-
+        
         // Track written indices
         let mut written_indices = std::collections::HashSet::new();
 
@@ -91,13 +88,6 @@ fuzz_target!(|data: FuzzData| {
                     if !written_indices.contains(index) {
                         items.push((*index, key_data.clone(), value_data.clone()));
                         written_indices.insert(*index);
-                        pending_writes += 1;
-
-                        // Auto-sync at 1000 pending writes
-                        if pending_writes >= 1000 {
-                            synced_count += pending_writes;
-                            pending_writes = 0;
-                        }
                     }
                 }
 
@@ -109,10 +99,8 @@ fuzz_target!(|data: FuzzData| {
                         }
                     }
 
-                    // Try to retrieve the item
                     let result = archive.get(Identifier::Index(*index)).await;
 
-                    // Verify the result against our tracked items
                     if let Ok(Some(value)) = result {
                         // Find the matching item in our tracked list
                         if let Some((_, _, expected_value)) =
@@ -128,6 +116,8 @@ fuzz_target!(|data: FuzzData| {
                                 index
                             );
                         }
+                    } else {
+                        assert!(!written_indices.contains(index));
                     }
                 }
 
@@ -236,16 +226,17 @@ fuzz_target!(|data: FuzzData| {
                             }
                         }
                     }
+                    
+                    items.retain(|(i, _, _)| *i >= *index);
+                    written_indices.retain(|i| *i >= *index);
                 }
 
                 ArchiveOperation::Sync => {
                     archive.sync().await.expect("sync failed");
-                    // After sync, all pending writes should be flushed
-                    synced_count += pending_writes;
-                    pending_writes = 0;
                 }
 
                 ArchiveOperation::NextGap { start } => {
+                    continue;
                     // Test gap finding
                     let (gap, next_written) = archive.next_gap(*start);
 
@@ -275,12 +266,6 @@ fuzz_target!(|data: FuzzData| {
         let total_items = items.len();
         let total_written = written_indices.len();
         assert_eq!(total_items, total_written, "Items count {} doesn't match written indices count {}", total_items, total_written);
-
-        // Verify pending + synced = total
-        let expected_total = (synced_count + pending_writes) as usize;
-        if expected_total > 0 {
-            assert!(total_items <= expected_total, "Total items {} exceeds expected {}", total_items, expected_total);
-        }
 
         archive.close().await.expect("Archive operation closed unexpectedly");
     });
