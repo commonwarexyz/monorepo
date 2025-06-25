@@ -20,6 +20,7 @@ enum AdbOperation {
     Update { key: RawKey, value: RawValue },
     Delete { key: RawKey },
     Commit,
+    OpCount,
     Get { key: RawKey },
 }
 #[derive(Arbitrary, Debug)]
@@ -28,7 +29,7 @@ struct FuzzData {
 }
 
 fuzz_target!(|data: FuzzData| {
-    if data.operations.is_empty() || data.operations.len() > 4 {
+    if data.operations.is_empty() || data.operations.len() > 256 {
         return;
     }
     let runner = deterministic::Runner::default();
@@ -88,6 +89,10 @@ fuzz_target!(|data: FuzzData| {
                         all_keys.insert(*key);
                     }
                     // If result is None, it was a no-op (key didn't exist)
+                }
+                
+                AdbOperation::OpCount => {
+                    adb.op_count();
                 }
 
                 AdbOperation::Commit => {
