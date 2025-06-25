@@ -4,10 +4,11 @@ use commonware_cryptography::{CoreSha256, Hasher, Sha256};
 use hkdf::{hmac::digest::typenum::Unsigned, Hkdf};
 use zeroize::Zeroize;
 
-// The size of the key used by the ChaCha20Poly1305 cipher.
+/// The size of the key used by the ChaCha20Poly1305 cipher.
 const CHACHA_KEY_SIZE: usize = <ChaCha20Poly1305 as KeySizeUser>::KeySize::USIZE;
 
-// A constant prefix used for the salt hash in the HKDF key derivation.
+/// A constant prefix used for the salt hash in the HKDF key derivation.
+/// This prevents key derivation collisions with other applications.
 const BASE_KDF_PREFIX: &[u8] = b"commonware-stream/KDF/v1/";
 
 // Constant infos for directional ciphers.
@@ -17,6 +18,9 @@ const CONFIRMATION_INFO_D2L: &[u8] = b"d2l/confirmation";
 const CONFIRMATION_INFO_L2D: &[u8] = b"l2d/confirmation";
 
 /// Return value when deriving directional ciphers.
+///
+/// Contains all four ciphers needed for a complete bidirectional encrypted connection:
+/// two for traffic (one per direction) and two for key confirmation during handshake.
 pub struct DirectionalCipher {
     /// The cipher used for sending messages from the dialer to the listener.
     pub d2l: ChaCha20Poly1305,

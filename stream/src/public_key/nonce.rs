@@ -1,15 +1,29 @@
 use crate::Error;
 use chacha20poly1305::Nonce;
 
-/// A struct that holds the nonce information. Holds a counter value that is incremented each time
-/// the nonce is used. Is able to be incremented up-to 96 bits (12 bytes) before overflowing.
+/// A struct that holds the nonce information for ChaCha20-Poly1305 encryption.
+///
+/// This struct manages a 96-bit counter that is used to generate unique nonces
+/// for each message. The counter can be incremented up to 2^96 times before
+/// overflowing, providing sufficient nonces for practical use cases.
+///
+/// # Security
+///
+/// Nonce reuse with the same key would allow an attacker to decrypt messages
+/// or forge authentication tags. This implementation prevents reuse by:
+/// - Using a monotonically increasing counter
+/// - Preventing overflow back to zero
+/// - Returning errors when the counter would overflow
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Info {
     counter: u128,
 }
 
-/// If the counter is greater-than-or-equal to this value, it is considered to have overflowed.
-/// This is 2^96 or, in binary, one followed by 96 zeros.
+/// Maximum valid counter value before overflow (2^96).
+///
+/// If the counter reaches this value, it is considered to have overflowed
+/// the 96-bit nonce space. This prevents wrapping back to zero which would
+/// cause nonce reuse.
 const OVERFLOW_VALUE: u128 = 1 << 96;
 
 impl Info {

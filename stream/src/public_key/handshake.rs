@@ -119,6 +119,7 @@ impl<C: PublicKey> Signed<C> {
         self.info.ephemeral_public_key
     }
 
+    /// Get the timestamp from the handshake message.
     pub fn timestamp(&self) -> u64 {
         self.info.timestamp
     }
@@ -206,12 +207,12 @@ impl<C: PublicKey> EncodeSize for Signed<C> {
     }
 }
 
-/// Cryptographic proof that a party can correctly derive the shared secret.
+/// Key confirmation message used during the handshake process.
 ///
-/// This is used in the 3-message handshake protocol to ensure mutual authentication.
-/// Each party encrypts the handshake transcript using the derived shared secret,
-/// producing an AEAD tag that serves as proof of knowledge of the correct key material
-/// and binds the confirmation to the complete handshake exchange.
+/// This struct contains cryptographic proof that a party can correctly derive
+/// the shared secret from the Diffie-Hellman exchange. It prevents attacks where
+/// an adversary might forward handshake messages without actually knowing the
+/// corresponding private keys.
 pub struct KeyConfirmation {
     /// AEAD tag of the encrypted proof demonstrating knowledge of the shared secret.
     tag: Tag<ChaCha20Poly1305>,
@@ -276,6 +277,7 @@ pub struct ListenerResponse<C: PublicKey> {
 }
 
 impl<C: PublicKey> ListenerResponse<C> {
+    /// Create a new listener response with the given handshake and key confirmation.
     pub fn new(handshake: Signed<C>, key_confirmation: KeyConfirmation) -> Self {
         Self {
             handshake,
@@ -283,6 +285,10 @@ impl<C: PublicKey> ListenerResponse<C> {
         }
     }
 
+    /// Extract the handshake and key confirmation from this response.
+    ///
+    /// This consumes the response and returns its constituent parts,
+    /// which is useful during the handshake verification process.
     pub fn into_parts(self) -> (Signed<C>, KeyConfirmation) {
         (self.handshake, self.key_confirmation)
     }

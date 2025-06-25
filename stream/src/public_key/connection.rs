@@ -757,7 +757,7 @@ mod tests {
             // Spawn a mock peer that responds with a ListenerResponse containing an all-zero ephemeral key
             context.with_label("mock_peer").spawn({
                 let namespace = dialer_config.namespace.clone();
-                let recipient = dialer_config.crypto.public_key();
+                let recipient_pk = dialer_config.crypto.public_key();
                 move |context| async move {
                     use chacha20poly1305::KeyInit;
 
@@ -772,7 +772,7 @@ mod tests {
                     // Create a custom handshake info bytes with zero ephemeral key
                     let timestamp = context.current().epoch_millis();
                     let info = handshake::Info::new(
-                        recipient,
+                        recipient_pk,
                         x25519::PublicKey::from_bytes([0u8; 32]),
                         timestamp,
                     );
