@@ -1226,4 +1226,413 @@ mod tests {
             synced_mmr.destroy().await.unwrap();
         });
     }
+
+    // Test init_sync with no operations after pruning boundary
+    // This tests the edge case where everything is pruned.
+    #[test_traced]
+    fn test_init_sync_empty_operations() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            // Create source MMR with 5 elements, then prune all of them
+            let mut source_mmr = Mmr::init(context.clone(), &mut hasher, test_config())
+                .await
+                .unwrap();
+
+            for i in 0..5 {
+                source_mmr
+                    .add(&mut hasher, &test_digest(i).to_vec())
+                    .await
+                    .unwrap();
+            }
+            source_mmr.sync(&mut hasher).await.unwrap();
+
+            // Prune everything (prune to the end)
+            let total_size = source_mmr.size();
+            source_mmr
+                .prune_to_pos(&mut hasher, total_size)
+                .await
+                .unwrap();
+
+            let source_root = source_mmr.root(&mut hasher);
+            let pinned_nodes = source_mmr.mem_mmr.pinned_nodes.clone();
+
+            source_mmr.destroy().await.unwrap();
+
+            // Initialize synced MMR with empty operations
+            let mut synced_config = test_config();
+            synced_config.journal_partition = "sync_empty_journal".into();
+            synced_config.metadata_partition = "sync_empty_metadata".into();
+
+            let synced_mmr = Mmr::init_sync(
+                context.clone(),
+                &mut hasher,
+                synced_config,
+                pinned_nodes,
+                total_size, // Everything is pruned
+                Vec::new(), // No operations should remain after pruning everything
+            )
+            .await
+            .unwrap();
+
+            // Verify the synced MMR matches the fully pruned source
+            assert_eq!(synced_mmr.root(&mut hasher), source_root);
+            assert_eq!(synced_mmr.size(), total_size);
+            assert_eq!(synced_mmr.pruned_to_pos(), total_size);
+            assert_eq!(synced_mmr.oldest_retained_pos(), None); // Nothing retained
+
+            synced_mmr.destroy().await.unwrap();
+        });
+    }
+
+    // Test init_sync with various pruning scenarios:
+    // 1. No pruning (pruned_to_pos = 0) - complete, unpruned MMR
+    // 2. Different pruning boundaries to ensure the method works correctly
+    #[test_traced]
+    fn test_init_sync_various_pruning_scenarios() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            const TOTAL_ELEMENTS: usize = 12;
+            let prune_boundaries = vec![0, 1, 3, 7, 10]; // 0 = no pruning, others = different pruning points
+
+            for prune_pos in prune_boundaries {
+                // Create source MMR with elements
+                let mut source_mmr = Mmr::init(context.clone(), &mut hasher, test_config())
+                    .await
+                    .unwrap();
+
+                for i in 0..TOTAL_ELEMENTS {
+                    source_mmr
+                        .add(&mut hasher, &test_digest(i).to_vec())
+                        .await
+                        .unwrap();
+                }
+                source_mmr.sync(&mut hasher).await.unwrap();
+
+                let source_root = source_mmr.root(&mut hasher);
+                let source_size = source_mmr.size();
+
+                // Apply pruning if needed
+                if prune_pos > 0 {
+                    source_mmr
+                        .prune_to_pos(&mut hasher, prune_pos as u64)
+                        .await
+                        .unwrap();
+                }
+
+                let pinned_nodes = source_mmr.mem_mmr.pinned_nodes.clone();
+
+                // Extract operations from the journal
+                let mut operations = Vec::new();
+                let start_pos = if prune_pos == 0 {
+                    // No pruning: extract all operations from the beginning
+                    0
+                } else {
+                    // With pruning: extract operations after pruning boundary
+                    source_mmr.oldest_retained_pos().unwrap_or(0)
+                };
+
+                for i in start_pos..source_mmr.journal_size {
+                    if let Ok(node) = source_mmr.journal.read(i).await {
+                        operations.push(node);
+                    }
+                }
+
+                source_mmr.destroy().await.unwrap();
+
+                // Initialize synced MMR
+                let mut synced_config = test_config();
+                synced_config.journal_partition = format!("sync_prune_{}_journal", prune_pos);
+                synced_config.metadata_partition = format!("sync_prune_{}_metadata", prune_pos);
+
+                let synced_mmr = Mmr::init_sync(
+                    context.clone(),
+                    &mut hasher,
+                    synced_config,
+                    pinned_nodes,
+                    prune_pos as u64,
+                    operations,
+                )
+                .await
+                .unwrap();
+
+                // Verify the synced MMR matches the source
+                assert_eq!(
+                    synced_mmr.root(&mut hasher),
+                    source_root,
+                    "Root mismatch for prune boundary {}",
+                    prune_pos
+                );
+                assert_eq!(
+                    synced_mmr.size(),
+                    source_size,
+                    "Size mismatch for prune boundary {}",
+                    prune_pos
+                );
+                assert_eq!(
+                    synced_mmr.pruned_to_pos(),
+                    prune_pos as u64,
+                    "Pruned boundary mismatch for prune boundary {}",
+                    prune_pos
+                );
+
+                // Verify oldest retained position
+                let expected_oldest = if prune_pos == 0 {
+                    Some(0)
+                } else {
+                    Some(prune_pos as u64)
+                };
+                assert_eq!(
+                    synced_mmr.oldest_retained_pos(),
+                    expected_oldest,
+                    "Oldest retained position mismatch for prune boundary {}",
+                    prune_pos
+                );
+
+                synced_mmr.destroy().await.unwrap();
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_init_sync_node_access_and_proofs() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            // Combined test that verifies:
+            // 1. Individual node access is identical between source and synced MMRs
+            // 2. Proof generation works correctly on synced MMRs
+            // This ensures the underlying structure is correct and functional
+
+            let test_cases = vec![
+                (8, 3, "node_access"), // Focused on detailed node access verification
+                (9, 4, "proof_gen"),   // Focused on proof generation functionality
+            ];
+
+            for (total_elements, prune_boundary, test_name) in test_cases {
+                // Create source MMR
+                let mut source_mmr = Mmr::init(context.clone(), &mut hasher, test_config())
+                    .await
+                    .unwrap();
+
+                for i in 0..total_elements {
+                    source_mmr
+                        .add(&mut hasher, &test_digest(i).to_vec())
+                        .await
+                        .unwrap();
+                }
+                source_mmr.sync(&mut hasher).await.unwrap();
+
+                // For node access test, store expected nodes before pruning
+                let mut expected_nodes = std::collections::HashMap::new();
+                if test_name == "node_access" {
+                    for i in prune_boundary..source_mmr.size() {
+                        if let Ok(Some(node)) = source_mmr.get_node(i).await {
+                            expected_nodes.insert(i, node);
+                        }
+                    }
+                }
+
+                source_mmr
+                    .prune_to_pos(&mut hasher, prune_boundary)
+                    .await
+                    .unwrap();
+
+                let source_root = source_mmr.root(&mut hasher);
+                let source_size = source_mmr.size();
+                let pinned_nodes = source_mmr.mem_mmr.pinned_nodes.clone();
+
+                // Extract operations
+                let mut operations = Vec::new();
+                if let Some(start_pos) = source_mmr.oldest_retained_pos() {
+                    for i in start_pos..source_mmr.journal_size {
+                        if let Ok(node) = source_mmr.journal.read(i).await {
+                            operations.push(node);
+                        }
+                    }
+                }
+
+                source_mmr.destroy().await.unwrap();
+
+                // Initialize synced MMR
+                let mut synced_config = test_config();
+                synced_config.journal_partition =
+                    format!("sync_{}_{}_journal", test_name, prune_boundary);
+                synced_config.metadata_partition =
+                    format!("sync_{}_{}_metadata", test_name, prune_boundary);
+
+                let synced_mmr = Mmr::init_sync(
+                    context.clone(),
+                    &mut hasher,
+                    synced_config,
+                    pinned_nodes,
+                    prune_boundary,
+                    operations,
+                )
+                .await
+                .unwrap();
+
+                // Verify basic properties
+                assert_eq!(
+                    synced_mmr.root(&mut hasher),
+                    source_root,
+                    "Root mismatch for {} test case",
+                    test_name
+                );
+                assert_eq!(
+                    synced_mmr.size(),
+                    source_size,
+                    "Size mismatch for {} test case",
+                    test_name
+                );
+                assert_eq!(
+                    synced_mmr.pruned_to_pos(),
+                    prune_boundary,
+                    "Pruned boundary mismatch for {} test case",
+                    test_name
+                );
+                assert_eq!(
+                    synced_mmr.oldest_retained_pos(),
+                    Some(prune_boundary),
+                    "Oldest retained position mismatch for {} test case",
+                    test_name
+                );
+
+                // For node access test, verify individual node access
+                if test_name == "node_access" {
+                    for i in prune_boundary..source_size {
+                        let expected_node = expected_nodes.get(&i);
+                        let synced_node = synced_mmr.get_node(i).await.unwrap();
+
+                        if let Some(expected) = expected_node {
+                            assert_eq!(
+                                Some(expected),
+                                synced_node.as_ref(),
+                                "Node mismatch at position {} for {} test case",
+                                i,
+                                test_name
+                            );
+                        } else {
+                            assert_eq!(
+                                None, synced_node,
+                                "Expected no node at position {} but found one for {} test case",
+                                i, test_name
+                            );
+                        }
+                    }
+                }
+
+                // Test proof generation functionality
+                if let Some(last_leaf_pos) = synced_mmr.last_leaf_pos() {
+                    let _proof = synced_mmr.proof(last_leaf_pos).await.unwrap_or_else(|e| {
+                        panic!(
+                            "Failed to generate proof for last leaf in {} test case: {}",
+                            test_name, e
+                        )
+                    });
+                }
+
+                // Test that we can access some key nodes
+                let test_positions = vec![prune_boundary, prune_boundary + 1, source_size - 1];
+
+                for pos in test_positions {
+                    if pos < source_size {
+                        synced_mmr.get_node(pos).await.unwrap_or_else(|_| {
+                            panic!(
+                                "Failed to access node at position {} for {} test case",
+                                pos, test_name
+                            )
+                        });
+                    }
+                }
+
+                synced_mmr.destroy().await.unwrap();
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_init_sync_journal_operations() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            // Test that journal operations are correctly stored and can be read back
+
+            // Create source MMR with 5 elements, prune to position 2
+            let mut source_mmr = Mmr::init(context.clone(), &mut hasher, test_config())
+                .await
+                .unwrap();
+
+            for i in 0..5 {
+                source_mmr
+                    .add(&mut hasher, &test_digest(i).to_vec())
+                    .await
+                    .unwrap();
+            }
+            source_mmr.sync(&mut hasher).await.unwrap();
+
+            source_mmr.prune_to_pos(&mut hasher, 2).await.unwrap();
+
+            let source_root = source_mmr.root(&mut hasher);
+            let pinned_nodes = source_mmr.mem_mmr.pinned_nodes.clone();
+
+            // Extract operations from the journal after pruning boundary
+            let mut operations = Vec::new();
+            if let Some(start_pos) = source_mmr.oldest_retained_pos() {
+                for i in start_pos..source_mmr.journal_size {
+                    if let Ok(node) = source_mmr.journal.read(i).await {
+                        operations.push(node);
+                    }
+                }
+            }
+
+            source_mmr.destroy().await.unwrap();
+
+            // Initialize synced MMR
+            let mut synced_config = test_config();
+            synced_config.journal_partition = "sync_journal_ops".into();
+            synced_config.metadata_partition = "sync_journal_meta".into();
+
+            let synced_mmr = Mmr::init_sync(
+                context.clone(),
+                &mut hasher,
+                synced_config,
+                pinned_nodes,
+                2,
+                operations.clone(),
+            )
+            .await
+            .unwrap();
+
+            // Verify root matches
+            assert_eq!(synced_mmr.root(&mut hasher), source_root);
+
+            // Test that we can read operations from the journal
+            // Operations start at pruned_to_pos in the journal
+            let start_pos = synced_mmr.pruned_to_pos();
+            for (i, expected_op) in operations.iter().enumerate() {
+                let journal_pos = start_pos + i as u64;
+                let stored_op = synced_mmr.journal.read(journal_pos).await.unwrap();
+                assert_eq!(
+                    &stored_op, expected_op,
+                    "Operation at journal position {} doesn't match",
+                    journal_pos
+                );
+            }
+
+            // Test journal size calculation
+            let expected_journal_size = synced_mmr.pruned_to_pos() + operations.len() as u64;
+            assert_eq!(
+                synced_mmr.journal.size().await.unwrap(),
+                expected_journal_size
+            );
+
+            synced_mmr.destroy().await.unwrap();
+        });
+    }
 }
