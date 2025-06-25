@@ -188,27 +188,15 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// Initialize an `Any` database in a pruned state.
     /// Removes all existing persisted data and applies the state given in `cfg`.
     pub async fn init_sync(context: E, cfg: SyncConfig<K, V, H, T>) -> Result<Self, Error> {
-        // For the simple case where pruned_to_loc = 0 (no pruning), we can use the regular init
-        // and then apply the operations. This avoids the complexity of MMR pinned nodes.
-        if cfg.pruned_to_loc == 0 {
-            // TODO danlaine: should we use NonZeroU64 for pruned_to_loc?
-            return Self::init(context, cfg.config).await;
-        }
-
-        let mut hasher = Standard::<H>::new();
-
         // Convert log operations to MMR digests
+        let mut hasher = Standard::<H>::new();
         let operations_hashes: Vec<H::Digest> = cfg
             .operations
             .iter()
             .map(|op| Self::op_digest(&mut hasher, op))
             .collect();
 
-        // Convert log location to MMR position for pruning boundary
-        let mmr_pruned_to_pos = leaf_num_to_pos(cfg.pruned_to_loc);
-
-        // Initialize MMR using init_sync
-        let mmr_sync_config = crate::mmr::journaled::SyncConfig {
+        let mmr_config = crate::mmr::journaled::SyncConfig {
             config: MmrConfig {
                 journal_partition: cfg.config.mmr_journal_partition,
                 metadata_partition: cfg.config.mmr_metadata_partition,
@@ -217,11 +205,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 pool: cfg.config.pool.clone(),
             },
             pinned_nodes: cfg.mmr_pinned_nodes,
-            pruned_to_pos: mmr_pruned_to_pos,
+            // Convert log index (location) to MMR index (position)
+            pruned_to_pos: leaf_num_to_pos(cfg.pruned_to_loc),
             operations: operations_hashes,
         };
-        let mut hasher = Standard::<H>::new();
-        let mmr = Mmr::init_sync(context.with_label("mmr"), &mut hasher, mmr_sync_config).await?;
+        let mmr = Mmr::init_sync(context.with_label("mmr"), &mut hasher, mmr_config).await?;
 
         // Initialize the log with the pruned state
         let mut log = Journal::<E, Operation<K, V>>::init_sync(
@@ -243,17 +231,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             context.with_label("snapshot"),
             cfg.config.translator.clone(),
         );
-        let start_leaf_num = cfg.pruned_to_loc;
         let inactivity_floor_loc = Self::build_snapshot_from_log(
-            start_leaf_num,
+            cfg.pruned_to_loc,
             &log,
             &mut snapshot,
-            None::<&mut Bitmap<H, UNUSED_N>>,
+            None::<&mut Bitmap<_, UNUSED_N>>,
         )
         .await?;
-
-        // The inactivity floor should be at least the pruning boundary
-        // (it may be higher if there are commit operations in the synced operations)
         assert!(inactivity_floor_loc >= cfg.pruned_to_loc);
 
         let mut db = Any {
@@ -265,7 +249,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             hasher,
         };
         db.sync().await?;
-
         Ok(db)
     }
 
