@@ -1512,17 +1512,16 @@ mod test {
             let mut hasher = Standard::<Sha256>::new();
             let source_root = source_db.root(&mut hasher);
             let source_op_count = source_db.op_count();
-            let source_inactivity_floor = source_db.inactivity_floor_loc;
-            let need_ops = source_op_count - source_inactivity_floor;
+            let need_ops = source_op_count - source_db.inactivity_floor_loc;
             let (proof, ops) = source_db
-                .proof(source_inactivity_floor, source_op_count)
+                .proof(source_db.inactivity_floor_loc, source_op_count)
                 .await
                 .unwrap();
             // Verify proof
             Any::<Context, Digest, Digest, Sha256, EightCap>::verify_proof(
                 &mut hasher,
                 &proof,
-                source_inactivity_floor,
+                source_db.inactivity_floor_loc,
                 &ops,
                 &source_root,
             )
@@ -1535,16 +1534,19 @@ mod test {
                 "sync_pruning",
                 EightCap,
                 pinned_nodes,
-                source_inactivity_floor,
+                source_db.inactivity_floor_loc,
                 ops,
             );
 
-            let synced_db = Any::init_sync(context.clone(), sync_config).await.unwrap();
+            let mut synced_db = Any::init_sync(context.clone(), sync_config).await.unwrap();
 
             // Verify the synced database matches the source
             assert_eq!(synced_db.root(&mut hasher), source_root);
             assert_eq!(synced_db.op_count(), source_op_count);
-            assert_eq!(synced_db.inactivity_floor_loc, source_inactivity_floor);
+            assert_eq!(
+                synced_db.inactivity_floor_loc,
+                source_db.inactivity_floor_loc
+            );
             assert_eq!(synced_db.ops.size(), source_db.ops.size());
             assert_eq!(synced_db.ops.pruned_to_pos(), source_db.ops.pruned_to_pos());
             assert_eq!(
@@ -1557,7 +1559,51 @@ mod test {
                 assert_eq!(synced_db.get(key).await.unwrap(), Some(*value));
             }
 
+            // Test that we can add more operations to the synced database
+            let key3 = hash(&3u64.to_be_bytes());
+            let value3 = hash(&30u64.to_be_bytes());
+            synced_db.update(key3, value3).await.unwrap();
+            synced_db.commit().await.unwrap();
+            assert_eq!(synced_db.get(&key3).await.unwrap(), Some(value3));
+            assert_eq!(
+                synced_db.log.size().await.unwrap(),
+                leaf_pos_to_num(synced_db.ops.size()).unwrap()
+            );
+
+            // Test we get the same root as the source db
+            source_db.update(key3, value3).await.unwrap();
+            source_db.commit().await.unwrap();
+            assert_eq!(source_db.root(&mut hasher), synced_db.root(&mut hasher));
+
+            // Test sizes are same
+            assert_eq!(
+                source_db.log.size().await.unwrap(),
+                synced_db.log.size().await.unwrap()
+            );
+            assert_eq!(source_db.ops.size(), synced_db.ops.size());
+            assert_eq!(source_db.ops.pruned_to_pos(), synced_db.ops.pruned_to_pos());
+
+            // Test that we can get a proof from the synced database
+            let (proof, ops) = synced_db
+                .proof(synced_db.inactivity_floor_loc, synced_db.op_count())
+                .await
+                .unwrap();
+            let synced_db_hash = synced_db.root(&mut hasher);
+            Any::<Context, Digest, Digest, Sha256, EightCap>::verify_proof(
+                &mut hasher,
+                &proof,
+                synced_db.inactivity_floor_loc,
+                &ops,
+                &synced_db_hash,
+            )
+            .unwrap();
+            assert_eq!(
+                ops.len(),
+                (synced_db.op_count() - synced_db.inactivity_floor_loc) as usize
+            );
+
             synced_db.destroy().await.unwrap();
+            source_db.destroy().await.unwrap();
         });
     }
 }
