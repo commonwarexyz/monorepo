@@ -1,6 +1,6 @@
 use crate::Error;
 use commonware_utils::{hex, StableBuf};
-use std::{fs::File, sync::Arc};
+use std::{fs::File, os::unix::fs::FileExt, sync::Arc};
 use tokio::task;
 
 #[derive(Clone)]
@@ -29,7 +29,6 @@ impl crate::Blob for Blob {
         let mut buf = buf.into();
         let file = self.file.clone();
         task::spawn_blocking(move || {
-            use std::os::unix::fs::FileExt;
             file.read_exact_at(buf.as_mut(), offset)?;
             Ok(buf)
         })
@@ -41,7 +40,6 @@ impl crate::Blob for Blob {
         let buf = buf.into();
         let file = self.file.clone();
         task::spawn_blocking(move || {
-            use std::os::unix::fs::FileExt;
             file.write_all_at(buf.as_ref(), offset)?;
             Ok(())
         })
