@@ -10,63 +10,41 @@
 //!
 //! ## Handshake
 //!
-//! A 3-message handshake is performed to mutually authenticate and establish a shared secret.
-//! This handshake is used instead of TLS, Noise, WireGuard, etc. because:
-//! - It supports arbitrary cryptographic schemes
-//! - No protocol negotiation (only one way to connect)
-//! - Simple implementation (few hundred lines of code)
-//! - Can be simulated deterministically
+//! A 3-message handshake provides mutual authentication and establishes a shared secret
+//! between peers. Custom implementation supports arbitrary cryptographic schemes without
+//! protocol negotiation overhead.
 //!
-//! The **dialer** initiates connection to a known address/identity (public key)
-//! and the **listener** receives this connection. The protocol works as follows:
+//! The **dialer** initiates the connection to a known peer identity, while the **listener**
+//! accepts incoming connections. Much like a SYN / SYN-ACK / ACK handshake, the dialer and listener
+//! exchange messages in three rounds.
 //!
-//! ### Message 1: Dialer → Listener (Initial Handshake)
+//! The SYN-equivalent is a handshake message that contains:
+//! - The recipient's expected public key (prevents wrong-target attacks)
+//! - The sender's ephemeral public key (for Diffie-Hellman key exchange)
+//! - The current timestamp (prevents replay attacks)
+//! - The sender's static public key and signature
 //!
-//! Upon establishing a TCP connection, the dialer sends a signed handshake message to the listener.
-//! This message contains the dialer's signature and static public key, plus:
+//! The ACK-equivalent is a key confirmation message that proves that each party can derive the
+//! correct shared secret.
 //!
-//! - The listener's expected public key
-//! - The dialer's ephemeral public key (for establishing a shared secret)
-//! - The current timestamp (for replay attack prevention)
-//!
-//! ### Message 2: Listener → Dialer (Response with Key Confirmation)
-//!
-//! The listener verifies:
-//! - Public keys are well-formatted
-//! - Timestamp is valid (not too old, not too far in the future)
-//! - Signature is valid
-//!
-//! If all checks pass, the listener:
-//!
-//! 1. Creates its own signed handshake message
-//! 2. Computes the X25519 Diffie-Hellman shared secret
-//! 3. Creates a key confirmation by encrypting the handshake transcript
-//! 4. Sends back a `ListenerResponse` containing both the signed handshake and key confirmation
-//!
-//! ### Message 3: Dialer → Listener (Final Confirmation)
-//!
-//! The dialer:
-//!
-//! 1. Verifies the listener's signed handshake message
-//! 2. Verifies the returned static public key matches expectations
-//! 3. Computes the shared secret and verifies the listener's key confirmation
-//! 4. Creates its own key confirmation
-//! 5. Sends the key confirmation to complete mutual authentication
+//! Thus:
+//! - Message 1 is a handshake message from the dialer to the listener
+//! - Message 2 is a handshake and key confirmation message from the listener to the dialer
+//! - Message 3 is a key confirmation message from the dialer to the listener
 //!
 //! ### Security Properties
 //!
 //! This protocol provides:
 //!
-//! - **Mutual Authentication**: Both parties prove knowledge of their static private keys through
-//!   signatures
-//! - **Key Confirmation**: Both parties prove they can derive the correct shared secret
-//! - **Transcript Binding**: Key confirmations are bound to the complete handshake exchange
-//! - **Replay Protection**: Timestamps prevent reuse of old handshake messages within the configured timestamp window
-//! - **Forward Secrecy**: Ephemeral keys ensure compromise of long-term static keys doesn't affect past
-//!   or future sessions
-//!
-//! A configurable deadline is enforced for handshake completion to protect against DoS attacks by
-//! malicious peers that create connections but abandon handshakes.
+//! - **Mutual Authentication**: Both parties prove existence of their static private keys through
+//!   signatures.
+//! - **Replay Protection**: Key confirmations are bound to the complete handshake exchange to
+//!   prevent replay attacks by confirming that the peer that sent the handshake message (with the
+//!   cryptographic signature) also had possession of the ephemeral key.
+//! - **Forward Secrecy**: Ephemeral keys ensure that any compromise of long-term static keys
+//!   doesn't affect other sessions.
+//! - **DoS Protection**: A configurable deadline is enforced for handshake completion to protect
+//!   against DoS attacks by malicious peers that create connections but abandon handshakes.
 //!
 //! ## Encryption
 //!
