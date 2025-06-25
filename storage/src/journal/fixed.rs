@@ -240,7 +240,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
     /// * `context` - The storage context
     /// * `cfg` - Configuration for the journal
     /// * `size` - The target size (number of operations) the journal should appear to have.
-    ///           This represents the first operation that would be retained after pruning.
+    ///   This represents the first operation that would be retained after pruning.
     ///
     /// # Behavior
     /// 1. Removes all existing blobs in the partition

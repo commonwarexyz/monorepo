@@ -1164,10 +1164,7 @@ mod tests {
 
             // Add 10 elements
             for i in 0..10 {
-                source_mmr
-                    .add(&mut hasher, &test_digest(i).to_vec())
-                    .await
-                    .unwrap();
+                source_mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
             }
             source_mmr.sync(&mut hasher).await.unwrap();
 
@@ -1282,10 +1279,7 @@ mod tests {
                 .unwrap();
 
             for i in 0..5 {
-                source_mmr
-                    .add(&mut hasher, &test_digest(i).to_vec())
-                    .await
-                    .unwrap();
+                source_mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
             }
             source_mmr.sync(&mut hasher).await.unwrap();
 
