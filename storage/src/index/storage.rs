@@ -108,7 +108,9 @@ impl<'a, T: Translator, V: Eq> Cursor<'a, T, V> {
         }
     }
 
-    /// Pushes a `Record` with `next` to the start of `past`.
+    /// Pushes a `Record` with no `next` to the end of `past`.
+    ///
+    /// This is called during iteration.
     fn past_push(&mut self, mut next: Box<Record<V>>) {
         // The new node has no `next` because it was taken in `Cursor::next`.
         assert!(next.next.is_none());
@@ -127,7 +129,9 @@ impl<'a, T: Translator, V: Eq> Cursor<'a, T, V> {
         }
     }
 
-    /// Pushes a `Record` that may have a `next` to the end of `past`.
+    /// Pushes a `Record` that may have some list of `next`s to the end of `past`.
+    ///
+    /// This may be called once when iteration is complete.
     fn past_push_list(&mut self, next: Box<Record<V>>) {
         // Ensure we only push a list once (`past_tail` becomes stale).
         assert!(!self.past_pushed_list);
@@ -319,7 +323,7 @@ where
                 // No action needed.
             }
             Phase::Next(next) => {
-                // The `next` contains all remaining nodes. Connect it to the tail of `past`.
+                // `next` is still valid (as is the list of nodes `next` points to).
                 self.past_push_list(next);
             }
             Phase::Done => {
@@ -335,14 +339,14 @@ where
                 // No action needed.
             }
             Phase::PostDeleteNext(Some(next)) => {
-                // If there is a stale record, we should connect it to the tail of `past`.
+                // If there is a stale record, we should recover it.
                 self.past_push_list(next);
             }
             Phase::PostDeleteNext(None) => {
                 // No action needed.
             }
             Phase::PostInsert(next) => {
-                // If there is a current record, we should connect it to the tail of `past`.
+                // If there is a current record, we should recover it.
                 self.past_push_list(next);
             }
         }
