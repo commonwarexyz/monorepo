@@ -75,7 +75,7 @@ pub struct SyncConfig<K: Array, V: Array, H: CHasher, T: Translator> {
     /// Base configuration for the database
     pub config: Config<T>,
 
-    /// HashMap containing the MMR pinned nodes needed for proof generation.
+    /// Location -> digest of the pinned nodes needed for proof generation.
     pub mmr_pinned_nodes: HashMap<u64, H::Digest>,
 
     /// The location (index into the Any database log) up to which operations have been pruned.
@@ -83,7 +83,7 @@ pub struct SyncConfig<K: Array, V: Array, H: CHasher, T: Translator> {
     /// Everything before this location is considered pruned/inactive.
     pub pruned_to_loc: u64,
 
-    /// The log operations to be applied after the pruning boundary.
+    /// The log operations to be applied starting at `pruned_to_loc`.
     pub operations: Vec<Operation<K, V>>,
 }
 
@@ -185,68 +185,20 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         Ok(db)
     }
 
-    /// Initialize an `Any` database in a synced state, matching a target database that has been pruned.
-    ///
-    /// This method creates a database that matches the state of a source database after operations
-    /// have been applied and then pruned. The resulting database will have the same root hash,
-    /// key-value pairs, and be able to generate identical proofs as the source.
-    ///
-    /// # Parameters
-    ///
-    /// * `context` - The runtime context for storage operations
-    /// * `cfg` - Configuration containing sync parameters including pruning boundary and operations
+    /// Initialize an `Any` database in a pruned state.
+    /// Removes all existing persisted data and applies the state given in `cfg`.
     pub async fn init_sync(context: E, cfg: SyncConfig<K, V, H, T>) -> Result<Self, Error> {
-        // Initialize the snapshot index
-        let mut snapshot: Index<T, u64> = Index::init(
-            context.with_label("snapshot"),
-            cfg.config.translator.clone(),
-        );
-        let mut hasher = Standard::<H>::new();
-
         // For the simple case where pruned_to_loc = 0 (no pruning), we can use the regular init
         // and then apply the operations. This avoids the complexity of MMR pinned nodes.
-        if cfg.pruned_to_loc == 0 && cfg.mmr_pinned_nodes.is_empty() {
-            // Initialize normally and apply operations
-            let (mut mmr, mut log) =
-                Self::init_mmr_and_log(context.clone(), cfg.config, &mut hasher).await?;
-
-            // Apply the operations to both MMR and log
-            for operation in &cfg.operations {
-                let digest = Self::op_digest(&mut hasher, operation);
-                mmr.add_batched(&mut hasher, &digest).await?;
-                log.append(operation.clone())
-                    .await
-                    .map_err(Error::JournalError)?;
-            }
-
-            // Sync to ensure consistency
-            mmr.sync(&mut hasher).await?;
-            log.sync().await?;
-
-            // Build the snapshot from all operations
-            let inactivity_floor_loc = Self::build_snapshot_from_log(
-                0,
-                &log,
-                &mut snapshot,
-                None::<&mut Bitmap<H, UNUSED_N>>,
-            )
-            .await?;
-
-            let db = Any {
-                ops: mmr,
-                log,
-                snapshot,
-                inactivity_floor_loc,
-                uncommitted_ops: 0,
-                hasher,
-            };
-
-            return Ok(db);
+        if cfg.pruned_to_loc == 0 {
+            // TODO danlaine: should we use NonZeroU64 for pruned_to_loc?
+            return Self::init(context, cfg.config).await;
         }
 
-        // For the complex case with pruning, use the MMR sync approach
+        let mut hasher = Standard::<H>::new();
+
         // Convert log operations to MMR digests
-        let mmr_operations: Vec<H::Digest> = cfg
+        let operations_hashes: Vec<H::Digest> = cfg
             .operations
             .iter()
             .map(|op| Self::op_digest(&mut hasher, op))
@@ -266,30 +218,31 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             },
             pinned_nodes: cfg.mmr_pinned_nodes,
             pruned_to_pos: mmr_pruned_to_pos,
-            operations: mmr_operations,
+            operations: operations_hashes,
         };
         let mut hasher = Standard::<H>::new();
         let mmr = Mmr::init_sync(context.with_label("mmr"), &mut hasher, mmr_sync_config).await?;
 
-        // Initialize log using init_with_pruned_state
-        let log_config = JConfig {
-            partition: cfg.config.log_journal_partition,
-            items_per_blob: cfg.config.log_items_per_blob,
-            write_buffer: cfg.config.log_write_buffer,
-        };
-        let mut log = Journal::<E, Operation<K, V>>::init_with_pruned_state(
+        // Initialize the log with the pruned state
+        let mut log = Journal::<E, Operation<K, V>>::init_sync(
             context.with_label("log"),
-            log_config,
+            JConfig {
+                partition: cfg.config.log_journal_partition,
+                items_per_blob: cfg.config.log_items_per_blob,
+                write_buffer: cfg.config.log_write_buffer,
+            },
             cfg.pruned_to_loc,
         )
         .await?;
-
-        // Add the log operations after the pruning boundary
         for operation in cfg.operations {
             log.append(operation).await.map_err(Error::JournalError)?;
         }
 
         // Build the snapshot from the log operations
+        let mut snapshot: Index<T, u64> = Index::init(
+            context.with_label("snapshot"),
+            cfg.config.translator.clone(),
+        );
         let start_leaf_num = cfg.pruned_to_loc;
         let inactivity_floor_loc = Self::build_snapshot_from_log(
             start_leaf_num,
@@ -303,7 +256,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         // (it may be higher if there are commit operations in the synced operations)
         assert!(inactivity_floor_loc >= cfg.pruned_to_loc);
 
-        let db = Any {
+        let mut db = Any {
             ops: mmr,
             log,
             snapshot,
@@ -311,6 +264,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             uncommitted_ops: 0,
             hasher,
         };
+        db.sync().await?;
 
         Ok(db)
     }

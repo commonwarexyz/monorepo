@@ -252,7 +252,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
     /// - Blob size would be (25 % 10) * CHUNK_SIZE = 5 * CHUNK_SIZE
     /// - This represents a journal that had operations 0-24, with operations 0-19 pruned away,
     ///   leaving operations 20-24 in blob 2
-    pub async fn init_with_pruned_state(context: E, cfg: Config, size: u64) -> Result<Self, Error> {
+    pub async fn init_sync(context: E, cfg: Config, size: u64) -> Result<Self, Error> {
         // First, clean up any existing blobs in the partition
         let stored_blobs = match context.scan(&cfg.partition).await {
             Ok(blobs) => blobs,
@@ -1412,13 +1412,10 @@ mod tests {
                     write_buffer: 1024,
                 };
 
-                let journal = Journal::<Context, Digest>::init_with_pruned_state(
-                    context.clone(),
-                    cfg.clone(),
-                    0,
-                )
-                .await
-                .expect("Failed to init with pruned state at size 0");
+                let journal =
+                    Journal::<Context, Digest>::init_sync(context.clone(), cfg.clone(), 0)
+                        .await
+                        .expect("Failed to init with pruned state at size 0");
 
                 // Should have size 0 and be ready to accept new items
                 assert_eq!(journal.size().await.unwrap(), 0);
@@ -1441,13 +1438,10 @@ mod tests {
                     write_buffer: 1024,
                 };
 
-                let journal = Journal::<Context, Digest>::init_with_pruned_state(
-                    context.clone(),
-                    cfg.clone(),
-                    3,
-                )
-                .await
-                .expect("Failed to init with pruned state at size 3");
+                let journal =
+                    Journal::<Context, Digest>::init_sync(context.clone(), cfg.clone(), 3)
+                        .await
+                        .expect("Failed to init with pruned state at size 3");
 
                 // Should appear to have 3 items
                 assert_eq!(journal.size().await.unwrap(), 3);
@@ -1473,7 +1467,7 @@ mod tests {
                     write_buffer: 1024,
                 };
 
-                let journal = Journal::<Context, Digest>::init_with_pruned_state(
+                let journal = Journal::<Context, Digest>::init_sync(
                     context.clone(),
                     cfg.clone(),
                     5, // Exactly one full blob
@@ -1503,7 +1497,7 @@ mod tests {
                     write_buffer: 1024,
                 };
 
-                let journal = Journal::<Context, Digest>::init_with_pruned_state(
+                let journal = Journal::<Context, Digest>::init_sync(
                     context.clone(),
                     cfg.clone(),
                     13, // 2 full blobs + 3 items in third blob
@@ -1543,7 +1537,7 @@ mod tests {
 
             // Initialize journal in pruned state as if it had 7 items (next operation goes in blob 2)
             let mut journal =
-                Journal::<Context, Digest>::init_with_pruned_state(context.clone(), cfg.clone(), 7)
+                Journal::<Context, Digest>::init_sync(context.clone(), cfg.clone(), 7)
                     .await
                     .expect("Failed to init with pruned state");
 
@@ -1626,7 +1620,7 @@ mod tests {
 
             // Now initialize with pruned state - this should clean up all existing blobs
             let pruned_journal =
-                Journal::<Context, Digest>::init_with_pruned_state(context.clone(), cfg.clone(), 5)
+                Journal::<Context, Digest>::init_sync(context.clone(), cfg.clone(), 5)
                     .await
                     .expect("Failed to init with pruned state");
 
@@ -1654,7 +1648,7 @@ mod tests {
             };
 
             // Initialize journal in pruned state
-            let mut journal = Journal::<Context, Digest>::init_with_pruned_state(
+            let mut journal = Journal::<Context, Digest>::init_sync(
                 context.clone(),
                 cfg.clone(),
                 6, // 1 full blob + 2 items in second blob

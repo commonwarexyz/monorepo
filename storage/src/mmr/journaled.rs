@@ -246,7 +246,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         };
 
         // Initialize journal in pruned state to match the target
-        let journal = Journal::<E, H::Digest>::init_with_pruned_state(
+        let journal = Journal::<E, H::Digest>::init_sync(
             context.with_label("mmr_journal"),
             journal_cfg,
             cfg.pruned_to_pos,
