@@ -33,13 +33,9 @@ runs:
           ~/.cargo/bin/cargo-cache
           ~/AppData/Local/cargo/bin/cargo-cache.exe
         key: ${{ runner.os }}-cargo-cache-${{ steps.rust-version.outputs.rust_version }}
-    - name: Install cargo-cache if not cached
-      if: steps.cargo-cache-cache.outputs.cache-hit != 'true'
-      shell: bash
-      run: cargo install cargo-cache
     - name: Maintain cargo cache
+      continue-on-error: true
       shell: bash
       run: |
-        if command -v cargo-cache &> /dev/null; then
-          cargo cache --autoclean
-        fi
+        cargo install cargo-cache
+        cargo cache --autoclean
