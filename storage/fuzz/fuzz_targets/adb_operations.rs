@@ -21,6 +21,7 @@ enum AdbOperation {
     Delete { key: RawKey },
     Commit,
     OpCount,
+    OldestRetainedLoC,
     Get { key: RawKey },
 }
 #[derive(Arbitrary, Debug)]
@@ -90,9 +91,13 @@ fuzz_target!(|data: FuzzData| {
                     }
                     // If result is None, it was a no-op (key didn't exist)
                 }
-                
+
                 AdbOperation::OpCount => {
                     adb.op_count();
+                }
+
+                AdbOperation::OldestRetainedLoC => {
+                    adb.oldest_retained_loc();
                 }
 
                 AdbOperation::Commit => {
