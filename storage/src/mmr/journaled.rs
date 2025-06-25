@@ -207,6 +207,95 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         Ok(s)
     }
 
+    /// Initialize a new `Mmr` instance.
+    /// Initialize a new `Mmr` instance in a synced state, matching a target database that has been pruned.
+    ///
+    /// # Parameters
+    ///
+    /// * `pinned_nodes` - HashMap containing the pinned nodes needed for proof generation
+    /// * `pruned_to_pos` - The position up to which elements have been pruned (first non-pruned element index)
+    /// * `operations` - The operations (digests) to be applied after the pruning boundary
+    pub async fn init_sync(
+        context: E,
+        hasher: &mut impl Hasher<H>,
+        cfg: Config,
+        pinned_nodes: HashMap<u64, H::Digest>,
+        pruned_to_pos: u64,
+        operations: Vec<H::Digest>,
+    ) -> Result<Self, Error> {
+        let journal_cfg = JConfig {
+            partition: cfg.journal_partition,
+            items_per_blob: cfg.items_per_blob,
+            write_buffer: cfg.write_buffer,
+        };
+
+        // Initialize journal in pruned state to match the target
+        let mut journal = Journal::<E, H::Digest>::init_with_pruned_state(
+            context.with_label("mmr_journal"),
+            journal_cfg,
+            pruned_to_pos,
+        )
+        .await?;
+
+        // Add the operations to the journal
+        for operation in &operations {
+            journal.append(*operation).await?;
+        }
+
+        // Set up metadata
+        let metadata_cfg = MConfig {
+            partition: cfg.metadata_partition,
+        };
+        // TODO danlaine: wipe old metadata.
+        let mut metadata = Metadata::init(context.with_label("mmr_metadata"), metadata_cfg).await?;
+
+        // Store the pinned nodes in metadata
+        for (pos, digest) in &pinned_nodes {
+            let key = U64::new(NODE_PREFIX, *pos);
+            metadata.put(key, digest.to_vec());
+        }
+
+        // Store the pruning boundary in metadata
+        let prune_key: U64 = U64::new(PRUNE_TO_POS_PREFIX, 0);
+        metadata.put(prune_key, pruned_to_pos.to_be_bytes().into());
+
+        // Sync metadata to ensure it's persisted
+        metadata.sync().await.map_err(Error::MetadataError)?;
+
+        let operations_count = operations.len() as u64;
+
+        // Convert pinned_nodes HashMap to Vec in the order expected by nodes_to_pin
+        // We need to use the total size to get all pinned nodes
+        let total_size = pruned_to_pos + operations_count;
+        let mut pinned_nodes_vec = Vec::new();
+        for pos in Proof::<H>::nodes_to_pin(total_size) {
+            if let Some(digest) = pinned_nodes.get(&pos) {
+                pinned_nodes_vec.push(*digest);
+            } else {
+                return Err(Error::MissingNode(pos));
+            }
+        }
+
+        // The memory MMR should be in "prune_all" state after sync
+        // All retained nodes are in the journal, pinned nodes are in pinned_nodes
+        let total_size = pruned_to_pos + operations_count;
+        let mut mem_mmr = MemMmr::init(MemConfig {
+            nodes: vec![],             // All nodes are "pruned" from memory MMR perspective
+            pruned_to_pos: total_size, // Everything is considered pruned
+            pinned_nodes: pinned_nodes_vec,
+            pool: cfg.pool,
+        });
+        mem_mmr.sync(hasher);
+
+        Ok(Self {
+            mem_mmr,
+            journal,
+            journal_size: total_size,
+            metadata,
+            pruned_to_pos,
+        })
+    }
+
     /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
     /// element's position will have this value.
     pub fn size(&self) -> u64 {
@@ -1016,6 +1105,125 @@ mod tests {
                 .await
                 .unwrap();
             mmr.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journaled_mmr_init_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            // First, create a regular MMR and add some elements
+            let mut source_mmr = Mmr::init(context.clone(), &mut hasher, test_config())
+                .await
+                .unwrap();
+
+            // Add 10 elements
+            for i in 0..10 {
+                source_mmr
+                    .add(&mut hasher, &test_digest(i).to_vec())
+                    .await
+                    .unwrap();
+            }
+            source_mmr.sync(&mut hasher).await.unwrap();
+
+            // Prune to position 5 (keeping elements 5-9)
+            source_mmr.prune_to_pos(&mut hasher, 5).await.unwrap();
+            let source_root = source_mmr.root(&mut hasher);
+            let source_size = source_mmr.size();
+
+            // Get the pinned nodes and operations from the source
+            let pinned_nodes = source_mmr.mem_mmr.pinned_nodes.clone();
+
+            // We need to extract the operations that were actually added to the journal
+            // These are the digests that were appended to the journal after the pruning boundary
+            let mut operations = Vec::new();
+            if let Some(start_pos) = source_mmr.oldest_retained_pos() {
+                for i in start_pos..source_mmr.journal_size {
+                    if let Ok(node) = source_mmr.journal.read(i).await {
+                        operations.push(node);
+                    }
+                }
+            }
+
+            // Store expected nodes for comparison
+            let mut expected_nodes = HashMap::new();
+            for i in 5..source_size {
+                if let Ok(Some(node)) = source_mmr.get_node(i).await {
+                    expected_nodes.insert(i, node);
+                }
+            }
+
+            source_mmr.destroy().await.unwrap();
+
+            // Now create a new MMR using init_sync
+            let mut synced_config = test_config();
+            synced_config.journal_partition = "sync_journal_partition".into();
+            synced_config.metadata_partition = "sync_metadata_partition".into();
+            let synced_mmr = Mmr::init_sync(
+                context.clone(),
+                &mut hasher,
+                synced_config,
+                pinned_nodes,
+                5, // pruned_to_pos
+                operations.clone(),
+            )
+            .await
+            .unwrap();
+
+            // Verify the synced MMR has the same root and properties
+            let synced_root = synced_mmr.root(&mut hasher);
+            assert_eq!(source_root, synced_root);
+            assert_eq!(synced_mmr.size(), source_size);
+            assert_eq!(synced_mmr.pruned_to_pos(), 5);
+
+            // More rigorous test: try to access individual nodes
+            for i in 5..source_size {
+                let expected_node = expected_nodes.get(&i);
+                let synced_node = synced_mmr.get_node(i).await.unwrap();
+                if let Some(expected) = expected_node {
+                    assert_eq!(
+                        Some(expected),
+                        synced_node.as_ref(),
+                        "Node at position {} doesn't match",
+                        i
+                    );
+                } else {
+                    assert_eq!(
+                        None, synced_node,
+                        "Expected no node at position {} but found one",
+                        i
+                    );
+                }
+            }
+
+            // Test that we can generate proofs
+            if let Some(last_leaf_pos) = synced_mmr.last_leaf_pos() {
+                let _proof = synced_mmr.proof(last_leaf_pos).await.unwrap();
+            }
+
+            // Test journal size - this should match pruned_to_pos + operations
+            let expected_journal_size = synced_mmr.pruned_to_pos() + operations.len() as u64;
+            assert_eq!(
+                synced_mmr.journal.size().await.unwrap(),
+                expected_journal_size
+            );
+
+            // Test that we can read operations from the journal
+            // Operations start at pruned_to_pos in the journal
+            let start_pos = synced_mmr.pruned_to_pos();
+            for (i, expected_op) in operations.iter().enumerate() {
+                let journal_pos = start_pos + i as u64;
+                let stored_op = synced_mmr.journal.read(journal_pos).await.unwrap();
+                assert_eq!(
+                    &stored_op, expected_op,
+                    "Operation at journal position {} doesn't match",
+                    journal_pos
+                );
+            }
+
+            synced_mmr.destroy().await.unwrap();
         });
     }
 }
