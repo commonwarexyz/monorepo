@@ -338,7 +338,7 @@ cfg_if::cfg_if! {
     if #[cfg(feature = "iouring-storage")] {
         type Storage = MeteredStorage<IoUringStorage>;
     } else {
-        type Storage = MeteredStorage<crate::storage::tokio::Storage>;
+        type Storage = MeteredStorage<TokioStorage>;
     }
 }
 
