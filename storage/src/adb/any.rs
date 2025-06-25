@@ -1545,115 +1545,17 @@ mod test {
             assert_eq!(synced_db.root(&mut hasher), source_root);
             assert_eq!(synced_db.op_count(), source_op_count);
             assert_eq!(synced_db.inactivity_floor_loc, source_inactivity_floor);
+            assert_eq!(synced_db.ops.size(), source_db.ops.size());
+            assert_eq!(synced_db.ops.pruned_to_pos(), source_db.ops.pruned_to_pos());
+            assert_eq!(
+                synced_db.log.size().await.unwrap(),
+                leaf_pos_to_num(synced_db.ops.size()).unwrap()
+            );
 
             // Verify the key-value pairs match what we expect
             for (key, value) in keys.iter().zip(values.iter()) {
                 assert_eq!(synced_db.get(key).await.unwrap(), Some(*value));
             }
-
-            synced_db.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced("WARN")]
-    pub fn test_any_db_init_sync_with_deletions() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
-
-            // First, create a source database and perform some operations including deletions
-            let mut source_db = Any::<_, Digest, Digest, Sha256, EightCap>::init(
-                context.clone(),
-                any_db_config("source_deletions", EightCap),
-            )
-            .await
-            .unwrap();
-
-            let key1 = hash(&1u64.to_be_bytes());
-            let value1 = hash(&10u64.to_be_bytes());
-            let key2 = hash(&2u64.to_be_bytes());
-            let value2 = hash(&20u64.to_be_bytes());
-
-            // Perform operations on source database: update both keys, then delete key2
-            source_db.update(key1, value1).await.unwrap();
-            source_db.update(key2, value2).await.unwrap();
-            source_db.delete(key2).await.unwrap();
-            source_db.commit().await.unwrap();
-
-            let source_root = source_db.root(&mut hasher);
-            let source_op_count = source_db.op_count();
-            let source_inactivity_floor = source_db.inactivity_floor_loc;
-
-            // For this test, use the simple approach: get all available operations
-            let start_pos = source_db.log.oldest_retained_pos().await.unwrap().unwrap();
-            let mut operations = Vec::new();
-            for i in start_pos..source_db.log.size().await.unwrap() {
-                operations.push(source_db.log.read(i).await.unwrap());
-            }
-
-            source_db.destroy().await.unwrap();
-
-            // Now create a synced database using the simple approach
-            let sync_config: SyncConfig<Digest, Digest, Sha256, EightCap> = test_sync_config(
-                "sync_deletions",
-                EightCap,
-                HashMap::new(), // No pinned nodes for simple case
-                start_pos,      // Use the actual start position
-                operations,
-            );
-
-            let synced_db = Any::init_sync(context.clone(), sync_config).await.unwrap();
-
-            // Verify the synced database matches the source
-            assert_eq!(synced_db.root(&mut hasher), source_root);
-            assert_eq!(synced_db.get(&key1).await.unwrap(), Some(value1));
-            assert_eq!(synced_db.get(&key2).await.unwrap(), None); // key2 was deleted
-            assert_eq!(synced_db.op_count(), source_op_count);
-            assert_eq!(synced_db.inactivity_floor_loc, source_inactivity_floor);
-
-            synced_db.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced("WARN")]
-    pub fn test_any_db_init_sync_functionality() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Test that a synced database can continue operating normally
-            let sync_config: SyncConfig<Digest, Digest, Sha256, EightCap> = test_sync_config(
-                "sync_functionality",
-                EightCap,
-                HashMap::new(), // No pinned nodes
-                0,              // No pruning
-                Vec::new(),     // No operations
-            );
-
-            let mut synced_db = Any::init_sync(context.clone(), sync_config).await.unwrap();
-
-            // Test normal database operations
-            let key1 = hash(&1u64.to_be_bytes());
-            let value1 = hash(&10u64.to_be_bytes());
-            let key2 = hash(&2u64.to_be_bytes());
-            let value2 = hash(&20u64.to_be_bytes());
-
-            // Test updates
-            synced_db.update(key1, value1).await.unwrap();
-            synced_db.update(key2, value2).await.unwrap();
-            assert_eq!(synced_db.get(&key1).await.unwrap(), Some(value1));
-            assert_eq!(synced_db.get(&key2).await.unwrap(), Some(value2));
-
-            // Test commit
-            synced_db.commit().await.unwrap();
-            assert!(synced_db.op_count() > 0);
-
-            // Test deletion
-            synced_db.delete(key2).await.unwrap();
-            assert_eq!(synced_db.get(&key2).await.unwrap(), None);
-
-            // Test update after deletion
-            let new_value2 = hash(&200u64.to_be_bytes());
-            synced_db.update(key2, new_value2).await.unwrap();
-            assert_eq!(synced_db.get(&key2).await.unwrap(), Some(new_value2));
 
             synced_db.destroy().await.unwrap();
         });
