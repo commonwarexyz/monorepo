@@ -37,7 +37,7 @@ struct FuzzData {
 }
 
 fuzz_target!(|data: FuzzData| {
-    if data.operations.is_empty() || data.operations.len() > 13 {
+    if data.operations.is_empty() || data.operations.len() > 106 {
         return;
     }
     let runner = deterministic::Runner::default();
@@ -48,7 +48,7 @@ fuzz_target!(|data: FuzzData| {
             section_mask: 0xffff_ffff_ffff_ff00u64,
             pending_writes: 1000, // Flush after 1000 writes
             write_buffer: 1024,
-            translator: EightCap::default(),
+            translator: EightCap,
             replay_buffer: 1024*1024,
             compression: None,
             codec_config: (),
@@ -78,14 +78,14 @@ fuzz_target!(|data: FuzzData| {
                             continue;
                         }
                     }
-                    let key = Key::new(key_data.clone());
-                    let value = Value::new(value_data.clone());
+                    let key = Key::new(*key_data);
+                    let value = Value::new(*value_data);
 
                     // Put the item into the archive
                     archive.put(*index, key, value).await.expect("put failed");
                     // Only add if not already written (Archive doesn't allow overwrites)
                     if !written_indices.contains(index) {
-                        items.push((*index, key_data.clone(), value_data.clone()));
+                        items.push((*index, *key_data, *value_data));
                         written_indices.insert(*index);
                     }
                 }
@@ -111,8 +111,7 @@ fuzz_target!(|data: FuzzData| {
                             // Check that the value matches what we expect
                             assert_eq!(
                                 value_bytes, expected_value,
-                                "Value mismatch for index {}",
-                                index
+                                "Value mismatch for index {index}",
                             );
                         }
                     } else {
@@ -122,7 +121,7 @@ fuzz_target!(|data: FuzzData| {
                 }
 
                 ArchiveOperation::GetByKey(key_data) => {
-                    let key = Key::new(key_data.clone());
+                    let key = Key::new(*key_data);
                     let result = archive.get(Identifier::Key(&key)).await;
 
                     // Verify the result against our tracked items
@@ -132,7 +131,7 @@ fuzz_target!(|data: FuzzData| {
                         // We need to check if ANY key in our tracked items could have produced this result.
 
                         // The translator is available in the config
-                        let translator = EightCap::default();
+                        let translator = EightCap;
                         let translated_key = translator.transform(&key_data[..]);
 
                         // Find all items whose keys translate to the same value
@@ -159,55 +158,47 @@ fuzz_target!(|data: FuzzData| {
                             let value_found =
                                 possible_matches.iter().any(|(_, _, v)| v == value_bytes);
                             if !value_found {
-                                // This can happen if:
-                                // 1. Archive allows overwrites and a different key with same hash overwrote the value
-                                // 2. Archive has data from previous runs that we didn't track
-                                // 3. Complex interactions between hash collisions and storage state
-                                panic!("Warning: Got unexpected value for key {:?} - possible overwrite or collision", key_data);
+                                panic!("Warning: Got unexpected value for key {key_data:?} - possible overwrite or collision");
                             }
                         } else {
-                            // This could happen due to hash collisions with keys inserted before pruning
-                            // or with keys we haven't tracked. Since we can't definitively say this is
-                            // wrong, we should just accept it.
-                            // The archive is working correctly if it returns a value for a key that
-                            // hashes to the same value as our query key.
+                            panic!("Warning: Got unexpected value for key {key_data:?}");
                         }
                     } else {
                         // then we also should not have that key
-                        assert!(items.iter().find(|(_, k, _)| *k == *key).is_none());
-
+                        assert!(!items.iter().any(|(_, k, _)| *k == *key));
                     }
                 }
 
                 ArchiveOperation::HasByKey(key_data) => {
-                    let key = Key::new(key_data.clone());
+                    let key = Key::new(*key_data);
                     let result = archive.has(Identifier::Key(&key)).await;
                     let our_result = items.iter().find(|(_, k, _)| *k == *key);
 
                     // Verify the result against our tracked items
                     if let Ok(has) = result {
+                        //println!("items {:?}", items);
                         if has {
-                            assert!(our_result.is_some(), "stub archive doesn't have key {:?} that we added", key_data);
+                            assert!(our_result.is_some(), "stub archive doesn't have key {key_data:?} that we added");
                         } else {
-                            assert!(our_result.is_none(), "Archive doesn't have key {:?} that we added", key_data);
+                            assert!(our_result.is_none(), "Archive doesn't have key {key_data:?} that we added");
                         }
                     }
                 }
 
                 ArchiveOperation::Prune(min) => {
-                    archive.prune(*min).await.expect("prune failed");
+                    let min = cfg.section_mask & min;
+                    archive.prune(min).await.expect("prune failed");
                     match oldest_allowed {
                         None => {
-                            oldest_allowed = Some(*min);
-                            items.retain(|(i, _, _)| *i >= *min);
-                            written_indices.retain(|i| *i >= *min);
+                            oldest_allowed = Some(min);
+                            items.retain(|(i, _, _)| *i >= min);
+                            written_indices.retain(|i| *i >= min);
                         }
                         Some(already_pruned) => {
-                            if *min > already_pruned {
-                                oldest_allowed = Some(*min);
-                                
-                                items.retain(|(i, _, _)| *i >= *min);
-                                written_indices.retain(|i| *i >= *min);
+                            if min > already_pruned {
+                                oldest_allowed = Some(min);
+                                items.retain(|(i, _, _)| *i >= min);
+                                written_indices.retain(|i| *i >= min);
                             }
                         }
                     }
@@ -218,24 +209,23 @@ fuzz_target!(|data: FuzzData| {
                 }
 
                 ArchiveOperation::NextGap { start } => {
-                    continue;
                     let (gap, next_written) = archive.next_gap(*start);
 
                     if let Some(gap_index) = gap {
                         // Gap should be at or after start
-                        assert!(gap_index >= *start, "Gap {} before requested start {}", gap_index, start);
+                        assert!(gap_index >= *start, "Gap {gap_index} before requested start {start}");
 
                         // If pruned, gap should be above threshold
                         if let Some(threshold) = oldest_allowed {
                             if gap_index < threshold {
-                                eprintln!("Warning: next_gap returned gap {} below pruning threshold {}", gap_index, threshold);
+                                panic!("Warning: next_gap returned gap {gap_index} below pruning threshold {threshold}");
                             }
                         }
                     }
 
                     if let Some(next_index) = next_written {
                         if next_index < *start {
-                            eprintln!("Warning: next_written {} is before start {}", next_index, start);
+                            panic!("Warning: next_written {next_index} is before start {start}");
                         }
                     }
                 }
@@ -246,7 +236,7 @@ fuzz_target!(|data: FuzzData| {
 
         let total_items = items.len();
         let total_written = written_indices.len();
-        assert_eq!(total_items, total_written, "Items count {} doesn't match written indices count {}", total_items, total_written);
+        assert_eq!(total_items, total_written, "Items count {total_items} doesn't match written indices count {total_written}");
 
         archive.close().await.expect("Archive operation closed unexpectedly");
     });
