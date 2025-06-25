@@ -337,19 +337,19 @@ impl<D: Digest> Proof<D> {
     }
 }
 
-async fn peak_digest_from_range<'a, InnerHasher, H: Hasher<InnerHasher>, I, S>(
+async fn peak_digest_from_range<'a, I, H: Hasher<I>, E, S>(
     hasher: &mut H,
     pos: u64,           // current node position in the tree
     two_h: u64,         // 2^height of the current node
     leftmost_pos: u64,  // leftmost leaf in the tree to be traversed
     rightmost_pos: u64, // rightmost leaf in the tree to be traversed
-    elements: &mut I,
+    elements: &mut E,
     sibling_digests: &mut S,
-) -> Result<InnerHasher::Digest, Error>
+) -> Result<I::Digest, Error>
 where
-    InnerHasher: CHasher,
-    I: Iterator<Item: AsRef<[u8]>>,
-    S: Iterator<Item = &'a InnerHasher::Digest>,
+    I: CHasher,
+    E: Iterator<Item: AsRef<[u8]>>,
+    S: Iterator<Item = &'a I::Digest>,
 {
     assert_ne!(two_h, 0);
     if two_h == 1 {
@@ -360,8 +360,8 @@ where
         }
     }
 
-    let mut left_digest: Option<InnerHasher::Digest> = None;
-    let mut right_digest: Option<InnerHasher::Digest> = None;
+    let mut left_digest: Option<I::Digest> = None;
+    let mut right_digest: Option<I::Digest> = None;
 
     let left_pos = pos - two_h;
     let right_pos = left_pos + two_h - 1;
@@ -412,10 +412,10 @@ where
 mod tests {
     use super::*;
     use crate::mmr::{hasher::Standard, mem::Mmr};
-    use commonware_cryptography::{hash, sha256, Sha256};
+    use commonware_cryptography::{hash, sha256::Digest, Sha256};
     use commonware_runtime::{deterministic, Runner};
 
-    fn test_digest(v: u8) -> sha256::Digest {
+    fn test_digest(v: u8) -> Digest {
         hash(&[v])
     }
 
@@ -425,7 +425,7 @@ mod tests {
         executor.start(|_| async move {
             // create an 11 element MMR over which we'll test single-element inclusion proofs
             let mut mmr = Mmr::new();
-            let element = sha256::Digest::from(*b"01234567012345670123456701234567");
+            let element = Digest::from(*b"01234567012345670123456701234567");
             let mut leaves: Vec<u64> = Vec::new();
             let mut hasher: Standard<Sha256> = Standard::new();
             for _ in 0..11 {
@@ -436,7 +436,7 @@ mod tests {
 
             // confirm the proof of inclusion for each leaf successfully verifies
             for leaf in leaves.iter().by_ref() {
-                let proof: Proof<sha256::Digest> = mmr.proof(*leaf).await.unwrap();
+                let proof: Proof<Digest> = mmr.proof(*leaf).await.unwrap();
                 assert!(
                     proof
                         .verify_element_inclusion(&mut hasher, &element, *leaf, &root_digest)
@@ -859,7 +859,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             assert_eq!(
-                Proof::<sha256::Digest>::max_serialization_size(),
+                Proof::<Digest>::max_serialization_size(),
                 8168,
                 "wrong max serialization size of a Sha256 proof"
             );
@@ -882,8 +882,7 @@ mod tests {
                     let proof = mmr.range_proof(start_pos, end_pos).await.unwrap();
 
                     let mut serialized_proof = proof.serialize();
-                    let deserialized_proof =
-                        Proof::<sha256::Digest>::deserialize(&serialized_proof);
+                    let deserialized_proof = Proof::<Digest>::deserialize(&serialized_proof);
                     assert!(deserialized_proof.is_some(), "proof didn't deserialize");
                     assert_eq!(
                         proof,
@@ -891,7 +890,7 @@ mod tests {
                         "deserialized proof should match source proof"
                     );
 
-                    let deserialized_truncated = Proof::<sha256::Digest>::deserialize(
+                    let deserialized_truncated = Proof::<Digest>::deserialize(
                         &serialized_proof[0..serialized_proof.len() - 1],
                     );
                     assert!(
@@ -901,7 +900,7 @@ mod tests {
 
                     serialized_proof.push(i as u8);
                     assert!(
-                        Proof::<sha256::Digest>::deserialize(&serialized_proof).is_none(),
+                        Proof::<Digest>::deserialize(&serialized_proof).is_none(),
                         "proof should not deserialize with extra data"
                     );
                 }
