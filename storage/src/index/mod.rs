@@ -258,6 +258,34 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_index_mutate_middle_of_four_through_iterator() {
+        let context = deterministic::Context::default();
+        let mut index = Index::init(context, TwoCap);
+
+        index.insert(b"key", 1);
+        index.insert(b"key", 2);
+        index.insert(b"key", 3);
+        index.insert(b"key", 4);
+
+        let mut values = index.get(b"key").copied().collect::<Vec<_>>();
+        values.sort();
+        assert_eq!(values, vec![1, 2, 3, 4]);
+
+        {
+            let mut cursor = index.get_mut(b"key").unwrap();
+            assert_eq!(*cursor.next().unwrap(), 1);
+            assert_eq!(*cursor.next().unwrap(), 4);
+            let old = *cursor.next().unwrap();
+            assert_eq!(old, 3);
+            cursor.update(99);
+        }
+
+        let mut values = index.get(b"key").copied().collect::<Vec<_>>();
+        values.sort();
+        assert_eq!(values, vec![1, 2, 4, 99]);
+    }
+
+    #[test_traced]
     fn test_index_remove_through_iterator() {
         let context = deterministic::Context::default();
         let mut index = Index::init(context.clone(), TwoCap);
