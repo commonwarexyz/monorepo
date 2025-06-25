@@ -21,6 +21,7 @@
 //! and the **listener** receives this connection. The protocol works as follows:
 //!
 //! ### Message 1: Dialer → Listener (Initial Handshake)
+//!
 //! Upon establishing a TCP connection, the dialer sends a signed handshake message to the listener.
 //! This message contains the dialer's signature and static public key, plus:
 //!
@@ -29,6 +30,7 @@
 //! - The current timestamp (for replay attack prevention)
 //!
 //! ### Message 2: Listener → Dialer (Response with Key Confirmation)
+//!
 //! The listener verifies:
 //! - Public keys are well-formatted
 //! - Timestamp is valid (not too old, not too far in the future)
@@ -43,6 +45,7 @@
 //! 4. Sends back a `ListenerResponse` containing both the signed handshake and key confirmation
 //!
 //! ### Message 3: Dialer → Listener (Final Confirmation)
+//!
 //! The dialer:
 //!
 //! 1. Verifies the listener's signed handshake message
@@ -52,6 +55,7 @@
 //! 5. Sends the key confirmation to complete mutual authentication
 //!
 //! ### Security Properties
+//!
 //! This protocol provides:
 //!
 //! - **Mutual Authentication**: Both parties prove knowledge of their static private keys through
@@ -62,14 +66,14 @@
 //! - **Forward Secrecy**: Ephemeral keys ensure compromise of long-term static keys doesn't affect past
 //!   or future sessions
 //!
-//! A configurable deadline is enforced for handshake completion to protect against DOS attacks by
+//! A configurable deadline is enforced for handshake completion to protect against DoS attacks by
 //! malicious peers that create connections but abandon handshakes.
 //!
 //! ## Encryption
 //!
 //! During the handshake, a shared X25519 secret is established using
 //! Diffie-Hellman key exchange. This secret is combined with the handshake
-//! transcript to derive separate ChaCha20-Poly1305 ciphers:
+//! transcript to derive four separate ChaCha20-Poly1305 ciphers:
 //!
 //! - **Confirmation Ciphers**: One cipher per direction for key confirmation during the handshake
 //! - **Traffic Ciphers**: One cipher per direction for encrypting post-handshake traffic
@@ -81,10 +85,10 @@
 //! Each direction of communication uses a 12-byte nonce derived from a counter that is
 //! incremented for each message sent. This provides a maximum of 2^96 messages per sender,
 //! which would be sufficient for over 2.5 trillion years of continuous communication at a rate of
-//! 1 billion messages per second—sufficient for all practical use cases. This
-//! approach ensures that well-behaving peers can remain connected
-//! indefinitely as long as they both stay online (maximizing p2p network stability). In the unlikely case of
-//! counter overflow, a new connection should be established.
+//! 1 billion messages per second—sufficient for all practical use cases. This approach ensures that
+//! well-behaving peers can remain connected indefinitely as long as they both stay online
+//! (maximizing p2p network stability). In the unlikely case of counter overflow, the connection
+//! will be terminated and a new connection should be established.
 //!
 //! This prevents nonce reuse (which would compromise message confidentiality)
 //! and saves bandwidth (as there is no need to transmit nonces alongside encrypted messages).

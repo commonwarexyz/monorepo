@@ -268,15 +268,15 @@ pub struct ListenerResponse<C: PublicKey> {
     handshake: Signed<C>,
 
     /// Key confirmation that the listener can derive the shared secret
-    key_confirmation: KeyConfirmation,
+    confirmation: KeyConfirmation,
 }
 
 impl<C: PublicKey> ListenerResponse<C> {
     /// Create a new listener response with the given handshake and key confirmation.
-    pub fn new(handshake: Signed<C>, key_confirmation: KeyConfirmation) -> Self {
+    pub fn new(handshake: Signed<C>, confirmation: KeyConfirmation) -> Self {
         Self {
             handshake,
-            key_confirmation,
+            confirmation,
         }
     }
 
@@ -285,14 +285,14 @@ impl<C: PublicKey> ListenerResponse<C> {
     /// This consumes the response and returns its constituent parts,
     /// which is useful during the handshake verification process.
     pub fn into_parts(self) -> (Signed<C>, KeyConfirmation) {
-        (self.handshake, self.key_confirmation)
+        (self.handshake, self.confirmation)
     }
 }
 
 impl<C: PublicKey> Write for ListenerResponse<C> {
     fn write(&self, buf: &mut impl BufMut) {
         self.handshake.write(buf);
-        self.key_confirmation.write(buf);
+        self.confirmation.write(buf);
     }
 }
 
@@ -301,17 +301,17 @@ impl<C: PublicKey> Read for ListenerResponse<C> {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let handshake = Signed::read(buf)?;
-        let key_confirmation = KeyConfirmation::read(buf)?;
+        let confirmation = KeyConfirmation::read(buf)?;
         Ok(Self {
             handshake,
-            key_confirmation,
+            confirmation,
         })
     }
 }
 
 impl<C: PublicKey> EncodeSize for ListenerResponse<C> {
     fn encode_size(&self) -> usize {
-        self.handshake.encode_size() + self.key_confirmation.encode_size()
+        self.handshake.encode_size() + self.confirmation.encode_size()
     }
 }
 

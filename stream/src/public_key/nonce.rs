@@ -3,28 +3,21 @@ use chacha20poly1305::Nonce;
 
 /// A struct that holds the nonce information for ChaCha20-Poly1305 encryption.
 ///
-/// This struct manages a 96-bit counter that is used to generate unique nonces
-/// for each message. The counter can be incremented up to 2^96 times before
-/// overflowing, providing sufficient nonces for practical use cases.
-///
-/// # Security
-///
 /// Nonce reuse with the same key would allow an attacker to decrypt messages
-/// or forge authentication tags. This implementation prevents reuse by:
-/// - Using a monotonically increasing counter
-/// - Preventing overflow back to zero
-/// - Returning errors when the counter would overflow
+/// or forge authentication tags. This struct prevents nonce reuse by using a
+/// 12 byte counter that is used to generate unique nonces for each message.
+/// The counter can be incremented up to 2^(12 * 8) times before overflowing,
+/// providing sufficient nonces for practical use cases.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Info {
     counter: u128,
 }
 
-/// Maximum valid counter value before overflow (2^96).
+/// Maximum valid counter value before overflow.
 ///
-/// If the counter reaches this value, it is considered to have overflowed
-/// the 96-bit nonce space. This prevents wrapping back to zero which would
-/// cause nonce reuse.
-const OVERFLOW_VALUE: u128 = 1 << 96;
+/// If the counter reaches this value, it has overflowed the 12 byte nonce space.
+/// This prevents wrapping back to zero which would cause nonce reuse.
+const OVERFLOW_VALUE: u128 = 1 << (12 * 8);
 
 impl Info {
     /// Encodes the nonce information into a 12-byte array and increments the nonce by 1 (to prevent
@@ -39,7 +32,7 @@ impl Info {
 
     /// Increments the nonce by 1.
     ///
-    /// Silently fails (does not increment) once the nonce has already overflowed 96 bits. This
+    /// Silently fails (does not increment) once the nonce has already overflowed 12 bytes. This
     /// prevents the nonce from overflowing back to 0.
     fn inc(&mut self) {
         // If the nonce has already overflowed, do not increment it.
@@ -55,7 +48,7 @@ impl Info {
     ///
     /// An error is returned if-and-only-if the nonce has overflowed 12 bytes.
     fn encode(&self) -> Result<Nonce, Error> {
-        // Check for overflow over 96 bits (12 bytes)
+        // Check for overflow over 12 bytes
         if self.counter >= OVERFLOW_VALUE {
             return Err(Error::NonceOverflow);
         }
@@ -66,7 +59,7 @@ impl Info {
         // The output is a 12-byte array
         let mut result = Nonce::default();
 
-        // Copy the least-significant 12 bytes (96 bits)
+        // Copy the least-significant 12 bytes
         result.copy_from_slice(&bytes[4..16]);
         Ok(result)
     }
@@ -137,7 +130,7 @@ mod tests {
         let result = nonce.next();
         assert!(result.is_ok());
 
-        // Verify the nonce was encoded correctly (should be the max 96-bit value)
+        // Verify the nonce was encoded correctly (should be the max 12-byte value)
         let encoded = result.unwrap();
         let expected = [0xFF; 12]; // All bits set in 12 bytes
         assert_eq!(encoded[..], expected[..]);
