@@ -25,7 +25,7 @@
 //!
 //! ### Message 1: Dialer → Listener (Initial Handshake)
 //! Upon forming a TCP connection, the dialer sends a signed handshake message to the listener.
-//! Besides the signature and the public key of the dialer, the handshake message contains:
+//! Besides the signature and the static public key of the dialer, the handshake message contains:
 //!
 //! - The receiver's public key.
 //! - The sender's ephemeral public key (used to establish a shared secret).
@@ -37,8 +37,10 @@
 //! this peer. If it is, it drops the connection. If it isn't, the listener:
 //!
 //! 1. Creates its own signed handshake message (same format as above)
-//! 2. Derives the shared secret from the ephemeral keys
-//! 3. Creates a key confirmation by encrypting the complete handshake transcript using the derived shared secret
+//! 2. Computes the X25519 Diffie-Hellman shared secret using our newly generated ephemeral private
+//!    key and the peer's ephemeral public key.
+//! 3. Creates a key confirmation by encrypting the complete handshake transcript using the
+//!    confirmation key derived from the shared secret.
 //! 4. Sends back a `ListenerResponse` containing both the signed handshake and key confirmation
 //!
 //! This key confirmation serves as cryptographic proof that the listener can correctly derive the shared secret,
@@ -48,8 +50,10 @@
 //! Upon receiving the listener's response, the dialer:
 //!
 //! 1. Verifies the listener's signed handshake message (same checks as the listener performed)
-//! 2. Additionally verifies that the public key returned matches what they expected at the address
-//! 3. Derives the shared secret and verifies the listener's key confirmation
+//! 2. Additionally verifies that the static public key returned matches what they expected at the address
+//! 3. Computes the X25519 Diffie-Hellman shared secret using its ephemeral private key and the
+//!    listener’s ephemeral public key. Derives the key confirmation keys and verifies the
+//!    listener's key confirmation message.
 //! 4. Creates its own key confirmation using the same handshake transcript
 //! 5. Sends the key confirmation to the listener to complete mutual authentication
 //!
@@ -59,11 +63,13 @@
 //! ### Security Properties
 //! This 3-message protocol provides several important security properties:
 //!
-//! - **Mutual Authentication**: Both parties prove knowledge of their private keys through signatures
+//! - **Mutual Authentication**: Both parties prove knowledge of their static private keys through
+//!   signatures
 //! - **Key Confirmation**: Both parties prove they can derive the correct shared secret
 //! - **Transcript Binding**: Key confirmations are bound to the complete handshake exchange
 //! - **Replay Protection**: Timestamps prevent reuse of old handshake messages
-//! - **Forward Secrecy**: Ephemeral keys ensure compromise of long-term keys doesn't affect past sessions
+//! - **Forward Secrecy**: Ephemeral keys ensure compromise of long-term keys doesn't affect past
+//!   sessions
 //!
 //! To better protect against malicious peers that create and/or accept connections but do not participate in handshakes,
 //! a configurable deadline is enforced for any handshake to be completed. This allows for the underlying runtime to maintain
