@@ -242,3 +242,64 @@ summary.function-title {
     color: -webkit-link;
     text-decoration: underline;
 }
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 20px 0;
+}
+
+table th,
+table td {
+    text-align: left;
+    padding: 8px;
+    border: 1px solid #ddd;
+}
+
+table th {
+    background-color: #f5f5f5;
+    font-weight: bold;
+}
+
+table tr:nth-child(even) {
+    background-color: #f9f9f9;
+}
+
+pre {
+    background-color: #f5f5f5;
+    padding: 15px;
+    overflow-x: auto;
+    margin: 15px 0;
+    font-family: 'Consolas', monospace;
+    font-size: 0.9em;
+    line-height: 1.4;
+}
+
+code {
+    background-color: #f5f5f5;
+    padding: 2px 4px;
+    font-family: 'Consolas', monospace;
+    font-size: 0.9em;
+}
+
+pre code {
+    background-color: transparent;
+    padding: 0;
+}
+
+ol {
+    margin: 10px 0;
+    padding-left: 30px;
+}
+
+ul {
+    margin: 10px 0;
+    padding-left: 30px;
+}
+
+ol ol,
+ul ul,
+ol ul,
+ul ol {
+    margin: 5px 0;
+}

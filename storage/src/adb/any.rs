@@ -536,7 +536,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
     /// the log with the provided root.
-    pub async fn verify_proof(
+    pub fn verify_proof(
         hasher: &mut Standard<H>,
         proof: &Proof<H>,
         start_loc: u64,
@@ -554,7 +554,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
         proof
             .verify_range_inclusion(hasher, digests, start_pos, end_pos, root_digest)
-            .await
             .map_err(Error::MmrError)
     }
 
@@ -1053,7 +1052,6 @@ mod test {
                         &log,
                         &root
                     )
-                    .await
                     .unwrap()
                 );
             }
