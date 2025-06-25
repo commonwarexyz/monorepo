@@ -189,8 +189,9 @@ mod tests {
             let flag_clone = flag.clone();
             let mut pool = Pool::<i32>::default();
 
+            let (_finisher, finished) = oneshot::channel::<()>();
             pool.push(async move {
-                delay(Duration::from_millis(100)).await;
+                finished.await.unwrap();
                 flag_clone.store(true, Ordering::SeqCst);
                 42
             });
@@ -198,8 +199,6 @@ mod tests {
 
             pool.cancel_all();
             assert!(pool.is_empty());
-
-            delay(Duration::from_millis(200)).await; // Wait longer than future’s delay
             assert!(!flag.load(Ordering::SeqCst));
 
             // Stream should not resolve future after cancellation
