@@ -4,12 +4,12 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{deterministic, Runner};
 use commonware_storage::{
     adb::any::{Any, Config},
-    index::translator::TwoCap,
+    index::translator::EightCap,
+    mmr::hasher::Standard,
 };
 use commonware_utils::array::FixedBytes;
 use libfuzzer_sys::fuzz_target;
 use std::collections::{HashMap, HashSet};
-use commonware_storage::mmr::hasher::Standard;
 
 type Key = FixedBytes<32>;
 type Value = FixedBytes<64>;
@@ -24,6 +24,7 @@ enum AdbOperation {
     OpCount,
     OldestRetainedLoC,
     Root,
+    Proof { start_loc: u64, max_ops: u64 },
     Get { key: RawKey },
 }
 #[derive(Arbitrary, Debug)]
@@ -33,13 +34,13 @@ struct FuzzData {
 
 fuzz_target!(|data: FuzzData| {
     let mut hasher = Standard::<Sha256>::new();
-    if data.operations.is_empty() || data.operations.len() > 256 {
+    if data.operations.is_empty() || data.operations.len() > 313 {
         return;
     }
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let cfg = Config::<TwoCap> {
+        let cfg = Config::<EightCap> {
             mmr_journal_partition: "test_adb_mmr_journal".into(),
             mmr_items_per_blob: 500000,
             mmr_write_buffer: 1024,
@@ -47,16 +48,17 @@ fuzz_target!(|data: FuzzData| {
             log_journal_partition: "test_adb_log_journal".into(),
             log_items_per_blob: 500000,
             log_write_buffer: 1024,
-            translator: TwoCap,
+            translator: EightCap,
             pool: None,
         };
 
-        let mut adb = Any::<_, Key, Value, Sha256, TwoCap>::init(context.clone(), cfg.clone())
+        let mut adb = Any::<_, Key, Value, Sha256, EightCap>::init(context.clone(), cfg.clone())
             .await
-            .unwrap();
+            .expect("init adb");
 
         let mut expected_state: HashMap<RawKey, Option<RawValue>> = HashMap::new();
         let mut all_keys: HashSet<RawKey> = HashSet::new();
+        let op_count: u64 = 0;
 
         for op in &data.operations {
             match op {
@@ -104,13 +106,43 @@ fuzz_target!(|data: FuzzData| {
                 }
 
                 AdbOperation::Commit => {
-                    adb.commit().await.unwrap();
+                    adb.commit().await.expect("commit should not fail");
                 }
-                
+
                 AdbOperation::Root => {
                     // root panics if there are uncommitted operations.
-                    adb.commit().await.unwrap();
+                    adb.commit().await.expect("commit should not fail");
                     adb.root(&mut hasher);
+                }
+
+                AdbOperation::Proof { start_loc, max_ops } => {
+                    // Only generate proof if we have operations and valid parameters
+                    if op_count > 0 && *start_loc < op_count && *max_ops > 0 {
+                        // Ensure all operations are committed before generating proof
+                        adb.commit().await.expect("commit should not fail");
+
+                        // Get the current root
+                        let current_root = adb.root(&mut hasher);
+
+                        // Adjust start_loc to be within valid range (1-indexed)
+                        let adjusted_start = (*start_loc % op_count) + 1;
+                        let adjusted_max_ops = (*max_ops % 100) + 1; // Limit max_ops to reasonable range
+
+                        let (proof, log) = adb
+                            .proof(adjusted_start, adjusted_max_ops)
+                            .await
+                            .expect("proof should not fail");
+                        assert!(
+                            Any::<deterministic::Context, _, _, _, EightCap>::verify_proof(
+                                &mut hasher,
+                                &proof,
+                                adjusted_start,
+                                &log,
+                                &current_root
+                            )
+                            .expect("verify proof should not fail")
+                        );
+                    }
                 }
 
                 AdbOperation::Get { key } => {
@@ -122,24 +154,22 @@ fuzz_target!(|data: FuzzData| {
                         Some(Some(expected_value)) => {
                             // Key should exist with this value
                             assert!(result.is_some(), "Expected value for key {key:?}");
-                            let v = result.unwrap();
-                            let v_bytes: &[u8; 64] = v.as_ref().try_into().unwrap();
+                            let v = result.expect("get should not fail");
+                            let v_bytes: &[u8; 64] = v.as_ref().try_into().expect("bytes");
                             assert_eq!(v_bytes, expected_value, "Value mismatch for key {key:?}");
                         }
                         Some(None) => {
                             // Key was explicitly deleted
                             assert!(
                                 result.is_none(),
-                                "Expected no value for deleted key {:?}, but found one",
-                                key
+                                "Expected no value for deleted key {key:?}, but found one",
                             );
                         }
                         None => {
                             // Key was never set or deleted
                             assert!(
                                 result.is_none(),
-                                "Found unexpected value for key {:?} that was never touched",
-                                key
+                                "Found unexpected value for key {key:?} that was never touched",
                             );
                         }
                     }
@@ -151,7 +181,7 @@ fuzz_target!(|data: FuzzData| {
         }
 
         // Final commit to ensure all operations are persisted
-        adb.commit().await.unwrap();
+        adb.commit().await.expect("commit should not fail");
 
         // Comprehensive final verification - check ALL keys ever touched
         for key in &all_keys {
@@ -161,8 +191,8 @@ fuzz_target!(|data: FuzzData| {
             match expected_state.get(key) {
                 Some(Some(expected_value)) => {
                     assert!(result.is_some(), "Lost value for key {key:?} at end");
-                    let v = result.unwrap();
-                    let v_bytes: &[u8; 64] = v.as_ref().try_into().unwrap();
+                    let v = result.expect("get should not fail");
+                    let v_bytes: &[u8; 64] = v.as_ref().try_into().expect("bytes");
                     assert_eq!(
                         v_bytes, expected_value,
                         "Final value mismatch for key {key:?}"
@@ -182,6 +212,6 @@ fuzz_target!(|data: FuzzData| {
             }
         }
 
-        adb.close().await.unwrap();
+        adb.close().await.expect("close should not fail");
     });
 });
