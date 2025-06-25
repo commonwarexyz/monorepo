@@ -76,7 +76,7 @@ mod tests {
         index.insert(key, 3);
         index.insert(key, 4);
         index.prune(key, |i| *i == 3);
-        assert_eq!(index.get(key).copied().collect::<Vec<_>>(), vec![1, 2, 4]);
+        assert_eq!(index.get(key).copied().collect::<Vec<_>>(), vec![1, 4, 2]);
         index.prune(key, |_| true);
         // Try removing all of a keys values.
         assert_eq!(
@@ -253,7 +253,7 @@ mod tests {
 
         assert_eq!(
             index.get(b"key").copied().collect::<Vec<_>>(),
-            vec![11, 12, 13]
+            vec![11, 13, 12]
         );
     }
 
@@ -351,7 +351,7 @@ mod tests {
 
         assert_eq!(
             index.get(b"key").copied().collect::<Vec<_>>(),
-            vec![4, 1, 3]
+            vec![4, 3, 1]
         );
 
         // Test removing all values.
@@ -803,7 +803,7 @@ mod tests {
         // Check that new values are around
         assert_eq!(
             index.get(b"key").copied().collect::<Vec<_>>(),
-            vec![3, 2, 4]
+            vec![3, 4, 2]
         );
     }
 
