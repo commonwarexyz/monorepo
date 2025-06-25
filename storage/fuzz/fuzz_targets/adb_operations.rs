@@ -9,6 +9,7 @@ use commonware_storage::{
 use commonware_utils::array::FixedBytes;
 use libfuzzer_sys::fuzz_target;
 use std::collections::{HashMap, HashSet};
+use commonware_storage::mmr::hasher::Standard;
 
 type Key = FixedBytes<32>;
 type Value = FixedBytes<64>;
@@ -22,6 +23,7 @@ enum AdbOperation {
     Commit,
     OpCount,
     OldestRetainedLoC,
+    Root,
     Get { key: RawKey },
 }
 #[derive(Arbitrary, Debug)]
@@ -30,6 +32,7 @@ struct FuzzData {
 }
 
 fuzz_target!(|data: FuzzData| {
+    let mut hasher = Standard::<Sha256>::new();
     if data.operations.is_empty() || data.operations.len() > 256 {
         return;
     }
@@ -102,6 +105,12 @@ fuzz_target!(|data: FuzzData| {
 
                 AdbOperation::Commit => {
                     adb.commit().await.unwrap();
+                }
+                
+                AdbOperation::Root => {
+                    // root panics if there are uncommitted operations.
+                    adb.commit().await.unwrap();
+                    adb.root(&mut hasher);
                 }
 
                 AdbOperation::Get { key } => {
