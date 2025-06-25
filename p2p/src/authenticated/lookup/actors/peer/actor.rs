@@ -191,7 +191,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                             match rate_limits.get(&data.channel) {
                                 Some(rate_limit) => rate_limit,
                                 None => { // Treat unknown channels as malformed
-                                    info!(?peer, channel = data.channel, "unknown channel");
+                                    debug!(?peer, channel = data.channel, "unknown channel");
                                     self.received_messages
                                         .get_or_create(&metrics::Message::new_invalid(&peer))
                                         .inc();
