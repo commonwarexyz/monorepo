@@ -303,7 +303,7 @@ where
                 // No action needed.
             }
             Phase::Next(next) => {
-                // `next` is still valid (as is the list of nodes `next` points to).
+                // If there is a next, we should add it to past.
                 self.past_push(next);
             }
             Phase::Done => {
@@ -319,14 +319,14 @@ where
                 // No action needed.
             }
             Phase::PostDeleteNext(Some(next)) => {
-                // If there is a stale record, we should recover it.
+                // If there is a stale record, we should add it to past.
                 self.past_push(next);
             }
             Phase::PostDeleteNext(None) => {
                 // No action needed.
             }
             Phase::PostInsert(next) => {
-                // If there is a current record, we should recover it.
+                // If there is a current record, we should add it to past.
                 self.past_push(next);
             }
         }
