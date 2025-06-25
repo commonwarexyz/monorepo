@@ -127,7 +127,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         }
 
         // Get parent
-        let timestamp = u128::from_be_bytes(buf.as_ref()[..16].try_into().unwrap());
+        let version = u128::from_be_bytes(buf.as_ref()[..16].try_into().unwrap());
 
         // Extract data
         //
@@ -155,7 +155,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         }
 
         // Return info
-        Ok(Some((timestamp, data)))
+        Ok(Some((version, data)))
     }
 
     /// Get a value from `Metadata` (if it exists).
