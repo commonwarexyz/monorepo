@@ -9,7 +9,7 @@ use crate::mmr::{
     Hasher,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{FixedSize, ReadExt};
+use commonware_codec::{varint::UInt, EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::Hasher as CHasher;
 use futures::future::try_join_all;
 use tracing::debug;
@@ -36,6 +36,37 @@ pub struct Proof<H: CHasher> {
 impl<H: CHasher> PartialEq for Proof<H> {
     fn eq(&self, other: &Self) -> bool {
         self.size == other.size && self.digests == other.digests
+    }
+}
+
+impl<H: CHasher> EncodeSize for Proof<H> {
+    fn encode_size(&self) -> usize {
+        UInt(self.size).encode_size() + self.digests.encode_size()
+    }
+}
+
+impl<H: CHasher> Write for Proof<H> {
+    fn write(&self, buf: &mut impl BufMut) {
+        // Write the number of nodes in the MMR as a varint
+        UInt(self.size).write(buf);
+
+        // Write the digests
+        self.digests.write(buf);
+    }
+}
+
+impl<H: CHasher> Read for Proof<H> {
+    /// The maximum number of digests in the proof.
+    type Cfg = usize;
+
+    fn read_cfg(buf: &mut impl Buf, max_len: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        // Read the number of nodes in the MMR
+        let size = UInt::<u64>::read(buf)?.into();
+
+        // Read the digests
+        let range = ..=max_len;
+        let digests = Vec::<H::Digest>::read_range(buf, range)?;
+        Ok(Proof { size, digests })
     }
 }
 
@@ -160,58 +191,6 @@ impl<H: CHasher> Proof<H> {
         }
 
         Ok(peak_digests)
-    }
-
-    /// Return the maximum size in bytes of any serialized `Proof`.
-    pub fn max_serialization_size() -> usize {
-        u64::SIZE + (u8::MAX as usize * H::Digest::SIZE)
-    }
-
-    /// Canonically serializes the `Proof` as:
-    /// ```text
-    ///    [0-8): size (u64 big-endian)
-    ///    [8-...): raw bytes of each hash, each of length `H::len()`
-    /// ```
-    pub fn serialize(&self) -> Vec<u8> {
-        // A proof should never contain more digests than the depth of the MMR, thus a single byte
-        // for encoding the length of the digests array still allows serializing MMRs up to 2^255
-        // elements.
-        assert!(
-            self.digests.len() <= u8::MAX as usize,
-            "too many digests in proof"
-        );
-
-        // Serialize the proof as a byte vector.
-        let bytes_len = u64::SIZE + (self.digests.len() * H::Digest::SIZE);
-        let mut bytes = Vec::with_capacity(bytes_len);
-        bytes.put_u64(self.size);
-        for hash in self.digests.iter() {
-            bytes.extend_from_slice(hash.as_ref());
-        }
-        assert_eq!(bytes.len(), bytes_len, "serialization length mismatch");
-        bytes.to_vec()
-    }
-
-    /// Deserializes a canonically encoded `Proof`. See `serialize` for the serialization format.
-    pub fn deserialize(bytes: &[u8]) -> Option<Self> {
-        let mut buf = bytes;
-        if buf.len() < u64::SIZE {
-            return None;
-        }
-        let size = buf.get_u64();
-
-        // A proof should divide neatly into the hash length and not contain more than 255 digests.
-        let buf_remaining = buf.remaining();
-        let digests_len = buf_remaining / H::Digest::SIZE;
-        if buf_remaining % H::Digest::SIZE != 0 || digests_len > u8::MAX as usize {
-            return None;
-        }
-        let mut digests = Vec::with_capacity(digests_len);
-        for _ in 0..digests_len {
-            let digest = H::Digest::read(&mut buf).ok()?;
-            digests.push(digest);
-        }
-        Some(Self { size, digests })
     }
 
     /// Return the list of pruned (pos < `start_pos`) node positions that are still required for
@@ -404,6 +383,8 @@ where
 mod tests {
     use super::*;
     use crate::mmr::{hasher::Standard, mem::Mmr};
+    use bytes::Bytes;
+    use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{hash, sha256::Digest, Sha256};
     use commonware_runtime::{deterministic, Runner};
 
@@ -830,11 +811,6 @@ mod tests {
     fn test_verification_proof_serialization() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            assert_eq!(
-                Proof::<Sha256>::max_serialization_size(),
-                8168,
-                "wrong max serialization size of a Sha256 proof"
-            );
             // create a new MMR and add a non-trivial amount of elements
             let mut mmr = Mmr::default();
             let mut elements = Vec::new();
@@ -853,28 +829,51 @@ mod tests {
                     let end_pos = element_positions[j];
                     let proof = mmr.range_proof(start_pos, end_pos).await.unwrap();
 
-                    let mut serialized_proof = proof.serialize();
-                    let deserialized_proof = Proof::<Sha256>::deserialize(&serialized_proof);
-                    assert!(deserialized_proof.is_some(), "proof didn't deserialize");
+                    let expected_size = proof.encode_size();
+                    let serialized_proof = proof.encode().freeze();
                     assert_eq!(
-                        proof,
-                        deserialized_proof.unwrap(),
+                        serialized_proof.len(),
+                        expected_size,
+                        "serialized proof should have expected size"
+                    );
+                    let max_digests = proof.digests.len();
+                    let deserialized_proof =
+                        Proof::decode_cfg(serialized_proof, &max_digests).unwrap();
+                    assert_eq!(
+                        proof, deserialized_proof,
                         "deserialized proof should match source proof"
                     );
 
-                    let deserialized_truncated = Proof::<Sha256>::deserialize(
-                        &serialized_proof[0..serialized_proof.len() - 1],
-                    );
+                    // Remove one byte from the end of the serialized
+                    // proof and confirm it fails to deserialize.
+                    let serialized_proof = proof.encode().freeze();
+                    let serialized_proof: Bytes =
+                        serialized_proof.slice(0..serialized_proof.len() - 1);
                     assert!(
-                        deserialized_truncated.is_none(),
+                        Proof::<Sha256>::decode_cfg(serialized_proof, &max_digests).is_err(),
                         "proof should not deserialize with truncated data"
                     );
 
-                    serialized_proof.push(i as u8);
+                    // Add 1 byte of extra data to the end of the serialized
+                    // proof and confirm it fails to deserialize.
+                    let mut serialized_proof = proof.encode();
+                    serialized_proof.extend_from_slice(&[0; 10]);
+                    let serialized_proof = serialized_proof.freeze();
+
                     assert!(
-                        Proof::<Sha256>::deserialize(&serialized_proof).is_none(),
+                        Proof::<Sha256>::decode_cfg(serialized_proof, &max_digests,).is_err(),
                         "proof should not deserialize with extra data"
                     );
+
+                    // Confirm deserialization fails when max length is exceeded.
+                    if max_digests > 0 {
+                        let serialized_proof = proof.encode().freeze();
+                        assert!(
+                            Proof::<Sha256>::decode_cfg(serialized_proof, &(max_digests - 1),)
+                                .is_err(),
+                            "proof should not deserialize with max length exceeded"
+                        );
+                    }
                 }
             }
         });
