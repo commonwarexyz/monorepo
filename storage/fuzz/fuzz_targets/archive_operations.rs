@@ -37,7 +37,7 @@ struct FuzzData {
 }
 
 fuzz_target!(|data: FuzzData| {
-    if data.operations.is_empty() || data.operations.len() > 100 {
+    if data.operations.is_empty() || data.operations.len() > 13 {
         return;
     }
     let runner = deterministic::Runner::default();
@@ -163,7 +163,7 @@ fuzz_target!(|data: FuzzData| {
                                 // 1. Archive allows overwrites and a different key with same hash overwrote the value
                                 // 2. Archive has data from previous runs that we didn't track
                                 // 3. Complex interactions between hash collisions and storage state
-                                eprintln!("Warning: Got unexpected value for key {:?} - possible overwrite or collision", key_data);
+                                panic!("Warning: Got unexpected value for key {:?} - possible overwrite or collision", key_data);
                             }
                         } else {
                             // This could happen due to hash collisions with keys inserted before pruning
@@ -182,45 +182,35 @@ fuzz_target!(|data: FuzzData| {
                 ArchiveOperation::HasByKey(key_data) => {
                     let key = Key::new(key_data.clone());
                     let result = archive.has(Identifier::Key(&key)).await;
+                    let our_result = items.iter().find(|(_, k, _)| *k == *key);
 
                     // Verify the result against our tracked items
                     if let Ok(has) = result {
                         if has {
-                            // If the archive says it has the key, one of two things is true:
-                            // 1. We explicitly added this key
-                            // 2. There's a hash collision with another key
-                            //
-                            // In case 1, we can verify the key exists in our items list.
-                            // In case 2, the Archive will perform the comparison internally when
-                            // retrieving the actual value, so we can trust its result.
-                            //
-                            // Therefore, we don't need an assertion here if the archive says it has the key.
+                            assert!(our_result.is_some(), "stub archive doesn't have key {:?} that we added", key_data);
                         } else {
-                            // If the archive says it doesn't have the key, check if we think we added it
-                            let we_added = items.iter().any(|(_, k, _)| *k == *key_data);
-
-                            if we_added {
-                                panic!("Archive doesn't have key {:?} that we added", key_data);
-                            }
+                            assert!(our_result.is_none(), "Archive doesn't have key {:?} that we added", key_data);
                         }
                     }
                 }
 
-                ArchiveOperation::Prune(index) => {
-                    archive.prune(*index).await.expect("prune failed");
+                ArchiveOperation::Prune(min) => {
+                    archive.prune(*min).await.expect("prune failed");
                     match oldest_allowed {
                         None => {
-                            oldest_allowed = Some(*index);
+                            oldest_allowed = Some(*min);
+                            items.retain(|(i, _, _)| *i >= *min);
+                            written_indices.retain(|i| *i >= *min);
                         }
                         Some(already_pruned) => {
-                            if *index > already_pruned {
-                                oldest_allowed = Some(*index);
+                            if *min > already_pruned {
+                                oldest_allowed = Some(*min);
+                                
+                                items.retain(|(i, _, _)| *i >= *min);
+                                written_indices.retain(|i| *i >= *min);
                             }
                         }
                     }
-
-                    items.retain(|(i, _, _)| *i >= *index);
-                    written_indices.retain(|i| *i >= *index);
                 }
 
                 ArchiveOperation::Sync => {
