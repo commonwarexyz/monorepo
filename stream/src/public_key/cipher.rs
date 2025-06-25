@@ -164,10 +164,7 @@ mod tests {
         let ct1 = cipher1.encrypt(&nonce, plaintext.as_ref()).unwrap();
         let ct2 = cipher2.encrypt(&nonce, plaintext.as_ref()).unwrap();
 
-        assert_ne!(
-            ct1, ct2,
-            "Different ciphers should produce different ciphertexts"
-        );
+        assert_ne!(ct1, ct2);
     }
 
     #[test]
@@ -185,12 +182,10 @@ mod tests {
         assert_eq!(
             c1_a.encrypt(&nonce, plaintext.as_ref()).unwrap(),
             c1_b.encrypt(&nonce, plaintext.as_ref()).unwrap(),
-            "Same inputs should produce identical ciphers"
         );
         assert_eq!(
             c2_a.encrypt(&nonce, plaintext.as_ref()).unwrap(),
             c2_b.encrypt(&nonce, plaintext.as_ref()).unwrap(),
-            "Same inputs should produce identical ciphers"
         );
     }
 
@@ -232,7 +227,6 @@ mod tests {
         assert_ne!(
             cipher_single.encrypt(&nonce, plaintext.as_ref()).unwrap(),
             cipher_multi.encrypt(&nonce, plaintext.as_ref()).unwrap(),
-            "Different parameter counts should produce different ciphers"
         );
     }
 
@@ -253,12 +247,10 @@ mod tests {
         assert_ne!(
             c1_ikm1.encrypt(&nonce, plaintext.as_ref()).unwrap(),
             c1_ikm2.encrypt(&nonce, plaintext.as_ref()).unwrap(),
-            "Different IKM should produce different ciphers"
         );
         assert_ne!(
             c2_ikm1.encrypt(&nonce, plaintext.as_ref()).unwrap(),
             c2_ikm2.encrypt(&nonce, plaintext.as_ref()).unwrap(),
-            "Different IKM should produce different ciphers"
         );
     }
 
@@ -284,7 +276,6 @@ mod tests {
             cipher_non_empty
                 .encrypt(&nonce, plaintext.as_ref())
                 .unwrap(),
-            "Empty and non-empty parameters should produce different results"
         );
     }
 
@@ -302,18 +293,10 @@ mod tests {
         let ciphertext = cipher.encrypt(&nonce, original_plaintext.as_ref()).unwrap();
         let decrypted = cipher.decrypt(&nonce, ciphertext.as_ref()).unwrap();
 
-        assert_eq!(
-            original_plaintext.as_ref(),
-            decrypted,
-            "Round-trip encryption/decryption should preserve the original message"
-        );
+        assert_eq!(original_plaintext.as_ref(), decrypted);
 
         // Verify ciphertext is actually different from plaintext
-        assert_ne!(
-            original_plaintext.as_ref(),
-            ciphertext.as_slice(),
-            "Ciphertext should be different from plaintext"
-        );
+        assert_ne!(original_plaintext.as_ref(), ciphertext.as_slice());
     }
 
     #[test]
@@ -328,10 +311,7 @@ mod tests {
         let ct1 = cipher.encrypt(&nonce1.into(), plaintext.as_ref()).unwrap();
         let ct2 = cipher.encrypt(&nonce2.into(), plaintext.as_ref()).unwrap();
 
-        assert_ne!(
-            ct1, ct2,
-            "Same message with different nonces should produce different ciphertexts"
-        );
+        assert_ne!(ct1, ct2);
     }
 
     #[test]
@@ -365,10 +345,7 @@ mod tests {
 
         // This should still work - HKDF can handle empty IKM
         let result = derive::<1>(&empty_ikm, salts, infos);
-        assert!(
-            result.is_ok(),
-            "Zero-length IKM should be handled gracefully"
-        );
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -381,7 +358,7 @@ mod tests {
         let infos: &[&[u8]] = &[large_info.as_slice()];
 
         let result = derive::<1>(&large_ikm, salts, infos);
-        assert!(result.is_ok(), "Large inputs should be handled correctly");
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -415,11 +392,7 @@ mod tests {
         // Ensure all are unique
         for i in 0..ciphertexts.len() {
             for j in (i + 1)..ciphertexts.len() {
-                assert_ne!(
-                    ciphertexts[i], ciphertexts[j],
-                    "All directional ciphertexts should be different (cipher {} vs {})",
-                    i, j
-                );
+                assert_ne!(ciphertexts[i], ciphertexts[j]);
             }
         }
     }
@@ -440,12 +413,10 @@ mod tests {
         assert_eq!(
             dir1.d2l.encrypt(&nonce, plaintext.as_ref()).unwrap(),
             dir2.d2l.encrypt(&nonce, plaintext.as_ref()).unwrap(),
-            "d2l should be consistent"
         );
         assert_eq!(
             dir1.l2d.encrypt(&nonce, plaintext.as_ref()).unwrap(),
             dir2.l2d.encrypt(&nonce, plaintext.as_ref()).unwrap(),
-            "l2d should be consistent"
         );
     }
 
@@ -469,13 +440,9 @@ mod tests {
         let plaintext = b"sensitivity_test";
         let base_ct = base_dir.d2l.encrypt(&nonce, plaintext.as_ref()).unwrap();
 
-        for (i, variant) in variants.iter().enumerate() {
+        for variant in variants.iter() {
             let variant_ct = variant.d2l.encrypt(&nonce, plaintext.as_ref()).unwrap();
-            assert_ne!(
-                base_ct, variant_ct,
-                "Variant {} should produce different result",
-                i
-            );
+            assert_ne!(base_ct, variant_ct);
         }
     }
 
@@ -498,11 +465,7 @@ mod tests {
         let encrypted = directional.d2l.encrypt(&nonce, message.as_ref()).unwrap();
         let decrypted = directional.d2l.decrypt(&nonce, encrypted.as_ref()).unwrap();
 
-        assert_eq!(
-            message.as_ref(),
-            decrypted,
-            "Realistic scenario should work end-to-end"
-        );
+        assert_eq!(message.as_ref(), decrypted);
     }
 
     #[test]
@@ -517,11 +480,7 @@ mod tests {
 
         for i in 0..constants.len() {
             for j in (i + 1)..constants.len() {
-                assert_ne!(
-                    constants[i], constants[j],
-                    "Constants should be unique (constant {} vs {})",
-                    i, j
-                );
+                assert_ne!(constants[i], constants[j]);
             }
         }
     }

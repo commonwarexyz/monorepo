@@ -119,11 +119,6 @@ impl<C: PublicKey> Signed<C> {
         self.info.ephemeral_public_key
     }
 
-    /// Get the timestamp from the handshake message.
-    pub fn timestamp(&self) -> u64 {
-        self.info.timestamp
-    }
-
     /// Verify a signed handshake message.
     pub fn verify<E: Clock>(
         &self,
