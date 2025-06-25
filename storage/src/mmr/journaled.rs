@@ -254,7 +254,6 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         let metadata_cfg = MConfig {
             partition: cfg.config.metadata_partition,
         };
-        // TODO danlaine: wipe old metadata.
         let mut metadata = Metadata::init(context.with_label("mmr_metadata"), metadata_cfg).await?;
 
         // Store the pinned nodes in metadata
@@ -270,8 +269,6 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         // Sync metadata to ensure it's persisted
         metadata.sync().await.map_err(Error::MetadataError)?;
 
-        // Initialize the mem_mmr in the "prune_all" state (following regular init pattern).
-        // This means all nodes are considered pruned and will be accessed via journal/pinned_nodes.
         let mut pinned_nodes_vec = Vec::new();
         for pos in Proof::<H>::nodes_to_pin(cfg.pruned_to_pos) {
             if let Some(digest) = cfg.pinned_nodes.get(&pos) {
