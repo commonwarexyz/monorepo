@@ -37,7 +37,7 @@ struct FuzzData {
 }
 
 fuzz_target!(|data: FuzzData| {
-    if data.operations.is_empty() || data.operations.len() > 10 {
+    if data.operations.is_empty() || data.operations.len() > 100 {
         return;
     }
     let runner = deterministic::Runner::default();
@@ -58,10 +58,10 @@ fuzz_target!(|data: FuzzData| {
 
         // Keep a map of inserted items for verification
         let mut items = Vec::new();
-        
+
         // Track the oldest allowed index for pruning
         let mut oldest_allowed: Option<u64> = None;
-        
+
         // Track written indices
         let mut written_indices = std::collections::HashSet::new();
 
@@ -78,7 +78,6 @@ fuzz_target!(|data: FuzzData| {
                             continue;
                         }
                     }
-                    // Convert raw data to our custom types
                     let key = Key::new(key_data.clone());
                     let value = Value::new(value_data.clone());
 
@@ -117,15 +116,13 @@ fuzz_target!(|data: FuzzData| {
                             );
                         }
                     } else {
+                        // then we also should not have that index
                         assert!(!written_indices.contains(index));
                     }
                 }
 
                 ArchiveOperation::GetByKey(key_data) => {
-                    // Convert to our custom key type
                     let key = Key::new(key_data.clone());
-
-                    // Try to retrieve the item
                     let result = archive.get(Identifier::Key(&key)).await;
 
                     // Verify the result against our tracked items
@@ -175,14 +172,15 @@ fuzz_target!(|data: FuzzData| {
                             // The archive is working correctly if it returns a value for a key that
                             // hashes to the same value as our query key.
                         }
+                    } else {
+                        // then we also should not have that key
+                        assert!(items.iter().find(|(_, k, _)| *k == *key).is_none());
+
                     }
                 }
 
                 ArchiveOperation::HasByKey(key_data) => {
-                    // Convert to our custom key type
                     let key = Key::new(key_data.clone());
-
-                    // Check if the archive has the key
                     let result = archive.has(Identifier::Key(&key)).await;
 
                     // Verify the result against our tracked items
@@ -202,11 +200,6 @@ fuzz_target!(|data: FuzzData| {
                             let we_added = items.iter().any(|(_, k, _)| *k == *key_data);
 
                             if we_added {
-                                // This can happen due to:
-                                // 1. Hash collisions where multiple keys map to same internal representation
-                                // 2. Archive allowing overwrites where later puts replace earlier ones
-                                // 3. The deterministic runtime reusing storage with different state
-                                // So we'll be lenient here and just warn
                                 panic!("Archive doesn't have key {:?} that we added", key_data);
                             }
                         }
@@ -214,7 +207,6 @@ fuzz_target!(|data: FuzzData| {
                 }
 
                 ArchiveOperation::Prune(index) => {
-                    // Prune the archive
                     archive.prune(*index).await.expect("prune failed");
                     match oldest_allowed {
                         None => {
@@ -226,7 +218,7 @@ fuzz_target!(|data: FuzzData| {
                             }
                         }
                     }
-                    
+
                     items.retain(|(i, _, _)| *i >= *index);
                     written_indices.retain(|i| *i >= *index);
                 }
@@ -237,7 +229,6 @@ fuzz_target!(|data: FuzzData| {
 
                 ArchiveOperation::NextGap { start } => {
                     continue;
-                    // Test gap finding
                     let (gap, next_written) = archive.next_gap(*start);
 
                     if let Some(gap_index) = gap {
