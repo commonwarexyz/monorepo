@@ -80,7 +80,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
             None => return Err(Error::PeerDisconnected),
         };
         assert!(
-            !rate_limits.contains_key(&data.channel),
+            rate_limits.contains_key(&data.channel),
             "outbound message on invalid channel"
         );
         Ok(data)
