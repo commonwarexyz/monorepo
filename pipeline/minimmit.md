@@ -6,9 +6,8 @@ Minimmit is a responsive, leader-based consensus protocol designed for simplicit
 
 ## 2. Model & Parameters
 
-- Byzantine replicas: `≤ f`
-- Total replicas: `n ≥ 5f + 1`
-- Partial synchrony: every message arrives within `Δ` after an unknown global stabilization time (GST).
+- There is a set `R` of `n` replicas of which at most `f` are Byzantine, such that `n ≥ 5f + 1`
+- Partial synchrony: every message arrives within `Δ` after an unknown Global Stabilization Time (GST).
 
 ## 3. Quorums
 
@@ -19,32 +18,34 @@ _There exists `≥ 1` honest replica in any `Q`-set and `L`-set intersection._
 
 ## 4. Message Types
 
-| Message | Purpose |
-|---------|---------|
-| `genesis` | The genesis block. |
-| `propose(c, v, (c', v'))` | Leader's proposal `c` for view `v` with parent `c'` in view `v'`. |
-| `notarize(c, v)` | Vote to finalize block `c` in view `v`. |
-| `nullify(v)` | Vote to advance to view `v + 1`. |
-| `notarization(c, v)` | Certificate of ≥ `L` `notarize(c, v)` messages for `(c, v)`. |
-| `nullification(v)` | Certificate of ≥ `L` `nullify(v)` messages for view `v`. |
-| `proof(v)` | Either a `notarization(*, v)` or a `nullification(v)` certificate. |
+| Message | Purpose                                                                                           |
+|---------|---------------------------------------------------------------------------------------------------|
+| `genesis` | The genesis block.                                                                                |
+| `propose(c, v, (c', v'))` | Leader's proposal `c` for view `v` with parent `c'` in view `v'`.                  |
+| `notarize(c, v)` | Vote to finalize block `c` in view `v`.                                                     |
+| `nullify(v)` | Vote to advance to view `v + 1`.                                                                |
+| `notarization(c, v)` | Certificate of ≥ `L` `notarize(c, v)` messages for `(c, v)`.                            |
+| `nullification(v)` | Certificate of ≥ `L` `nullify(v)` messages for view `v`.                                  |
+| `proof(v)` | Either a `notarization(c, v)` certificate for some block `c` or a `nullification(v)` certificate. |
 
 ## 5. Initial Replica State
 
-```text
-view         = 0
-notarized    = ⊥         # the proposal this replica has notarized
-nullified    = false     # whether this replica has nullified this view
-timer        = None      # time until nullify if not yet nullified or notarized
-messages     = []        # list of messages this replica has seen
-proofs       = []        # list of proofs this replica has collected
-```
+A replica state contains the following fields:
+
+- `view` is the replica’s view, initially 0
+- `notarized` is the proposal this replica has notarized, initially ⊥
+- `nullified` is whether this replica has nullified this view, initially false
+- `timer` is time until nullify if not yet nullified or notarized, initially None
+- `proofs` is a map `View → Set<Certificate>` the set of certificates this replica has collected for each view, initially is ∅.
+- `messages` is a map `View → (Replica → Set<Message>)` storing every message the replica has received, grouped first by view and then by sender; initially is ∅.
+
+We denote replica `r`’s state fields using dot notation (e.g., `r.view`, `r.timer`, etc.).
 
 ## 6. External Functions
 
 ```text
 // Select the leader for view `v`
-fn leader(v) -> L;
+fn leader(v) -> R;
 
 // Build a block on top of `c'`. This should pass `verify(c, c')`.
 fn build(c') -> c;
@@ -56,93 +57,98 @@ fn verify(c, c') -> bool;
 
 ## 7. Helpers
 
+In every helper function, the first parameter `r` is the replica whose local state the helper inspects or updates .
 ```text
-// Find a valid parent to build on
-fn select_parent(v) -> (c', v') {
+// Replica `r` selects a valid parent to build on
+fn select_parent(r, v) -> (c', v') {
     let i = v - 1;
     while i >= 0 {
-        if ∃c': notarization(c', i) ∈ proofs[i] {
-            // If there are multiple, pick any.
+        let C = { c : notarization(c, i) ∈ r.proofs[i] };
+        if C ≠ ∅ {
+            // Pick an arbitrary element of C
+            let c' = any(C);
             return (c', i);
         }
-        if nullification(i) ∈ proofs[i] {
+        if nullification(i) ∈ r.proofs[i] {
             i -= 1;
             continue;
         }
-        return ⊥;
+        return (⊥, 0);
     }
-    return genesis;
+    return (genesis, 0);
 }
 
-// Ensure there are proofs for all views between `v` and `v'`
-fn valid_parent(v, (c', v')) -> bool {
+// Replica `r` ensures there are proofs for all views between `v` and `v'`
+fn valid_parent(r, v, (c', v')) -> bool {
     let i = v - 1;
     while i > v' {
-        if nullification(i) ∈ proofs[i] {
+        if nullification(i) ∈ r.proofs[i] {
             i -= 1;
             continue;
         }
         return false;
     }
-    return notarization(c', v') ∈ proofs[v']
+    return notarization(c', v') ∈ r.proofs[v']
 }
 
-// Enter view `next`
-fn enter_view(next) {
-    if view >= next {
+// Replica `r` enters view `next`
+fn enter_view(r, next) {
+    if r.view >= next {
         return;
     }
-    view = next;
-    notarized = ⊥;
-    nullified = false;
-    timer = 2Δ;
+    
+    r.view = next;
+    r.notarized = ⊥;
+    r.nullified = false;
+    r.timer = 2Δ;
 }
 
-// Record a message from a `replica`
-fn record_message(replica, message) -> bool {
-    if message.view ∉ messages {
-        messages[message.view] = {};
+// Replica `r` records a message received from a replica `s`
+fn record_message(r, s, message) -> bool {
+    if message.view ∉ r.messages {
+        r.messages[message.view] = {};
     }
-    if replica ∉ messages[message.view] {
-        messages[message.view][replica] = [];
+    if s ∉ r.messages[message.view] {
+        r.messages[message.view][s] = set();
     }
-    if message ∉ messages[message.view][replica] {
-        messages[message.view][replica].add(message);
+    if message ∉ r.messages[message.view][s] {
+        r.messages[message.view][s].add(message);
         return true;
     }
     return false;
 }
 
-// Prune data less than `view`
-fn prune(view) {
-    messages.remove(m => m.view < view);
-    proofs.remove(p => p.view < view);
+// Replica `r` prunes data less than `view`
+fn prune(r, view) {
+    r.messages.remove(v => v < view);
+    r.proofs.remove(v => v < view);
 }
 ```
 
-## 8. Protocol for View `v`
+## 8. Protocol for replica `i` in view `v`
 
 ### 8.1. Propose
 
-_If the leader, propose._
+_If replica `i` is the leader, propose._
 
-1. Upon entering view `v`, if identity is equal to `leader(v)`:
-   1. `(c', v') = select_parent(v)` (if `⊥`, return).
+1. Upon entering view `v`, if `leader(v) = i`:
+   1. `(c', v') = select_parent(i, v)`. 
+   1.  If `c'` == `⊥`, return.
    1. `c = build(c')`.
-   1. `notarized = c`.
+   1. Set `i.notarized = c`.
    1. Broadcast `propose(c, v, (c', v'))`.
 
-_Treat `propose(c, v, (c', v'))` as `leader(v)`'s `notarize(c, v)`._
+_Treat `propose(c, v, (c', v'))` as `r`'s `notarize(c, v)`. _
 
 ### 8.2. Notarize
 
 _Upon receipt of a first valid block proposal from leader, broadcast `notarize(c, v)`._
 
 1. On receiving first `propose(c, v, (c', v'))` from `leader(v)`:
-   1. If `notarized != ⊥` or `nullified`, return.
-   1. If `!valid_parent(v, (c', v'))`, return.
+   1. If `i.notarized != ⊥` or `i.nullified`, return.
+   1. If `!valid_parent(i, v, (c', v'))`, return.
    1. If `!verify(c, c')`, return.
-   1. `notarized = c`.
+   1. Set `i.notarized = c`.
    1. Broadcast `notarize(c, v)`.
 
 ### 8.3. Nullify by Timeout
@@ -150,43 +156,43 @@ _Upon receipt of a first valid block proposal from leader, broadcast `notarize(c
 _If `timer` expires, broadcast `nullify(v)` if not yet broadcasted `notarize(c, v)`._
 
 1. On `timer` expiry:
-   1. If `notarized != ⊥` or `nullified`, return.
-   1. `nullified = true`.
+   1. If `i.notarized != ⊥` or `i.nullified`, return.
+   1. Set `i.nullified = true`.
    1. Broadcast `nullify(v)`.
 
 ### 8.4. Notarization & Finalization
 
 _After `L` messages, create and broadcast a `notarization(c, v)` certificate. After `Q` messages, finalize._
 
-1. On receiving `notarize(c, v)` from replica `r`:
-   1. If `!record_message(r, notarize(c, v))`, return.
+1. On receiving `notarize(c, v)` from replica `j`:
+   1. If `!record_message(i, j, notarize(c, v))`, return.
 1. On observing `≥ L` `notarize(c, v)` messages:
    1. Assemble `notarization(c, v)`.
-   1. Add `notarization(c, v)` to `proofs`.
+   1. Add `notarization(c, v)` to `i.proofs[v]`.
    1. Broadcast `notarization(c, v)`.
-   1. `enter_view(v + 1)`.
+   1. Call `enter_view(i, v + 1)`.
 1. On observing `≥ Q` `notarize(c, v)` messages:
    1. Finalize `c` and all of its ancestors.
-   1. `prune(v)`.
+   1. Call `prune(i, v)`.
 
 ### 8.5. Nullification
 
 _After `L` messages, create and broadcast a `nullification(v)` certificate._
 
-1. On receiving `nullify(v)` from replica `r`:
-   1. If `!record_message(r, nullify(v))`, return.
+1. On receiving `nullify(v)` from replica `j`:
+   1. If `!record_message(i, j, nullify(v))`, return.
 1. On observing `≥ L` `nullify(v)` messages (or a single `nullification(v)` message):
    1. Assemble `nullification(v)`.
-   1. Add `nullification(v)` to `proofs`.
+   1. Add `nullification(v)` to `i.proofs[v]`.
    1. Broadcast `nullification(v)`.
-   1. `enter_view(v + 1)`.
+   1. Call `enter_view(i, v + 1)`.
 
 ### 8.6 Nullify by Contradiction
 
 _If you have already broadcast `notarize(c, v)` for a `c` that cannot be finalized directly, broadcast `nullify(v)` to ensure some `proof(v)` will exist in view `v`._
 
 1. On observing messages from `≥ L` replicas of either `nullify(v)` or `notarize(*, v)` (where `notarized != ⊥` and `notarized != *`):
-   1. `nullified = true`.
+   1. Set `i.nullified = true`.
    1. Broadcast `nullify(v)`.
 
 ## 9. Intuition
