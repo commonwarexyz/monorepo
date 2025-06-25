@@ -155,26 +155,29 @@ mod tests {
         block_on(async move {
             let mut pool = Pool::<i32>::default();
 
-            // Futures resolve in order of completion time, not addition order
+            // Futures resolve in order of completion, not addition order
+            let (finisher_1, finished_1) = oneshot::channel();
+            let (finisher_3, finished_3) = oneshot::channel();
             pool.push(async move {
-                delay(Duration::from_millis(200)).await;
+                finished_1.await.unwrap();
+                finisher_3.send(()).unwrap();
                 1
             });
             pool.push(async move {
-                delay(Duration::from_millis(100)).await;
+                finisher_1.send(()).unwrap();
                 2
             });
             pool.push(async move {
-                delay(Duration::from_millis(300)).await;
+                finished_3.await.unwrap();
                 3
             });
 
             let first = pool.next_completed().await;
-            assert_eq!(first, 2, "First resolved should be 2 (100ms)");
+            assert_eq!(first, 2, "First resolved should be 2");
             let second = pool.next_completed().await;
-            assert_eq!(second, 1, "Second resolved should be 1 (200ms)");
+            assert_eq!(second, 1, "Second resolved should be 1");
             let third = pool.next_completed().await;
-            assert_eq!(third, 3, "Third resolved should be 3 (300ms)");
+            assert_eq!(third, 3, "Third resolved should be 3");
             assert!(pool.is_empty(),);
         });
     }
