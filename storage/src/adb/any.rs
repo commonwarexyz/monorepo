@@ -1430,7 +1430,7 @@ mod test {
     }
 
     #[test_traced("WARN")]
-    pub fn test_any_db_init_sync_no_pruning() {
+    pub fn test_any_db_init_sync_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Test basic init_sync with minimal data - empty database case
@@ -1441,7 +1441,6 @@ mod test {
                 0,              // No pruning
                 Vec::new(),     // No operations
             );
-
             let mut synced_db = Any::init_sync(context.clone(), sync_config).await.unwrap();
 
             // Verify empty database properties
