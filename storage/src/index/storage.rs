@@ -105,6 +105,7 @@ impl<'a, T: Translator, V: Eq> Cursor<'a, T, V> {
             phase: Phase::Initial,
 
             entry: Some(entry),
+
             past: None,
             past_tail: None,
             past_pushed_list: false,
