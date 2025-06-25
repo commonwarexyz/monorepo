@@ -151,7 +151,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         let mmr_size = leaf_num_to_pos(pruned_chunks as u64);
 
         let mut pinned_nodes = Vec::new();
-        for (index, pos) in Proof::<H>::nodes_to_pin(mmr_size).enumerate() {
+        for (index, pos) in Proof::<H::Digest>::nodes_to_pin(mmr_size).enumerate() {
             let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, index as u64)) else {
                 error!(size = mmr_size, pos, "missing pinned node");
                 return Err(MissingNode(pos));
@@ -206,7 +206,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 
         // Write the pinned nodes.
         let mmr_size = leaf_num_to_pos(self.pruned_chunks as u64);
-        for (i, digest) in Proof::<H>::nodes_to_pin(mmr_size).enumerate() {
+        for (i, digest) in Proof::<H::Digest>::nodes_to_pin(mmr_size).enumerate() {
             let digest = self.mmr.get_node_unchecked(digest);
             let key = U64::new(NODE_PREFIX, i as u64);
             metadata.put(key, digest.to_vec());
@@ -534,7 +534,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         &self,
         hasher: &mut impl Hasher<H>,
         bit_offset: u64,
-    ) -> Result<(Proof<H>, [u8; N]), Error> {
+    ) -> Result<(Proof<H::Digest>, [u8; N]), Error> {
         assert!(bit_offset < self.bit_count(), "out of bounds");
         assert!(
             !self.is_dirty(),
@@ -557,7 +557,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
             ));
         }
 
-        let mut proof = Proof::<H>::range_proof(&self.mmr, leaf_pos, leaf_pos).await?;
+        let mut proof = Proof::<H::Digest>::range_proof(&self.mmr, leaf_pos, leaf_pos).await?;
         proof.size = self.bit_count();
         if self.next_bit == 0 {
             // Bitmap is chunk aligned.
@@ -576,7 +576,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     /// bitmap corresponding to `root_digest`.
     pub async fn verify_bit_inclusion(
         hasher: &mut impl Hasher<H>,
-        proof: &Proof<H>,
+        proof: &Proof<H::Digest>,
         chunk: &[u8; N],
         bit_offset: u64,
         root_digest: &H::Digest,
@@ -588,7 +588,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         }
         let leaf_pos = Self::leaf_pos(bit_offset);
 
-        let mut mmr_proof = Proof::<H> {
+        let mut mmr_proof = Proof::<H::Digest> {
             size: leaf_num_to_pos(bit_count / Self::CHUNK_SIZE_BITS),
             digests: proof.digests.clone(),
         };

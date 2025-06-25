@@ -509,7 +509,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         &self,
         start_loc: u64,
         max_ops: u64,
-    ) -> Result<(Proof<H>, Vec<Operation<K, V>>), Error> {
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
         let mmr = &self.ops;
         let start_pos = leaf_num_to_pos(start_loc);
         let end_pos_last = mmr.last_leaf_pos().unwrap();
@@ -537,7 +537,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// the log with the provided root.
     pub fn verify_proof(
         hasher: &mut Standard<H>,
-        proof: &Proof<H>,
+        proof: &Proof<H::Digest>,
         start_loc: u64,
         ops: &[Operation<K, V>],
         root_digest: &H::Digest,

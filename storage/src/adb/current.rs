@@ -416,7 +416,7 @@ impl<
         hasher: &mut H,
         start_loc: u64,
         max_ops: u64,
-    ) -> Result<(Proof<H>, Vec<Operation<K, V>>, Vec<[u8; N]>), Error> {
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>, Vec<[u8; N]>), Error> {
         assert!(
             !self.status.is_dirty(),
             "must process updates before computing proofs"
@@ -433,7 +433,7 @@ impl<
         let height = Self::grafting_height();
         let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, mmr, height);
 
-        let mut proof = Proof::<H>::range_proof(&grafted_mmr, start_pos, end_pos).await?;
+        let mut proof = Proof::<H::Digest>::range_proof(&grafted_mmr, start_pos, end_pos).await?;
 
         let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
         let futures = (start_loc..=end_loc)
@@ -470,7 +470,7 @@ impl<
     /// the log with the provided root.
     pub fn verify_range_proof(
         hasher: &mut Standard<H>,
-        proof: &Proof<H>,
+        proof: &Proof<H::Digest>,
         start_loc: u64,
         ops: &[Operation<K, V>],
         chunks: &[[u8; N]],
@@ -499,7 +499,7 @@ impl<
             .collect::<Vec<_>>();
 
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
-        let mut verifier = GraftingVerifier::new(
+        let mut verifier = GraftingVerifier::<H>::new(
             Self::grafting_height(),
             start_loc / Bitmap::<H, N>::CHUNK_SIZE_BITS,
             chunk_vec,
@@ -555,7 +555,7 @@ impl<
         &self,
         hasher: &mut H,
         key: K,
-    ) -> Result<(Proof<H>, KeyValueProofInfo<K, V, N>), Error> {
+    ) -> Result<(Proof<H::Digest>, KeyValueProofInfo<K, V, N>), Error> {
         assert!(
             !self.status.is_dirty(),
             "must process updates before computing proofs"
@@ -568,7 +568,7 @@ impl<
         let height = Self::grafting_height();
         let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, &self.any.ops, height);
 
-        let mut proof = Proof::<H>::range_proof(&grafted_mmr, pos, pos).await?;
+        let mut proof = Proof::<H::Digest>::range_proof(&grafted_mmr, pos, pos).await?;
         let chunk = *self.status.get_chunk(loc);
 
         let last_chunk = self.status.last_chunk();
@@ -592,7 +592,7 @@ impl<
     /// the given root.
     pub async fn verify_key_value_proof(
         hasher: &mut H,
-        proof: &Proof<H>,
+        proof: &Proof<H::Digest>,
         info: &KeyValueProofInfo<K, V, N>,
         root_digest: &H::Digest,
     ) -> Result<bool, Error> {
@@ -614,7 +614,7 @@ impl<
         let pos = leaf_num_to_pos(info.loc);
         let num = info.loc / Bitmap::<H, N>::CHUNK_SIZE_BITS;
         let mut verifier = GraftingVerifier::new(Self::grafting_height(), num, vec![&info.chunk]);
-        let digest = Any::<E, _, _, _, T>::op_digest(
+        let digest = Any::<E, _, _, H, T>::op_digest(
             verifier.standard(),
             &Operation::Update(info.key.clone(), info.value.clone()),
         );
@@ -683,14 +683,14 @@ impl<
         &self,
         hasher: &mut H,
         loc: u64,
-    ) -> Result<(Proof<H>, Operation<K, V>, u64, [u8; N]), Error> {
+    ) -> Result<(Proof<H::Digest>, Operation<K, V>, u64, [u8; N]), Error> {
         let op = self.any.log.read(loc).await?;
 
         let pos = leaf_num_to_pos(loc);
         let height = Self::grafting_height();
         let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, &self.any.ops, height);
 
-        let mut proof = Proof::<H>::range_proof(&grafted_mmr, pos, pos).await?;
+        let mut proof = Proof::<H::Digest>::range_proof(&grafted_mmr, pos, pos).await?;
         let chunk = *self.status.get_chunk(loc);
 
         let last_chunk = self.status.last_chunk();

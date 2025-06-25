@@ -118,7 +118,7 @@ impl<H: CHasher> Mmr<H> {
             return mmr;
         }
 
-        for (i, pos) in Proof::<H>::nodes_to_pin(config.pruned_to_pos).enumerate() {
+        for (i, pos) in Proof::<H::Digest>::nodes_to_pin(config.pruned_to_pos).enumerate() {
             mmr.pinned_nodes.insert(pos, config.pinned_nodes[i]);
         }
 
@@ -563,7 +563,7 @@ impl<H: CHasher> Mmr<H> {
     /// # Warning
     ///
     /// Panics if there are unprocessed batch updates.
-    pub async fn proof(&self, element_pos: u64) -> Result<Proof<H>, Error> {
+    pub async fn proof(&self, element_pos: u64) -> Result<Proof<H::Digest>, Error> {
         self.range_proof(element_pos, element_pos).await
     }
 
@@ -577,7 +577,7 @@ impl<H: CHasher> Mmr<H> {
         &self,
         start_element_pos: u64,
         end_element_pos: u64,
-    ) -> Result<Proof<H>, Error> {
+    ) -> Result<Proof<H::Digest>, Error> {
         if start_element_pos < self.pruned_to_pos {
             return Err(ElementPruned(start_element_pos));
         }
@@ -585,7 +585,7 @@ impl<H: CHasher> Mmr<H> {
             self.dirty_nodes.is_empty(),
             "dirty nodes must be processed before computing proofs"
         );
-        Proof::<H>::range_proof(self, start_element_pos, end_element_pos).await
+        Proof::<H::Digest>::range_proof(self, start_element_pos, end_element_pos).await
     }
 
     /// Prune all nodes and pin the O(log2(n)) number of them required for proof generation going
@@ -621,7 +621,7 @@ impl<H: CHasher> Mmr<H> {
     /// Get the nodes (position + digest) that need to be pinned (those required for proof
     /// generation) in this MMR when pruned to position `prune_pos`.
     pub(super) fn nodes_to_pin(&self, prune_pos: u64) -> HashMap<u64, H::Digest> {
-        Proof::<H>::nodes_to_pin(prune_pos)
+        Proof::<H::Digest>::nodes_to_pin(prune_pos)
             .map(|pos| (pos, *self.get_node_unchecked(pos)))
             .collect()
     }
@@ -629,7 +629,7 @@ impl<H: CHasher> Mmr<H> {
     /// Get the digests of nodes that need to be pinned (those required for proof generation) in
     /// this MMR when pruned to position `prune_pos`.
     pub(super) fn node_digests_to_pin(&self, start_pos: u64) -> Vec<H::Digest> {
-        Proof::<H>::nodes_to_pin(start_pos)
+        Proof::<H::Digest>::nodes_to_pin(start_pos)
             .map(|pos| *self.get_node_unchecked(pos))
             .collect()
     }

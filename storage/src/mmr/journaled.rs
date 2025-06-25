@@ -164,7 +164,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
 
         // Initialize the mem_mmr in the "prune_all" state.
         let mut pinned_nodes = Vec::new();
-        for pos in Proof::<H>::nodes_to_pin(journal_size) {
+        for pos in Proof::<H::Digest>::nodes_to_pin(journal_size) {
             let digest =
                 Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             pinned_nodes.push(digest);
@@ -179,7 +179,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         // Compute the additional pinned nodes needed to prove all journal elements at the current
         // pruning boundary.
         let mut pinned_nodes = HashMap::new();
-        for pos in Proof::<H>::nodes_to_pin(metadata_prune_pos) {
+        for pos in Proof::<H::Digest>::nodes_to_pin(metadata_prune_pos) {
             let digest =
                 Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             pinned_nodes.insert(pos, digest);
@@ -330,7 +330,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
 
         // Reset the mem_mmr to one of the new_size in the "prune_all" state.
         let mut pinned_nodes = Vec::new();
-        for pos in Proof::<H>::nodes_to_pin(new_size) {
+        for pos in Proof::<H::Digest>::nodes_to_pin(new_size) {
             let digest =
                 Mmr::<E, H>::get_from_metadata_or_journal(&self.metadata, &self.journal, pos)
                     .await?;
@@ -376,7 +376,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         // Recompute pinned nodes since we'll need to repopulate the cache after it is cleared by
         // pruning the mem_mmr.
         let mut pinned_nodes = HashMap::new();
-        for pos in Proof::<H>::nodes_to_pin(self.pruned_to_pos) {
+        for pos in Proof::<H::Digest>::nodes_to_pin(self.pruned_to_pos) {
             let digest = self.mem_mmr.get_node_unchecked(pos);
             pinned_nodes.insert(pos, *digest);
         }
@@ -396,7 +396,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         prune_to_pos: u64,
     ) -> Result<HashMap<u64, H::Digest>, Error> {
         let mut pinned_nodes = HashMap::new();
-        for pos in Proof::<H>::nodes_to_pin(prune_to_pos) {
+        for pos in Proof::<H::Digest>::nodes_to_pin(prune_to_pos) {
             let digest = self.get_node(pos).await?.unwrap();
             self.metadata
                 .put(U64::new(NODE_PREFIX, pos), digest.to_vec());
@@ -417,7 +417,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     /// # Warning
     ///
     /// Panics if there are unprocessed updates.
-    pub async fn proof(&self, element_pos: u64) -> Result<Proof<H>, Error> {
+    pub async fn proof(&self, element_pos: u64) -> Result<Proof<H::Digest>, Error> {
         self.range_proof(element_pos, element_pos).await
     }
 
@@ -431,9 +431,9 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         &self,
         start_element_pos: u64,
         end_element_pos: u64,
-    ) -> Result<Proof<H>, Error> {
+    ) -> Result<Proof<H::Digest>, Error> {
         assert!(!self.mem_mmr.is_dirty());
-        Proof::<H>::range_proof::<Mmr<E, H>>(self, start_element_pos, end_element_pos).await
+        Proof::<H::Digest>::range_proof::<Mmr<E, H>>(self, start_element_pos, end_element_pos).await
     }
 
     /// Prune as many nodes as possible, leaving behind at most items_per_blob nodes in the current
