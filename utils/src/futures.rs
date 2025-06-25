@@ -157,24 +157,24 @@ mod tests {
 
             // Futures resolve in order of completion time, not addition order
             pool.push(async move {
-                delay(Duration::from_millis(100)).await;
+                delay(Duration::from_millis(200)).await;
                 1
             });
             pool.push(async move {
-                delay(Duration::from_millis(50)).await;
+                delay(Duration::from_millis(100)).await;
                 2
             });
             pool.push(async move {
-                delay(Duration::from_millis(150)).await;
+                delay(Duration::from_millis(300)).await;
                 3
             });
 
             let first = pool.next_completed().await;
-            assert_eq!(first, 2, "First resolved should be 2 (50ms)");
+            assert_eq!(first, 2, "First resolved should be 2 (100ms)");
             let second = pool.next_completed().await;
-            assert_eq!(second, 1, "Second resolved should be 1 (100ms)");
+            assert_eq!(second, 1, "Second resolved should be 1 (200ms)");
             let third = pool.next_completed().await;
-            assert_eq!(third, 3, "Third resolved should be 3 (150ms)");
+            assert_eq!(third, 3, "Third resolved should be 3 (300ms)");
             assert!(pool.is_empty(),);
         });
     }
@@ -196,7 +196,7 @@ mod tests {
             pool.cancel_all();
             assert!(pool.is_empty());
 
-            delay(Duration::from_millis(150)).await; // Wait longer than future’s delay
+            delay(Duration::from_millis(200)).await; // Wait longer than future’s delay
             assert!(!flag.load(Ordering::SeqCst));
 
             // Stream should not resolve future after cancellation
