@@ -108,12 +108,13 @@ impl<'a, T: Translator, V: Eq> Cursor<'a, T, V> {
         }
     }
 
-    /// Pushes a `Record` with no `next` to the end of `past`.
+    /// Pushes a `Record` to the end of `past`.
     ///
-    /// This is called during iteration.
+    /// If the record has a `next`, this function cannot be called again.
     fn past_push(&mut self, mut next: Box<Record<V>>) {
-        // The new node has no `next` because it was taken in `Cursor::next`.
-        assert!(next.next.is_none());
+        // Ensure we only push a list once (`past_tail` becomes stale).
+        assert!(!self.past_pushed_list);
+        self.past_pushed_list = next.next.is_some();
 
         // Connect `next` to `past`.
         if self.past_tail.is_none() {
@@ -126,27 +127,6 @@ impl<'a, T: Translator, V: Eq> Cursor<'a, T, V> {
                 (*self.past_tail.unwrap()).next = Some(next);
                 self.past_tail = Some(next_tail);
             }
-        }
-    }
-
-    /// Pushes a `Record` that may have some list of `next`s to the end of `past`.
-    ///
-    /// This may be called once when iteration is complete.
-    fn past_push_list(&mut self, next: Box<Record<V>>) {
-        // Ensure we only push a list once (`past_tail` becomes stale).
-        assert!(!self.past_pushed_list);
-        self.past_pushed_list = true;
-
-        // Connect `next` to `past`.
-        if let Some(tail_ptr) = self.past_tail {
-            // `past` list exists. Connect `next` to its tail.
-            unsafe {
-                assert!((*tail_ptr).next.is_none());
-                (*tail_ptr).next = Some(next);
-            }
-        } else {
-            // `past` was empty. `next` is now the entire `past` list.
-            self.past = Some(next);
         }
     }
 
@@ -324,7 +304,7 @@ where
             }
             Phase::Next(next) => {
                 // `next` is still valid (as is the list of nodes `next` points to).
-                self.past_push_list(next);
+                self.past_push(next);
             }
             Phase::Done => {
                 // No action needed.
@@ -340,14 +320,14 @@ where
             }
             Phase::PostDeleteNext(Some(next)) => {
                 // If there is a stale record, we should recover it.
-                self.past_push_list(next);
+                self.past_push(next);
             }
             Phase::PostDeleteNext(None) => {
                 // No action needed.
             }
             Phase::PostInsert(next) => {
                 // If there is a current record, we should recover it.
-                self.past_push_list(next);
+                self.past_push(next);
             }
         }
 
