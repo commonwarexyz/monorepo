@@ -4,7 +4,7 @@
 
 Minimmit is a responsive, leader-based consensus protocol designed for simplicity and speed, tolerant of a Byzantine adversary that controls fewer than `20%` of replicas. Minimmit advances to the next view when a `40%` quorum is reached and finalizes blocks when an `80%` quorum is reached (after only a single round of voting). Minimmit can be instantiated with a number of practical optimizations to improve performance when deployed in production.
 
-_Minimmit is so-named for "mini + commit"._
+_Minimmit is so-named for the `2f + 1` proofs that provide its "faster block times". We call each proof a "mini" + "commit"._
 
 ## 2. Model & Parameters
 
@@ -205,18 +205,20 @@ _If you have already broadcast `notarize(c, v)` for a `c` that cannot be finaliz
 - In any given view `v`, there may be multiple `notarization(*, v)` messages and one `nullification(v)`. If there are multiple `notarization(*, v)`s, no block `*` referenced by a `notarization(*, v)` can be finalized in `v`. If there exists some `nullification(v)`, no block can be finalized in `v`.
 
 ### 9.3 Liveness
-
-- There exists at least one `proof(v)` for every view `v`.
-- After GST, all views with honest leaders will emit a `notarization` message before the timer of any honest replica expires. To see this is true, consider the following:
-    - The first honest replica broadcasts some `proof(v - 1)` message to all replicas and enters view `v` at time `t_0`.
-    - The leader of view `v` will receive said `proof(v - 1)` message by `t_0 + Δ` and broadcast some `propose(c, v, (c', v'))` message to all replicas.
-    - All honest replicas will receive said `propose(c, v, (c', v'))` message by `t_0 + 2Δ` and broadcast some `notarize(c, v)` message.
-- Replicas enter `v + 1` as soon as they see some `proof(v)` (as fast as `L` messages). If the network is partitioned in two, replicas in each half of the partition may continue to enter successive views (on different `proof(v)`s) but will never finalize conflicting blocks. To bound the depth of forks in a partition, replicas can wait to enter some view `v + k` until they have seen `Q` messages in view `v`.
-- A Byzantine leader could equivocate, sending a distinct proposal to each replica and causing them to broadcast a `notarize(*, v)` for different blocks. After a replica observes `≥ L` `notarize(*, v)` messages for some `* != c`, it will then choose to broadcast a `nullify(v)` message. Eventually, `L` `nullify(v)` messages will be received and honest replicas will enter `v + 1` (within `Δ` of the first honest replica).
-- Since at most `f` nodes are Byzantine or faulty, once an honest leader is assigned, it is possible for at least `Q` correct replicas to finalize a block (including all of its ancestors).
-- A faulty leader can delay the network by at most `3Δ`. If replicas time out at `2Δ`, then a `nullification(v)` will be seen by replicas by time `3Δ`.
-- A Byzantine leader can delay the network by at most `4Δ`. If the leader equivocates with multiple proposals such that no single proposal can reach a quorum of `L`, and such that no `nullification(v)` can be produced in a single round of voting, then replicas who previously sent a `notarize(c, v)` message must send a second `nullify(v)` message. Since all original messages are sent within `2Δ` of entering the round, the second round of messages are sent within `3Δ`. This means the second round of messages are received by other replicas within `4Δ`, allowing them to generate a `nullification(v)`.
-  - While 2 rounds of voting might sound slow, the latency bound turns out to be even lower than similar protocols that only require a single round of voting to timeout, such as [Simplex](#simplex). This is because our original timer is set to the more aggressive value of `2Δ` (versus `3Δ` in Simplex). Using the notation from Simplex where messages arrive within `δ` for some `δ < Δ`, each Minimmit replica can enter the next view within `2Δ + 2δ` even if the leader is Byzantine (versus `3Δ + δ` for any type of faulty leader in Simplex, even non-Byzantine).
+- After GST, all views with honest leaders will:
+   - Emit a `notarization` message before the timer of any honest replica expires. To see this is true:
+      - The first honest replica broadcasts some `proof(v - 1)` message to all replicas and enters view `v` at time `t`.
+      - The leader of view `v` will receive said `proof(v - 1)` message by `t + Δ` and broadcast some `propose(c, v, (c', v'))` message to all replicas.
+      - All honest replicas will receive said `propose(c, v, (c', v'))` message by `t + 2Δ` and broadcast some `notarize(c, v)` message.
+      - Since, by definition, the first honest replica entered the view at `t`, then none of the honest replica timers fired before broadcasting `notarize(c, v)`.
+   - Finalize a block. To see this is true:
+      - As above, each honest replica will broadcast `notarize(c, v)` before their timers expire.
+      - As there are at least `Q` honest nodes, each honest node will eventually see at least `Q` `notarize(c, v)` messages.
+- Faulty leaders can delay the network, however it still makes progress under good network conditions.
+    - A crash-faulty leader can delay the network by at most `3Δ`. Let's assume that all honest replicas enter view `v` by time `t` and set a `2Δ` timer. If the leader is faulty and sends no proposal, all timers will expire by `t + 2Δ`, causing honest replicas to broadcast `nullify(v)`. These messages will be seen by all other honest replicas by `t + 3Δ`, allowing them to form a `nullification(v)` and enter view `v+1`.
+    - A Byzantine leader can delay the network by at most `4Δ`. This can happen if the leader equivocates by sending different proposals to different replicas, causing them to broadcast `notarize(*, v)` for different blocks. To see why, again assume all honest replicas enter view `v` by time `t`. The first round of `notarize` messages are sent and received by `t + 3Δ`. At this point, all honest replicas observe the conflicting votes and broadcast `nullify(v)`. This "second-round" vote is received by `t + 4Δ`, allowing a `nullification(v)` to be created, allowing them to enter `v+1`.
+    - These latency bounds are competitive despite the possibility of two rounds of voting. This is due to the timer being set to `2Δ`. For comparison, a protocol like Simplex with a `3Δ` timer would see replicas advance to the next view by `t + 4Δ` regardless of whether the leader is crash-faulty or Byzantine.
+- Every view `v` eventually produces at least one certificate `proof(v)`. As soon as a replica sees any `proof(v)` (as fast as `L` messages), it moves to view `v + 1`. If the network is partitioned in two, replicas in each half of the partition may continue to enter successive views (on different `proof(v)`s) but will never be able to finalize such blocks. To bound the depth of forks in a partition, replicas can wait to enter some view `v + k` until they have seen `Q` messages in view `v`.
 
 ## 10. Extensions
 
@@ -224,7 +226,7 @@ Minimmit can be instantiated in several different ways to tune performance when 
 
 - Use block digests (i.e. `c = hash(block)`) in `propose(c, v, (c', v'))`, `notarize(c, v)`, and `notarization(c, v)` messages.
 - Employ BLS multi-signatures or BLS threshold signatures, like [Threshold Simplex](#threshold), to cap `notarization(c, v)` and `nullification(v)` messages at a constant size regardless of the number of replicas.
-- As another optimization taken from [Threshold Simplex](#threshold), for leaders that have been observed to be offline (for some period of time) or who are not directly connected (via p2p), replicas may choose to instantly broadcast `nullify(v)` upon entering view `v` rather than waiting for the timer. This reduces the effect of faulty or crashed nodes on the throughput of the network. Once the faulty replicas reconnect or show "signs of life" via notarizing other proposals, honest replicas can stop "fast-skipping" their views.
+- Broadcast `nullify(v)` when entering the view of a leader that has been offline for some number of recent views, like [Threshold Simplex](#threshold). This reduces the effect of faulty or crashed nodes on a network's block production rate. Once the faulty replicas begin voting in consensus again, honest replicas can stop "fast-skipping" their views.
 - Attach some recent set of `proof(v)` messages to each `propose(c, v, (c', v'))` message (to ensure honest replicas that are not yet aware of recent proofs can still broadcast a `notarize(c, v)` message for valid blocks).
 - If `≥ f + 1` `notarize(c, v)` messages are observed for some `proposal(c, v, (c', v'))` considered invalid, request the missing `notarization(c, v')` or `nullification(v')` not found in our `proofs` (that prohibited us from broadcasting a `notarize(c, v)`) from the peers that consider it valid.
 - If stuck in the same view `v` for time `t_s`, re-broadcast some `proof(v - 1)` (to ensure all correct replicas enter `v`) and re-broadcast `notarized` (if not `⊥`) and `nullified` (if not `false`).
