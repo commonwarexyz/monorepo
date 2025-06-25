@@ -74,13 +74,20 @@ enum Phase<V: Eq> {
 ///
 /// _If you don't need advanced functionality, just use `insert()`, `insert_and_prune()`, or `remove()` instead._
 pub struct Cursor<'a, T: Translator, V: Eq> {
+    // The current phase of the cursor.
     phase: Phase<V>,
 
+    // The current entry.
     entry: Option<OccupiedEntry<'a, T::Key, Record<V>>>,
+
+    // The head of the linked list of previously visited records.
     past: Option<Box<Record<V>>>,
+    // The tail of the linked list of previously visited records.
     past_tail: Option<*mut Record<V>>,
+    // Whether we've pushed a record with a populated `next` field to `past` (invalidates `past_tail`).
     past_pushed_list: bool,
 
+    // Metrics.
     keys: &'a Gauge,
     items: &'a Gauge,
     pruned: &'a Counter,
@@ -116,7 +123,7 @@ impl<'a, T: Translator, V: Eq> Cursor<'a, T, V> {
         assert!(!self.past_pushed_list);
         self.past_pushed_list = next.next.is_some();
 
-        // Connect `next` to `past`.
+        // Add `next` to the tail of `past`.
         if self.past_tail.is_none() {
             self.past_tail = Some(&mut *next);
             self.past = Some(next);
