@@ -78,6 +78,7 @@ pub struct Cursor<'a, T: Translator, V: Eq> {
 
     entry: Option<OccupiedEntry<'a, T::Key, Record<V>>>,
     past: Option<Box<Record<V>>>,
+    past_tail: Option<*mut Record<V>>,
 
     keys: &'a Gauge,
     items: &'a Gauge,
@@ -97,6 +98,7 @@ impl<'a, T: Translator, V: Eq> Cursor<'a, T, V> {
 
             entry: Some(entry),
             past: None,
+            past_tail: None,
 
             keys,
             items,
@@ -106,12 +108,33 @@ impl<'a, T: Translator, V: Eq> Cursor<'a, T, V> {
 
     /// Pushes a `Record` to the past list, maintaining the linked list structure.
     fn past_push(&mut self, mut new: Box<Record<V>>) {
-        if self.past.is_none() {
+        // The new node has no `next` because it was taken in `Cursor::next`.
+        assert!(new.next.is_none());
+
+        if self.past_tail.is_none() {
+            // `past` is empty. The new node is both the head and the tail.
+            self.past_tail = Some(&mut *new);
             self.past = Some(new);
         } else {
-            let past = self.past.take().unwrap();
-            new.next = Some(past);
+            // `past` is not empty. Prepend `new` to the head. The tail does not change.
+            new.next = self.past.take();
             self.past = Some(new);
+        }
+    }
+
+    /// Appends a chain of records to the end of the `past` list.
+    fn past_append_remaining(&mut self, next: Box<Record<V>>) {
+        if let Some(tail_ptr) = self.past_tail {
+            // `past` list exists. Connect the new chain to its tail.
+            // This is safe because `tail_ptr` is guaranteed to be valid and point
+            // to a node that we own within the `Cursor`.
+            unsafe {
+                assert!((*tail_ptr).next.is_none());
+                (*tail_ptr).next = Some(next);
+            }
+        } else {
+            // `past` was empty. The appended chain is now the entire `past` list.
+            self.past = Some(next);
         }
     }
 
@@ -288,15 +311,8 @@ where
                 // No action needed.
             }
             Phase::Next(next) => {
-                // We need to preserve next's chain while adding it to past.
-                // Since order doesn't matter, just use past_push but on past instead.
-                // This preserves next's chain since we're not modifying next.next
-                if let Some(mut past) = self.past.take() {
-                    past.next = Some(next);
-                    self.past = Some(past);
-                } else {
-                    self.past = Some(next);
-                }
+                // The `unvisited_chain` contains all remaining nodes. Append it to the `past` list.
+                self.past_append_remaining(next);
             }
             Phase::Done => {
                 // No action needed.
@@ -312,14 +328,14 @@ where
             }
             Phase::PostDeleteNext(Some(next)) => {
                 // If there is a stale record, we should add it to past.
-                self.past_push(next);
+                self.past_append_remaining(next);
             }
             Phase::PostDeleteNext(None) => {
                 // No action needed.
             }
             Phase::PostInsert(next) => {
                 // If there is a current record, we should add it to past.
-                self.past_push(next);
+                self.past_append_remaining(next);
             }
         }
 
