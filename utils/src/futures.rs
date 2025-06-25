@@ -189,7 +189,8 @@ mod tests {
             let flag_clone = flag.clone();
             let mut pool = Pool::<i32>::default();
 
-            let (_finisher, finished) = oneshot::channel::<()>();
+            // Push a future that will set the flag to true when it resolves.
+            let (finisher, finished) = oneshot::channel();
             pool.push(async move {
                 finished.await.unwrap();
                 flag_clone.store(true, Ordering::SeqCst);
@@ -197,11 +198,15 @@ mod tests {
             });
             assert_eq!(pool.len(), 1);
 
+            // Cancel all futures.
             pool.cancel_all();
             assert!(pool.is_empty());
             assert!(!flag.load(Ordering::SeqCst));
 
-            // Stream should not resolve future after cancellation
+            // Send the finisher signal (should be ignored).
+            let _ = finisher.send(());
+
+            // Stream should not resolve future after cancellation.
             let stream_future = pool.next_completed();
             let timeout_future = async {
                 delay(Duration::from_millis(100)).await;
@@ -212,11 +217,12 @@ mod tests {
             match result {
                 Either::Left((_, _)) => panic!("Stream resolved after cancellation"),
                 Either::Right((_, _)) => {
-                    // Timeout occurred, which is expected
+                    // Wait for the timeout to trigger.
                 }
             }
+            assert!(!flag.load(Ordering::SeqCst));
 
-            // Push and await a new future
+            // Push and await a new future.
             pool.push(future::ready(42));
             assert_eq!(pool.len(), 1);
             let result = pool.next_completed().await;
