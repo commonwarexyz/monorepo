@@ -17,14 +17,21 @@ env:
 
 jobs:
   Tests:
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
     strategy:
       matrix:
-        flags:
-          - "--features commonware-runtime/iouring-storage"
-          - "--features commonware-runtime/iouring-network"
-          - ""
+        include:
+          - os: ubuntu-latest
+            flags: "--features commonware-runtime/iouring-storage"
+          - os: ubuntu-latest
+            flags: "--features commonware-runtime/iouring-network"
+          - os: ubuntu-latest
+            flags: ""
+          - os: windows-latest
+            flags: ""
+          - os: macos-latest
+            flags: ""
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
