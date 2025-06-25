@@ -204,12 +204,16 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                         types::Payload::BitVec(_) => &bit_vec_rate_limiter,
                         types::Payload::Peers(_) => &peers_rate_limiter,
                         types::Payload::Data(data) => {
-                            let Some(rate_limiter) = rate_limits.get(&data.channel) else {
-                                // We permit unknown messages to be received in case peers
-                                // are on a newer version than us
-                                continue;
-                            };
-                            rate_limiter
+                            match rate_limits.get(&data.channel) {
+                                Some(rate_limit) => rate_limit,
+                                None => { // Treat unknown channels as malformed
+                                    debug!(?peer, channel = data.channel, "unknown channel");
+                                    self.received_messages
+                                        .get_or_create(&metrics::Message::new_invalid(&peer))
+                                        .inc();
+                                    return Err(Error::UnknownChannel);
+                                }
+                            }
                         }
                     };
                     if let Err(wait_until) = rate_limiter.check() {

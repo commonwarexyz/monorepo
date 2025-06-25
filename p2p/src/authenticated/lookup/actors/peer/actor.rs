@@ -188,12 +188,16 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                     // Wait until rate limiter allows us to process the message
                     let rate_limiter = match &msg {
                         types::Message::Data(data) => {
-                            let Some(rate_limiter) = rate_limits.get(&data.channel) else {
-                                // We permit unknown messages to be received in case peers
-                                // are on a newer version than us
-                                continue;
-                            };
-                            rate_limiter
+                            match rate_limits.get(&data.channel) {
+                                Some(rate_limit) => rate_limit,
+                                None => { // Treat unknown channels as malformed
+                                    debug!(?peer, channel = data.channel, "unknown channel");
+                                    self.received_messages
+                                        .get_or_create(&metrics::Message::new_invalid(&peer))
+                                        .inc();
+                                    return Err(Error::UnknownChannel);
+                                }
+                            }
                         }
                         types::Message::Ping => &ping_rate_limiter,
                     };
