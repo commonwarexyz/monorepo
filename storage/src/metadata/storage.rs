@@ -17,7 +17,7 @@ pub struct Metadata<E: Clock + Storage + Metrics, K: Array> {
     data: BTreeMap<K, Vec<u8>>,
     cursor: usize,
     partition: String,
-    blobs: [(E::Blob, u64, u128); 2],
+    blobs: [(E::Blob, u64, u64); 2],
 
     syncs: Counter,
     keys: Gauge,
@@ -84,7 +84,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         index: usize,
         blob: &E::Blob,
         len: u64,
-    ) -> Result<Option<(u128, BTreeMap<K, Vec<u8>>)>, Error<K>> {
+    ) -> Result<Option<(u64, BTreeMap<K, Vec<u8>>)>, Error<K>> {
         // Get blob length
         if len == 0 {
             // Empty blob
@@ -95,8 +95,10 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         let len = len.try_into().map_err(|_| Error::BlobTooLarge(len))?;
         let buf = blob.read_at(vec![0u8; len], 0).await?;
 
-        // Verify integrity
-        if buf.len() < 20 {
+        // Verify integrity.
+        //
+        // 8 bytes for version + 4 bytes for checksum.
+        if buf.len() < 12 {
             // Truncate and return none
             warn!(
                 blob = index,
@@ -127,14 +129,14 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         }
 
         // Get parent
-        let version = u128::from_be_bytes(buf.as_ref()[..16].try_into().unwrap());
+        let version = u64::from_be_bytes(buf.as_ref()[..8].try_into().unwrap());
 
         // Extract data
         //
         // If the checksum is correct, we assume data is correctly packed and we don't perform
         // length checks on the cursor.
         let mut data = BTreeMap::new();
-        let mut cursor = u128::SIZE;
+        let mut cursor = u64::SIZE;
         while cursor < checksum_index {
             // Read key
             let next_cursor = cursor + K::SIZE;
@@ -187,13 +189,16 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
 
     /// Atomically commit the current state of `Metadata`.
     pub async fn sync(&mut self) -> Result<(), Error<K>> {
-        // Compute next version
+        // Compute next version.
+        //
+        // While it is possible that extremely high-frequency updates to `Metadata` could cause an eventual
+        // overflow of version, syncing once per millisecond would overflow in 584,942,417 years.
         let past_version = &self.blobs[self.cursor].2;
         let next_version = past_version.checked_add(1).expect("version overflow");
 
         // Create buffer
         let mut buf = Vec::new();
-        buf.put_u128(next_version);
+        buf.put_u64(next_version);
         for (key, value) in &self.data {
             buf.put_slice(key.as_ref());
             let value_len = value
