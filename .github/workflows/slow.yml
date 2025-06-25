@@ -18,7 +18,7 @@ env:
 jobs:
   Tests:
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
+    timeout-minutes: 180
     strategy:
       matrix:
         include:
