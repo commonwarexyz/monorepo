@@ -72,18 +72,18 @@ pub struct Config<T: Translator> {
 /// Configuration for syncing an `Any` authenticated database to match a pruned target state.
 #[derive(Clone)]
 pub struct SyncConfig<K: Array, V: Array, H: CHasher, T: Translator> {
-    /// Base configuration for the database
+    /// Base configuration for the database.
     pub config: Config<T>,
 
-    /// Location -> digest of the pinned nodes needed for proof generation.
+    /// Location -> digest of the pinned nodes needed for proofs.
     pub mmr_pinned_nodes: HashMap<u64, H::Digest>,
 
-    /// The location (index into the Any database log) up to which operations have been pruned.
+    /// The location in the [Any] up to which operations have been pruned.
     /// This serves as both the log pruning boundary and the inactivity floor.
     /// Everything before this location is considered pruned/inactive.
     pub pruned_to_loc: u64,
 
-    /// The log operations to be applied starting at `pruned_to_loc`.
+    /// The live set of operations to be applied to the [Any] starting at `pruned_to_loc`.
     pub operations: Vec<Operation<K, V>>,
 }
 
@@ -185,7 +185,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         Ok(db)
     }
 
-    /// Initialize an `Any` database in a pruned state.
+    /// Initialize an [Any] database in a pruned state.
     /// Removes all existing persisted data and applies the state given in `cfg`.
     pub async fn init_sync(context: E, cfg: SyncConfig<K, V, H, T>) -> Result<Self, Error> {
         // Convert log operations to MMR digests
@@ -1429,11 +1429,11 @@ mod test {
         }
     }
 
+    /// Test init_sync where the target state is empty and unpruned.
     #[test_traced("WARN")]
     pub fn test_any_db_init_sync_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Test basic init_sync with minimal data - empty database case
             let sync_config: SyncConfig<Digest, Digest, Sha256, EightCap> = test_sync_config(
                 "sync_basic",
                 EightCap,
@@ -1468,6 +1468,7 @@ mod test {
         });
     }
 
+    /// Test init_sync where the target state is pruned.
     #[test_traced("WARN")]
     pub fn test_any_db_init_sync_with_pruning() {
         let executor = deterministic::Runner::default();
@@ -1479,7 +1480,7 @@ mod test {
             .await
             .unwrap();
 
-            // Add operations and commit to ensure MMR is in clean state
+            // Add operations to the source db.
             let mut keys = Vec::new();
             let mut values = Vec::new();
             for i in 0..5u64 {
@@ -1491,6 +1492,7 @@ mod test {
             }
             source_db.commit().await.unwrap();
 
+            // Get state from the source db to use later.
             let mut hasher = Standard::<Sha256>::new();
             let source_root = source_db.root(&mut hasher);
             let source_op_count = source_db.op_count();
@@ -1499,7 +1501,7 @@ mod test {
                 .proof(source_db.inactivity_floor_loc, source_op_count)
                 .await
                 .unwrap();
-            // Verify proof
+            // Verify proof (not really part of this test but doesn't hurt).
             Any::<Context, Digest, Digest, Sha256, EightCap>::verify_proof(
                 &mut hasher,
                 &proof,
@@ -1509,9 +1511,9 @@ mod test {
             )
             .unwrap();
             assert_eq!(ops.len(), need_ops as usize);
-
             let pinned_nodes = source_db.ops.get_pinned_nodes();
 
+            // Initialize the synced db.
             let sync_config: SyncConfig<Digest, Digest, Sha256, EightCap> = test_sync_config(
                 "sync_pruning",
                 EightCap,
@@ -1519,7 +1521,6 @@ mod test {
                 source_db.inactivity_floor_loc,
                 ops,
             );
-
             let mut synced_db = Any::init_sync(context.clone(), sync_config).await.unwrap();
 
             // Verify the synced database matches the source

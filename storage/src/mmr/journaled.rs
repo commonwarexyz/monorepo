@@ -58,7 +58,7 @@ pub struct SyncConfig<D> {
     /// The position up to which elements have been pruned (first non-pruned element index).
     pub pruned_to_pos: u64,
 
-    /// The operations (digests) to be applied after the pruning boundary.
+    /// The live set of operations to be applied to the [Mmr] starting at `pruned_to_pos`.
     pub operations: Vec<D>,
 }
 
@@ -223,17 +223,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         Ok(s)
     }
 
-    /// Initialize a new `Mmr` instance in a synced state, matching a target database that has been pruned.
-    ///
-    /// This method creates an MMR that matches the state of a source database after operations
-    /// have been applied and then pruned. The resulting MMR will have the same root hash and
-    /// be able to generate identical proofs as the source.
-    ///
-    /// # Parameters
-    ///
-    /// * `context` - The runtime context for storage operations
-    /// * `hasher` - The hasher instance to use for digest computation
-    /// * `cfg` - Configuration containing sync parameters including pinned nodes, pruning boundary, and operations
+    /// Initialize a new [Mmr] instance in a pruned state.
     pub async fn init_sync(
         context: E,
         hasher: &mut impl Hasher<H>,

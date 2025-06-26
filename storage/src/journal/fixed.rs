@@ -230,26 +230,22 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         })
     }
 
-    /// Initialize a new `Journal` instance in a pruned state.
-    ///
-    /// This creates a journal that appears to have been pruned to contain only operations
-    /// starting from the specified `size`. The journal will be set up with the correct
-    /// blob structure as if operations 0..size had been applied and then pruned.
+    /// Initialize a new [Journal] instance in a pruned state.
     ///
     /// # Arguments
     /// * `context` - The storage context
     /// * `cfg` - Configuration for the journal
     /// * `size` - The target size (number of operations) the journal should appear to have.
-    ///   This represents the first operation that would be retained after pruning.
     ///
     /// # Behavior
     /// 1. Removes all existing blobs in the partition
     /// 2. Creates a single blob at the index that would contain the operation at `size`
-    /// 3. Sets the blob size to represent the "leftover" operations within that blob
+    /// 3. Sets the blob size to represent the "leftover" operations within that blob.
     ///
     /// For example, if `items_per_blob = 10` and `size = 25`:
     /// - Blob index would be 25 / 10 = 2 (third blob, 0-indexed)
     /// - Blob size would be (25 % 10) * CHUNK_SIZE = 5 * CHUNK_SIZE
+    /// - Blob is filled with dummy data up to its size -- this shouldn't be read.
     /// - This represents a journal that had operations 0-24, with operations 0-19 pruned,
     ///   leaving operations 20-24 in blob 2
     pub async fn init_sync(context: E, cfg: Config, size: u64) -> Result<Self, Error> {
