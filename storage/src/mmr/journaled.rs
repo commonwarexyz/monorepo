@@ -568,7 +568,6 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     }
 
     /// Get the pinned nodes from the memory MMR for testing purposes.
-    /// TODO danlaine: remove this once test refactor is done
     #[cfg(test)]
     pub fn get_pinned_nodes(&self) -> HashMap<u64, H::Digest> {
         self.mem_mmr.pinned_nodes.clone()
