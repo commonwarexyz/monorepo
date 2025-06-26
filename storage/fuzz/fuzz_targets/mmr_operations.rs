@@ -45,8 +45,6 @@ impl ReferenceMmr {
         self.leaf_positions.push(leaf_pos);
         self.leaf_data.push(data);
         // Track nodes added (leaf + any parent nodes)
-        let leaves_before = self.leaf_positions.len() - 1;
-        let nodes_before = if leaves_before == 0 { 0 } else { self.calculate_mmr_size(leaves_before) };
         let nodes_after = self.calculate_mmr_size(self.leaf_positions.len());
         self.total_nodes_added = nodes_after;
     }
@@ -95,7 +93,7 @@ impl ReferenceMmr {
         
         while remaining > 0 {
             // Find largest power of 2 <= remaining
-            let height = (64 - remaining.leading_zeros() - 1) as u32;
+            let height = 63 - remaining.leading_zeros();
             let subtree_leaves = 1u64 << height;
             let subtree_size = (2 * subtree_leaves) - 1;
             
@@ -136,18 +134,18 @@ fn fuzz(input: FuzzInput) {
                     // Basic checks
                     assert!(
                         mmr.size() > size_before,
-                        "Operation {}: Size should increase after add", op_idx
+                        "Operation {op_idx}: Size should increase after add"
                     );
 
                     assert_eq!(
                         mmr.last_leaf_pos(), 
                         Some(mmr_pos),
-                        "Operation {}: Last leaf position should be the added position", op_idx
+                        "Operation {op_idx}: Last leaf position should be the added position"
                     );
 
                     assert!(
                         mmr.get_node(mmr_pos).is_some(),
-                        "Operation {}: Should be able to get added node", op_idx
+                        "Operation {op_idx}: Should be able to get added node"
                     );
                 }
 
@@ -158,19 +156,18 @@ fn fuzz(input: FuzzInput) {
 
                     assert_eq!(
                         mmr_result.is_ok(), ref_result.is_ok(),
-                        "Operation {}: Pop result mismatch - MMR: {:?}, Ref: {:?}", 
-                        op_idx, mmr_result, ref_result
+                        "Operation {op_idx}: Pop result mismatch - MMR: {mmr_result:?}, Ref: {ref_result:?}", 
                     );
 
                     if mmr_result.is_ok() {
                         assert!(
                             mmr.size() < size_before,
-                            "Operation {}: Size should decrease after successful pop", op_idx
+                            "Operation {op_idx}: Size should decrease after successful pop"
                         );
 
                         assert_eq!(
                             mmr.last_leaf_pos(), reference.last_leaf_pos(),
-                            "Operation {}: Last leaf position mismatch after pop", op_idx
+                            "Operation {op_idx}: Last leaf position mismatch after pop"
                         );
                     }
                 }
@@ -195,15 +192,15 @@ fn fuzz(input: FuzzInput) {
                         // Size should not change
                         assert_eq!(
                             mmr.size(), size_before,
-                            "Operation {}: Size should not change after update_leaf", op_idx
+                            "Operation {op_idx}: Size should not change after update_leaf"
                         );
 
                         // Root should change (unless data is identical)
                         let root_after = mmr.root(&mut hasher);
-                        if limited_data != &reference.leaf_data[idx] {
+                        if limited_data != reference.leaf_data[idx] {
                             assert_ne!(
                                 root_before, root_after,
-                                "Operation {}: Root should change after update_leaf with different data", op_idx
+                                "Operation {op_idx}: Root should change after update_leaf with different data"
                             );
                         }
                     }
@@ -217,7 +214,7 @@ fn fuzz(input: FuzzInput) {
                         // We should be able to get any position within size
                         // (unless it's been pruned, but we're not testing pruning yet)
                         if node.is_none() {
-                            println!("Warning: Could not get node at position {} (size: {})", safe_pos, mmr.size());
+                            println!("Warning: Could not get node at position {safe_pos} (size: {})", mmr.size());
                         }
                     }
                 }
@@ -228,8 +225,7 @@ fn fuzz(input: FuzzInput) {
 
                     assert_eq!(
                         mmr_last, ref_last,
-                        "Operation {}: Last leaf position mismatch - MMR: {:?}, Ref: {:?}", 
-                        op_idx, mmr_last, ref_last
+                        "Operation {op_idx}: Last leaf position mismatch - MMR: {mmr_last:?}, Ref: {ref_last:?}", 
                     );
                 }
 
@@ -239,8 +235,8 @@ fn fuzz(input: FuzzInput) {
 
                     assert_eq!(
                         mmr_size, expected_size,
-                        "Operation {}: Size mismatch - MMR: {}, Expected: {} (leaves: {})", 
-                        op_idx, mmr_size, expected_size, reference.leaf_count()
+                        "Operation {op_idx}: Size mismatch - MMR: {mmr_size}, Expected: {expected_size} (leaves: {})", 
+                        reference.leaf_count()
                     );
                 }
 
@@ -251,7 +247,7 @@ fn fuzz(input: FuzzInput) {
                     
                     assert_eq!(
                         root1, root2,
-                        "Operation {}: Root calculation should be deterministic", op_idx
+                        "Operation {op_idx}: Root calculation should be deterministic"
                     );
                 }
 
@@ -270,17 +266,16 @@ fn fuzz(input: FuzzInput) {
                                     Ok(is_valid) => {
                                         assert!(
                                             is_valid,
-                                            "Operation {}: Proof verification failed for leaf at pos {}", 
-                                            op_idx, pos
+                                            "Operation {op_idx}: Proof verification failed for leaf at pos {pos}", 
                                         );
                                     }
                                     Err(e) => {
-                                        println!("Proof verification error for pos {}: {:?}", pos, e);
+                                        println!("Proof verification error for pos {pos}: {e:?}");
                                     }
                                 }
                             }
                             Err(e) => {
-                                println!("Could not generate proof for pos {}: {:?}", pos, e);
+                                println!("Could not generate proof for pos {pos}: {e:?}");
                             }
                         }
                     }
@@ -293,14 +288,14 @@ fn fuzz(input: FuzzInput) {
                 if let Some(last_pos) = mmr.last_leaf_pos() {
                     assert!(
                         last_pos < mmr.size(),
-                        "Operation {}: Last leaf position {} >= size {}", 
-                        op_idx, last_pos, mmr.size()
+                        "Operation {op_idx}: Last leaf position {last_pos} >= size {}", 
+                        mmr.size()
                     );
                 }
             } else {
                 assert!(
                     mmr.last_leaf_pos().is_none(),
-                    "Operation {}: Empty MMR should have no last leaf", op_idx
+                    "Operation {op_idx}: Empty MMR should have no last leaf"
                 );
             }
         }
