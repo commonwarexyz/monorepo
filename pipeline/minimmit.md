@@ -124,7 +124,7 @@ fn prune(r, view) {
 }
 ```
 
-## 8. Protocol for replica `r` in view `v`
+## 8. Protocol for Replica `r` in View `v`
 
 ### 8.1. Propose
 
