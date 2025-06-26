@@ -270,7 +270,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         metadata.sync().await.map_err(Error::MetadataError)?;
 
         let mut pinned_nodes_vec = Vec::new();
-        for pos in Proof::<H>::nodes_to_pin(cfg.pruned_to_pos) {
+        for pos in Proof::<H::Digest>::nodes_to_pin(cfg.pruned_to_pos) {
             if let Some(digest) = cfg.pinned_nodes.get(&pos) {
                 pinned_nodes_vec.push(*digest);
             } else {
