@@ -23,7 +23,7 @@ _There exists `≥ 1` honest replica in any `Q`-set and `L`-set intersection._
 
 | Message | Purpose |
 |---------|---------|
-| `genesis` | The genesis block. |
+| `genesis` | The genesis block. Considered finalized at view `⊥ < 0`. |
 | `propose(r, c, v, (c', v'))` | Leader `r`'s proposal `c` for view `v` with parent `c'` in view `v'`. |
 | `notarize(c, v)` | Vote to finalize block `c` in view `v`. |
 | `nullify(v)` | Vote to advance to view `v + 1`. |
@@ -33,17 +33,16 @@ _There exists `≥ 1` honest replica in any `Q`-set and `L`-set intersection._
 
 ## 5. Initial Replica State
 
-_We denote replica `r`'s state fields using dot notation (e.g., `r.view`, `r.timer`, etc.)._
-
 A replica's (`r`'s) state contains the following fields:
 
 - `view` is the replica's view, initially `0`
 - `notarized` is the proposal this replica has notarized, initially `⊥`
 - `nullified` is whether this replica has nullified this view, initially `false`
-- `timer` is the time until nullifying (if `r.notarized == ⊥` and `!r.nullified` ), initially `None`
+- `timer` is the time until nullifying (if `notarized == ⊥` and `!nullified` ), initially `None`
 - `proofs` is a map `View → Set<Certificate>` the set of certificates this replica has collected for each view, initially `{}`.
 - `messages` is a map `View → (Replica → Set<Message>)` storing every message the replica has received, grouped first by view and then by sender, initially `{}`.
 
+_We denote replica `r`'s state fields using dot notation (e.g., `r.view`, `r.timer`, etc.)._
 
 ## 6. External Functions
 
@@ -68,19 +67,16 @@ _In every helper function, the first parameter `r` is the replica whose local st
 fn select_parent(r, v) -> (c', v') {
     let i = v - 1;
     while i >= 0 {
-        let C = { c : notarization(c, i) ∈ r.proofs[i] };
-        if C ≠ ∅ {
-            // Pick an arbitrary element of C
-            let c' = any(C);
-            return (c', i);
+        if notarization(c', i) ∈ r.proofs[i] {
+            return (c', i); // If there are multiple, pick any
         }
         if nullification(i) ∈ r.proofs[i] {
             i -= 1;
             continue;
         }
-        return (⊥, 0);
+        return (⊥, ⊥); // No proofs for view i, cannot proceed
     }
-    return (genesis, 0);
+    return (genesis, ⊥);
 }
 
 // Replica `r` ensures there are nullifications for all views `[v', v)` and that there is a `notarization(c', v')`
