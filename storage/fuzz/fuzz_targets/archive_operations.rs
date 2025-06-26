@@ -32,11 +32,11 @@ enum ArchiveOperation {
 }
 
 #[derive(Arbitrary, Debug)]
-struct FuzzData {
+struct FuzzInput {
     operations: Vec<ArchiveOperation>,
 }
 
-fuzz_target!(|data: FuzzData| {
+fn fuzz(data: FuzzInput) {
     if data.operations.is_empty() || data.operations.len() > 106 {
         return;
     }
@@ -240,4 +240,8 @@ fuzz_target!(|data: FuzzData| {
 
         archive.close().await.expect("Archive operation closed unexpectedly");
     });
+}
+
+fuzz_target!(|input: FuzzInput| {
+    fuzz(input);
 });

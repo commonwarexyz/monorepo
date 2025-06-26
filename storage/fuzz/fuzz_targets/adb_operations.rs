@@ -28,11 +28,11 @@ enum AdbOperation {
     Get { key: RawKey },
 }
 #[derive(Arbitrary, Debug)]
-struct FuzzData {
+struct FuzzInput {
     operations: Vec<AdbOperation>,
 }
 
-fuzz_target!(|data: FuzzData| {
+fn fuzz(data: FuzzInput) {
     let mut hasher = Standard::<Sha256>::new();
     if data.operations.is_empty() || data.operations.len() > 313 {
         return;
@@ -214,4 +214,8 @@ fuzz_target!(|data: FuzzData| {
 
         adb.close().await.expect("close should not fail");
     });
+}
+
+fuzz_target!(|input: FuzzInput| {
+    fuzz(input);
 });
