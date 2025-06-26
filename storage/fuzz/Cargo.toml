@@ -35,3 +35,10 @@ path = "fuzz_targets/rmap_operations.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "mmr_operations"
+path = "fuzz_targets/mmr_operations.rs"
+test = false
+doc = false
+bench = false

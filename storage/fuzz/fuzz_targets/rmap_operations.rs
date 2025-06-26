@@ -73,7 +73,10 @@ fn fuzz(data: FuzzInput) {
                         "Value {value} should be within range [{start}, {end}]",
                     );
                 } else {
-                    assert!(range.is_none(), "Value {value} should not be in reference set");
+                    assert!(
+                        range.is_none(),
+                        "Value {value} should not be in reference set"
+                    );
                 }
             }
 
