@@ -69,7 +69,7 @@ pub struct Config<T: Translator> {
     pub pool: Option<ThreadPool>,
 }
 
-/// Configuration for syncing an `Any` authenticated database to match a pruned target state.
+/// Configuration for syncing an [Any] to a pruned target state.
 #[derive(Clone)]
 pub struct SyncConfig<K: Array, V: Array, H: CHasher, T: Translator> {
     /// Base configuration for the database.
