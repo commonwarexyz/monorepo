@@ -22,7 +22,7 @@ _There exists `≥ 1` honest replica in any `Q`-set and `L`-set intersection._
 ## 4. Message Types
 
 | Message | Purpose |
-|---------|--------|
+|---------|---------|
 | `genesis` | The genesis block. |
 | `propose(r, c, v, (c', v'))` | Leader `r`'s proposal `c` for view `v` with parent `c'` in view `v'`. |
 | `notarize(c, v)` | Vote to finalize block `c` in view `v`. |
