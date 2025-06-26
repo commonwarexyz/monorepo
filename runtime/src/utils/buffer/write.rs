@@ -19,19 +19,28 @@ struct Buffer {
 }
 
 impl Buffer {
+    /// Creates a new buffer with the provided `size` and `capacity`.
+    fn new(size: u64, capacity: usize) -> Self {
+        Self {
+            data: Vec::with_capacity(capacity),
+            offset: size,
+            capacity,
+        }
+    }
+
     /// Returns the current logical size of the blob including any buffered data.
     fn size(&self) -> u64 {
         self.offset + self.data.len() as u64
     }
 
-    /// Truncates the buffer to the provided `len` if it falls within the current range.
-    /// Returns `false` and resets the buffer if the truncation point precedes the current range.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the truncation point is greater than the current size of the blob.
+    /// Truncates the buffer to the provided `len` if it falls within the current range. Returns
+    /// `false` and resets the buffer if the truncation point precedes the current range. A
+    /// truncation point at or beyond the end of the logical blob is ignored, with `true` being
+    /// returned.
     fn truncate(&mut self, len: u64) -> bool {
-        assert!(len <= self.size());
+        if len >= self.size() {
+            return true;
+        }
         if len <= self.offset {
             self.data.clear();
             self.offset = len;
@@ -46,26 +55,27 @@ impl Buffer {
         self.data.is_empty()
     }
 
-    /// Takes & returns the buffered data for flushing, setting up the buffer for a new write.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the buffer is empty.
-    fn take_buf(&mut self) -> (Vec<u8>, u64) {
-        assert!(!self.is_empty());
+    /// Takes & returns the buffered data and its blob offset, or returns `None` if the buffer is
+    /// already empty. The buffer is reset to the empty state with an updated offset positioned at
+    /// the end of the logical blob.
+    fn take_buf(&mut self) -> Option<(Vec<u8>, u64)> {
+        if self.is_empty() {
+            return None;
+        }
         let buf = std::mem::replace(&mut self.data, Vec::with_capacity(self.capacity));
         let offset = self.offset;
         self.offset += buf.len() as u64;
-        (buf, offset)
+        Some((buf, offset))
     }
 
-    /// Read any requested data that overlaps with the buffer, returning the number of bytes
-    /// remaining to be read. (Any unread bytes are always those at the beginning of the range.)
+    /// Extract and return any data from the blob range `[offset,offset+buf.len)` that is contained
+    /// in the buffer, returning the number of bytes that could not be extracted. (Any bytes
+    /// that could not be extracted must reside at the beginning of the range.)
     ///
     /// # Panics
     ///
     /// Panics if the end offset of the requested data falls outside the range of the logical blob.
-    fn read(&self, buf: &mut [u8], offset: u64) -> usize {
+    fn extract(&self, buf: &mut [u8], offset: u64) -> usize {
         assert!(offset + buf.len() as u64 <= self.size());
         if offset + buf.len() as u64 <= self.offset {
             // Range does not overlap with the buffer.
@@ -103,6 +113,7 @@ impl Buffer {
         }
         let start = (offset - self.offset) as usize;
         let end = start + data.len();
+
         // Expand buffer if necessary (fills with zeros).
         if end > self.data.len() {
             self.data.resize(end, 0);
@@ -168,11 +179,7 @@ impl<B: Blob> Write<B> {
 
         Self {
             blob,
-            buffer: Arc::new(RwLock::new(Buffer {
-                data: Vec::with_capacity(capacity),
-                offset: size,
-                capacity,
-            })),
+            buffer: Arc::new(RwLock::new(Buffer::new(size, capacity))),
         }
     }
 
@@ -190,7 +197,7 @@ impl<B: Blob> Write<B> {
     /// # Warning
     ///
     /// Any buffered data that hasn't been flushed or synced will be discarded.
-    pub fn take_blob(self) -> B {
+    pub fn take_inner(self) -> B {
         self.blob
     }
 
@@ -199,7 +206,7 @@ impl<B: Blob> Write<B> {
     /// # Warning
     ///
     /// The returned blob will not include any data that has yet to be flushed from the buffer.
-    pub fn clone_blob(&self) -> B {
+    pub fn clone_inner(&self) -> B {
         self.blob.clone()
     }
 }
@@ -227,51 +234,54 @@ impl<B: Blob> Blob for Write<B> {
             return Err(Error::BlobInsufficientLength);
         }
 
-        // Read any bytes from the buffer that overlap with the requested range.
-        let remaining = buffer.read(buf.as_mut(), offset);
+        // Extract any bytes from the buffer that overlap with the requested range.
+        let remaining = buffer.extract(buf.as_mut(), offset);
         if remaining == 0 {
             return Ok(buf);
         }
 
-        // If bytes remain, read directly from the blob.
+        // If bytes remain, read directly from the blob. Any remaining bytes reside at the beginning
+        // of the range.
         let blob_part = self.blob.read_at(vec![0u8; remaining], offset).await?;
         buf.as_mut()[..remaining].copy_from_slice(blob_part.as_ref());
 
         Ok(buf)
     }
 
-    async fn write_at(&self, data: impl Into<StableBuf> + Send, offset: u64) -> Result<(), Error> {
+    async fn write_at(&self, buf: impl Into<StableBuf> + Send, offset: u64) -> Result<(), Error> {
         // Prepare `buf` to be written.
-        let data = data.into();
-        let data_len = data.len(); // number of bytes to write
+        let buf = buf.into();
+        let buf_len = buf.len(); // number of bytes to write
 
         // Ensure the write doesn't overflow.
         let end_offset = offset
-            .checked_add(data_len as u64)
+            .checked_add(buf_len as u64)
             .ok_or(Error::OffsetOverflow)?;
 
         // Acquire a write lock on the buffer.
         let mut buffer = self.buffer.write().await;
 
-        // Case 1: Write falls entirely within the buffer's current range and can be merged.
-        if buffer.merge(data.as_ref(), offset) {
+        // Write falls entirely within the buffer's current range and can be merged.
+        if buffer.merge(buf.as_ref(), offset) {
             return Ok(());
         }
 
-        // Case 2: Write cannot be merged, so flush the buffer if the range overlaps, and check if
-        // merge is possible after.
-        if !buffer.is_empty() && buffer.offset < end_offset {
-            let (old_buf, buffer_offset) = buffer.take_buf();
-            self.blob.write_at(old_buf, buffer_offset).await?;
-
-            if buffer.merge(data.as_ref(), offset) {
-                return Ok(());
+        // Write cannot be merged, so flush the buffer if the range overlaps, and check if merge is
+        // possible after.
+        if buffer.offset < end_offset {
+            if let Some((old_buf, buffer_offset)) = buffer.take_buf() {
+                self.blob.write_at(old_buf, buffer_offset).await?;
+                if buffer.merge(buf.as_ref(), offset) {
+                    return Ok(());
+                }
             }
         }
 
-        // Case 3: Write could not be merged (exceeds capacity or outside its range), so write
-        // directly.
-        self.blob.write_at(data, offset).await?;
+        // Write could not be merged (exceeds buffer capacity or outside its range), so write
+        // directly. Note that we end up writing an intersecting range twice: once when the buffer
+        // is flushed above, then again when we write the `buf` below. Removing this inefficiency
+        // may not be worth the additional complexity.
+        self.blob.write_at(buf, offset).await?;
 
         // Maintain the "buffer at tip" invariant by advancing offset to the end of this write if it
         // extended the underlying blob.
@@ -292,8 +302,7 @@ impl<B: Blob> Blob for Write<B> {
 
     async fn sync(&self) -> Result<(), Error> {
         let mut buffer = self.buffer.write().await;
-        if !buffer.is_empty() {
-            let (buf, offset) = buffer.take_buf();
+        if let Some((buf, offset)) = buffer.take_buf() {
             self.blob.write_at(buf, offset).await?;
         }
         self.blob.sync().await
