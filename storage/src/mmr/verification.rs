@@ -328,12 +328,13 @@ impl<D: Digest> Proof<D> {
     /// * `end_element_pos` - End of the proven range
     ///
     /// # Returns
-    /// A HashMap mapping node positions to their digest values for all nodes in `nodes_to_pin(pruning_boundary)`
+    /// A Vec of digest values for all nodes in `nodes_to_pin(pruning_boundary)`,
+    /// in the same order as returned by `nodes_to_pin` (decreasing height order)
     pub fn extract_pinned_nodes(
         &self,
         start_element_pos: u64,
         end_element_pos: u64,
-    ) -> Result<std::collections::HashMap<u64, D>, Error> {
+    ) -> Result<Vec<D>, Error> {
         // Get the positions of all nodes that should be pinned
         let pinned_positions: Vec<u64> = Self::nodes_to_pin(start_element_pos).collect();
 
@@ -358,15 +359,14 @@ impl<D: Digest> Proof<D> {
             .map(|(&pos, &digest)| (pos, digest))
             .collect();
 
-        // Extract the pinned nodes
-        let mut result = HashMap::new();
+        // Extract the pinned nodes in the same order as nodes_to_pin
+        let mut result = Vec::with_capacity(pinned_positions.len());
         for pinned_pos in pinned_positions {
-            if let Some(&digest) = position_to_digest.get(&pinned_pos) {
-                result.insert(pinned_pos, digest);
-            } else {
+            let Some(&digest) = position_to_digest.get(&pinned_pos) else {
                 debug!("Pinned node at position {} not found in proof", pinned_pos);
                 return Err(Error::MissingDigests);
-            }
+            };
+            result.push(digest);
         }
         Ok(result)
     }
@@ -943,10 +943,10 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_pinned_nodes_stress_test() {
+    fn test_extract_pinned_nodes() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            // Test for every number of elements from 0 to 255
+            // Test for every number of elements from 1 to 255
             for num_elements in 1u8..255 {
                 // Build MMR with the specified number of elements
                 let mut mmr = Mmr::new();
@@ -1013,26 +1013,16 @@ mod tests {
                             end_pos
                         );
 
-                        // Verify all expected positions are present
-                        for &expected_pos in &expected_pinned {
-                            assert!(
-                                pinned_nodes.contains_key(&expected_pos),
-                                "Position {} should be extractable as pinned node for {} elements, boundary={}, range=[{}, {}]",
-                                expected_pos,
-                                num_elements,
-                                start_pos,
-                                start_pos,
-                                end_pos
-                            );
-                        }
-
                         // Verify extracted hashes match actual node values
-                        for (&pos, &extracted_hash) in &pinned_nodes {
-                            let actual_hash = mmr.get_node(pos).unwrap();
+                        // The pinned_nodes Vec is in the same order as expected_pinned
+                        for (i, &expected_pos) in expected_pinned.iter().enumerate() {
+                            let extracted_hash = pinned_nodes[i];
+                            let actual_hash = mmr.get_node(expected_pos).unwrap();
                             assert_eq!(
                                 extracted_hash, actual_hash,
-                                "Hash mismatch at position {} for {} elements, boundary={}, range=[{}, {}]",
-                                pos,
+                                "Hash mismatch at position {} (index {}) for {} elements, boundary={}, range=[{}, {}]",
+                                expected_pos,
+                                i,
                                 num_elements,
                                 start_pos,
                                 start_pos,
