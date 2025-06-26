@@ -55,7 +55,7 @@ impl ReferenceMmr {
         }
         self.leaf_positions.pop();
         self.leaf_data.pop();
-        
+
         if self.leaf_positions.is_empty() {
             self.total_nodes_added = 0;
         } else {
@@ -87,20 +87,20 @@ impl ReferenceMmr {
         if num_leaves == 0 {
             return 0;
         }
-        
+
         let mut size = 0u64;
         let mut remaining = num_leaves as u64;
-        
+
         while remaining > 0 {
             // Find largest power of 2 <= remaining
             let height = 63 - remaining.leading_zeros();
             let subtree_leaves = 1u64 << height;
             let subtree_size = (2 * subtree_leaves) - 1;
-            
+
             size += subtree_size;
             remaining -= subtree_leaves;
         }
-        
+
         size
     }
 }
@@ -138,7 +138,7 @@ fn fuzz(input: FuzzInput) {
                     );
 
                     assert_eq!(
-                        mmr.last_leaf_pos(), 
+                        mmr.last_leaf_pos(),
                         Some(mmr_pos),
                         "Operation {op_idx}: Last leaf position should be the added position"
                     );
@@ -210,7 +210,6 @@ fn fuzz(input: FuzzInput) {
                     if mmr.size() > 0 {
                         let safe_pos = *pos % mmr.size();
                         let node = mmr.get_node(safe_pos);
-                        
                         // We should be able to get any position within size
                         // (unless it's been pruned, but we're not testing pruning yet)
                         if node.is_none() {
@@ -244,7 +243,6 @@ fn fuzz(input: FuzzInput) {
                     // Root should always be computable
                     let root1 = mmr.root(&mut hasher);
                     let root2 = mmr.root(&mut hasher);
-                    
                     assert_eq!(
                         root1, root2,
                         "Operation {op_idx}: Root calculation should be deterministic"
@@ -261,7 +259,6 @@ fn fuzz(input: FuzzInput) {
                                 // Verify the proof with the actual data we stored
                                 let root = mmr.root(&mut hasher);
                                 let leaf_data = &reference.leaf_data[idx];
-                                
                                 match proof.verify_element_inclusion(&mut hasher, leaf_data, pos, &root) {
                                     Ok(is_valid) => {
                                         assert!(
