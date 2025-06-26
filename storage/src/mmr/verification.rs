@@ -338,11 +338,11 @@ impl<D: Digest> Proof<D> {
         // Get the positions of all nodes that should be pinned
         let pinned_positions: Vec<u64> = Self::nodes_to_pin(start_element_pos).collect();
 
-        // Get all positions required for the proof to understand the structure
+        // Get all positions required for the proof
         let required_positions =
             Self::nodes_required_for_range_proof(self.size, start_element_pos, end_element_pos);
 
-        // The proof digests correspond 1:1 with required_positions
+        // Should be the nodes in the proof
         if required_positions.len() != self.digests.len() {
             debug!(
                 "Proof digest count ({}) doesn't match required positions ({})",
