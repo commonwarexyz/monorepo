@@ -66,7 +66,7 @@ mod tests {
         sha256::Digest as Sha256Digest,
         PrivateKeyExt as _, Signer as _,
     };
-    use commonware_macros::test_traced;
+    use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{
         deterministic::{self, Context},
@@ -74,6 +74,7 @@ mod tests {
     };
     use commonware_utils::NonZeroDuration;
     use futures::{channel::oneshot, future::join_all};
+    use rand::Rng;
     use std::{
         collections::{BTreeMap, HashMap},
         sync::{Arc, Mutex},
@@ -327,44 +328,193 @@ mod tests {
     fn unclean_shutdown<V: Variant>() {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        let target_index = 3; // Target multiple rounds of signing
+        let max_shutdowns = 5;
 
-        runner.start(|mut context| async move {
-            let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
-            shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+        let mut prev_ctx = None;
+        let mut shutdown_count = 0;
+        let completed_validators = Arc::new(Mutex::new(std::collections::HashSet::new()));
 
-            let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
-                context.with_label("simulation"),
-                num_validators,
-                &mut shares_vec,
-                RELIABLE_LINK,
-            )
-            .await;
-            let automatons = Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
-            let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>::new();
+        // Continue until all validators reach target or max shutdowns exceeded
+        while completed_validators.lock().unwrap().len() < num_validators as usize
+            && shutdown_count < max_shutdowns
+        {
+            let completed_clone = completed_validators.clone();
+            let f = move |mut context: Context| {
+                let completed = completed_clone;
+                async move {
+                    let (polynomial, mut shares_vec) =
+                        ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+                    shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
-            // Start all validators with unique journal names
-            spawn_validator_engines::<V>(
-                context.with_label("validator"),
-                polynomial.clone(),
-                &pks,
-                &validators,
-                &mut registrations,
-                &mut automatons.lock().unwrap(),
-                &mut reporters,
-                &mut oracle,
-                Duration::from_secs(5),
-                |_| false,
-                None,
+                    let (oracle, validators, pks, mut registrations) = initialize_simulation(
+                        context.with_label("simulation"),
+                        num_validators,
+                        &mut shares_vec,
+                        RELIABLE_LINK,
+                    )
+                    .await;
+                    let automatons =
+                        Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
+                    let mut reporters =
+                        BTreeMap::<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>::new();
+
+                    // Use unique journal partitions for each validator to enable restart recovery
+                    let mut engine_monitors = HashMap::new();
+                    let namespace = b"my testing namespace";
+                    for (validator, _scheme, share) in validators.iter() {
+                        let validator_context = context.with_label(&validator.to_string());
+                        let monitor = mocks::Monitor::new(111);
+                        engine_monitors.insert(validator.clone(), monitor.clone());
+                        let supervisor = {
+                            let mut s = mocks::Supervisor::<PublicKey, V>::new();
+                            s.add_epoch(111, share.clone(), polynomial.clone(), pks.to_vec());
+                            s
+                        };
+
+                        let blocker = oracle.control(validator.clone());
+                        let automaton = mocks::Application::new(|_| false);
+                        automatons
+                            .lock()
+                            .unwrap()
+                            .insert(validator.clone(), automaton.clone());
+
+                        let (reporter, reporter_mailbox) = mocks::Reporter::<V, Sha256Digest>::new(
+                            namespace,
+                            polynomial.clone(),
+                            None,
+                        );
+                        validator_context
+                            .with_label("reporter")
+                            .spawn(|_| reporter.run());
+                        reporters.insert(validator.clone(), reporter_mailbox);
+
+                        let engine = Engine::new(
+                            validator_context.with_label("engine"),
+                            Config {
+                                monitor,
+                                validators: supervisor,
+                                automaton,
+                                reporter: reporters.get(validator).unwrap().clone(),
+                                blocker,
+                                namespace: namespace.to_vec(),
+                                priority_acks: false,
+                                rebroadcast_timeout: NonZeroDuration::new_panic(
+                                    Duration::from_secs(3),
+                                ),
+                                epoch_bounds: (1, 1),
+                                window: std::num::NonZeroU64::new(10).unwrap(),
+                                // Use validator-specific partition for journal recovery
+                                partition: format!("unclean_shutdown_test/{}/", validator),
+                                journal_write_buffer: std::num::NonZeroUsize::new(4096).unwrap(),
+                                journal_replay_buffer: std::num::NonZeroUsize::new(4096).unwrap(),
+                                journal_heights_per_section: std::num::NonZeroU64::new(100)
+                                    .unwrap(),
+                                journal_compression: Some(3),
+                            },
+                        );
+
+                        let (sender, receiver) = registrations.remove(validator).unwrap();
+                        engine.start((sender, receiver));
+                    }
+
+                    // Create completion watchers for all validators
+                    let mut completion_tasks = Vec::new();
+                    for (validator_pk, mut reporter_mailbox) in reporters {
+                        let validator = validator_pk.clone();
+                        let completed_ref = completed.clone();
+                        let task = context.with_label("completion_watcher").spawn(
+                            move |context| async move {
+                                loop {
+                                    if let Some((tip_index, tip_epoch)) =
+                                        reporter_mailbox.get_tip().await
+                                    {
+                                        if tip_index >= target_index && tip_epoch >= 111 {
+                                            // Verify that validator has signed messages at all indices
+                                            for check_index in 0..=tip_index {
+                                                if let Some((digest, epoch)) =
+                                                    reporter_mailbox.get(check_index).await
+                                                {
+                                                    assert_eq!(
+                                                        epoch, 111,
+                                                        "Epoch should be consistent"
+                                                    );
+                                                    debug!(
+                                                        ?validator,
+                                                        check_index,
+                                                        ?digest,
+                                                        "Verified validator signed message"
+                                                    );
+                                                }
+                                            }
+                                            completed_ref.lock().unwrap().insert(validator.clone());
+                                            debug!(
+                                                ?validator,
+                                                tip_index, "Validator completed signing target"
+                                            );
+                                            break;
+                                        }
+                                    }
+                                    context.sleep(Duration::from_millis(50)).await;
+                                }
+                            },
+                        );
+                        completion_tasks.push(task);
+                    }
+
+                    // Random shutdown timing to simulate unclean shutdown
+                    let shutdown_wait =
+                        context.gen_range(Duration::from_millis(100)..Duration::from_millis(8_000));
+
+                    select! {
+                        _ = context.sleep(shutdown_wait) => {
+                            debug!(shutdown_wait = ?shutdown_wait, "Simulating unclean shutdown");
+                            (false, context) // Unclean shutdown
+                        },
+                        _ = join_all(completion_tasks) => {
+                            debug!("All validators completed normally");
+                            (true, context) // Clean completion
+                        }
+                    }
+                }
+            };
+
+            let (complete, context) = if let Some(prev_ctx) = prev_ctx {
+                debug!(shutdown_count, "Restarting from previous context");
+                deterministic::Runner::from(prev_ctx)
+            } else {
+                debug!("Starting initial run");
+                deterministic::Runner::timed(Duration::from_secs(45))
+            }
+            .start(f);
+
+            prev_ctx = Some(context.recover());
+            shutdown_count += 1;
+
+            if complete {
+                debug!("Test completed successfully");
+                break;
+            }
+
+            debug!(
+                shutdown_count,
+                completed = completed_validators.lock().unwrap().len(),
+                "Shutdown occurred, restarting"
             );
+        }
 
-            // Test that aggregation works even with potential unclean shutdowns
-            // The engine implementation includes journaling which should handle
-            // restarts gracefully
-            await_reporters(context.with_label("reporter"), &reporters, 1, 111).await;
-        });
+        // Verify that all validators eventually reached the target
+        let final_completed = completed_validators.lock().unwrap().len();
+        assert_eq!(
+            final_completed, num_validators as usize,
+            "All validators should reach target index {} despite unclean shutdowns. Only {} completed after {} shutdowns",
+            target_index, final_completed, shutdown_count
+        );
+
+        debug!(
+            shutdown_count,
+            target_index, "Unclean shutdown test completed successfully"
+        );
     }
 
     fn slow_and_lossy_links<V: Variant>() {
