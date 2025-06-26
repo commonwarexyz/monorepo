@@ -90,7 +90,11 @@ impl crate::Storage for Storage {
         file.set_max_buf_size(self.cfg.maximum_buffer_size);
 
         // Get the file length
-        let len = file.metadata().await.map_err(|_| Error::ReadFailed)?.len();
+        let len = file
+            .metadata()
+            .await
+            .map_err(|err| Error::ReadFailed(err))?
+            .len();
 
         // Construct the blob
         Ok((Blob::new(partition.into(), name, file), len))
@@ -125,8 +129,15 @@ impl crate::Storage for Storage {
             .await
             .map_err(|_| Error::PartitionMissing(partition.into()))?;
         let mut blobs = Vec::new();
-        while let Some(entry) = entries.next_entry().await.map_err(|_| Error::ReadFailed)? {
-            let file_type = entry.file_type().await.map_err(|_| Error::ReadFailed)?;
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|err| Error::ReadFailed(err))?
+        {
+            let file_type = entry
+                .file_type()
+                .await
+                .map_err(|err| Error::ReadFailed(err))?;
             if !file_type.is_file() {
                 return Err(Error::PartitionCorrupt(partition.into()));
             }
@@ -151,10 +162,10 @@ impl crate::Blob for Blob {
         // Perform the read
         file.seek(SeekFrom::Start(offset))
             .await
-            .map_err(|_| Error::ReadFailed)?;
+            .map_err(|err| Error::ReadFailed(err))?;
         file.read_exact(buf.as_mut())
             .await
-            .map_err(|_| Error::ReadFailed)?;
+            .map_err(|err| Error::ReadFailed(err))?;
         Ok(buf)
     }
 
