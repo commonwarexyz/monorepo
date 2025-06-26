@@ -19,33 +19,17 @@ struct FuzzInput {
 }
 
 fn fuzz(data: FuzzInput) {
-    if data.operations.is_empty() || data.operations.len() > 106 {
+    if data.operations.is_empty() || data.operations.len() > 300 {
         return;
     }
     let mut rmap = RMap::new();
-    let mut reference_set = BTreeSet::new();
+    let mut expected_state = BTreeSet::new();
 
     for op in &data.operations {
         match op {
             RMapOperation::Insert(value) => {
                 rmap.insert(*value);
-                reference_set.insert(*value);
-
-                // Verify that the value can be found
-                let range = rmap.get(value);
-                assert!(
-                    range.is_some(),
-                    "Value {} should be found after insertion",
-                    value
-                );
-                let (start, end) = range.unwrap();
-                assert!(
-                    start <= *value && *value <= end,
-                    "Value {} should be within range [{}, {}]",
-                    value,
-                    start,
-                    end
-                );
+                expected_state.insert(*value);
             }
 
             RMapOperation::Remove { start, end } => {
@@ -58,8 +42,7 @@ fn fuzz(data: FuzzInput) {
 
                 rmap.remove(start, end);
 
-                // Remove from reference set
-                reference_set.retain(|&v| v < start || v > end);
+                expected_state.retain(|&v| v < start || v > end);
 
                 // Verify removal
                 for value in start..=end.min(start.saturating_add(1000)) {
@@ -69,12 +52,7 @@ fn fuzz(data: FuzzInput) {
                         // The value should not be in a range that was fully contained in [start, end]
                         assert!(
                             !(range_start >= start && range_end <= end),
-                            "Value {} should not be in range [{}, {}] after removal of [{}, {}]",
-                            value,
-                            range_start,
-                            range_end,
-                            start,
-                            end
+                            "Value {value} should not be in range [{range_start}, {range_end}] after removal of [{start}, {end}]",
                         );
                     }
                 }
@@ -82,22 +60,20 @@ fn fuzz(data: FuzzInput) {
 
             RMapOperation::Get(value) => {
                 let range = rmap.get(value);
-                let in_reference = reference_set.contains(value);
+                let in_reference = expected_state.contains(value);
 
                 if in_reference {
                     assert!(
                         range.is_some(),
-                        "Value {} should be found in RMap since it's in reference set",
-                        value
+                        "Value {value} should be found in RMap since it's in reference set",
                     );
                     let (start, end) = range.unwrap();
                     assert!(
                         start <= *value && *value <= end,
-                        "Value {} should be within range [{}, {}]",
-                        value,
-                        start,
-                        end
+                        "Value {value} should be within range [{start}, {end}]",
                     );
+                } else {
+                    assert!(range.is_none(), "Value {value} should not be in reference set");
                 }
             }
 
@@ -136,8 +112,7 @@ fn fuzz(data: FuzzInput) {
                     let should_exist = rmap.get(&after_start);
                     assert!(
                         should_exist.is_some(),
-                        "Value {} should exist as it's the start of the next range",
-                        after_start
+                        "Value {after_start} should exist as it's the start of the next range",
                     );
                 }
             }
@@ -151,21 +126,18 @@ fn fuzz(data: FuzzInput) {
                     let (curr_start, _) = ranges[i];
                     assert!(
                         prev_end < curr_start,
-                        "Ranges should be disjoint: prev_end={}, curr_start={}",
-                        prev_end,
-                        curr_start
+                        "Ranges should be disjoint: prev_end={prev_end}, curr_start={curr_start}",
                     );
                 }
 
-                // Check that all values in reference set are covered by ranges
-                for &value in &reference_set {
+                // Check that all values in reference set covered by ranges
+                for &value in &expected_state {
                     let found = ranges
                         .iter()
                         .any(|&(start, end)| start <= &value && &value <= end);
                     assert!(
                         found,
-                        "Value {} from reference set not found in ranges",
-                        value
+                        "Value {value} from reference set not found in ranges",
                     );
                 }
             }
