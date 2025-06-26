@@ -966,7 +966,7 @@ mod tests {
                     } else {
                         // Multi-element case: test with various end positions
                         let mut ends = vec![start_pos]; // Single element proof
-                        
+
                         // Add a few more end positions if available
                         let start_idx = element_positions.iter().position(|&pos| pos == start_pos).unwrap();
                         if start_idx + 1 < element_positions.len() {
@@ -979,7 +979,7 @@ mod tests {
                         if *element_positions.last().unwrap() != start_pos {
                             ends.push(*element_positions.last().unwrap());
                         }
-                        
+
                         ends.into_iter().collect::<std::collections::HashSet<_>>().into_iter().collect()
                     };
 
