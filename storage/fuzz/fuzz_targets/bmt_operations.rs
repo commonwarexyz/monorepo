@@ -95,7 +95,7 @@ fn fuzz(input: FuzzInput) {
             }
 
             BmtOperation::DeserializeProof { data } => {
-                if let Ok(_) = Proof::<Sha256>::deserialize(data) {}
+                if Proof::<Sha256>::deserialize(data).is_ok() {}
             }
 
             BmtOperation::BuildEmptyTree => {
@@ -119,7 +119,7 @@ fn fuzz(input: FuzzInput) {
 
             BmtOperation::ProofOutOfBounds { position } => {
                 if let Some(ref t) = tree {
-                    if let Ok(_) = t.proof(*position) {}
+                    if t.proof(*position).is_ok() {}
                 }
             }
         }
