@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::{hash, sha256::Digest};
+use commonware_cryptography::{hash};
 use commonware_runtime::{deterministic, Runner};
 use commonware_storage::journal::fixed::{Config, Journal};
 use futures::{pin_mut, StreamExt};
