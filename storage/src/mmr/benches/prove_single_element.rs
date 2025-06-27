@@ -39,14 +39,12 @@ fn bench_prove_single_element(c: &mut Criterion) {
                             let mut hasher = Standard::<Sha256>::new();
                             for (pos, element) in samples {
                                 let proof = mmr.proof(pos).await.unwrap();
-                                assert!(proof
-                                    .verify_element_inclusion(
-                                        &mut hasher,
-                                        &element,
-                                        pos,
-                                        &root_digest,
-                                    )
-                                    .unwrap());
+                                assert!(proof.verify_element_inclusion(
+                                    &mut hasher,
+                                    &element,
+                                    pos,
+                                    &root_digest,
+                                ));
                             }
                         });
                     },

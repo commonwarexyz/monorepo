@@ -17,7 +17,6 @@ use crate::{
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
         storage::Grafting as GStorage,
         verification::Proof,
-        Error::*,
     },
 };
 use commonware_codec::FixedSize;
@@ -475,11 +474,11 @@ impl<
         ops: &[Operation<K, V>],
         chunks: &[[u8; N]],
         root_digest: &H::Digest,
-    ) -> Result<bool, Error> {
+    ) -> bool {
         let op_count = leaf_pos_to_num(proof.size);
         let Some(op_count) = op_count else {
             debug!("verification failed, invalid proof size");
-            return Ok(false);
+            return false;
         };
         let end_loc = start_loc + ops.len() as u64 - 1;
         if end_loc >= op_count {
@@ -487,7 +486,7 @@ impl<
                 loc = end_loc,
                 op_count, "proof verification failed, invalid range"
             );
-            return Ok(false);
+            return false;
         }
 
         let start_pos = leaf_num_to_pos(start_loc);
@@ -506,15 +505,19 @@ impl<
         );
 
         if op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS == 0 {
-            return proof
-                .verify_range_inclusion(&mut verifier, digests, start_pos, end_pos, root_digest)
-                .map_err(Error::MmrError);
+            return proof.verify_range_inclusion(
+                &mut verifier,
+                digests,
+                start_pos,
+                end_pos,
+                root_digest,
+            );
         }
 
         // The proof must contain the partial chunk digest as its last hash.
         if proof.digests.is_empty() {
             debug!("proof has no digests");
-            return Ok(false);
+            return false;
         }
         let mut proof = proof.clone();
         let last_chunk_digest = proof.digests.pop().unwrap();
@@ -522,15 +525,10 @@ impl<
         // Reconstruct the MMR root.
         let mmr_root = match proof.reconstruct_root(&mut verifier, digests, start_pos, end_pos) {
             Ok(root) => root,
-            Err(MissingDigests) => {
-                debug!("Not enough digests in proof to reconstruct root");
-                return Ok(false);
+            Err(error) => {
+                debug!(error = ?error, "invalid proof input");
+                return false;
             }
-            Err(ExtraDigests) => {
-                debug!("Not all digests in proof were used to reconstruct root");
-                return Ok(false);
-            }
-            Err(e) => return Err(Error::MmrError(e)),
         };
 
         let next_bit = op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS;
@@ -541,7 +539,7 @@ impl<
             &last_chunk_digest,
         );
 
-        Ok(reconstructed_root == *root_digest)
+        reconstructed_root == *root_digest
     }
 
     /// Generate and return a proof of the current value of `key`, along with the other
@@ -590,15 +588,15 @@ impl<
 
     /// Return true if the proof authenticates that `key` currently has value `value` in the db with
     /// the given root.
-    pub async fn verify_key_value_proof(
+    pub fn verify_key_value_proof(
         hasher: &mut H,
         proof: &Proof<H::Digest>,
         info: &KeyValueProofInfo<K, V, N>,
         root_digest: &H::Digest,
-    ) -> Result<bool, Error> {
+    ) -> bool {
         let Some(op_count) = leaf_pos_to_num(proof.size) else {
             debug!("verification failed, invalid proof size");
-            return Ok(false);
+            return false;
         };
 
         // Make sure that the bit for the operation in the bitmap chunk is actually a 1 (indicating
@@ -608,7 +606,7 @@ impl<
                 loc = info.loc,
                 "proof verification failed, operation is inactive"
             );
-            return Ok(false);
+            return false;
         }
 
         let pos = leaf_num_to_pos(info.loc);
@@ -620,15 +618,13 @@ impl<
         );
 
         if op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS == 0 {
-            return proof
-                .verify_element_inclusion(&mut verifier, &digest, pos, root_digest)
-                .map_err(Error::MmrError);
+            return proof.verify_element_inclusion(&mut verifier, &digest, pos, root_digest);
         }
 
         // The proof must contain the partial chunk digest as its last hash.
         if proof.digests.is_empty() {
             debug!("proof has no digests");
-            return Ok(false);
+            return false;
         }
 
         let mut proof = proof.clone();
@@ -642,29 +638,24 @@ impl<
             let expected_last_chunk_digest = verifier.digest(&info.chunk);
             if last_chunk_digest != expected_last_chunk_digest {
                 debug!("last chunk digest does not match expected value");
-                return Ok(false);
+                return false;
             }
         }
 
         // Reconstruct the MMR root.
         let mmr_root = match proof.reconstruct_root(&mut verifier, &[digest], pos, pos) {
             Ok(root) => root,
-            Err(MissingDigests) => {
-                debug!("Not enough digests in proof to reconstruct root");
-                return Ok(false);
+            Err(error) => {
+                debug!(error = ?error, "invalid proof input");
+                return false;
             }
-            Err(ExtraDigests) => {
-                debug!("Not all digests in proof were used to reconstruct root");
-                return Ok(false);
-            }
-            Err(e) => return Err(Error::MmrError(e)),
         };
 
         let next_bit = op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS;
         let reconstructed_root =
             Bitmap::<H, N>::partial_chunk_root(hasher, &mmr_root, next_bit, &last_chunk_digest);
 
-        Ok(reconstructed_root == *root_digest)
+        reconstructed_root == *root_digest
     }
 
     /// Close the db. Operations that have not been committed will be lost.
@@ -752,14 +743,14 @@ pub mod test {
 
     fn current_db_config(partition_prefix: &str) -> Config<TwoCap> {
         Config {
-            mmr_journal_partition: format!("{}_journal_partition", partition_prefix),
-            mmr_metadata_partition: format!("{}_metadata_partition", partition_prefix),
+            mmr_journal_partition: format!("{partition_prefix}_journal_partition"),
+            mmr_metadata_partition: format!("{partition_prefix}_metadata_partition"),
             mmr_items_per_blob: 11,
             mmr_write_buffer: 1024,
-            log_journal_partition: format!("{}_partition_prefix", partition_prefix),
+            log_journal_partition: format!("{partition_prefix}_partition_prefix"),
             log_items_per_blob: 7,
             log_write_buffer: 1024,
-            bitmap_metadata_partition: format!("{}_bitmap_metadata_partition", partition_prefix),
+            bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
             translator: TwoCap,
             pool: None,
         }
@@ -871,9 +862,7 @@ pub mod test {
                     &proof.0,
                     &info,
                     &root,
-                )
-                .await
-                .unwrap()
+                ),
             );
 
             let v2 = Sha256::fill(0xA2);
@@ -886,9 +875,7 @@ pub mod test {
                     &proof.0,
                     &bad_info,
                     &root,
-                )
-                .await
-                .unwrap()
+                ),
             );
 
             // update the key to invalidate its previous update
@@ -903,9 +890,7 @@ pub mod test {
                     &proof.0,
                     &info,
                     &root,
-                )
-                .await
-                .unwrap()
+                ),
             );
 
             // Create a proof of the now-inactive operation.
@@ -927,9 +912,7 @@ pub mod test {
                     &proof_inactive.0,
                     &proof_inactive_info,
                     &root,
-                )
-                .await
-                .unwrap()
+                ),
             );
 
             // Attempt #1 to "fool" the verifier:  change the location to that of an active
@@ -950,9 +933,7 @@ pub mod test {
                     &proof_inactive.0,
                     &proof_inactive_info,
                     &root,
-                )
-                .await
-                .unwrap()
+                ),
             );
 
             // Attempt #2 to "fool" the verifier: Modify the chunk in the proof info to make it look
@@ -973,9 +954,7 @@ pub mod test {
                     &proof_inactive.0,
                     &info_with_modified_chunk,
                     &root,
-                )
-                .await
-                .unwrap()
+                ),
             );
 
             db.destroy().await.unwrap();
@@ -1052,8 +1031,7 @@ pub mod test {
                         &ops,
                         &chunks,
                         &root
-                    )
-                    .unwrap(),
+                    ),
                     "failed to verify range at start_loc {start_loc}",
                 );
             }
@@ -1097,8 +1075,6 @@ pub mod test {
                         &info,
                         &root
                     )
-                    .await
-                    .unwrap()
                 );
                 // Proof should fail against the wrong value.
                 let wrong_val = Sha256::fill(0xFF);
@@ -1110,9 +1086,7 @@ pub mod test {
                         &proof,
                         &bad_info,
                         &root
-                    )
-                    .await
-                    .unwrap()
+                    ),
                 );
                 // Proof should fail against the wrong key.
                 let wrong_key = Sha256::fill(0xEE);
@@ -1124,9 +1098,7 @@ pub mod test {
                         &proof,
                         &bad_info,
                         &root
-                    )
-                    .await
-                    .unwrap()
+                    ),
                 );
                 // Proof should fail against the wrong root.
                 let wrong_root = Sha256::fill(0xDD);
@@ -1136,10 +1108,8 @@ pub mod test {
                         &proof,
                         &info,
                         &wrong_root,
-                    )
-                    .await
-                    .unwrap()
-                )
+                    ),
+                );
             }
 
             db.destroy().await.unwrap();
@@ -1209,9 +1179,7 @@ pub mod test {
                         &proof,
                         &info,
                         &root
-                    )
-                    .await
-                    .unwrap(),
+                    ),
                     "proof of update {i} failed to verify"
                 );
                 // Ensure the proof does NOT verify if we use the previous value.
@@ -1221,9 +1189,7 @@ pub mod test {
                         &proof,
                         &old_info,
                         &root
-                    )
-                    .await
-                    .unwrap(),
+                    ),
                     "proof of update {i} failed to verify"
                 );
                 old_info = info.clone();

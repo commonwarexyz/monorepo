@@ -361,7 +361,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// independent of the snapshot contents.
     async fn get_update_op(log: &Journal<E, Operation<K, V>>, loc: u64) -> Result<(K, V), Error> {
         let Operation::Update(k, v) = log.read(loc).await? else {
-            panic!("location does not reference update operation. loc={}", loc);
+            panic!("location does not reference update operation. loc={loc}");
         };
 
         Ok((k, v))
@@ -541,7 +541,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         start_loc: u64,
         ops: &[Operation<K, V>],
         root_digest: &H::Digest,
-    ) -> Result<bool, Error> {
+    ) -> bool {
         let start_pos = leaf_num_to_pos(start_loc);
         let end_loc = start_loc + ops.len() as u64 - 1;
         let end_pos = leaf_num_to_pos(end_loc);
@@ -551,9 +551,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             .map(|op| Any::<E, _, _, _, T>::op_digest(hasher, op))
             .collect::<Vec<_>>();
 
-        proof
-            .verify_range_inclusion(hasher, digests, start_pos, end_pos, root_digest)
-            .map_err(Error::MmrError)
+        proof.verify_range_inclusion(hasher, digests, start_pos, end_pos, root_digest)
     }
 
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
@@ -744,11 +742,11 @@ mod test {
 
     fn any_db_config<T: Translator>(suffix: &str, translator: T) -> Config<T> {
         Config {
-            mmr_journal_partition: format!("journal_{}", suffix),
-            mmr_metadata_partition: format!("metadata_{}", suffix),
+            mmr_journal_partition: format!("journal_{suffix}"),
+            mmr_metadata_partition: format!("metadata_{suffix}"),
             mmr_items_per_blob: 11,
             mmr_write_buffer: 1024,
-            log_journal_partition: format!("log_journal_{}", suffix),
+            log_journal_partition: format!("log_journal_{suffix}"),
             log_items_per_blob: 7,
             log_write_buffer: 1024,
             translator,
@@ -1021,7 +1019,7 @@ mod test {
                 let k = hash(&i.to_be_bytes());
                 if let Some(map_value) = map.get(&k) {
                     let Some(db_value) = db.get(&k).await.unwrap() else {
-                        panic!("key not found in db: {}", k);
+                        panic!("key not found in db: {k}");
                     };
                     assert_eq!(*map_value, db_value);
                 } else {
@@ -1050,8 +1048,7 @@ mod test {
                         i,
                         &log,
                         &root
-                    )
-                    .unwrap()
+                    ),
                 );
             }
 
