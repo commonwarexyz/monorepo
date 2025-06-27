@@ -36,7 +36,7 @@ fn fuzz(input: FuzzInput) {
         };
         let mut metadata = match Metadata::init(context.clone(), cfg).await {
             Ok(m) => Some(m),
-            Err(_) => return, // Skip on init failure
+            Err(err) => panic!("{:?}", err), 
         };
 
         for op in input.operations.iter() {
@@ -61,7 +61,7 @@ fn fuzz(input: FuzzInput) {
 
                 MetadataOperation::Get { key } => {
                     let array_key = U64::new(*key);
-                    let _ = metadata_ref.get(&array_key);
+                    metadata_ref.get(&array_key);
                 }
 
                 MetadataOperation::Remove { key } => {
@@ -75,17 +75,18 @@ fn fuzz(input: FuzzInput) {
 
                 MetadataOperation::Sync => {
                     // Ignore sync errors - they're expected in some edge cases
-                    let _ = metadata_ref.sync().await;
+                    metadata_ref.sync().await.unwrap();
                 }
 
                 MetadataOperation::LastUpdate => {
-                    let _ = metadata_ref.last_update();
+                    metadata_ref.last_update();
                 }
 
                 MetadataOperation::Close => {
                     // Close metadata (takes ownership)
                     if let Some(m) = metadata.take() {
                         let _ = m.close().await;
+                        return;
                     }
                 }
 
@@ -93,6 +94,7 @@ fn fuzz(input: FuzzInput) {
                     // Destroy metadata (takes ownership)
                     if let Some(m) = metadata.take() {
                         let _ = m.destroy().await;
+                        return;
                     }
                 }
             }
