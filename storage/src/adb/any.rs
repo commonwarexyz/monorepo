@@ -27,6 +27,7 @@ use futures::{
     future::{try_join_all, TryFutureExt},
     pin_mut, try_join, StreamExt,
 };
+use std::num::NonZeroU64;
 use tracing::{debug, warn};
 
 /// Indicator that the generic parameter N is unused by the call. N is only
@@ -508,8 +509,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     pub async fn proof(
         &self,
         start_loc: u64,
-        max_ops: u64,
+        max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
+        let max_ops = max_ops.get();
         let mmr = &self.ops;
         let start_pos = leaf_num_to_pos(start_loc);
         let end_pos_last = mmr.last_leaf_pos().unwrap();
@@ -535,6 +537,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
     /// the log with the provided root.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::EmptyProof] if the proof has no operations.
     pub fn verify_proof(
         hasher: &mut Standard<H>,
         proof: &Proof<H::Digest>,
@@ -542,6 +548,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         ops: &[Operation<K, V>],
         root_digest: &H::Digest,
     ) -> Result<bool, Error> {
+        if ops.is_empty() {
+            return Err(Error::EmptyProof);
+        }
+
         let start_pos = leaf_num_to_pos(start_loc);
         let end_loc = start_loc + ops.len() as u64 - 1;
         let end_pos = leaf_num_to_pos(end_loc);
@@ -734,6 +744,7 @@ mod test {
     use commonware_cryptography::{hash, sha256::Digest, Hasher as CHasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};
+    use commonware_utils::NZU64;
     use rand::{
         rngs::{OsRng, StdRng},
         RngCore, SeedableRng,
@@ -1031,7 +1042,7 @@ mod test {
 
             // Make sure size-constrained batches of operations are provable from the oldest
             // retained op to tip.
-            let max_ops = 4;
+            let max_ops = NZU64!(4);
             let end_loc = db.op_count();
             let start_pos = db.ops.pruned_to_pos();
             let start_loc = leaf_pos_to_num(start_pos).unwrap();
@@ -1322,5 +1333,30 @@ mod test {
 
             db.destroy().await.unwrap();
         });
+    }
+
+    #[test_traced("WARN")]
+    pub fn test_verify_proof_empty_ops() {
+        let mut hasher = Standard::<Sha256>::new();
+
+        // Create a dummy proof and root digest
+        let proof = Proof {
+            size: 0,
+            digests: Vec::new(),
+        };
+        let root_digest = Sha256::fill(0x00);
+
+        // Empty operations slice
+        let empty_ops: Vec<Operation<Digest, Digest>> = Vec::new();
+
+        // Verify that verify_proof returns EmptyProof error for empty operations
+        let result = Any::<deterministic::Context, Digest, Digest, Sha256, EightCap>::verify_proof(
+            &mut hasher,
+            &proof,
+            0, // start_loc
+            &empty_ops,
+            &root_digest,
+        );
+        assert!(matches!(result, Err(Error::EmptyProof)));
     }
 }

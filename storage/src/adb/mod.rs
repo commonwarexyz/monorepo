@@ -32,4 +32,7 @@ pub enum Error {
     /// The requested key was not found in the snapshot.
     #[error("key not found")]
     KeyNotFound(),
+
+    #[error("empty proof")]
+    EmptyProof,
 }
