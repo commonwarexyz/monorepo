@@ -263,7 +263,7 @@ mod tests {
                             ?reporter,
                             "reporter status"
                         );
-                        if index >= threshold_index && epoch >= threshold_epoch {
+                        if contiguous_index >= threshold_index && epoch >= threshold_epoch {
                             debug!(
                                 ?reporter,
                                 "reporter reached threshold, signaling completion"
@@ -321,7 +321,7 @@ mod tests {
                 |_| false,
                 None,
             );
-            await_reporters(context.with_label("reporter"), &reporters, 1, 111).await;
+            await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
         });
     }
 
@@ -559,7 +559,7 @@ mod tests {
                 None,
             );
 
-            await_reporters(context.with_label("reporter"), &reporters, 1, 111).await;
+            await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
         });
     }
 
@@ -601,7 +601,7 @@ mod tests {
                 |_| false,
                 None,
             );
-            await_reporters(context.with_label("reporter"), &reporters, 1, 111).await;
+            await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
         });
     }
 
@@ -665,7 +665,7 @@ mod tests {
                 None,
             );
 
-            await_reporters(context.with_label("reporter"), &reporters, 0, 111).await;
+            await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
         });
     }
 
@@ -738,7 +738,7 @@ mod tests {
                 }
             }
 
-            await_reporters(context.with_label("reporter"), &reporters, 1, 111).await;
+            await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
         });
     }
 
@@ -801,7 +801,7 @@ mod tests {
                 None,
             );
 
-            await_reporters(context.with_label("reporter"), &reporters, 1, 111).await;
+            await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
         });
     }
 
@@ -847,7 +847,7 @@ mod tests {
                 None,
             );
 
-            await_reporters(context.with_label("reporter"), &reporters, 1, 111).await;
+            await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
 
             // Additional validation: verify that consensus was achieved and items are retrievable
             // The reporter mock already validates ack signatures internally and panics on invalid ones
@@ -949,7 +949,7 @@ mod tests {
                 Some(10), // Allow more missed acks due to advanced Byzantine behavior
             );
 
-            await_reporters(context.with_label("reporter"), &reporters, 2, 111).await;
+            await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
         });
     }
 
@@ -1071,7 +1071,7 @@ mod tests {
                 None,
             );
 
-            await_reporters(context.with_label("reporter"), &reporters, 2, 111).await;
+            await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
 
             // Now verify that all consensus items have mathematically valid threshold signatures
             for (validator_pk, mut reporter_mailbox) in reporters {
