@@ -226,7 +226,82 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             tracked,
             synced,
             pruned,
+            _array: PhantomData,
+        })
+    }
 
+    /// Initialize a new [Journal] instance in a pruned state.
+    ///
+    /// # Arguments
+    /// * `context` - The storage context
+    /// * `cfg` - Configuration for the journal
+    /// * `size` - The target size (number of operations) the journal should appear to have.
+    ///
+    /// # Behavior
+    /// 1. Removes all existing blobs in the partition
+    /// 2. Creates a single blob at the index that would contain the operation at `size`
+    /// 3. Sets the blob size to represent the "leftover" operations within that blob.
+    ///
+    /// For example, if `items_per_blob = 10` and `size = 25`:
+    /// - Blob index would be 25 / 10 = 2 (third blob, 0-indexed)
+    /// - Blob size would be (25 % 10) * CHUNK_SIZE = 5 * CHUNK_SIZE
+    /// - Blob is filled with dummy data up to its size -- this shouldn't be read.
+    /// - This represents a journal that had operations 0-24, with operations 0-19 pruned,
+    ///   leaving operations 20-24 in blob 2
+    pub async fn init_sync(context: E, cfg: Config, size: u64) -> Result<Self, Error> {
+        // Remove all existing blobs
+        match context.scan(&cfg.partition).await {
+            Ok(blobs) => {
+                for blob_name in blobs {
+                    context
+                        .remove(&cfg.partition, Some(&blob_name))
+                        .await
+                        .map_err(Error::Runtime)?;
+                    debug!(
+                        blob_name = hex(&blob_name),
+                        "removed existing blob during pruned init"
+                    );
+                }
+            }
+            Err(RError::PartitionMissing(_)) => {}
+            Err(err) => return Err(Error::Runtime(err)),
+        }
+
+        let blob_index = size / cfg.items_per_blob;
+        let blob_num_items = size % cfg.items_per_blob;
+        let blob_size = blob_num_items * Self::CHUNK_SIZE_U64;
+        debug!(
+            blob_index,
+            blob_num_items, blob_size, "initializing journal in pruned state",
+        );
+
+        // Create the blob map with just the target blob.
+        let mut blobs = BTreeMap::new();
+        let (blob, actual_size) = context
+            .open(&cfg.partition, &blob_index.to_be_bytes())
+            .await
+            .map_err(Error::Runtime)?;
+        assert_eq!(actual_size, 0, "we just emptied all blobs");
+
+        let blob = Write::new(blob, blob_size, cfg.write_buffer);
+        blobs.insert(blob_index, blob);
+
+        // Initialize metrics
+        let tracked = Gauge::default();
+        let synced = Counter::default();
+        let pruned = Counter::default();
+        context.register("tracked", "Number of blobs", tracked.clone());
+        context.register("synced", "Number of syncs", synced.clone());
+        context.register("pruned", "Number of blobs pruned", pruned.clone());
+        tracked.set(blobs.len() as i64);
+
+        Ok(Self {
+            context,
+            cfg,
+            blobs,
+            tracked,
+            synced,
+            pruned,
             _array: PhantomData,
         })
     }
@@ -1308,6 +1383,310 @@ mod tests {
             let journal = Journal::<Context, Digest>::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_init_sync_empty() {
+        const ITEMS_PER_BLOB: u64 = 5;
+        const WRITE_BUFFER: usize = 1024;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Test Case 1: Initialize with pruned state at size 0 (empty journal)
+            {
+                let cfg = Config {
+                    partition: "test_pruned_0".into(),
+                    items_per_blob: ITEMS_PER_BLOB,
+                    write_buffer: WRITE_BUFFER,
+                };
+
+                let synced_journal =
+                    Journal::<Context, Digest>::init_sync(context.clone(), cfg.clone(), 0)
+                        .await
+                        .expect("Failed to init with pruned state at size 0");
+
+                // Verify the synced journal state
+                assert_eq!(synced_journal.size().await.unwrap(), 0);
+                assert_eq!(synced_journal.oldest_retained_pos().await.unwrap(), None);
+                assert_eq!(synced_journal.blobs.len(), 1);
+                assert!(synced_journal.blobs.contains_key(&0));
+
+                let blob_0 = synced_journal.blobs.get(&0).unwrap();
+                assert_eq!(blob_0.size().await, 0);
+
+                synced_journal.destroy().await.unwrap();
+            }
+
+            // Test Case 2: Initialize with pruned state in the middle of first blob
+            {
+                const PRUNED_SIZE: u64 = 3;
+
+                let cfg = Config {
+                    partition: "test_pruned_3".into(),
+                    items_per_blob: ITEMS_PER_BLOB,
+                    write_buffer: WRITE_BUFFER,
+                };
+
+                let synced_journal = Journal::<Context, Digest>::init_sync(
+                    context.clone(),
+                    cfg.clone(),
+                    PRUNED_SIZE,
+                )
+                .await
+                .expect("Failed to init with pruned state at size 3");
+
+                // Verify the synced journal matches expected state
+                assert_eq!(synced_journal.size().await.unwrap(), PRUNED_SIZE);
+                assert_eq!(synced_journal.oldest_retained_pos().await.unwrap(), Some(0));
+                assert_eq!(synced_journal.blobs.len(), 1);
+                assert!(synced_journal.blobs.contains_key(&0));
+
+                let blob_0 = synced_journal.blobs.get(&0).unwrap();
+                assert_eq!(
+                    blob_0.size().await,
+                    PRUNED_SIZE * Journal::<Context, Digest>::CHUNK_SIZE_U64
+                );
+
+                synced_journal.destroy().await.unwrap();
+            }
+
+            // Test Case 3: Initialize with pruned state exactly at blob boundary
+            {
+                let cfg = Config {
+                    partition: "test_pruned_boundary".into(),
+                    items_per_blob: ITEMS_PER_BLOB,
+                    write_buffer: WRITE_BUFFER,
+                };
+
+                let synced_journal = Journal::<Context, Digest>::init_sync(
+                    context.clone(),
+                    cfg.clone(),
+                    ITEMS_PER_BLOB, // Exactly one full blob
+                )
+                .await
+                .expect("Failed to init with pruned state at blob boundary");
+
+                // Verify the synced journal has correct state
+                assert_eq!(synced_journal.size().await.unwrap(), ITEMS_PER_BLOB);
+                assert_eq!(synced_journal.oldest_retained_pos().await.unwrap(), None);
+                assert_eq!(synced_journal.blobs.len(), 1);
+                assert!(synced_journal.blobs.contains_key(&1));
+
+                let blob_1 = synced_journal.blobs.get(&1).unwrap();
+                assert_eq!(blob_1.size().await, 0);
+
+                synced_journal.destroy().await.unwrap();
+            }
+
+            // Test Case 4: Initialize with pruned state spanning multiple blobs
+            {
+                const MULTI_BLOB_SIZE: u64 = 14; // 2 full blobs + 4 items in third blob
+
+                let cfg = Config {
+                    partition: "test_pruned_multi".into(),
+                    items_per_blob: ITEMS_PER_BLOB,
+                    write_buffer: WRITE_BUFFER,
+                };
+
+                let synced_journal = Journal::<Context, Digest>::init_sync(
+                    context.clone(),
+                    cfg.clone(),
+                    MULTI_BLOB_SIZE,
+                )
+                .await
+                .expect("Failed to init with pruned state spanning multiple blobs");
+
+                // Verify the synced journal state
+                assert_eq!(synced_journal.size().await.unwrap(), MULTI_BLOB_SIZE);
+                assert_eq!(
+                    synced_journal.oldest_retained_pos().await.unwrap(),
+                    Some(10)
+                );
+                assert_eq!(synced_journal.blobs.len(), 1);
+                assert!(synced_journal.blobs.contains_key(&2));
+
+                let blob_2 = synced_journal.blobs.get(&2).unwrap();
+                assert_eq!(
+                    blob_2.size().await,
+                    4 * Journal::<Context, Digest>::CHUNK_SIZE_U64
+                );
+
+                synced_journal.destroy().await.unwrap();
+            }
+
+            // Test Case 5: Test operations after initializing in pruned state
+            {
+                const PRUNED_OPS_SIZE: u64 = 7;
+                const OPERATIONS_PER_BLOB: u64 = 3;
+
+                let cfg = Config {
+                    partition: "test_pruned_ops".into(),
+                    items_per_blob: OPERATIONS_PER_BLOB,
+                    write_buffer: WRITE_BUFFER,
+                };
+
+                // Initialize journal in pruned state
+                let mut synced_journal = Journal::<Context, Digest>::init_sync(
+                    context.clone(),
+                    cfg.clone(),
+                    PRUNED_OPS_SIZE,
+                )
+                .await
+                .expect("Failed to init with pruned state");
+
+                // Verify initial synced state
+                assert_eq!(synced_journal.size().await.unwrap(), PRUNED_OPS_SIZE);
+                assert_eq!(synced_journal.oldest_retained_pos().await.unwrap(), Some(6));
+                assert_eq!(synced_journal.blobs.len(), 1);
+                assert!(synced_journal.blobs.contains_key(&2));
+
+                // Test that operations work normally after sync
+                let pos = synced_journal.append(test_digest(100)).await.unwrap();
+                assert_eq!(pos, 7);
+                assert_eq!(synced_journal.size().await.unwrap(), 8);
+
+                let pos = synced_journal.append(test_digest(101)).await.unwrap();
+                assert_eq!(pos, 8);
+                assert_eq!(synced_journal.size().await.unwrap(), 9);
+
+                // Fill the current blob
+                let pos = synced_journal.append(test_digest(102)).await.unwrap();
+                assert_eq!(pos, 9);
+                assert_eq!(synced_journal.size().await.unwrap(), 10);
+
+                // Verify blob creation after filling
+                assert_eq!(synced_journal.blobs.len(), 2);
+                assert!(synced_journal.blobs.contains_key(&3));
+
+                // Verify we can read the items we added
+                let item = synced_journal.read(7).await.unwrap();
+                assert_eq!(item, test_digest(100));
+
+                let item = synced_journal.read(8).await.unwrap();
+                assert_eq!(item, test_digest(101));
+
+                let item = synced_journal.read(9).await.unwrap();
+                assert_eq!(item, test_digest(102));
+
+                // Verify pruned items cannot be read
+                let result = synced_journal.read(0).await;
+                assert!(matches!(result, Err(Error::ItemPruned(0))));
+
+                let result = synced_journal.read(5).await;
+                assert!(matches!(result, Err(Error::ItemPruned(5))));
+
+                synced_journal.destroy().await.unwrap();
+            }
+        });
+    }
+
+    /// Test that init_with_pruned_state properly cleans up existing blobs.
+    #[test_traced]
+    fn test_pruned_state_cleanup_existing_blobs() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_cleanup".into(),
+                items_per_blob: 3,
+                write_buffer: 1024,
+            };
+
+            // First, create a normal journal with some data
+            let mut original_journal =
+                Journal::<Context, Digest>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to init original journal");
+
+            // Add some items to create multiple blobs
+            for i in 0..10 {
+                original_journal.append(test_digest(i)).await.unwrap();
+            }
+            original_journal.sync().await.unwrap();
+
+            // Verify we have multiple blobs
+            assert!(original_journal.blobs.len() > 1);
+            let original_blob_count = original_journal.blobs.len();
+            original_journal.close().await.unwrap();
+
+            // Verify blobs exist in storage
+            let stored_blobs = context.scan(&cfg.partition).await.unwrap();
+            assert_eq!(stored_blobs.len(), original_blob_count);
+
+            // Now initialize with pruned state - this should clean up all existing blobs
+            let pruned_journal =
+                Journal::<Context, Digest>::init_sync(context.clone(), cfg.clone(), 5)
+                    .await
+                    .expect("Failed to init with pruned state");
+
+            // Should have only the blobs needed for the pruned state
+            assert_eq!(pruned_journal.blobs.len(), 1); // Only blob 1 (empty)
+            assert!(pruned_journal.blobs.contains_key(&1));
+
+            // Verify old blobs are gone from storage
+            let stored_blobs_after = context.scan(&cfg.partition).await.unwrap();
+            assert_eq!(stored_blobs_after.len(), 1); // Only the new blob
+
+            pruned_journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test that replay works correctly with a journal initialized in pruned state.
+    #[test_traced]
+    fn test_pruned_state_replay() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_replay".into(),
+                items_per_blob: 4,
+                write_buffer: 1024,
+            };
+
+            // Initialize journal in pruned state
+            let mut journal = Journal::<Context, Digest>::init_sync(
+                context.clone(),
+                cfg.clone(),
+                6, // 1 full blob + 2 items in second blob
+            )
+            .await
+            .expect("Failed to init with pruned state");
+
+            // Add some actual data to the journal
+            journal.append(test_digest(100)).await.unwrap(); // position 6
+            journal.append(test_digest(101)).await.unwrap(); // position 7
+            journal.append(test_digest(102)).await.unwrap(); // position 8
+            journal.sync().await.unwrap();
+
+            // Test replay from the beginning of retained data
+            {
+                let stream = journal.replay(1024, 4).await.unwrap(); // Start from position 4 (first retained)
+                pin_mut!(stream);
+
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    match result {
+                        Ok((pos, item)) => {
+                            items.push((pos, item));
+                        }
+                        Err(err) => {
+                            // Expected for positions 4-5 since they don't have actual data
+                            // but positions 6-8 should work
+                            if items.len() < 3 {
+                                continue; // Skip expected errors for positions without data
+                            }
+                            panic!("Unexpected error during replay: {}", err);
+                        }
+                    }
+                }
+
+                // Should have successfully read the items we actually added
+                assert_eq!(items.len(), 3);
+                assert_eq!(items[0], (6, test_digest(100)));
+                assert_eq!(items[1], (7, test_digest(101)));
+                assert_eq!(items[2], (8, test_digest(102)));
+            }
+
             journal.destroy().await.unwrap();
         });
     }
