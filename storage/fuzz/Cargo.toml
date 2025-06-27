@@ -42,3 +42,10 @@ path = "fuzz_targets/mmr_operations.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "metadata_operations"
+path = "fuzz_targets/metadata_operations.rs"
+test = false
+doc = false
+bench = false
