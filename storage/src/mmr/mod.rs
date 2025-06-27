@@ -111,4 +111,8 @@ pub enum Error {
     Empty,
     #[error("invalid update")]
     InvalidUpdate,
+    #[error("invalid proof length")]
+    InvalidProofLength,
+    #[error("proof missing digest at position: {0}")]
+    MissingDigest(u64),
 }
