@@ -15,9 +15,8 @@ enum MmrOperation {
     GetSize,
     GetRoot,
     GenerateProof { leaf_idx: u8 },
-    // Temporarily disable pruning operations to isolate the core bug
-    // PruneAll,
-    // ClonePruned,
+    PruneAll,
+    PruneToPos { pos_idx: u8 },
 }
 
 #[derive(Arbitrary, Debug)]
@@ -30,6 +29,7 @@ struct ReferenceMmr {
     leaf_positions: Vec<u64>,
     leaf_data: Vec<Vec<u8>>,
     total_nodes_added: u64,
+    pruned_to_pos: u64,
 }
 
 impl ReferenceMmr {
@@ -38,6 +38,7 @@ impl ReferenceMmr {
             leaf_positions: Vec::new(),
             leaf_data: Vec::new(),
             total_nodes_added: 0,
+            pruned_to_pos: 0,
         }
     }
 
@@ -53,6 +54,13 @@ impl ReferenceMmr {
         if self.leaf_positions.is_empty() {
             return Err(());
         }
+        
+        // Check if the last leaf would be pruned - if so, we can't pop it
+        let last_leaf_pos = *self.leaf_positions.last().unwrap();
+        if last_leaf_pos < self.pruned_to_pos {
+            return Err(()); // Element is pruned, can't pop
+        }
+        
         self.leaf_positions.pop();
         self.leaf_data.pop();
 
@@ -82,6 +90,24 @@ impl ReferenceMmr {
         self.total_nodes_added
     }
 
+    fn prune_all(&mut self) {
+        self.pruned_to_pos = self.total_nodes_added;
+    }
+
+    fn prune_to_pos(&mut self, pos: u64) {
+        if pos <= self.total_nodes_added {
+            self.pruned_to_pos = pos;
+        }
+    }
+
+    fn get_pruned_to_pos(&self) -> u64 {
+        self.pruned_to_pos
+    }
+
+    fn is_leaf_pruned(&self, leaf_pos: u64) -> bool {
+        leaf_pos < self.pruned_to_pos
+    }
+
     // Calculate expected MMR size for n leaves
     fn calculate_mmr_size(&self, num_leaves: usize) -> u64 {
         if num_leaves == 0 {
@@ -108,7 +134,7 @@ impl ReferenceMmr {
 fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
-    if input.operations.is_empty() || input.operations.len() > 50 {
+    if input.operations.is_empty() || input.operations.len() > 200 {
         return;
     }
 
@@ -120,6 +146,12 @@ fn fuzz(input: FuzzInput) {
         for (op_idx, op) in input.operations.iter().enumerate() {
             match op {
                 MmrOperation::Add { data } => {
+                    // Skip adding if we're fully pruned (pruned_to_pos == size)
+                    // because the MMR needs access to previous nodes to compute parent hashes
+                    if mmr.pruned_to_pos() == mmr.size() && mmr.size() > 0 {
+                        continue;
+                    }
+                    
                     // Limit data size
                     let limited_data = if data.len() > 16 {
                         &data[0..16]
@@ -183,6 +215,10 @@ fn fuzz(input: FuzzInput) {
                             new_data
                         };
 
+                        if reference.is_leaf_pruned(pos) {
+                            continue;
+                        }
+
                         let size_before = mmr.size();
                         let root_before = mmr.root(&mut hasher);
 
@@ -210,10 +246,17 @@ fn fuzz(input: FuzzInput) {
                     if mmr.size() > 0 {
                         let safe_pos = *pos % mmr.size();
                         let node = mmr.get_node(safe_pos);
-                        // We should be able to get any position within size
-                        // (unless it's been pruned, but we're not testing pruning yet)
-                        if node.is_none() {
-                            println!("Warning: Could not get node at position {safe_pos} (size: {})", mmr.size());
+                        
+                        // Check if the node is pruned
+                        if safe_pos < mmr.pruned_to_pos() {
+                            // Node is pruned, so it's expected to be None (unless it's pinned)
+                            // We don't panic here as this is expected behavior
+                        } else {
+                            // Node is not pruned, so it should exist
+                            if node.is_none() {
+                                panic!("Could not get non-pruned node at position {safe_pos} (size: {}, pruned_to: {})", 
+                                    mmr.size(), mmr.pruned_to_pos());
+                            }
                         }
                     }
                 }
@@ -254,8 +297,12 @@ fn fuzz(input: FuzzInput) {
                         let idx = (*leaf_idx as usize) % reference.leaf_positions.len();
                         let pos = reference.leaf_positions[idx];
 
+                        // Check if the element is pruned
+                        let is_pruned = reference.is_leaf_pruned(pos);
+
                         match mmr.proof(pos).await {
                             Ok(proof) => {
+                                // If we got a proof for a pruned element, it might be pinned
                                 // Verify the proof with the actual data we stored
                                 let root = mmr.root(&mut hasher);
                                 let leaf_data = &reference.leaf_data[idx];
@@ -267,14 +314,100 @@ fn fuzz(input: FuzzInput) {
                                         );
                                     }
                                     Err(e) => {
-                                        println!("Proof verification error for pos {pos}: {e:?}");
+                                        panic!("Proof verification error for pos {pos}: {e:?}");
                                     }
                                 }
                             }
                             Err(e) => {
-                                println!("Could not generate proof for pos {pos}: {e:?}");
+                                // Expected error for pruned elements
+                                if is_pruned {
+                                    // This is expected - we can't generate proofs for pruned elements
+                                    // unless they're pinned
+                                } else {
+                                    // Unexpected error for non-pruned elements
+                                    panic!("Could not generate proof for non-pruned pos {pos}: {e:?}");
+                                }
                             }
                         }
+                    }
+                }
+
+                MmrOperation::PruneAll => {
+                    // Skip prune_all if we're already fully pruned to avoid issues with subsequent adds
+                    if mmr.pruned_to_pos() == mmr.size() {
+                        continue;
+                    }
+                    
+                    let size_before = mmr.size();
+                    
+                    mmr.prune_all();
+                    reference.prune_all();
+
+                    // Size should remain the same
+                    assert_eq!(
+                        mmr.size(), size_before,
+                        "Operation {op_idx}: Size should not change after prune_all"
+                    );
+
+                    // Pruned position should be updated
+                    assert_eq!(
+                        mmr.pruned_to_pos(), reference.get_pruned_to_pos(),
+                        "Operation {op_idx}: Pruned position mismatch after prune_all"
+                    );
+
+                    // Root should still be computable
+                    let root = mmr.root(&mut hasher);
+                    assert!(
+                        !root.as_ref().is_empty(),
+                        "Operation {op_idx}: Root should be computable after prune_all"
+                    );
+                }
+
+                MmrOperation::PruneToPos { pos_idx } => {
+                    if mmr.size() > 0 {
+                        // Only prune to positions within the current size (0 to size inclusive)
+                        let pos = (*pos_idx as u64) % (mmr.size() + 1);
+                        
+                        // Skip if trying to prune to a position before or equal to what's already pruned
+                        if pos <= mmr.pruned_to_pos() {
+                            continue;
+                        }
+                        
+                        // Skip if trying to prune beyond the current size
+                        if pos > mmr.size() {
+                            continue;
+                        }
+                        
+                        let size_before = mmr.size();
+                        let pruned_to_pos_before = mmr.pruned_to_pos();
+
+                        mmr.prune_to_pos(pos);
+                        reference.prune_to_pos(pos);
+
+                        // Size should remain the same
+                        assert_eq!(
+                            mmr.size(), size_before,
+                            "Operation {op_idx}: Size should not change after prune_to_pos"
+                        );
+
+                        // Pruned position should be updated correctly
+                        assert_eq!(
+                            mmr.pruned_to_pos(), reference.get_pruned_to_pos(),
+                            "Operation {op_idx}: Pruned position mismatch after prune_to_pos"
+                        );
+
+                        // Pruned position should not decrease
+                        assert!(
+                            mmr.pruned_to_pos() >= pruned_to_pos_before,
+                            "Operation {op_idx}: Pruned position should not decrease"
+                        );
+
+                        // Root should still be computable
+                        let root = mmr.root(&mut hasher);
+                        assert!(
+                            !root.as_ref().is_empty(),
+                            "Operation {op_idx}: Root should be computable after prune_to_pos"
+                        );
                     }
                 }
             }
