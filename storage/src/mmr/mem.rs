@@ -297,7 +297,7 @@ impl<H: CHasher> Mmr<H> {
     /// - Use of this method will prevent using this structure as a base mmr for grafting.
     pub fn update_leaf(&mut self, hasher: &mut impl Hasher<H>, pos: u64, element: &[u8]) {
         if pos < self.pruned_to_pos {
-            panic!("element pruned: pos={}", pos);
+            panic!("element pruned: pos={pos}");
         }
 
         // Update the digest of the leaf node.
@@ -349,7 +349,7 @@ impl<H: CHasher> Mmr<H> {
 
         for (pos, element) in updates {
             if *pos < self.pruned_to_pos {
-                panic!("element pruned: pos={}", pos);
+                panic!("element pruned: pos={pos}");
             }
 
             // Update the digest of the leaf node and mark its ancestors as dirty.
@@ -879,8 +879,7 @@ mod tests {
                 for size in old_size + 1..mmr.size() {
                     assert!(
                         !PeakIterator::check_validity(size),
-                        "mmr of size {} should be invalid",
-                        size
+                        "mmr of size {size} should be invalid",
                     );
                 }
             }
@@ -931,7 +930,7 @@ mod tests {
             for i in 0u64..199 {
                 let root = mmr.root(&mut hasher);
                 let expected_root = ROOTS[i as usize];
-                assert_eq!(hex(&root), expected_root, "at: {}", i);
+                assert_eq!(hex(&root), expected_root, "at: {i}");
                 hasher.inner().update(&i.to_be_bytes());
                 let element = hasher.inner().finalize();
                 mmr.add(&mut hasher, &element);
