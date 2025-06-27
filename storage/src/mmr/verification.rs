@@ -351,6 +351,7 @@ impl<D: Digest> Proof<D> {
         }
 
         // Happy path: we can extract the pinned nodes directly from the proof.
+        // This happens when the `end_element_pos` is the last element in the MMR.
         if pinned_positions
             == required_positions[required_positions.len() - pinned_positions.len()..]
         {
