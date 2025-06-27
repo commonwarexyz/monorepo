@@ -364,17 +364,9 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     ///
     /// Panics if the bit doesn't exist or has been pruned.
     fn chunk_index(&self, bit_offset: u64) -> usize {
-        assert!(
-            bit_offset < self.bit_count(),
-            "out of bounds: {}",
-            bit_offset
-        );
+        assert!(bit_offset < self.bit_count(), "out of bounds: {bit_offset}");
         let chunk_num = Self::chunk_num(bit_offset);
-        assert!(
-            chunk_num >= self.pruned_chunks,
-            "bit pruned: {}",
-            bit_offset
-        );
+        assert!(chunk_num >= self.pruned_chunks, "bit pruned: {bit_offset}");
 
         chunk_num - self.pruned_chunks
     }
@@ -574,17 +566,17 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 
     /// Verify whether `proof` proves that the `chunk` containing the referenced bit belongs to the
     /// bitmap corresponding to `root_digest`.
-    pub async fn verify_bit_inclusion(
+    pub fn verify_bit_inclusion(
         hasher: &mut impl Hasher<H>,
         proof: &Proof<H::Digest>,
         chunk: &[u8; N],
         bit_offset: u64,
         root_digest: &H::Digest,
-    ) -> Result<bool, Error> {
+    ) -> bool {
         let bit_count = proof.size;
         if bit_offset >= bit_count {
             debug!(bit_count, bit_offset, "tried to verify non-existent bit");
-            return Ok(false);
+            return false;
         }
         let leaf_pos = Self::leaf_pos(bit_offset);
 
@@ -599,7 +591,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 
         if proof.digests.is_empty() {
             debug!("proof has no digests");
-            return Ok(false);
+            return false;
         }
         let last_digest = mmr_proof.digests.pop().unwrap();
 
@@ -612,7 +604,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
                     digests = mmr_proof.digests.len() + 1,
                     "proof over partial chunk should have exactly 1 digest"
                 );
-                return Ok(false);
+                return false;
             }
             let last_chunk_digest = hasher.digest(chunk);
             let next_bit = bit_count % Self::CHUNK_SIZE_BITS;
@@ -622,29 +614,24 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
                 next_bit,
                 &last_chunk_digest,
             );
-            return Ok(reconstructed_root == *root_digest);
+            return reconstructed_root == *root_digest;
         };
 
         // For the case where the proof is over a bit in a full chunk, `last_digest` contains the
         // digest of that chunk.
         let mmr_root = match mmr_proof.reconstruct_root(hasher, &[chunk], leaf_pos, leaf_pos) {
             Ok(root) => root,
-            Err(MissingDigests) => {
-                debug!("Not enough digests in proof to reconstruct root");
-                return Ok(false);
+            Err(error) => {
+                debug!(error = ?error, "invalid proof input");
+                return false;
             }
-            Err(ExtraDigests) => {
-                debug!("Not all digests in proof were used to reconstruct root");
-                return Ok(false);
-            }
-            Err(e) => return Err(e),
         };
 
         let next_bit = bit_count % Self::CHUNK_SIZE_BITS;
         let reconstructed_root =
             Self::partial_chunk_root(hasher.inner(), &mmr_root, next_bit, &last_digest);
 
-        Ok(reconstructed_root == *root_digest)
+        reconstructed_root == *root_digest
     }
 }
 
@@ -685,9 +672,7 @@ mod tests {
                     &[0u8; SHA256_SIZE],
                     0,
                     &Sha256::fill(0x00),
-                )
-                .await
-                .unwrap(),
+                ),
                 "proof without digests shouldn't verify or panic"
             );
         });
@@ -734,16 +719,12 @@ mod tests {
             // Chunk should be provable.
             let (proof, chunk) = bitmap.proof(&mut hasher, 0).await.unwrap();
             assert!(
-                Bitmap::verify_bit_inclusion(&mut hasher, &proof, &chunk, 255, &root)
-                    .await
-                    .unwrap(),
+                Bitmap::verify_bit_inclusion(&mut hasher, &proof, &chunk, 255, &root),
                 "failed to prove bit in only chunk"
             );
             // bit outside range should not verify
             assert!(
-                !Bitmap::verify_bit_inclusion(&mut hasher, &proof, &chunk, 256, &root)
-                    .await
-                    .unwrap(),
+                !Bitmap::verify_bit_inclusion(&mut hasher, &proof, &chunk, 256, &root),
                 "should not be able to prove bit outside of chunk"
             );
 
@@ -935,7 +916,7 @@ mod tests {
                 bitmap.set_bit(bit_pos, !bit);
                 bitmap.sync(&mut hasher).await.unwrap();
                 let new_root = bitmap.root(&mut hasher).await.unwrap();
-                assert_ne!(root, new_root, "failed at bit {}", bit_pos);
+                assert_ne!(root, new_root, "failed at bit {bit_pos}");
                 // flip it back
                 bitmap.set_bit(bit_pos, bit);
                 bitmap.sync(&mut hasher).await.unwrap();
@@ -951,7 +932,7 @@ mod tests {
                 bitmap.set_bit(bit_pos, !bit);
                 bitmap.sync(&mut hasher).await.unwrap();
                 let new_root = bitmap.root(&mut hasher).await.unwrap();
-                assert_ne!(root, new_root, "failed at bit {}", bit_pos);
+                assert_ne!(root, new_root, "failed at bit {bit_pos}");
                 // flip it back
                 bitmap.set_bit(bit_pos, bit);
                 bitmap.sync(&mut hasher).await.unwrap();
@@ -982,7 +963,7 @@ mod tests {
             let mut hasher = Standard::new();
             let mut bitmap = Bitmap::<Sha256, N>::new();
             for i in 0u32..10 {
-                bitmap.append_chunk_unchecked(&test_chunk(format!("test{}", i).as_bytes()));
+                bitmap.append_chunk_unchecked(&test_chunk(format!("test{i}").as_bytes()));
             }
             // Add a few extra bits to exercise not being on a chunk or byte boundary.
             bitmap.append_byte_unchecked(0xA6);
@@ -1005,11 +986,8 @@ mod tests {
 
                     // Proof should verify for the original chunk containing the bit.
                     assert!(
-                        Bitmap::<_, N>::verify_bit_inclusion(&mut hasher, &proof, &chunk, i, &root)
-                            .await
-                            .unwrap(),
-                        "failed to prove bit {}",
-                        i
+                        Bitmap::<_, N>::verify_bit_inclusion(&mut hasher, &proof, &chunk, i, &root),
+                        "failed to prove bit {i}",
                     );
 
                     // Flip the bit in the chunk and make sure the proof fails.
@@ -1021,11 +999,8 @@ mod tests {
                             &corrupted,
                             i,
                             &root
-                        )
-                        .await
-                        .unwrap(),
-                        "proving bit {} after flipping should have failed",
-                        i
+                        ),
+                        "proving bit {i} after flipping should have failed",
                     );
                 }
             }
@@ -1049,7 +1024,7 @@ mod tests {
             // Add a non-trivial amount of data.
             let mut hasher = Standard::new();
             for i in 0..FULL_CHUNK_COUNT {
-                bitmap.append_chunk_unchecked(&test_chunk(format!("test{}", i).as_bytes()));
+                bitmap.append_chunk_unchecked(&test_chunk(format!("test{i}").as_bytes()));
             }
             bitmap.sync(&mut hasher).await.unwrap();
             let chunk_aligned_root = bitmap.root(&mut hasher).await.unwrap();
@@ -1076,7 +1051,7 @@ mod tests {
 
                 // Replay missing chunks.
                 for j in i..FULL_CHUNK_COUNT {
-                    bitmap.append_chunk_unchecked(&test_chunk(format!("test{}", j).as_bytes()));
+                    bitmap.append_chunk_unchecked(&test_chunk(format!("test{j}").as_bytes()));
                 }
                 assert_eq!(bitmap.pruned_chunks, i);
                 assert_eq!(bitmap.bit_count(), FULL_CHUNK_COUNT as u64 * 256);

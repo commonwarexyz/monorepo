@@ -58,15 +58,13 @@ fn bench_prove_many_elements(c: &mut Criterion) {
                             block_on(async {
                                 for ((start_index, end_index), (start_pos, end_pos)) in samples {
                                     let proof = mmr.range_proof(start_pos, end_pos).await.unwrap();
-                                    assert!(proof
-                                        .verify_range_inclusion(
-                                            &mut hasher,
-                                            &elements[start_index..=end_index],
-                                            start_pos,
-                                            end_pos,
-                                            &root_digest,
-                                        )
-                                        .unwrap());
+                                    assert!(proof.verify_range_inclusion(
+                                        &mut hasher,
+                                        &elements[start_index..=end_index],
+                                        start_pos,
+                                        end_pos,
+                                        &root_digest,
+                                    ));
                                 }
                             })
                         },
