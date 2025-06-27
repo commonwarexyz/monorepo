@@ -98,7 +98,7 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
                         current_epoch = self.current_epoch,
                         "Reporter received Lock activity"
                     );
-                    // Verify threshold signature (this was previously skipped)
+                    // Verify threshold signature
                     use commonware_cryptography::bls12381::primitives::{ops, poly};
                     let mut ack_namespace = self.namespace.clone();
                     ack_namespace.extend_from_slice(b"_AGG_ACK");

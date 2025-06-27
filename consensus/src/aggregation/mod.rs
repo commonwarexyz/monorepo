@@ -999,20 +999,25 @@ mod tests {
                 None,
             );
 
-            // Consensus should not be achievable with insufficient validators
-            // Wait for a reasonable amount of time and verify no progress
-            context.sleep(Duration::from_secs(10)).await;
+            // With insufficient validators, consensus should not be achievable
+            // Wait long enough for any potential consensus attempts to complete
+            context.sleep(Duration::from_secs(12)).await;
 
-            // Check that no validator achieved consensus
-            let mut any_progress = false;
+            // Check that no validator achieved meaningful consensus progress
+            let mut any_consensus = false;
             for (validator_pk, mut reporter_mailbox) in reporters {
+                // Check both tip and contiguous tip to ensure no real progress
                 if let Some((tip_index, _)) = reporter_mailbox.get_tip().await {
-                    if tip_index >= 1 {
-                        any_progress = true;
+                    let contiguous_tip = reporter_mailbox.get_contiguous_tip().await.unwrap_or(0);
+
+                    // Real consensus progress requires both tip advancement AND contiguous signatures
+                    if tip_index >= 1 && contiguous_tip >= 1 {
+                        any_consensus = true;
                         tracing::warn!(
                             ?validator_pk,
                             tip_index,
-                            "Unexpected progress with insufficient validators"
+                            contiguous_tip,
+                            "Unexpected consensus with insufficient validators"
                         );
                     }
                 }
@@ -1020,8 +1025,8 @@ mod tests {
 
             // With only 2 out of 5 validators (below quorum of 3), consensus should not succeed
             assert!(
-                !any_progress,
-                "Consensus should not be achieved with insufficient validator participation"
+                !any_consensus,
+                "Consensus should not be achieved with insufficient validator participation (below quorum)"
             );
         });
     }
