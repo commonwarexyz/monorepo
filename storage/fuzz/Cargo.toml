@@ -52,8 +52,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "fixed_journal_operations"
-path = "fuzz_targets/fixed_journal_operations.rs"
+name = "journal_operations"
+path = "fuzz_targets/journal_operations.rs"
 test = false
 doc = false
 bench = false
