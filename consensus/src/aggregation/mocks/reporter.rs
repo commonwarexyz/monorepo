@@ -40,7 +40,7 @@ pub struct Reporter<V: Variant, D: Digest> {
     digests: BTreeMap<Index, (D, Epoch)>,
 
     // Highest contiguous known height
-    contiguous: Index,
+    contiguous: Option<Index>,
 
     // Highest known height (and epoch)
     highest: Option<(Index, Epoch)>,
@@ -64,7 +64,7 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
                 acks: HashSet::new(),
                 limit_misses,
                 digests: BTreeMap::new(),
-                contiguous: 0,
+                contiguous: None,
                 highest: None,
                 current_epoch: 111, // Initialize with the expected epoch
             },
@@ -160,14 +160,12 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
                     }
 
                     // Update the highest contiguous height
-                    // Check if this item extends our contiguous range
-                    if item.index <= self.contiguous + 1 {
-                        // Recompute contiguous from 0
-                        let mut contiguous = 0;
-                        while self.digests.contains_key(&contiguous) {
-                            contiguous += 1;
-                        }
-                        self.contiguous = contiguous.saturating_sub(1);
+                    let mut next_contiguous = self.contiguous.map(|c| c + 1).unwrap_or(0);
+                    while self.digests.contains_key(&next_contiguous) {
+                        next_contiguous += 1;
+                    }
+                    if next_contiguous > 0 {
+                        self.contiguous = Some(next_contiguous.checked_sub(1).unwrap());
                     }
                 }
                 Message::Tip(index) => {
@@ -180,7 +178,7 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
                     sender.send(self.highest).unwrap();
                 }
                 Message::GetContiguousTip(sender) => {
-                    sender.send(Some(self.contiguous)).unwrap();
+                    sender.send(self.contiguous).unwrap();
                 }
                 Message::Get(index, sender) => {
                     let digest = self.digests.get(&index).cloned();

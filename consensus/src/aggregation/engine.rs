@@ -608,6 +608,7 @@ impl<
             .pending
             .insert(index, Pending::Unverified(HashMap::new()))
             .is_none());
+
         let mut automaton = self.automaton.clone();
         let timer = self.metrics.digest_duration.timer();
         self.digest_requests.push(async move {
