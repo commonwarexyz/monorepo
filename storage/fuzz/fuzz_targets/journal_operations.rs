@@ -47,7 +47,7 @@ fn fuzz(input: FuzzInput) {
             items_per_blob: 3, // Small value to trigger more blob creation
             write_buffer: 512,
         };
-        
+
         let mut journal = match Journal::init(context.clone(), cfg).await {
             Ok(j) => Some(j),
             Err(err) => panic!("Unable to init journal {err:?}"),

@@ -54,13 +54,13 @@ impl ReferenceMmr {
         if self.leaf_positions.is_empty() {
             return Err(());
         }
-        
+
         // Check if the last leaf would be pruned - if so, we can't pop it
         let last_leaf_pos = *self.leaf_positions.last().unwrap();
         if last_leaf_pos < self.pruned_to_pos {
             return Err(()); // Element is pruned, can't pop
         }
-        
+
         self.leaf_positions.pop();
         self.leaf_data.pop();
 

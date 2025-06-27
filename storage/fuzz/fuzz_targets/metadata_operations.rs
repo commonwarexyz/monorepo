@@ -40,7 +40,7 @@ fn fuzz(input: FuzzInput) {
         };
         let mut metadata = match Metadata::init(context.clone(), cfg).await {
             Ok(m) => Some(m),
-            Err(err) => panic!("Unable to init metadata {err:?}"), 
+            Err(err) => panic!("Unable to init metadata {err:?}"),
         };
 
         for op in input.operations.iter() {
@@ -58,7 +58,7 @@ fn fuzz(input: FuzzInput) {
                     } else {
                         value
                     };
-                    
+
                     let array_key = U64::new(*key);
                     metadata_ref.put(array_key, limited_value.to_vec());
                 }

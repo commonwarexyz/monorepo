@@ -6,23 +6,59 @@ use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug, Clone)]
 enum IndexOperation {
-    Insert { key: Vec<u8>, value: u64 },
-    Get { key: Vec<u8> },
-    GetMut { key: Vec<u8> },
-    GetMutOrInsert { key: Vec<u8>, value: u64 },
-    Remove { key: Vec<u8> },
-    Prune { key: Vec<u8>, prune_value: u64 },
-    InsertAndPrune { key: Vec<u8>, value: u64, prune_value: u64 },
+    Insert {
+        key: Vec<u8>,
+        value: u64,
+    },
+    Get {
+        key: Vec<u8>,
+    },
+    GetMut {
+        key: Vec<u8>,
+    },
+    GetMutOrInsert {
+        key: Vec<u8>,
+        value: u64,
+    },
+    Remove {
+        key: Vec<u8>,
+    },
+    Prune {
+        key: Vec<u8>,
+        prune_value: u64,
+    },
+    InsertAndPrune {
+        key: Vec<u8>,
+        value: u64,
+        prune_value: u64,
+    },
     Keys,
     // Edge case operations
-    InsertLargeKey { value: u64 },
-    InsertMany { key: Vec<u8>, count: u8 },
-    PruneAll { key: Vec<u8> },
+    InsertLargeKey {
+        value: u64,
+    },
+    InsertMany {
+        key: Vec<u8>,
+        count: u8,
+    },
+    PruneAll {
+        key: Vec<u8>,
+    },
     // Cursor operations
-    CursorIterate { key: Vec<u8> },
-    CursorUpdate { key: Vec<u8>, new_value: u64 },
-    CursorDelete { key: Vec<u8> },
-    CursorInsert { key: Vec<u8>, value: u64 },
+    CursorIterate {
+        key: Vec<u8>,
+    },
+    CursorUpdate {
+        key: Vec<u8>,
+        new_value: u64,
+    },
+    CursorDelete {
+        key: Vec<u8>,
+    },
+    CursorInsert {
+        key: Vec<u8>,
+        value: u64,
+    },
 }
 
 #[derive(Arbitrary, Debug)]
@@ -74,7 +110,11 @@ fn fuzz(input: FuzzInput) {
                 index.prune(key, |v| *v == *prune_value);
             }
 
-            IndexOperation::InsertAndPrune { key, value, prune_value } => {
+            IndexOperation::InsertAndPrune {
+                key,
+                value,
+                prune_value,
+            } => {
                 index.insert_and_prune(key, *value, |v| *v == *prune_value);
             }
 

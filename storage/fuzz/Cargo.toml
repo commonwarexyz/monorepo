@@ -64,3 +64,10 @@ path = "fuzz_targets/index_operations.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "bmt_operations"
+path = "fuzz_targets/bmt_operations.rs"
+test = false
+doc = false
+bench = false
