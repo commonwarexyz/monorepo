@@ -57,3 +57,10 @@ path = "fuzz_targets/journal_operations.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "index_operations"
+path = "fuzz_targets/index_operations.rs"
+test = false
+doc = false
+bench = false
