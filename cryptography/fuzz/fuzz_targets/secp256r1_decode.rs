@@ -1,5 +1,4 @@
 #![no_main]
-extern crate core;
 
 use arbitrary::Arbitrary;
 use commonware_codec::{DecodeExt, Encode};

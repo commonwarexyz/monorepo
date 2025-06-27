@@ -1,4 +1,5 @@
 #![no_main]
+
 use arbitrary::Arbitrary;
 use commonware_runtime::deterministic;
 use commonware_storage::index::{translator::TwoCap, Index};
@@ -67,10 +68,6 @@ struct FuzzInput {
 }
 
 fn fuzz(input: FuzzInput) {
-    if input.operations.is_empty() || input.operations.len() > 150 {
-        return;
-    }
-
     let context = deterministic::Context::default();
     let mut index = Index::init(context.clone(), TwoCap);
 

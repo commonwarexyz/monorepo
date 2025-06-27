@@ -1,4 +1,5 @@
 #![no_main]
+
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{deterministic, Runner};
@@ -133,10 +134,6 @@ impl ReferenceMmr {
 
 fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
-
-    if input.operations.is_empty() || input.operations.len() > 200 {
-        return;
-    }
 
     runner.start(|_context| async move {
         let mut mmr = Mmr::<Sha256>::new();

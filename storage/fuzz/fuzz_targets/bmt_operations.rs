@@ -1,4 +1,5 @@
 #![no_main]
+
 use arbitrary::Arbitrary;
 use commonware_cryptography::{hash, sha256::Sha256};
 use commonware_storage::bmt::{Builder, Proof};
@@ -26,10 +27,6 @@ struct FuzzInput {
 }
 
 fn fuzz(input: FuzzInput) {
-    if input.operations.is_empty() || input.operations.len() > 100 {
-        return;
-    }
-
     let mut builder: Option<Builder<Sha256>> = None;
     let mut tree = None;
     let mut proof = None;

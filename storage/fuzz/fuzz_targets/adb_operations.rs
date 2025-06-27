@@ -1,4 +1,5 @@
 #![no_main]
+
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{deterministic, Runner};
@@ -27,6 +28,7 @@ enum AdbOperation {
     Proof { start_loc: u64, max_ops: u64 },
     Get { key: RawKey },
 }
+
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
     operations: Vec<AdbOperation>,
@@ -34,9 +36,6 @@ struct FuzzInput {
 
 fn fuzz(data: FuzzInput) {
     let mut hasher = Standard::<Sha256>::new();
-    if data.operations.is_empty() || data.operations.len() > 313 {
-        return;
-    }
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {

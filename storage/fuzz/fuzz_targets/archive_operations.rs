@@ -37,9 +37,6 @@ struct FuzzInput {
 }
 
 fn fuzz(data: FuzzInput) {
-    if data.operations.is_empty() || data.operations.len() > 106 {
-        return;
-    }
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {

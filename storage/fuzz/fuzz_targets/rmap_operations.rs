@@ -1,4 +1,5 @@
 #![no_main]
+
 use arbitrary::Arbitrary;
 use commonware_storage::rmap::RMap;
 use libfuzzer_sys::fuzz_target;
@@ -19,9 +20,6 @@ struct FuzzInput {
 }
 
 fn fuzz(data: FuzzInput) {
-    if data.operations.is_empty() || data.operations.len() > 300 {
-        return;
-    }
     let mut rmap = RMap::new();
     let mut expected_state = BTreeSet::new();
 

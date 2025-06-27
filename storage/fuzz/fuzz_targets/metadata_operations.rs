@@ -1,4 +1,5 @@
 #![no_main]
+
 use arbitrary::Arbitrary;
 use commonware_runtime::{deterministic, Runner};
 use commonware_storage::metadata::{Config, Metadata};
@@ -27,10 +28,6 @@ struct FuzzInput {
 }
 
 fn fuzz(input: FuzzInput) {
-    if input.operations.is_empty() || input.operations.len() > 100 {
-        return;
-    }
-
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {

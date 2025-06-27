@@ -1,4 +1,5 @@
 #![no_main]
+
 use arbitrary::Arbitrary;
 use commonware_cryptography::{hash, sha256::Digest};
 use commonware_runtime::{deterministic, Runner};
@@ -28,16 +29,7 @@ struct FuzzInput {
     operations: Vec<JournalOperation>,
 }
 
-/// Generate a test digest for the given value
-fn test_digest(value: u64) -> Digest {
-    hash(&value.to_be_bytes())
-}
-
 fn fuzz(input: FuzzInput) {
-    if input.operations.is_empty() || input.operations.len() > 200 {
-        return;
-    }
-
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
@@ -65,7 +57,7 @@ fn fuzz(input: FuzzInput) {
 
             match op {
                 JournalOperation::Append { value } => {
-                    let digest = test_digest(*value);
+                    let digest = hash(&value.to_be_bytes());
                     let _pos = journal_ref.append(digest).await.unwrap();
                     journal_size += 1;
                 }
@@ -136,7 +128,7 @@ fn fuzz(input: FuzzInput) {
                 JournalOperation::AppendMany { count } => {
                     // Append multiple items to stress test blob transitions
                     for _ in 0..*count {
-                        let digest = test_digest(next_value);
+                        let digest = hash(&next_value.to_be_bytes());
                         journal_ref.append(digest).await.unwrap();
                         next_value += 1;
                         journal_size += 1;
