@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_runtime::{deterministic, Runner};
 use commonware_storage::{
     archive::{Archive, Config, Identifier},
-    index::{translator::EightCap, Translator},
+    index::translator::EightCap,
 };
 use commonware_utils::array::FixedBytes;
 use libfuzzer_sys::fuzz_target;
@@ -121,48 +121,49 @@ fn fuzz(data: FuzzInput) {
                     let key = Key::new(*key_data);
                     let result = archive.get(Identifier::Key(&key)).await;
 
-                    // Verify the result against our tracked items
                     if let Ok(Some(value)) = result {
-                        // Due to hash collisions in the translator (EightCap), we might get a value
-                        // for a different key that hashes to the same internal representation.
-                        // We need to check if ANY key in our tracked items could have produced this result.
+                        // Find all items with this exact key that haven't been pruned
+                        let matching_items: Vec<_> = items.iter()
+                            .filter(|(idx, k, _)| {
+                                let not_pruned = if let Some(threshold) = oldest_allowed {
+                                    *idx >= threshold
+                                } else {
+                                    true
+                                };
+                                not_pruned && *k == *key_data
+                            })
+                            .collect();
 
-                        // The translator is available in the config
-                        let translator = EightCap;
-                        let translated_key = translator.transform(&key_data[..]);
+                        if matching_items.is_empty() {
+                            panic!("Got value for key {key_data:?} that we didn't insert or was pruned");
+                        }
 
-                        // Find all items whose keys translate to the same value
-                        let possible_matches: Vec<_> = items
-                        .iter()
-                        .filter(|(idx, _, _)| {
-                            // Only consider items that haven't been pruned
-                            if let Some(threshold) = oldest_allowed {
+                        // Convert value to its raw form for comparison
+                        let value_bytes: &[u8; 32] = value.as_ref().try_into().unwrap();
+
+                        // Check if the returned value matches ANY of the values we inserted for this key
+                        let found_match = matching_items.iter().any(|(_, _, expected_value)| {
+                            value_bytes == expected_value
+                        });
+
+                        if !found_match {
+                            panic!(
+                                "Value mismatch for key {key_data:?}. Got {:?}, but expected one of: {:?}",
+                                value_bytes,
+                                matching_items.iter().map(|(idx, _, v)| (idx, v)).collect::<Vec<_>>()
+                            );
+                        }
+                    } else {
+                        // If archive doesn't have it, we shouldn't have it either (or it was pruned)
+                        let should_not_exist = !items.iter().any(|(idx, k, _)| {
+                            let not_pruned = if let Some(threshold) = oldest_allowed {
                                 *idx >= threshold
                             } else {
                                 true
-                            }
-                        })
-                        .filter(|(_, k, _)| {
-                            let k_translated = translator.transform(&k[..]);
-                            k_translated == translated_key
-                        })
-                        .collect();
-
-                        if !possible_matches.is_empty() {
-                            // Verify that the returned value matches one of the possible values
-                            let value_bytes: &[u8; 32] = value.as_ref().try_into().unwrap();
-
-                            let value_found =
-                                possible_matches.iter().any(|(_, _, v)| v == value_bytes);
-                            if !value_found {
-                                panic!("Warning: Got unexpected value for key {key_data:?} - possible overwrite or collision");
-                            }
-                        } else {
-                            panic!("Warning: Got unexpected value for key {key_data:?}");
-                        }
-                    } else {
-                        // then we also should not have that key
-                        assert!(!items.iter().any(|(_, k, _)| *k == *key));
+                            };
+                            not_pruned && *k == *key_data
+                        });
+                        assert!(should_not_exist, "Archive should have key {key_data:?}");
                     }
                 }
 
