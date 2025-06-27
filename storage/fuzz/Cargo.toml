@@ -14,6 +14,7 @@ commonware-storage = { workspace = true }
 commonware-utils = { workspace = true }
 arbitrary = { workspace = true, features = ["derive"] }
 libfuzzer-sys = { workspace = true }
+futures = { workspace = true }
 
 [[bin]]
 name = "adb_operations"
@@ -46,6 +47,13 @@ bench = false
 [[bin]]
 name = "metadata_operations"
 path = "fuzz_targets/metadata_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "journal_operations"
+path = "fuzz_targets/journal_operations.rs"
 test = false
 doc = false
 bench = false
