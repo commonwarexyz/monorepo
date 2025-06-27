@@ -335,35 +335,33 @@ impl<D: Digest> Proof<D> {
         start_element_pos: u64,
         end_element_pos: u64,
     ) -> Result<Vec<D>, Error> {
-        // Get the positions of all nodes that should be pinned
+        // Get the positions of all nodes that should be pinned.
         let pinned_positions: Vec<u64> = Self::nodes_to_pin(start_element_pos).collect();
 
-        // Get all positions required for the proof
+        // Get all positions required for the proof.
         let required_positions =
             Self::nodes_required_for_range_proof(self.size, start_element_pos, end_element_pos);
-
-        // Should be the nodes in the proof
         if required_positions.len() != self.digests.len() {
             debug!(
-                "Proof digest count ({}) doesn't match required positions ({})",
-                self.digests.len(),
-                required_positions.len()
+                digests_len = self.digests.len(),
+                required_positions_len = required_positions.len(),
+                "Proof digest count doesn't match required positions",
             );
             return Err(Error::MissingDigests);
         }
 
-        // Create a mapping from position to digest
+        // Create a mapping from position to digest.
         let position_to_digest: HashMap<u64, D> = required_positions
             .iter()
             .zip(self.digests.iter())
             .map(|(&pos, &digest)| (pos, digest))
             .collect();
 
-        // Extract the pinned nodes in the same order as nodes_to_pin
+        // Extract the pinned nodes in the same order as nodes_to_pin.
         let mut result = Vec::with_capacity(pinned_positions.len());
         for pinned_pos in pinned_positions {
             let Some(&digest) = position_to_digest.get(&pinned_pos) else {
-                debug!("Pinned node at position {} not found in proof", pinned_pos);
+                debug!(pinned_pos, "Pinned node not found in proof");
                 return Err(Error::MissingDigests);
             };
             result.push(digest);
