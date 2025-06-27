@@ -15,6 +15,10 @@ enum MetadataOperation {
     LastUpdate,
     Close,
     Destroy,
+    // Add operations that test edge cases
+    PutLargeValue { key: u64 },
+    PutEmptyValue { key: u64 },
+    MultipleSyncs,
 }
 
 #[derive(Arbitrary, Debug)]
@@ -23,20 +27,20 @@ struct FuzzInput {
 }
 
 fn fuzz(input: FuzzInput) {
-    let runner = deterministic::Runner::default();
-
     if input.operations.is_empty() || input.operations.len() > 100 {
         return;
     }
 
+    let runner = deterministic::Runner::default();
+
     runner.start(|context| async move {
         // Initialize metadata store
         let cfg = Config {
-            partition: "fuzz_test".to_string(),
+            partition: "metadata_operations_fuzz_test".to_string(),
         };
         let mut metadata = match Metadata::init(context.clone(), cfg).await {
             Ok(m) => Some(m),
-            Err(err) => panic!("{:?}", err), 
+            Err(err) => panic!("Unable to init metadata {err:?}"), 
         };
 
         for op in input.operations.iter() {
@@ -48,9 +52,9 @@ fn fuzz(input: FuzzInput) {
 
             match op {
                 MetadataOperation::Put { key, value } => {
-                    // Limit value size to prevent memory issues
-                    let limited_value = if value.len() > 1000 {
-                        &value[0..1000]
+                    // Don't limit value size too much - let larger values through to test edge cases
+                    let limited_value = if value.len() > 50_000 {
+                        &value[0..50_000] // Allow up to 50KB to stress test
                     } else {
                         value
                     };
@@ -74,7 +78,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 MetadataOperation::Sync => {
-                    // Ignore sync errors - they're expected in some edge cases
+                    // Panic on sync errors to find bugs
                     metadata_ref.sync().await.unwrap();
                 }
 
@@ -83,26 +87,46 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 MetadataOperation::Close => {
-                    // Close metadata (takes ownership)
+                    // Close metadata (takes ownership) - panic on errors
                     if let Some(m) = metadata.take() {
-                        let _ = m.close().await;
+                        m.close().await.unwrap();
                         return;
                     }
                 }
 
                 MetadataOperation::Destroy => {
-                    // Destroy metadata (takes ownership)
+                    // Destroy metadata (takes ownership) - panic on errors
                     if let Some(m) = metadata.take() {
-                        let _ = m.destroy().await;
+                        m.destroy().await.unwrap();
                         return;
                     }
+                }
+
+                MetadataOperation::PutLargeValue { key } => {
+                    // Test with large values to find memory/size bugs
+                    let array_key = U64::new(*key);
+                    let large_value = vec![0u8; 100_000]; // 100KB
+                    metadata_ref.put(array_key, large_value);
+                }
+
+                MetadataOperation::PutEmptyValue { key } => {
+                    // Test with empty values to find edge case bugs
+                    let array_key = U64::new(*key);
+                    metadata_ref.put(array_key, Vec::new());
+                }
+
+                MetadataOperation::MultipleSyncs => {
+                    // Test multiple rapid syncs to find race conditions
+                    metadata_ref.sync().await.unwrap();
+                    metadata_ref.sync().await.unwrap();
+                    metadata_ref.sync().await.unwrap();
                 }
             }
         }
 
-        // Clean up if metadata still exists
+        // Clean up if metadata still exists - panic on cleanup errors
         if let Some(m) = metadata.take() {
-            let _ = m.destroy().await;
+            m.destroy().await.unwrap();
         }
     });
 }
