@@ -1,16 +1,40 @@
 use crate::{aggregation::types::Index, Automaton as A};
 use commonware_cryptography::{sha256, Hasher, Sha256};
 use futures::channel::oneshot;
+use rand::{thread_rng, Rng};
 use tracing::trace;
+
+#[derive(Clone, Debug)]
+pub enum ByzantineStrategy {
+    None,
+    DoubleHash,
+    RandomDigest,
+    WrongPrefix,
+    ConflictingContent,
+}
 
 #[derive(Clone)]
 pub struct Application {
     invalid_when: fn(u64) -> bool,
+    byzantine_strategy: ByzantineStrategy,
 }
 
 impl Application {
     pub fn new(invalid_when: fn(u64) -> bool) -> Self {
-        Self { invalid_when }
+        Self {
+            invalid_when,
+            byzantine_strategy: ByzantineStrategy::DoubleHash,
+        }
+    }
+
+    pub fn with_byzantine_strategy(
+        invalid_when: fn(u64) -> bool,
+        strategy: ByzantineStrategy,
+    ) -> Self {
+        Self {
+            invalid_when,
+            byzantine_strategy: strategy,
+        }
     }
 }
 
@@ -31,14 +55,36 @@ impl A for Application {
         let mut hasher = Sha256::default();
         hasher.update(payload.as_bytes());
 
-        // Inject an invalid digest by updating with the payload again.
-        if (self.invalid_when)(context) {
-            hasher.update(payload.as_bytes());
-        }
+        let digest = if (self.invalid_when)(context) {
+            match self.byzantine_strategy {
+                ByzantineStrategy::None => hasher.finalize(),
+                ByzantineStrategy::DoubleHash => {
+                    hasher.update(payload.as_bytes());
+                    hasher.finalize()
+                }
+                ByzantineStrategy::RandomDigest => {
+                    let mut random_bytes = [0u8; 32];
+                    thread_rng().fill(&mut random_bytes);
+                    sha256::Digest::from(random_bytes)
+                }
+                ByzantineStrategy::WrongPrefix => {
+                    let mut hasher = Sha256::default();
+                    hasher.update(b"wrong_prefix");
+                    hasher.update(payload.as_bytes());
+                    hasher.finalize()
+                }
+                ByzantineStrategy::ConflictingContent => {
+                    let conflicting_payload = format!("conflicting_data for index {}", context);
+                    let mut hasher = Sha256::default();
+                    hasher.update(conflicting_payload.as_bytes());
+                    hasher.finalize()
+                }
+            }
+        } else {
+            hasher.finalize()
+        };
 
-        let digest = hasher.finalize();
         sender.send(digest).unwrap();
-
         receiver
     }
 
