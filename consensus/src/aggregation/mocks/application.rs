@@ -49,8 +49,16 @@ impl A for Application {
     ) -> oneshot::Receiver<bool> {
         trace!(?context, ?payload, "verify");
         let (sender, receiver) = oneshot::channel();
-        // Always say the payload is valid.
-        sender.send(true).unwrap();
+
+        // Compute the expected valid digest
+        let expected_payload = format!("data for index {}", context);
+        let mut hasher = Sha256::default();
+        hasher.update(expected_payload.as_bytes());
+        let expected_digest = hasher.finalize();
+
+        // Return true only if the payload matches the expected digest
+        let is_valid = payload == expected_digest;
+        sender.send(is_valid).unwrap();
         receiver
     }
 }
