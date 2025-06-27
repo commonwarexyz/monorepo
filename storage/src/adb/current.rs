@@ -16,7 +16,7 @@ use crate::{
         hasher::{Grafting, GraftingVerifier, Hasher, Standard},
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
         storage::Grafting as GStorage,
-        verification::{Proof, ReconstructionError},
+        verification::Proof,
     },
 };
 use commonware_codec::FixedSize;
@@ -525,12 +525,8 @@ impl<
         // Reconstruct the MMR root.
         let mmr_root = match proof.reconstruct_root(&mut verifier, digests, start_pos, end_pos) {
             Ok(root) => root,
-            Err(ReconstructionError::MissingDigests) => {
-                debug!("Not enough digests in proof to reconstruct root");
-                return false;
-            }
-            Err(ReconstructionError::ExtraDigests) => {
-                debug!("Not all digests in proof were used to reconstruct root");
+            Err(error) => {
+                debug!(error = ?error, "invalid proof input");
                 return false;
             }
         };
@@ -649,12 +645,8 @@ impl<
         // Reconstruct the MMR root.
         let mmr_root = match proof.reconstruct_root(&mut verifier, &[digest], pos, pos) {
             Ok(root) => root,
-            Err(ReconstructionError::MissingDigests) => {
-                debug!("Not enough digests in proof to reconstruct root");
-                return false;
-            }
-            Err(ReconstructionError::ExtraDigests) => {
-                debug!("Not all digests in proof were used to reconstruct root");
+            Err(error) => {
+                debug!(error = ?error, "invalid proof input");
                 return false;
             }
         };

@@ -15,7 +15,7 @@ use crate::{
     mmr::{
         iterator::leaf_num_to_pos,
         mem::{Config as MemConfig, Mmr},
-        verification::{Proof, ReconstructionError},
+        verification::Proof,
         Error,
         Error::*,
         Hasher,
@@ -621,12 +621,8 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         // digest of that chunk.
         let mmr_root = match mmr_proof.reconstruct_root(hasher, &[chunk], leaf_pos, leaf_pos) {
             Ok(root) => root,
-            Err(ReconstructionError::MissingDigests) => {
-                debug!("Not enough digests in proof to reconstruct root");
-                return false;
-            }
-            Err(ReconstructionError::ExtraDigests) => {
-                debug!("Not all digests in proof were used to reconstruct root");
+            Err(error) => {
+                debug!(error = ?error, "invalid proof input");
                 return false;
             }
         };

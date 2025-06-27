@@ -1,5 +1,5 @@
-//! Defines the inclusion `Proof` structure, functions for generating them from any MMR implementing
-//! the `Storage` trait, and functions for verifying them against a root digest.
+//! Defines the inclusion [Proof] structure, functions for generating them from any MMR implementing
+//! the [Storage] trait, and functions for verifying them against a root digest.
 
 use crate::mmr::{
     iterator::{leaf_pos_to_num, PathIterator, PeakIterator},
@@ -14,7 +14,7 @@ use tracing::debug;
 
 /// Errors that can occur when reconstructing a digest from a proof due to invalid input.
 #[derive(Error, Debug)]
-pub enum ReconstructionError {
+pub(crate) enum ReconstructionError {
     #[error("missing digests in proof")]
     MissingDigests,
     #[error("extra digests in proof")]
@@ -118,22 +118,19 @@ impl<D: Digest> Proof<D> {
             debug!(pos = end_element_pos, "end pos is not a leaf");
             return false;
         }
+
         match self.reconstruct_root(hasher, elements, start_element_pos, end_element_pos) {
             Ok(reconstructed_root) => *root_digest == reconstructed_root,
-            Err(ReconstructionError::MissingDigests) => {
-                debug!("Not enough digests in proof to reconstruct peak digests");
-                false
-            }
-            Err(ReconstructionError::ExtraDigests) => {
-                debug!("Not all digests in proof were used to reconstruct peak digests");
+            Err(error) => {
+                debug!(error = ?error, "invalid proof input");
                 false
             }
         }
     }
 
     /// Reconstructs the root digest of the MMR from the digests in the proof and the provided range
-    /// of elements, or returns a `ReconstructionError` if the input data is invalid.
-    pub fn reconstruct_root<I, H, E>(
+    /// of elements, or returns a [ReconstructionError] if the input data is invalid.
+    pub(crate) fn reconstruct_root<I, H, E>(
         &self,
         hasher: &mut H,
         elements: E,
@@ -151,9 +148,10 @@ impl<D: Digest> Proof<D> {
         Ok(hasher.root_digest(self.size, peak_digests.iter()))
     }
 
-    /// Reconstruct the peak digests of the MMR that produced this proof, returning `MissingDigests`
-    /// error if there are not enough proof digests, or `ExtraDigests` error if not all proof
-    /// digests were used in the reconstruction.
+    /// Reconstruct the peak digests of the MMR that produced this proof, returning
+    /// [ReconstructionError::MissingDigests] error if there are not enough proof digests, or
+    /// [ReconstructionError::ExtraDigests] error if not all proof digests were used in the
+    /// reconstruction.
     fn reconstruct_peak_digests<I, H, E>(
         &self,
         hasher: &mut H,
