@@ -568,7 +568,7 @@ impl<
         }
 
         // Validate height
-        if ack.item.index <= self.tip {
+        if ack.item.index < self.tip {
             return Err(Error::AckThresholded(ack.item.index));
         }
         if ack.item.index >= self.tip + self.window {
