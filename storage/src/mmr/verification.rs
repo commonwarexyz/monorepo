@@ -351,7 +351,7 @@ impl<D: Digest> Proof<D> {
                 required_positions_len = required_positions.len(),
                 "Proof digest count doesn't match required positions",
             );
-            return Err(Error::MissingDigests);
+            return Err(Error::InvalidProofLength);
         }
 
         // Happy path: we can extract the pinned nodes directly from the proof.
@@ -374,7 +374,7 @@ impl<D: Digest> Proof<D> {
         for pinned_pos in pinned_positions {
             let Some(&digest) = position_to_digest.get(&pinned_pos) else {
                 debug!(pinned_pos, "Pinned node not found in proof");
-                return Err(Error::MissingDigests);
+                return Err(Error::MissingDigest(pinned_pos));
             };
             result.push(digest);
         }
