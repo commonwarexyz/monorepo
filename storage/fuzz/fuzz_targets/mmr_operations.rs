@@ -151,7 +151,7 @@ fn fuzz(input: FuzzInput) {
                     if mmr.pruned_to_pos() == mmr.size() && mmr.size() > 0 {
                         continue;
                     }
-                    
+
                     // Limit data size
                     let limited_data = if data.len() > 16 {
                         &data[0..16]
@@ -188,7 +188,7 @@ fn fuzz(input: FuzzInput) {
 
                     assert_eq!(
                         mmr_result.is_ok(), ref_result.is_ok(),
-                        "Operation {op_idx}: Pop result mismatch - MMR: {mmr_result:?}, Ref: {ref_result:?}", 
+                        "Operation {op_idx}: Pop result mismatch - MMR: {mmr_result:?}, Ref: {ref_result:?}",
                     );
 
                     if mmr_result.is_ok() {
@@ -246,7 +246,7 @@ fn fuzz(input: FuzzInput) {
                     if mmr.size() > 0 {
                         let safe_pos = *pos % mmr.size();
                         let node = mmr.get_node(safe_pos);
-                        
+
                         // Check if the node is pruned
                         if safe_pos < mmr.pruned_to_pos() {
                             // Node is pruned, so it's expected to be None (unless it's pinned)
@@ -254,7 +254,7 @@ fn fuzz(input: FuzzInput) {
                         } else {
                             // Node is not pruned, so it should exist
                             if node.is_none() {
-                                panic!("Could not get non-pruned node at position {safe_pos} (size: {}, pruned_to: {})", 
+                                panic!("Could not get non-pruned node at position {safe_pos} (size: {}, pruned_to: {})",
                                     mmr.size(), mmr.pruned_to_pos());
                             }
                         }
@@ -267,7 +267,7 @@ fn fuzz(input: FuzzInput) {
 
                     assert_eq!(
                         mmr_last, ref_last,
-                        "Operation {op_idx}: Last leaf position mismatch - MMR: {mmr_last:?}, Ref: {ref_last:?}", 
+                        "Operation {op_idx}: Last leaf position mismatch - MMR: {mmr_last:?}, Ref: {ref_last:?}",
                     );
                 }
 
@@ -277,7 +277,7 @@ fn fuzz(input: FuzzInput) {
 
                     assert_eq!(
                         mmr_size, expected_size,
-                        "Operation {op_idx}: Size mismatch - MMR: {mmr_size}, Expected: {expected_size} (leaves: {})", 
+                        "Operation {op_idx}: Size mismatch - MMR: {mmr_size}, Expected: {expected_size} (leaves: {})",
                         reference.leaf_count()
                     );
                 }
@@ -310,7 +310,7 @@ fn fuzz(input: FuzzInput) {
                                     Ok(is_valid) => {
                                         assert!(
                                             is_valid,
-                                            "Operation {op_idx}: Proof verification failed for leaf at pos {pos}", 
+                                            "Operation {op_idx}: Proof verification failed for leaf at pos {pos}",
                                         );
                                     }
                                     Err(e) => {
@@ -337,9 +337,9 @@ fn fuzz(input: FuzzInput) {
                     if mmr.pruned_to_pos() == mmr.size() {
                         continue;
                     }
-                    
+
                     let size_before = mmr.size();
-                    
+
                     mmr.prune_all();
                     reference.prune_all();
 
@@ -367,17 +367,17 @@ fn fuzz(input: FuzzInput) {
                     if mmr.size() > 0 {
                         // Only prune to positions within the current size (0 to size inclusive)
                         let pos = (*pos_idx as u64) % (mmr.size() + 1);
-                        
+
                         // Skip if trying to prune to a position before or equal to what's already pruned
                         if pos <= mmr.pruned_to_pos() {
                             continue;
                         }
-                        
+
                         // Skip if trying to prune beyond the current size
                         if pos > mmr.size() {
                             continue;
                         }
-                        
+
                         let size_before = mmr.size();
                         let pruned_to_pos_before = mmr.pruned_to_pos();
 
@@ -418,7 +418,7 @@ fn fuzz(input: FuzzInput) {
                 if let Some(last_pos) = mmr.last_leaf_pos() {
                     assert!(
                         last_pos < mmr.size(),
-                        "Operation {op_idx}: Last leaf position {last_pos} >= size {}", 
+                        "Operation {op_idx}: Last leaf position {last_pos} >= size {}",
                         mmr.size()
                     );
                 }
