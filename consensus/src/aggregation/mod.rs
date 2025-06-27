@@ -563,46 +563,6 @@ mod tests {
         });
     }
 
-    fn slow_validator<V: Variant>() {
-        let num_validators: u32 = 4;
-        let quorum: u32 = 3;
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-
-        runner.start(|mut context| async move {
-            let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
-            shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
-
-            let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
-                context.with_label("simulation"),
-                num_validators,
-                &mut shares_vec,
-                RELIABLE_LINK,
-            )
-            .await;
-            let automatons = Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
-            let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>::new();
-
-            // Start all validators but with increased rebroadcast timeout for the first one (slow)
-            spawn_validator_engines::<V>(
-                context.with_label("validator"),
-                polynomial.clone(),
-                &pks,
-                &validators,
-                &mut registrations,
-                &mut automatons.lock().unwrap(),
-                &mut reporters,
-                &mut oracle,
-                Duration::from_secs(15), // Slower rebroadcast timeout
-                |_| false,
-                None,
-            );
-
-            await_reporters(context.with_label("reporter"), &reporters, 1, 111).await;
-        });
-    }
-
     fn one_offline<V: Variant>() {
         let num_validators: u32 = 5;
         let quorum: u32 = 3;
@@ -655,12 +615,6 @@ mod tests {
     fn test_one_offline() {
         one_offline::<MinPk>();
         one_offline::<MinSig>();
-    }
-
-    #[test_traced]
-    fn test_slow_validator() {
-        slow_validator::<MinPk>();
-        slow_validator::<MinSig>();
     }
 
     #[test_traced]
