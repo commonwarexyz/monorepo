@@ -717,14 +717,12 @@ mod tests {
 
             let proof = mmr.proof(test_element_pos).await.unwrap();
             let root = mmr.root(&mut hasher);
-            assert!(proof
-                .verify_element_inclusion(
-                    &mut hasher,
-                    &leaves[TEST_ELEMENT],
-                    test_element_pos,
-                    &root,
-                )
-                .unwrap());
+            assert!(proof.verify_element_inclusion(
+                &mut hasher,
+                &leaves[TEST_ELEMENT],
+                test_element_pos,
+                &root,
+            ));
 
             // Sync the MMR, make sure it flushes the in-mem MMR as expected.
             mmr.sync(&mut hasher).await.unwrap();
@@ -743,15 +741,13 @@ mod tests {
                 .range_proof(test_element_pos, last_element_pos)
                 .await
                 .unwrap();
-            assert!(proof
-                .verify_range_inclusion(
-                    &mut hasher,
-                    &leaves[TEST_ELEMENT..last_element + 1],
-                    test_element_pos,
-                    last_element_pos,
-                    &root
-                )
-                .unwrap());
+            assert!(proof.verify_range_inclusion(
+                &mut hasher,
+                &leaves[TEST_ELEMENT..last_element + 1],
+                test_element_pos,
+                last_element_pos,
+                &root
+            ));
 
             mmr.destroy().await.unwrap();
         });
