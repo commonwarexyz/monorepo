@@ -350,6 +350,13 @@ impl<D: Digest> Proof<D> {
             return Err(Error::MissingDigests);
         }
 
+        // Happy path: we can extract the pinned nodes directly from the proof.
+        if pinned_positions
+            == required_positions[required_positions.len() - pinned_positions.len()..]
+        {
+            return Ok(self.digests[required_positions.len() - pinned_positions.len()..].to_vec());
+        }
+
         // Create a mapping from position to digest.
         let position_to_digest: HashMap<u64, D> = required_positions
             .iter()
