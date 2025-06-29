@@ -54,7 +54,10 @@ impl FixedSize for PublicKey {
     const SIZE: usize = 32;
 }
 
-/// Generate a new ephemeral secret.
+/// Generate a new ephemeral secret for X25519 key exchange.
+///
+/// This creates a fresh ephemeral secret key that should be used for a single
+/// key exchange and then discarded. The ephemeral nature provides forward secrecy.
 pub fn new<R: Rng + CryptoRng>(rng: &mut R) -> EphemeralSecret {
     EphemeralSecret::random_from_rng(rng)
 }
