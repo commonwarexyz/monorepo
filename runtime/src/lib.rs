@@ -700,31 +700,16 @@ mod tests {
             blob.write_at(Vec::from(data3), 5)
                 .await
                 .expect("Failed to write data3");
-
-            // Resize the blob
-            blob.resize(5).await.expect("Failed to resize blob");
-            let read = blob
-                .read_at(vec![0; 5], 0)
-                .await
-                .expect("Failed to read data");
-            assert_eq!(&read.as_ref()[..5], data1);
-
-            // Full read after resize
-            let result = blob.read_at(vec![0u8; 10], 0).await;
-            assert!(result.is_err());
-
-            // Close the blob
-            blob.close().await.expect("Failed to close blob");
         });
     }
 
-    fn test_blob_resize_extend<R: Runner>(runner: R)
+    fn test_blob_resize<R: Runner>(runner: R)
     where
         R::Context: Storage,
     {
         runner.start(|context| async move {
-            let partition = "test_partition_resize_extend";
-            let name = b"test_blob_resize_extend";
+            let partition = "test_partition_resize";
+            let name = b"test_blob_resize";
 
             // Open and write to a new blob
             let (blob, _) = context
@@ -770,6 +755,18 @@ mod tests {
                 .unwrap();
             assert_eq!(extended_part.as_ref(), vec![0; data.len()].as_slice());
 
+            // Truncate the blob
+            blob.resize(data.len() as u64).await.unwrap();
+            blob.sync().await.unwrap();
+            blob.close().await.unwrap();
+
+            // Reopen to check truncation
+            let (blob, size) = context.open(partition, name).await.unwrap();
+            assert_eq!(size, data.len() as u64);
+
+            // Read truncated data
+            let read_buf = blob.read_at(vec![0; data.len()], 0).await.unwrap();
+            assert_eq!(read_buf.as_ref(), data);
             blob.close().await.unwrap();
         });
     }
@@ -1196,9 +1193,9 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_blob_resize_extend() {
+    fn test_deterministic_blob_resize() {
         let executor = deterministic::Runner::default();
-        test_blob_resize_extend(executor);
+        test_blob_resize(executor);
     }
 
     #[test]
@@ -1373,9 +1370,9 @@ mod tests {
     }
 
     #[test]
-    fn test_tokio_blob_resize_extend() {
+    fn test_tokio_blob_resize() {
         let executor = tokio::Runner::default();
-        test_blob_resize_extend(executor);
+        test_blob_resize(executor);
     }
 
     #[test]
