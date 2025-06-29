@@ -81,21 +81,16 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         let incoming = match IncomingConnection::verify(&context, stream_cfg, sink, stream).await {
             Ok(partial) => partial,
             Err(err) => {
-                debug!(?err, "failed to verify incoming handshake");
+                debug!(?err, ?address, "failed to verify incoming handshake");
                 return;
             }
         };
         let peer = incoming.peer();
-        span.record("peer", peer.to_string());
-        debug!(?peer, "verified handshake");
+        debug!(?peer, ?address, "verified handshake");
 
         // Check if the peer is listenable
-        if !tracker
-            .listenable(peer.clone())
-            .instrument(debug_span!("check"))
-            .await
-        {
-            status::error(&span, "peer not listenable", None);
+        if !tracker.listenable(peer.clone()).await {
+            debug!(?peer, ?address, "peer not listenable");
             return;
         }
 
@@ -103,26 +98,18 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         let stream = match Connection::upgrade_listener(context, incoming).await {
             Ok(connection) => connection,
             Err(err) => {
-                debug!(?err, "failed to upgrade connection");
+                debug!(?err, ?peer, ?address, "failed to upgrade connection");
                 return;
             }
         };
-        debug!(?peer, "completed handshake");
+        debug!(?peer, ?address, "completed handshake");
 
         // Attempt to claim the connection
-        let Some(reservation) = tracker
-            .listen(peer.clone())
-            .instrument(debug_span!("reserve"))
-            .await
-        else {
-            status::error(&span, "unable to reserve connection to peer", None);
+        let Some(reservation) = tracker.listen(peer.clone()).await else {
+            debug!(?peer, "unable to reserve connection to peer");
             return;
         };
-        debug!(?peer, "reserved connection");
-
-        // Drop guard
-        status::ok(&span);
-        drop(guard);
+        debug!(?peer, ?address, "reserved connection");
 
         // Start peer to handle messages
         supervisor.spawn(stream, reservation).await;
