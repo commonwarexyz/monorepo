@@ -47,10 +47,20 @@ impl Buffer {
     ///
     /// If the new size is less than the current size, the buffer is truncated to the new size.
     fn resize(&mut self, len: u64) -> Option<(Vec<u8>, u64)> {
-        if len >= self.size() {
-            let previous = self.take();
+        // Handle case where the buffer is empty.
+        if self.is_empty() {
             self.offset = len;
-            previous
+            return None;
+        }
+
+        // Handle case where there is some data in the buffer.
+        if len >= self.size() {
+            let previous = (
+                std::mem::replace(&mut self.data, Vec::with_capacity(self.capacity)),
+                self.offset,
+            );
+            self.offset = len;
+            Some(previous)
         } else if len >= self.offset {
             self.data.truncate((len - self.offset) as usize);
             None
