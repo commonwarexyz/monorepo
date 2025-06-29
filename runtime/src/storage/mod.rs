@@ -30,7 +30,7 @@ pub(crate) mod tests {
         test_sequential_chunk_read_write(&storage).await;
         test_read_empty_blob(&storage).await;
         test_overlapping_writes(&storage).await;
-        test_truncate_then_open(&storage).await;
+        test_resize_then_open(&storage).await;
     }
 
     /// Test opening a blob, writing to it, and reading back the data.
@@ -336,14 +336,14 @@ pub(crate) mod tests {
         );
     }
 
-    async fn test_truncate_then_open<S>(storage: &S)
+    async fn test_resize_then_open<S>(storage: &S)
     where
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
         {
             let (blob, _) = storage
-                .open("test_truncate_then_open", b"test_blob")
+                .open("test_resize_then_open", b"test_blob")
                 .await
                 .unwrap();
 
@@ -351,17 +351,17 @@ pub(crate) mod tests {
             blob.write_at(b"hello world".to_vec(), 0).await.unwrap();
 
             // Truncate the blob
-            blob.truncate(5).await.unwrap();
+            blob.resize(5).await.unwrap();
 
             blob.close().await.unwrap();
         }
 
         // Reopen the blob
         let (blob, len) = storage
-            .open("test_truncate_then_open", b"test_blob")
+            .open("test_resize_then_open", b"test_blob")
             .await
             .unwrap();
-        assert_eq!(len, 5, "Blob length after truncate is incorrect");
+        assert_eq!(len, 5, "Blob length after resize is incorrect");
 
         // Read back the data
         let read = blob.read_at(vec![0; 5], 0).await.unwrap();

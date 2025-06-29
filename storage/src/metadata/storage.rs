@@ -105,7 +105,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
                 len = buf.len(),
                 "blob is too short: truncating"
             );
-            blob.truncate(0).await?;
+            blob.resize(0).await?;
             blob.sync().await?;
             return Ok(None);
         }
@@ -123,7 +123,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
                 computed = computed_checksum,
                 "checksum mismatch: truncating"
             );
-            blob.truncate(0).await?;
+            blob.resize(0).await?;
             blob.sync().await?;
             return Ok(None);
         }
@@ -218,7 +218,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         // Write and truncate blob
         let buf_len = buf.len() as u64;
         next_blob.0.write_at(buf, 0).await?;
-        next_blob.0.truncate(buf_len).await?;
+        next_blob.0.resize(buf_len).await?;
         next_blob.0.sync().await?;
         next_blob.1 = buf_len;
         next_blob.2 = next_version;

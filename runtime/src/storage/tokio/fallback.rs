@@ -55,7 +55,7 @@ impl crate::Blob for Blob {
         Ok(())
     }
 
-    async fn truncate(&self, len: u64) -> Result<(), Error> {
+    async fn resize(&self, len: u64) -> Result<(), Error> {
         let file = self.file.lock().await;
         file.set_len(len)
             .await

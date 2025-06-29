@@ -389,7 +389,7 @@ mod tests {
 
             // Corrupt the metadata store
             let (blob, len) = context.open("test", b"left").await.unwrap();
-            blob.truncate(len - 8).await.unwrap();
+            blob.resize(len - 8).await.unwrap();
             blob.close().await.unwrap();
 
             // Reopen the metadata store
@@ -437,7 +437,7 @@ mod tests {
 
             // Corrupt the metadata store
             let (blob, _) = context.open("test", b"left").await.unwrap();
-            blob.truncate(5).await.unwrap();
+            blob.resize(5).await.unwrap();
             blob.close().await.unwrap();
 
             // Reopen the metadata store

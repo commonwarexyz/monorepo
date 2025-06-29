@@ -47,7 +47,7 @@ impl crate::Blob for Blob {
         .map_err(|_| Error::WriteFailed)?
     }
 
-    async fn truncate(&self, len: u64) -> Result<(), Error> {
+    async fn resize(&self, len: u64) -> Result<(), Error> {
         let file = self.file.clone();
         task::spawn_blocking(move || file.set_len(len))
             .await

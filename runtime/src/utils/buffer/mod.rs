@@ -326,7 +326,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_read_truncate() {
+    fn test_read_resize() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create a memory blob with some test data
@@ -341,12 +341,12 @@ mod tests {
             let reader = Read::new(blob.clone(), data_len, buffer_size);
 
             // Truncate the blob to half its size
-            let truncate_len = data_len / 2;
-            reader.truncate(truncate_len).await.unwrap();
+            let resize_len = data_len / 2;
+            reader.resize(resize_len).await.unwrap();
 
             // Reopen to check truncation
             let (blob, size) = context.open("partition", b"test").await.unwrap();
-            assert_eq!(size, truncate_len, "Blob should be truncated to half size");
+            assert_eq!(size, resize_len, "Blob should be resized to half size");
 
             // Create a new buffer and read to verify truncation
             let mut new_reader = Read::new(blob, size, buffer_size);
@@ -359,7 +359,7 @@ mod tests {
                 .unwrap();
             assert_eq!(&buf, b"ABCDEFGHIJKLM", "Truncated content should match");
 
-            // Reading beyond truncated size should fail
+            // Reading beyond resized size should fail
             let mut extra_buf = [0u8; 1];
             let result = new_reader.read_exact(&mut extra_buf, 1).await;
             assert!(matches!(result, Err(Error::BlobInsufficientLength)));
@@ -367,7 +367,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_read_truncate_to_zero() {
+    fn test_read_resize_to_zero() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create a memory blob with some test data
@@ -382,16 +382,16 @@ mod tests {
             let reader = Read::new(blob.clone(), data_len, buffer_size);
 
             // Truncate the blob to zero
-            reader.truncate(0).await.unwrap();
+            reader.resize(0).await.unwrap();
 
             // Reopen to check truncation
             let (blob, size) = context.open("partition", b"test").await.unwrap();
-            assert_eq!(size, 0, "Blob should be truncated to zero");
+            assert_eq!(size, 0, "Blob should be resized to zero");
 
             // Create a new buffer and try to read (should fail)
             let mut new_reader = Read::new(blob, size, buffer_size);
 
-            // Reading from truncated blob should fail
+            // Reading from resized blob should fail
             let mut buf = [0u8; 1];
             let result = new_reader.read_exact(&mut buf, 1).await;
             assert!(matches!(result, Err(Error::BlobInsufficientLength)));
@@ -603,11 +603,11 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_write_truncate() {
+    fn test_write_resize() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Test blob truncation functionality and subsequent writes
-            let (blob, size) = context.open("partition", b"truncate_write").await.unwrap();
+            // Test blob resize functionality and subsequent writes
+            let (blob, size) = context.open("partition", b"resize_write").await.unwrap();
             let writer = Write::new(blob, size, 10);
 
             // Write initial data
@@ -617,38 +617,52 @@ mod tests {
             assert_eq!(writer.size().await, 11);
 
             let (blob_check, size_check) =
-                context.open("partition", b"truncate_write").await.unwrap();
+                context.open("partition", b"resize_write").await.unwrap();
             assert_eq!(size_check, 11);
             drop(blob_check);
 
             // Truncate to smaller size
-            writer.truncate(5).await.unwrap();
+            writer.resize(5).await.unwrap();
             assert_eq!(writer.size().await, 5);
             writer.sync().await.unwrap();
 
-            // Verify truncation
-            let (blob, size) = context.open("partition", b"truncate_write").await.unwrap();
+            // Verify resize
+            let (blob, size) = context.open("partition", b"resize_write").await.unwrap();
             assert_eq!(size, 5);
             let mut reader = Read::new(blob, size, 5);
             let mut buf = vec![0u8; 5];
             reader.read_exact(&mut buf, 5).await.unwrap();
             assert_eq!(&buf, b"hello");
 
-            // Write to truncated blob
+            // Write to resized blob
             writer.write_at(b"X".to_vec(), 0).await.unwrap();
             assert_eq!(writer.size().await, 5);
             writer.sync().await.unwrap();
 
             // Verify overwrite
-            let (blob, size) = context.open("partition", b"truncate_write").await.unwrap();
+            let (blob, size) = context.open("partition", b"resize_write").await.unwrap();
             assert_eq!(size, 5);
             let mut reader = Read::new(blob, size, 5);
             let mut buf = vec![0u8; 5];
             reader.read_exact(&mut buf, 5).await.unwrap();
             assert_eq!(&buf, b"Xello");
 
-            // Test truncate to zero
-            let (blob_zero, size) = context.open("partition", b"truncate_zero").await.unwrap();
+            // Test resize to larger size
+            writer.resize(10).await.unwrap();
+            assert_eq!(writer.size().await, 10);
+            writer.sync().await.unwrap();
+
+            // Verify resize
+            let (blob, size) = context.open("partition", b"resize_write").await.unwrap();
+            assert_eq!(size, 10);
+            let mut reader = Read::new(blob, size, 10);
+            let mut buf = vec![0u8; 10];
+            reader.read_exact(&mut buf, 10).await.unwrap();
+            assert_eq!(&buf[0..5], b"Xello");
+            assert_eq!(&buf[5..10], [0u8; 5]);
+
+            // Test resize to zero
+            let (blob_zero, size) = context.open("partition", b"resize_zero").await.unwrap();
             let writer_zero = Write::new(blob_zero.clone(), size, 10);
             writer_zero
                 .write_at(b"some data".to_vec(), 0)
@@ -657,13 +671,13 @@ mod tests {
             assert_eq!(writer_zero.size().await, 9);
             writer_zero.sync().await.unwrap();
             assert_eq!(writer_zero.size().await, 9);
-            writer_zero.truncate(0).await.unwrap();
+            writer_zero.resize(0).await.unwrap();
             assert_eq!(writer_zero.size().await, 0);
             writer_zero.sync().await.unwrap();
             assert_eq!(writer_zero.size().await, 0);
 
             // Ensure the blob is empty
-            let (_, size_z) = context.open("partition", b"truncate_zero").await.unwrap();
+            let (_, size_z) = context.open("partition", b"resize_zero").await.unwrap();
             assert_eq!(size_z, 0);
         });
     }
@@ -1036,12 +1050,12 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_truncate_then_append_at_size() {
+    fn test_resize_then_append_at_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Test truncating, then appending at the new size
             let (blob, size) = context
-                .open("partition", b"truncate_then_append_at_size")
+                .open("partition", b"resize_then_append_at_size")
                 .await
                 .unwrap();
             let writer = Write::new(blob.clone(), size, 10);
@@ -1056,27 +1070,27 @@ mod tests {
             assert_eq!(writer.size().await, 16);
 
             // Truncate
-            let truncate_to = 5;
-            writer.truncate(truncate_to).await.unwrap();
-            // after truncate, inner.position should be `truncate_to` (5)
+            let resize_to = 5;
+            writer.resize(resize_to).await.unwrap();
+            // after resize, inner.position should be `resize_to` (5)
             // buffer should be empty
-            assert_eq!(writer.size().await, truncate_to);
+            assert_eq!(writer.size().await, resize_to);
             writer.sync().await.unwrap(); // Ensure truncation is persisted for verify step
-            assert_eq!(writer.size().await, truncate_to);
+            assert_eq!(writer.size().await, resize_to);
 
-            // Append at the new (truncated) size
+            // Append at the new (resized) size
             writer
                 .write_at(b"XXXXX".to_vec(), writer.size().await)
                 .await
                 .unwrap(); // 5 bytes
                            // inner.buffer = "XXXXX", inner.position = 5
-            assert_eq!(writer.size().await, 10); // 5 (truncated) + 5 (XXXXX)
+            assert_eq!(writer.size().await, 10); // 5 (resized) + 5 (XXXXX)
             writer.sync().await.unwrap();
             assert_eq!(writer.size().await, 10);
 
             // Verify final content
             let (blob_check, size_check) = context
-                .open("partition", b"truncate_then_append_at_size")
+                .open("partition", b"resize_then_append_at_size")
                 .await
                 .unwrap();
             assert_eq!(size_check, 10);

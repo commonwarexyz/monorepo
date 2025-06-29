@@ -286,7 +286,7 @@ impl<B: Blob> Blob for Write<B> {
         Ok(())
     }
 
-    async fn truncate(&self, len: u64) -> Result<(), Error> {
+    async fn resize(&self, len: u64) -> Result<(), Error> {
         // Acquire a write lock on the inner state
         let mut inner = self.inner.write().await;
 
@@ -300,7 +300,7 @@ impl<B: Blob> Blob for Write<B> {
             //
             // All buffered data is now beyond the new length and should be discarded.
             inner.buffer.clear();
-            inner.blob.truncate(len).await?;
+            inner.blob.resize(len).await?;
             inner.position = len;
         } else if len < buffer_end {
             // Truncation point is within the buffer.
