@@ -224,13 +224,21 @@ impl<D: Digest> Proof<D> {
     }
 
     /// Return the list of node positions required by the range proof for the specified range of
-    /// elements, inclusive of both endpoints.
+    /// elements, inclusive of both endpoints. Panics if the range is empty and not the degenerate
+    /// case of proving that the MMR is empty (positions 0 and 0).
     pub fn nodes_required_for_range_proof(
         size: u64,
         start_element_pos: u64,
         end_element_pos: u64,
     ) -> Vec<u64> {
         let mut positions = Vec::new();
+        if start_element_pos == end_element_pos {
+            if start_element_pos == 0 {
+                // Handle degenerate case proving that the MMR is empty.
+                return positions;
+            }
+            panic!("empty range");
+        }
 
         // Find the mountains that contain no elements from the range. The peaks of these mountains
         // are required to prove the range, so they are added to the result.
@@ -405,6 +413,37 @@ mod tests {
 
     fn test_digest(v: u8) -> Digest {
         hash(&[v])
+    }
+
+    #[test]
+    fn test_verification_empty_proof() {
+        // Test that an empty proof authenticates an empty MMR.
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mmr = Mmr::new();
+            let mut hasher: Standard<Sha256> = Standard::new();
+            let root_digest = mmr.root(&mut hasher);
+            let proof = mmr.range_proof(0, 0).await.unwrap();
+            assert!(proof.digests.is_empty());
+            assert_eq!(proof.size, 0);
+            assert!(proof.verify_range_inclusion(
+                &mut hasher,
+                &[] as &[Digest],
+                0,
+                0,
+                &root_digest
+            ));
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "empty range")]
+    fn test_verification_non_degenerate_empty_range_panics() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mmr: Mmr<Sha256> = Mmr::new();
+            mmr.range_proof(1, 1).await.unwrap();
+        });
     }
 
     #[test]
