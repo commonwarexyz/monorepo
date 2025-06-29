@@ -239,20 +239,24 @@ impl<E: Storage + Metrics + Clock, V: Array> Store<E, V> {
             return Ok(0);
         }
 
-        // Find oldest and newest sections
+        // Find oldest section
         let oldest_section = *self.blobs.keys().next().unwrap();
-        let newest_section = *self.blobs.keys().last().unwrap();
 
-        // Don't prune beyond the point where we'd remove the newest section
-        let prune_up_to_section = std::cmp::min(min_section, newest_section);
-
-        if prune_up_to_section <= oldest_section {
+        if min_section <= oldest_section {
             // Nothing to prune
             return Ok(oldest_section * self.config.items_per_blob);
         }
 
-        // Remove blobs from oldest_section to prune_up_to_section (exclusive)
-        for section in oldest_section..prune_up_to_section {
+        // Collect sections to remove (those less than min_section)
+        let sections_to_remove: Vec<u64> = self
+            .blobs
+            .keys()
+            .filter(|&&section| section < min_section)
+            .copied()
+            .collect();
+
+        // Remove the collected sections
+        for section in sections_to_remove {
             if let Some(blob) = self.blobs.remove(&section) {
                 blob.close().await?;
                 self.context
@@ -269,7 +273,7 @@ impl<E: Storage + Metrics + Clock, V: Array> Store<E, V> {
             }
         }
 
-        Ok(prune_up_to_section * self.config.items_per_blob)
+        Ok(min_section * self.config.items_per_blob)
     }
 
     /// Sync all pending entries to disk.

@@ -1575,4 +1575,69 @@ mod tests {
             assert!(buffer.contains("pruned_total 2"));
         });
     }
+
+    #[test_traced]
+    fn test_store_prune_non_contiguous_sections() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: 100,
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
+            };
+
+            let mut store = Store::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize store");
+
+            // Insert data in non-contiguous sections (0, 2, 5, 7)
+            store.put(0, FixedBytes::new([0u8; 32])).unwrap(); // Section 0
+            store.put(250, FixedBytes::new([50u8; 32])).unwrap(); // Section 2 (250/100 = 2)
+            store.put(500, FixedBytes::new([44u8; 32])).unwrap(); // Section 5 (500/100 = 5)
+            store.put(750, FixedBytes::new([45u8; 32])).unwrap(); // Section 7 (750/100 = 7)
+            store.sync().await.unwrap();
+
+            // Verify all data exists initially
+            assert!(store.has(0));
+            assert!(store.has(250));
+            assert!(store.has(500));
+            assert!(store.has(750));
+
+            // Prune up to section 3 (index 300) - should remove sections 0 and 2
+            let pruned_to = store.prune(300).await.unwrap();
+            assert_eq!(pruned_to, 300);
+
+            // Verify correct data was pruned
+            assert!(!store.has(0)); // Section 0 pruned
+            assert!(!store.has(250)); // Section 2 pruned
+            assert!(store.has(500)); // Section 5 remains
+            assert!(store.has(750)); // Section 7 remains
+
+            let buffer = context.encode();
+            assert!(buffer.contains("pruned_total 2"));
+
+            // Prune up to section 6 (index 600) - should remove section 5
+            let pruned_to = store.prune(600).await.unwrap();
+            assert_eq!(pruned_to, 600);
+
+            // Verify section 5 was pruned
+            assert!(!store.has(500)); // Section 5 pruned
+            assert!(store.has(750)); // Section 7 remains
+
+            let buffer = context.encode();
+            assert!(buffer.contains("pruned_total 3"));
+
+            // Prune everything - should remove section 7
+            let pruned_to = store.prune(1000).await.unwrap();
+            assert_eq!(pruned_to, 1000); // Prunes up to section 10
+
+            // Verify all data is gone
+            assert!(!store.has(750)); // Section 7 pruned
+
+            let buffer = context.encode();
+            assert!(buffer.contains("pruned_total 4"));
+        });
+    }
 }
