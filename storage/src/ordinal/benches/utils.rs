@@ -1,4 +1,3 @@
-//! Helpers shared by the Store benchmarks.
 use commonware_runtime::tokio::Context;
 use commonware_storage::ordinal;
 use commonware_utils::array::FixedBytes;
