@@ -1,0 +1,28 @@
+[package]
+name = "commonware-sync"
+edition = "2021"
+publish = true
+version = "0.0.54"
+license = "MIT OR Apache-2.0"
+description = "Synchronizes data structures."
+readme = "README.md"
+homepage = "https://commonware.xyz"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/sync"
+documentation = "https://docs.rs/commonware-sync"
+
+[dependencies]
+commonware-storage = { workspace = true }
+commonware-runtime = { workspace = true }
+commonware-utils = { workspace = true }
+commonware-cryptography = { workspace = true }
+commonware-codec = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+rand = { workspace = true }
+
+
+[dev-dependencies]
+commonware-macros = { workspace = true }
+test-case = "2.0"
+
+[lib]

@@ -46,6 +46,22 @@ pub struct Config {
     pub pool: Option<ThreadPool>,
 }
 
+/// Configuration for initializing a journaled MMR in a synced state.
+#[derive(Clone)]
+pub struct SyncConfig<D> {
+    /// Base configuration for the MMR (journal, metadata, etc.)
+    pub config: Config,
+
+    /// HashMap containing the pinned nodes needed for proof generation.
+    pub pinned_nodes: HashMap<u64, D>,
+
+    /// The position up to which elements have been pruned (first non-pruned element index).
+    pub pruned_to_pos: u64,
+
+    /// The live set of operations to be applied to the [Mmr] starting at `pruned_to_pos`.
+    pub operations: Vec<D>,
+}
+
 /// A MMR backed by a fixed-item-length journal.
 pub struct Mmr<E: RStorage + Clock + Metrics, H: CHasher> {
     /// A memory resident MMR used to build the MMR structure and cache updates.
@@ -205,6 +221,72 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         }
 
         Ok(s)
+    }
+
+    /// Initialize a new [Mmr] instance in a pruned state.
+    pub async fn init_sync(
+        context: E,
+        hasher: &mut impl Hasher<H>,
+        cfg: SyncConfig<H::Digest>,
+    ) -> Result<Self, Error> {
+        let journal = Journal::<E, H::Digest>::init_sync(
+            context.with_label("mmr_journal"),
+            JConfig {
+                partition: cfg.config.journal_partition,
+                items_per_blob: cfg.config.items_per_blob,
+                write_buffer: cfg.config.write_buffer,
+            },
+            cfg.pruned_to_pos,
+        )
+        .await?;
+
+        // Set up metadata
+        let metadata_cfg = MConfig {
+            partition: cfg.config.metadata_partition,
+        };
+        let mut metadata = Metadata::init(context.with_label("mmr_metadata"), metadata_cfg).await?;
+
+        // Store the pinned nodes in metadata
+        for (pos, digest) in &cfg.pinned_nodes {
+            let key = U64::new(NODE_PREFIX, *pos);
+            metadata.put(key, digest.to_vec());
+        }
+
+        // Store the pruning boundary in metadata
+        let prune_key: U64 = U64::new(PRUNE_TO_POS_PREFIX, 0);
+        metadata.put(prune_key, cfg.pruned_to_pos.to_be_bytes().into());
+
+        // Sync metadata to ensure it's persisted
+        metadata.sync().await.map_err(Error::MetadataError)?;
+
+        let mut pinned_nodes_vec = Vec::new();
+        for pos in Proof::<H::Digest>::nodes_to_pin(cfg.pruned_to_pos) {
+            if let Some(digest) = cfg.pinned_nodes.get(&pos) {
+                pinned_nodes_vec.push(*digest);
+            } else {
+                return Err(Error::MissingNode(pos));
+            }
+        }
+
+        let mut mmr = Self {
+            mem_mmr: MemMmr::init(MemConfig {
+                nodes: vec![],
+                pruned_to_pos: cfg.pruned_to_pos,
+                pinned_nodes: pinned_nodes_vec,
+                pool: cfg.config.pool,
+            }),
+            journal,
+            journal_size: cfg.pruned_to_pos,
+            metadata,
+            pruned_to_pos: cfg.pruned_to_pos,
+        };
+
+        for operation in cfg.operations {
+            mmr.add_batched(hasher, &operation).await?;
+        }
+        mmr.sync(hasher).await?;
+
+        Ok(mmr)
     }
 
     /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
@@ -485,6 +567,12 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         Some(self.pruned_to_pos)
     }
 
+    /// Get the pinned nodes from the memory MMR for testing purposes.
+    #[cfg(test)]
+    pub fn get_pinned_nodes(&self) -> HashMap<u64, H::Digest> {
+        self.mem_mmr.pinned_nodes.clone()
+    }
+
     /// Close the MMR, syncing any cached elements to disk and closing the journal.
     pub async fn close(mut self, h: &mut impl Hasher<H>) -> Result<(), Error> {
         self.sync(h).await?;
@@ -575,6 +663,27 @@ mod tests {
             items_per_blob: 7,
             write_buffer: 1024,
             pool: None,
+        }
+    }
+
+    fn test_sync_config<D>(
+        journal_partition: String,
+        metadata_partition: String,
+        pinned_nodes: HashMap<u64, D>,
+        pruned_to_pos: u64,
+        operations: Vec<D>,
+    ) -> SyncConfig<D> {
+        SyncConfig {
+            config: Config {
+                journal_partition,
+                metadata_partition,
+                items_per_blob: 7,
+                write_buffer: 1024,
+                pool: None,
+            },
+            pinned_nodes,
+            pruned_to_pos,
+            operations,
         }
     }
 
@@ -1012,6 +1121,151 @@ mod tests {
                 .await
                 .unwrap();
             mmr.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journaled_mmr_init_sync() {
+        const PRUNED_TO_POS: u64 = 7;
+        const NUM_OPERATIONS: usize = 10;
+        const PRUNED_OPS: usize = 4;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            // First, create a regular MMR and add some elements
+            let mut source_mmr = Mmr::init(context.clone(), &mut hasher, test_config())
+                .await
+                .unwrap();
+
+            // add 10 elements
+            let mut operations = vec![];
+            for i in 0..NUM_OPERATIONS {
+                operations.push(test_digest(i));
+            }
+            for operation in &operations {
+                source_mmr.add(&mut hasher, operation).await.unwrap();
+            }
+            source_mmr.sync(&mut hasher).await.unwrap();
+
+            // Prune to position 7 (keeping elements 7-17, which includes leaves 7, 8, 10, 11, 15, 16)
+            source_mmr
+                .prune_to_pos(&mut hasher, PRUNED_TO_POS)
+                .await
+                .unwrap();
+            let source_root = source_mmr.root(&mut hasher);
+            let source_size = source_mmr.size();
+
+            // Get the pinned nodes and operations from the source
+            let pinned_nodes = source_mmr.mem_mmr.pinned_nodes.clone();
+
+            // Store expected nodes for comparison
+            let mut expected_nodes = HashMap::new();
+            for i in PRUNED_TO_POS..source_size {
+                if let Ok(Some(node)) = source_mmr.get_node(i).await {
+                    expected_nodes.insert(i, node);
+                }
+            }
+
+            // Now create a new MMR using init_sync
+            // After pruning to position 7, the remaining leaves are at positions 7, 8, 10, 11, 15, 16
+            // These correspond to operations 4, 5, 6, 7, 8, 9 (0-indexed)
+            let sync_config = test_sync_config(
+                "sync_journal_partition".into(),
+                "sync_metadata_partition".into(),
+                pinned_nodes,
+                PRUNED_TO_POS,
+                operations.clone()[PRUNED_OPS..].to_vec(),
+            );
+            let synced_mmr = Mmr::init_sync(context.clone(), &mut hasher, sync_config)
+                .await
+                .unwrap();
+
+            // Verify the synced MMR has the same root and properties
+            assert_eq!(synced_mmr.root(&mut hasher), source_root);
+            assert_eq!(synced_mmr.size(), source_size);
+            assert_eq!(synced_mmr.pruned_to_pos(), PRUNED_TO_POS);
+            assert_eq!(synced_mmr.oldest_retained_pos(), Some(PRUNED_TO_POS));
+            assert_eq!(synced_mmr.journal.size().await.unwrap(), synced_mmr.size());
+
+            // Verify nodes are the same
+            for i in PRUNED_TO_POS..source_size {
+                let expected_node = expected_nodes.get(&i);
+                let synced_node = synced_mmr.get_node(i).await.unwrap();
+                if let Some(expected) = expected_node {
+                    assert_eq!(
+                        Some(expected),
+                        synced_node.as_ref(),
+                        "Node at position {} doesn't match",
+                        i
+                    );
+                } else {
+                    assert_eq!(
+                        None, synced_node,
+                        "Expected no node at position {} but found one",
+                        i
+                    );
+                }
+            }
+
+            // Test that we can generate proofs
+            let last_leaf_pos = synced_mmr.last_leaf_pos().unwrap();
+            let synced_proof = synced_mmr.proof(last_leaf_pos).await.unwrap();
+            let source_proof = source_mmr.proof(last_leaf_pos).await.unwrap();
+            assert_eq!(synced_proof, source_proof);
+
+            synced_mmr.destroy().await.unwrap();
+            source_mmr.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_init_sync_prune_all() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            // Create source MMR with 5 elements, then prune all of them
+            let mut source_mmr = Mmr::init(context.clone(), &mut hasher, test_config())
+                .await
+                .unwrap();
+
+            for i in 0..5 {
+                source_mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
+            }
+            source_mmr.sync(&mut hasher).await.unwrap();
+
+            // Prune everything (prune to the end)
+            let source_mmr_size = source_mmr.size();
+            source_mmr
+                .prune_to_pos(&mut hasher, source_mmr_size)
+                .await
+                .unwrap();
+            let source_root = source_mmr.root(&mut hasher);
+            let pinned_nodes = source_mmr.mem_mmr.pinned_nodes.clone();
+
+            // Initialize synced MMR with empty operations
+            let sync_config = test_sync_config(
+                "sync_empty_journal".into(),
+                "sync_empty_metadata".into(),
+                pinned_nodes,
+                source_mmr_size, // Everything is pruned
+                Vec::new(),      // No operations should remain after pruning everything
+            );
+
+            let synced_mmr = Mmr::init_sync(context.clone(), &mut hasher, sync_config)
+                .await
+                .unwrap();
+
+            // Verify the synced MMR matches the fully pruned source
+            assert_eq!(synced_mmr.root(&mut hasher), source_root);
+            assert_eq!(synced_mmr.size(), source_mmr_size);
+            assert_eq!(synced_mmr.pruned_to_pos(), source_mmr_size);
+            assert_eq!(synced_mmr.oldest_retained_pos(), None);
+
+            synced_mmr.destroy().await.unwrap();
+            source_mmr.destroy().await.unwrap();
         });
     }
 }

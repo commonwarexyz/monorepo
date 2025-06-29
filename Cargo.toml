@@ -10,6 +10,7 @@ members = [
     "resolver",
     "runtime",
     "storage",
+    "sync",
     "utils",
     "examples/bridge",
     "examples/chat",
@@ -36,6 +37,7 @@ commonware-resolver = { version = "0.0.54", path = "resolver" }
 commonware-runtime = { version = "0.0.54", path = "runtime" }
 commonware-storage = { version = "0.0.54", path = "storage" }
 commonware-stream = { version = "0.0.54", path = "stream" }
+commonware-sync = { version = "0.0.54", path = "sync" }
 commonware-utils = { version = "0.0.54", path = "utils" }
 thiserror = "2.0.12"
 bytes = "1.7.1"

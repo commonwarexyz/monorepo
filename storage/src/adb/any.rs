@@ -27,6 +27,7 @@ use futures::{
     future::{try_join_all, TryFutureExt},
     pin_mut, try_join, StreamExt,
 };
+use std::collections::HashMap;
 use tracing::{debug, warn};
 
 /// Indicator that the generic parameter N is unused by the call. N is only
@@ -66,6 +67,24 @@ pub struct Config<T: Translator> {
 
     /// An optional thread pool to use for parallelizing batch operations.
     pub pool: Option<ThreadPool>,
+}
+
+/// Configuration for syncing an [Any] to a pruned target state.
+#[derive(Clone)]
+pub struct SyncConfig<K: Array, V: Array, H: CHasher, T: Translator> {
+    /// Base configuration for the database.
+    pub config: Config<T>,
+
+    /// Location -> digest of the pinned nodes needed for proofs.
+    pub mmr_pinned_nodes: HashMap<u64, H::Digest>,
+
+    /// The location in the [Any] up to which operations have been pruned.
+    /// This serves as both the log pruning boundary and the inactivity floor.
+    /// Everything before this location is considered pruned/inactive.
+    pub pruned_to_loc: u64,
+
+    /// The live set of operations to be applied to the [Any] starting at `pruned_to_loc`.
+    pub operations: Vec<Operation<K, V>>,
 }
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
@@ -163,6 +182,73 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             hasher,
         };
 
+        Ok(db)
+    }
+
+    /// Initialize an [Any] database in a pruned state.
+    /// Removes all existing persisted data and applies the state given in `cfg`.
+    pub async fn init_sync(context: E, cfg: SyncConfig<K, V, H, T>) -> Result<Self, Error> {
+        // Convert log operations to MMR digests
+        let mut hasher = Standard::<H>::new();
+        let operations_hashes: Vec<H::Digest> = cfg
+            .operations
+            .iter()
+            .map(|op| Self::op_digest(&mut hasher, op))
+            .collect();
+
+        let mmr_config = crate::mmr::journaled::SyncConfig {
+            config: MmrConfig {
+                journal_partition: cfg.config.mmr_journal_partition,
+                metadata_partition: cfg.config.mmr_metadata_partition,
+                items_per_blob: cfg.config.mmr_items_per_blob,
+                write_buffer: cfg.config.mmr_write_buffer,
+                pool: cfg.config.pool.clone(),
+            },
+            pinned_nodes: cfg.mmr_pinned_nodes,
+            // Convert log index (location) to MMR index (position)
+            pruned_to_pos: leaf_num_to_pos(cfg.pruned_to_loc),
+            operations: operations_hashes,
+        };
+        let mmr = Mmr::init_sync(context.with_label("mmr"), &mut hasher, mmr_config).await?;
+
+        // Initialize the log with the pruned state
+        let mut log = Journal::<E, Operation<K, V>>::init_sync(
+            context.with_label("log"),
+            JConfig {
+                partition: cfg.config.log_journal_partition,
+                items_per_blob: cfg.config.log_items_per_blob,
+                write_buffer: cfg.config.log_write_buffer,
+            },
+            cfg.pruned_to_loc,
+        )
+        .await?;
+        for operation in cfg.operations {
+            log.append(operation).await.map_err(Error::JournalError)?;
+        }
+
+        // Build the snapshot from the log operations
+        let mut snapshot: Index<T, u64> = Index::init(
+            context.with_label("snapshot"),
+            cfg.config.translator.clone(),
+        );
+        let inactivity_floor_loc = Self::build_snapshot_from_log(
+            cfg.pruned_to_loc,
+            &log,
+            &mut snapshot,
+            None::<&mut Bitmap<_, UNUSED_N>>,
+        )
+        .await?;
+        assert!(inactivity_floor_loc >= cfg.pruned_to_loc);
+
+        let mut db = Any {
+            ops: mmr,
+            log,
+            snapshot,
+            inactivity_floor_loc,
+            uncommitted_ops: 0,
+            hasher,
+        };
+        db.sync().await?;
         Ok(db)
     }
 
@@ -731,7 +817,10 @@ mod test {
     use commonware_codec::{DecodeExt, FixedSize};
     use commonware_cryptography::{hash, sha256::Digest, Hasher as CHasher, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{
+        deterministic::{self, Context},
+        Runner as _,
+    };
     use rand::{
         rngs::{OsRng, StdRng},
         RngCore, SeedableRng,
@@ -1318,6 +1407,183 @@ mod test {
             }
 
             db.destroy().await.unwrap();
+        });
+    }
+
+    /// Helper function to create a SyncConfig for testing
+    fn test_sync_config<K: Array, V: Array, H: CHasher, T: Translator>(
+        suffix: &str,
+        translator: T,
+        mmr_pinned_nodes: HashMap<u64, H::Digest>,
+        pruned_to_loc: u64,
+        operations: Vec<Operation<K, V>>,
+    ) -> SyncConfig<K, V, H, T> {
+        SyncConfig {
+            config: any_db_config(suffix, translator),
+            mmr_pinned_nodes,
+            pruned_to_loc,
+            operations,
+        }
+    }
+
+    /// Test init_sync where the target state is empty and unpruned.
+    #[test_traced("WARN")]
+    pub fn test_any_db_init_sync_empty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let sync_config: SyncConfig<Digest, Digest, Sha256, EightCap> = test_sync_config(
+                "sync_basic",
+                EightCap,
+                HashMap::new(), // No pinned nodes for empty case
+                0,              // No pruning
+                Vec::new(),     // No operations
+            );
+            let mut synced_db = Any::init_sync(context.clone(), sync_config).await.unwrap();
+
+            // Verify empty database properties
+            assert_eq!(synced_db.op_count(), 0);
+            assert_eq!(synced_db.inactivity_floor_loc, 0);
+            assert_eq!(synced_db.log.size().await.unwrap(), 0);
+            assert_eq!(synced_db.ops.size(), 0);
+
+            // Test that we can perform operations on the synced database
+            let key1 = hash(&1u64.to_be_bytes());
+            let value1 = hash(&10u64.to_be_bytes());
+            let key2 = hash(&2u64.to_be_bytes());
+            let value2 = hash(&20u64.to_be_bytes());
+
+            synced_db.update(key1, value1).await.unwrap();
+            synced_db.update(key2, value2).await.unwrap();
+            synced_db.commit().await.unwrap();
+
+            // Verify the operations worked
+            assert_eq!(synced_db.get(&key1).await.unwrap(), Some(value1));
+            assert_eq!(synced_db.get(&key2).await.unwrap(), Some(value2));
+            assert!(synced_db.op_count() > 0);
+
+            synced_db.destroy().await.unwrap();
+        });
+    }
+
+    /// Test init_sync where the target state is pruned.
+    #[test_traced("WARN")]
+    pub fn test_any_db_init_sync_with_pruning() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut source_db = Any::<_, Digest, Digest, Sha256, EightCap>::init(
+                context.clone(),
+                any_db_config("source_ops", EightCap),
+            )
+            .await
+            .unwrap();
+
+            // Add operations to the source db.
+            let mut keys = Vec::new();
+            let mut values = Vec::new();
+            for i in 0..5u64 {
+                let key = hash(&i.to_be_bytes());
+                let value = hash(&i.to_be_bytes());
+                keys.push(key);
+                values.push(value);
+                source_db.update(key, value).await.unwrap();
+            }
+            source_db.commit().await.unwrap();
+
+            // Get state from the source db to use later.
+            let mut hasher = Standard::<Sha256>::new();
+            let source_root = source_db.root(&mut hasher);
+            let source_op_count = source_db.op_count();
+            let need_ops = source_op_count - source_db.inactivity_floor_loc;
+            let (proof, ops) = source_db
+                .proof(source_db.inactivity_floor_loc, source_op_count)
+                .await
+                .unwrap();
+            // Verify proof (not really part of this test but doesn't hurt).
+            Any::<Context, Digest, Digest, Sha256, EightCap>::verify_proof(
+                &mut hasher,
+                &proof,
+                source_db.inactivity_floor_loc,
+                &ops,
+                &source_root,
+            )
+            .unwrap();
+            assert_eq!(ops.len(), need_ops as usize);
+            let pinned_nodes = source_db.ops.get_pinned_nodes();
+
+            // Initialize the synced db.
+            let sync_config: SyncConfig<Digest, Digest, Sha256, EightCap> = test_sync_config(
+                "sync_pruning",
+                EightCap,
+                pinned_nodes,
+                source_db.inactivity_floor_loc,
+                ops,
+            );
+            let mut synced_db = Any::init_sync(context.clone(), sync_config).await.unwrap();
+
+            // Verify the synced database matches the source
+            assert_eq!(synced_db.root(&mut hasher), source_root);
+            assert_eq!(synced_db.op_count(), source_op_count);
+            assert_eq!(
+                synced_db.inactivity_floor_loc,
+                source_db.inactivity_floor_loc
+            );
+            assert_eq!(synced_db.ops.size(), source_db.ops.size());
+            assert_eq!(synced_db.ops.pruned_to_pos(), source_db.ops.pruned_to_pos());
+            assert_eq!(
+                synced_db.log.size().await.unwrap(),
+                leaf_pos_to_num(synced_db.ops.size()).unwrap()
+            );
+
+            // Verify the key-value pairs match what we expect
+            for (key, value) in keys.iter().zip(values.iter()) {
+                assert_eq!(synced_db.get(key).await.unwrap(), Some(*value));
+            }
+
+            // Test that we can add more operations to the synced database
+            let key3 = hash(&3u64.to_be_bytes());
+            let value3 = hash(&30u64.to_be_bytes());
+            synced_db.update(key3, value3).await.unwrap();
+            synced_db.commit().await.unwrap();
+            assert_eq!(synced_db.get(&key3).await.unwrap(), Some(value3));
+            assert_eq!(
+                synced_db.log.size().await.unwrap(),
+                leaf_pos_to_num(synced_db.ops.size()).unwrap()
+            );
+
+            // Test we get the same root as the source db
+            source_db.update(key3, value3).await.unwrap();
+            source_db.commit().await.unwrap();
+            assert_eq!(source_db.root(&mut hasher), synced_db.root(&mut hasher));
+
+            // Test sizes are same
+            assert_eq!(
+                source_db.log.size().await.unwrap(),
+                synced_db.log.size().await.unwrap()
+            );
+            assert_eq!(source_db.ops.size(), synced_db.ops.size());
+            assert_eq!(source_db.ops.pruned_to_pos(), synced_db.ops.pruned_to_pos());
+
+            // Test that we can get a proof from the synced database
+            let (proof, ops) = synced_db
+                .proof(synced_db.inactivity_floor_loc, synced_db.op_count())
+                .await
+                .unwrap();
+            let synced_db_hash = synced_db.root(&mut hasher);
+            Any::<Context, Digest, Digest, Sha256, EightCap>::verify_proof(
+                &mut hasher,
+                &proof,
+                synced_db.inactivity_floor_loc,
+                &ops,
+                &synced_db_hash,
+            )
+            .unwrap();
+            assert_eq!(
+                ops.len(),
+                (synced_db.op_count() - synced_db.inactivity_floor_loc) as usize
+            );
+
+            synced_db.destroy().await.unwrap();
+            source_db.destroy().await.unwrap();
         });
     }
 }
