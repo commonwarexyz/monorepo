@@ -1,4 +1,3 @@
-//! Random index-lookup benchmark for Ordinal Store.
 use super::utils::{append_random, init, Ordinal};
 use commonware_runtime::{
     benchmarks::{context, tokio},
