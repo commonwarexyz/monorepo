@@ -177,7 +177,7 @@ mod tests {
             "Hashes do not match after read"
         );
 
-        // Truncate the blobs
+        // Resize the blobs
         blob1.resize(5).await.unwrap();
         blob2.resize(5).await.unwrap();
         assert_eq!(

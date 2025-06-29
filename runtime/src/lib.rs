@@ -81,7 +81,7 @@ pub enum Error {
     #[error("blob missing: {0}/{1}")]
     BlobMissing(String, String),
     #[error("blob resize failed: {0}/{1} error: {2}")]
-    BlobTruncateFailed(String, String, IoError),
+    BlobResizeFailed(String, String, IoError),
     #[error("blob sync failed: {0}/{1} error: {2}")]
     BlobSyncFailed(String, String, IoError),
     #[error("blob close failed: {0}/{1} error: {2}")]
@@ -745,7 +745,7 @@ mod tests {
             let (blob, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, data.len() as u64);
 
-            // Truncate to extend the file
+            // Resize to extend the file
             let new_len = (data.len() as u64) * 2;
             blob.resize(new_len)
                 .await

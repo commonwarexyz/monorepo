@@ -59,7 +59,7 @@ impl crate::Blob for Blob {
         let file = self.file.lock().await;
         file.set_len(len)
             .await
-            .map_err(|e| Error::BlobTruncateFailed(self.partition.clone(), hex(&self.name), e))?;
+            .map_err(|e| Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), e))?;
         Ok(())
     }
 

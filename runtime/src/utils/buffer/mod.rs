@@ -340,7 +340,7 @@ mod tests {
             let buffer_size = 10;
             let reader = Read::new(blob.clone(), data_len, buffer_size);
 
-            // Truncate the blob to half its size
+            // Resize the blob to half its size
             let resize_len = data_len / 2;
             reader.resize(resize_len).await.unwrap();
 
@@ -357,7 +357,7 @@ mod tests {
                 .read_exact(&mut buf, size as usize)
                 .await
                 .unwrap();
-            assert_eq!(&buf, b"ABCDEFGHIJKLM", "Truncated content should match");
+            assert_eq!(&buf, b"ABCDEFGHIJKLM", "Resized content should match");
 
             // Reading beyond resized size should fail
             let mut extra_buf = [0u8; 1];
@@ -381,7 +381,7 @@ mod tests {
             let buffer_size = 10;
             let reader = Read::new(blob.clone(), data_len, buffer_size);
 
-            // Truncate the blob to zero
+            // Resize the blob to zero
             reader.resize(0).await.unwrap();
 
             // Reopen to check truncation
@@ -621,7 +621,7 @@ mod tests {
             assert_eq!(size_check, 11);
             drop(blob_check);
 
-            // Truncate to smaller size
+            // Resize to smaller size
             writer.resize(5).await.unwrap();
             assert_eq!(writer.size().await, 5);
             writer.sync().await.unwrap();
@@ -1069,7 +1069,7 @@ mod tests {
             writer.sync().await.unwrap(); // inner.position = 16, buffer empty
             assert_eq!(writer.size().await, 16);
 
-            // Truncate
+            // Resize
             let resize_to = 5;
             writer.resize(resize_to).await.unwrap();
             // after resize, inner.position should be `resize_to` (5)

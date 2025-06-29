@@ -261,7 +261,7 @@ impl crate::Blob for Blob {
     // TODO: Make this async. See https://github.com/commonwarexyz/monorepo/issues/831
     async fn resize(&self, len: u64) -> Result<(), Error> {
         self.file.set_len(len).map_err(|e| {
-            Error::BlobTruncateFailed(self.partition.clone(), hex(&self.name), IoError::other(e))
+            Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), IoError::other(e))
         })
     }
 

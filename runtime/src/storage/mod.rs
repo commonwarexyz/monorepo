@@ -350,7 +350,7 @@ pub(crate) mod tests {
             // Write some data
             blob.write_at(b"hello world".to_vec(), 0).await.unwrap();
 
-            // Truncate the blob
+            // Resize the blob
             blob.resize(5).await.unwrap();
 
             blob.close().await.unwrap();
@@ -365,6 +365,6 @@ pub(crate) mod tests {
 
         // Read back the data
         let read = blob.read_at(vec![0; 5], 0).await.unwrap();
-        assert_eq!(read.as_ref(), b"hello", "Truncated data is incorrect");
+        assert_eq!(read.as_ref(), b"hello", "Resized data is incorrect");
     }
 }
