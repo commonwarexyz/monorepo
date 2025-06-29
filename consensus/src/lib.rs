@@ -5,15 +5,14 @@
 //! `commonware-consensus` is **ALPHA** software and is not yet recommended for production use. Developers should
 //! expect breaking changes and occasional instability.
 
-use commonware_cryptography::PublicKey;
-
+pub mod aggregation;
 pub mod ordered_broadcast;
 pub mod simplex;
 pub mod threshold_simplex;
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
-        use commonware_cryptography::Digest;
+        use commonware_cryptography::{Digest, PublicKey};
         use futures::channel::{oneshot, mpsc};
         use std::future::Future;
 
