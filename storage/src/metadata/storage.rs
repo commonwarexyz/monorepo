@@ -1,7 +1,7 @@
 use super::{Config, Error};
 use bytes::BufMut;
 use commonware_codec::{FixedSize, ReadExt};
-use commonware_runtime::{Blob, Clock, Metrics, Storage};
+use commonware_runtime::{Blob, Clock, Error as RError, Metrics, Storage};
 use commonware_utils::Array;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::BTreeMap;
@@ -248,7 +248,13 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
                 .await?;
             debug!(blob = i, "destroyed blob");
         }
-        self.context.remove(&self.partition, None).await?;
+        match self.context.remove(&self.partition, None).await {
+            Ok(()) => {}
+            Err(RError::PartitionMissing(_)) => {
+                // Partition already removed or never existed.
+            }
+            Err(err) => return Err(Error::Runtime(err)),
+        }
         Ok(())
     }
 }

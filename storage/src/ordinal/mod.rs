@@ -114,7 +114,7 @@ pub enum Error {
 /// Configuration for [Ordinal] storage.
 #[derive(Clone)]
 pub struct Config {
-    /// The `commonware-runtime::Storage` partition to use for storing the index.
+    /// The [commonware_runtime::Storage] partition to use for storing the index.
     pub partition: String,
 
     /// The maximum number of items to store in each index blob.

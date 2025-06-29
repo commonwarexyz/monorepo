@@ -4,7 +4,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
-    Blob, Clock, Metrics, Storage,
+    Blob, Clock, Error as RError, Metrics, Storage,
 };
 use commonware_utils::{hex, Array};
 use prometheus_client::metrics::counter::Counter;
@@ -337,7 +337,13 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
                 .await?;
             debug!(section = i, "destroyed blob");
         }
-        self.context.remove(&self.config.partition, None).await?;
+        match self.context.remove(&self.config.partition, None).await {
+            Ok(()) => {}
+            Err(RError::PartitionMissing(_)) => {
+                // Partition already removed or never existed.
+            }
+            Err(err) => return Err(Error::Runtime(err)),
+        }
         Ok(())
     }
 }
