@@ -52,6 +52,15 @@ impl RangeCfg {
     }
 }
 
+impl Default for RangeCfg {
+    fn default() -> Self {
+        RangeCfg {
+            start: Bound::Unbounded,
+            end: Bound::Unbounded,
+        }
+    }
+}
+
 // Allow conversion from any type that implements `RangeBounds<usize>` to `RangeCfg`.
 impl<R: RangeBounds<usize>> From<R> for RangeCfg {
     fn from(r: R) -> Self {

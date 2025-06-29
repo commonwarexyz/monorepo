@@ -194,6 +194,9 @@ pub mod varint;
 
 // Re-export main types and traits
 pub use codec::*;
+// Re-export derive macros
+#[cfg(feature = "derive")]
+pub use commonware_codec_derive::{EncodeSize, FixedSize, Read, Write};
 pub use config::RangeCfg;
 pub use error::Error;
 pub use extensions::*;
