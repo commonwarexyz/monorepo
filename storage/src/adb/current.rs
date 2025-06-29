@@ -505,13 +505,7 @@ impl<
         );
 
         if op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS == 0 {
-            return proof.verify_range_inclusion(
-                &mut verifier,
-                digests,
-                start_pos,
-                end_pos,
-                root_digest,
-            );
+            return proof.verify_range_inclusion(&mut verifier, &digests, start_pos, root_digest);
         }
 
         // The proof must contain the partial chunk digest as its last hash.
@@ -523,7 +517,7 @@ impl<
         let last_chunk_digest = proof.digests.pop().unwrap();
 
         // Reconstruct the MMR root.
-        let mmr_root = match proof.reconstruct_root(&mut verifier, digests, start_pos, end_pos) {
+        let mmr_root = match proof.reconstruct_root(&mut verifier, &digests, start_pos, end_pos) {
             Ok(root) => root,
             Err(error) => {
                 debug!(error = ?error, "invalid proof input");
