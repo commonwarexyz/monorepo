@@ -695,11 +695,27 @@ mod tests {
             assert_eq!(&read.as_ref()[..5], data1);
             assert_eq!(&read.as_ref()[5..], data2);
 
+            // Read past end of blob
+            let result = blob.read_at(vec![0u8; 10], 10).await;
+            assert!(result.is_err());
+
             // Rewrite data without affecting length
             let data3 = b"Store";
             blob.write_at(Vec::from(data3), 5)
                 .await
                 .expect("Failed to write data3");
+
+            // Read data back
+            let read = blob
+                .read_at(vec![0u8; 10], 0)
+                .await
+                .expect("Failed to read data");
+            assert_eq!(&read.as_ref()[..5], data1);
+            assert_eq!(&read.as_ref()[5..], data3);
+
+            // Read past end of blob
+            let result = blob.read_at(vec![0u8; 10], 10).await;
+            assert!(result.is_err());
         });
     }
 
