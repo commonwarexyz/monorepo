@@ -1,4 +1,4 @@
-use super::utils::{append_random_ordinal, get_ordinal};
+use super::utils::{append_random, init};
 use commonware_runtime::benchmarks::{context, tokio};
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
@@ -12,10 +12,10 @@ fn bench_ordinal_put(c: &mut Criterion) {
                 let ctx = context::get::<commonware_runtime::tokio::Context>();
                 let mut total = Duration::ZERO;
                 for _ in 0..iters {
-                    let mut store = get_ordinal(ctx.clone()).await;
+                    let mut store = init(ctx.clone()).await;
 
                     let start = Instant::now();
-                    append_random_ordinal(&mut store, items).await;
+                    append_random(&mut store, items).await;
                     total += start.elapsed();
 
                     store.destroy().await.unwrap();

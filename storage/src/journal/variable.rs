@@ -677,6 +677,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                 .remove(&self.cfg.partition, Some(&i.to_be_bytes()))
                 .await?;
         }
+        self.context.remove(&self.cfg.partition, None).await?;
         Ok(())
     }
 }

@@ -517,6 +517,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                 .remove(&self.cfg.partition, Some(&i.to_be_bytes()))
                 .await?;
         }
+        self.context.remove(&self.cfg.partition, None).await?;
         Ok(())
     }
 }

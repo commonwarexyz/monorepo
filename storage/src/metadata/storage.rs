@@ -248,6 +248,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
                 .await?;
             debug!(blob = i, "destroyed blob");
         }
+        self.context.remove(&self.partition, None).await?;
         Ok(())
     }
 }

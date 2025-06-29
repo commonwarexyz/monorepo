@@ -1,5 +1,5 @@
 //! Random index-lookup benchmark for Ordinal Store.
-use super::utils::{append_random_ordinal, get_ordinal, Ordinal};
+use super::utils::{append_random, init, Ordinal};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Config,
@@ -46,8 +46,8 @@ fn bench_ordinal_get(c: &mut Criterion) {
     // Create a shared on-disk store once so later setup is fast.
     let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
     builder.start(|ctx| async move {
-        let mut store = get_ordinal(ctx).await;
-        append_random_ordinal(&mut store, ITEMS).await;
+        let mut store = init(ctx).await;
+        append_random(&mut store, ITEMS).await;
         store.close().await.unwrap();
     });
 
@@ -59,7 +59,7 @@ fn bench_ordinal_get(c: &mut Criterion) {
             c.bench_function(&label, |b| {
                 b.to_async(&runner).iter_custom(move |iters| async move {
                     let ctx = context::get::<commonware_runtime::tokio::Context>();
-                    let store = get_ordinal(ctx).await;
+                    let store = init(ctx).await;
                     let selected_indices = select_indices(reads, ITEMS);
                     let start = Instant::now();
                     for _ in 0..iters {
@@ -80,7 +80,7 @@ fn bench_ordinal_get(c: &mut Criterion) {
     // Clean up shared artifacts.
     let cleaner = commonware_runtime::tokio::Runner::new(cfg.clone());
     cleaner.start(|ctx| async move {
-        let store = get_ordinal(ctx).await;
+        let store = init(ctx).await;
         store.destroy().await.unwrap();
     });
 }

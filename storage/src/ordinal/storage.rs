@@ -277,7 +277,6 @@ impl<E: Storage + Metrics + Clock, V: Array> Store<E, V> {
 
     /// Destroy the store and remove all data.
     pub async fn destroy(self) -> Result<(), Error> {
-        // Close all blobs
         for (i, blob) in self.blobs.into_iter() {
             blob.close().await?;
             self.context
@@ -285,6 +284,7 @@ impl<E: Storage + Metrics + Clock, V: Array> Store<E, V> {
                 .await?;
             debug!(section = i, "destroyed blob");
         }
+        self.context.remove(&self.config.partition, None).await?;
         Ok(())
     }
 }

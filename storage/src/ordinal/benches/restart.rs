@@ -1,4 +1,4 @@
-use super::utils::{append_random_ordinal, get_ordinal};
+use super::utils::{append_random, init};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Config,
@@ -13,8 +13,8 @@ fn bench_ordinal_restart(c: &mut Criterion) {
     for items in [10_000, 50_000, 100_000, 500_000] {
         let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
         builder.start(|ctx| async move {
-            let mut store = get_ordinal(ctx).await;
-            append_random_ordinal(&mut store, items).await;
+            let mut store = init(ctx).await;
+            append_random(&mut store, items).await;
             store.close().await.unwrap();
         });
 
@@ -27,7 +27,7 @@ fn bench_ordinal_restart(c: &mut Criterion) {
                 let mut total = Duration::ZERO;
                 for _ in 0..iters {
                     let start = Instant::now();
-                    let store = get_ordinal(ctx.clone()).await; // replay happens inside init
+                    let store = init(ctx.clone()).await; // replay happens inside init
                     total += start.elapsed();
                     store.close().await.unwrap();
                 }
@@ -38,7 +38,7 @@ fn bench_ordinal_restart(c: &mut Criterion) {
         // Tear down
         let cleaner = commonware_runtime::tokio::Runner::new(cfg.clone());
         cleaner.start(|ctx| async move {
-            let store = get_ordinal(ctx).await;
+            let store = init(ctx).await;
             store.destroy().await.unwrap();
         });
     }
