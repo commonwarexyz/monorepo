@@ -5,9 +5,7 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::Signer;
-use commonware_runtime::{
-    telemetry::traces::status, Clock, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf,
-};
+use commonware_runtime::{Clock, Handle, Listener, Metrics, Network, SinkOf, Spawner, StreamOf};
 use commonware_stream::public_key::{Config as StreamConfig, Connection, IncomingConnection};
 use governor::{
     clock::ReasonablyRealtime,
@@ -18,7 +16,7 @@ use governor::{
 use prometheus_client::metrics::counter::Counter;
 use rand::{CryptoRng, Rng};
 use std::net::SocketAddr;
-use tracing::{debug, debug_span, Instrument};
+use tracing::debug;
 
 /// Configuration for the listener actor.
 pub struct Config<C: Signer> {
@@ -76,55 +74,36 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         mut tracker: Mailbox<tracker::Message<E, C::PublicKey>>,
         mut supervisor: Mailbox<spawner::Message<E, SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
-        // Create span
-        let span = debug_span!("listener", ?address);
-        let guard = span.enter();
-
         // Wait for the peer to send us their public key
         //
         // IncomingConnection limits how long we will wait for the peer to send us their public key
         // to ensure an adversary can't force us to hold many pending connections open.
-        let incoming = match IncomingConnection::verify(&context, stream_cfg, sink, stream)
-            .instrument(debug_span!("verify"))
-            .await
-        {
+        let incoming = match IncomingConnection::verify(&context, stream_cfg, sink, stream).await {
             Ok(partial) => partial,
-            Err(e) => {
-                status::error(&span, "failed to verify incoming handshake", Some(&e));
+            Err(err) => {
+                debug!(?err, "failed to verify incoming handshake");
                 return;
             }
         };
-        span.record("peer", incoming.peer().to_string());
 
         // Attempt to claim the connection
         //
         // Reserve also checks if the peer is authorized.
         let peer = incoming.peer();
-        let Some(reservation) = tracker
-            .listen(peer.clone())
-            .instrument(debug_span!("reserve"))
-            .await
-        else {
-            status::error(&span, "unable to reserve connection to peer", None);
+        let Some(reservation) = tracker.listen(peer.clone()).await else {
+            debug!("unable to reserve connection to peer");
             return;
         };
 
         // Perform handshake
-        let stream = match Connection::upgrade_listener(context, incoming)
-            .instrument(debug_span!("upgrade"))
-            .await
-        {
+        let stream = match Connection::upgrade_listener(context, incoming).await {
             Ok(connection) => connection,
-            Err(e) => {
-                status::error(&span, "failed to upgrade connection", Some(&e));
+            Err(err) => {
+                debug!(?err, "failed to upgrade connection");
                 return;
             }
         };
-        debug!(?peer, "upgraded connection");
-
-        // Drop guard
-        status::ok(&span);
-        drop(guard);
+        debug!(?peer, ?address, "upgraded connection");
 
         // Start peer to handle messages
         supervisor.spawn(stream, reservation).await;
