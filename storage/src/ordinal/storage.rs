@@ -103,7 +103,7 @@ impl<E: Storage + Metrics + Clock, V: Array> Store<E, V> {
                     "blob size is not a multiple of record size, truncating"
                 );
                 len -= len % record_size;
-                blob.truncate(len).await?;
+                blob.resize(len).await?;
                 blob.sync().await?;
             }
 

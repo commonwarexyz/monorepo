@@ -603,7 +603,7 @@ mod tests {
                     .await
                     .unwrap();
                 // Truncate to remove last 4 bytes (CRC)
-                blob.truncate(size - 4).await.unwrap();
+                blob.resize(size - 4).await.unwrap();
                 blob.close().await.unwrap();
             }
 
@@ -807,7 +807,7 @@ mod tests {
                     .unwrap();
                 // Truncate to create partial record
                 if size >= 36 {
-                    blob.truncate(26).await.unwrap(); // Partial record (less than 36 bytes)
+                    blob.resize(26).await.unwrap(); // Partial record (less than 36 bytes)
                 }
                 blob.close().await.unwrap();
             }
