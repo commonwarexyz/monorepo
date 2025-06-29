@@ -78,7 +78,7 @@ impl crate::Storage for Storage {
 
         #[cfg(unix)]
         {
-            // Convert to a blocking std::fs::File to use positional IO.
+            // Convert to a blocking std::fs::File
             let file = file.into_std().await;
 
             // Construct the blob
