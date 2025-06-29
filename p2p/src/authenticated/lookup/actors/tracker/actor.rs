@@ -111,6 +111,12 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 } => {
                     let _ = reservation.send(self.directory.dial(&public_key));
                 }
+                Message::Listenable {
+                    public_key,
+                    responder,
+                } => {
+                    let _ = responder.send(self.directory.listenable(&public_key));
+                }
                 Message::Listen {
                     public_key,
                     reservation,

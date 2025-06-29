@@ -94,20 +94,18 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                 return;
             }
         };
-        span.record("peer", incoming.peer().to_string());
-
-        // Attempt to claim the connection
-        //
-        // Reserve also checks if the peer is authorized.
         let peer = incoming.peer();
-        let Some(reservation) = tracker
-            .listen(peer.clone())
-            .instrument(debug_span!("reserve"))
+        span.record("peer", peer.to_string());
+
+        // Check if the peer is listenable
+        if !tracker
+            .listenable(peer.clone())
+            .instrument(debug_span!("check"))
             .await
-        else {
-            status::error(&span, "unable to reserve connection to peer", None);
+        {
+            status::error(&span, "peer not listenable", None);
             return;
-        };
+        }
 
         // Perform handshake
         let stream = match Connection::upgrade_listener(context, incoming)
@@ -120,7 +118,18 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                 return;
             }
         };
-        debug!(?peer, "upgraded connection");
+        debug!(?peer, "completed handshake");
+
+        // Attempt to claim the connection
+        let Some(reservation) = tracker
+            .listen(peer.clone())
+            .instrument(debug_span!("reserve"))
+            .await
+        else {
+            status::error(&span, "unable to reserve connection to peer", None);
+            return;
+        };
+        debug!(?peer, "reserved connection");
 
         // Drop guard
         status::ok(&span);
