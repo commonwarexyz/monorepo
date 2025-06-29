@@ -116,12 +116,13 @@ jobs:
     - name: Install cargo-fuzz
       if: steps.cargo-fuzz-cache.outputs.cache-hit != 'true'
       run: cargo +nightly install cargo-fuzz --version ${{ env.FUZZ_VERSION }}
-    - name: Build codec
-      run: cargo +nightly fuzz build --fuzz-dir codec/fuzz
-    - name: Build cryptography
-      run: cargo +nightly fuzz build --fuzz-dir cryptography/fuzz
-    - name: Build stream
-      run: cargo +nightly fuzz build --fuzz-dir stream/fuzz
+    - name: Test all targets
+      run: |
+        for dir in codec/fuzz cryptography/fuzz stream/fuzz; do
+          for target in $(cargo +nightly fuzz list --fuzz-dir $dir); do
+            cargo +nightly fuzz run $target --fuzz-dir $dir -- -max_total_time=60
+          done
+        done
 
   WASM:
     runs-on: ubuntu-latest
