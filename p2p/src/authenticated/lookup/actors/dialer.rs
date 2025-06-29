@@ -105,7 +105,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
                         return;
                     }
                 };
-                debug!("dialed peer");
+                debug!(?peer, ?address, "dialed peer");
 
                 // Upgrade connection
                 let connection =
@@ -118,7 +118,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
                             return;
                         }
                     };
-                debug!("upgraded connection");
+                debug!(?peer, ?address, "upgraded connection");
 
                 // Start peer to handle messages
                 supervisor.spawn(connection, reservation).await;
