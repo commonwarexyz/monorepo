@@ -96,14 +96,13 @@ fuzz_target!(|input: FuzzInput| {
         context
             .with_label("stream_sender")
             .spawn(move |_| async move {
-                send_frame(
+                // Our target is panic.
+                let _ = send_frame(
                     &mut stream_sender,
                     &handshake.encode(),
                     input.max_message_size,
                 )
-                .await
-                // Our target is panic.
-                .unwrap_or(());
+                .await;
             });
 
         let config = Config {
@@ -116,9 +115,6 @@ fuzz_target!(|input: FuzzInput| {
         };
 
         // Our target is panic.
-        if IncomingConnection::verify(&context, config, sink, stream)
-            .await
-            .is_ok()
-        {}
+        let _ = IncomingConnection::verify(&context, config, sink, stream).await;
     });
 });

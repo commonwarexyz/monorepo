@@ -790,9 +790,7 @@ mod tests {
             assert_eq!(len, 36); // N+4 = 36 bytes per node, 1 node in the last blob
 
             // truncate the blob by one byte to corrupt the checksum of the last parent node.
-            blob.truncate(len - 1)
-                .await
-                .expect("Failed to corrupt blob");
+            blob.resize(len - 1).await.expect("Failed to corrupt blob");
             blob.close().await.expect("Failed to close blob");
 
             let mmr = Mmr::init(context.clone(), &mut hasher, test_config())
@@ -825,7 +823,7 @@ mod tests {
             assert_eq!(len, 36 * 7); // this blob should be full.
 
             // The last leaf should be in slot 5 of this blob, truncate last byte of its checksum.
-            blob.truncate(36 * 5 + 35)
+            blob.resize(36 * 5 + 35)
                 .await
                 .expect("Failed to corrupt blob");
             blob.close().await.expect("Failed to close blob");

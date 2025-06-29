@@ -173,7 +173,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                 "last blob size is not a multiple of item size, truncating"
             );
             size -= size % Self::CHUNK_SIZE_U64;
-            newest_blob.truncate(size).await?;
+            newest_blob.resize(size).await?;
             truncated = true;
         }
 
@@ -192,7 +192,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                         offset, "checksum mismatch: truncating",
                     );
                     size -= Self::CHUNK_SIZE_U64;
-                    newest_blob.truncate(size).await?;
+                    newest_blob.resize(size).await?;
                     truncated = true;
                 }
                 Err(err) => return Err(err),
@@ -332,7 +332,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             Some(blob) => blob,
             None => return Err(Error::MissingBlob(rewind_to_blob_index)),
         };
-        rewind_blob.truncate(rewind_to_offset).await?;
+        rewind_blob.resize(rewind_to_offset).await?;
 
         Ok(())
     }
@@ -815,7 +815,7 @@ mod tests {
                 .await
                 .expect("Failed to open blob");
             // truncate the blob at the start of the corrupted checksum
-            blob.truncate(checksum_offset)
+            blob.resize(checksum_offset)
                 .await
                 .expect("Failed to corrupt blob");
             blob.close().await.expect("Failed to close blob");
@@ -976,9 +976,7 @@ mod tests {
                 .await
                 .expect("Failed to open blob");
             // truncate the most recent blob by 1 byte which corrupts the most recent item
-            blob.truncate(size - 1)
-                .await
-                .expect("Failed to corrupt blob");
+            blob.resize(size - 1).await.expect("Failed to corrupt blob");
             blob.close().await.expect("Failed to close blob");
 
             // Re-initialize the journal to simulate a restart
@@ -1035,9 +1033,7 @@ mod tests {
                 .await
                 .expect("Failed to open blob");
             // Truncate the most recent blob by 1 byte which corrupts the one appended item
-            blob.truncate(size - 1)
-                .await
-                .expect("Failed to corrupt blob");
+            blob.resize(size - 1).await.expect("Failed to corrupt blob");
             blob.close().await.expect("Failed to close blob");
 
             // Re-initialize the journal to simulate a restart
