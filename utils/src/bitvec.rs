@@ -288,7 +288,7 @@ impl BitVec {
     }
 
     /// Creates an iterator over the bits.
-    pub fn iter(&self) -> BitIterator {
+    pub fn iter(&self) -> BitIterator<'_> {
         BitIterator { vec: self, pos: 0 }
     }
 
