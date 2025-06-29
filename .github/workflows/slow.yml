@@ -78,6 +78,9 @@ jobs:
   Fuzz:
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    strategy:
+      matrix:
+        fuzz_dir: [codec/fuzz, cryptography/fuzz, stream/fuzz]
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
@@ -99,8 +102,6 @@ jobs:
       run: cargo +nightly install cargo-fuzz --version ${{ env.FUZZ_VERSION }}
     - name: Test all targets
       run: |
-        for dir in codec/fuzz cryptography/fuzz stream/fuzz; do
-          for target in $(cargo +nightly fuzz list --fuzz-dir $dir); do
-            cargo +nightly fuzz run $target --fuzz-dir $dir -- -max_total_time=60 -detect_leaks=0
-          done
+        for target in $(cargo +nightly fuzz list --fuzz-dir ${{ matrix.fuzz_dir }}); do
+          cargo +nightly fuzz run $target --fuzz-dir ${{ matrix.fuzz_dir }} -- -max_total_time=60 -detect_leaks=0
         done
