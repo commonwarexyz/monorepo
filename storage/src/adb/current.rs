@@ -560,7 +560,7 @@ impl<
         );
         let op = self.any.get_with_loc(&key).await?;
         let Some((value, loc)) = op else {
-            return Err(Error::KeyNotFound());
+            return Err(Error::KeyNotFound);
         };
         let pos = leaf_num_to_pos(loc);
         let height = Self::grafting_height();
@@ -1055,7 +1055,7 @@ pub mod test {
             // Confirm bad keys produce the expected error.
             let bad_key = Sha256::fill(0xAA);
             let res = db.key_value_proof(hasher.inner(), bad_key).await;
-            assert!(matches!(res, Err(Error::KeyNotFound())));
+            assert!(matches!(res, Err(Error::KeyNotFound)));
 
             let start = db.oldest_retained_loc().unwrap();
             for i in start..db.status.bit_count() {
