@@ -474,7 +474,7 @@ mod tests {
         assert_eq!(state, state2);
     }
 
-    #[test_traced("INFO")]
+    #[test_traced]
     #[ignore]
     fn test_determinism_one() {
         for i in 0..10 {
@@ -482,7 +482,7 @@ mod tests {
         }
     }
 
-    #[test_traced("INFO")]
+    #[test_traced]
     #[ignore]
     fn test_determinism_some() {
         for i in 0..10 {
@@ -490,7 +490,7 @@ mod tests {
         }
     }
 
-    #[test_traced("INFO")]
+    #[test_traced]
     #[ignore]
     fn test_determinism_all() {
         for i in 0..10 {
