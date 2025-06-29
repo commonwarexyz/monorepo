@@ -925,7 +925,6 @@ mod tests {
                         &mut verifier,
                         &range,
                         0,
-                        4,
                         &grafted_storage_root
                     ));
 
@@ -936,7 +935,6 @@ mod tests {
                         &mut verifier,
                         &range,
                         0,
-                        4,
                         &grafted_storage_root
                     ));
                 }
