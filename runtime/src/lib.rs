@@ -383,6 +383,9 @@ pub trait Blob: Clone + Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Truncate the blob to the given length.
+    ///
+    /// If the length is greater than the current length, the blob is extended with zeros.
+    /// If the length is less than the current length, the blob is truncated.
     fn truncate(&self, len: u64) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Ensure all pending data is durably persisted.
@@ -712,6 +715,62 @@ mod tests {
 
             // Close the blob
             blob.close().await.expect("Failed to close blob");
+        });
+    }
+
+    fn test_blob_truncate_extend<R: Runner>(runner: R)
+    where
+        R::Context: Storage,
+    {
+        runner.start(|context| async move {
+            let partition = "test_partition_truncate_extend";
+            let name = b"test_blob_truncate_extend";
+
+            // Open and write to a new blob
+            let (blob, _) = context
+                .open(partition, name)
+                .await
+                .expect("Failed to open blob");
+
+            let data = b"some data";
+            blob.write_at(data.to_vec(), 0)
+                .await
+                .expect("Failed to write");
+            blob.sync().await.expect("Failed to sync after write");
+            blob.close()
+                .await
+                .expect("Failed to close blob after writing");
+
+            // Re-open and check length
+            let (blob, len) = context.open(partition, name).await.unwrap();
+            assert_eq!(len, data.len() as u64);
+
+            // Truncate to extend the file
+            let new_len = (data.len() as u64) * 2;
+            blob.truncate(new_len)
+                .await
+                .expect("Failed to truncate to extend");
+            blob.sync().await.expect("Failed to sync after truncate");
+            blob.close()
+                .await
+                .expect("Failed to close blob after truncating");
+
+            // Re-open and check length again
+            let (blob, len) = context.open(partition, name).await.unwrap();
+            assert_eq!(len, new_len);
+
+            // Read original data
+            let read_buf = blob.read_at(vec![0; data.len()], 0).await.unwrap();
+            assert_eq!(read_buf.as_ref(), data);
+
+            // Read extended part (should be zeros)
+            let extended_part = blob
+                .read_at(vec![0; data.len()], data.len() as u64)
+                .await
+                .unwrap();
+            assert_eq!(extended_part.as_ref(), vec![0; data.len()].as_slice());
+
+            blob.close().await.unwrap();
         });
     }
 
@@ -1137,6 +1196,12 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_blob_truncate_extend() {
+        let executor = deterministic::Runner::default();
+        test_blob_truncate_extend(executor);
+    }
+
+    #[test]
     fn test_deterministic_many_partition_read_write() {
         let executor = deterministic::Runner::default();
         test_many_partition_read_write(executor);
@@ -1305,6 +1370,12 @@ mod tests {
     fn test_tokio_blob_read_write() {
         let executor = tokio::Runner::default();
         test_blob_read_write(executor);
+    }
+
+    #[test]
+    fn test_tokio_blob_truncate_extend() {
+        let executor = tokio::Runner::default();
+        test_blob_truncate_extend(executor);
     }
 
     #[test]
