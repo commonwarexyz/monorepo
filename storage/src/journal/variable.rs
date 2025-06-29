@@ -464,7 +464,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                         found,
                                         "corruption detected: truncating"
                                     );
-                                    reader.truncate(valid_size).await.ok()?;
+                                    reader.resize(valid_size).await.ok()?;
                                     None
                                 }
                                 Err(Error::Runtime(RError::BlobInsufficientLength)) => {
@@ -477,7 +477,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                                         new_size = valid_size,
                                         "trailing bytes detected: truncating"
                                     );
-                                    reader.truncate(valid_size).await.ok()?;
+                                    reader.resize(valid_size).await.ok()?;
                                     None
                                 }
                                 Err(err) => {
@@ -1237,7 +1237,7 @@ mod tests {
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            blob.truncate(blob_size - 4)
+            blob.resize(blob_size - 4)
                 .await
                 .expect("Failed to corrupt blob");
             blob.close().await.expect("Failed to close blob");
@@ -1398,7 +1398,7 @@ mod tests {
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            blob.truncate(blob_size - 4)
+            blob.resize(blob_size - 4)
                 .await
                 .expect("Failed to corrupt blob");
             blob.close().await.expect("Failed to close blob");
@@ -1569,7 +1569,7 @@ mod tests {
             Ok(())
         }
 
-        async fn truncate(&self, _len: u64) -> Result<(), RError> {
+        async fn resize(&self, _len: u64) -> Result<(), RError> {
             Ok(())
         }
 
