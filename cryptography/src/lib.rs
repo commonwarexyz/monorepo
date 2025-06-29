@@ -194,7 +194,7 @@ pub trait Hasher: Clone + Send + Sync + 'static {
     fn reset(&mut self);
 
     /// Return result of hashing nothing.
-    fn empty(&self) -> Self::Digest;
+    fn empty() -> Self::Digest;
 }
 
 #[cfg(test)]

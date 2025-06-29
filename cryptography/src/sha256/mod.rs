@@ -93,8 +93,8 @@ impl Hasher for Sha256 {
         self.hasher = ISha256::new();
     }
 
-    fn empty(&self) -> Self::Digest {
-        Self::finalize(&mut self.clone())
+    fn empty() -> Self::Digest {
+        Self::new().finalize()
     }
 }
 
@@ -206,17 +206,15 @@ mod tests {
 
     #[test]
     fn test_hash_empty() {
-        let hasher = Sha256::new();
-        let digest1 = hasher.empty();
-        let digest2 = hasher.empty();
+        let digest1 = Sha256::empty();
+        let digest2 = Sha256::empty();
 
         assert_eq!(digest1, digest2);
     }
 
     #[test]
     fn test_sha256_empty() {
-        let hasher = Sha256::new();
-        let empty_digest = hasher.empty();
+        let empty_digest = Sha256::empty();
 
         // SHA-256 hash of empty string:
         // e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
