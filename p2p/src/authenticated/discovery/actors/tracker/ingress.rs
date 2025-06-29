@@ -94,6 +94,15 @@ pub enum Message<E: Spawner + Metrics, C: PublicKey> {
     },
 
     // ---------- Used by listener ----------
+    /// Check if we should listen to a peer.
+    Listenable {
+        /// The public key of the peer to check.
+        public_key: C,
+
+        /// The sender to respond with the listenable status.
+        responder: oneshot::Sender<bool>,
+    },
+
     /// Request a reservation for a particular peer.
     ///
     /// The tracker will respond with an [Option<Reservation<E, C>>], which will be `None` if  the
@@ -159,6 +168,18 @@ impl<E: Spawner + Metrics, C: PublicKey> Mailbox<Message<E, C>> {
         self.send(Message::Dial {
             public_key,
             reservation: tx,
+        })
+        .await
+        .unwrap();
+        rx.await.unwrap()
+    }
+
+    /// Send a `Listenable` message to the tracker.
+    pub async fn listenable(&mut self, public_key: C) -> bool {
+        let (tx, rx) = oneshot::channel();
+        self.send(Message::Listenable {
+            public_key,
+            responder: tx,
         })
         .await
         .unwrap();

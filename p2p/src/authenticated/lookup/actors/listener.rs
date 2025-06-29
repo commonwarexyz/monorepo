@@ -96,6 +96,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         };
         let peer = incoming.peer();
         span.record("peer", peer.to_string());
+        debug!(?peer, "verified handshake");
 
         // Check if the peer is listenable
         if !tracker
