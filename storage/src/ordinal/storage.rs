@@ -55,7 +55,7 @@ impl<V: Array> Read for Record<V> {
 }
 
 /// Implementation of ordinal storage.
-pub struct Store<E: Storage + Metrics + Clock, V: Array> {
+pub struct Ordinal<E: Storage + Metrics + Clock, V: Array> {
     // Configuration and context
     context: E,
     config: Config,
@@ -75,7 +75,7 @@ pub struct Store<E: Storage + Metrics + Clock, V: Array> {
     pruned: Counter,
 }
 
-impl<E: Storage + Metrics + Clock, V: Array> Store<E, V> {
+impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
     /// Initialize a new [Store] instance.
     pub async fn init(context: E, config: Config) -> Result<Self, Error> {
         // Scan for all blobs in the partition

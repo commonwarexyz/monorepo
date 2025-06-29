@@ -17,7 +17,7 @@ pub const ORDINAL_PARTITION: &str = "ordinal_bench_partition";
 const ORDINAL_ITEMS_PER_BLOB: u64 = 10000;
 
 /// Concrete ordinal store type for benchmarks.
-pub type Ordinal = ordinal::Store<Context, FixedBytes<128>>;
+pub type Ordinal = ordinal::Ordinal<Context, FixedBytes<128>>;
 
 /// Open (or create) an ordinal store.
 pub async fn init(ctx: Context) -> Ordinal {
@@ -27,7 +27,7 @@ pub async fn init(ctx: Context) -> Ordinal {
         write_buffer: WRITE_BUFFER,
         replay_buffer: REPLAY_BUFFER,
     };
-    ordinal::Store::init(ctx, cfg).await.unwrap()
+    ordinal::Ordinal::init(ctx, cfg).await.unwrap()
 }
 
 /// Append `count` random index-value pairs to ordinal store and sync once.
