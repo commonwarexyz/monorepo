@@ -14,6 +14,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  FUZZ_VERSION: 0.12.0
 
 jobs:
   Tests:
@@ -73,3 +74,33 @@ jobs:
         cargo bench ${{ matrix.cargo_flags }} \
           --benches -p ${{ matrix.package }} \
           -- --test --verbose
+
+  Fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Install nightly Rust toolchain
+      run: rustup toolchain install nightly
+    - name: Get Rust version
+      id: rust-version
+      run: echo "rust_version=$(rustc +nightly --version)" >> "$GITHUB_OUTPUT"
+    - name: Run setup
+      uses: ./.github/actions/setup
+    - name: Cache cargo-fuzz
+      id: cargo-fuzz-cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/bin/cargo-fuzz
+        key: ${{ runner.os }}-${{ env.FUZZ_VERSION }}-cargo-fuzz-${{ steps.rust-version.outputs.rust_version }}
+    - name: Install cargo-fuzz
+      if: steps.cargo-fuzz-cache.outputs.cache-hit != 'true'
+      run: cargo +nightly install cargo-fuzz --version ${{ env.FUZZ_VERSION }}
+    - name: Test all targets
+      run: |
+        for dir in codec/fuzz cryptography/fuzz stream/fuzz; do
+          for target in $(cargo +nightly fuzz list --fuzz-dir $dir); do
+            cargo +nightly fuzz run $target --fuzz-dir $dir -- -max_total_time=60 -detect_leaks=0
+          done
+        done
