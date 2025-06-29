@@ -363,6 +363,26 @@ mod tests {
             let mut extra_buf = [0u8; 1];
             let result = new_reader.read_exact(&mut extra_buf, 1).await;
             assert!(matches!(result, Err(Error::BlobInsufficientLength)));
+
+            // Test resize to larger size
+            new_reader.resize(data_len * 2).await.unwrap();
+
+            // Reopen to check resize
+            let (blob, new_size) = context.open("partition", b"test").await.unwrap();
+            assert_eq!(new_size, data_len * 2);
+
+            // Create a new buffer and read to verify resize
+            let mut new_reader = Read::new(blob, new_size, buffer_size);
+            let mut buf = vec![0u8; new_size as usize];
+            new_reader
+                .read_exact(&mut buf, new_size as usize)
+                .await
+                .unwrap();
+            assert_eq!(&buf[..size as usize], b"ABCDEFGHIJKLM");
+            assert_eq!(
+                &buf[size as usize..],
+                vec![0u8; new_size as usize - size as usize]
+            );
         });
     }
 
