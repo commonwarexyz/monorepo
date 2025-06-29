@@ -38,14 +38,16 @@ impl Buffer {
         self.data.is_empty()
     }
 
-    /// Resizes the buffer to the provided `len` and returns the buffered data and its blob offset
-    /// to write to the blob, or `None` if the buffer is already empty.
+    /// Resizes the buffer to the provided `len`.
     ///
-    /// If the new size is greater than the current size, the buffer is flushed to the underlying
-    /// blob and the buffer is reset to the empty state with an updated offset positioned at the end
+    /// If the new size is greater than the current size, the existing buffer is returned (to be flushed to
+    /// the underlying blob) and the buffer is reset to the empty state with an updated offset positioned at the end
     /// of the logical blob.
     ///
-    /// If the new size is less than the current size, the buffer is truncated to the new size.
+    /// If the new size is less than the current size (but still greater than current offset), the buffer is truncated to the new size.
+    ///
+    /// If the new size is less than the current offset, the buffer is reset to the empty state with an updated offset positioned at the end
+    /// of the logical blob.
     fn resize(&mut self, len: u64) -> Option<(Vec<u8>, u64)> {
         // Handle case where the buffer is empty.
         if self.is_empty() {
@@ -295,7 +297,9 @@ impl<B: Blob> Blob for Write<B> {
         // Acquire a write lock on the buffer.
         let mut buffer = self.buffer.write().await;
 
-        // Flush any buffered data to the underlying blob.
+        // Flush buffered data to the underlying blob.
+        //
+        // This can only happen if the new size is greater than the current size.
         if let Some((buf, offset)) = buffer.resize(len) {
             self.blob.write_at(buf, offset).await?;
         }
