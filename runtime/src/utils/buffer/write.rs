@@ -33,32 +33,40 @@ impl Buffer {
         self.offset + self.data.len() as u64
     }
 
-    /// Truncates the buffer to the provided `len` if it falls within the current range. Returns
-    /// `false` and resets the buffer if the truncation point precedes the current range. A
-    /// truncation point at or beyond the end of the logical blob is ignored, with `true` being
-    /// returned.
-    fn truncate(&mut self, len: u64) -> bool {
-        if len >= self.size() {
-            return true;
-        }
-        if len <= self.offset {
-            self.data.clear();
-            self.offset = len;
-            return false;
-        }
-        self.data.truncate((len - self.offset) as usize);
-        true
-    }
-
     /// Returns true if the buffer is empty.
     fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
 
-    /// Takes & returns the buffered data and its blob offset, or returns `None` if the buffer is
-    /// already empty. The buffer is reset to the empty state with an updated offset positioned at
+    /// Resizes the buffer to the provided `len` and returns the buffered data and its blob offset
+    /// to write to the blob, or `None` if the buffer is already empty.
+    ///
+    /// If the new size is greater than the current size, the buffer is flushed to the underlying
+    /// blob and the buffer is reset to the empty state with an updated offset positioned at the end
+    /// of the logical blob.
+    ///
+    /// If the new size is less than the current size, the buffer is truncated to the new size.
+    fn resize(&mut self, len: u64) -> Option<(Vec<u8>, u64)> {
+        if len >= self.size() {
+            let previous = self.take();
+            self.offset = len;
+            previous
+        } else if len >= self.offset {
+            self.data.truncate((len - self.offset) as usize);
+            None
+        } else {
+            self.data.clear();
+            self.offset = len;
+            None
+        }
+    }
+
+    /// Returns the buffered data and its blob offset, or returns `None` if the buffer is
+    /// already empty.
+    ///
+    /// The buffer is reset to the empty state with an updated offset positioned at
     /// the end of the logical blob.
-    fn take_buf(&mut self) -> Option<(Vec<u8>, u64)> {
+    fn take(&mut self) -> Option<(Vec<u8>, u64)> {
         if self.is_empty() {
             return None;
         }
@@ -100,10 +108,11 @@ impl Buffer {
     }
 
     /// Merges the provided `data` into the buffer at the provided blob `offset` if it falls
-    /// entirely within the range `[buffer.offset,buffer.offset+capacity)`. The buffer will be
-    /// expanded if necessary to accommodate the new data, and any gaps that may result are filled
-    /// with zeros. Returns `true` if the merge was performed, otherwise the caller is responsible
-    /// for continuing to manage the data.
+    /// entirely within the range `[buffer.offset,buffer.offset+capacity)`.
+    ///
+    /// The buffer will be expanded if necessary to accommodate the new data, and any gaps that
+    /// may result are filled with zeros. Returns `true` if the merge was performed, otherwise the
+    /// caller is responsible for continuing to manage the data.
     fn merge(&mut self, data: &[u8], offset: u64) -> bool {
         let end_offset = offset + data.len() as u64;
         let can_merge_into_buffer =
@@ -191,24 +200,6 @@ impl<B: Blob> Write<B> {
         let buffer = self.buffer.read().await;
         buffer.size()
     }
-
-    /// Consumes the [Write] and returns the underlying blob.
-    ///
-    /// # Warning
-    ///
-    /// Any buffered data that hasn't been flushed or synced will be discarded.
-    pub fn take_inner(self) -> B {
-        self.blob
-    }
-
-    /// Clones the underlying blob.
-    ///
-    /// # Warning
-    ///
-    /// The returned blob will not include any data that has yet to be flushed from the buffer.
-    pub fn clone_inner(&self) -> B {
-        self.blob.clone()
-    }
 }
 
 impl<B: Blob> Blob for Write<B> {
@@ -269,7 +260,7 @@ impl<B: Blob> Blob for Write<B> {
         // Write cannot be merged, so flush the buffer if the range overlaps, and check if merge is
         // possible after.
         if buffer.offset < end_offset {
-            if let Some((old_buf, buffer_offset)) = buffer.take_buf() {
+            if let Some((old_buf, buffer_offset)) = buffer.take() {
                 self.blob.write_at(old_buf, buffer_offset).await?;
                 if buffer.merge(buf.as_ref(), offset) {
                     return Ok(());
@@ -293,16 +284,21 @@ impl<B: Blob> Blob for Write<B> {
     async fn resize(&self, len: u64) -> Result<(), Error> {
         // Acquire a write lock on the buffer.
         let mut buffer = self.buffer.write().await;
-        if !buffer.truncate(len) {
-            self.blob.resize(len).await?;
+
+        // Flush any buffered data to the underlying blob.
+        if let Some((buf, offset)) = buffer.resize(len) {
+            self.blob.write_at(buf, offset).await?;
         }
+
+        // Resize the underlying blob.
+        self.blob.resize(len).await?;
 
         Ok(())
     }
 
     async fn sync(&self) -> Result<(), Error> {
         let mut buffer = self.buffer.write().await;
-        if let Some((buf, offset)) = buffer.take_buf() {
+        if let Some((buf, offset)) = buffer.take() {
             self.blob.write_at(buf, offset).await?;
         }
         self.blob.sync().await
