@@ -15,14 +15,21 @@ env:
 
 jobs:
   Lint:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     strategy:
       matrix:
-        flags:
-          - "--features commonware-runtime/iouring-storage"
-          - "--features commonware-runtime/iouring-network"
-          - ""
+        include:
+          - os: ubuntu-latest
+            flags: "--features commonware-runtime/iouring-storage"
+          - os: ubuntu-latest
+            flags: "--features commonware-runtime/iouring-network"
+          - os: ubuntu-latest
+            flags: ""
+          - os: windows-latest
+            flags: ""
+          - os: macos-latest
+            flags: ""
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
@@ -40,14 +47,21 @@ jobs:
         RUSTDOCFLAGS: "-D warnings"
 
   Tests:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
     strategy:
       matrix:
-        flags:
-          - "--features commonware-runtime/iouring-storage"
-          - "--features commonware-runtime/iouring-network"
-          - ""
+        include:
+          - os: ubuntu-latest
+            flags: "--features commonware-runtime/iouring-storage"
+          - os: ubuntu-latest
+            flags: "--features commonware-runtime/iouring-network"
+          - os: ubuntu-latest
+            flags: ""
+          - os: windows-latest
+            flags: ""
+          - os: macos-latest
+            flags: ""
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
