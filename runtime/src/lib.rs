@@ -90,6 +90,8 @@ pub enum Error {
     BlobInsufficientLength,
     #[error("offset overflow")]
     OffsetOverflow,
+    #[error("io error: {0}")]
+    Io(#[from] IoError),
 }
 
 /// Interface that any task scheduler must implement to start
