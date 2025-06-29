@@ -40,14 +40,16 @@ impl Buffer {
 
     /// Resizes the buffer to the provided `len`.
     ///
-    /// If the new size is greater than the current size, the existing buffer is returned (to be flushed to
-    /// the underlying blob) and the buffer is reset to the empty state with an updated offset positioned at the end
-    /// of the logical blob.
+    /// If the new size is greater than the current size, the existing buffer is
+    /// returned (to be flushed to the underlying blob) and the buffer is reset to
+    /// the empty state with an updated offset positioned at the end of the logical
+    /// blob.
     ///
-    /// If the new size is less than the current size (but still greater than current offset), the buffer is truncated to the new size.
+    /// If the new size is less than the current size (but still greater than current
+    /// offset), the buffer is truncated to the new size.
     ///
-    /// If the new size is less than the current offset, the buffer is reset to the empty state with an updated offset positioned at the end
-    /// of the logical blob.
+    /// If the new size is less than the current offset, the buffer is reset to the empty
+    /// state with an updated offset positioned at the end of the logical blob.
     fn resize(&mut self, len: u64) -> Option<(Vec<u8>, u64)> {
         // Handle case where the buffer is empty.
         if self.is_empty() {
