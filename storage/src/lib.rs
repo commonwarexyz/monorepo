@@ -8,8 +8,11 @@
 pub mod adb;
 pub mod archive;
 pub mod bmt;
+pub mod identifier;
 pub mod index;
 pub mod journal;
 pub mod metadata;
 pub mod mmr;
 pub mod rmap;
+pub mod store;
+pub mod translator;

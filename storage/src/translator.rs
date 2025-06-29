@@ -1,13 +1,26 @@
 //! Primitive implementations of [Translator].
 
-use super::Translator;
-use std::hash::{BuildHasher, Hasher};
+use std::hash::{BuildHasher, Hash, Hasher};
+
+/// Translate keys into a truncated representation.
+///
+/// # Warning
+///
+/// The output of [Translator::transform] is used as the key in a hash table. If the output is not uniformly
+/// distributed, the performance of storage implementations that rely on [Translator] will degrade substantially.
+pub trait Translator: Clone + BuildHasher {
+    /// The internal representation of keys.
+    type Key: Eq + Hash + Copy;
+
+    /// Transform a key into its internal representation.
+    fn transform(&self, key: &[u8]) -> Self::Key;
+}
 
 /// A “do-nothing” hasher for `uint`.
 ///
-/// [super::Index] typically stores keys that are **already hashed** (shortened by the [Translator]).
-/// Re-hashing them with SipHash (by [std::collections::HashMap]) would waste CPU, so we give `HashMap`
-/// this identity hasher instead:
+/// Most storage implementations that rely on [Translator] store keys that are **already hashed** (and shortened
+/// by the [Translator]). Re-hashing them with SipHash (by [std::collections::HashMap]) would waste CPU, so we give
+/// [std::collections::HashMap] this identity hasher instead:
 ///
 /// * `write_u8`, `write_u16`, `write_u32`, `write_u64` copies the input into an internal field;
 /// * `finish()` returns that value unchanged.

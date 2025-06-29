@@ -70,6 +70,8 @@ pub enum Error {
     SendFailed,
     #[error("recv failed")]
     RecvFailed,
+    #[error("io error: {0}")]
+    Io(#[from] IoError),
     #[error("partition creation failed: {0}")]
     PartitionCreationFailed(String),
     #[error("partition missing: {0}")]

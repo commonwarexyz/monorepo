@@ -17,14 +17,21 @@ env:
 
 jobs:
   Tests:
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
     strategy:
       matrix:
-        flags:
-          - "--features commonware-runtime/iouring-storage"
-          - "--features commonware-runtime/iouring-network"
-          - ""
+        include:
+          - os: ubuntu-latest
+            flags: "--features commonware-runtime/iouring-storage"
+          - os: ubuntu-latest
+            flags: "--features commonware-runtime/iouring-network"
+          - os: ubuntu-latest
+            flags: ""
+          - os: windows-latest
+            flags: ""
+          - os: macos-latest
+            flags: ""
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
@@ -32,3 +39,37 @@ jobs:
       uses: ./.github/actions/setup
     - name: Run ignored tests
       run: cargo test ${{ matrix.flags }} --verbose -- --ignored
+
+  Benchmarks:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - package: commonware-cryptography
+            cargo_flags: ""
+            file_suffix: ""
+            benchmark_name: "commonware-cryptography"
+          - package: commonware-storage
+            cargo_flags: ""
+            file_suffix: ""
+            benchmark_name: "commonware-storage"
+          - package: commonware-storage
+            cargo_flags: "--features commonware-runtime/iouring-storage" # Additional features can be added here
+            file_suffix: "-features"
+            benchmark_name: "commonware-storage --features"
+          - package: commonware-stream
+            cargo_flags: ""
+            file_suffix: ""
+            benchmark_name: "commonware-stream"
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Install nightly Rust toolchain
+      run: rustup toolchain install nightly
+    - name: Run setup
+      uses: ./.github/actions/setup
+    - name: Test benchmarks
+      run: |
+        cargo bench ${{ matrix.cargo_flags }} \
+          --benches -p ${{ matrix.package }} \
+          -- --test --verbose

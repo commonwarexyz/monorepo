@@ -22,11 +22,11 @@ fn benchmark_sender_send(c: &mut Criterion) {
                         cipher1,
                         cipher2,
                     );
-                    let (sender, _receiver) = connection.split();
+                    let (sender, receiver) = connection.split();
                     let msg = msg.clone();
-                    (sender, msg)
+                    (sender, receiver, msg)
                 },
-                |(mut sender, msg)| {
+                |(mut sender, _receiver, msg)| {
                     block_on(async move {
                         sender.send(&msg).await.unwrap();
                     });
